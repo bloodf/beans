@@ -712,7 +712,8 @@ fn safe_git(args: &[String]) -> bool {
 }
 
 /// Whether a stage writes a file through redirection: `>`, `>>`, `&>`, or `>&` to anything but
-/// `/dev/null`. Copying, moving, or closing a descriptor (`2>&1`, `>&3-`, `>&-`) writes nothing.
+/// `/dev/null`, stdout, or stderr. Copying the output streams or closing one (`2>&1`, `>&2`,
+/// `>&-`) writes nothing; another descriptor (`>&3`) may be open on a file the shell inherited.
 fn has_effectful_redirection(stage: &str) -> bool {
     let mut quote = None;
     let mut escaped = false;
@@ -762,8 +763,7 @@ fn has_effectful_redirection(stage: &str) -> bool {
                 }
                 let target: String = chars[start..i].iter().collect();
                 let target = target.trim_matches(|c| c == '\'' || c == '"');
-                let descriptor = !target.is_empty() && target.strip_suffix('-').unwrap_or(target).chars().all(|c| c.is_ascii_digit());
-                if !(duplicates && descriptor) && target != "/dev/null" {
+                if !(duplicates && matches!(target, "1" | "2" | "-")) && target != "/dev/null" {
                     return true;
                 }
                 continue;
@@ -819,6 +819,8 @@ mod tests {
             "echo ok > report.txt",
             "echo ok >&report.txt",
             "echo ok >& report.txt",
+            "echo ok >&3",
+            "echo ok >&3-",
             "ls &>report.txt",
             r#"echo "$(rm -rf report)""#,
             r#"echo "$(echo ok > report.txt)""#,

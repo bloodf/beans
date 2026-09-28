@@ -18,13 +18,11 @@ import { CLI_NAME, ROOT, buildCLI, color, log } from "./app.ts"
 const DESKTOP = join(ROOT, "desktop")
 const MYGO = join(DESKTOP, "node_modules", ".bin", process.platform === "win32" ? "mygo.exe" : "mygo")
 
-/** The Rust target of the CLI each MyGo platform ships: static builds for Linux, and on Windows
- * on Arm the x86_64 build, which it runs. */
+/** The Rust target of the CLI each MyGo platform ships, static builds for Linux. */
 const RUST_TARGETS: Record<string, string> = {
   "linux/amd64": "x86_64-unknown-linux-musl",
   "linux/arm64": "aarch64-unknown-linux-musl",
   "windows/amd64": "x86_64-pc-windows-gnu",
-  "windows/arm64": "x86_64-pc-windows-gnu",
 }
 
 function hostPlatform(): string {

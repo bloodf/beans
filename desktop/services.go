@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json/jsontext"
+	"fmt"
+	"net/url"
 	"strconv"
 	"sync"
 
@@ -72,7 +74,7 @@ func (Host) WindowState(ctx context.Context) WindowState {
 	if win == nil {
 		return WindowState{}
 	}
-	return WindowState{Focused: win.IsFocused(), Visible: win.IsVisible(), Minimized: win.IsMinimized()}
+	return stateOf(win)
 }
 
 // ShowMainWindow brings the main window up.
@@ -119,8 +121,16 @@ func (Host) SetTrayMenu(open, quit string) {
 	}
 }
 
-// OpenExternal opens a link in the browser.
-func (Host) OpenExternal(url string) error { return mygo.Shell.OpenExternal(url) }
+// OpenExternal opens a web link in the browser or a mail link in the mail app. The links come
+// from bots, plugins, and the marketplace, so any other scheme is refused: the system would
+// start whatever app handles it.
+func (Host) OpenExternal(link string) error {
+	u, err := url.Parse(link)
+	if err != nil || !(u.Scheme == "mailto" || (u.Scheme == "http" || u.Scheme == "https") && u.Host != "") {
+		return fmt.Errorf("not a web or mail link: %q", link)
+	}
+	return mygo.Shell.OpenExternal(link)
+}
 
 // CopyText puts text on the clipboard.
 func (Host) CopyText(text string) { mygo.Clipboard.WriteText(text) }

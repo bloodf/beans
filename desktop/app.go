@@ -35,9 +35,14 @@ type WindowState struct {
 	Focused   bool `json:"focused"`
 	Visible   bool `json:"visible"`
 	Minimized bool `json:"minimized"`
-	// Maximized tells a page that draws its own title bar which window button to show, and
-	// whether its edges resize the window.
+	// Maximized tells a page that draws its own title bar which window button to show:
+	// Maximize or Restore.
 	Maximized bool `json:"maximized"`
+}
+
+// stateOf is how a window stands, as WindowState answers and WindowStateChanged reports it.
+func stateOf(win *mygo.Window) WindowState {
+	return WindowState{Focused: win.IsFocused(), Visible: win.IsVisible(), Minimized: win.IsMinimized(), Maximized: win.IsMaximized()}
 }
 
 var (
@@ -237,9 +242,7 @@ func (a *appDelegate) isMainWindow(win *mygo.Window) bool {
 
 func (a *appDelegate) newWindow(options mygo.WindowOptions) *mygo.Window {
 	win := mygo.NewWindow(options)
-	report := func() {
-		_ = WindowStateChanged.Emit(win, WindowState{Focused: win.IsFocused(), Visible: win.IsVisible(), Minimized: win.IsMinimized(), Maximized: win.IsMaximized()})
-	}
+	report := func() { _ = WindowStateChanged.Emit(win, stateOf(win)) }
 	win.OnFocus(report)
 	win.OnBlur(report)
 	win.OnShow(report)

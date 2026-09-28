@@ -295,10 +295,12 @@ func (a *appDelegate) showMainWindow() {
 			BackgroundColor: "light-dark(#ffffff, #1c1c1c)",
 		}
 		// The page's panes carry the title bar: their headers hold the title, the buttons, and
-		// the drag regions. On macOS the traffic lights stay, in the sidebar's header; elsewhere
-		// the page draws the window buttons and the menu too.
+		// the drag regions. On macOS the traffic lights stay, in the sidebar's header, where the
+		// Mac app's toolbar puts them: the close button 19 points in and down, centered in the
+		// 52-point header. Elsewhere the page draws the window buttons and the menu too.
 		if runtime.GOOS == "darwin" {
-			options.TitleBarStyle = mygo.TitleBarHiddenInset
+			options.TitleBarStyle = mygo.TitleBarHidden
+			options.TrafficLightPosition = &mygo.Point{X: 19, Y: 19}
 		} else {
 			options.Frameless = true
 		}

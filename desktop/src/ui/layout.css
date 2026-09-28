@@ -70,9 +70,23 @@ body.resizing * {
   padding: 0 10px 0 12px;
 }
 
+/* The buttons after the traffic lights (or the menu), 4 apart, as in the Mac app's leading titlebar
+   accessory. The traffic lights end 79 in, and AppKit starts the accessory's first button at 96. */
+.leading-buttons {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 4px;
+}
+
 .traffic-light-space {
   flex: none;
-  width: 74px;
+  width: 84px;
+}
+
+/* With the sidebar collapsed they move to the content's header, which has 4 more padding. */
+.content-header .traffic-light-space {
+  width: 80px;
 }
 
 /* The window buttons take the top-right corner, over whichever pane's header is there. */
@@ -200,75 +214,6 @@ body.resizing * {
 
 .frame-custom.platform-linux {
   box-shadow: inset 0 0 0 1px var(--toolbar-line);
-}
-
-.resize-edge {
-  position: fixed;
-  z-index: 30;
-}
-
-.resize-edge.n,
-.resize-edge.s {
-  left: 8px;
-  right: 8px;
-  height: 5px;
-  cursor: ns-resize;
-}
-
-.resize-edge.e,
-.resize-edge.w {
-  top: 8px;
-  bottom: 8px;
-  width: 5px;
-  cursor: ew-resize;
-}
-
-.resize-edge.n {
-  top: 0;
-}
-
-.resize-edge.s {
-  bottom: 0;
-}
-
-.resize-edge.e {
-  right: 0;
-}
-
-.resize-edge.w {
-  left: 0;
-}
-
-.resize-edge.nw,
-.resize-edge.ne,
-.resize-edge.sw,
-.resize-edge.se {
-  width: 10px;
-  height: 10px;
-}
-
-.resize-edge.nw {
-  top: 0;
-  left: 0;
-  cursor: nwse-resize;
-}
-
-.resize-edge.se {
-  bottom: 0;
-  right: 0;
-  cursor: nwse-resize;
-}
-
-.resize-edge.ne {
-  top: 0;
-  right: 0;
-  cursor: nesw-resize;
-}
-
-.resize-edge.sw {
-  bottom: 0;
-  left: 0;
-  cursor: nesw-resize;
 }
 
 .toolbar-navigation {

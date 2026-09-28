@@ -123,8 +123,6 @@ export const windowControls = {
   minimize: () => (inApp ? currentWindow.minimize() : Promise.resolve()),
   toggleMaximize: () => (inApp ? currentWindow.toggleMaximize() : Promise.resolve()),
   close: () => (inApp ? currentWindow.close() : Promise.resolve()),
-  /** Linux: resizes the window from an edge while the button is down. */
-  startResize: (edge: string, x: number, y: number) => (inApp ? Host.startResize(edge, x, y) : Promise.resolve()),
 };
 
 export function preferences(): Preferences {

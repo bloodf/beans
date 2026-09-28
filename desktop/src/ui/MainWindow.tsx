@@ -5,7 +5,7 @@
 // (`/chat/:id`), a settings pane (`/settings/:pane`), or with nothing selected, a state (`/`).
 
 import { useLocation, useNavigate, type RouteSectionProps } from "@solidjs/router";
-import { createEffect, createMemo, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onSettled, Show } from "solid-js";
 import { frameStyle, host, hostInfo, onOpenChat, onUpdateAvailable, setPreferences, watchWindowState, windowControls, type WindowState } from "../host";
 import { L, Lc } from "../l10n";
 import { isDeviceScoped, paneTitle, type SettingsPane } from "../model/models";
@@ -153,9 +153,6 @@ export function MainWindow(props: RouteSectionProps) {
       </div>
       <Show when={frameStyle() === "custom"}>
         <WindowButtons state={frame()} />
-        <Show when={hostInfo().platform === "linux" && !frame().maximized}>
-          <ResizeEdges />
-        </Show>
       </Show>
       <PaletteHost />
     </div>
@@ -355,7 +352,7 @@ function Divider(props: { edge: "sidebar" | "inspector" }) {
 function LeadingButtons() {
   const isSettings = () => selection.read()?.kind === "settings";
   return (
-    <>
+    <div class="leading-buttons">
       <Show when={frameStyle() === "mac"}>
         <span class="traffic-light-space" />
       </Show>
@@ -383,7 +380,7 @@ function LeadingButtons() {
           });
         }}
       />
-    </>
+    </div>
   );
 }
 
@@ -460,25 +457,6 @@ function WindowButtons(props: { state: WindowState }) {
         </svg>
       </button>
     </div>
-  );
-}
-
-/** A frameless GTK window has no border to resize it by: thin edges hand the drag to the window
- * manager instead. */
-function ResizeEdges() {
-  return (
-    <For each={["n", "s", "e", "w", "nw", "ne", "sw", "se"]}>
-      {(edge) => (
-        <div
-          class={["resize-edge", edge]}
-          onMouseDown={(event) => {
-            if (event.button !== 0) return;
-            event.preventDefault();
-            void windowControls.startResize(edge, Math.round(event.screenX), Math.round(event.screenY));
-          }}
-        />
-      )}
-    </For>
   );
 }
 

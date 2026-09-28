@@ -16,14 +16,14 @@
     "@solidjs/web": "2.0.0-rc.10",
     "lucide": "1.48.0",
     "markdown-it": "15.0.2",
-    "mygo-runtime": "0.1.4",
+    "mygo-runtime": "0.1.5",
     "qrcode-generator": "2.0.4",
     "solid-js": "2.0.0-rc.10"
   },
   "devDependencies": {
     "@solidjs/vite-plugin": "3.0.0-next.35",
     "@types/bun": "latest",
-    "mygo-cli": "0.1.4",
+    "mygo-cli": "0.1.5",
     "typescript": "^7",
     "vite": "^8"
   }

@@ -393,6 +393,13 @@ final class ComposerView: NSView {
         updateButtons()
     }
 
+    /// Drops the draft: its text, its files, and the bots picked from the `@` menu.
+    func clearDraft() {
+        attachments = []
+        updateAttachments()
+        text = ""
+    }
+
     // MARK: - Actions
 
     private var hasContent: Bool {

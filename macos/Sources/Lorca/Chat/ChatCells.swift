@@ -152,11 +152,11 @@ final class MessageCellView: TranscriptCellView {
         attachments.isHidden = items.isEmpty
 
         avatar.content = avatarContent
-        avatar.isHidden = isUser || !metrics.showsName || !groupStart
+        avatar.isHidden = isUser || !metrics.showsName
 
         author.stringValue = authorName
         author.textColor = nameColor
-        author.isHidden = !metrics.showsName || !groupStart
+        author.isHidden = !metrics.showsName
         stamp.stringValue = Preferences.showTimestamps ? Format.time(message.createdAt) : ""
         stamp.isHidden = stamp.stringValue.isEmpty
 
@@ -181,8 +181,8 @@ final class MessageCellView: TranscriptCellView {
         let bubbleWidth = metrics.bubbleWidth
         let bubbleHeight = metrics.bubbleHeight
         let x = isUser ? bounds.width - ChatMetrics.horizontalInset - bubbleWidth : metrics.indent
-        let nameHeight = author.isHidden ? 0 : metrics.headerHeight
-        let bubbleY = top + nameHeight
+        // The row's height counts the same header, so a bubble fills its row.
+        let bubbleY = top + metrics.headerHeight
 
         author.frame = NSRect(x: x + 4, y: top, width: bounds.width - x - ChatMetrics.horizontalInset, height: ChatMetrics.headerLineHeight)
         bubble.frame = NSRect(x: x, y: bubbleY, width: bubbleWidth, height: bubbleHeight)
@@ -762,7 +762,7 @@ final class PermissionCellView: TranscriptCellView {
                 sender.showCopied()
             }
         }
-        if let link, let url = URL(string: link) { NSWorkspace.shared.open(url) }
+        if let link, let url = URL(string: link) { NSWorkspace.shared.openLink(url) }
     }
 
     @available(*, unavailable)

@@ -55,6 +55,8 @@ final class OnboardingViewController: NSViewController {
     private var phrase: [String] = []
     private var pairingTask: Task<Void, Never>?
     private var busy = false
+    /// A subscription sign-in is waiting on the browser.
+    private var isSigningIn = false
 
     var isOnFinalStep: Bool { step == .done || step == .create || step == .bot || step == .provider }
     private var providerKind: ProviderCredential.Kind = .deepseek
@@ -328,7 +330,7 @@ final class OnboardingViewController: NSViewController {
             L("Credentials belong to your account: your bots use them on every Runner you pair. They sync encrypted with your account key; the relay cannot read them."),
             font: .systemFont(ofSize: 12.5), color: .secondaryLabelColor, lines: 0
         )
-        let skip = secondaryButton(L("Skip for Now"), action: #selector(goDone))
+        let skip = secondaryButton(L("Skip for Now"), action: #selector(skipProvider))
         let next = primaryButton(L("Continue"), action: #selector(connectProvider))
         next.identifier = NSUserInterfaceItemIdentifier("continue")
         let layout = stepLayout(title: title, subtitle: subtitle, body: card(formGrid(providerRows())), back: skip, next: next)
@@ -579,8 +581,14 @@ final class OnboardingViewController: NSViewController {
     @objc private func goWelcome() { transition(to: .welcome) }
     @objc private func goRestore() { transition(to: .restore) }
     @objc private func goPair() { transition(to: .pair) }
-    @objc private func goDone() { transition(to: .done) }
     @objc private func goBot() { transition(to: firstBot == nil ? .provider : .bot) }
+
+    /// Skip for Now leaves the provider for later, a sign-in still waiting on the browser
+    /// included, so finishing it there afterwards connects nothing.
+    @objc private func skipProvider() {
+        if isSigningIn { store.cancelSignIn() }
+        transition(to: .done)
+    }
 
     @objc private func providerPicked(_ sender: NSPopUpButton) {
         providerKind = ProviderCredential.Kind.allCases[max(0, sender.indexOfSelectedItem)]
@@ -629,10 +637,15 @@ final class OnboardingViewController: NSViewController {
                 if self.providerKind.usesAPIKey {
                     try await self.store.connectAPIKey(self.providerKind, apiKey: key)
                 } else {
+                    self.isSigningIn = true
+                    defer { self.isSigningIn = false }
                     try await self.store.connectSignIn(self.providerKind)
                 }
+                // Skipped while the browser waited: the page has moved on.
+                guard self.step != .done else { return }
                 self.transition(to: .done)
             } catch {
+                guard self.step != .done else { return }
                 self.setStatus(error.localizedDescription, color: .systemRed)
             }
         }

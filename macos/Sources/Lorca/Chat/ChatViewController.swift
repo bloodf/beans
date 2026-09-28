@@ -193,7 +193,8 @@ final class ChatViewController: NSViewController {
         emptyState.isHidden = !chat.messages.isEmpty
         emptyState.configure(chat: chat, bots: members)
 
-        if !isSameChat { composer.text = "" }
+        // A draft belongs to the chat it was started in.
+        if !isSameChat { composer.clearDraft() }
         isPinnedToBottom = true
         // Before returning, not from a block on the main queue: AppKit can display the window
         // before that block runs, which shows a long transcript from its first row for a frame.
@@ -686,8 +687,8 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
         return view
     }
 
-    /// A bot's row in a group carries its avatar, beside a bubble or a card, and a bubble its
-    /// name as well; a DM's bot needs neither.
+    /// A bot's row in a group carries its avatar, beside a bubble or a card, and the first bubble
+    /// of a run its name as well; a DM's bot needs neither.
     private func showsAvatar(for message: Message?) -> Bool {
         guard let chatID, store.chat(chatID)?.isGroup == true, message?.author.botID != nil else { return false }
         return true
@@ -811,20 +812,20 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
             switch message.body {
             case .text:
                 guard let messageCell = cell as? MessageCellView else { return }
-                let showsName = showsAvatar(for: message)
+                let metrics = layout.metrics(
+                    for: message,
+                    showsAvatar: showsAvatar(for: message),
+                    groupStart: groupStart,
+                    tableWidth: max(tableView.bounds.width, 320))
                 let name: String
                 let nameColor: NSColor
-                if showsName, case let .bot(botID) = message.author {
+                if metrics.showsName, case let .bot(botID) = message.author {
                     name = store.bot(botID)?.name ?? L("Bot")
                     nameColor = store.bot(botID)?.accent.color ?? .secondaryLabelColor
                 } else {
                     name = ""
                     nameColor = .secondaryLabelColor
                 }
-                let metrics = layout.metrics(
-                    for: message,
-                    showsName: showsName,
-                    tableWidth: max(tableView.bounds.width, 320))
                 let items = zip(message.attachments, metrics.attachmentFrames).map { attachment, frame in
                     AttachmentsView.Item(
                         attachment: attachment,

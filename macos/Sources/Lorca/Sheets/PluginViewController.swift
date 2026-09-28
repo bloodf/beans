@@ -135,7 +135,7 @@ final class PluginViewController: SheetViewController {
             let site = ActionRow(
                 key: L("Site"), value: url.host ?? homepage, tint: .secondaryLabelColor,
                 actionTitle: L("Open"))
-            site.onAction = { NSWorkspace.shared.open(url) }
+            site.onAction = { NSWorkspace.shared.openLink(url) }
             statusRows.append(site)
         }
         status.setRows(statusRows)
@@ -154,7 +154,7 @@ final class PluginViewController: SheetViewController {
                     row.onAction = { [weak row] in
                         NSPasteboard.general.clearContents()
                         if NSPasteboard.general.setString(code, forType: .string) { row?.showCopied() }
-                        NSWorkspace.shared.open(link)
+                        NSWorkspace.shared.openLink(link)
                     }
                     return row
                 }

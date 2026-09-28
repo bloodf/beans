@@ -142,12 +142,9 @@ final class GeneralSettingsViewController: SettingsPaneViewController {
         ])
         addSection(chats)
 
+        // In the order of `Preferences.Appearance.allCases`.
         appearance.addItems(withTitles: [L("System"), L("Light"), L("Dark")])
-        switch NSApp.appearance?.name {
-        case .aqua?: appearance.selectItem(at: 1)
-        case .darkAqua?: appearance.selectItem(at: 2)
-        default: appearance.selectItem(at: 0)
-        }
+        appearance.selectItem(at: Preferences.Appearance.allCases.firstIndex(of: Preferences.appearance) ?? 0)
         configure(appearance, action: #selector(changeAppearance))
         let look = SectionView(title: L("Appearance"))
         // The app's own language. Each one is named in itself, so it reads whatever is showing.
@@ -255,11 +252,8 @@ final class GeneralSettingsViewController: SettingsPaneViewController {
     }
 
     @objc private func changeAppearance() {
-        switch appearance.indexOfSelectedItem {
-        case 1: NSApp.appearance = NSAppearance(named: .aqua)
-        case 2: NSApp.appearance = NSAppearance(named: .darkAqua)
-        default: NSApp.appearance = nil
-        }
+        Preferences.appearance = Preferences.Appearance.allCases[max(0, appearance.indexOfSelectedItem)]
+        NSApp.appearance = Preferences.appearance.nsAppearance
     }
 }
 

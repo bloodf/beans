@@ -1302,6 +1302,12 @@ final class AppStore {
         _ = try await client.request("providers.connect_\(kind.wireValue)")
     }
 
+    /// Stops a sign-in that is waiting on the browser: its `connectSignIn` fails, and finishing
+    /// in the browser afterwards connects nothing.
+    func cancelSignIn() {
+        perform("providers.auth.cancel")
+    }
+
     func credential(for kind: ProviderCredential.Kind) -> ProviderCredential? {
         providers.first { $0.kind == kind }
     }

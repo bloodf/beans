@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 enum Preferences {
     private enum Key {
@@ -10,6 +10,21 @@ enum Preferences {
         static let cliPort = "lorca.cliPort"
         static let showTimestamps = "lorca.showTimestamps"
         static let dictationLanguage = "lorca.dictationLanguage"
+        static let appearance = "lorca.appearance"
+    }
+
+    /// The look picked in Settings › General, in the order its pop-up lists them.
+    enum Appearance: String, CaseIterable {
+        case system, light, dark
+
+        /// What `NSApp.appearance` takes; nil follows the system.
+        var nsAppearance: NSAppearance? {
+            switch self {
+            case .system: nil
+            case .light: NSAppearance(named: .aqua)
+            case .dark: NSAppearance(named: .darkAqua)
+            }
+        }
     }
 
     private static let defaults = UserDefaults.standard
@@ -40,6 +55,12 @@ enum Preferences {
     static var showTimestamps: Bool {
         get { defaults.object(forKey: Key.showTimestamps) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.showTimestamps) }
+    }
+
+    /// Applied at launch, before any window shows.
+    static var appearance: Appearance {
+        get { defaults.string(forKey: Key.appearance).flatMap(Appearance.init(rawValue:)) ?? .system }
+        set { defaults.set(newValue.rawValue, forKey: Key.appearance) }
     }
 
     /// Speech recognizer locale identifier; nil follows the system's preferred languages.

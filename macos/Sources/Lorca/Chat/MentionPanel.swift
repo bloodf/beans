@@ -1,13 +1,20 @@
 import AppKit
 
-/// Non-activating child window so `@` completion never pulls focus out of the composer.
+/// Non-activating child window so `@` completion never pulls focus out of the composer. It is
+/// tall enough for five bots and scrolls to the rest.
 @MainActor
 final class MentionPanel {
     private var panel: NSPanel?
     private var rows: [MentionRowView] = []
     private let stack = Build.stack([], spacing: 0)
+    private let scrollView = NSScrollView()
+    private let document = FlippedView()
     private var bots: [Bot] = []
     private var selectedIndex = 0
+    /// Where the pointer was when the list last moved under it: shown, filtered, or scrolled by
+    /// the arrow keys. A row arriving beneath a resting pointer leaves the highlight alone; only
+    /// a real move highlights.
+    private var restingPointer = NSEvent.mouseLocation
 
     var onPick: ((Bot) -> Void)?
 
@@ -16,19 +23,24 @@ final class MentionPanel {
     private static let rowHeight: CGFloat = 38
     private static let maxRows = 5
     private static let width: CGFloat = 268
+    /// Above the first row and below the last.
+    private static let inset: CGFloat = 5
 
     func show(bots newBots: [Bot], near caretRect: NSRect, relativeTo view: NSView) {
         guard let parent = view.window else { return }
         bots = newBots
         selectedIndex = min(selectedIndex, max(0, bots.count - 1))
+        restingPointer = NSEvent.mouseLocation
 
         let panel = self.panel ?? makePanel()
         self.panel = panel
 
         syncRows()
+        document.frame = NSRect(
+            x: 0, y: 0, width: Self.width, height: CGFloat(bots.count) * Self.rowHeight + Self.inset * 2)
 
         let visibleRows = CGFloat(min(bots.count, Self.maxRows))
-        let height = visibleRows * Self.rowHeight + 10
+        let height = visibleRows * Self.rowHeight + Self.inset * 2
         var origin = NSPoint(x: caretRect.minX - 10, y: caretRect.maxY + 8)
 
         if let screen = parent.screen, origin.y + height > screen.visibleFrame.maxY {
@@ -36,6 +48,8 @@ final class MentionPanel {
         }
 
         panel.setFrame(NSRect(origin: origin, size: NSSize(width: Self.width, height: height)), display: true)
+        panel.contentView?.layoutSubtreeIfNeeded()
+        scrollSelectionToVisible()
 
         if panel.parent == nil {
             parent.addChildWindow(panel, ordered: .above)
@@ -52,7 +66,9 @@ final class MentionPanel {
     func moveSelection(by delta: Int) {
         guard !bots.isEmpty else { return }
         selectedIndex = (selectedIndex + delta + bots.count) % bots.count
+        restingPointer = NSEvent.mouseLocation
         syncSelection()
+        scrollSelectionToVisible()
     }
 
     func commitSelection() {
@@ -88,26 +104,50 @@ final class MentionPanel {
 
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.edgeInsets = NSEdgeInsets(top: 5, left: 0, bottom: 5, right: 0)
+        stack.edgeInsets = NSEdgeInsets(top: Self.inset, left: 0, bottom: Self.inset, right: 0)
 
-        effect.addSubview(stack)
+        // The rows stack in a document as tall as all of them, which `show` sizes.
+        document.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: effect.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: document.topAnchor),
         ])
+        scrollView.documentView = document
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.verticalScrollElasticity = .none
+        effect.addSubview(scrollView)
+        scrollView.pin(to: effect)
 
         panel.contentView = effect
         return panel
+    }
+
+    /// Whether the pointer moved since the list last moved under it.
+    private func pointerMoved() -> Bool {
+        let pointer = NSEvent.mouseLocation
+        guard abs(pointer.x - restingPointer.x) > 1 || abs(pointer.y - restingPointer.y) > 1 else { return false }
+        restingPointer = NSPoint(x: CGFloat.infinity, y: CGFloat.infinity)
+        return true
+    }
+
+    /// Brings the highlighted row into view, and the list's inset with the first or last row.
+    private func scrollSelectionToVisible() {
+        guard rows.indices.contains(selectedIndex) else { return }
+        let row = rows[selectedIndex]
+        document.scrollToVisible(document.convert(row.bounds, from: row).insetBy(dx: 0, dy: -Self.inset))
     }
 
     private func syncRows() {
         while rows.count < bots.count {
             let row = MentionRowView()
             row.onHover = { [weak self] view in
-                guard let index = self?.rows.firstIndex(of: view) else { return }
-                self?.selectedIndex = index
-                self?.syncSelection()
+                guard let self, let index = rows.firstIndex(of: view), pointerMoved() else { return }
+                selectedIndex = index
+                syncSelection()
             }
             row.onClick = { [weak self] view in
                 guard let index = self?.rows.firstIndex(of: view), let bot = self?.bots[index] else {
@@ -189,12 +229,15 @@ final class MentionRowView: NSView {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
         let area = NSTrackingArea(
-            rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self)
+            rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways], owner: self)
         addTrackingArea(area)
         tracking = area
     }
 
+    // A move inside the row counts too: the panel ignores a row that scrolled in under a
+    // resting pointer until the pointer moves.
     override func mouseEntered(with event: NSEvent) { onHover?(self) }
+    override func mouseMoved(with event: NSEvent) { onHover?(self) }
     override func mouseUp(with event: NSEvent) { onClick?(self) }
 
     override func draw(_ dirtyRect: NSRect) {

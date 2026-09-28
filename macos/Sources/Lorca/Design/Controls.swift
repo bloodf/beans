@@ -412,6 +412,23 @@ extension NSView {
     }
 }
 
+// MARK: - Links
+
+extension NSWorkspace {
+    /// Opens a link from a message, a plugin, or the marketplace: a web link (http or https,
+    /// with a host) in the browser, a mail link in the mail app. Any other scheme beeps instead,
+    /// since the system would start whatever app handles it.
+    func openLink(_ url: URL) {
+        let scheme = url.scheme?.lowercased()
+        let isWeb = (scheme == "http" || scheme == "https") && url.host?.isEmpty == false
+        guard isWeb || scheme == "mailto" else {
+            NSSound.beep()
+            return
+        }
+        open(url)
+    }
+}
+
 // MARK: - Settings pop-up
 
 /// A pop-up button as System Settings' rows have it: the choice as plain text, as wide as it

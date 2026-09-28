@@ -392,6 +392,12 @@ final class MarkdownTextView: NSTextView {
         ]
     }
 
+    /// A link in a message opens only as a web or mail link; the text view would open any scheme.
+    override func clicked(onLink link: Any, at charIndex: Int) {
+        guard let url = link as? URL ?? (link as? String).flatMap(URL.init(string:)) else { return }
+        NSWorkspace.shared.openLink(url)
+    }
+
     func show(_ text: NSAttributedString, topInset: CGFloat, bottomInset: CGFloat) {
         if text !== shown {
             textStorage?.setAttributedString(text)

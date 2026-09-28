@@ -91,7 +91,7 @@ final class MarketplacePluginPage: MarketplacePage {
 
         var actions: [NSView] = []
         if let homepage = plugin.homepage, let url = URL(string: homepage) {
-            let website = ActionButton(title: L("Website")) { NSWorkspace.shared.open(url) }
+            let website = ActionButton(title: L("Website")) { NSWorkspace.shared.openLink(url) }
             website.image = NSImage(systemSymbolName: "arrow.up.right", accessibilityDescription: nil)
             website.imagePosition = .imageTrailing
             website.toolTip = homepage

@@ -82,12 +82,14 @@ enum AttachmentLayout {
     }
 }
 
-/// The name sits above the bubble (group chats only); the bubble holds the attachments, the
-/// text, and the stamp.
+/// The name sits above the first bubble of a run (group chats only); the bubble holds the
+/// attachments, the text, and the stamp.
 struct BubbleMetrics {
     var textWidth: CGFloat
     var textHeight: CGFloat
     var timeWidth: CGFloat
+    /// The first bubble of a bot's run in a group: its name above it and its avatar beside it.
+    /// The bubbles after it in the run sit right under the one before.
     var showsName: Bool
     /// Where the bubble starts: after the avatar column in a group, at the inset in a DM.
     var indent: CGFloat
@@ -182,10 +184,11 @@ final class ChatLayout {
         var card: (width: CGFloat, height: CGFloat)?
     }
 
-    /// What a bubble's measurement depends on besides the message.
+    /// What a bubble's measurement depends on besides the message. Whether it shows the name
+    /// is the row's, and changes no measurement.
     private struct BubbleKey: Equatable {
         var maxInner: CGFloat
-        var showsName: Bool
+        var showsAvatar: Bool
         var showsTime: Bool
     }
 
@@ -230,15 +233,20 @@ final class ChatLayout {
         return max(140, min(ChatMetrics.maxBubbleWidth, tableWidth - reserved))
     }
 
-    /// `showsName` is a group chat's bot message: name above, avatar beside the bubble.
-    func metrics(for message: Message, showsName: Bool, tableWidth: CGFloat) -> BubbleMetrics {
-        let indent = ChatMetrics.indent(showsAvatar: showsName)
+    /// `showsAvatar` is a group chat's bot message, in the column after the avatars; the first
+    /// bubble of a run of them (`groupStart`) shows the bot's name and avatar.
+    func metrics(for message: Message, showsAvatar: Bool, groupStart: Bool, tableWidth: CGFloat) -> BubbleMetrics {
+        let indent = ChatMetrics.indent(showsAvatar: showsAvatar)
+        let showsName = showsAvatar && groupStart
         let maxBubble = availableBubbleWidth(for: message, indent: indent, tableWidth: tableWidth)
         let key = BubbleKey(
-            maxInner: maxBubble - ChatMetrics.bubblePadX * 2, showsName: showsName,
+            maxInner: maxBubble - ChatMetrics.bubblePadX * 2, showsAvatar: showsAvatar,
             showsTime: Preferences.showTimestamps)
         var entry = entry(for: message)
-        if let bubble = entry.bubbles.first(where: { $0.key == key }) { return bubble.metrics }
+        if var bubble = entry.bubbles.first(where: { $0.key == key })?.metrics {
+            bubble.showsName = showsName
+            return bubble
+        }
 
         let maxInner = key.maxInner
         let timeWidth = key.showsTime ? timeWidth(for: message.createdAt) : 0
@@ -344,8 +352,8 @@ final class ChatLayout {
         )
     }
 
-    /// `showsAvatar` is a bot's row in a group: its avatar beside the bubble or card, and a
-    /// bubble's name above it.
+    /// `showsAvatar` is a bot's row in a group: its avatar beside the bubble or card, and the
+    /// name above the first bubble of a run.
     func height(
         for row: ChatRow, message: Message?, tableWidth: CGFloat, showsAvatar: Bool
     ) -> CGFloat {
@@ -366,7 +374,7 @@ final class ChatLayout {
 
             switch message.body {
             case .text:
-                let metrics = metrics(for: message, showsName: showsAvatar, tableWidth: tableWidth)
+                let metrics = metrics(for: message, showsAvatar: showsAvatar, groupStart: groupStart, tableWidth: tableWidth)
                 return top + metrics.rowHeight
 
             // Tool calls never show but as a message_bot marker or a command's card.

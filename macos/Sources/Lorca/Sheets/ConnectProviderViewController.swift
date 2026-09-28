@@ -21,6 +21,8 @@ final class ConnectProviderViewController: SheetViewController {
     private lazy var statusRow = Build.stack([spinner, status], orientation: .horizontal, spacing: 8)
     private var task: Task<Void, Never>?
     private var isBusy = false
+    /// The CLI is running a browser sign-in for this sheet.
+    private var isSigningIn = false
 
     private let onDone: () -> Void
 
@@ -150,6 +152,8 @@ final class ConnectProviderViewController: SheetViewController {
                 if self.kind.usesAPIKey {
                     try await self.store.connectAPIKey(self.kind, apiKey: key, baseURL: baseURL)
                 } else {
+                    self.isSigningIn = true
+                    defer { self.isSigningIn = false }
                     try await self.store.connectSignIn(self.kind)
                 }
                 try Task.checkCancellation()
@@ -166,7 +170,10 @@ final class ConnectProviderViewController: SheetViewController {
         }
     }
 
+    /// Cancel stops a sign-in waiting on the browser as well: the CLI drops it, so finishing
+    /// there afterwards connects nothing.
     override func dismissSheet() {
+        if isSigningIn { store.cancelSignIn() }
         task?.cancel()
         super.dismissSheet()
     }

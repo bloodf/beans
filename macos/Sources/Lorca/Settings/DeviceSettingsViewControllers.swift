@@ -202,7 +202,7 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
 
         var rows: [NSView] = [
             KeyValueRow(key: SettingsEntry.machineKey.row, value: device.machineKey, monospaced: true),
-            KeyValueRow(key: L("OS"), value: "\(device.os.rawValue) · \(device.osVersion)"),
+            KeyValueRow(key: L("OS"), value: "\(device.os.displayName) · \(device.osVersion)"),
             KeyValueRow(
                 key: L("Role"),
                 value: device.isRunner ? L("Runner · runs bots with its own credentials") : L("Device · never runs bots")),

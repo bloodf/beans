@@ -97,7 +97,6 @@ final class NewBotViewController: SheetViewController {
         }
 
         setButtons(confirm: L("Create Bot"))
-        confirmButton.isEnabled = false
         runnerChanged()
     }
 
@@ -200,15 +199,29 @@ final class NewBotViewController: SheetViewController {
         thinkingPopup.selectItem(at: 0)
     }
 
-    @objc private func runnerChanged() {
+    /// The Runner picked in the pop-up; nil while none is paired.
+    private var selectedRunner: Device? {
         let runners = store.runners
-        guard runners.indices.contains(runnerPopup.indexOfSelectedItem) else {
+        let index = runnerPopup.indexOfSelectedItem
+        return runners.indices.contains(index) ? runners[index] : nil
+    }
+
+    private var trimmedName: String {
+        nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Create Bot needs a name and a Runner to run the bot on.
+    private func updateConfirmButton() {
+        confirmButton.isEnabled = !trimmedName.isEmpty && selectedRunner != nil
+    }
+
+    @objc private func runnerChanged() {
+        updateConfirmButton()
+        guard let runner = selectedRunner else {
             note.stringValue = L("No Runner is paired. Bots run on a Device with macOS, Linux, or Windows.")
             note.textColor = .systemOrange
-            confirmButton.isEnabled = false
             return
         }
-        let runner = runners[runnerPopup.indexOfSelectedItem]
         let provider = selectedProvider
         if store.credential(for: provider)?.isConnected == true {
             note.stringValue = L("%@ is connected. Turns run on %@.", provider.rawValue, runner.name)
@@ -221,8 +234,8 @@ final class NewBotViewController: SheetViewController {
     }
 
     override func confirmTapped() {
-        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { return }
+        let name = trimmedName
+        guard !name.isEmpty, let runner = selectedRunner else { return }
         let look = Self.looks[selectedLook]
         let description = descriptionField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -231,7 +244,7 @@ final class NewBotViewController: SheetViewController {
             description: description,
             symbolName: look.symbolName,
             accent: look.accent,
-            runnerID: store.runners[runnerPopup.indexOfSelectedItem].id,
+            runnerID: runner.id,
             provider: selectedProvider,
             model: selectedModel,
             thinking: selectedThinking
@@ -243,8 +256,7 @@ final class NewBotViewController: SheetViewController {
 
 extension NewBotViewController: NSTextFieldDelegate {
     func controlTextDidChange(_ obj: Notification) {
-        confirmButton.isEnabled = !nameField.stringValue
-            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        updateConfirmButton()
     }
 }
 

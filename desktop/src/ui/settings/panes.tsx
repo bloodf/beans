@@ -32,6 +32,7 @@ import { open, revealed, settingsDeviceID } from "../root";
 import { AccessoryRow, ActionRow, BotRow, EditableRow, KeyValueRow, NoteRow, PluginRow, Section, StatusRow } from "../sections";
 import { presentConnectProvider } from "../sheets/connectProvider";
 import { presentPlugin } from "../sheets/plugin";
+import { checkForUpdates } from "../window";
 import { Entries } from "./search";
 
 export function SettingsPage(props: { pane: SettingsPane }) {
@@ -64,8 +65,9 @@ function PaneFrame(props: { pane: SettingsPane; children: JSX.Element }) {
   const flash = (row: string) => {
     if (!scroller) return;
     const targets = [...scroller.querySelectorAll<HTMLElement>("[data-label]")].filter((element) => element.dataset.label === row);
-    // A row before a section of the same name: the row is the setting.
-    const target = targets.find((element) => element.classList.contains("row")) ?? targets[0];
+    // A section of that name flashes its card, ahead of a row with the same label, as on the Mac.
+    const section = targets.find((element) => element.classList.contains("section"));
+    const target = section?.querySelector<HTMLElement>(":scope > .section-card") ?? targets[0];
     if (!target) return;
     target.scrollIntoView({ block: "nearest", behavior: "smooth" });
     target.classList.remove("flash");
@@ -73,6 +75,8 @@ function PaneFrame(props: { pane: SettingsPane; children: JSX.Element }) {
     target.classList.add("flash");
     setTimeout(() => target.classList.remove("flash"), 1300);
   };
+  // A pick while the page shows; one that opened the page is the settled page's to flash, and
+  // an earlier pick stays where it was when the page comes back.
   createEffect(
     () => revealed.read(),
     (picked) => {
@@ -80,6 +84,15 @@ function PaneFrame(props: { pane: SettingsPane; children: JSX.Element }) {
       // The page may have come on screen with this same click, so its rows settle first.
       requestAnimationFrame(() => flash(picked.entry.row));
     },
+    { defer: true },
+  );
+  // Another Device's page starts at its top.
+  createEffect(
+    () => settingsDeviceID.read(),
+    () => {
+      if (scroller) scroller.scrollTop = 0;
+    },
+    { defer: true },
   );
   onSettled(() => {
     const picked = revealed.get();
@@ -157,7 +170,7 @@ export function GeneralPane() {
             value={`${updater()?.version ?? hostInfo().version} · ${lastCheck()}`}
             tint="var(--label-2)"
             actionTitle={L("Check for Updates…")}
-            onAction={() => void host.checkForUpdates()}
+            onAction={() => void checkForUpdates()}
           />
           <AccessoryRow label={Entries.automaticChecks().row}>
             <Switch
@@ -240,8 +253,8 @@ export function AdvancedPane() {
   return (
     <PaneFrame pane="advanced">
       <Section title={L("Connection")} style="heading">
-        <EditableRow label={Entries.relayURL().row} value={relayValue()} placeholder={hostInfo().productionRelayURL} monospaced alignRight onCommit={commitRelay} />
-        <EditableRow label={Entries.cliPort().row} value={String(prefs().cliPort)} placeholder={String(hostInfo().defaultCLIPort)} monospaced alignRight onCommit={commitPort} />
+        <EditableRow label={Entries.relayURL().row} value={relayValue()} placeholder={hostInfo().productionRelayURL} monospaced onCommit={commitRelay} />
+        <EditableRow label={Entries.cliPort().row} value={String(prefs().cliPort)} placeholder={String(hostInfo().defaultCLIPort)} monospaced onCommit={commitPort} />
       </Section>
       <Footnote
         text={L(

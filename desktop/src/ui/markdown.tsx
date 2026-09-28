@@ -35,7 +35,6 @@ function spanNode(span: Span, bold: boolean): JSX.Element {
     node = (
       <a
         href={href}
-        title={href}
         onClick={(event) => {
           event.preventDefault();
           openLink(href);

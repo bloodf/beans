@@ -21,7 +21,11 @@ function entry(pane: SettingsPane, title: string, options: { row?: string; keywo
 }
 
 export const Entries = {
-  sendOnReturn: () => entry("general", L("Return sends the message"), { keywords: [L("enter send newline keyboard chats")] }),
+  // The key is Return on a Mac keyboard and Enter on the others.
+  sendOnReturn: () =>
+    entry("general", hostInfo().platform === "darwin" ? L("Return sends the message") : L("Enter sends the message"), {
+      keywords: [L("enter send newline keyboard chats")],
+    }),
   timestamps: () => entry("general", L("Show timestamps in transcripts"), { keywords: [L("time date messages chats")] }),
   appearance: () => entry("general", L("Appearance"), { keywords: [L("theme dark mode light mode system")] }),
   appLanguage: () => entry("general", L("App Language"), { keywords: [L("language locale english chinese translation")] }),

@@ -2,6 +2,7 @@
 // StateViewControllers: loading while the CLI starts, the recovery page while it is not answering,
 // and the placeholder when nothing is selected.
 
+import { onSettled } from "solid-js";
 import { hostInfo, preferences } from "../host";
 import { L } from "../l10n";
 import { track } from "../model/reactive";
@@ -9,13 +10,14 @@ import { store } from "../model/store";
 import { newBot } from "./actions";
 import { Button, CopyButton, Spinner } from "./controls";
 import { Icon } from "./icons";
+import { hasSheet } from "./overlay";
 
 /** The first window is ready while the CLI starts and loads the account. */
 export function Loading() {
   return (
     <div class="state-page">
-      <div class="state-column">
-        <Spinner size={22} />
+      <div class="state-column loading">
+        <Spinner size={32} />
         <div class="state-caption">{L("Loading…")}</div>
       </div>
     </div>
@@ -25,6 +27,16 @@ export function Loading() {
 /** Shown when the local CLI is not answering on 127.0.0.1. */
 export function Offline() {
   const command = hostInfo().cliCommand;
+  // Retry Connection is the default button: Return presses it while nothing else has the keyboard.
+  onSettled(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Enter" || event.isComposing || event.defaultPrevented || event.target !== document.body || hasSheet()) return;
+      event.preventDefault();
+      store.reconnect();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
   const hint = () => {
     track.connection();
     return `${store.offlineStatus} · 127.0.0.1:${preferences().cliPort}`;

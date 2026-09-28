@@ -11,7 +11,7 @@ import { paneSymbol, paneTitle, settingsPanes } from "../model/models";
 import { store } from "../model/store";
 import { AvatarCluster, botAvatar } from "./avatar";
 import { box } from "./box";
-import { commands, shortcutText } from "./commands";
+import { commands, setBeforeCommand, shortcutText } from "./commands";
 import { Icon } from "./icons";
 import { hasSheet } from "./overlay";
 import { open, reveal, settingsDeviceID, showSettings } from "./root";
@@ -259,6 +259,10 @@ export const palette = {
   },
   isOpen: () => isOpen.get(),
 };
+
+// A command run from the keyboard or a menu while the palette is up acts on the window, which the
+// palette then no longer covers.
+setBeforeCommand(() => palette.close());
 
 export function PaletteHost() {
   return (

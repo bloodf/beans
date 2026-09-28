@@ -306,7 +306,9 @@ function Memory(props: { bot: Bot }) {
  * none, the sentence that says how to get one. */
 function Routines(props: { bot: Bot }) {
   const routines = () => {
+    // A run shows as it starts, with the turns in the chats.
     track.roster();
+    track.chats();
     return store.routinesFor(props.bot.id);
   };
   return (

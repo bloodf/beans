@@ -3,13 +3,13 @@
 // and enabled state of the command palette's actions, and, in a browser tab where there is no menu
 // bar, the shortcuts.
 
-import { createEffect, createMemo } from "solid-js";
-import { frameStyle, hostInfo, inApp, menus, onMenuCommand, type MenuItemSpec, type MenuItemState } from "../host";
+import { createEffect, createMemo, createSignal } from "solid-js";
+import { frameStyle, hostInfo, inApp, menus, onMenuCommand, watchWindowState, type MenuItemSpec, type MenuItemState } from "../host";
 import { L } from "../l10n";
 import { isDM, isGroup } from "../model/models";
 import { track } from "../model/reactive";
 import { store } from "../model/store";
-import { hasSheet } from "./overlay";
+import { hasSheet, readHasSheet } from "./overlay";
 import { botsAvailableToAdd, selection } from "./root";
 
 export interface Command {
@@ -26,6 +26,24 @@ export interface Command {
 }
 
 const handlers = new Map<string, () => void>();
+
+/** Whether this page's window is in full screen, which words the View menu's item. */
+const [isFullScreen, setFullScreen] = createSignal(false);
+
+/** A check for updates the user asked for is under way; the menu's item waits for it. */
+const [checkingForUpdates, setCheckingForUpdates] = createSignal(false);
+export { setCheckingForUpdates };
+
+/** What a sheet leaves working: the app's own commands, not the window's, as a sheet takes the
+ * window's keys on the Mac. */
+const whileSheet = new Set(["quit", "about", "help", "architecture", "checkForUpdates", "fullScreen", "simulateOffline", "replayMock", "showOnboarding"]);
+
+/** Closes what floats over the window before a command acts on it, as the palette. */
+let beforeCommand: (() => void) | undefined;
+
+export function setBeforeCommand(run: () => void): void {
+  beforeCommand = run;
+}
 
 function chatSelected(): boolean {
   const current = selection.read();
@@ -56,7 +74,7 @@ export const commandTable: Command[] = [
     accelerator: "CmdOrCtrl+Shift+B",
   },
   { id: "scrollToLatest", title: () => L("Scroll to Latest"), accelerator: "CmdOrCtrl+J", enabled: chatSelected },
-  { id: "fullScreen", title: () => L("Enter Full Screen"), accelerator: "F11", role: "toggleFullScreen" },
+  { id: "fullScreen", title: () => (isFullScreen() ? L("Exit Full Screen") : L("Enter Full Screen")), accelerator: "F11", role: "toggleFullScreen" },
   {
     id: "addBot",
     title: () => L("Add Bot…"),
@@ -91,7 +109,7 @@ export const commandTable: Command[] = [
   {
     id: "checkForUpdates",
     title: () => L("Check for Updates…"),
-    enabled: () => hostInfo().updatesEnabled,
+    enabled: () => hostInfo().updatesEnabled && !checkingForUpdates(),
   },
   { id: "about", title: () => L("About %@", hostInfo().name) },
   {
@@ -114,6 +132,9 @@ export const commands = {
   run(id: string): void {
     const command = byID.get(id);
     if (command?.enabled && !command.enabled()) return;
+    if (hasSheet() && !whileSheet.has(id)) return;
+    // The palette's own shortcut opens it afresh; any other command closes it first.
+    if (id !== "palette") beforeCommand?.();
     handlers.get(id)?.();
   },
   /** Whether the page answers `id` itself. */
@@ -132,7 +153,8 @@ export function shortcutText(accelerator: string): string {
   if (hostInfo().platform === "darwin") {
     const glyphs: Record<string, string> = { Ctrl: "⌃", Alt: "⌥", Shift: "⇧", CmdOrCtrl: "⌘", Cmd: "⌘" };
     const order = ["Ctrl", "Alt", "Shift", "CmdOrCtrl", "Cmd"];
-    return order.filter((modifier) => parts.includes(modifier)).map((modifier) => glyphs[modifier]).join("") + key.toUpperCase();
+    const keys: Record<string, string> = { Enter: "Return" };
+    return order.filter((modifier) => parts.includes(modifier)).map((modifier) => glyphs[modifier]).join("") + (keys[key] ?? key.toUpperCase());
   }
   const names: Record<string, string> = { CmdOrCtrl: "Ctrl", Cmd: "Win" };
   return [...parts.map((modifier) => names[modifier] ?? modifier), key.length === 1 ? key.toUpperCase() : key].join("+");
@@ -142,7 +164,10 @@ export function shortcutText(accelerator: string): string {
 
 function item(id: string, window: "main" | "other"): MenuItemSpec {
   const command = byID.get(id)!;
-  const enabled = window === "main" ? (command.enabled?.() ?? true) : command.role !== undefined || ["settings", "help", "architecture", "about", "checkForUpdates", "showOnboarding"].includes(id);
+  const enabled =
+    window === "main"
+      ? (command.enabled?.() ?? true) && (!readHasSheet() || whileSheet.has(id))
+      : command.role !== undefined || (["settings", "help", "architecture", "about", "checkForUpdates", "showOnboarding", "simulateOffline", "replayMock"].includes(id) && (command.enabled?.() ?? true));
   return {
     id,
     label: command.title(),
@@ -176,6 +201,7 @@ function menuBar(window: "main" | "other"): MenuItemSpec[] {
         { role: "cut", label: L("Cut") },
         { role: "copy", label: L("Copy") },
         { role: "paste", label: L("Paste") },
+        { role: "pasteAndMatchStyle", label: L("Paste and Match Style"), accelerator: "CmdOrCtrl+Alt+Shift+V" },
         { role: "selectAll", label: L("Select All") },
         separator,
         at("find"),
@@ -209,6 +235,16 @@ export async function popupAppMenu(anchor: HTMLElement): Promise<void> {
  * with the store and the selection. Clicks come back as commands. A window whose page draws its
  * title bar keeps its menu in a button there and answers the shortcuts itself. */
 export function installMenuBar(window: "main" | "other"): () => void {
+  // Only a window has full screen; a browser tab stays out of it.
+  const offState = inApp ? watchWindowState((state) => setFullScreen(state.fullScreen)) : () => {};
+  const offMenu = installMenus(window);
+  return () => {
+    offState();
+    offMenu();
+  };
+}
+
+function installMenus(window: "main" | "other"): () => void {
   if (!inApp || (window === "main" && frameStyle() === "custom")) return installShortcuts();
   void menus.setBar(menuBar(window));
   const states = createMemo(() => {
@@ -242,9 +278,12 @@ function installChatNumberKeys(): () => void {
   const onKey = (event: KeyboardEvent) => {
     const primary = hostInfo().platform === "darwin" ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
     if (!primary || event.shiftKey || event.altKey || hasSheet()) return;
-    if (/^[1-9]$/.test(event.key)) {
+    // The digit keys by where they sit, so a layout that types other characters on them (AZERTY)
+    // still reaches the chats.
+    const digit = /^Digit([1-9])$/.exec(event.code)?.[1];
+    if (digit) {
       event.preventDefault();
-      goToChat?.(Number(event.key));
+      goToChat?.(Number(digit));
     }
   };
   window.addEventListener("keydown", onKey);
@@ -262,7 +301,8 @@ export function setGoToChat(run: (number: number) => void): void {
  * a way to do it. */
 function installShortcuts(): () => void {
   const onKey = (event: KeyboardEvent) => {
-    if (event.defaultPrevented) return;
+    // AltGr types characters ("{" is AltGr+B on some layouts); Windows reports it as Ctrl+Alt.
+    if (event.defaultPrevented || event.getModifierState("AltGraph")) return;
     for (const command of commandTable) {
       if (!command.accelerator || (command.role && !commands.has(command.id)) || !matches(command.accelerator, event)) continue;
       event.preventDefault();

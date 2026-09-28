@@ -72,6 +72,7 @@ const defaultPrefs: Preferences = {
   lastUpdateCheck: 0,
   noAutomaticUpdateChecks: false,
   automaticUpdateDownloads: false,
+  skippedUpdate: "",
 };
 
 let prefs: Preferences = defaultPrefs;
@@ -302,7 +303,7 @@ export function watchWindowState(listener: (state: WindowState) => void): () => 
     void Host.windowState().then(listener);
     return events.windowState.on(listener);
   }
-  const report = () => listener({ focused: document.hasFocus(), visible: document.visibilityState === "visible", minimized: false, maximized: false });
+  const report = () => listener({ focused: document.hasFocus(), visible: document.visibilityState === "visible", minimized: false, maximized: false, fullScreen: false });
   report();
   window.addEventListener("focus", report);
   window.addEventListener("blur", report);

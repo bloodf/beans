@@ -104,6 +104,9 @@
 }
 
 .link-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   border: 0;
   background: transparent;
   padding: 0;
@@ -112,10 +115,6 @@
   font-weight: 500;
   white-space: nowrap;
   flex: none;
-}
-
-.link-button:hover:not(:disabled) {
-  text-decoration: underline;
 }
 
 .link-button:disabled {
@@ -222,8 +221,19 @@
   justify-content: center;
   width: 19px;
   height: 19px;
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--hover);
+}
+
+/* Pressed, or with its menu up, the platter's fill doubles. */
+.popup-button.settings:active:not(:disabled) .popup-chevrons,
+.popup-button.settings.open .popup-chevrons {
+  background: var(--pressed);
+}
+
+.popup-symbol {
+  margin-right: -3px;
+  color: var(--label-2);
 }
 
 .popup-button.settings:hover:not(:disabled) {
@@ -317,13 +327,14 @@ textarea::placeholder {
   color: var(--placeholder);
 }
 
+/* A capsule, as NSSearchField is. */
 .search-field {
   display: flex;
   align-items: center;
   gap: 6px;
   height: 30px;
   padding: 0 8px 0 10px;
-  border-radius: 8px;
+  border-radius: 15px;
   background: var(--search-bg, rgba(0, 0, 0, 0.055));
   color: var(--label-2);
 }
@@ -428,9 +439,11 @@ textarea::placeholder {
   color: var(--label);
 }
 
+/* An accessory sits on the title's line without making it taller, so the card keeps its gap. */
 .section-accessory {
   display: inline-flex;
   flex: none;
+  margin-block: -6px;
 }
 
 .section-card {
@@ -475,12 +488,18 @@ textarea::placeholder {
   min-width: 0;
 }
 
-.row.clickable:hover {
+/* Rows a bot or a switch sits in fill under the pointer; status rows, as the Mac's, don't. */
+.bot-row.clickable:hover {
   background: var(--hover-row, rgba(0, 0, 0, 0.04));
 }
 
-:root[data-dark] .row.clickable:hover {
+:root[data-dark] .bot-row.clickable:hover {
   --hover-row: rgba(255, 255, 255, 0.05);
+}
+
+/* A value that wraps keeps its label on its first line. */
+.key-value-row {
+  align-items: baseline;
 }
 
 .row-key {
@@ -601,7 +620,6 @@ textarea::placeholder {
 }
 
 .row-accessory:hover {
-  background: var(--hover);
   color: var(--label-2);
 }
 
@@ -671,7 +689,8 @@ textarea::placeholder {
   font-size: 11px;
 }
 
-.row-field:focus {
+/* Editing, a field reads from its start, unless it is right-aligned, as the inspector's Name. */
+.row-field:focus:not(.right) {
   text-align: start;
 }
 
@@ -889,6 +908,30 @@ textarea::placeholder {
 
 .alert-accessory {
   margin-top: 12px;
+}
+
+/* The app's icon leads an alert, as NSAlert's does; a critical one carries a caution sign. */
+.alert-icon {
+  position: relative;
+  display: block;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 12px;
+}
+
+.alert-icon img {
+  display: block;
+  width: 48px;
+  height: 48px;
+}
+
+.alert-caution {
+  position: absolute;
+  right: -6px;
+  bottom: -4px;
+  display: flex;
+  color: var(--orange);
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.25));
 }
 
 .sheet-caption {

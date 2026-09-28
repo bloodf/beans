@@ -242,6 +242,8 @@ export function ActionRow(props: {
   actionTitle?: string;
   monospaced?: boolean;
   tooltip?: string;
+  /** The action just copied something: a green check and its title, as a copy button shows. */
+  actionCopied?: boolean;
   onAction?: () => void;
 }) {
   return (
@@ -251,7 +253,12 @@ export function ActionRow(props: {
         {props.value ?? ""}
       </span>
       <Show when={props.actionTitle}>
-        <LinkButton onClick={() => props.onAction?.()}>{props.actionTitle}</LinkButton>
+        <LinkButton class={props.actionCopied ? "copied" : undefined} onClick={() => props.onAction?.()}>
+          <Show when={props.actionCopied}>
+            <Icon name="checkmark" size={11} strokeWidth={2.6} />
+          </Show>
+          {props.actionTitle}
+        </LinkButton>
       </Show>
     </div>
   );
@@ -311,6 +318,9 @@ export function EditableRow(props: {
             props.onCommit(event.currentTarget.value.trim());
             event.currentTarget.blur();
           } else if (event.key === "Escape") {
+            // The field takes Escape back to its value; Settings stays open.
+            event.preventDefault();
+            event.stopPropagation();
             committed = true;
             event.currentTarget.value = props.value;
             event.currentTarget.blur();

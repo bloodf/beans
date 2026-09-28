@@ -144,7 +144,8 @@ export function RunningTasks(props: { chatID: string; onEmpty: () => void; onClo
                 <Show when={task().output !== ""}>
                   <CommandOutput text={task().output} lines={10} />
                 </Show>
-                <Show when={errors()[task().id]}>{(error) => <div class="running-task-error">{error()}</div>}</Show>
+                {/* A failed Stop says so while the command runs; once it ends, its state says the rest. */}
+                <Show when={isLive(task()) && errors()[task().id]}>{(error) => <div class="running-task-error">{error()}</div>}</Show>
               </div>
             </div>
           );

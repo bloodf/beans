@@ -414,13 +414,18 @@ body.resizing * {
   flex: none;
   min-width: 16px;
   height: 16px;
-  padding: 0 5px;
+  padding: 0 2.5px;
   border-radius: 8px;
   background: var(--label-3);
   color: #ffffff;
   font-size: var(--text-caption);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+
+/* On the selected row of the focused list, the pill lightens against the selection. */
+.sidebar-list:focus .chat-row.selected .unread-pill {
+  background: rgba(255, 255, 255, 0.25);
 }
 
 .sidebar-footer {
@@ -476,7 +481,7 @@ body.resizing * {
   padding: 0 8px 0 52px;
   border-radius: 6px;
   font-size: 12px;
-  color: var(--label-2);
+  color: var(--label);
 }
 
 .sidebar-no-results {
@@ -576,9 +581,9 @@ body.resizing * {
   background: rgba(255, 255, 255, 0.35);
 }
 
+/* The time keeps a column of its own beside the text, level with the last line. */
 .bubble-body {
   display: flex;
-  flex-wrap: wrap;
   align-items: flex-end;
   column-gap: 8px;
   min-width: 0;
@@ -609,9 +614,22 @@ body.resizing * {
 
 .bubble-attachments {
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bubble-attachments.below-text {
+  margin-bottom: 8px;
+}
+
+.bubble-attachments.below-stamp {
+  margin-bottom: 4px;
+}
+
+.attachment-row {
+  display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 8px;
 }
 
 .attachment-image {
@@ -667,10 +685,10 @@ body.resizing * {
 
 .working-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   height: 44px;
-  padding: 0 22px;
+  padding: 14px 22px 0;
 }
 
 .working-avatar {
@@ -681,24 +699,38 @@ body.resizing * {
 }
 
 .working-text {
+  margin-top: 5px;
   font-size: 12.5px;
+  line-height: 16px;
 }
 
+/* Shimmering words: dimmed to 40%, with a bright band 30% of their width sweeping from the leading
+   edge to the trailing one in 1.5 s, resting a quarter second between sweeps. The mask is 2.3 times
+   as wide as the words, the band at 100%–130% of their width, so moving it from 100% to 0% carries
+   the band from just before the words to just past them. */
 .shimmer {
-  background: linear-gradient(90deg, var(--label-2) 0%, var(--label-2) 38%, var(--label) 50%, var(--label-2) 62%, var(--label-2) 100%);
-  background-size: 300% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  animation: shimmer 2.2s linear infinite;
+  --shimmer-mask: linear-gradient(90deg, rgba(0, 0, 0, 0.4) 0%, rgba(0, 0, 0, 0.4) 43.48%, #000 50%, rgba(0, 0, 0, 0.4) 56.52%, rgba(0, 0, 0, 0.4) 100%);
+  -webkit-mask-image: var(--shimmer-mask);
+  mask-image: var(--shimmer-mask);
+  -webkit-mask-size: 230% 100%;
+  mask-size: 230% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  animation: shimmer 1.75s linear infinite;
 }
 
 @keyframes shimmer {
-  from {
-    background-position: 100% 0;
+  0% {
+    -webkit-mask-position: 100% 0;
+    mask-position: 100% 0;
   }
-  to {
-    background-position: 0 0;
+  85.7% {
+    -webkit-mask-position: 0% 0;
+    mask-position: 0% 0;
+  }
+  100% {
+    -webkit-mask-position: 0% 0;
+    mask-position: 0% 0;
   }
 }
 
@@ -771,6 +803,11 @@ body.resizing * {
   padding-top: 4px;
 }
 
+.handoff-row.handoff {
+  justify-content: flex-start;
+  padding-left: 58px;
+}
+
 .handoff-marker {
   display: inline-flex;
   align-items: center;
@@ -784,8 +821,8 @@ body.resizing * {
   color: var(--label-2);
 }
 
-.handoff-marker.clickable:hover {
-  background: var(--chip);
+.handoff-marker.clickable {
+  cursor: pointer;
 }
 
 .handoff-lead,
@@ -796,6 +833,7 @@ body.resizing * {
 .handoff-name {
   flex: none;
   font-weight: 500;
+  color: var(--label);
 }
 
 .handoff-arrow {
@@ -804,6 +842,7 @@ body.resizing * {
 
 .handoff-preview {
   min-width: 0;
+  max-width: 260px;
 }
 
 /* MARK: Cards */
@@ -873,6 +912,7 @@ body.resizing * {
 
 .card-reason {
   margin-top: 7px;
+  color: var(--label-2);
   font-size: 11.5px;
   line-height: 1.35;
   white-space: pre-wrap;
@@ -936,6 +976,7 @@ body.resizing * {
   font-size: 11px;
   line-height: 15px;
   text-align: start;
+  cursor: pointer;
 }
 
 .command-block:hover {
@@ -958,7 +999,7 @@ body.resizing * {
   overflow-y: auto;
   border-radius: 6px;
   background: var(--code);
-  color: var(--label-2);
+  color: var(--label);
   font-family: var(--mono);
   font-size: 11px;
   line-height: 15px;
@@ -1027,7 +1068,10 @@ body.resizing * {
   pointer-events: none;
 }
 
+/* A little above the middle of the room over the composer. */
 .chat-empty {
+  position: relative;
+  top: -20px;
   pointer-events: auto;
 }
 
@@ -1035,19 +1079,28 @@ body.resizing * {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
-  max-width: 440px;
-  padding: 0 24px;
+  gap: 12px;
+  width: 440px;
+  max-width: 100vw;
+  padding: 0 16px;
   text-align: center;
 }
 
+.chat-empty-column > .avatar-stack {
+  margin-bottom: 4px;
+}
+
 .chat-empty-title {
-  margin-top: 4px;
-  font-size: 17px;
+  font-size: 19px;
   font-weight: 600;
 }
 
 .chat-empty-subtitle {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  max-width: 400px;
+  overflow: hidden;
   font-size: 12.5px;
   line-height: 1.4;
   color: var(--label-2);
@@ -1056,22 +1109,26 @@ body.resizing * {
 
 .chat-empty-suggestions {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
 .suggestion-chip {
   padding: 6px 12px;
   border: 1px solid var(--separator);
-  border-radius: 15px;
-  background: transparent;
-  font-size: 12.5px;
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--label-2);
+  font-size: 12px;
+  cursor: pointer;
 }
 
 .suggestion-chip:hover {
-  background: var(--hover);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
 }
 
 /* MARK: Composer */
@@ -1114,12 +1171,14 @@ body.resizing * {
   padding: 12px 8px 8px;
 }
 
+/* Chips 14 apart side by side (8, and the remove button's overhang), rows 8 apart, room for the
+   overhang above the first row. */
 .composer-strip {
   grid-area: strip;
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  padding: 0 4px 6px;
+  gap: 8px 14px;
+  padding: 6px 4px 6px;
 }
 
 .composer-attach {
@@ -1191,7 +1250,7 @@ body.resizing * {
   overflow-y: hidden;
   background: transparent;
   color: transparent;
-  caret-color: var(--label);
+  caret-color: var(--accent);
 }
 
 .composer-backdrop {
@@ -1218,19 +1277,19 @@ body.resizing * {
   display: block;
   width: 56px;
   height: 56px;
-  border-radius: 8px;
-  object-fit: cover;
+  border-radius: 10px;
+  object-fit: contain;
 }
 
 .composer-chip-card {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 200px;
+  width: 176px;
   height: 56px;
   padding: 0 10px;
-  border-radius: 8px;
-  background: var(--chip);
+  border-radius: 10px;
+  background: var(--composer-control);
 }
 
 .composer-chip-text {
@@ -1257,18 +1316,21 @@ body.resizing * {
   padding: 0;
   border: 0;
   border-radius: 9px;
-  background: var(--label-2);
-  color: var(--content);
+  background: rgba(0, 0, 0, 0.7);
+  color: #ffffff;
 }
 
+/* It hangs from the composer, which lets clicks through to the transcript; its rows take them. */
 .mention-panel {
   position: fixed;
   z-index: 60;
   width: 268px;
   padding: 5px;
+  overflow-y: auto;
   border-radius: 10px;
   background: var(--popover);
   box-shadow: var(--shadow);
+  pointer-events: auto;
 }
 
 .mention-row {
@@ -1320,13 +1382,21 @@ body.resizing * {
 }
 
 .running-task {
+  position: relative;
   display: flex;
   gap: 10px;
   padding: 10px 8px;
 }
 
-.running-task + .running-task {
-  border-top: 1px solid var(--separator);
+/* Separators 14 in from the list's edges. */
+.running-task + .running-task::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 8px;
+  right: 8px;
+  height: 1px;
+  background: var(--separator);
 }
 
 .running-task-icon {
@@ -1404,7 +1474,15 @@ body.resizing * {
   color: var(--label-3);
 }
 
-[data-label].flash {
+/* A picked setting scrolls in with room above it for its section's heading, then flashes: its row,
+   or a section's card. */
+.settings-page [data-label],
+.settings-page .section-card {
+  scroll-margin-block: 40px;
+}
+
+[data-label].flash,
+.section-card.flash {
   animation: flash 1.2s ease-out;
 }
 
@@ -1507,6 +1585,7 @@ body.resizing * {
 
 .rule-editor {
   height: 90px;
+  font-size: 12px;
 }
 
 .settings-window {
@@ -1576,8 +1655,7 @@ body.resizing * {
 }
 
 .routine-prompt {
-  max-height: 96px;
-  min-height: 40px;
+  height: 96px;
   overflow-y: auto;
   padding: 8px 12px;
   font-size: 12px;
@@ -1599,6 +1677,10 @@ body.resizing * {
 
 .sheet-note.warning {
   color: var(--orange);
+}
+
+.sheet-note.secondary {
+  color: var(--label-2);
 }
 
 .sheet-leading {
@@ -1725,8 +1807,7 @@ body.resizing * {
   opacity: 0.35;
 }
 
-.look-choice.selected,
-.look-choice:hover {
+.look-choice.selected {
   opacity: 1;
 }
 
@@ -1765,6 +1846,7 @@ body.resizing * {
   border-radius: 8px;
   background: var(--chip);
   color: var(--label);
+  cursor: pointer;
 }
 
 .look-symbol.selected {
@@ -1783,6 +1865,7 @@ body.resizing * {
   padding: 0;
   border: 0;
   border-radius: 13px;
+  cursor: pointer;
 }
 
 .look-accent.selected {
@@ -1799,11 +1882,6 @@ body.resizing * {
   font-size: var(--text-caption);
   line-height: 1.4;
   color: var(--label-3);
-}
-
-.picker-list .section-card {
-  max-height: 340px;
-  overflow-y: auto;
 }
 
 .selectable-bot-row {
@@ -2069,6 +2147,11 @@ body.resizing * {
   padding: 0 4px 0 12px;
 }
 
+/* View all hangs 4 in from the edge; a control, as the kind filter, 12. */
+.market-section-header.with-control {
+  padding-right: 12px;
+}
+
 .market-section-title {
   font-size: 14px;
   font-weight: 600;
@@ -2258,18 +2341,24 @@ body.resizing * {
   background: var(--separator);
 }
 
+/* The panel is at least as tall as the list beside it. */
 .market-bot-body {
   display: flex;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 16px;
 }
 
 .market-rail {
   display: flex;
   flex-direction: column;
+  align-self: flex-start;
   gap: 2px;
   flex: none;
   width: 196px;
+}
+
+.market-stack.bot-page {
+  gap: 20px;
 }
 
 .market-rail-item {
@@ -2358,6 +2447,10 @@ body.resizing * {
   border: 1px solid var(--separator);
   background: var(--window);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   font-size: 12.5px;
   line-height: 1.35;
   transform: translateX(-50%);
@@ -2744,6 +2837,10 @@ body.resizing * {
   align-items: center;
   gap: 10px;
   text-align: center;
+}
+
+.state-column.loading {
+  gap: 12px;
 }
 
 .state-column.offline {

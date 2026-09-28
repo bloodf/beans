@@ -14,21 +14,26 @@ import { errorText, store } from "../model/store";
 import { Avatar, botAvatar } from "./avatar";
 import { Button, CopyButton, PopUpButton } from "./controls";
 import { Icon } from "./icons";
-import { alert } from "./overlay";
+import { alert, hasSheet } from "./overlay";
 
 type Step = "welcome" | "create" | "restore" | "pair" | "bot" | "provider" | "done";
 
 /** The first bot's description as the CLI writes it, which the page shows in the app's language. */
 const defaultDescription = "Chief of staff. Plans the work and delegates each task to the right teammate, proposing a new one when none fits. Does hands-on work when necessary.";
 
+// Where onboarding stands lives outside the page: a language change draws the page again, and the
+// user stays on the step they were on, with the phrase they were shown and what they typed.
+const [step, setStep] = createSignal<Step>("welcome");
+const [phrase, setPhrase] = createSignal<string[]>([]);
+const [savedPhrase, setSavedPhrase] = createSignal(false);
+const [status, setStatus] = createSignal<{ text: string; color: string } | null>(null);
+const [providerKind, setProviderKind] = createSignal<ProviderKind>("deepseek");
+const [apiKey, setAPIKey] = createSignal("");
+let busy = false;
+/** A subscription sign-in is waiting on the browser. */
+let signingIn = false;
+
 export function Onboarding() {
-  const [step, setStep] = createSignal<Step>("welcome");
-  const [phrase, setPhrase] = createSignal<string[]>([]);
-  const [savedPhrase, setSavedPhrase] = createSignal(false);
-  const [status, setStatus] = createSignal<{ text: string; color: string } | null>(null);
-  const [providerKind, setProviderKind] = createSignal<ProviderKind>("deepseek");
-  const [apiKey, setAPIKey] = createSignal("");
-  let busy = false;
 
   /** The bot the CLI created with the identity, or the first bot in the roster. */
   const firstBot = createMemo(() => {
@@ -49,6 +54,19 @@ export function Onboarding() {
       if (step() === "welcome" || step() === "restore" || step() === "pair") go("done");
     }),
   );
+  // Return presses the page's default button while nothing on it has the keyboard, as a window's
+  // default button answers Return wherever the keyboard is.
+  onSettled(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Enter" || event.isComposing || event.defaultPrevented || event.target !== document.body || hasSheet()) return;
+      const button = document.querySelector<HTMLButtonElement>(".onboarding .button.primary:not(:disabled)");
+      if (!button) return;
+      event.preventDefault();
+      button.click();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const presentError = (message: string) => void alert({ message: hostInfo().name, informative: message, style: "warning", buttons: [{ title: L("OK") }] });
 
@@ -118,13 +136,26 @@ export function Onboarding() {
     setStatus({ text: usesAPIKey(kind) ? L("Checking the key with %@…", providerName(kind)) : L("Waiting for the browser…"), color: "var(--label-2)" });
     try {
       if (usesAPIKey(kind)) await store.connectAPIKey(kind, key);
-      else await store.connectSignIn(kind);
+      else {
+        signingIn = true;
+        await store.connectSignIn(kind);
+      }
       go("done");
     } catch (error) {
-      setStatus({ text: errorText(error), color: "var(--red)" });
+      // Skipped while the browser waited, the page has moved on; the bot step and the provider
+      // step both show the rows the error belongs under.
+      if (step() !== "done") setStatus({ text: errorText(error), color: "var(--red)" });
     } finally {
       busy = false;
+      signingIn = false;
     }
+  };
+
+  /** Skip for Now leaves the provider for later, a sign-in still waiting on the browser included,
+   * so finishing it there afterwards connects nothing. */
+  const skipProvider = () => {
+    if (signingIn) store.cancelSignIn();
+    go("done");
   };
 
   const saveFirstBot = (name: string, description: string) => {
@@ -143,7 +174,17 @@ export function Onboarding() {
   };
 
   const providerRows = () => (
-    <ProviderRows kind={providerKind} setKind={setProviderKind} apiKey={apiKey} setAPIKey={setAPIKey} status={status} />
+    <ProviderRows
+      kind={providerKind}
+      setKind={(kind) => {
+        // The note under the key is the new provider's, not the last one's error.
+        setStatus(null);
+        setProviderKind(kind);
+      }}
+      apiKey={apiKey}
+      setAPIKey={setAPIKey}
+      status={status}
+    />
   );
   /** The Continue button of a step with a credential: signing in says so, a key must be typed. */
   const credentialButton = (run: () => void) => ({
@@ -228,7 +269,7 @@ export function Onboarding() {
                   subtitle={L(
                     "Credentials belong to your account: your bots use them on every Runner you pair. They sync encrypted with your account key; the relay cannot read them.",
                   )}
-                  back={{ title: L("Skip for Now"), run: () => go("done") }}
+                  back={{ title: L("Skip for Now"), run: skipProvider }}
                   next={credentialButton(() => void connectProvider())}
                 >
                   <div class="onboarding-card">

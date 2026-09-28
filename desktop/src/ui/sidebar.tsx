@@ -2,7 +2,7 @@
 // a row per chat, and a footer with Settings, this computer, and the marketplace) and, while
 // Settings is up, the settings panes (a search over the panes and their settings, and Back).
 
-import { createMemo, createSignal, For, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
 import { hostInfo, preferences } from "../host";
 import { L } from "../l10n";
 import * as Format from "../model/format";
@@ -15,6 +15,7 @@ import { HoverButton, SearchField } from "./controls";
 import { Icon } from "./icons";
 import { popupMenu, separator } from "./menu";
 import {
+  botsAvailableToAdd,
   closeSettings,
   deleteChat,
   open,
@@ -125,9 +126,9 @@ function ChatRow(props: { id: string; index: number }) {
     const picked = await popupMenu(
       [
         { id: "pin", label: chat.isPinned ? L("Unpin") : L("Pin") },
-        ...(isGroup(chat) ? [{ id: "rename", label: L("Rename…") }, { id: "add", label: L("Add Bot…") }] : []),
+        ...(isGroup(chat) ? [{ id: "rename", label: L("Rename…") }, { id: "add", label: L("Add Bot…"), disabled: botsAvailableToAdd(props.id).length === 0 }] : []),
         separator,
-        { id: "delete", label: isDM(chat) ? L("Delete Bot") : L("Delete") },
+        { id: "delete", label: isDM(chat) ? L("Delete Bot") : L("Delete Chat") },
       ],
       { x: event.clientX, y: event.clientY },
     );
@@ -197,15 +198,30 @@ export function ChatsSidebar() {
   );
   let list: HTMLDivElement | undefined;
   onSettled(() => watchShortcutKey());
-  const move = (delta: number) => {
+  const selectAt = (index: number) => {
     const ids = chatIDs();
-    const current = selection.get();
-    const index = current?.kind === "chat" ? ids.indexOf(current.id) : -1;
-    const next = ids[Math.min(ids.length - 1, Math.max(0, index + delta))];
+    const next = ids[Math.min(ids.length - 1, Math.max(0, index))];
     if (next) {
       select({ kind: "chat", id: next });
       list?.querySelector(`[data-chat="${CSS.escape(next)}"]`)?.scrollIntoView({ block: "nearest" });
     }
+  };
+  const currentIndex = () => {
+    const current = selection.get();
+    return current?.kind === "chat" ? chatIDs().indexOf(current.id) : -1;
+  };
+  /** Typing a chat's first letters selects it, as an outline view's type-select does. */
+  let typed = "";
+  let typedTimer: ReturnType<typeof setTimeout> | undefined;
+  const typeSelect = (character: string) => {
+    typed += character.toLocaleLowerCase();
+    clearTimeout(typedTimer);
+    typedTimer = setTimeout(() => (typed = ""), 1000);
+    const index = chatIDs().findIndex((id) => {
+      const chat = store.chat(id);
+      return !!chat && store.title(chat).toLocaleLowerCase().startsWith(typed);
+    });
+    if (index >= 0) selectAt(index);
   };
   return (
     <div class="sidebar chats-sidebar">
@@ -218,16 +234,30 @@ export function ChatsSidebar() {
         tabindex={0}
         ref={(el) => (list = el)}
         onKeyDown={(event) => {
-          if (event.key === "ArrowDown") {
+          // A page of rows is the list's height in 54-pixel rows, less one kept in view.
+          const page = Math.max(1, Math.floor((list?.clientHeight ?? 0) / 54) - 1);
+          const steps: Record<string, () => number> = {
+            ArrowDown: () => currentIndex() + 1,
+            ArrowUp: () => currentIndex() - 1,
+            PageDown: () => currentIndex() + page,
+            PageUp: () => currentIndex() - page,
+            Home: () => 0,
+            End: () => chatIDs().length - 1,
+          };
+          const step = steps[event.key];
+          if (step) {
             event.preventDefault();
-            move(1);
-          } else if (event.key === "ArrowUp") {
-            event.preventDefault();
-            move(-1);
+            selectAt(step());
           } else if (event.key === "Enter") {
             const current = selection.get();
             if (current?.kind === "chat") open(current.id);
+          } else if (event.key.length === 1 && event.key !== " " && !event.ctrlKey && !event.metaKey && !event.altKey) {
+            typeSelect(event.key);
           }
+        }}
+        // A click past the last row selects nothing, and the window shows its placeholder.
+        onMouseDown={(event) => {
+          if (event.button === 0 && event.target === event.currentTarget) select(null);
         }}
       >
         <For each={chatIDs()}>{(id, index) => <ChatRow id={id} index={index()} />}</For>
@@ -300,13 +330,27 @@ export function SettingsSidebar() {
     const current = selection.read();
     return current?.kind === "settings" ? current.pane : null;
   };
-  const [picked, setPicked] = createSignal<SettingsEntry | null>(null);
+  /** The result picked, by its pane and row, which outlast the rows rebuilt as the query or the
+   * roster changes. */
+  const [picked, setPicked] = createSignal<{ pane: SettingsPane; row: string } | null>(null);
+  // The pane changed some other way (Back, Forward, the palette): its row is the one selected.
+  createEffect(selectedPane, (pane) => {
+    if (picked() && picked()!.pane !== pane) setPicked(null);
+  });
+  const keyOf = (row: SettingsRow) => (row.kind === "pane" ? `pane:${row.pane}` : `setting:${row.entry.pane}:${row.entry.row}`);
+  /** The row the list shows selected: the picked result on its pane, else the pane on screen. */
+  const selectedKey = () => {
+    const result = picked();
+    if (result && result.pane === selectedPane()) return `setting:${result.pane}:${result.row}`;
+    const pane = selectedPane();
+    return pane ? `pane:${pane}` : null;
+  };
   const pickRow = (row: SettingsRow) => {
     if (row.kind === "pane") {
       setPicked(null);
       select({ kind: "settings", pane: row.pane });
     } else {
-      setPicked(row.entry);
+      setPicked({ pane: row.entry.pane, row: row.entry.row });
       reveal(row.entry);
     }
   };
@@ -319,10 +363,11 @@ export function SettingsSidebar() {
     pickRow(first);
     return true;
   };
+  /** Up and Down walk every row, the results with the panes, as the Mac's outline does. */
   const move = (delta: number) => {
-    const panes = rows().filter((row): row is { kind: "pane"; pane: SettingsPane } => row.kind === "pane");
-    const index = panes.findIndex((row) => row.pane === selectedPane());
-    const next = panes[Math.min(panes.length - 1, Math.max(0, index + delta))];
+    const all = rows();
+    const index = all.findIndex((row) => keyOf(row) === selectedKey());
+    const next = all[Math.min(all.length - 1, Math.max(0, index + delta))];
     if (next) pickRow(next);
   };
   return (
@@ -335,7 +380,9 @@ export function SettingsSidebar() {
           onKeyDown={(event) => {
             if (event.key === "ArrowDown") {
               event.preventDefault();
-              if (!pickFirst()) move(0);
+              // A result is picked only when the list has no row selected; otherwise Down only moves
+              // the keyboard to the list.
+              if (!rows().some((row) => keyOf(row) === selectedKey())) pickFirst();
               list?.focus();
             } else if (event.key === "Enter") {
               event.preventDefault();
@@ -363,7 +410,7 @@ export function SettingsSidebar() {
           {(row) =>
             row.kind === "pane" ? (
               <div
-                class={["pane-row", { selected: selectedPane() === row.pane && picked() === null }]}
+                class={["pane-row", { selected: selectedKey() === keyOf(row) }]}
                 role="option"
                 onMouseDown={(event) => {
                   if (event.button === 0) pickRow(row);
@@ -376,7 +423,7 @@ export function SettingsSidebar() {
               </div>
             ) : (
               <div
-                class={["setting-row", { selected: picked() === row.entry }]}
+                class={["setting-row", { selected: selectedKey() === keyOf(row) }]}
                 role="option"
                 title={row.entry.title}
                 onMouseDown={(event) => {

@@ -36,6 +36,7 @@ function CodeRow(props: { label: string; code: string; link: string }) {
       tint="var(--label)"
       monospaced
       actionTitle={copied() ? L("Copied") : L("Copy code and open %@", hostOf(props.link) ?? L("link"))}
+      actionCopied={copied()}
       onAction={() => {
         void host.copyText(props.code);
         setCopied(true);
@@ -236,7 +237,7 @@ function PluginSheet(props: { pluginID: string; runner: Device; dismiss: () => v
           <For each={detail()?.skills ?? []}>{(skill) => <KeyValueRow label={skill.name} value={skill.description} />}</For>
         </Section>
       </Show>
-      <div class="sheet-note">
+      <div class="sheet-note secondary">
         {props.runner.isThisDevice
           ? L("Keys and sign-ins stay on this device.")
           : L("Keys and sign-ins are sent sealed to %@ and stay there. A sign-in opens the browser on %@.", props.runner.name, props.runner.name)}

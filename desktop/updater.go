@@ -107,7 +107,7 @@ func (u *updater) background() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	found, err := u.check(ctx)
-	if err != nil || found == nil {
+	if err != nil || found == nil || found.Version == prefs.get().SkippedUpdate {
 		return
 	}
 	if prefs.get().AutomaticUpdateDownloads {

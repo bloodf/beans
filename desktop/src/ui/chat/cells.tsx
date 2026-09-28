@@ -8,6 +8,7 @@ import { files, preferences } from "../../host";
 import { L } from "../../l10n";
 import * as Format from "../../model/format";
 import { isImage, sizeText, type Attachment, type Bot, type Message, type ToolInvocation } from "../../model/models";
+import { track } from "../../model/reactive";
 import { store } from "../../model/store";
 import { Avatar, authorAvatar, botAvatar, type AvatarContent } from "../avatar";
 import { Icon } from "../icons";
@@ -40,40 +41,63 @@ function imageSize(attachment: Attachment): { width: number; height: number } {
   return { width: Math.max(imageMin, Math.ceil(width * scale)), height: Math.max(imageMin, Math.ceil(height * scale)) };
 }
 
-/** Thumbnails and file cards inside a bubble, above the text: images flow in rows, a file card
- * takes a row of its own. A click opens the file. */
-function AttachmentTiles(props: { attachments: Attachment[]; chatID: string; messageID: string; onUserBubble: boolean }) {
+/** The tiles by row: images side by side, wrapping at the bubble's edge, and each file card on a
+ * row of its own. */
+function tileRows(attachments: Attachment[]): Attachment[][] {
+  const rows: Attachment[][] = [];
+  for (const attachment of attachments) {
+    const last = rows[rows.length - 1];
+    if (last && isImage(attachment) && isImage(last[0]!)) last.push(attachment);
+    else rows.push([attachment]);
+  }
+  return rows;
+}
+
+/** Thumbnails and file cards inside a bubble, above the text, 8 above it or 4 above a lone time.
+ * A click opens the file. */
+function AttachmentTiles(props: { attachments: Attachment[]; chatID: string; messageID: string; onUserBubble: boolean; below: "text" | "stamp" | "none" }) {
   return (
-    <div class="bubble-attachments">
-      <For each={props.attachments}>
-        {(attachment) => {
-          const file = () => store.localFile(attachment, props.chatID, props.messageID);
-          const open = () => {
-            const known = file();
-            if (known) void files.open(known.path);
-          };
-          return isImage(attachment) ? (
-            <button
-              class="attachment-image"
-              style={{ width: `${imageSize(attachment).width}px`, height: `${imageSize(attachment).height}px` }}
-              title={file() ? attachment.name : L("%@ · fetching…", attachment.name)}
-              aria-label={attachment.name}
-              onClick={open}
-            >
-              <Show when={file()?.url}>{(url) => <img src={url()} alt="" draggable={false} />}</Show>
-            </button>
-          ) : (
-            <button class={["attachment-file", { "on-user": props.onUserBubble }]} title={file() ? attachment.name : L("%@ · fetching…", attachment.name)} onClick={open}>
-              <Icon name="doc.fill" size={20} strokeWidth={1.8} />
-              <span class="attachment-file-text">
-                <span class="attachment-file-name truncate">{attachment.name}</span>
-                <span class="attachment-file-size">{sizeText(attachment.size)}</span>
-              </span>
-            </button>
-          );
-        }}
+    <div class={["bubble-attachments", `below-${props.below}`]}>
+      <For each={tileRows(props.attachments)}>
+        {(row) => (
+          <div class="attachment-row">
+            <For each={row}>{(attachment) => <AttachmentTile attachment={attachment} chatID={props.chatID} messageID={props.messageID} onUserBubble={props.onUserBubble} />}</For>
+          </div>
+        )}
       </For>
     </div>
+  );
+}
+
+function AttachmentTile(props: { attachment: Attachment; chatID: string; messageID: string; onUserBubble: boolean }) {
+  const attachment = props.attachment;
+  // The bytes of a file sent from another Device land later; the message's change brings them in.
+  const file = () => {
+    track.chat(props.chatID);
+    return store.localFile(attachment, props.chatID, props.messageID);
+  };
+  const open = () => {
+    const known = file();
+    if (known) void files.open(known.path);
+  };
+  return isImage(attachment) ? (
+    <button
+      class="attachment-image"
+      style={{ width: `${imageSize(attachment).width}px`, height: `${imageSize(attachment).height}px` }}
+      title={file() ? attachment.name : L("%@ · fetching…", attachment.name)}
+      aria-label={attachment.name}
+      onClick={open}
+    >
+      <Show when={file()?.url}>{(url) => <img src={url()} alt="" draggable={false} />}</Show>
+    </button>
+  ) : (
+    <button class={["attachment-file", { "on-user": props.onUserBubble }]} title={file() ? attachment.name : L("%@ · fetching…", attachment.name)} onClick={open}>
+      <Icon name="doc.fill" size={20} strokeWidth={1.8} />
+      <span class="attachment-file-text">
+        <span class="attachment-file-name truncate">{attachment.name}</span>
+        <span class="attachment-file-size">{sizeText(attachment.size)}</span>
+      </span>
+    </button>
   );
 }
 
@@ -82,7 +106,15 @@ function AttachmentTiles(props: { attachments: Attachment[]; chatID: string; mes
 export function MessageCell(props: { message: Message; groupStart: boolean; chatID: string; showsAvatar: boolean }) {
   const isUser = () => props.message.author.kind === "you";
   const text = () => (props.message.body.kind === "text" ? props.message.body.text : "");
-  const bot = () => (props.message.author.kind === "bot" ? store.bot(props.message.author.botID) : undefined);
+  // A bot's name and look follow a rename or a new image.
+  const bot = () => {
+    track.roster();
+    return props.message.author.kind === "bot" ? store.bot(props.message.author.botID) : undefined;
+  };
+  const avatar = () => {
+    track.roster();
+    return authorAvatar(props.message.author);
+  };
   const showsName = () => props.showsAvatar && props.groupStart;
   const indent = () => (props.showsAvatar ? ChatMetrics.bubbleIndent : ChatMetrics.horizontalInset);
   return (
@@ -98,21 +130,29 @@ export function MessageCell(props: { message: Message; groupStart: boolean; chat
         </Show>
         <div class={["bubble", isUser() ? "user" : "bot"]}>
           <Show when={props.message.attachments.length > 0}>
-            <AttachmentTiles attachments={props.message.attachments} chatID={props.chatID} messageID={props.message.id} onUserBubble={isUser()} />
+            <AttachmentTiles
+              attachments={props.message.attachments}
+              chatID={props.chatID}
+              messageID={props.message.id}
+              onUserBubble={isUser()}
+              below={text() !== "" ? "text" : preferences().showTimestamps ? "stamp" : "none"}
+            />
           </Show>
-          <div class={["bubble-body", { "attachments-only": text() === "" }]}>
-            <Show when={text() !== ""}>
-              <Markdown text={text()} onUserBubble={isUser()} class="bubble-text" />
-            </Show>
-            <Show when={preferences().showTimestamps}>
-              <span class="bubble-stamp">{Format.time(props.message.createdAt)}</span>
-            </Show>
-          </div>
+          <Show when={text() !== "" || preferences().showTimestamps}>
+            <div class={["bubble-body", { "attachments-only": text() === "" }]}>
+              <Show when={text() !== ""}>
+                <Markdown text={text()} onUserBubble={isUser()} class="bubble-text" />
+              </Show>
+              <Show when={preferences().showTimestamps}>
+                <span class="bubble-stamp">{Format.time(props.message.createdAt)}</span>
+              </Show>
+            </div>
+          </Show>
         </div>
       </div>
       <Show when={showsName()}>
         <span class="message-avatar">
-          <Avatar content={authorAvatar(props.message.author)} size={ChatMetrics.avatarSize} />
+          <Avatar content={avatar()} size={ChatMetrics.avatarSize} />
         </span>
       </Show>
     </div>

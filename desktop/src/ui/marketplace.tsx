@@ -498,7 +498,7 @@ function Grid(props: { items: Item[]; market: Market }) {
 function MarketSection(props: { title: string; items: Item[]; market: Market; accessory?: JSX.Element; onViewAll?: () => void }) {
   return (
     <div class="market-section">
-      <div class="market-section-header">
+      <div class={["market-section-header", { "with-control": !props.onViewAll && !!props.accessory }]}>
         <span class="market-section-title">{props.title}</span>
         <Show when={props.onViewAll} fallback={props.accessory}>
           <HoverButton title={L("View all")} onClick={() => props.onViewAll?.()} />
@@ -627,7 +627,14 @@ function HomePage(props: { market: Market }) {
           )}
         </Show>
       </div>
-      <SearchField ref={(element) => (search = element)} class="large market-search" value={query()} placeholder={L("Search plugins and bots")} onInput={setQuery} />
+      <SearchField
+        ref={(element) => (search = element)}
+        class="large market-search"
+        value={query()}
+        placeholder={L("Search plugins and bots")}
+        clearsOnEscape={false}
+        onInput={setQuery}
+      />
       <div class="market-body">
         <Show
           when={!(allItems(market.catalog()).length === 0 && market.loading() !== "loaded")}
@@ -895,7 +902,7 @@ function BotPage(props: { market: Market; templateID: string }) {
         ];
         const selected = () => (parts().includes(picked()) ? picked() : "instructions");
         return (
-          <div class="market-stack">
+          <div class="market-stack bot-page">
             <div class="market-bot-header">
               <Avatar content={{ kind: "bot", symbolName: current().symbolName, accent: current().accent }} size={64} />
               <div class="market-bot-title-row">

@@ -38,11 +38,19 @@ type WindowState struct {
 	// Maximized tells a page that draws its own title bar which window button to show:
 	// Maximize or Restore.
 	Maximized bool `json:"maximized"`
+	// FullScreen words the menu's full screen item: Enter or Exit.
+	FullScreen bool `json:"fullScreen"`
 }
 
 // stateOf is how a window stands, as WindowState answers and WindowStateChanged reports it.
 func stateOf(win *mygo.Window) WindowState {
-	return WindowState{Focused: win.IsFocused(), Visible: win.IsVisible(), Minimized: win.IsMinimized(), Maximized: win.IsMaximized()}
+	return WindowState{
+		Focused:    win.IsFocused(),
+		Visible:    win.IsVisible(),
+		Minimized:  win.IsMinimized(),
+		Maximized:  win.IsMaximized(),
+		FullScreen: win.IsFullScreen(),
+	}
 }
 
 var (
@@ -199,8 +207,10 @@ func (a *appDelegate) identityChanged(has bool) {
 			return
 		}
 		// The account is gone: a main window hidden behind onboarding goes with it, and
-		// onboarding opened over the account becomes the real thing.
+		// onboarding opened over the account becomes the real thing. Its unread count goes too,
+		// since the main window's page that kept it is gone.
 		a.onboardingOverIdentity = false
+		Host{}.SetBadge(0)
 		if a.main != nil {
 			main := a.main
 			a.main = nil
@@ -251,6 +261,8 @@ func (a *appDelegate) newWindow(options mygo.WindowOptions) *mygo.Window {
 	win.OnRestore(report)
 	win.OnMaximize(report)
 	win.OnUnmaximize(report)
+	win.OnEnterFullScreen(report)
+	win.OnLeaveFullScreen(report)
 	win.OnDOMReady(report)
 	// The app's pages stay in the window; a link goes to the browser.
 	win.OnWillNavigate(func(e *mygo.NavigateEvent) {
@@ -508,6 +520,9 @@ func (a *appDelegate) installTray() {
 	if err != nil {
 		return
 	}
+	// A click on the icon brings the app back, as a click on its Dock icon does; the menu is on
+	// the right button on Windows, and all a click shows on Linux.
+	tray.OnClick(func() { mygo.RunOnMain(a.reopen) })
 	a.tray = tray
 }
 

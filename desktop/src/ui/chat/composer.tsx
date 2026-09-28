@@ -4,10 +4,10 @@
 // Return sends (Shift-Return breaks the line) unless Settings reserves sending for Ctrl-Return.
 // `@` offers the bots, and a name picked from the menu goes out with the message by id.
 
-import { createMemo, createSignal, For, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
 import { files, hostInfo, onDroppedFiles, preferences, type FileInfo } from "../../host";
 import { L } from "../../l10n";
-import { isImage, sizeText, type Bot } from "../../model/models";
+import { isImage, providerName, sizeText, type Bot } from "../../model/models";
 import { attachmentID, store, type OutgoingAttachment } from "../../model/store";
 import { Avatar, botAvatar } from "../avatar";
 import { shortcutText } from "../commands";
@@ -17,6 +17,12 @@ import { alert } from "../overlay";
 const maxBytes = 100 * 1024 * 1024;
 const maxCount = 10;
 const maxTextHeight = 168;
+const mentionRowHeight = 38;
+const mentionRows = 5;
+
+/** The draft left in the composer when Settings took the window, for the chat it was typed in, as
+ * the macOS app's one chat view keeps its composer. Another chat starts empty. */
+let kept: { chatID: string; text: string; attachments: OutgoingAttachment[]; picked: Bot[] } | null = null;
 
 export interface ComposerHandle {
   focus(): void;
@@ -56,6 +62,7 @@ function outgoing(file: FileInfo): OutgoingAttachment {
 }
 
 export function Composer(props: {
+  chatID: string;
   placeholder: string;
   bots: Bot[];
   isResponding: boolean;
@@ -64,16 +71,19 @@ export function Composer(props: {
   ref?: (handle: ComposerHandle) => void;
   onHeight?: (height: number) => void;
 }) {
-  const [text, setText] = createSignal("");
-  const [attachments, setAttachments] = createSignal<OutgoingAttachment[]>([]);
+  const draft = kept?.chatID === props.chatID ? kept : null;
+  kept = null;
+  const [text, setText] = createSignal(draft?.text ?? "");
+  const [attachments, setAttachments] = createSignal<OutgoingAttachment[]>(draft?.attachments ?? []);
   const [expanded, setExpanded] = createSignal(false);
   const [mention, setMention] = createSignal<{ start: number; end: number; bots: Bot[]; x: number; top: number; bottom: number } | null>(null);
   const [mentionIndex, setMentionIndex] = createSignal(0);
-  let picked: Bot[] = [];
+  let picked: Bot[] = draft?.picked ?? [];
   let area: HTMLTextAreaElement | undefined;
   let backdrop: HTMLDivElement | undefined;
   let field: HTMLDivElement | undefined;
   let root: HTMLDivElement | undefined;
+  let menu: HTMLDivElement | undefined;
 
   const hasContent = () => text().trim() !== "" || attachments().length > 0;
 
@@ -116,7 +126,11 @@ export function Composer(props: {
       const height = Math.min(maxTextHeight, Math.max(line + 8, area.scrollHeight));
       area.style.height = `${height}px`;
       area.style.overflowY = area.scrollHeight > maxTextHeight ? "auto" : "hidden";
-      if (backdrop) backdrop.style.height = `${height}px`;
+      if (backdrop) {
+        backdrop.style.height = `${height}px`;
+        // A scroll bar narrows the field's lines; the drawn text wraps in the same width.
+        backdrop.style.paddingRight = `${area.offsetWidth - area.clientWidth}px`;
+      }
       syncScroll();
     });
   };
@@ -167,7 +181,10 @@ export function Composer(props: {
 
   const insertMention = (bot: Bot) => {
     const range = mentionRange();
-    if (!range || !area) return;
+    if (!range || !area) {
+      setMention(null);
+      return;
+    }
     const insertion = `@${bot.name} `;
     area.setRangeText(insertion, range.start, range.end, "end");
     setText(area.value);
@@ -178,9 +195,8 @@ export function Composer(props: {
 
   // MARK: Attachments
 
-  /** Adds the files it can; the rest get one alert. */
-  const addFiles = (infos: FileInfo[]) => {
-    const problems: string[] = [];
+  /** Adds the files it can; the rest get one alert, with `problems` found before. */
+  const addFiles = (infos: FileInfo[], problems: string[] = []) => {
     const added: OutgoingAttachment[] = [];
     for (const info of infos) {
       if (attachments().length + added.length >= maxCount) {
@@ -213,22 +229,33 @@ export function Composer(props: {
     const hasText = data.types.includes("text/plain") && data.getData("text/plain") !== "";
     if (pasted.length === 0 || (hasText && pasted.every((file) => file.type.startsWith("image/")))) return;
     event.preventDefault();
+    // The limits come first, so a file that can't go is never read.
+    const problems: string[] = [];
     const saved: FileInfo[] = [];
     for (const file of pasted) {
+      if (attachments().length + saved.length >= maxCount) {
+        problems.push(L("At most %d files per message.", maxCount));
+        break;
+      }
+      if (file.size > maxBytes) {
+        problems.push(L("%@ is larger than %d MB.", file.name, maxBytes / 1024 / 1024));
+        continue;
+      }
       try {
         saved.push(await files.savePasted(file.name, file));
       } catch {}
     }
-    if (saved.length > 0) addFiles(saved);
+    if (saved.length > 0 || problems.length > 0) addFiles(saved, problems);
   };
 
   onSettled(() => {
+    // Files go where the composer is, as its field is the drop target.
     const offDrop = onDroppedFiles(async ({ paths, x, y }) => {
-      const target = document.elementFromPoint(x, y);
-      if (!root?.parentElement?.contains(target)) return;
+      if (!field?.contains(document.elementFromPoint(x, y))) return;
       addFiles(await files.inspect(paths));
-      focus();
     });
+    // A draft back from Settings shows as it was.
+    if (area && text() !== "") area.value = text();
     const observer = new ResizeObserver(() => props.onHeight?.(root?.offsetHeight ?? 0));
     if (root) observer.observe(root);
     const onResize = () => updateLayout();
@@ -238,7 +265,24 @@ export function Composer(props: {
       offDrop();
       observer.disconnect();
       window.removeEventListener("resize", onResize);
+      if (text() !== "" || attachments().length > 0) kept = { chatID: props.chatID, text: text(), attachments: attachments(), picked };
     };
+  });
+
+  // Another chat starts with an empty composer.
+  createEffect(
+    () => props.chatID,
+    () => {
+      setAttachments([]);
+      setMention(null);
+      replaceText("");
+    },
+    { defer: true },
+  );
+
+  // The highlighted bot stays in view in a list longer than the menu.
+  createEffect(mentionIndex, (index) => {
+    menu?.children[index]?.scrollIntoView({ block: "nearest" });
   });
 
   // MARK: Send
@@ -282,6 +326,12 @@ export function Composer(props: {
     }
     if (event.key !== "Enter") return;
     const primary = hostInfo().platform === "darwin" ? event.metaKey : event.ctrlKey;
+    if (event.altKey && !primary) {
+      // Alt-Enter starts a line, as Option-Return does on the Mac; Chromium's field does nothing.
+      event.preventDefault();
+      document.execCommand("insertText", false, "\n");
+      return;
+    }
     if (preferences().sendOnReturn) {
       if (event.shiftKey) return;
       event.preventDefault();
@@ -317,7 +367,11 @@ export function Composer(props: {
   });
 
   const sendTooltip = () =>
-    (preferences().sendOnReturn ? L("Send (Return) · Shift-Return for a new line") : L("Send (%@)", shortcutText("CmdOrCtrl+Enter"))) +
+    (preferences().sendOnReturn
+      ? hostInfo().platform === "darwin"
+        ? L("Send (Return) · Shift-Return for a new line")
+        : L("Send (Enter) · Shift-Enter for a new line")
+      : L("Send (%@)", shortcutText("CmdOrCtrl+Enter"))) +
     (props.bots.length > 1 ? L(" · @ to mention") : "");
 
   return (
@@ -369,7 +423,7 @@ export function Composer(props: {
         </button>
         <div class="composer-text">
           <div class="composer-backdrop" ref={(el) => (backdrop = el)} aria-hidden="true">
-            <For each={highlighted()}>{(part) => (part.bot ? <span style={{ color: `var(--${part.bot.accent})`, "font-weight": 600 }}>{part.text}</span> : part.text)}</For>
+            <For each={highlighted()}>{(part) => (part.bot ? <span style={{ color: `var(--${part.bot.accent})` }}>{part.text}</span> : part.text)}</For>
             {"​"}
           </div>
           <textarea
@@ -386,7 +440,9 @@ export function Composer(props: {
             }}
             onKeyDown={onKeyDown}
             onKeyUp={(event) => {
-              if (event.key.startsWith("Arrow") && !mention()) updateMentions();
+              // The caret moved: in or out of an `@name`. Up and Down belong to an open menu.
+              if (mention() && (event.key === "ArrowUp" || event.key === "ArrowDown")) return;
+              if (event.key.startsWith("Arrow") || event.key === "Home" || event.key === "End" || event.key === "PageUp" || event.key === "PageDown") updateMentions();
             }}
             onClick={updateMentions}
             onScroll={syncScroll}
@@ -413,27 +469,34 @@ export function Composer(props: {
         </div>
       </div>
       <Show when={mention()}>
-        {(panel) => (
-          <div
-            class="mention-panel"
-            style={{ left: `${Math.max(8, panel().x - 10)}px`, top: `${panel().top - 8 - Math.min(panel().bots.length, 5) * 38 - 10}px` }}
-            onMouseDown={(event) => event.preventDefault()}
-          >
-            <For each={panel().bots}>
-              {(bot, index) => (
-                <div class={["mention-row", { highlighted: index() === mentionIndex() }]} onMouseEnter={() => setMentionIndex(index())} onClick={() => insertMention(bot)}>
-                  <Avatar content={botAvatar(bot)} size={22} />
-                  <span class="mention-text">
-                    <span class="mention-name truncate">{bot.name}</span>
-                    <span class="mention-detail truncate">
-                      {store.device(bot.runnerID)?.name ? L("on %@", store.device(bot.runnerID)!.name) : bot.provider}
+        {(panel) => {
+          // Above the caret's line, or under it where there is no room above; five rows show and
+          // the rest scroll.
+          const height = () => Math.min(panel().bots.length, mentionRows) * mentionRowHeight + 10;
+          const top = () => (panel().top - 8 - height() >= 8 ? panel().top - 8 - height() : panel().bottom + 8);
+          return (
+            <div
+              ref={(el) => (menu = el)}
+              class="mention-panel"
+              style={{ left: `${Math.max(8, panel().x - 10)}px`, top: `${top()}px`, "max-height": `${height()}px` }}
+              onMouseDown={(event) => event.preventDefault()}
+            >
+              <For each={panel().bots}>
+                {(bot, index) => (
+                  <div class={["mention-row", { highlighted: index() === mentionIndex() }]} onMouseEnter={() => setMentionIndex(index())} onClick={() => insertMention(bot)}>
+                    <Avatar content={botAvatar(bot)} size={22} />
+                    <span class="mention-text">
+                      <span class="mention-name truncate">{bot.name}</span>
+                      <span class="mention-detail truncate">
+                        {store.device(bot.runnerID)?.name ? L("on %@", store.device(bot.runnerID)!.name) : providerName(bot.provider)}
+                      </span>
                     </span>
-                  </span>
-                </div>
-              )}
-            </For>
-          </div>
-        )}
+                  </div>
+                )}
+              </For>
+            </div>
+          );
+        }}
       </Show>
     </div>
   );

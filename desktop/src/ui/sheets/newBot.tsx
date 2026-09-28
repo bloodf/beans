@@ -110,6 +110,7 @@ function NewBotSheet(props: { onCreate: (botID: string) => void; dismiss: () => 
           value={description()}
           placeholder={L("What it does and how it should work")}
           rows={3}
+          grows
           class="wrapping-field"
           onInput={setDescription}
           onKeyDown={(event) => {

@@ -5,8 +5,11 @@ import (
 	"encoding/json/jsontext"
 	"fmt"
 	"net/url"
+	"runtime"
 	"strconv"
+	"strings"
 	"sync"
+	"unicode/utf16"
 
 	"github.com/egoist/mygo"
 )
@@ -168,10 +171,21 @@ func (n *Notices) Supported() bool { return mygo.NotificationsSupported() }
 
 // Show posts a notification; one with the same id replaces it.
 func (n *Notices) Show(options NoticeOptions) error {
+	title, body := options.Title, options.Body
+	// Windows shows a notification as a tray balloon, which holds 63 UTF-16 units of title and 255
+	// of text, the subtitle's line among them: the words are cut to fit, ending in an ellipsis.
+	if runtime.GOOS == "windows" {
+		title = fitUTF16(title, 63)
+		room := 255
+		if options.Subtitle != "" {
+			room -= len(utf16.Encode([]rune(options.Subtitle))) + 1
+		}
+		body = fitUTF16(body, room)
+	}
 	notification := mygo.NewNotification(mygo.NotificationOptions{
-		Title:    options.Title,
+		Title:    title,
 		Subtitle: options.Subtitle,
-		Body:     options.Body,
+		Body:     body,
 	})
 	chatID := options.ChatID
 	notification.OnClick(func() { app.openChat(chatID) })
@@ -213,4 +227,25 @@ func (n *Notices) ClearChat(chatID string) {
 	for _, notification := range gone {
 		notification.Close()
 	}
+}
+
+// fitUTF16 cuts s to at most n UTF-16 units, the last of them an ellipsis when it cuts.
+func fitUTF16(s string, n int) string {
+	if len(utf16.Encode([]rune(s))) <= n {
+		return s
+	}
+	if n <= 0 {
+		return ""
+	}
+	var kept []rune
+	used := 0
+	for _, r := range s {
+		size := utf16.RuneLen(r)
+		if used+size > n-1 {
+			break
+		}
+		kept = append(kept, r)
+		used += size
+	}
+	return strings.TrimRight(string(kept), " ") + "…"
 }

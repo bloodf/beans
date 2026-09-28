@@ -52,6 +52,8 @@ function pluginName(toolName: string, botID: string): string | undefined {
  * not flash back to its name between two commands), thinking, or a model call waiting to be asked
  * again, which outranks both. */
 function activity(botIDs: string[], chat: Chat): string | undefined {
+  // Thinking and retries come as the chat's events, with the same messages.
+  track.chat(chat.id);
   let words: string | undefined;
   const only = botIDs.length === 1 ? botIDs[0]! : undefined;
   const last = chat.messages[chat.messages.length - 1];
@@ -67,10 +69,12 @@ function activity(botIDs: string[], chat: Chat): string | undefined {
 }
 
 function botName(message: Message): string {
+  track.roster();
   return (message.author.kind === "bot" && store.bot(message.author.botID)?.name) || L("The bot");
 }
 
 function handoffMode(message: Message, chat: Chat): { mode: HandoffMode; reason: string } | undefined {
+  track.roster();
   const body = message.body;
   if (body.kind === "tool") return { mode: { kind: "outgoing", to: body.tool.targetBotID ? store.bot(body.tool.targetBotID) : undefined }, reason: body.tool.detail };
   if (body.kind === "handoff") {
@@ -88,7 +92,10 @@ function RowView(props: { row: ChatRow; chat: Chat }) {
   const message = () => (props.row.kind === "message" ? props.row.message : undefined);
   const groupStart = () => (props.row.kind === "message" ? props.row.groupStart : true);
   const showsAvatar = () => group() && message()?.author.kind === "bot";
-  const cardAvatar = () => (showsAvatar() && message() ? authorAvatar(message()!.author) : undefined);
+  const cardAvatar = () => {
+    track.roster();
+    return showsAvatar() && message() ? authorAvatar(message()!.author) : undefined;
+  };
   return (
     <Switch>
       <Match when={props.row.kind === "day" && props.row}>{(row) => <DayCell at={(row() as Extract<ChatRow, { kind: "day" }>).at} />}</Match>
@@ -96,9 +103,13 @@ function RowView(props: { row: ChatRow; chat: Chat }) {
       <Match when={props.row.kind === "working" && props.row}>
         {(row) => {
           const botIDs = () => (row() as Extract<ChatRow, { kind: "working" }>).botIDs;
+          const bots = () => {
+            track.roster();
+            return botIDs().flatMap((id) => store.bot(id) ?? []);
+          };
           return (
             <WorkingCell
-              bots={botIDs().flatMap((id) => store.bot(id) ?? [])}
+              bots={bots()}
               activity={activity(botIDs(), props.chat)}
               showsName={group()}
             />
@@ -160,12 +171,42 @@ export function ChatView(props: { chatID: string; onRedirect: (chatID: string) =
   const [stoppedNotice, setStoppedNotice] = createSignal<string | null>(null);
   const [showsJump, setShowsJump] = createSignal(false);
   const [composerHeight, setComposerHeight] = createSignal(66);
+  /** Stop was pressed: the composer shows Send until the turn's next word. */
+  const [stopping, setStopping] = createSignal(false);
   let scroller: HTMLDivElement | undefined;
   let content: HTMLDivElement | undefined;
   let composer: ComposerHandle | undefined;
   let pinned = true;
-  /** What the user was reading when the rows above it changed: a message and its offset. */
+  /** A scroll to the end is animating, so the scroll events on the way don't unpin it. */
+  let following = false;
+  /** The next scroll to the end animates, as it does after a new message. */
+  let animateNext = false;
+  /** What the user was reading when the rows changed or the pane resized: a message and its
+   * offset, captured before the change and put back after it. */
   let anchor: { key: string; offset: number } | null = null;
+  /** The same, as of the last scroll, for a resize that comes with no warning. */
+  let reading: { key: string; offset: number } | null = null;
+  /** The control in the transcript that had the keyboard, such as a command card's answer field. */
+  let focused: Element | null = null;
+
+  /** The first message starting on screen, and how far from the top it sits. */
+  const captureAnchor = () => {
+    if (!scroller || !content) return null;
+    const top = scroller.getBoundingClientRect().top;
+    for (const element of content.querySelectorAll<HTMLElement>("[data-row]")) {
+      const rect = element.getBoundingClientRect();
+      if (rect.bottom > top && element.dataset.message === "1") return { key: element.dataset.row!, offset: rect.bottom - top };
+    }
+    return null;
+  };
+
+  const restoreAnchor = (held: { key: string; offset: number } | null) => {
+    if (!held || !scroller || !content) return;
+    const element = content.querySelector<HTMLElement>(`[data-row="${CSS.escape(held.key)}"]`);
+    if (!element) return;
+    const top = scroller.getBoundingClientRect().top;
+    scroller.scrollTop += element.getBoundingClientRect().bottom - top - held.offset;
+  };
 
   const chat = createMemo(() => {
     track.chat(props.chatID);
@@ -177,6 +218,8 @@ export function ChatView(props: { chatID: string; onRedirect: (chatID: string) =
     track.chat(props.chatID);
     track.roster();
     const current = store.chat(props.chatID);
+    // The rows on screen are about to change: note what the user is reading first.
+    if (!pinned && !anchor) anchor = captureAnchor();
     const next = current ? reuse(previousRows, buildRows(current, store.workingBots(props.chatID), stoppedNotice())) : [];
     previousRows = next;
     return next;
@@ -202,49 +245,71 @@ export function ChatView(props: { chatID: string; onRedirect: (chatID: string) =
   };
   const isResponding = () => {
     track.chat(props.chatID);
-    return store.isResponding(props.chatID);
+    return store.isResponding(props.chatID) && !stopping();
   };
 
+  let followTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Scrolls to the end, over 0.18 s or so when `animated`, and rests there. */
   const scrollToBottom = (animated: boolean) => {
     if (!scroller) return;
+    following = animated;
+    clearTimeout(followTimer);
+    // A scroll that lands short of the end, as content grows under it, lets go all the same.
+    if (animated) followTimer = setTimeout(() => (following = false), 600);
     scroller.scrollTo({ top: scroller.scrollHeight, behavior: animated ? "smooth" : "auto" });
     pinned = true;
+    reading = null;
     setShowsJump(false);
   };
 
-  /** The first message starting on screen, and how far from the top it sits. */
-  const captureAnchor = () => {
-    if (!scroller || !content) return null;
-    const top = scroller.getBoundingClientRect().top;
-    for (const element of content.querySelectorAll<HTMLElement>("[data-row]")) {
-      const rect = element.getBoundingClientRect();
-      if (rect.bottom > top && element.dataset.message === "1") return { key: element.dataset.row!, offset: rect.bottom - top };
-    }
-    return null;
-  };
-
-  const restoreAnchor = () => {
-    const held = anchor;
-    anchor = null;
-    if (!held || !scroller || !content) return;
-    const element = content.querySelector<HTMLElement>(`[data-row="${CSS.escape(held.key)}"]`);
-    if (!element) return;
-    const top = scroller.getBoundingClientRect().top;
-    scroller.scrollTop += element.getBoundingClientRect().bottom - top - held.offset;
-  };
-
-  // New rows land: a transcript resting at its end follows them; one scrolled back keeps the
-  // message being read where it was.
+  // New rows land: a transcript resting at its end follows them, over a moment for a new message;
+  // one scrolled back keeps the message being read where it was. When the card holding the
+  // keyboard went with the rows, the composer takes it back.
   createEffect(rows, () => {
-    if (anchor) restoreAnchor();
-    else if (pinned) scrollToBottom(false);
+    if (anchor) {
+      restoreAnchor(anchor);
+      anchor = null;
+      reading = captureAnchor();
+    } else if (pinned) {
+      scrollToBottom(animateNext);
+    }
+    animateNext = false;
+    if (focused && !focused.isConnected) {
+      focused = null;
+      if (!document.activeElement || document.activeElement === document.body) composer?.focus();
+    }
   });
 
+  // Another chat in the same view opens at its end, with none of the last one's notices.
+  createEffect(
+    () => props.chatID,
+    () => {
+      setStoppedNotice(null);
+      setStopping(false);
+      anchor = null;
+      animateNext = false;
+      scrollToBottom(false);
+    },
+    { defer: true },
+  );
+
+  let readingFrame = 0;
   const onScroll = () => {
     if (!scroller) return;
     const distance = scroller.scrollHeight - (scroller.scrollTop + scroller.clientHeight);
-    pinned = distance < pinDistance;
-    setShowsJump(!pinned && rows().length > 0);
+    if (following) {
+      // An animated scroll to the end passes through here on its way down.
+      if (distance < 1) following = false;
+    } else {
+      pinned = distance < pinDistance;
+      setShowsJump(!pinned && rows().length > 0);
+      if (!pinned && !readingFrame) {
+        readingFrame = requestAnimationFrame(() => {
+          readingFrame = 0;
+          if (!pinned) reading = captureAnchor();
+        });
+      }
+    }
     // Nearing the first message: ask for the page before it.
     if (scroller.scrollTop < 600) store.loadOlderMessages(props.chatID);
   };
@@ -256,8 +321,10 @@ export function ChatView(props: { chatID: string; onRedirect: (chatID: string) =
       switch (event.kind) {
         case "messageAdded":
           setStoppedNotice(null);
+          animateNext = true;
           break;
         case "respondingChanged": {
+          setStopping(false);
           const current = store.chat(props.chatID);
           const last = current?.messages[current.messages.length - 1];
           if (current && !store.isResponding(props.chatID) && last?.author.kind === "you") {
@@ -265,14 +332,13 @@ export function ChatView(props: { chatID: string; onRedirect: (chatID: string) =
           }
           break;
         }
-        case "olderMessagesLoaded":
-          anchor = captureAnchor();
-          break;
       }
     });
-    // Images and wrapped text settle after the rows land: a pinned transcript keeps its end in view.
+    // Images and wrapped text settle after the rows land, and the pane resizes: a pinned
+    // transcript keeps its end in view, one scrolled back the message being read.
     const observer = new ResizeObserver(() => {
-      if (pinned) scrollToBottom(false);
+      if (pinned) scrollToBottom(following);
+      else if (reading) restoreAnchor(reading);
     });
     if (content) observer.observe(content);
     if (scroller) observer.observe(scroller);
@@ -288,6 +354,8 @@ export function ChatView(props: { chatID: string; onRedirect: (chatID: string) =
     return () => {
       offEvents();
       observer.disconnect();
+      clearTimeout(followTimer);
+      cancelAnimationFrame(readingFrame);
       chatActions.focusComposer = undefined;
       chatActions.prefill = undefined;
       chatActions.scrollToLatest = undefined;
@@ -296,7 +364,14 @@ export function ChatView(props: { chatID: string; onRedirect: (chatID: string) =
 
   return (
     <div class="chat-view">
-      <div class="transcript" ref={(el) => (scroller = el)} onScroll={onScroll} style={{ "padding-bottom": `${composerHeight()}px` }}>
+      <div
+        class="transcript"
+        ref={(el) => (scroller = el)}
+        onScroll={onScroll}
+        onWheel={() => (following = false)}
+        onFocusIn={(event) => (focused = event.target as Element)}
+        style={{ "padding-bottom": `${composerHeight()}px` }}
+      >
         <div class="transcript-rows" ref={(el) => (content = el)} role="log" aria-label={L("Transcript")}>
           <Show when={chat()}>
             {(current) => (
@@ -336,11 +411,15 @@ export function ChatView(props: { chatID: string; onRedirect: (chatID: string) =
       </Show>
       <Composer
         ref={(handle) => (composer = handle)}
+        chatID={props.chatID}
         placeholder={placeholder()}
         bots={mentionable()}
         isResponding={isResponding()}
         onHeight={setComposerHeight}
-        onStop={() => store.stopResponding(props.chatID)}
+        onStop={() => {
+          setStopping(true);
+          store.stopResponding(props.chatID);
+        }}
         onSend={(text, attachments, mentions) => {
           pinned = true;
           const destination = store.send(text, attachments, mentions, props.chatID);

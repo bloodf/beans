@@ -53,7 +53,7 @@ function RoutineSheet(props: { routineID: string; bot: Bot; onEditInChat: (text:
       message: L("Delete “%@”?", current.name),
       informative: L("This deletes the routine and stops its future runs. This can't be undone."),
       style: "warning",
-      buttons: [{ title: L("Delete routine"), destructive: true }, { title: L("Cancel") }],
+      buttons: [{ title: L("Delete routine") }, { title: L("Cancel") }],
     });
     if (answer !== 0) return;
     store.deleteRoutine(props.routineID);

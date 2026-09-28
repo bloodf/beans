@@ -59,7 +59,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export class Notifier {
   private started = false;
   private pendingPermissions = new Set<string>();
-  private window: WindowState = { focused: false, visible: false, minimized: false, maximized: false };
+  private window: WindowState = { focused: false, visible: false, minimized: false, maximized: false, fullScreen: false };
   private stops: (() => void)[] = [];
 
   /** The chat the user is looking at: the main window is in front and shows it. */

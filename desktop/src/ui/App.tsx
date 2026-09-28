@@ -5,7 +5,8 @@
 
 import { createRouter, useNavigate } from "@solidjs/router";
 import { For, onCleanup } from "solid-js";
-import { languageKey } from "../l10n";
+import { hostInfo } from "../host";
+import { L, languageKey } from "../l10n";
 import { settingsPanes } from "../model/models";
 import { ChatRoute, HomeRoute, MainWindow, SettingsRoute } from "./MainWindow";
 import { PageMenuHost } from "./menu";
@@ -16,13 +17,17 @@ import { setupWindow } from "./window";
 
 // The menu bar keeps its items in step through a memo and an effect, so it is set up with the
 // window's page, not after it settles.
+// The window's title follows the page's: the app's name over onboarding, Settings for the small
+// window of settings, as the Mac's.
 function OnboardingRoute() {
   onCleanup(setupWindow("other"));
+  document.title = hostInfo().name;
   return <Onboarding />;
 }
 
 function SettingsWindowRoute() {
   onCleanup(setupWindow("other"));
+  document.title = L("Settings");
   return <SettingsWindow />;
 }
 

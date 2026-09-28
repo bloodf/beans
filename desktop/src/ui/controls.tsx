@@ -110,6 +110,8 @@ export interface PopUpOption<T> {
   label: string;
   /** A separator before this option. */
   separated?: boolean;
+  /** A symbol the button shows before the picked option's label, as a Device's. */
+  symbol?: string;
 }
 
 /** A pop-up button: the choice as text; the menu is the system's, with a check on the choice.
@@ -129,6 +131,8 @@ export function PopUpButton<T>(props: {
   class?: string;
 }) {
   const current = () => props.options.find((option) => option.value === props.value);
+  /** The menu is up: the platter stays pressed, as a highlighted pop-up's does. */
+  const [opened, setOpened] = createSignal(false);
   const open = async (event: MouseEvent) => {
     if (props.disabled) return;
     const entries: MenuEntry[] = [];
@@ -137,7 +141,8 @@ export function PopUpButton<T>(props: {
       entries.push({ id: String(index), label: option.label, checked: option.value === props.value });
     });
     if (props.extras?.length) entries.push(separator, ...props.extras);
-    const picked = await popupMenu(entries, event.currentTarget as HTMLElement);
+    setOpened(true);
+    const picked = await popupMenu(entries, event.currentTarget as HTMLElement).finally(() => setOpened(false));
     if (picked === null) return;
     const index = Number(picked);
     if (Number.isInteger(index) && props.options[index]) {
@@ -148,7 +153,7 @@ export function PopUpButton<T>(props: {
   };
   return (
     <button
-      class={["popup-button", props.style ?? "bordered", props.class]}
+      class={["popup-button", props.style ?? "bordered", props.class, { open: opened() }]}
       disabled={props.disabled}
       title={props.tooltip}
       aria-label={props.label}
@@ -165,6 +170,7 @@ export function PopUpButton<T>(props: {
         }
       }}
     >
+      <Show when={current()?.symbol}>{(symbol) => <Icon name={symbol()} size={13} strokeWidth={1.9} class="popup-symbol" />}</Show>
       <span class="popup-title truncate">{current()?.label ?? ""}</span>
       <span class="popup-chevrons">
         <Icon name="chevron.up.chevron.down" size={props.style === "settings" ? 11 : 12} strokeWidth={2.4} />
@@ -193,7 +199,11 @@ export function TextField(props: {
 }) {
   let input: HTMLInputElement | undefined;
   onSettled(() => {
-    if (props.autofocus) input?.focus();
+    // Taking the keyboard selects what is there, as a field becoming first responder does, so
+    // typing replaces a name being renamed.
+    if (!props.autofocus || !input) return;
+    input.focus();
+    input.select();
   });
   return (
     <input
@@ -238,10 +248,18 @@ export function TextArea(props: {
   onInput?: (value: string) => void;
   onKeyDown?: (event: KeyboardEvent) => void;
   ref?: (element: HTMLTextAreaElement) => void;
+  /** Grows with its text from `rows` lines, as a wrapping text field does, and the sheet with it. */
+  grows?: boolean;
 }) {
   let area: HTMLTextAreaElement | undefined;
+  const fit = () => {
+    if (!props.grows || !area) return;
+    area.style.height = "auto";
+    area.style.height = `${area.scrollHeight}px`;
+  };
   onSettled(() => {
     if (props.autofocus) area?.focus();
+    fit();
   });
   return (
     <textarea
@@ -257,7 +275,10 @@ export function TextArea(props: {
       readonly={props.readOnly}
       aria-label={props.label}
       spellcheck={false}
-      onInput={(event) => props.onInput?.(event.currentTarget.value)}
+      onInput={(event) => {
+        props.onInput?.(event.currentTarget.value);
+        fit();
+      }}
       onKeyDown={(event) => props.onKeyDown?.(event)}
     />
   );
@@ -273,6 +294,9 @@ export function SearchField(props: {
   onKeyDown?: (event: KeyboardEvent) => void;
   ref?: (element: HTMLInputElement) => void;
   class?: string;
+  /** Escape clears the text first, as NSSearchField's does; off where Escape closes what holds
+   * the field wherever the keyboard is, as the marketplace. */
+  clearsOnEscape?: boolean;
 }) {
   return (
     <div class={["search-field", props.class]} onMouseDown={(event) => {
@@ -292,7 +316,7 @@ export function SearchField(props: {
         tabindex={props.onActivate ? -1 : 0}
         onInput={(event) => props.onInput?.(event.currentTarget.value)}
         onKeyDown={(event) => {
-          if (event.key === "Escape" && (props.value ?? "") !== "") {
+          if (event.key === "Escape" && (props.value ?? "") !== "" && props.clearsOnEscape !== false) {
             event.preventDefault();
             event.stopPropagation();
             props.onInput?.("");
@@ -336,7 +360,7 @@ export function CopyButton(props: {
   };
   return (
     <button
-      class={[props.bordered ? "button default small" : "copy-button", props.class, { copied: copied() }]}
+      class={[props.bordered ? "button default" : "copy-button", props.class, { copied: copied() }]}
       title={copied() ? L("Copied") : props.tooltip}
       aria-label={props.tooltip ?? props.title ?? L("Copy")}
       onClick={copy}

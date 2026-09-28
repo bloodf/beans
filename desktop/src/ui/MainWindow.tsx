@@ -8,7 +8,7 @@ import { useLocation, useNavigate, type RouteSectionProps } from "@solidjs/route
 import { createEffect, createMemo, createSignal, onCleanup, onSettled, Show } from "solid-js";
 import { frameStyle, host, hostInfo, onOpenChat, onUpdateAvailable, setPreferences, watchWindowState, windowControls, type WindowState } from "../host";
 import { L, Lc } from "../l10n";
-import { isDeviceScoped, paneTitle, type SettingsPane } from "../model/models";
+import { deviceSymbol, isDeviceScoped, paneTitle, type SettingsPane } from "../model/models";
 import { onStoreEvent, track } from "../model/reactive";
 import { store } from "../model/store";
 import { addBotToChat, newBot, newGroupChat, presentMarketplace, presentPairing } from "./actions";
@@ -57,6 +57,13 @@ import { chatForShortcut, ChatsSidebar, SettingsSidebar } from "./sidebar";
 import { Loading, Offline, Placeholder } from "./states";
 import { offerUpdate, setupWindow } from "./window";
 
+/** The narrowest the content gets before the side panes give way. */
+const contentMinWidth = 460;
+
+/** The relay turned this build away. Said once per launch, since every sync attempt gets the same
+ * answer until Lorca is updated. */
+let saidUpdateRequired = false;
+
 export function MainWindow(props: RouteSectionProps) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -69,13 +76,55 @@ export function MainWindow(props: RouteSectionProps) {
   );
 
   const isSettings = () => selection.read()?.kind === "settings";
+  /** A chat has been on screen since the window opened. */
+  let shownChat = false;
   const chatID = createMemo(() => {
     track.connection();
     track.chats();
     const current = selection.read();
-    return current?.kind === "chat" && store.isConnected && store.chat(current.id) ? current.id : null;
+    const id = current?.kind === "chat" && store.isConnected && store.chat(current.id) ? current.id : null;
+    if (id) shownChat = true;
+    return id;
   });
-  const showsInspector = () => chatID() !== null && userWantsInspector.read();
+  /** Until a chat has shown (loading, or a first start that failed), the inspector keeps its saved
+   * width for the chat the window is about to show, so the transcript never widens and then
+   * narrows. */
+  const holdsInspector = () => {
+    track.connection();
+    return !shownChat && !store.isConnected && selection.read()?.kind === "chat";
+  };
+  const showsInspector = () => userWantsInspector.read() && (chatID() !== null || holdsInspector());
+
+  // As the window narrows, the side panes give way to the content down to their own minimums, the
+  // inspector first; past that the inspector steps aside until there is room again, as AppKit's
+  // split view collapses it.
+  const [windowWidth, setWindowWidth] = createSignal(window.innerWidth);
+  onSettled(() => {
+    const onResize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  });
+  const panes = createMemo(() => {
+    const available = windowWidth();
+    // Widths count the pane's divider, a pixel.
+    const fit = (sidebar: number, inspector: number) => {
+      let short = contentMinWidth - (available - sidebar - inspector);
+      const giveWay = (width: number, low: number) => {
+        const taken = Math.max(0, Math.min(short, width - low));
+        short -= taken;
+        return width - taken;
+      };
+      if (inspector) inspector = giveWay(inspector, 268 + 1);
+      if (sidebar) sidebar = giveWay(sidebar, 232 + 1);
+      return { sidebar, inspector, fits: short <= 0 };
+    };
+    const sidebar = sidebarCollapsed.read() ? 0 : sidebarWidth.read() + 1;
+    const inspector = showsInspector() ? inspectorWidth.read() + 1 : 0;
+    let layout = fit(sidebar, inspector);
+    // With the inspector aside, the sidebar has its own width back where there is room.
+    if (!layout.fits && inspector) layout = fit(sidebar, 0);
+    return { sidebar: Math.max(0, layout.sidebar - 1), inspector: Math.max(0, layout.inspector - 1) };
+  });
 
   // The window's title: the chat's, the pane's, or the app's.
   const title = createMemo(() => {
@@ -111,14 +160,14 @@ export function MainWindow(props: RouteSectionProps) {
   });
 
   // The window's buttons and, on Linux, whether its edges resize it.
-  const [frame, setFrame] = createSignal<WindowState>({ focused: true, visible: true, minimized: false, maximized: false });
+  const [frame, setFrame] = createSignal<WindowState>({ focused: true, visible: true, minimized: false, maximized: false, fullScreen: false });
   onSettled(() => watchWindowState(setFrame));
 
   return (
     <div class={["main-window", `frame-${frameStyle()}`, `platform-${hostInfo().platform}`]}>
       <div class="split">
         <Show when={!sidebarCollapsed.read()}>
-          <aside class="pane sidebar-pane" style={{ width: `${sidebarWidth.read()}px` }}>
+          <aside class="pane sidebar-pane" style={{ width: `${panes().sidebar}px` }}>
             <header class="pane-header sidebar-header">
               <LeadingButtons />
             </header>
@@ -131,24 +180,20 @@ export function MainWindow(props: RouteSectionProps) {
           <Divider edge="sidebar" />
         </Show>
         <main class="pane content-pane">
-          <ContentHeader chatID={chatID()} title={title().title} subtitle={title().subtitle} rightmost={!showsInspector()} />
+          <ContentHeader chatID={chatID()} title={title().title} subtitle={title().subtitle} rightmost={panes().inspector === 0} />
           <div class="pane-body content-body">{props.children}</div>
         </main>
-        <Show when={showsInspector() && chatID()}>
-          {(id) => (
-            <>
-              <Divider edge="inspector" />
-              <aside class="pane inspector-pane" style={{ width: `${inspectorWidth.read()}px` }}>
-                <header class="pane-header inspector-header rightmost">
-                  <span class="toolbar-spacer" />
-                  <InspectorToggle />
-                </header>
-                <div class="pane-body">
-                  <Inspector chatID={id()} />
-                </div>
-              </aside>
-            </>
-          )}
+        <Show when={panes().inspector > 0}>
+          <Divider edge="inspector" />
+          <aside class="pane inspector-pane" style={{ width: `${panes().inspector}px` }}>
+            <header class="pane-header inspector-header rightmost">
+              <span class="toolbar-spacer" />
+              <InspectorToggle />
+            </header>
+            <div class="pane-body">
+              <Show when={chatID()}>{(id) => <Inspector chatID={id()} />}</Show>
+            </div>
+          </aside>
         </Show>
       </div>
       <Show when={frameStyle() === "custom"}>
@@ -240,10 +285,12 @@ function startServices(notifier: Notifier): () => void {
     quit: () => void host.quit(),
     fullScreen: () => void host.toggleFullScreen(),
   });
-  // Ctrl+1 to Ctrl+9: the chat at that place in the sidebar, ready for a reply.
+  // Ctrl+1 to Ctrl+9: the chat at that place in the sidebar, ready for a reply, its row in view.
   setGoToChat((number) => {
     const id = chatForShortcut(number);
-    if (id) open(id);
+    if (!id) return;
+    open(id);
+    document.querySelector(`.chat-row[data-chat="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
   });
   stops.push(followStore());
 
@@ -260,11 +307,7 @@ function startServices(notifier: Notifier): () => void {
     void host.setBadge(count);
   };
   updateBadge();
-  void host.setTrayMenu(L("Open %@", hostInfo().name), L("Quit %@", hostInfo().name));
 
-  // The relay turned this build away. Said once per launch, since every sync attempt gets the same
-  // answer until Lorca is updated.
-  let saidUpdateRequired = false;
   const relayStateChanged = () => {
     if (!store.relayUpdateRequired || saidUpdateRequired) return;
     saidUpdateRequired = true;
@@ -294,7 +337,7 @@ function startServices(notifier: Notifier): () => void {
       startNotifier();
     }),
     onOpenChat((id) => open(id)),
-    onUpdateAvailable((update) => void offerUpdate(update)),
+    onUpdateAvailable((update) => void offerUpdate(update, { automatic: true })),
     // Coming to the front marks the chat on screen read.
     watchWindowState((state) => {
       const id = selectedChatID();
@@ -311,6 +354,7 @@ function startServices(notifier: Notifier): () => void {
   };
   window.addEventListener("keydown", onKey);
   stops.push(() => window.removeEventListener("keydown", onKey));
+  if (frameStyle() === "custom") stops.push(installMenuKeys());
 
   return () => {
     attachNavigator(null);
@@ -318,9 +362,45 @@ function startServices(notifier: Notifier): () => void {
   };
 }
 
+/** F10, and on Windows Alt pressed alone, open the menu, as they reach a window's menu bar there. */
+function installMenuKeys(): () => void {
+  const openMenu = () => {
+    const button = document.querySelector<HTMLElement>(".app-menu-button");
+    if (button && !hasSheet()) void popupAppMenu(button);
+  };
+  let loneAlt = false;
+  const down = (event: KeyboardEvent) => {
+    loneAlt = event.key === "Alt" && !event.repeat && !event.ctrlKey && !event.shiftKey && !event.metaKey;
+    if (event.key === "F10" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      event.preventDefault();
+      openMenu();
+    }
+  };
+  const up = (event: KeyboardEvent) => {
+    if (event.key === "Alt" && loneAlt && hostInfo().platform === "windows") {
+      event.preventDefault();
+      openMenu();
+    }
+    loneAlt = false;
+  };
+  // A click or a switch away with Alt held is no menu key.
+  const cancel = () => (loneAlt = false);
+  window.addEventListener("keydown", down);
+  window.addEventListener("keyup", up);
+  window.addEventListener("mousedown", cancel, true);
+  window.addEventListener("blur", cancel);
+  return () => {
+    window.removeEventListener("keydown", down);
+    window.removeEventListener("keyup", up);
+    window.removeEventListener("mousedown", cancel, true);
+    window.removeEventListener("blur", cancel);
+  };
+}
+
 // MARK: - Layout
 
-/** A drag handle between two panes. The sidebar keeps 232 to 340 pixels, the inspector 268 to 320. */
+/** A drag handle between two panes. The sidebar keeps 232 to 340 pixels, the inspector 268 to 320;
+ * dragging the sidebar's well past its narrowest collapses it, as a split view's collapsible pane. */
 function Divider(props: { edge: "sidebar" | "inspector" }) {
   const start = (event: MouseEvent) => {
     if (event.button !== 0) return;
@@ -332,7 +412,13 @@ function Divider(props: { edge: "sidebar" | "inspector" }) {
     document.body.classList.add("resizing");
     const move = (next: MouseEvent) => {
       const delta = next.clientX - origin;
-      box.set(clamp(props.edge === "sidebar" ? from + delta : from - delta, low, high));
+      const wanted = props.edge === "sidebar" ? from + delta : from - delta;
+      if (props.edge === "sidebar" && wanted < low / 2) {
+        end();
+        toggleSidebar();
+        return;
+      }
+      box.set(clamp(wanted, low, high));
     };
     const end = () => {
       window.removeEventListener("mousemove", move);
@@ -357,14 +443,24 @@ function LeadingButtons() {
         <span class="traffic-light-space" />
       </Show>
       <Show when={frameStyle() === "custom"}>
-        <HoverButton symbol="line.3.horizontal" tooltip={L("Menu")} onMouseDown={(event) => {
-          if (event.button !== 0) return;
-          event.preventDefault();
-          void popupAppMenu(event.currentTarget as HTMLElement);
-        }} />
+        {/* A press opens the menu; Enter and Space reach it from the keyboard as a click. */}
+        <HoverButton
+          symbol="line.3.horizontal"
+          tooltip={L("Menu")}
+          class="app-menu-button"
+          onMouseDown={(event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            void popupAppMenu(event.currentTarget as HTMLElement);
+          }}
+          onClick={(event) => {
+            if (event.detail === 0) void popupAppMenu(event.currentTarget as HTMLElement);
+          }}
+        />
       </Show>
       <HoverButton symbol="sidebar.leading" tooltip={L("Toggle Sidebar (%@)", shortcutText("CmdOrCtrl+B"))} onClick={toggleSidebar} />
-      {/* Creating bots and chats belongs to the chats; Settings hides it. A press opens its menu. */}
+      {/* Creating bots and chats belongs to the chats; Settings hides it. A press opens its menu;
+          the keyboard's press is the New Bot action, as the Mac button's own action is. */}
       <HoverButton
         symbol="plus"
         tooltip={L("Create")}
@@ -378,6 +474,9 @@ function LeadingButtons() {
           ).then((picked) => {
             if (picked) commands.run(picked);
           });
+        }}
+        onClick={(event) => {
+          if (event.detail === 0) commands.run("newBot");
         }}
       />
     </div>
@@ -473,7 +572,7 @@ function DevicePicker() {
       class="device-picker"
       label={L("Device")}
       tooltip={L("The Device this page shows")}
-      options={devices().map((device) => ({ value: device.id, label: device.isThisDevice ? L("%@ (This computer)", device.name) : device.name }))}
+      options={devices().map((device) => ({ value: device.id, label: device.isThisDevice ? L("%@ (This computer)", device.name) : device.name, symbol: deviceSymbol(device) }))}
       value={settingsDeviceID.read() ?? ""}
       onChange={(id) => showSettingsDevice(id)}
       extras={[{ id: "pairDevice", label: L("Pair a Device…") }]}

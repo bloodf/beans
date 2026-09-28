@@ -3,11 +3,15 @@
 // control that opened it and closes when the user clicks elsewhere.
 
 import { Portal } from "@solidjs/web";
-import { For, onSettled, Show } from "solid-js";
+import { createEffect, For, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
+import { hostInfo } from "../host";
 import { L } from "../l10n";
 import { box } from "./box";
 import { Button } from "./controls";
+import { Icon } from "./icons";
+import devIconURL from "./images/icon-dev.png";
+import iconURL from "./images/icon.png";
 import { Markdown } from "./markdown";
 
 // MARK: - Sheets
@@ -16,6 +20,8 @@ interface SheetEntry {
   id: number;
   render: (dismiss: () => void) => JSX.Element;
   onDismiss?: () => void;
+  /** What had the keyboard when the sheet came up. */
+  focus: Element | null;
 }
 
 const sheets = box<SheetEntry[]>([]);
@@ -25,18 +31,41 @@ export interface SheetHandle {
   dismiss(): void;
 }
 
+/** The sheet in front: the element a sheet's content renders in its frame. */
+function frontSheet(): HTMLElement | null {
+  const frames = document.querySelectorAll(".sheet-frame");
+  const sheet = frames[frames.length - 1]?.firstElementChild;
+  return sheet instanceof HTMLElement ? sheet : null;
+}
+
+/** Takes a sheet away and hands the keyboard back to what had it before, as a sheet's window
+ * closing does on the Mac, once the window behind takes keys again; unless something took the
+ * keyboard on the way, as a chat the sheet opened. */
+function removeSheet(id: number): void {
+  const entry = sheets.get().find((sheet) => sheet.id === id);
+  if (!entry) return;
+  sheets.set(sheets.get().filter((sheet) => sheet.id !== id));
+  entry.onDismiss?.();
+  setTimeout(() => {
+    if (document.activeElement && document.activeElement !== document.body) return;
+    const previous = entry.focus;
+    if (previous instanceof HTMLElement && previous.isConnected && !previous.closest("[inert]")) previous.focus({ preventScroll: true });
+    else frontSheet()?.focus();
+  });
+}
+
 /** Presents a sheet over the window. `render` gets the function that closes it. */
 export function presentSheet(render: (dismiss: () => void) => JSX.Element, onDismiss?: () => void): SheetHandle {
   const id = nextSheet++;
-  const dismiss = () => {
-    const entry = sheets.get().find((sheet) => sheet.id === id);
-    if (!entry) return;
-    sheets.set(sheets.get().filter((sheet) => sheet.id !== id));
-    entry.onDismiss?.();
-  };
-  sheets.set([...sheets.get(), { id, render, onDismiss }]);
-  return { dismiss };
+  sheets.set([...sheets.get(), { id, render, onDismiss, focus: document.activeElement }]);
+  return { dismiss: () => removeSheet(id) };
 }
+
+/** A click on a sheet's button leaves the keyboard where it was, so Return still presses the
+ * default button and a field keeps its caret, as AppKit's buttons do. */
+const keepFocus = (event: MouseEvent) => {
+  if ((event.target as Element).closest("button")) event.preventDefault();
+};
 
 /** Whether a sheet is up, so the window's commands leave the keyboard to it. */
 export function hasSheet(): boolean {
@@ -48,14 +77,22 @@ export function readHasSheet(): boolean {
 }
 
 export function SheetHost() {
+  // The window behind a sheet takes no clicks, keys, or Tab, as a window with a sheet on the Mac;
+  // nor does a sheet behind another.
+  createEffect(
+    () => sheets.read().length > 0,
+    (up) => {
+      const root = document.getElementById("root");
+      if (root) root.inert = up;
+    },
+  );
   onSettled(() => {
     // A sheet is the key window. A key typed while nothing has the keyboard, once the control that
     // had it went away with a page or turned into a spinner, goes to the sheet in front, which takes
     // the keyboard back for the keys after it.
     const onKey = (event: KeyboardEvent) => {
-      const frames = document.querySelectorAll(".sheet-frame");
-      const sheet = frames[frames.length - 1]?.firstElementChild;
-      if (!(sheet instanceof HTMLElement) || event.target !== document.body) return;
+      const sheet = frontSheet();
+      if (!sheet || event.target !== document.body) return;
       event.stopImmediatePropagation();
       sheet.focus();
       if (!sheet.dispatchEvent(new KeyboardEvent(event.type, event))) event.preventDefault();
@@ -66,17 +103,12 @@ export function SheetHost() {
   return (
     <For each={sheets.read()}>
       {(entry, index) => {
-        const dismiss = () => {
-          const found = sheets.get().find((sheet) => sheet.id === entry.id);
-          if (!found) return;
-          sheets.set(sheets.get().filter((sheet) => sheet.id !== entry.id));
-          found.onDismiss?.();
-        };
+        const covered = () => index() < sheets.read().length - 1;
         return (
           <Portal>
-            <div class={["sheet-scrim", { covered: index() < sheets.read().length - 1 }]}>
-              <div class="sheet-frame" role="dialog" aria-modal="true">
-                {entry.render(dismiss)}
+            <div class={["sheet-scrim", { covered: covered() }]} inert={covered()}>
+              <div class="sheet-frame" role="dialog" aria-modal="true" onMouseDown={keepFocus}>
+                {entry.render(() => removeSheet(entry.id))}
               </div>
             </div>
           </Portal>
@@ -109,7 +141,7 @@ export function Sheet(props: {
   onSettled(() => {
     // The first field takes the keyboard, as a sheet's initial first responder does; with none, the
     // sheet itself does, so keys stop going to the window behind it.
-    const field = element?.querySelector<HTMLElement>("[data-autofocus], input:not([readonly]), textarea");
+    const field = element?.querySelector<HTMLElement>("[data-autofocus], input:not([readonly]), textarea:not([readonly])");
     if (element && !element.contains(document.activeElement)) (field ?? element).focus();
   });
   const onKeyDown = (event: KeyboardEvent) => {
@@ -166,8 +198,10 @@ export function Sheet(props: {
 export interface AlertOptions {
   message: string;
   informative?: string;
-  /** The first is the default (Return); one titled Cancel answers Escape. */
+  /** The first is the default (Return); one titled Cancel answers Escape, else the last. */
   buttons?: { title: string; destructive?: boolean }[];
+  /** The button Escape presses, when it is neither Cancel nor the last. */
+  escape?: number;
   style?: "informational" | "warning" | "critical";
   /** A control under the text, as an alert's accessory view. */
   accessory?: () => JSX.Element;
@@ -185,7 +219,7 @@ export function alert(options: AlertOptions): Promise<number> {
       dismiss();
       resolve(index);
     };
-    const cancelIndex = buttons.findIndex((button) => button.title === L("Cancel"));
+    const cancelIndex = options.escape ?? buttons.findIndex((button) => button.title === L("Cancel"));
     presentSheet(
       (dismiss) => (
         <div
@@ -203,6 +237,14 @@ export function alert(options: AlertOptions): Promise<number> {
             }
           }}
         >
+          <span class="alert-icon" aria-hidden="true">
+            <img src={hostInfo().isDevelopment ? devIconURL : iconURL} width={48} height={48} alt="" draggable={false} />
+            <Show when={options.style === "critical"}>
+              <span class="alert-caution">
+                <Icon name="exclamationmark.triangle.fill" size={20} strokeWidth={2.2} />
+              </span>
+            </Show>
+          </span>
           <div class="sheet-header">
             <div class="sheet-title">{options.message}</div>
             <Show when={options.informative}>

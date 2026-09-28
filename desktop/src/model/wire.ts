@@ -93,6 +93,7 @@ export interface WireBot {
 
 export interface WireRun {
   session_id?: string | null;
+  started_at?: number | null;
   command?: string | null;
   state: string;
   prompt?: string | null;
@@ -395,6 +396,7 @@ export function toMessage(wire: WireMessage): Message {
       const run = body.run
         ? {
             sessionID: optional(body.run.session_id),
+            startedAt: body.run.started_at == null ? undefined : seconds(body.run.started_at),
             command: body.run.command ?? "",
             state: (commandStates as string[]).includes(body.run.state) ? (body.run.state as CommandState) : ("stopped" as CommandState),
             prompt: optional(body.run.prompt),

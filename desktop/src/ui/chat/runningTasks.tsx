@@ -78,7 +78,7 @@ export function RunningTasks(props: { chatID: string; onEmpty: () => void; onClo
         firstLine: firstLine(run),
         output: run.output ?? "",
         state: run.state,
-        startedAt: message.createdAt,
+        startedAt: run.startedAt ?? message.createdAt,
       });
     }
     return list;

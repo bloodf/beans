@@ -605,6 +605,9 @@ export interface CommandRun {
   /** The terminal session running it, once one does. None before it starts, and on a Windows
    * Runner, where a command runs on pipes and takes no answers. */
   sessionID?: string;
+  /** When its terminal started it, on the Runner's clock: after Auto-review and the user's answer,
+   * which the row's time comes before. None until a terminal runs it. */
+  startedAt?: number;
   /** The command, its first 8,000 characters. */
   command: string;
   state: CommandState;

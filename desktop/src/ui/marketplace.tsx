@@ -358,7 +358,7 @@ function PluginIcon(props: { pluginID: string; symbol: string; size: number }) {
 }
 
 /** One entry in a grid: the icon or avatar, the name with its maker, a line about it, and what can
- * be done with it on the Runner. A click anywhere but the accessory opens it. */
+ * be done with it on the Runner. A click anywhere but the accessory's button opens it. */
 function MarketRow(props: { media: JSX.Element; title: string; byline?: string; subtitle: string; accessory?: JSX.Element; onOpen: () => void; onCard?: boolean }) {
   return (
     <div
@@ -367,7 +367,9 @@ function MarketRow(props: { media: JSX.Element; title: string; byline?: string; 
       tabindex={0}
       title={props.subtitle}
       aria-label={[props.title, props.byline ?? "", props.subtitle].filter((part) => part !== "").join(", ")}
-      onClick={() => props.onOpen()}
+      onClick={(event) => {
+        if (!(event.target as Element).closest("button")) props.onOpen();
+      }}
       onKeyDown={(event) => {
         if ((event.key === "Enter" || event.key === " ") && event.target === event.currentTarget) {
           event.preventDefault();
@@ -386,9 +388,7 @@ function MarketRow(props: { media: JSX.Element; title: string; byline?: string; 
         <span class="market-row-subtitle truncate">{props.subtitle}</span>
       </div>
       <Show when={props.accessory}>
-        <span class="market-row-accessory" onClick={(event) => event.stopPropagation()}>
-          {props.accessory}
-        </span>
+        <span class="market-row-accessory">{props.accessory}</span>
       </Show>
     </div>
   );

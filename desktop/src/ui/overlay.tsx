@@ -48,6 +48,21 @@ export function readHasSheet(): boolean {
 }
 
 export function SheetHost() {
+  onSettled(() => {
+    // A sheet is the key window. A key typed while nothing has the keyboard, once the control that
+    // had it went away with a page or turned into a spinner, goes to the sheet in front, which takes
+    // the keyboard back for the keys after it.
+    const onKey = (event: KeyboardEvent) => {
+      const frames = document.querySelectorAll(".sheet-frame");
+      const sheet = frames[frames.length - 1]?.firstElementChild;
+      if (!(sheet instanceof HTMLElement) || event.target !== document.body) return;
+      event.stopImmediatePropagation();
+      sheet.focus();
+      if (!sheet.dispatchEvent(new KeyboardEvent(event.type, event))) event.preventDefault();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  });
   return (
     <For each={sheets.read()}>
       {(entry, index) => {
@@ -92,9 +107,10 @@ export function Sheet(props: {
 }) {
   let element: HTMLDivElement | undefined;
   onSettled(() => {
-    // The first field takes the keyboard, as a sheet's initial first responder does.
+    // The first field takes the keyboard, as a sheet's initial first responder does; with none, the
+    // sheet itself does, so keys stop going to the window behind it.
     const field = element?.querySelector<HTMLElement>("[data-autofocus], input:not([readonly]), textarea");
-    if (field && !element?.contains(document.activeElement)) field.focus();
+    if (element && !element.contains(document.activeElement)) (field ?? element).focus();
   });
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.defaultPrevented || event.isComposing) return;
@@ -115,7 +131,7 @@ export function Sheet(props: {
     }
   };
   return (
-    <div ref={(el) => (element = el)} class={["sheet", props.class]} style={{ width: `${props.width ?? 420}px` }} onKeyDown={onKeyDown}>
+    <div ref={(el) => (element = el)} class={["sheet", props.class]} style={{ width: `${props.width ?? 420}px` }} tabindex={-1} onKeyDown={onKeyDown}>
       <div class="sheet-header">
         <div class="sheet-title">{props.title}</div>
         <Show when={props.subtitle}>
@@ -175,6 +191,7 @@ export function alert(options: AlertOptions): Promise<number> {
         <div
           class="sheet alert"
           style={{ width: `${options.width ?? 380}px` }}
+          tabindex={-1}
           onKeyDown={(event) => {
             if (event.isComposing) return;
             if (event.key === "Escape") {

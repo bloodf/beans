@@ -841,6 +841,11 @@ textarea::placeholder {
   overflow: auto;
 }
 
+/* A sheet takes the keyboard itself when none of its controls has it, without a ring around it. */
+.sheet:focus-visible {
+  outline: none;
+}
+
 :root:not([data-dark]) .sheet {
   --sheet-bg: #f6f6f7;
 }

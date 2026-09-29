@@ -89,13 +89,6 @@ func (Host) FinishOnboarding() { mygo.RunOnMain(app.endOnboarding) }
 // ShowOnboarding opens onboarding again over the main window, from Settings › Advanced.
 func (Host) ShowOnboarding() { mygo.RunOnMain(app.showOnboarding) }
 
-// CloseWindow closes the calling page's window, as its Cancel does.
-func (Host) CloseWindow(ctx context.Context) {
-	if win := mygo.CallerWindow(ctx); win != nil {
-		win.Close()
-	}
-}
-
 // ToggleFullScreen puts the calling page's window in full screen or takes it out, for the command
 // palette's Enter Full Screen; the menu's item is the system's own.
 func (Host) ToggleFullScreen(ctx context.Context) {
@@ -140,9 +133,6 @@ func (Host) CopyText(text string) { mygo.Clipboard.WriteText(text) }
 
 // Beep is the system's alert sound, for a command that cannot run.
 func (Host) Beep() { mygo.Shell.Beep() }
-
-// Quit quits the app, and the CLI it started with it.
-func (Host) Quit() { mygo.App.Quit() }
 
 // NoticeOptions is one system notification: a reply, a failed response, or a question.
 type NoticeOptions struct {

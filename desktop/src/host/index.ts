@@ -2,7 +2,7 @@
 // stand-ins when it runs in a browser tab of the dev server (for working on the views), where it
 // talks to a CLI's websocket itself or runs the demo.
 
-import { currentWindow, isMyGo, onFileDrop, type FileDrop } from "mygo-runtime";
+import { isMyGo, onFileDrop, type FileDrop } from "mygo-runtime";
 import {
   CLI,
   events,
@@ -110,21 +110,11 @@ export function isMacOS(): boolean {
   return info.platform === "darwin";
 }
 
-/** Who draws the main window's title bar: its panes' headers, around the traffic lights on macOS
- * (`mac`) or with the window buttons and resize edges drawn by the page elsewhere (`custom`); a
- * browser tab has none (`browser`). */
-export function frameStyle(): "browser" | "mac" | "custom" {
-  // A browser tab posing as Windows or Linux draws their title bar, to preview it.
-  if (!inApp) return query.has("platform") && info.platform !== "darwin" ? "custom" : "browser";
-  return info.platform === "darwin" ? "mac" : "custom";
+/** Who draws the main window's title bar: on macOS its panes' headers, around the traffic lights
+ * (`mac`); on Windows and Linux, and in a browser tab, the system (`system`). */
+export function frameStyle(): "mac" | "system" {
+  return inApp && info.platform === "darwin" ? "mac" : "system";
 }
-
-/** The window buttons a page draws for a window without a frame. */
-export const windowControls = {
-  minimize: () => (inApp ? currentWindow.minimize() : Promise.resolve()),
-  toggleMaximize: () => (inApp ? currentWindow.toggleMaximize() : Promise.resolve()),
-  close: () => (inApp ? currentWindow.close() : Promise.resolve()),
-};
 
 export function preferences(): Preferences {
   return prefs;
@@ -303,7 +293,7 @@ export function watchWindowState(listener: (state: WindowState) => void): () => 
     void Host.windowState().then(listener);
     return events.windowState.on(listener);
   }
-  const report = () => listener({ focused: document.hasFocus(), visible: document.visibilityState === "visible", minimized: false, maximized: false, fullScreen: false });
+  const report = () => listener({ focused: document.hasFocus(), visible: document.visibilityState === "visible", minimized: false, fullScreen: false });
   report();
   window.addEventListener("focus", report);
   window.addEventListener("blur", report);
@@ -320,14 +310,12 @@ export const host = {
   // A browser tab has one window: the page goes to the other route, with its query (`?mock=1`).
   finishOnboarding: () => (inApp ? Host.finishOnboarding() : Promise.resolve(location.assign(`/${location.search}`))),
   showOnboarding: () => (inApp ? Host.showOnboarding() : Promise.resolve(location.assign(`/onboarding${location.search}`))),
-  closeWindow: () => (inApp ? Host.closeWindow() : Promise.resolve()),
   toggleFullScreen: () => (inApp ? Host.toggleFullScreen() : document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()),
   setBadge: (count: number) => (inApp ? Host.setBadge(count) : Promise.resolve()),
   setTrayMenu: (open: string, quit: string) => (inApp ? Host.setTrayMenu(open, quit) : Promise.resolve()),
   openExternal: (url: string) => (inApp ? Host.openExternal(url) : Promise.resolve(void window.open(url, "_blank"))),
   copyText: (text: string) => (inApp ? Host.copyText(text) : navigator.clipboard.writeText(text)),
   beep: () => (inApp ? Host.beep() : Promise.resolve()),
-  quit: () => (inApp ? Host.quit() : Promise.resolve()),
   updaterState: (): Promise<UpdaterState> =>
     inApp
       ? Host.updaterState()

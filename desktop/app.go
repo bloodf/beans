@@ -35,9 +35,6 @@ type WindowState struct {
 	Focused   bool `json:"focused"`
 	Visible   bool `json:"visible"`
 	Minimized bool `json:"minimized"`
-	// Maximized tells a page that draws its own title bar which window button to show:
-	// Maximize or Restore.
-	Maximized bool `json:"maximized"`
 	// FullScreen words the menu's full screen item: Enter or Exit.
 	FullScreen bool `json:"fullScreen"`
 }
@@ -48,7 +45,6 @@ func stateOf(win *mygo.Window) WindowState {
 		Focused:    win.IsFocused(),
 		Visible:    win.IsVisible(),
 		Minimized:  win.IsMinimized(),
-		Maximized:  win.IsMaximized(),
 		FullScreen: win.IsFullScreen(),
 	}
 }
@@ -259,8 +255,6 @@ func (a *appDelegate) newWindow(options mygo.WindowOptions) *mygo.Window {
 	win.OnHide(report)
 	win.OnMinimize(report)
 	win.OnRestore(report)
-	win.OnMaximize(report)
-	win.OnUnmaximize(report)
 	win.OnEnterFullScreen(report)
 	win.OnLeaveFullScreen(report)
 	win.OnDOMReady(report)
@@ -309,15 +303,13 @@ func (a *appDelegate) showMainWindow() {
 			StateKey:        "main",
 			BackgroundColor: "light-dark(#ffffff, #1c1c1c)",
 		}
-		// The page's panes carry the title bar: their headers hold the title, the buttons, and
-		// the drag regions. On macOS the traffic lights stay, in the sidebar's header, where the
-		// Mac app's toolbar puts them: the close button 19 points in and down, centered in the
-		// 52-point header. Elsewhere the page draws the window buttons and the menu too.
+		// On macOS the page's panes carry the title bar: their headers hold the title, the
+		// buttons, and the drag regions, and the traffic lights sit in the sidebar's header where
+		// the Mac app's toolbar puts them: the close button 19 points in and down, centered in the
+		// 52-point header. Windows and Linux keep the system's title bar and menu bar.
 		if runtime.GOOS == "darwin" {
 			options.TitleBarStyle = mygo.TitleBarHidden
 			options.TrafficLightPosition = &mygo.Point{X: 19, Y: 19}
-		} else {
-			options.Frameless = true
 		}
 		win := a.newWindow(options)
 		win.OnClose(func(e *mygo.CloseEvent) {

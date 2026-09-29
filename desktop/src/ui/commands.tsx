@@ -4,7 +4,7 @@
 // bar, the shortcuts.
 
 import { createEffect, createMemo, createSignal } from "solid-js";
-import { frameStyle, hostInfo, inApp, menus, onMenuCommand, watchWindowState, type MenuItemSpec, type MenuItemState } from "../host";
+import { hostInfo, inApp, menus, onMenuCommand, watchWindowState, type MenuItemSpec, type MenuItemState } from "../host";
 import { L } from "../l10n";
 import { isDM, isGroup } from "../model/models";
 import { track } from "../model/reactive";
@@ -222,18 +222,9 @@ function flatten(items: MenuItemSpec[]): MenuItemSpec[] {
   return items.flatMap((entry) => (entry.submenu ? flatten(entry.submenu) : entry.id ? [entry] : []));
 }
 
-/** The main window's menu when its page draws the title bar (Windows and Linux): the menu bar's
- * menus, from a button in the sidebar's header. */
-export async function popupAppMenu(anchor: HTMLElement): Promise<void> {
-  if (!inApp) return;
-  const rect = anchor.getBoundingClientRect();
-  const picked = await menus.popup(menuBar("main"), Math.round(rect.left), Math.round(rect.bottom + 4));
-  if (picked) commands.run(picked);
-}
-
 /** Puts this window's menu bar up and keeps its items' titles, checks, and enabled states in step
- * with the store and the selection. Clicks come back as commands. A window whose page draws its
- * title bar keeps its menu in a button there and answers the shortcuts itself. */
+ * with the store and the selection. Clicks come back as commands. A browser tab, with no menu bar,
+ * answers the shortcuts itself. */
 export function installMenuBar(window: "main" | "other"): () => void {
   // Only a window has full screen; a browser tab stays out of it.
   const offState = inApp ? watchWindowState((state) => setFullScreen(state.fullScreen)) : () => {};
@@ -245,7 +236,7 @@ export function installMenuBar(window: "main" | "other"): () => void {
 }
 
 function installMenus(window: "main" | "other"): () => void {
-  if (!inApp || (window === "main" && frameStyle() === "custom")) return installShortcuts();
+  if (!inApp) return installShortcuts();
   void menus.setBar(menuBar(window));
   const states = createMemo(() => {
     track.any();
@@ -296,9 +287,8 @@ export function setGoToChat(run: (number: number) => void): void {
   goToChat = run;
 }
 
-/** Without a menu bar (a browser tab, a window whose page draws its title bar) the page answers
- * the menu's shortcuts itself; a system item (Quit, Close Window, Full Screen) where the page has
- * a way to do it. */
+/** In a browser tab, with no menu bar, the page answers the menu's shortcuts itself; the system's
+ * items (Quit, Close Window, Full Screen) are the browser's. */
 function installShortcuts(): () => void {
   const onKey = (event: KeyboardEvent) => {
     // AltGr types characters ("{" is AltGr+B on some layouts); Windows reports it as Ctrl+Alt.

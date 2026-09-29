@@ -43,11 +43,15 @@ body.resizing * {
   min-height: 0;
 }
 
-/* Each pane has a header of its own, in its own color, where a title bar would be: the sidebar's
-   holds the traffic lights or the menu with the sidebar and Create buttons, the content's the title,
-   and the inspector's its toggle. They drag the window; the buttons in them stay buttons. */
-.pane-header {
+/* Each pane has a header of its own, in its own color: the sidebar's holds the sidebar and Create
+   buttons, the content's the title, and the inspector's its toggle. On macOS they are where the
+   title bar would be, the traffic lights in the sidebar's, and they drag the window; the buttons in
+   them stay buttons. */
+.frame-mac .pane-header {
   --app-region: drag;
+}
+
+.pane-header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -89,23 +93,6 @@ body.resizing * {
   width: 80px;
 }
 
-/* The window buttons take the top-right corner, over whichever pane's header is there. */
-.main-window {
-  --window-buttons: 0px;
-}
-
-.frame-custom.platform-windows {
-  --window-buttons: 138px;
-}
-
-.frame-custom.platform-linux {
-  --window-buttons: 102px;
-}
-
-.frame-custom .pane-header.rightmost {
-  padding-right: calc(var(--window-buttons) + 8px);
-}
-
 .pane-body {
   display: flex;
   flex-direction: column;
@@ -128,92 +115,6 @@ body.resizing * {
   height: 10px;
   background: linear-gradient(var(--content), transparent);
   pointer-events: none;
-}
-
-.window-buttons {
-  position: absolute;
-  top: 0;
-  right: 0;
-  z-index: 20;
-  display: flex;
-}
-
-.window-button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 46px;
-  height: 32px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--label);
-}
-
-.window-button svg {
-  width: 10px;
-  height: 10px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1;
-  shape-rendering: crispEdges;
-}
-
-.window-button.close svg {
-  shape-rendering: geometricPrecision;
-}
-
-.window-button:hover {
-  background: var(--hover);
-}
-
-.window-button:active {
-  background: var(--pressed);
-}
-
-.window-button.close:hover {
-  background: #c42b1c;
-  color: #ffffff;
-}
-
-.window-button.close:active {
-  background: #c83c31;
-  color: #ffffff;
-}
-
-.window-buttons.inactive .window-button:not(:hover) {
-  color: var(--label-3);
-}
-
-/* Linux draws them as the desktop's header bars do: round, beside each other. */
-.platform-linux .window-buttons {
-  top: 14px;
-  right: 10px;
-  gap: 10px;
-}
-
-.platform-linux .window-button {
-  width: 24px;
-  height: 24px;
-  border-radius: 12px;
-  background: var(--chip);
-}
-
-.platform-linux .window-button svg {
-  width: 8px;
-  height: 8px;
-  stroke-width: 1.4;
-  shape-rendering: geometricPrecision;
-}
-
-.platform-linux .window-button:hover,
-.platform-linux .window-button.close:hover {
-  background: var(--pressed);
-  color: var(--label);
-}
-
-.frame-custom.platform-linux {
-  box-shadow: inset 0 0 0 1px var(--toolbar-line);
 }
 
 .toolbar-navigation {

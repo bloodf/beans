@@ -6,15 +6,15 @@
 
 import { useLocation, useNavigate, type RouteSectionProps } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, onCleanup, onSettled, Show } from "solid-js";
-import { frameStyle, host, hostInfo, onOpenChat, onUpdateAvailable, setPreferences, watchWindowState, windowControls, type WindowState } from "../host";
-import { L, Lc } from "../l10n";
+import { frameStyle, host, hostInfo, onOpenChat, onUpdateAvailable, setPreferences, watchWindowState } from "../host";
+import { L } from "../l10n";
 import { deviceSymbol, isDeviceScoped, paneTitle, type SettingsPane } from "../model/models";
 import { onStoreEvent, track } from "../model/reactive";
 import { store } from "../model/store";
 import { addBotToChat, newBot, newGroupChat, presentMarketplace, presentPairing } from "./actions";
 import { ChatView } from "./chat/ChatView";
 import { RunningTasks } from "./chat/runningTasks";
-import { commands, popupAppMenu, setGoToChat, shortcutText } from "./commands";
+import { commands, setGoToChat, shortcutText } from "./commands";
 import { HoverButton, PopUpButton } from "./controls";
 import { Inspector } from "./inspector";
 import { popupMenu, separator } from "./menu";
@@ -159,12 +159,8 @@ export function MainWindow(props: RouteSectionProps) {
     return startServices(notifier);
   });
 
-  // The window's buttons and, on Linux, whether its edges resize it.
-  const [frame, setFrame] = createSignal<WindowState>({ focused: true, visible: true, minimized: false, maximized: false, fullScreen: false });
-  onSettled(() => watchWindowState(setFrame));
-
   return (
-    <div class={["main-window", `frame-${frameStyle()}`, `platform-${hostInfo().platform}`]}>
+    <div class={["main-window", `frame-${frameStyle()}`]}>
       <div class="split">
         <Show when={!sidebarCollapsed.read()}>
           <aside class="pane sidebar-pane" style={{ width: `${panes().sidebar}px` }}>
@@ -186,7 +182,7 @@ export function MainWindow(props: RouteSectionProps) {
         <Show when={panes().inspector > 0}>
           <Divider edge="inspector" />
           <aside class="pane inspector-pane" style={{ width: `${panes().inspector}px` }}>
-            <header class="pane-header inspector-header rightmost">
+            <header class="pane-header inspector-header">
               <span class="toolbar-spacer" />
               <InspectorToggle />
             </header>
@@ -196,9 +192,6 @@ export function MainWindow(props: RouteSectionProps) {
           </aside>
         </Show>
       </div>
-      <Show when={frameStyle() === "custom"}>
-        <WindowButtons state={frame()} />
-      </Show>
       <PaletteHost />
     </div>
   );
@@ -280,10 +273,6 @@ function startServices(notifier: Notifier): () => void {
       if (id) store.stopResponding(id);
     },
     deleteChat: () => void deleteChat(),
-    // The system's items, for a window whose page draws its title bar and answers their keys.
-    closeWindow: () => void host.closeWindow(),
-    quit: () => void host.quit(),
-    fullScreen: () => void host.toggleFullScreen(),
   });
   // Ctrl+1 to Ctrl+9: the chat at that place in the sidebar, ready for a reply, its row in view.
   setGoToChat((number) => {
@@ -354,46 +343,10 @@ function startServices(notifier: Notifier): () => void {
   };
   window.addEventListener("keydown", onKey);
   stops.push(() => window.removeEventListener("keydown", onKey));
-  if (frameStyle() === "custom") stops.push(installMenuKeys());
 
   return () => {
     attachNavigator(null);
     for (const stop of stops) stop();
-  };
-}
-
-/** F10, and on Windows Alt pressed alone, open the menu, as they reach a window's menu bar there. */
-function installMenuKeys(): () => void {
-  const openMenu = () => {
-    const button = document.querySelector<HTMLElement>(".app-menu-button");
-    if (button && !hasSheet()) void popupAppMenu(button);
-  };
-  let loneAlt = false;
-  const down = (event: KeyboardEvent) => {
-    loneAlt = event.key === "Alt" && !event.repeat && !event.ctrlKey && !event.shiftKey && !event.metaKey;
-    if (event.key === "F10" && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
-      event.preventDefault();
-      openMenu();
-    }
-  };
-  const up = (event: KeyboardEvent) => {
-    if (event.key === "Alt" && loneAlt && hostInfo().platform === "windows") {
-      event.preventDefault();
-      openMenu();
-    }
-    loneAlt = false;
-  };
-  // A click or a switch away with Alt held is no menu key.
-  const cancel = () => (loneAlt = false);
-  window.addEventListener("keydown", down);
-  window.addEventListener("keyup", up);
-  window.addEventListener("mousedown", cancel, true);
-  window.addEventListener("blur", cancel);
-  return () => {
-    window.removeEventListener("keydown", down);
-    window.removeEventListener("keyup", up);
-    window.removeEventListener("mousedown", cancel, true);
-    window.removeEventListener("blur", cancel);
   };
 }
 
@@ -432,31 +385,14 @@ function Divider(props: { edge: "sidebar" | "inspector" }) {
   return <div class={["divider", props.edge]} role="separator" aria-orientation="vertical" onMouseDown={start} />;
 }
 
-/** The buttons beside the traffic lights on macOS, or where a title bar's would be elsewhere: the
- * menu (on Windows and Linux, where the window has no menu bar), the sidebar, and Create. They sit
- * in the sidebar's header, or in the content's while the sidebar is collapsed. */
+/** The sidebar and Create buttons, after the traffic lights on macOS. They sit in the sidebar's
+ * header, or in the content's while the sidebar is collapsed. */
 function LeadingButtons() {
   const isSettings = () => selection.read()?.kind === "settings";
   return (
     <div class="leading-buttons">
       <Show when={frameStyle() === "mac"}>
         <span class="traffic-light-space" />
-      </Show>
-      <Show when={frameStyle() === "custom"}>
-        {/* A press opens the menu; Enter and Space reach it from the keyboard as a click. */}
-        <HoverButton
-          symbol="line.3.horizontal"
-          tooltip={L("Menu")}
-          class="app-menu-button"
-          onMouseDown={(event) => {
-            if (event.button !== 0) return;
-            event.preventDefault();
-            void popupAppMenu(event.currentTarget as HTMLElement);
-          }}
-          onClick={(event) => {
-            if (event.detail === 0) void popupAppMenu(event.currentTarget as HTMLElement);
-          }}
-        />
       </Show>
       <HoverButton symbol="sidebar.leading" tooltip={L("Toggle Sidebar (%@)", shortcutText("CmdOrCtrl+B"))} onClick={toggleSidebar} />
       {/* Creating bots and chats belongs to the chats; Settings hides it. A press opens its menu;
@@ -497,7 +433,7 @@ function ContentHeader(props: { chatID: string | null; title: string; subtitle: 
   };
   const isSettings = () => pane() !== null;
   return (
-    <header class={["pane-header", "content-header", { rightmost: props.rightmost }]}>
+    <header class="pane-header content-header">
       <Show when={sidebarCollapsed.read()}>
         <LeadingButtons />
       </Show>
@@ -524,38 +460,6 @@ function ContentHeader(props: { chatID: string | null; title: string; subtitle: 
         </Show>
       </Show>
     </header>
-  );
-}
-
-/** Minimize, maximize or restore, and close, drawn by the page at the window's top-right corner:
- * Windows 11's caption buttons, or round ones on Linux. They dim while the window is behind. */
-function WindowButtons(props: { state: WindowState }) {
-  return (
-    <div class={["window-buttons", { inactive: !props.state.focused }]}>
-      <button class="window-button" title={L("Minimize")} aria-label={L("Minimize")} onClick={() => void windowControls.minimize()}>
-        <svg viewBox="0 0 10 10" aria-hidden="true">
-          <path d="M0 5.5h10" />
-        </svg>
-      </button>
-      <button
-        class="window-button"
-        title={props.state.maximized ? Lc("Restore", "window") : L("Maximize")}
-        aria-label={props.state.maximized ? Lc("Restore", "window") : L("Maximize")}
-        onClick={() => void windowControls.toggleMaximize()}
-      >
-        <svg viewBox="0 0 10 10" aria-hidden="true">
-          <Show when={props.state.maximized} fallback={<rect x="0.5" y="0.5" width="9" height="9" />}>
-            <path d="M2.5 2.5V0.5h7v7h-2" />
-            <rect x="0.5" y="2.5" width="7" height="7" />
-          </Show>
-        </svg>
-      </button>
-      <button class="window-button close" title={L("Close")} aria-label={L("Close")} onClick={() => void windowControls.close()}>
-        <svg viewBox="0 0 10 10" aria-hidden="true">
-          <path d="M0.5 0.5l9 9M9.5 0.5l-9 9" />
-        </svg>
-      </button>
-    </div>
   );
 }
 

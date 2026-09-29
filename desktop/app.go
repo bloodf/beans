@@ -79,9 +79,18 @@ type appDelegate struct {
 
 	hasIdentity *bool
 	starting    bool
-	tray        *mygo.Tray
-	quitting    bool
+	// stoppedWaiting is a launch done waiting for the CLI's first answer: the CLI failed to start,
+	// or answerWait passed. Until then a computer without an identity opens no window, so
+	// onboarding never replaces a main window that just appeared.
+	stoppedWaiting bool
+	tray           *mygo.Tray
+	quitting       bool
 }
+
+// answerWait is how long a computer without an identity waits for the CLI's first answer before
+// the main window opens on the offline recovery controls. It outlasts the loading state's 2.5
+// seconds, which a CLI's first start (a new binary, a new database) can take on its own.
+const answerWait = 10 * time.Second
 
 var app = &appDelegate{starting: true}
 
@@ -113,7 +122,6 @@ func (a *appDelegate) didFinishLaunching() {
 				go a.askIdentity()
 			}
 			a.publishState()
-			mygo.RunOnMain(a.showMainWindowIfDue)
 		}
 		a.cli.onEvent = a.cliEvent
 		a.cli.onReconnectNeeded = a.launcher.ensureRunning
@@ -124,14 +132,17 @@ func (a *appDelegate) didFinishLaunching() {
 			}
 			if status.Kind == "failed" {
 				a.finishStartup()
+				a.stopWaiting()
 			}
 			a.publishState()
 		}
 		a.launcher.onReady = a.cli.connect
 		a.launcher.ensureRunning()
-		// A slow or silent CLI leaves the user with the offline recovery controls. This bounds
-		// the loading state, never the time until a window shows.
+		// A slow or silent CLI leaves the user with the offline recovery controls: in the main
+		// window that is up once the loading state ends, and on a computer without an identity,
+		// which opens its window on the CLI's answer, once the app stops waiting for it.
 		time.AfterFunc(2500*time.Millisecond, a.finishStartup)
+		time.AfterFunc(answerWait, a.stopWaiting)
 	}
 	a.installTray()
 	if a.mainWindowIsDue() {
@@ -147,6 +158,17 @@ func (a *appDelegate) finishStartup() {
 	a.mu.Unlock()
 	if changed {
 		a.publishState()
+	}
+}
+
+// stopWaiting gives up on the CLI's first answer: a computer still waiting for it to pick a
+// window opens the main window, whose recovery controls say why the CLI is not answering.
+func (a *appDelegate) stopWaiting() {
+	a.mu.Lock()
+	changed := !a.stoppedWaiting
+	a.stoppedWaiting = true
+	a.mu.Unlock()
+	if changed {
 		mygo.RunOnMain(a.showMainWindowIfDue)
 	}
 }
@@ -219,15 +241,15 @@ func (a *appDelegate) identityChanged(has bool) {
 }
 
 // mainWindowIsDue is whether the main window is the one to show: with an identity, and before
-// the CLI's first answer on a computer that had one, or once the app stops waiting (the offline
-// recovery controls).
+// the CLI's first answer on a computer that had one, or once the app stops waiting for that
+// answer (the offline recovery controls).
 func (a *appDelegate) mainWindowIsDue() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.hasIdentity != nil {
 		return *a.hasIdentity
 	}
-	return prefs.get().HadIdentity || !a.starting
+	return prefs.get().HadIdentity || a.stoppedWaiting
 }
 
 func (a *appDelegate) showMainWindowIfDue() {

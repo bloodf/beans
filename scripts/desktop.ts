@@ -66,12 +66,13 @@ async function placeCLI(platform: string): Promise<boolean> {
   let built: string
   if (goos === "windows" && platform === hostPlatform()) {
     // Windows builds its own CLI with its own toolchain.
+    log(`${color.bold("building")} ${color.dim("the CLI (release)")}`)
     const cli = await buildCLI("release")
     if (!cli.ok) return false
     built = `${cli.path}.exe`
   } else {
     log(`${color.bold("building")} ${color.dim(`the CLI for ${target}`)}`)
-    if ((await run(["cargo", "zigbuild", "-q", "--release", "--locked", "-p", CLI_NAME, "--target", target])) !== 0) return false
+    if ((await run(["cargo", "zigbuild", "--release", "--locked", "-p", CLI_NAME, "--target", target])) !== 0) return false
     built = join(ROOT, "target", target, "release", exe)
   }
   const directory = join(DESKTOP, "resources", `${goos}-${goarch}`, "bin")

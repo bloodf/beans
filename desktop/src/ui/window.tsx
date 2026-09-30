@@ -1,11 +1,11 @@
 // What every window of the app sets up, after the macOS app's AppDelegate actions: its menu bar and
 // the commands any window answers (Help, Architecture Notes, About, Check for Updates, and the Debug
-// menu's), and the update offer.
+// menu's).
 
-import { host, hostInfo, inApp, preferences, setPreferences, type UpdateInfo } from "../host";
+import { host, hostInfo, inApp, preferences } from "../host";
 import { L } from "../l10n";
-import { errorText, store } from "../model/store";
-import { commands, installMenuBar, setCheckingForUpdates } from "./commands";
+import { store } from "../model/store";
+import { commands, installMenuBar } from "./commands";
 import { popupMenu } from "./menu";
 import { alert } from "./overlay";
 
@@ -36,47 +36,6 @@ export function showAbout(): void {
   void alert({ message: hostInfo().name, informative: L("Version %@", hostInfo().version), buttons: [{ title: L("OK") }] });
 }
 
-/** Offers a newer version: install it now, which relaunches the app, later, or never, as Sparkle's
- * alert does. An automatic check passes over a version the user skipped. */
-export async function offerUpdate(update: UpdateInfo, options: { automatic?: boolean } = {}): Promise<void> {
-  if (options.automatic && preferences().skippedUpdate === update.version) return;
-  const name = hostInfo().name;
-  const answer = await alert({
-    message: L("A new version of %@ is available!", name),
-    informative: [L("%@ %@ is now available—you have %@. Would you like to install it now?", name, update.version, hostInfo().version), update.notes.trim()]
-      .filter((part) => part !== "")
-      .join("\n\n"),
-    buttons: [{ title: L("Install Update") }, { title: L("Remind Me Later") }, { title: L("Skip This Version") }],
-    escape: 1,
-    width: 440,
-  });
-  if (answer === 2) void setPreferences({ skippedUpdate: update.version });
-  if (answer !== 0) return;
-  try {
-    await host.installUpdate();
-  } catch (error) {
-    void alert({ message: L("Update Error!"), informative: errorText(error) });
-  }
-}
-
-/** A check the user asked for, from the menu or Settings: its answer, whatever it is, shows. */
-let checking = false;
-export async function checkForUpdates(): Promise<void> {
-  if (checking) return;
-  checking = true;
-  setCheckingForUpdates(true);
-  try {
-    const found = await host.checkForUpdates();
-    if (found) await offerUpdate(found);
-    else void alert({ message: L("You’re up to date!"), informative: L("%@ %@ is currently the newest version available.", hostInfo().name, hostInfo().version) });
-  } catch (error) {
-    void alert({ message: L("Update Error!"), informative: errorText(error) });
-  } finally {
-    checking = false;
-    setCheckingForUpdates(false);
-  }
-}
-
 /** A right-click gets the app's menus, never the webview's (Back, Reload, Print): over selected text
  * the Copy a text view offers, and in a field the system's own menu for editing. A control with a
  * menu of its own has shown it by now. */
@@ -102,7 +61,7 @@ export function setupWindow(kind: "main" | "other"): () => void {
     help: showHelp,
     architecture: showArchitecture,
     about: showAbout,
-    checkForUpdates: () => void checkForUpdates(),
+    checkForUpdates: () => void host.checkForUpdates(),
     simulateOffline: () => (store.isMock ? store.setConnected(!store.isConnected) : store.reconnect()),
     replayMock: () => store.resetMockData(),
     showOnboarding: () => void host.showOnboarding(),

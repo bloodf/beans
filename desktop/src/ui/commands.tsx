@@ -30,10 +30,6 @@ const handlers = new Map<string, () => void>();
 /** Whether this page's window is in full screen, which words the View menu's item. */
 const [isFullScreen, setFullScreen] = createSignal(false);
 
-/** A check for updates the user asked for is under way; the menu's item waits for it. */
-const [checkingForUpdates, setCheckingForUpdates] = createSignal(false);
-export { setCheckingForUpdates };
-
 /** What a sheet leaves working: the app's own commands, not the window's, as a sheet takes the
  * window's keys on the Mac. */
 const whileSheet = new Set(["quit", "about", "help", "architecture", "checkForUpdates", "fullScreen", "simulateOffline", "replayMock", "showOnboarding"]);
@@ -109,7 +105,7 @@ export const commandTable: Command[] = [
   {
     id: "checkForUpdates",
     title: () => L("Check for Updates…"),
-    enabled: () => hostInfo().updatesEnabled && !checkingForUpdates(),
+    enabled: () => hostInfo().updatesEnabled,
   },
   { id: "about", title: () => L("About %@", hostInfo().name) },
   {

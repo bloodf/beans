@@ -20,12 +20,11 @@ import {
   type NoticeOptions,
   type Preferences,
   type PreferencesPatch,
-  type UpdateInfo,
   type UpdaterState,
   type WindowState,
 } from "../mygo";
 
-export type { CLIState, FileInfo, HostInfo, MenuItemSpec, MenuItemState, Preferences, UpdateInfo, UpdaterState, WindowState };
+export type { CLIState, FileInfo, HostInfo, MenuItemSpec, MenuItemState, Preferences, UpdaterState, WindowState };
 
 export const inApp = isMyGo();
 
@@ -69,10 +68,6 @@ const defaultPrefs: Preferences = {
   sidebarWidth: 0,
   inspectorWidth: 0,
   sidebarCollapsed: false,
-  lastUpdateCheck: 0,
-  noAutomaticUpdateChecks: false,
-  automaticUpdateDownloads: false,
-  skippedUpdate: "",
 };
 
 let prefs: Preferences = defaultPrefs;
@@ -281,14 +276,6 @@ export function onOpenChat(listener: (chatID: string) => void): () => void {
   return inApp ? events.openChat.on(listener) : () => {};
 }
 
-export function onUpdateAvailable(listener: (update: UpdateInfo) => void): () => void {
-  return inApp ? events.updateAvailable.on(listener) : () => {};
-}
-
-export function onUpdaterChanged(listener: (state: UpdaterState) => void): () => void {
-  return inApp ? events.updaterChanged.on(listener) : () => {};
-}
-
 /** Whether this page's window is where the user looks: in front, shown, not minimized. */
 export function watchWindowState(listener: (state: WindowState) => void): () => void {
   if (inApp) {
@@ -321,9 +308,9 @@ export const host = {
   updaterState: (): Promise<UpdaterState> =>
     inApp
       ? Host.updaterState()
-      : Promise.resolve({ enabled: false, version: "dev", lastCheck: 0, automaticChecks: false, automaticDownloads: false, checking: false }),
-  checkForUpdates: () => Host.checkForUpdates(),
-  installUpdate: () => Host.installUpdate(),
+      : Promise.resolve({ version: "dev", lastCheck: 0, automaticChecks: false, automaticDownloads: false }),
+  /** Opens MyGo's update window, which says what the check finds. */
+  checkForUpdates: () => (inApp ? Host.checkForUpdates() : Promise.resolve()),
   setAutomaticUpdates: (checks: boolean, downloads: boolean) => Host.setAutomaticUpdates(checks, downloads),
 };
 

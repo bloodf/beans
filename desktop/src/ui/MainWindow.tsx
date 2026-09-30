@@ -6,7 +6,7 @@
 
 import { useLocation, useNavigate, type RouteSectionProps } from "@solidjs/router";
 import { createEffect, createMemo, createSignal, onCleanup, onSettled, Show } from "solid-js";
-import { frameStyle, host, hostInfo, onOpenChat, onUpdateAvailable, setPreferences, watchWindowState } from "../host";
+import { frameStyle, host, hostInfo, onOpenChat, setPreferences, watchWindowState } from "../host";
 import { L } from "../l10n";
 import { deviceSymbol, isDeviceScoped, paneTitle, type SettingsPane } from "../model/models";
 import { onStoreEvent, track } from "../model/reactive";
@@ -55,7 +55,7 @@ import {
 import { SettingsPage } from "./settings/panes";
 import { chatForShortcut, ChatsSidebar, SettingsSidebar } from "./sidebar";
 import { Loading, Offline, Placeholder } from "./states";
-import { offerUpdate, setupWindow } from "./window";
+import { setupWindow } from "./window";
 
 /** The narrowest the content gets before the side panes give way. */
 const contentMinWidth = 460;
@@ -326,7 +326,6 @@ function startServices(notifier: Notifier): () => void {
       startNotifier();
     }),
     onOpenChat((id) => open(id)),
-    onUpdateAvailable((update) => void offerUpdate(update, { automatic: true })),
     // Coming to the front marks the chat on screen read.
     watchWindowState((state) => {
       const id = selectedChatID();

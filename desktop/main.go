@@ -16,6 +16,7 @@ func main() {
 	prefs.load()
 	applyAppearance(prefs.get().Appearance)
 
+	useUpdater()
 	mygo.Bind(CLI{}, Host{}, Files{}, Menus{}, &Notices{}, Prefs{})
 	if err := mygo.Protocol.HandleFunc(fileScheme, serveFile); err != nil {
 		log.Fatal(err)
@@ -34,10 +35,7 @@ func main() {
 	})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { app.quitting = true })
 	mygo.App.OnQuit(app.willTerminate)
-	mygo.App.WhenReady(func() {
-		app.didFinishLaunching()
-		updates.start()
-	})
+	mygo.App.WhenReady(app.didFinishLaunching)
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
 	}

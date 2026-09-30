@@ -36,13 +36,6 @@ type Preferences struct {
 	SidebarWidth     int  `json:"sidebarWidth"`
 	InspectorWidth   int  `json:"inspectorWidth"`
 	SidebarCollapsed bool `json:"sidebarCollapsed"`
-	// The updater's: when it last looked, and its two switches.
-	LastUpdateCheck          int64 `json:"lastUpdateCheck"`
-	NoAutomaticUpdateChecks  bool  `json:"noAutomaticUpdateChecks"`
-	AutomaticUpdateDownloads bool  `json:"automaticUpdateDownloads"`
-	// SkippedUpdate is the version the user chose to skip: automatic checks pass over it, and
-	// a check the user asks for still offers it.
-	SkippedUpdate string `json:"skippedUpdate"`
 }
 
 // PreferencesPatch changes the preferences it names.
@@ -59,11 +52,6 @@ type PreferencesPatch struct {
 	SidebarWidth     *int    `json:"sidebarWidth,omitempty"`
 	InspectorWidth   *int    `json:"inspectorWidth,omitempty"`
 	SidebarCollapsed *bool   `json:"sidebarCollapsed,omitempty"`
-
-	LastUpdateCheck          *int64  `json:"lastUpdateCheck,omitempty"`
-	NoAutomaticUpdateChecks  *bool   `json:"noAutomaticUpdateChecks,omitempty"`
-	AutomaticUpdateDownloads *bool   `json:"automaticUpdateDownloads,omitempty"`
-	SkippedUpdate            *string `json:"skippedUpdate,omitempty"`
 }
 
 // PreferencesChanged tells every window what the preferences are now, after any window changed
@@ -155,18 +143,6 @@ func (s *prefsStore) update(patch PreferencesPatch) Preferences {
 	}
 	if patch.SidebarCollapsed != nil {
 		v.SidebarCollapsed = *patch.SidebarCollapsed
-	}
-	if patch.LastUpdateCheck != nil {
-		v.LastUpdateCheck = *patch.LastUpdateCheck
-	}
-	if patch.NoAutomaticUpdateChecks != nil {
-		v.NoAutomaticUpdateChecks = *patch.NoAutomaticUpdateChecks
-	}
-	if patch.SkippedUpdate != nil {
-		v.SkippedUpdate = *patch.SkippedUpdate
-	}
-	if patch.AutomaticUpdateDownloads != nil {
-		v.AutomaticUpdateDownloads = *patch.AutomaticUpdateDownloads
 	}
 	saved := *v
 	path := s.path

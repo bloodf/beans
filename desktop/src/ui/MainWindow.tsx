@@ -382,7 +382,8 @@ function Divider(props: { edge: "sidebar" | "inspector" }) {
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", end);
   };
-  return <div class={["divider", props.edge]} role="separator" aria-orientation="vertical" onMouseDown={start} />;
+  // Not the edge's own class: `.inspector` scrolls, which would clip the handle to its pixel.
+  return <div class={["divider", `${props.edge}-divider`]} role="separator" aria-orientation="vertical" onMouseDown={start} />;
 }
 
 /** The sidebar and Create buttons, after the traffic lights on macOS, or the window controls on

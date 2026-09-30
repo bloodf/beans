@@ -14,6 +14,10 @@ type UpdaterState struct {
 	AutomaticDownloads bool  `json:"automaticDownloads"`
 }
 
+// UpdaterChanged tells Settings that a check went through, the update window's checkbox moved, or
+// a switch did.
+var UpdaterChanged = mygo.NewEvent[UpdaterState]("updater:changed")
+
 // useUpdater gives the app MyGo's update window, as Sparkle gives the macOS app its own: a daily
 // check in the background, the release notes of a new version with Install Update, Remind Me
 // Later and Skip This Version, the download's progress, and the offer to relaunch. It installs
@@ -22,6 +26,7 @@ type UpdaterState struct {
 // the system's.
 func useUpdater() {
 	mygo.Use(updater.New(updater.Options{Language: prefs.get().AppLanguage}))
+	updater.OnChange(func() { UpdaterChanged.Broadcast(Host{}.UpdaterState()) })
 }
 
 // UpdaterState returns what Settings shows about updates.

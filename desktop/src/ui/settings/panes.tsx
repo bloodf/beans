@@ -4,7 +4,7 @@
 
 import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import { host, hostInfo, preferences, setPreferences, watchWindowState, type UpdaterState } from "../../host";
+import { host, hostInfo, onUpdaterChanged, preferences, setPreferences, type UpdaterState } from "../../host";
 import { chosenLanguage, L, supportedLanguages } from "../../l10n";
 import * as Format from "../../model/format";
 import {
@@ -120,11 +120,7 @@ export function GeneralPane() {
   onSettled(() => {
     if (!hostInfo().updatesEnabled) return;
     void host.updaterState().then(setUpdater);
-    // The update window records its checks and its "Automatically download" box: coming back to
-    // the front reads them again.
-    return watchWindowState((state) => {
-      if (state.focused) void host.updaterState().then(setUpdater);
-    });
+    return onUpdaterChanged(setUpdater);
   });
   const lastCheck = () => {
     const state = updater();

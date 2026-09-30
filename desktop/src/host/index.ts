@@ -276,6 +276,10 @@ export function onOpenChat(listener: (chatID: string) => void): () => void {
   return inApp ? events.openChat.on(listener) : () => {};
 }
 
+export function onUpdaterChanged(listener: (state: UpdaterState) => void): () => void {
+  return inApp ? events.updaterChanged.on(listener) : () => {};
+}
+
 /** Whether this page's window is where the user looks: in front, shown, not minimized. */
 export function watchWindowState(listener: (state: WindowState) => void): () => void {
   if (inApp) {

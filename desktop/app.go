@@ -269,6 +269,9 @@ func (a *appDelegate) isMainWindow(win *mygo.Window) bool {
 }
 
 func (a *appDelegate) newWindow(options mygo.WindowOptions) *mygo.Window {
+	// On Windows and Linux the menu bar stays out of sight until Alt or F10 takes the keyboard to
+	// it, and its shortcuts work all along. The Mac's is at the top of the screen.
+	options.AutoHideMenuBar = true
 	win := mygo.NewWindow(options)
 	report := func() { _ = WindowStateChanged.Emit(win, stateOf(win)) }
 	win.OnFocus(report)
@@ -328,7 +331,7 @@ func (a *appDelegate) showMainWindow() {
 		// On macOS the page's panes carry the title bar: their headers hold the title, the
 		// buttons, and the drag regions, and the traffic lights sit in the sidebar's header where
 		// the Mac app's toolbar puts them: the close button 19 points in and down, centered in the
-		// 52-point header. Windows and Linux keep the system's title bar and menu bar.
+		// 52-point header. Windows and Linux keep the system's title bar.
 		if runtime.GOOS == "darwin" {
 			options.TitleBarStyle = mygo.TitleBarHidden
 			options.TrafficLightPosition = &mygo.Point{X: 19, Y: 19}

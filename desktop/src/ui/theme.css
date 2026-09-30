@@ -47,6 +47,7 @@
   --composer-primary-content: #ffffff;
   --hover: rgba(0, 0, 0, 0.06);
   --pressed: rgba(0, 0, 0, 0.12);
+  --button-bg: rgba(0, 0, 0, 0.08);
   --selection: #0064e1;
   --selection-text: #ffffff;
   --selection-inactive: rgba(0, 0, 0, 0.1);
@@ -103,6 +104,7 @@
   --composer-primary-content: #000000;
   --hover: rgba(255, 255, 255, 0.07);
   --pressed: rgba(255, 255, 255, 0.14);
+  --button-bg: rgba(255, 255, 255, 0.12);
   --selection: #0a64d8;
   --selection-inactive: rgba(255, 255, 255, 0.1);
   --field: rgba(255, 255, 255, 0.06);

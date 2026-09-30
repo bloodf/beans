@@ -39,39 +39,34 @@
   display: none;
 }
 
+/* A push button as macOS 26 draws one: a flat rounded fill without a border or shadow, 24 tall,
+   in the accent color for the default button. */
 .button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
-  height: 28px;
-  padding: 0 14px;
+  height: 24px;
+  padding: 0 12px;
   border-radius: 6px;
-  border: 1px solid var(--field-border);
-  background: var(--button-bg, #ffffff);
+  border: 0;
+  background: var(--button-bg);
   color: var(--label);
   font-size: 13px;
   white-space: nowrap;
   flex: none;
-  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
-}
-
-:root[data-dark] .button {
-  --button-bg: rgba(255, 255, 255, 0.09);
-  box-shadow: none;
 }
 
 .button:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--button-bg, #ffffff) 92%, var(--label));
+  background: color-mix(in srgb, var(--button-bg) 96%, var(--label));
 }
 
 .button:active:not(:disabled) {
-  background: color-mix(in srgb, var(--button-bg, #ffffff) 84%, var(--label));
+  background: color-mix(in srgb, var(--button-bg) 92%, var(--label));
 }
 
 .button.primary {
   background: var(--accent);
-  border-color: transparent;
   color: var(--accent-text);
 }
 
@@ -244,18 +239,24 @@
   background: transparent;
 }
 
+/* A form's pop-up has a push button's flat fill, as macOS 26 draws both, with the chevrons at its
+   end. */
 .popup-button.bordered {
   height: 24px;
   padding: 0 6px 0 9px;
-  border: 1px solid var(--field-border);
   border-radius: 6px;
-  background: var(--button-bg, #ffffff);
+  background: var(--button-bg);
   font-size: 12px;
   justify-content: space-between;
 }
 
-:root[data-dark] .popup-button.bordered {
-  --button-bg: rgba(255, 255, 255, 0.09);
+.popup-button.bordered:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--button-bg) 96%, var(--label));
+}
+
+.popup-button.bordered:active:not(:disabled),
+.popup-button.bordered.open {
+  background: color-mix(in srgb, var(--button-bg) 92%, var(--label));
 }
 
 .popup-button.bordered .popup-chevrons {
@@ -857,7 +858,8 @@ textarea::placeholder {
   max-width: calc(100vw - 32px);
   max-height: 100%;
   padding: 20px;
-  border-radius: 12px;
+  /* As round as macOS 26's sheets, and white in the light appearance. */
+  border-radius: 22px;
   background: var(--sheet-bg, var(--window));
   box-shadow: var(--shadow);
   overflow: auto;
@@ -869,7 +871,7 @@ textarea::placeholder {
 }
 
 :root:not([data-dark]) .sheet {
-  --sheet-bg: #f6f6f7;
+  --sheet-bg: #ffffff;
 }
 
 .sheet-header {

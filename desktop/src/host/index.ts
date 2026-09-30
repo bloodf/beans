@@ -110,10 +110,12 @@ export function isMacOS(): boolean {
   return info.platform === "darwin";
 }
 
-/** Who draws the main window's title bar: on macOS its panes' headers, around the traffic lights
- * (`mac`); on Windows and Linux, and in a browser tab, the system (`system`). */
-export function frameStyle(): "mac" | "system" {
-  return inApp && info.platform === "darwin" ? "mac" : "system";
+/** Who draws the main window's title bar: its panes' headers, around the traffic lights on macOS
+ * (`mac`), and elsewhere under the window controls MyGo puts in a top corner (`overlay`), whose
+ * room the `--mygo-titlebar-inset-*` variables give; a browser tab has the browser's (`system`). */
+export function frameStyle(): "mac" | "overlay" | "system" {
+  if (!inApp) return "system";
+  return info.platform === "darwin" ? "mac" : "overlay";
 }
 
 export function preferences(): Preferences {

@@ -385,8 +385,9 @@ function Divider(props: { edge: "sidebar" | "inspector" }) {
   return <div class={["divider", props.edge]} role="separator" aria-orientation="vertical" onMouseDown={start} />;
 }
 
-/** The sidebar and Create buttons, after the traffic lights on macOS. They sit in the sidebar's
- * header, or in the content's while the sidebar is collapsed. */
+/** The sidebar and Create buttons, after the traffic lights on macOS, or the window controls on
+ * Linux when the desktop puts them at the left. They sit in the sidebar's header, or in the
+ * content's while the sidebar is collapsed. */
 function LeadingButtons() {
   const isSettings = () => selection.read()?.kind === "settings";
   return (
@@ -425,7 +426,8 @@ function InspectorToggle() {
 
 /** The content's header: back and forward in Settings, the title, the Device picker on the Device
  * panes, and the chat's running tasks. The inspector's toggle sits here while the inspector is
- * closed, and in the inspector's header while it is open. */
+ * closed, and in the inspector's header while it is open; the rightmost header keeps clear of the
+ * window controls on Windows and Linux. */
 function ContentHeader(props: { chatID: string | null; title: string; subtitle: string; rightmost: boolean }) {
   const pane = () => {
     const current = selection.read();
@@ -433,7 +435,7 @@ function ContentHeader(props: { chatID: string | null; title: string; subtitle: 
   };
   const isSettings = () => pane() !== null;
   return (
-    <header class="pane-header content-header">
+    <header class={["pane-header", "content-header", { rightmost: props.rightmost }]}>
       <Show when={sidebarCollapsed.read()}>
         <LeadingButtons />
       </Show>

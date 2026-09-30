@@ -44,11 +44,28 @@ body.resizing * {
 }
 
 /* Each pane has a header of its own, in its own color: the sidebar's holds the sidebar and Create
-   buttons, the content's the title, and the inspector's its toggle. On macOS they are where the
-   title bar would be, the traffic lights in the sidebar's, and they drag the window; the buttons in
-   them stay buttons. */
-.frame-mac .pane-header {
+   buttons, the content's the title, and the inspector's its toggle. They are where the title bar
+   would be, under the window controls (the traffic lights in the sidebar's on macOS), and they drag
+   the window; the buttons in them stay buttons. */
+.frame-mac .pane-header,
+.frame-overlay .pane-header {
   --app-region: drag;
+}
+
+/* On Windows and Linux the window controls take a top corner of the headers, the room MyGo's
+   variables give: at the right the rightmost header's (the inspector's while it is open, else the
+   content's), and at the left, where the desktop's button layout puts them there, the leading
+   buttons'. In full screen they take none. */
+.frame-overlay .content-header.rightmost {
+  padding-right: max(12px, calc(var(--mygo-titlebar-inset-right, 0px) + 8px));
+}
+
+.frame-overlay .inspector-header {
+  padding-right: max(10px, calc(var(--mygo-titlebar-inset-right, 0px) + 8px));
+}
+
+.frame-overlay .leading-buttons {
+  margin-left: var(--mygo-titlebar-inset-left, 0px);
 }
 
 .pane-header {
@@ -74,8 +91,9 @@ body.resizing * {
   padding: 0 10px 0 12px;
 }
 
-/* The buttons after the traffic lights (or the menu), 4 apart, as in the Mac app's leading titlebar
-   accessory. The traffic lights end 79 in, and AppKit starts the accessory's first button at 96. */
+/* The buttons after the traffic lights (or window controls at the left), 4 apart, as in the Mac
+   app's leading titlebar accessory. The traffic lights end 79 in, and AppKit starts the
+   accessory's first button at 96. */
 .leading-buttons {
   display: flex;
   align-items: center;

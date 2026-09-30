@@ -327,13 +327,15 @@ func (a *appDelegate) showMainWindow() {
 			MinHeight:       520,
 			StateKey:        "main",
 			BackgroundColor: "light-dark(#ffffff, #1c1c1c)",
+			// The page's panes carry the title bar: their headers hold the title, the buttons,
+			// and the drag regions, and the window controls sit over them. On Windows and Linux
+			// the controls go in a top corner and fill the 52-pixel headers or center in them.
+			TitleBarStyle:  mygo.TitleBarHidden,
+			TitleBarHeight: 52,
 		}
-		// On macOS the page's panes carry the title bar: their headers hold the title, the
-		// buttons, and the drag regions, and the traffic lights sit in the sidebar's header where
-		// the Mac app's toolbar puts them: the close button 19 points in and down, centered in the
-		// 52-point header. Windows and Linux keep the system's title bar.
+		// The traffic lights sit in the sidebar's header where the Mac app's toolbar puts them:
+		// the close button 19 points in and down, centered in the 52-point header.
 		if runtime.GOOS == "darwin" {
-			options.TitleBarStyle = mygo.TitleBarHidden
 			options.TrafficLightPosition = &mygo.Point{X: 19, Y: 19}
 		}
 		win := a.newWindow(options)

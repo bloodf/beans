@@ -250,9 +250,10 @@ body.resizing * {
   min-height: 0;
 }
 
+/* Right under the header: its buttons end 12 above, and 2 more leave room for the focus ring. */
 .sidebar-search {
   flex: none;
-  padding: 10px 10px 6px;
+  padding: 2px 10px 6px;
 }
 
 .sidebar-list {

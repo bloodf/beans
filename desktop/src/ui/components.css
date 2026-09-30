@@ -327,7 +327,8 @@ textarea::placeholder {
   color: var(--placeholder);
 }
 
-/* A capsule, as NSSearchField is. */
+/* A capsule, as NSSearchField is, with the I-beam over all of it, even where a click only opens a
+   search elsewhere. */
 .search-field {
   display: flex;
   align-items: center;
@@ -337,6 +338,7 @@ textarea::placeholder {
   border-radius: 15px;
   background: var(--search-bg, rgba(0, 0, 0, 0.055));
   color: var(--label-2);
+  cursor: text;
 }
 
 :root[data-dark] .search-field {
@@ -357,7 +359,6 @@ textarea::placeholder {
 }
 
 .search-field input[readonly] {
-  cursor: default;
   user-select: none;
 }
 

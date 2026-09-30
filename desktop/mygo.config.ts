@@ -21,6 +21,8 @@ export default defineConfig(({ command }) => ({
   updates: {
     publicKey: "WzJsOGNIuf6mcEqo5ff8jub+NoQQOEk4JXreLPYjgyQ=",
     url: "https://releases.lorca.app",
+    // The version's section of the apps' changelog, which the Mac app's updates show too.
+    changelog: "../CHANGELOG.md",
     s3: {
       bucket: "lorca-releases",
       endpoint: `https://${process.env.R2_ACCOUNT_ID ?? "account-id"}.r2.cloudflarestorage.com`,

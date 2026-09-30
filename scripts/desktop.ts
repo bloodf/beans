@@ -18,6 +18,7 @@ import { copyFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from "no
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { CLI_NAME, ROOT, buildCLI, color, log } from "./app.ts"
+import { extractReleaseNotes } from "./changelog.ts"
 
 const DESKTOP = join(ROOT, "desktop")
 const MYGO = join(DESKTOP, "node_modules", ".bin", process.platform === "win32" ? "mygo.exe" : "mygo")
@@ -138,6 +139,11 @@ async function build(platforms: string[], options: { upload?: boolean } = {}): P
     if (!release) return 1
     env = release
     const version = (await Bun.file(join(ROOT, "package.json")).json()).version as string
+    // mygo build reads the notes too (updates.changelog), but only once the apps are built.
+    if (!extractReleaseNotes(await Bun.file(join(ROOT, "CHANGELOG.md")).text(), version)) {
+      log(color.red(`CHANGELOG.md has no "## [${version}]" section: add the notes of the update window`))
+      return 1
+    }
     const again = await published(platforms, version)
     if (again.length > 0 && process.env.FORCE !== "1") {
       log(color.red(`${version} is already published for ${again.join(", ")}: bump "version" in package.json, or FORCE=1 to replace it`))

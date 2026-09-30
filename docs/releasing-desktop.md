@@ -52,11 +52,16 @@ It stops before building when one is missing.
 
 ## Cutting a release
 
-The version is `"version"` in the root [`package.json`](../package.json), the Mac app's too. Run:
+The version is `"version"` in the root [`package.json`](../package.json), the Mac app's too.
 
-```sh
-bun run release-desktop [platforms]
-```
+1. Make sure [`CHANGELOG.md`](../CHANGELOG.md) has a `## [<version>]` section: it becomes the
+   release notes of the update window (`updates.changelog`), and `release-desktop` stops before
+   building without it. A version the Mac app released already has one.
+2. Run:
+
+   ```sh
+   bun run release-desktop [platforms]
+   ```
 
 Platforms are MyGo's, comma separated. The default is this computer's, or `linux/amd64` and
 `windows/amd64` from a Mac. The script:

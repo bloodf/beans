@@ -6,6 +6,8 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- Lorca opens on your last chat, even when you quit it with Settings open.
+
 ## [0.1.0]
 
 - The first release.

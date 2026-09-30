@@ -83,7 +83,8 @@ final class RootSplitViewController: NSSplitViewController {
             guard selection != oldValue else { return }
             recordHistory()
             if case let .chat(id) = oldValue { lastChatID = id }
-            Preferences.selection = encode(selection)
+            // A relaunch lands on the chat that showed last, never on a settings pane.
+            if selection?.isSettings != true { Preferences.selection = encode(selection) }
             updateContent()
             onSelectionChange?()
         }
@@ -106,7 +107,7 @@ final class RootSplitViewController: NSSplitViewController {
         inspectorItem = NSSplitViewItem(inspectorWithViewController: inspectorContainer)
         inspectorItem.minimumThickness = 268
         inspectorItem.maximumThickness = 320
-        inspectorItem.isCollapsed = !userWantsInspector || Preferences.selection?.hasPrefix("settings:") == true
+        inspectorItem.isCollapsed = !userWantsInspector
 
         addSplitViewItem(sidebarItem)
         addSplitViewItem(contentItem)
@@ -120,22 +121,19 @@ final class RootSplitViewController: NSSplitViewController {
         restoreSelection()
     }
 
+    /// An open settings pane stays; otherwise the saved chat when it still exists, else the first
+    /// chat.
     private func restoreSelection() {
         let restored: Selection?
-        if let encoded = Preferences.selection, let decoded = decode(encoded), exists(decoded) {
-            restored = decoded
+        if selection?.isSettings == true {
+            restored = selection
+        } else if let encoded = Preferences.selection, case let .chat(id)? = decode(encoded), store.chat(id) != nil {
+            restored = .chat(id)
         } else {
             restored = store.chats.first.map { .chat($0.id) }
         }
         if restored == selection { updateContent() } else { selection = restored }
         syncSidebar()
-    }
-
-    private func exists(_ selection: Selection) -> Bool {
-        switch selection {
-        case let .chat(id): store.chat(id) != nil
-        case .settings: true
-        }
     }
 
     private func encode(_ selection: Selection?) -> String? {

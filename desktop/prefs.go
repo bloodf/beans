@@ -17,8 +17,8 @@ type Preferences struct {
 	// at once when it did, and otherwise waits for the answer, so a fresh install goes straight
 	// to onboarding.
 	HadIdentity bool `json:"hadIdentity"`
-	// Selection is what the main window showed ("chat:<id>", "settings:<pane>"), so a relaunch
-	// lands back on it.
+	// Selection is the chat the main window showed last ("chat:<id>"), so a relaunch lands back
+	// on it rather than on a settings pane.
 	Selection      string `json:"selection"`
 	ShowsInspector bool   `json:"showsInspector"`
 	SendOnReturn   bool   `json:"sendOnReturn"`

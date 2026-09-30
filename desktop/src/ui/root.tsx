@@ -130,7 +130,8 @@ function setSelection(next: Selection | null): void {
   recordHistory(next);
   if (old?.kind === "chat") lastChatID = old.id;
   if (!sameSelection(selectionAt(location.pathname), next)) navigate?.(pathFor(next));
-  void setPreferences({ selection: encodeSelection(next) });
+  // A relaunch lands on the chat that showed last, never on a settings pane.
+  if (next?.kind !== "settings") void setPreferences({ selection: encodeSelection(next) });
 }
 
 /** The route changed under the window, as on load: the selection follows it. */
@@ -163,15 +164,14 @@ export function selectedChatID(): string | null {
   return current?.kind === "chat" ? current.id : null;
 }
 
-/** Brings the selection back after a snapshot: the saved one when it still exists, else the
- * first chat. */
+/** Brings the selection back after a snapshot: an open settings pane or a chat that still exists
+ * stays, else the saved chat when it still exists, else the first chat. */
 export function restoreSelection(): void {
-  const saved = decodeSelection(preferences().selection);
   const current = selection.get();
-  const exists = (candidate: Selection | null) => candidate !== null && (candidate.kind === "settings" || store.chat(candidate.id) !== undefined);
-  if (exists(current)) return;
-  const restored = exists(saved) ? saved : store.chats[0] ? ({ kind: "chat", id: store.chats[0].id } as Selection) : null;
-  setSelection(restored);
+  if (current?.kind === "settings" || (current && store.chat(current.id))) return;
+  const saved = decodeSelection(preferences().selection);
+  const id = saved?.kind === "chat" && store.chat(saved.id) ? saved.id : store.chats[0]?.id;
+  setSelection(id ? { kind: "chat", id } : null);
 }
 
 /** Settings lives in this window: its panes take the content area, and the sidebar lists them in

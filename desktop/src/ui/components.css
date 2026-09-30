@@ -22,6 +22,12 @@
   font-size: 13px;
 }
 
+/* The label's capitals center on the symbol, as text does on SF Symbols, whatever the font's line
+   metrics: Segoe UI's leave the text a pixel low. */
+.hover-button.labelled > span {
+  text-box: trim-both cap alphabetic;
+}
+
 .hover-button:hover:not(:disabled),
 .hover-button.active {
   background: var(--hover);

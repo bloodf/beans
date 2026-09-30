@@ -489,7 +489,6 @@ body.resizing * {
 
 .bubble.bot {
   background: var(--bot-bubble);
-  box-shadow: inset 0 0 0 1px var(--bot-bubble-border);
 }
 
 .bubble.user {

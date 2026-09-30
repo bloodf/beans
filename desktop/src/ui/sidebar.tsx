@@ -255,10 +255,6 @@ export function ChatsSidebar() {
             typeSelect(event.key);
           }
         }}
-        // A click past the last row selects nothing, and the window shows its placeholder.
-        onMouseDown={(event) => {
-          if (event.button === 0 && event.target === event.currentTarget) select(null);
-        }}
       >
         <For each={chatIDs()}>{(id, index) => <ChatRow id={id} index={index()} />}</For>
       </div>

@@ -32,7 +32,7 @@ public class LorcaCoreModule: Module {
     guard let key = core?.pushKey() else { return }
     // A push can arrive while the phone is locked.
     let status = SecItemAdd(item.merging([kSecValueData: key, kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]) { $1 } as CFDictionary, nil)
-    if status != errSecSuccess { NSLog("Lorca: sharing the push key failed (%d)", status) }
+    if status != errSecSuccess { NSLog("Beans: sharing the push key failed (%d)", status) }
   }
 
   public func definition() -> ModuleDefinition {

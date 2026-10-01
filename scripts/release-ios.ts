@@ -6,7 +6,7 @@
 //   BUILD_NUMBER=42 bun run release-ios    upload under a chosen build number
 //
 // Signing and the upload go through the Apple account signed in to Xcode (team GJE9R5VE87), with
-// automatic provisioning. App Store Connect holds the app record "Lorca" for `app.lorca`. The
+// automatic provisioning. App Store Connect holds the app record "Beans" for `ai.amoena.beans`. The
 // marketing version is `version` in mobile/app.config.ts. A build appears under TestFlight after
 // Apple finishes processing it, usually within half an hour.
 import { $ } from "bun"
@@ -33,7 +33,7 @@ const TEAM_ID = "GJE9R5VE87"
 const BUNDLE_ID = "ai.amoena.beans"
 const MOBILE = join(ROOT, "mobile")
 const BUILD_DIR = join(ROOT, "dist", "ios")
-// The production project is generated in a copy, so mobile/ios stays the dev loop's Lorca Dev project.
+// The production project is generated in a copy, so mobile/ios stays the dev loop's Beans Dev project.
 // The copy stays between releases at the same path: Xcode's compilation cache keys hold absolute
 // paths, and the pods installed in it are used again.
 const PROJECT = join(BUILD_DIR, "mobile")
@@ -53,7 +53,7 @@ const buildNumber =
 if (!/^\d+$/.test(buildNumber)) die(`BUILD_NUMBER must be digits, got "${buildNumber}"`)
 
 // CocoaPods dies on a non-UTF-8 locale, and the CommandLineTools SDK breaks the pod install and
-// the build with "unknown architecture" from tapi. The variant variables would make a Lorca Dev build.
+// the build with "unknown architecture" from tapi. The variant variables would make a Beans Dev build.
 const env: Record<string, string> = {
   ...(process.env as Record<string, string>),
   LANG: "en_US.UTF-8",

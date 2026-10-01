@@ -69,7 +69,7 @@ async function stopApp() {
       return
     }
     if (attempt === 10) {
-      log(color.yellow(`Lorca still running (${pids.join(", ")}) — sending SIGKILL`))
+      log(color.yellow(`Beans still running (${pids.join(", ")}) — sending SIGKILL`))
       for (const pid of pids) killPid(pid, "SIGKILL")
     }
     await Bun.sleep(50)
@@ -77,7 +77,7 @@ async function stopApp() {
 
   pids = await lorcaPids()
   if (pids.length > 0) {
-    log(color.red(`could not stop Lorca pids ${pids.join(", ")}`))
+    log(color.red(`could not stop Beans pids ${pids.join(", ")}`))
   }
 }
 

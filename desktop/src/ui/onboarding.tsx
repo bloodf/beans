@@ -372,7 +372,7 @@ function JoinStep(props: {
           ref={(element) => (field = element)}
           class="text-field mono onboarding-wide"
           placeholder={props.placeholder}
-          spellcheck={false}
+          spellcheck="false"
           autocomplete="off"
           value={text()}
           onInput={(event) => setText(event.currentTarget.value)}
@@ -435,7 +435,7 @@ function ProviderRows(props: {
             type="password"
             placeholder={keyPlaceholder(kind())}
             aria-label={L("API key")}
-            spellcheck={false}
+            spellcheck="false"
             autocomplete="off"
             value={props.apiKey()}
             onInput={(event) => props.setAPIKey(event.currentTarget.value)}
@@ -477,7 +477,7 @@ function FirstBot(props: {
             <Avatar content={props.bot ? botAvatar(props.bot) : { kind: "bot", symbolName: "sparkles", accent: "indigo" }} size={40} />
           </FormRow>
           <FormRow label={L("Name")}>
-            <input class="text-field" placeholder={L("Name")} value={name()} spellcheck={false} onInput={(event) => setName(event.currentTarget.value)} />
+            <input class="text-field" placeholder={L("Name")} value={name()} spellcheck="false" onInput={(event) => setName(event.currentTarget.value)} />
           </FormRow>
           <FormRow label={L("Description")} top>
             <textarea

@@ -6,6 +6,14 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- Pairing a computer or restoring your identity no longer asks you to connect a provider your
+  account already has. Onboarding waits until the account's providers arrive from the relay, which a
+  slow connection or a long list of chats used to outlast.
+- Onboarding's last step says the computer is paired, or that your identity is restored, instead of
+  calling it your first Device. A paired computer is no longer pointed to Pair a Device, which only
+  the computer that created or restored your identity can do.
+- While onboarding pairs or restores, the Pair or Restore button and the field are disabled beside a
+  spinner, and Back stops a pairing that is still waiting on the other computer.
 - The marketplace adds plugins for 飞书, 飞书项目, 滴答清单, 腾讯文档, 秘塔 AI 搜索, 知乎, 高德地图, and
   可灵. 飞书, 飞书项目, 滴答清单, 腾讯文档, and 可灵 sign in with your account in the browser; 秘塔 AI
   搜索 and 知乎 take an API key from their sites, and 高德地图 a Web Service key from the Amap console.

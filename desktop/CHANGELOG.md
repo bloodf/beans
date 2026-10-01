@@ -6,6 +6,9 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- The marketplace adds plugins for 飞书, 飞书项目, 滴答清单, 腾讯文档, 秘塔 AI 搜索, 知乎, 高德地图, and
+  可灵. 飞书, 飞书项目, 滴答清单, 腾讯文档, and 可灵 sign in with your account in the browser; 秘塔 AI
+  搜索 and 知乎 take an API key from their sites, and 高德地图 a Web Service key from the Amap console.
 - On Windows 10 the main window and onboarding no longer show Windows' own title bar, with a second
   set of window buttons, above the app's.
 

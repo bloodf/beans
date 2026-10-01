@@ -12,6 +12,7 @@
     "build": "bun run scripts/build.ts",
     "release-mac": "bun run scripts/release-mac.ts",
     "release-ios": "bun run scripts/release-ios.ts",
+    "android:release": "bun run scripts/android-release.ts",
     "desktop": "bun run scripts/desktop.ts",
     "desktop:build": "bun run scripts/desktop.ts build",
     "release-desktop": "bun run scripts/desktop.ts release",

@@ -8,6 +8,7 @@ Beans is the macOS and phone branding of Lorca. The Swift target, Rust crates, `
 | --- | --- |
 | `scripts/app.ts` | Names the macOS bundles Beans / Beans Dev, assigns `ai.amoena.beans` / `.dev`, copies the unchanged Swift `Lorca` executable under the Beans bundle name, and omits the upstream Sparkle feed and key while disabling automatic checks. |
 | `package.json` | Uses the Beans Dev APNs topic for the standalone local relay script. |
+| `scripts/android-release.ts` | Rebuilds the Android core and generates a production release APK with external signing credentials. |
 | `scripts/dev.ts` | Uses the Beans Dev APNs topic for the local relay. |
 | `scripts/mobile.ts` | Opens the Beans Dev phone app and its Expo development URL. |
 | `scripts/release-ios.ts` | Uses the Beans iOS bundle ID and generated Xcode project, scheme, and archive paths. |
@@ -28,6 +29,8 @@ Beans is the macOS and phone branding of Lorca. The Swift target, Rust crates, `
 | `macos/Resources/zh-Hans.lproj/InfoPlist.strings` | Names Beans in Chinese system permissions. |
 | `macos/Resources/zh-Hans.lproj/Localizable.strings` | Translates Beans-facing UI strings. |
 | `mobile/app.config.ts` | Names both phone builds, separates IDs/groups/schemes, and reads Android Firebase configuration only from `BEANS_GOOGLE_SERVICES_FILE` when set. |
+| `mobile/plugins/with-android-release-signing.js` | Applies the external release keystore during Android prebuild without changing debug signing. |
+| `mobile/plugins/with-android-locale-defaults.js` | Gives Android permission translations a default English resource for release lint. |
 | `mobile/locales/en.json` | Names Beans in English system permissions. |
 | `mobile/locales/zh-Hans.json` | Names Beans in Chinese system permissions. |
 | `mobile/app/pair.tsx` | Recognizes Beans Dev and names Beans in pairing copy. |
@@ -54,6 +57,16 @@ The Rust core emits `lorca://pair` codes. Beans registers `lorca` as a secondary
 ## Relay selection
 
 `macos/Sources/Lorca/App/AppInfo.swift` sets the release fallback to `https://cortex.tailfd052e.ts.net:8790` (the Beans relay, reachable on the tailnet); `macos/Sources/Lorca/App/CLILauncher.swift` passes it as `LORCA_DEFAULT_RELAY_URL` when launching the CLI. The phone inherits the relay URL in its pairing code. `crates/cli/src/config.rs` and `crates/cli/src/app.rs` resolve `LORCA_RELAY_URL` first, then saved settings, the paired Device URL, the development LAN relay, and finally `LORCA_DEFAULT_RELAY_URL`. Rust defaults remain unchanged; configure your relay explicitly before using the fork.
+
+## Production notes
+
+When APNs is used, run the relay with `LORCA_RELAY_APNS_TOPIC=ai.amoena.beans`. `scripts/release-mac.ts` and the publishing constants in `scripts/app.ts` (`RELEASES_URL`, `FEED_URL`, `SPARKLE_PUBLIC_KEY`) still name upstream release hosting and are not used by Beans builds. `mobile/google-services.json` is upstream's and is not used unless `BEANS_GOOGLE_SERVICES_FILE` points to a Beans file.
+
+## Android release build
+
+Run `bun run android:release` from the repository root. It rebuilds the Rust phone core, runs a clean production Android prebuild, and assembles `mobile/android/app/build/outputs/apk/release/app-release.apk`. Expo SDK 57 uses JDK 17; set `JAVA_HOME` for the command if your shell uses another JDK.
+
+The signing keystore lives outside the repository at `~/.config/beans/android/beans-release.keystore`. The script reads `~/.config/beans/android/keystore.env`, or the path in `BEANS_ANDROID_ENV`; both that file and the keystore must have mode 0600. The env file must supply the complete set of `BEANS_ANDROID_KEYSTORE`, `BEANS_ANDROID_KEYSTORE_PASSWORD`, `BEANS_ANDROID_KEY_ALIAS`, and `BEANS_ANDROID_KEY_PASSWORD`; inherited shell values cannot fill missing entries. Back up the keystore and passwords to keep future APK updates installable. Signing configuration is added only when these variables are set, by `mobile/plugins/with-android-release-signing.js` during prebuild. Without `BEANS_GOOGLE_SERVICES_FILE` pointing to a Beans Firebase client file, the Android build omits Firebase push configuration and push is unavailable.
 
 ## Merge upstream
 

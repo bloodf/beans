@@ -96,6 +96,8 @@ export default (): ExpoConfig => {
       "expo-notifications",
       "@bacons/apple-targets",
       "./plugins/with-scene-lifecycle",
+      "./plugins/with-android-release-signing",
+      "./plugins/with-android-locale-defaults",
       "expo-web-browser",
     ],
     experiments: {

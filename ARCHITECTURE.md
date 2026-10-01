@@ -106,6 +106,7 @@ lorca/
   crates/provider-auth/ # OAuth token types and PKCE flows shared by every Device
   crates/cli/          # lorca: the Device core as a library (keys, relay sync, jobs, the JSON API) + runner and server features + the binary
   crates/mobile/       # lorca-mobile: the core for the phone over UniFFI
+  crates/markdown/     # lorca-markdown: message Markdown as the blocks and spans every app renders (pulldown-cmark, and GitHub's autolinks for bare URLs and addresses), for the Mac and phone over UniFFI
   crates/relay/        # lorca-relay: axum + SQLite or Postgres, and its Dockerfile
   macos/               # AppKit SPM app; the build bundles the CLI
   desktop/             # the Windows and Linux app: MyGo (Go + system webview) with a Solid page; the build bundles the CLI

@@ -120,7 +120,7 @@ It posts to `{base_url}/chat/completions` with bearer auth, `stream: true`, and 
 | User text | `content` as a string. |
 | User text and images | `content` parts; images as `data:` URLs. |
 | Assistant text and tool calls | `content` and `tool_calls`. Thinking and server blocks are not sent back. |
-| Tool result | A `tool` message with the result's text (`(see attached image)` or `(no tool output)` when there is none), then a `user` message with the images, if any. |
+| Tool result | A `tool` message with the result's text (`(see attached image)` or `(no tool output)` when there is none). The images of a run of results follow the run's `tool` messages in one `user` message, each result's after a line naming its tool, since nothing may come between the tool calls and the `tool` messages that answer them. |
 | Tools | `function` tools. |
 
 The transcript goes through the [shared transform](#before-conversion) first. `supports_images` (true by default), `max_retries` (2), and `max_retry_delay_ms` are public fields. From the stream it reads `content` deltas as text, `reasoning_content` or `reasoning` deltas as thinking, `tool_calls` deltas as tool calls, `finish_reason` as the stop reason (`length`, `tool_calls`, anything else as stop), and `usage`: `prompt_cache_hit_tokens` or `prompt_tokens_details.cached_tokens` as `cache_read`, `completion_tokens_details.reasoning_tokens` as `reasoning`. HTTP errors become an error message with the status and the server's `error.message`, after the same retries as the Anthropic adapter.

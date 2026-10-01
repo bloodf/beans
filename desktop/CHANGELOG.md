@@ -6,6 +6,9 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- On Windows 10 the main window and onboarding no longer show Windows' own title bar, with a second
+  set of window buttons, above the app's.
+
 ## [0.1.1]
 
 - A routine can watch for something without spending a turn each time: the bot gives it a check, a

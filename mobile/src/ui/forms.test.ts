@@ -15,7 +15,18 @@ mock.module("react-native", () => ({
   useWindowDimensions: () => ({ width: 402, height: 874 }),
 }));
 mock.module("@expo/ui/swift-ui", () => ({ Button: "Button", Divider: "Divider", HStack: "HStack", Host: "Host", Image: "Image", Menu: "Menu", Text: "Text" }));
-mock.module("@expo/ui/swift-ui/modifiers", () => ({ foregroundStyle: () => ({}), frame: () => ({}), lineLimit: () => ({}), tint: () => ({}), truncationMode: () => ({}) }));
+mock.module("@expo/ui/swift-ui/modifiers", () => ({
+  contentShape: () => ({}),
+  font: () => ({}),
+  foregroundStyle: () => ({}),
+  frame: () => ({}),
+  lineLimit: () => ({}),
+  menuOrder: () => ({}),
+  padding: () => ({}),
+  shapes: {},
+  tint: () => ({}),
+  truncationMode: () => ({}),
+}));
 mock.module("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
 mock.module("./Symbol", () => ({ Symbol: "Symbol" }));
 mock.module("./theme", () => ({ Font: { body: 17, small: 15 }, usePalette: () => ({ cell: "cell", separator: "separator", secondaryLabel: "secondaryLabel" }) }));

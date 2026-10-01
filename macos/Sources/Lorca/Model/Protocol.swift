@@ -120,11 +120,39 @@ enum Wire {
         var isConnected: Bool
         var detail: String
         var baseUrl: String?
+        var name: String?
+        var api: String?
+        var models: [StatusModel]?
 
         func toModel() -> ProviderCredential? {
             guard let kind = ProviderCredential.Kind(wireValue: kind) else { return nil }
-            return ProviderCredential(kind: kind, isConnected: isConnected, detail: detail, baseURL: baseUrl)
+            return ProviderCredential(
+                kind: kind, isConnected: isConnected, detail: detail, baseURL: baseUrl, name: name,
+                api: api.flatMap(CustomAPI.init(rawValue:)), models: (models ?? []).map { $0.toModel() })
         }
+    }
+
+    /// A custom provider's model in its status, or in a server's model list.
+    struct StatusModel: Decodable {
+        var id: String
+        var name: String?
+        var contextWindow: Int?
+        var images: Bool?
+        var levels: [String]?
+
+        func toModel() -> CustomModel {
+            CustomModel(id: id, name: name, contextWindow: contextWindow, images: images, levels: levels ?? [])
+        }
+    }
+
+    struct CustomProviderSaved: Decodable {
+        var kind: String
+    }
+
+    /// `providers.list_models`: the chat models a custom provider's server lists.
+    struct ListedModels: Decodable {
+        var listed: Bool
+        var models: [StatusModel]
     }
 
     struct Device: Decodable {
@@ -138,6 +166,8 @@ enum Wire {
         var status: String
         var lastSeen: Double
         var plugins: [PluginStatus]?
+        /// The relay lists the machine, but it never sent its `machine` blob: no name, no `os`.
+        var unknown: Bool?
     }
 
     struct PluginStatus: Decodable {
@@ -567,9 +597,9 @@ extension Wire.Device {
     func toModel() -> Device {
         Device(
             id: id,
-            name: name,
+            name: unknown == true ? L("Unknown Device") : name,
             model: model,
-            os: Device.OS(rawValue: os) ?? .linux,
+            os: unknown == true ? Device.OS.unknown : Device.OS(rawValue: os) ?? .linux,
             osVersion: osVersion,
             isThisDevice: isThisDevice,
             status: status == "online" ? .online : (status == "pairing" ? .pairing : .offline),

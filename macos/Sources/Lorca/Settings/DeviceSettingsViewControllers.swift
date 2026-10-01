@@ -34,6 +34,7 @@ class DevicePaneViewController: SettingsPaneViewController {
     func placeholderRows(for device: Device?) -> [NSView]? {
         guard let device else { return [KeyValueRow(key: L("Waiting for the CLI"), value: "")] }
         guard !device.isRunner else { return nil }
+        if device.os == .unknown { return [NoteRow(text: Device.unknownNote)] }
         return [
             NoteRow(
                 text: L("%@ Devices hold your keys and chats but never run a bot. Pick a Runner: a Device running macOS, Linux, or Windows.", device.os.displayName))
@@ -65,7 +66,7 @@ final class BotsSettingsViewController: DevicePaneViewController {
             let row = BotRow()
             row.configure(
                 bot: bot,
-                detailText: bot.provider.rawValue,
+                detailText: bot.provider.name,
                 accessorySymbol: "bubble.left",
                 tooltip: L("Open chat")
             )
@@ -114,28 +115,71 @@ final class ProvidersSettingsViewController: SettingsPaneViewController {
             section.setRows([KeyValueRow(key: L("Waiting for the CLI"), value: "")])
             return
         }
-        section.setRows(
-            store.providers.map { credential in
-                let row = StatusRow()
-                row.configure(
-                    symbol: credential.kind.symbolName,
-                    title: credential.kind.rawValue,
-                    subtitle: "\(credential.kind.subtitle) · \(credential.detail)",
-                    state: credential.isConnected ? L("Connected") : nil,
-                    stateColor: .systemGreen,
-                    actionTitle: credential.isConnected ? (credential.kind.usesAPIKey ? L("Edit…") : L("Disconnect")) : L("Connect…"),
-                    destructive: credential.isConnected && !credential.kind.usesAPIKey
-                )
-                row.onAction = { [weak self] in
-                    guard let self else { return }
-                    if credential.isConnected && !credential.kind.usesAPIKey {
-                        Task { try? await self.store.disconnectProvider(credential.kind) }
-                    } else {
-                        ConnectProviderViewController.present(kind: credential.kind, from: self, baseURL: credential.baseURL)
-                    }
+        var rows: [NSView] = store.providers.map { credential in
+            let row = StatusRow()
+            // A subscription disconnects right here; an API key or a custom provider opens its sheet.
+            let disconnects = credential.isConnected && !credential.kind.usesAPIKey && !credential.kind.isCustom
+            row.configure(
+                symbol: credential.kind.symbolName,
+                title: credential.kind.name,
+                subtitle: "\(credential.kind.subtitle) · \(credential.detail)",
+                state: credential.isConnected ? L("Connected") : nil,
+                stateColor: .systemGreen,
+                actionTitle: credential.isConnected ? (disconnects ? L("Disconnect") : L("Edit…")) : L("Connect…"),
+                destructive: disconnects
+            )
+            row.onAction = { [weak self] in
+                guard let self else { return }
+                if credential.kind.isCustom {
+                    CustomProviderViewController.present(kind: credential.kind, from: self)
+                } else if disconnects {
+                    Task { try? await self.store.disconnectProvider(credential.kind) }
+                } else {
+                    ConnectProviderViewController.present(kind: credential.kind, from: self, baseURL: credential.baseURL)
                 }
-                return row
-            })
+            }
+            return row
+        }
+        let add = ActionRow(key: L("Custom"), value: "", tint: .secondaryLabelColor, actionTitle: L("Add Provider…"))
+        add.onAction = { [weak self, weak add] in
+            guard let self, let button = add?.actionView else { return }
+            self.addMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        }
+        rows.append(add)
+        section.setRows(rows)
+    }
+
+    /// The servers people often add, then any other. One the account has already opens it.
+    private func addMenu() -> NSMenu {
+        let menu = NSMenu()
+        for (index, presets) in [CustomProviderPreset.cloud, CustomProviderPreset.local].enumerated() {
+            if index > 0 { menu.addItem(.separator()) }
+            for preset in presets {
+                let item = NSMenuItem(title: preset.name, action: #selector(addPreset(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = preset
+                item.state = existing(named: preset.name) == nil ? .off : .on
+                menu.addItem(item)
+            }
+        }
+        menu.addItem(.separator())
+        let other = NSMenuItem(title: L("Other Server…"), action: #selector(addOther), keyEquivalent: "")
+        other.target = self
+        menu.addItem(other)
+        return menu
+    }
+
+    private func existing(named name: String) -> ProviderCredential? {
+        store.providers.first { $0.kind.isCustom && $0.name?.caseInsensitiveCompare(name) == .orderedSame }
+    }
+
+    @objc private func addPreset(_ sender: NSMenuItem) {
+        guard let preset = sender.representedObject as? CustomProviderPreset else { return }
+        CustomProviderViewController.present(kind: existing(named: preset.name)?.kind, preset: preset, from: self)
+    }
+
+    @objc private func addOther() {
+        CustomProviderViewController.present(kind: nil, from: self)
     }
 }
 
@@ -200,15 +244,25 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
         guard let device else { return }
         header.configure(device: device)
 
-        var rows: [NSView] = [
-            KeyValueRow(key: SettingsEntry.machineKey.row, value: device.machineKey, monospaced: true),
-            KeyValueRow(key: L("OS"), value: "\(device.os.displayName) · \(device.osVersion)"),
+        // A machine that never said what it is has no system to show, only why it is listed.
+        let unknown = device.os == .unknown
+        var rows: [NSView] = []
+        if unknown {
+            rows.append(NoteRow(text: Device.unknownNote))
+        }
+        rows.append(KeyValueRow(key: SettingsEntry.machineKey.row, value: device.machineKey, monospaced: true))
+        if !unknown {
+            rows.append(KeyValueRow(key: L("OS"), value: "\(device.os.displayName) · \(device.osVersion)"))
+        }
+        rows.append(
             KeyValueRow(
                 key: L("Role"),
-                value: device.isRunner ? L("Runner · runs bots with its own credentials") : L("Device · never runs bots")),
+                value: device.isRunner ? L("Runner · runs bots with its own credentials") : L("Device · never runs bots")))
+        rows.append(
             KeyValueRow(
                 key: L("Last seen"),
-                value: device.status == .online ? L("Active now") : Format.lastSeen(device.lastSeen)),
+                value: device.status == .online ? L("Active now") : Format.lastSeen(device.lastSeen)))
+        rows.append(
             KeyValueRow(
                 key: L("Relay"),
                 value: store.relayURL.map { url in
@@ -217,8 +271,7 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
                     // Why the last try to connect failed, in the CLI's words.
                     return store.relayError.map { "\(url) · \($0)" } ?? L("%@ · offline", url)
                 } ?? L("Not configured"),
-                monospaced: true),
-        ]
+                monospaced: true))
         let unpair = ActionRow(
             key: SettingsEntry.pairing.row, value: L("Paired to this account"), tint: .secondaryLabelColor,
             actionTitle: L("Unpair…"))
@@ -268,6 +321,7 @@ final class DeviceHeaderView: NSView {
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 34, weight: .regular)
         name.stringValue = device.name
         model.stringValue = "\(device.model) · \(device.osVersion)"
+        model.isHidden = device.os == .unknown
         dot.status = device.status
 
         switch device.status {

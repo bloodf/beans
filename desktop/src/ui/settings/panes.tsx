@@ -10,6 +10,7 @@ import * as Format from "../../model/format";
 import {
   behaviorTitle,
   deviceSymbol,
+  isCustomKind,
   isRunner,
   osDisplayName,
   paneSymbol,
@@ -17,6 +18,7 @@ import {
   providerName,
   providerSubtitle,
   providerSymbol,
+  unknownDeviceNote,
   usesAPIKey,
   type AutoReviewRule,
   type Device,
@@ -31,6 +33,7 @@ import { alert, presentSheet, Sheet } from "../overlay";
 import { open, revealed, settingsDeviceID } from "../root";
 import { AccessoryRow, ActionRow, BotRow, EditableRow, KeyValueRow, NoteRow, PluginRow, Section, StatusRow } from "../sections";
 import { presentConnectProvider } from "../sheets/connectProvider";
+import { presentAddProviderMenu, presentCustomProvider } from "../sheets/customProvider";
 import { presentPlugin } from "../sheets/plugin";
 import { Entries } from "./search";
 
@@ -276,7 +279,8 @@ export function AdvancedPane() {
 
 // MARK: - Providers
 
-/** The account's provider credentials: connected on any Device, used by every Runner. */
+/** The account's provider credentials: connected on any Device, used by every Runner. The built-in
+ * providers come first, then the custom ones in the order they were added, and a row to add one. */
 function ProvidersPane() {
   const providers = () => {
     track.roster();
@@ -288,24 +292,33 @@ function ProvidersPane() {
         <Show when={providers().length > 0} fallback={<KeyValueRow label={L("Waiting for the CLI")} value="" />}>
           <For each={providers()} keyed={(credential) => credential.kind}>
             {(credential) => {
-              const signIn = () => credential().isConnected && !usesAPIKey(credential().kind);
+              // A subscription disconnects right here; an API key or a custom provider opens its sheet.
+              const disconnects = () => credential().isConnected && !usesAPIKey(credential().kind) && !isCustomKind(credential().kind);
               return (
                 <StatusRow
                   symbol={providerSymbol(credential().kind)}
-                  title={providerName(credential().kind)}
+                  title={providerName(credential().kind, providers())}
                   subtitle={`${providerSubtitle(credential().kind)} · ${credential().detail}`}
                   state={credential().isConnected ? L("Connected") : undefined}
                   stateColor="var(--green)"
-                  actionTitle={credential().isConnected ? (usesAPIKey(credential().kind) ? L("Edit…") : L("Disconnect")) : L("Connect…")}
-                  destructive={signIn()}
+                  actionTitle={credential().isConnected ? (disconnects() ? L("Disconnect") : L("Edit…")) : L("Connect…")}
+                  destructive={disconnects()}
                   onAction={() => {
-                    if (signIn()) void store.disconnectProvider(credential().kind).catch(() => {});
-                    else void presentConnectProvider(credential().kind, { baseURL: credential().baseURL });
+                    const kind = credential().kind;
+                    if (isCustomKind(kind)) void presentCustomProvider(kind);
+                    else if (disconnects()) void store.disconnectProvider(kind).catch(() => {});
+                    else void presentConnectProvider(kind, { baseURL: credential().baseURL });
                   }}
                 />
               );
             }}
           </For>
+          <ActionRow
+            label={L("Custom")}
+            tint="var(--label-2)"
+            actionTitle={L("Add Provider…")}
+            onAction={(event) => void presentAddProviderMenu(event.currentTarget as HTMLElement)}
+          />
         </Show>
       </Section>
       <Footnote
@@ -451,7 +464,15 @@ function Placeholder(props: { device: Device | undefined; children: JSX.Element 
       {(device) => (
         <Show
           when={isRunner(device())}
-          fallback={<NoteRow text={L("%@ Devices hold your keys and chats but never run a bot. Pick a Runner: a Device running macOS, Linux, or Windows.", osDisplayName(device().os))} />}
+          fallback={
+            <NoteRow
+              text={
+                device().os === "unknown"
+                  ? unknownDeviceNote()
+                  : L("%@ Devices hold your keys and chats but never run a bot. Pick a Runner: a Device running macOS, Linux, or Windows.", osDisplayName(device().os))
+              }
+            />
+          }
         >
           {props.children}
         </Show>
@@ -504,7 +525,7 @@ function BotsPane() {
             {(bot) => (
               <BotRow
                 bot={bot()}
-                detail={providerName(bot().provider)}
+                detail={providerName(bot().provider, store.providers)}
                 accessorySymbol="bubble.left"
                 accessoryTooltip={L("Open chat")}
                 onAccessory={() => openChat(bot().id)}
@@ -526,12 +547,11 @@ function BotsPane() {
 /** The confirmation behind Unpair in the Devices pane. Another Device is unpaired by id; this one
  * forgets the identity, and the app goes back to onboarding. */
 export async function confirmUnpair(device: Device): Promise<void> {
-  // Only a Device that holds the identity pairs others, and only the backup phrase brings the
-  // identity back once this one forgets it.
+  // Only the backup phrase brings the identity back once the Device that holds it forgets it.
   const holdsIdentity = device.isThisDevice && store.isIdentityDevice;
   const informative = device.isThisDevice
     ? holdsIdentity
-      ? L("This computer forgets its keys, credentials, and synced chats, and bots assigned to it stop running until you assign them to another Runner. Your other paired Devices keep everything. Because this computer holds your identity, you need your backup phrase to use this account here again or to pair a new Device.")
+      ? L("This computer forgets its keys, credentials, and synced chats, and bots assigned to it stop running until you assign them to another Runner. Your other paired Devices keep everything, and you can pair again any time. Because this computer holds your identity, your backup phrase becomes the only way to restore it.")
       : L("This computer forgets its keys, credentials, and synced chats, and bots assigned to it stop running until you assign them to another Runner. Your other paired Devices keep everything, and you can pair again any time.")
     : isRunner(device)
       ? L("It loses its keys and synced chats the next time it connects, and bots assigned to it stop running until you assign them to another Runner. You can pair it again any time.")
@@ -597,7 +617,9 @@ function DevicePane() {
               </span>
               <div class="device-header-text">
                 <span class="device-header-name">{current().name}</span>
-                <span class="device-header-model">{`${current().model} · ${current().osVersion}`}</span>
+                <Show when={current().os !== "unknown"}>
+                  <span class="device-header-model">{`${current().model} · ${current().osVersion}`}</span>
+                </Show>
                 <span class="device-header-status" style={{ color: status(current()).color }}>
                   <StatusDot status={current().status} />
                   {status(current()).text}
@@ -605,8 +627,13 @@ function DevicePane() {
               </div>
             </div>
             <Section title={L("Machine")} style="heading">
+              <Show when={current().os === "unknown"}>
+                <NoteRow text={unknownDeviceNote()} />
+              </Show>
               <KeyValueRow label={Entries.machineKey().row} value={current().machineKey} monospaced />
-              <KeyValueRow label={L("OS")} value={`${osDisplayName(current().os)} · ${current().osVersion}`} />
+              <Show when={current().os !== "unknown"}>
+                <KeyValueRow label={L("OS")} value={`${osDisplayName(current().os)} · ${current().osVersion}`} />
+              </Show>
               <KeyValueRow label={L("Role")} value={isRunner(current()) ? L("Runner · runs bots with its own credentials") : L("Device · never runs bots")} />
               <KeyValueRow label={L("Last seen")} value={current().status === "online" ? L("Active now") : Format.lastSeen(current().lastSeen)} />
               <KeyValueRow label={L("Relay")} value={relay()} monospaced />

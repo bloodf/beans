@@ -4,7 +4,7 @@
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { engine } from "../../../src/core/engine";
-import { isRunner, providerLabel, type Device, type PluginStatus } from "../../../src/core/model";
+import { deviceName, isRunner, providerLabel, type Device, type PluginStatus } from "../../../src/core/model";
 import { deviceIsOnline, useStore } from "../../../src/core/store";
 import { t, useLanguage } from "../../../src/i18n";
 import { BotAvatar } from "../../../src/ui/Avatar";
@@ -39,6 +39,7 @@ export default function DeviceScreen() {
   const device = useStore((s) => s.devices.find((d) => d.id === id));
   const seen = useStore((s) => s.device_seen[id]);
   const allBots = useStore((s) => s.bots);
+  const providers = useStore((s) => s.providers);
   const chats = useStore((s) => s.chats);
   const relayConnected = useStore((s) => s.relayConnected);
   const relayUpdateRequired = useStore((s) => s.relayUpdateRequired);
@@ -64,7 +65,7 @@ export default function DeviceScreen() {
     const detail = isRunner(target)
       ? t("It loses its keys and synced chats the next time it connects, and bots assigned to it stop running until you assign them to another Runner. You can pair it again any time.")
       : t("It loses its keys and synced chats the next time it connects. You can pair it again any time.");
-    Alert.alert(t("Unpair {name}?", { name: target.name }), detail, [
+    Alert.alert(t("Unpair {name}?", { name: deviceName(target) }), detail, [
       { text: t("Cancel"), style: "cancel" },
       {
         text: t("Unpair"),
@@ -73,7 +74,7 @@ export default function DeviceScreen() {
           engine
             .unpairDevice(target.id)
             .then(() => router.back())
-            .catch((error: unknown) => Alert.alert(t("Couldn’t unpair {name}", { name: target.name }), error instanceof Error ? error.message : String(error)));
+            .catch((error: unknown) => Alert.alert(t("Couldn’t unpair {name}", { name: deviceName(target) }), error instanceof Error ? error.message : String(error)));
         },
       },
     ]);
@@ -85,7 +86,7 @@ export default function DeviceScreen() {
       <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingBottom: 40 }}>
         <View style={styles.header}>
           <Symbol name={deviceSymbol(device.os, device.model)} size={48} color={p.label} />
-          <Text style={[styles.name, { color: p.label }]}>{device.name}</Text>
+          <Text style={[styles.name, { color: p.label }]}>{deviceName(device)}</Text>
           <Text style={[styles.model, { color: p.secondaryLabel }]}>{[device.model, device.os_version].filter(Boolean).join(" · ")}</Text>
           <View style={styles.status}>
             <View style={[styles.dot, { backgroundColor: online ? p.green : p.tertiaryLabel }]} />
@@ -95,7 +96,7 @@ export default function DeviceScreen() {
 
         {runner && (
           <Section title={t("Bots assigned here")}>
-            {bots.length === 0 ? <Row title={t("No bots assigned")} /> : bots.map((bot) => <Row key={bot.id} title={bot.name} subtitle={providerLabel(bot.provider)} leading={<BotAvatar bot={bot} size={32} />} chevron onPress={() => openChat(bot.id)} />)}
+            {bots.length === 0 ? <Row title={t("No bots assigned")} /> : bots.map((bot) => <Row key={bot.id} title={bot.name} subtitle={providerLabel(bot.provider, providers)} leading={<BotAvatar bot={bot} size={32} />} chevron onPress={() => openChat(bot.id)} />)}
           </Section>
         )}
 
@@ -109,9 +110,18 @@ export default function DeviceScreen() {
           </Section>
         )}
 
-        <Section title={t("Machine")} footer={runner ? undefined : t("{os} Devices hold your keys and chats but never run a bot. Assign bots to a Runner: a Device running macOS, Linux, or Windows.", { os: osName })}>
+        <Section
+          title={t("Machine")}
+          footer={
+            device.unknown
+              ? t("This machine is paired to your account but has not sent its name or system. If you don't recognize it, unpair it.")
+              : runner
+                ? undefined
+                : t("{os} Devices hold your keys and chats but never run a bot. Assign bots to a Runner: a Device running macOS, Linux, or Windows.", { os: osName })
+          }
+        >
           <Row title={t("Machine key")} detail={device.machine_key} />
-          <Row title={t("OS")} detail={device.os_version || osName} />
+          {!device.unknown && <Row title={t("OS")} detail={device.os_version || osName} />}
           <Row title={t("Role")} detail={runner ? t("Runner") : t("Device")} />
           <Row title={t("Last seen")} detail={online ? t("Active now") : lastSeen(seen)} />
           <Row title={t("Relay")} detail={relay ? (relayUpdateRequired ? t("{relay} · update Lorca to sync", { relay }) : relayConnected ? relay : t("{relay} · offline", { relay })) : t("Not configured")} />

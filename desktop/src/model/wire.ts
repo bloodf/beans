@@ -5,6 +5,8 @@ import { L } from "../l10n";
 import * as Format from "./format";
 import {
   isAccent,
+  isCustomAPI,
+  isCustomKind,
   isProviderKind,
   type Attachment,
   type AutoReview,
@@ -14,6 +16,7 @@ import {
   type Chat,
   type ChatUsage,
   type CommandState,
+  type CustomModel,
   type Device,
   type DeviceOS,
   type InstalledPlugin,
@@ -67,6 +70,8 @@ export interface WireDevice {
   status: string;
   last_seen: number;
   plugins?: WirePluginStatus[];
+  /** The relay lists the machine, but it never sent its `machine` blob: no name, no `os`. */
+  unknown?: boolean;
 }
 
 export interface WireAttachment {
@@ -193,6 +198,28 @@ export interface WireProvider {
   is_connected: boolean;
   detail: string;
   base_url?: string | null;
+  /** A custom provider's name, wire protocol, and models. Built-in providers have none. */
+  name?: string | null;
+  api?: string | null;
+  models?: WireCustomModel[] | null;
+}
+
+/** A custom provider's model, with what its server's model list said of it, and in a status the
+ * thinking levels it takes. */
+export interface WireCustomModel {
+  id: string;
+  name?: string | null;
+  context_window?: number | null;
+  max_output?: number | null;
+  images?: boolean | null;
+  levels?: string[] | null;
+}
+
+/** `providers.list_models`: the chat models a server lists, in its order. `listed` is false when
+ * the server publishes no list. */
+export interface WireModelList {
+  listed: boolean;
+  models: WireCustomModel[];
 }
 
 export interface WireRunningTurn {
@@ -362,9 +389,9 @@ export function toDevice(wire: WireDevice): Device {
   const oses: DeviceOS[] = ["macos", "linux", "windows", "ios", "ipados", "android"];
   return {
     id: wire.id,
-    name: wire.name,
+    name: wire.unknown ? L("Unknown Device") : wire.name,
     model: wire.model,
-    os: (oses as string[]).includes(wire.os) ? (wire.os as DeviceOS) : "linux",
+    os: wire.unknown ? "unknown" : (oses as string[]).includes(wire.os) ? (wire.os as DeviceOS) : "linux",
     osVersion: wire.os_version,
     isThisDevice: wire.is_this_device,
     status: wire.status === "online" ? "online" : wire.status === "pairing" ? "pairing" : "offline",
@@ -545,12 +572,35 @@ export function toAutoReview(wire: WireAutoReview | null | undefined): AutoRevie
   };
 }
 
+/** The built-in providers, then the custom ones in the order they were added. A kind this build
+ * does not know is left out. */
 export function toProviders(wire: WireProvider[] | null | undefined): ProviderCredential[] {
-  return (wire ?? []).flatMap((provider) =>
-    isProviderKind(provider.kind)
-      ? [{ kind: provider.kind, isConnected: provider.is_connected, detail: provider.detail, baseURL: optional(provider.base_url) }]
-      : [],
-  );
+  return (wire ?? []).flatMap((provider): ProviderCredential[] => {
+    if (!isProviderKind(provider.kind)) return [];
+    const credential: ProviderCredential = {
+      kind: provider.kind,
+      isConnected: provider.is_connected,
+      detail: provider.detail,
+      baseURL: optional(provider.base_url),
+    };
+    if (isCustomKind(provider.kind)) {
+      credential.name = optional(provider.name);
+      credential.api = provider.api && isCustomAPI(provider.api) ? provider.api : undefined;
+      credential.models = (provider.models ?? []).map(toCustomModel);
+    }
+    return [credential];
+  });
+}
+
+export function toCustomModel(wire: WireCustomModel): CustomModel {
+  return {
+    id: wire.id,
+    name: optional(wire.name),
+    contextWindow: optional(wire.context_window),
+    maxOutput: optional(wire.max_output),
+    images: optional(wire.images),
+    levels: optional(wire.levels),
+  };
 }
 
 export function toModels(wire: WireModel[] | null | undefined): ProviderModel[] {

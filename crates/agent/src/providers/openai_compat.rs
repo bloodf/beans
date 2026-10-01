@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::models::{self, ModelInfo};
 use crate::provider::{channel_stream, AssistantEvent, AssistantEventStream, ModelRequest, Provider};
+use crate::request::bearer_auth;
 use crate::retry::{send_with_retry, RequestFailure, DEFAULT_MAX_RETRY_DELAY_MS};
 use crate::sse::SseParser;
 use crate::transform::{transform_messages, TransformOptions};
@@ -37,6 +38,9 @@ pub struct OpenAiCompatProvider {
     pub thinking_level: Option<ThinkingLevel>,
     /// The catalog entry for the model, when it has one.
     pub info: Option<&'static ModelInfo>,
+    /// Sends the session id as `prompt_cache_key`, OpenAI's routing hint for its prompt cache.
+    /// Off for a server that refuses fields it does not know.
+    pub prompt_cache_key: bool,
     client: reqwest::Client,
 }
 
@@ -52,6 +56,7 @@ impl OpenAiCompatProvider {
             max_retry_delay_ms: DEFAULT_MAX_RETRY_DELAY_MS,
             thinking_level: None,
             info: models::find(provider_id, model),
+            prompt_cache_key: true,
             client: reqwest::Client::new(),
         }
     }
@@ -85,7 +90,7 @@ impl OpenAiCompatProvider {
         if let Some(max_tokens) = request.max_tokens {
             body["max_tokens"] = Value::from(max_tokens);
         }
-        if let Some(session_id) = &request.options.session_id {
+        if let Some(session_id) = request.options.session_id.as_ref().filter(|_| self.prompt_cache_key) {
             body["prompt_cache_key"] = Value::String(session_id.clone());
         }
         let level = self.thinking_level.and_then(|level| match self.info {
@@ -377,7 +382,7 @@ impl Provider for OpenAiCompatProvider {
         let info = self.info;
 
         tokio::spawn(async move {
-            let build = || options.apply_to(client.post(&url).bearer_auth(&api_key).header("User-Agent", USER_AGENT)).json(&body);
+            let build = || options.apply_to(bearer_auth(client.post(&url), &api_key).header("User-Agent", USER_AGENT)).json(&body);
             let response = match send_with_retry(build, max_retries, max_retry_delay_ms, &cancel).await {
                 Ok(response) => {
                     options.report(&response);

@@ -11,6 +11,7 @@ import {
   providerName,
   providerSubtitle,
   thinkingLevels,
+  withCustomModels,
   type Accent,
   type ProviderKind,
 } from "../../model/models";
@@ -53,6 +54,12 @@ function NewBotSheet(props: { onCreate: (botID: string) => void; dismiss: () => 
   const [provider, setProvider] = createSignal<ProviderKind>(providerKinds[0]!);
   const [model, setModel] = createSignal("");
   const [thinking, setThinking] = createSignal("");
+  /** The providers as the sheet opened: the built-in ones, then the custom ones. */
+  const kinds = store.providerKinds;
+  const providers = () => {
+    track.roster();
+    return store.providers;
+  };
 
   const runners = createMemo(() => {
     track.roster();
@@ -63,9 +70,10 @@ function NewBotSheet(props: { onCreate: (botID: string) => void; dismiss: () => 
     track.roster();
     const host = runner();
     if (!host) return { text: L("No Runner is paired. Bots run on a Device with macOS, Linux, or Windows."), warning: true };
-    if (store.credential(provider())?.isConnected) return { text: L("%@ is connected. Turns run on %@.", providerName(provider()), host.name), warning: false };
+    const name = providerName(provider(), store.providers);
+    if (store.credential(provider())?.isConnected) return { text: L("%@ is connected. Turns run on %@.", name, host.name), warning: false };
     return {
-      text: L("%@ is not connected yet. The bot is created now and its first turn waits until you connect it in Settings.", providerName(provider())),
+      text: L("%@ is not connected yet. The bot is created now and its first turn waits until you connect it in Settings.", name),
       warning: true,
     };
   };
@@ -90,10 +98,10 @@ function NewBotSheet(props: { onCreate: (botID: string) => void; dismiss: () => 
     props.onCreate(botID);
   };
 
-  // The CLI's catalog, which comes with each snapshot.
+  // The CLI's catalog, which comes with each snapshot, and the custom providers' saved models.
   const catalog = () => {
     track.roster();
-    return store.models;
+    return withCustomModels(store.models, store.providers);
   };
   const models = () => providerModels(catalog(), provider());
   const levels = () => thinkingLevels(catalog(), provider(), model() || undefined);
@@ -148,7 +156,7 @@ function NewBotSheet(props: { onCreate: (botID: string) => void; dismiss: () => 
       </LabeledRow>
       <LabeledRow label={L("Provider")}>
         <PopUpButton
-          options={providerKinds.map((kind) => ({ value: kind, label: `${providerName(kind)} (${providerSubtitle(kind)})` }))}
+          options={kinds.map((kind) => ({ value: kind, label: `${providerName(kind, providers())} (${providerSubtitle(kind)})` }))}
           value={provider()}
           onChange={(kind) => {
             // A new provider starts on its default model and thinking level.

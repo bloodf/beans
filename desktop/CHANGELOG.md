@@ -6,12 +6,25 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- Custom providers: Add Provider… in Settings' Providers pane adds OpenAI, OpenRouter, Gemini,
+  Groq, Together AI, Ollama, LM Studio, or any other server that speaks OpenAI's Chat Completions
+  or Responses API or Anthropic's Messages API, such as a gateway or a model server on your
+  network. The sheet loads the models the server lists to pick from, and takes any it does not
+  list. Bots pick the provider, its models, and a thinking level as they do a built-in one, and it
+  reaches your paired Devices encrypted with the account key.
+- Bots on ChatGPT, Grok, and OpenCode's GPT, Grok, and Muse Spark models see the images their
+  tools return, such as a browser plugin's screenshot or an image file they read. They used to get
+  only the text beside the image.
 - Pairing a computer or restoring your identity no longer asks you to connect a provider your
   account already has. Onboarding waits until the account's providers arrive from the relay, which a
   slow connection or a long list of chats used to outlast.
 - Onboarding's last step says the computer is paired, or that your identity is restored, instead of
-  calling it your first Device. A paired computer is no longer pointed to Pair a Device, which only
-  the computer that created or restored your identity can do.
+  calling it your first Device.
+- Pair a Device works on every paired computer. On a computer that had joined by pairing it showed
+  an error, since only the computer that created or restored your identity could pair others. If you
+  run your own relay, update it first.
+- Settings › Devices shows a machine that is paired to your account but never sent its name or
+  system as Unknown Device, with a note to unpair it if you don't recognize it.
 - While onboarding pairs or restores, the Pair or Restore button and the field are disabled beside a
   spinner, and Back stops a pairing that is still waiting on the other computer.
 - The marketplace adds plugins for 飞书, 飞书项目, 滴答清单, 腾讯文档, 秘塔 AI 搜索, 知乎, 高德地图, and
@@ -21,11 +34,14 @@ and the update window shows it.
   set of window buttons, above the app's.
 - Settings › Devices can unpair this computer too: Lorca forgets the account's keys, credentials,
   and chats here and goes back to onboarding. When this computer holds your identity, the
-  confirmation says that coming back, or pairing a new Device, takes your backup phrase.
+  confirmation says that your backup phrase becomes the only way to restore it.
 - Red spelling underlines no longer appear under API keys, URLs, plugin variables, names, and
   searches as you type them, or in the description, rule, and memory sheets. The composer still
   checks spelling.
 - Bot avatars, image attachments, and the app icon can no longer be dragged out of the window.
+- On Windows, plugins that start with `npx`, such as Browser and 高德地图, no longer fail with
+  "Cannot start npx: program not found". Lorca finds a plugin's program as a terminal does, so it
+  finds the `npx.cmd` that Node.js installs.
 
 ## [0.1.1]
 

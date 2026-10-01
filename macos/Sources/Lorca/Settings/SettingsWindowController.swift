@@ -202,7 +202,7 @@ final class GeneralSettingsViewController: SettingsPaneViewController {
         }
 
         addFootnote(
-            L("Lorca talks only to the CLI on this computer. Nothing here is synced; each Device keeps its own settings.")
+            L("Beans talks only to the CLI on this computer. Nothing here is synced; each Device keeps its own settings.")
         )
     }
 
@@ -277,7 +277,7 @@ final class AdvancedSettingsViewController: SettingsPaneViewController {
         connection.setRows([relay, port])
         addSection(connection)
         addFootnote(
-            L("Self-hosting the relay is a URL change: clients sign their requests and upload ciphertext, so the relay has nothing to trust. Leave it empty to use Lorca’s relay.")
+            L("Self-hosting the relay is a URL change: clients sign their requests and upload ciphertext, so the relay has nothing to trust. Leave it empty to use the default relay.")
         )
 
         let onboarding = ActionRow(

@@ -68,7 +68,7 @@ describe("pairing", () => {
   });
 
   test("rejects other text", () => {
-    expect(() => parsePairingString("hello")).toThrow("not a Lorca pairing string");
+    expect(() => parsePairingString("hello")).toThrow("not a Beans pairing string");
     expect(() => parsePairingString("lorca://pair?relay=x&id=y")).toThrow("missing a field");
   });
 });

@@ -4,9 +4,9 @@ export default (): ExpoConfig => {
   const development =
     process.env.LORCA_MOBILE_VARIANT === "development" ||
     process.env.EAS_BUILD_PROFILE === "development";
-  const appName = development ? "Lorca Dev" : "Lorca";
-  const appId = development ? "app.lorca.dev" : "app.lorca";
-  const appGroup = development ? "group.app.lorca.dev" : "group.app.lorca";
+  const appName = development ? "Beans Dev" : "Beans";
+  const appId = development ? "ai.amoena.beans.dev" : "ai.amoena.beans";
+  const appGroup = development ? "group.ai.amoena.beans.dev" : "group.ai.amoena.beans";
   const icon = development ? "./assets/icon-dev.png" : "./assets/icon.png";
   const splash = development ? "./assets/splash-icon-dev.png" : "./assets/splash-icon.png";
   const favicon = development ? "./assets/favicon-dev.png" : "./assets/favicon.png";
@@ -16,9 +16,9 @@ export default (): ExpoConfig => {
 
   return {
     name: appName,
-    slug: "lorca",
+    slug: "beans",
     version: "1.0.0",
-    scheme: development ? "lorca-dev" : "lorca",
+    scheme: development ? ["beans-dev", "lorca"] : ["beans", "lorca"],
     orientation: "portrait",
     icon,
     userInterfaceStyle: "automatic",
@@ -26,10 +26,10 @@ export default (): ExpoConfig => {
       bundleIdentifier: appId,
       supportsTablet: true,
       infoPlist: {
-        NSCameraUsageDescription: "Lorca scans a pairing QR code from another Device.",
-        NSMicrophoneUsageDescription: "Lorca listens while you dictate a message.",
-        NSSpeechRecognitionUsageDescription: "Lorca turns what you say into the message text.",
-        NSPhotoLibraryUsageDescription: "Lorca attaches photos you pick to a message.",
+        NSCameraUsageDescription: "Beans scans a pairing QR code from another Device.",
+        NSMicrophoneUsageDescription: "Beans listens while you dictate a message.",
+        NSSpeechRecognitionUsageDescription: "Beans turns what you say into the message text.",
+        NSPhotoLibraryUsageDescription: "Beans attaches photos you pick to a message.",
         CFBundleAllowMixedLocalizations: true,
       },
       // scripts/release-ios.ts sets a fresh one for every upload; the notify extension takes the
@@ -42,8 +42,8 @@ export default (): ExpoConfig => {
     },
     android: {
       package: appId,
-      // Firebase project lorca-a03db, with a client for app.lorca and app.lorca.dev: FCM tokens for pushes.
-      googleServicesFile: "./google-services.json",
+      // FCM tokens for pushes: set BEANS_GOOGLE_SERVICES_FILE to your Firebase google-services.json.
+      ...(process.env.BEANS_GOOGLE_SERVICES_FILE ? { googleServicesFile: process.env.BEANS_GOOGLE_SERVICES_FILE } : {}),
       adaptiveIcon: {
         backgroundColor: adaptiveIconBackgroundColor,
         foregroundImage: icon,
@@ -74,21 +74,21 @@ export default (): ExpoConfig => {
       [
         "expo-camera",
         {
-          cameraPermission: "Lorca scans a pairing QR code from another Device.",
+          cameraPermission: "Beans scans a pairing QR code from another Device.",
         },
       ],
       [
         "expo-image-picker",
         {
-          photosPermission: "Lorca attaches photos you pick to a message.",
-          cameraPermission: "Lorca attaches photos you take to a message.",
+          photosPermission: "Beans attaches photos you pick to a message.",
+          cameraPermission: "Beans attaches photos you take to a message.",
         },
       ],
       [
         "expo-speech-recognition",
         {
-          microphonePermission: "Lorca listens while you dictate a message.",
-          speechRecognitionPermission: "Lorca turns what you say into the message text.",
+          microphonePermission: "Beans listens while you dictate a message.",
+          speechRecognitionPermission: "Beans turns what you say into the message text.",
         },
       ],
       "expo-image",

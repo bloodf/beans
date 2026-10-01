@@ -190,9 +190,9 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
           connect has failed it says so, and a tap shows the error. */}
       {updateRequired ? (
         <Stack.Title asChild>
-          <View style={styles.status} accessibilityRole="header" accessibilityLabel={t("Update Lorca to sync")}>
+          <View style={styles.status} accessibilityRole="header" accessibilityLabel={t("Update Beans to sync")}>
             <Text style={[styles.statusText, { color: p.secondaryLabel }]} numberOfLines={1}>
-              {t("Update Lorca to sync")}
+              {t("Update Beans to sync")}
             </Text>
           </View>
         </Stack.Title>

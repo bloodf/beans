@@ -19,7 +19,7 @@ class PushService : FirebaseMessagingService() {
   override fun onMessageReceived(message: RemoteMessage) {
     val sealed = message.data["c"] ?: return
     // The folder the JS side starts the core with (`coreHome()` in src/core/prefs.ts).
-    val development = packageName == "app.lorca.dev"
+    val development = packageName == "ai.amoena.beans.dev"
     val home = File(filesDir, "${if (development) "lorca-dev" else "lorca"}/core").absolutePath
     val notice = try { pushOpen(home, sealed) } catch (_: Throwable) { null }
     // The user is looking at that chat: the reply is arriving in front of them.
@@ -27,7 +27,7 @@ class PushService : FirebaseMessagingService() {
 
     val manager = getSystemService(NotificationManager::class.java)
     manager.createNotificationChannel(NotificationChannel(CHANNEL, "Replies", NotificationManager.IMPORTANCE_HIGH))
-    val scheme = if (development) "lorca-dev" else "lorca"
+    val scheme = if (development) "beans-dev" else "beans"
     val open = Intent(Intent.ACTION_VIEW, Uri.parse(if (notice != null) "$scheme://chat/${notice.chatId}" else "$scheme://")).setPackage(packageName)
     val tap = PendingIntent.getActivity(this, notice?.chatId.hashCode(), open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     val title = when {

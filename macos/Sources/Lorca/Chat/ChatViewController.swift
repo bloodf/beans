@@ -774,7 +774,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 switch message.author {
                 case .you: author = L("You")
                 case let .bot(botID): author = store.bot(botID)?.name ?? L("Bot")
-                case .system: author = "Lorca"
+                case .system: author = "Beans"
                 }
                 let words = layout.rendered(for: message).plainText
                 return "\(author): \(words.isEmpty ? Attachment.summary(message.attachments) : words)"

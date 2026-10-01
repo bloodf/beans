@@ -10,10 +10,12 @@ export const SOURCES_DIR = join(PACKAGE_DIR, "Sources")
 export const CRATES_DIR = join(ROOT, "crates")
 export const CLI_NAME = "lorca"
 
-export const APP_NAME = "Lorca"
-export const DEBUG_APP_NAME = "Lorca Dev"
-export const BUNDLE_ID = "app.lorca"
-export const DEBUG_BUNDLE_ID = "app.lorca.dev"
+export const APP_NAME = "Beans"
+export const DEBUG_APP_NAME = "Beans Dev"
+export const BUNDLE_ID = "ai.amoena.beans"
+export const DEBUG_BUNDLE_ID = "ai.amoena.beans.dev"
+/** The Swift executable target keeps its upstream name; the bundle executable is APP_NAME. */
+export const SWIFT_PRODUCT = "Lorca"
 export const APP_ICON_NAME = "Lorca.icns"
 export const DEBUG_APP_ICON_NAME = "Lorca-dev.icns"
 
@@ -27,8 +29,8 @@ export function readVersion(): string {
   return version
 }
 
-/** Where the app looks for updates, and the EdDSA public key Sparkle checks them against: the
- * public half of the login keychain's Sparkle key (docs/releasing-mac.md). */
+/** Publishing-only constants for scripts/release-mac.ts and generate-appcast.ts. Not written to
+ * Info.plist: the app ships with updates disabled. */
 export const RELEASES_URL = process.env.DOWNLOAD_URL_PREFIX ?? "https://mac-releases.lorca.app/"
 export const FEED_URL = process.env.FEED_URL ?? `${RELEASES_URL}appcast.xml`
 export const SPARKLE_PUBLIC_KEY = "gv9GLMPjH5yMQkZMFXnoNfHOyL8/7KGzl/jzAqlzZZY="
@@ -107,21 +109,17 @@ function infoPlist(version: string, config: Config) {
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Lorca listens while you dictate a message.</string>
+	<string>Beans listens while you dictate a message.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Lorca turns what you say into the message text.</string>
+	<string>Beans turns what you say into the message text.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
-	<key>SUFeedURL</key>
-	<string>${FEED_URL}</string>
-	<key>SUPublicEDKey</key>
-	<string>${SPARKLE_PUBLIC_KEY}</string>
 	<key>SUEnableAutomaticChecks</key>
-	<true/>
+	<false/>
 </dict>
 </plist>
 `
@@ -325,7 +323,7 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   }
 
   const binDir = await run(["swift", "build", "-c", config, "--show-bin-path"], { capture: true })
-  const source = join(binDir.stdout.trim(), APP_NAME)
+  const source = join(binDir.stdout.trim(), SWIFT_PRODUCT)
 
   const bundle = bundlePath(config)
   const macos = join(bundle, "Contents", "MacOS")

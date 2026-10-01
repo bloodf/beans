@@ -202,7 +202,7 @@ export function Composer({
   async function takePhoto() {
     const permission = await ImagePicker.requestCameraPermissionsAsync();
     if (!permission.granted) {
-      Alert.alert(t("Camera access is off"), t("Allow the camera for Lorca in Settings to take a photo."), [
+      Alert.alert(t("Camera access is off"), t("Allow the camera for Beans in Settings to take a photo."), [
         { text: t("Settings"), onPress: () => void Linking.openSettings() },
         { text: t("OK"), style: "cancel" },
       ]);
@@ -286,7 +286,7 @@ export function Composer({
     }
     const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
     if (!permission.granted) {
-      Alert.alert(t("Dictation needs the microphone"), t("Allow the microphone and speech recognition for Lorca in Settings."), [
+      Alert.alert(t("Dictation needs the microphone"), t("Allow the microphone and speech recognition for Beans in Settings."), [
         { text: t("Settings"), onPress: () => void Linking.openSettings() },
         { text: t("OK"), style: "cancel" },
       ]);

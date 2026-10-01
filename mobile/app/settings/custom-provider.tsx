@@ -139,7 +139,7 @@ export default function CustomProviderScreen() {
   // On a phone, localhost is the phone: the server must be named as the Runners reach it.
   const local = !!adding?.local || isLoopbackHost(host);
   const urlNote = [
-    requestURL ? t("Requests go to {url}.", { url: requestURL }) : t("Lorca adds {path} to it.", { path: protocol.path }),
+    requestURL ? t("Requests go to {url}.", { url: requestURL }) : t("Beans adds {path} to it.", { path: protocol.path }),
     local ? t("Use the address of the computer running it, as your Runners reach it.") : undefined,
   ]
     .filter(Boolean)

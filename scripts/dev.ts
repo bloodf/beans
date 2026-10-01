@@ -109,7 +109,7 @@ async function strayRelayPid(): Promise<number | null> {
 
 /** A local relay on every interface, so a phone on this network can pair through it. The dev
  * app (LORCA_DEV=1) defaults its relay URL to this Mac's LAN IP on this port, and the phone
- * that pairs is the development build, so APNs pushes go to `app.lorca.dev`. A relay left
+ * that pairs is the development build, so APNs pushes go to `ai.amoena.beans.dev`. A relay left
  * over from an earlier loop is replaced: it may predate the blob kinds the CLI now syncs, and
  * the CLI fails every cycle against one that rejects them. Its database lives in `temp/`, out
  * of the build output that mbx prunes on its own: a relay that loses it forgets every paired
@@ -135,7 +135,7 @@ async function startRelay() {
   }
   mkdirSync(join(ROOT, "temp"), { recursive: true })
   relay = Bun.spawn(
-    [join(ROOT, "target", "debug", "lorca-relay"), "--bind", `0.0.0.0:${RELAY_PORT}`, "--db", join(ROOT, "temp", "lorca-relay.db"), "--apns-topic", "app.lorca.dev"],
+    [join(ROOT, "target", "debug", "lorca-relay"), "--bind", `0.0.0.0:${RELAY_PORT}`, "--db", join(ROOT, "temp", "lorca-relay.db"), "--apns-topic", "ai.amoena.beans.dev"],
     {
       cwd: ROOT,
       stdin: "ignore",

@@ -424,7 +424,7 @@ final class CustomProviderViewController: SheetViewController {
     /// and offers the server's host as the name.
     private func updateEndpoint() {
         baseURLField.placeholderString = api.baseURLPlaceholder
-        endpointNote.stringValue = baseURL.isEmpty ? L("Lorca adds %@ to it.", api.path) : L("Requests go to %@.", api.endpoint(for: baseURL))
+        endpointNote.stringValue = baseURL.isEmpty ? L("Beans adds %@ to it.", api.path) : L("Requests go to %@.", api.endpoint(for: baseURL))
         nameField.placeholderString = suggestedName ?? "OpenRouter"
         if kind == nil, keyField.stringValue.isEmpty {
             keyField.placeholderString = CustomProviderPreset.matching(baseURL)?.keyPlaceholder ?? L("Optional for a server on your network")

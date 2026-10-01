@@ -2,8 +2,8 @@ import AppKit
 import Sparkle
 
 /// The app's updater: a thin front for Sparkle, which downloads, checks the EdDSA signature,
-/// and swaps the bundle. The feed URL and the public key are in Info.plist (`SUFeedURL`,
-/// `SUPublicEDKey`), written by scripts/app.ts. docs/releasing-mac.md covers publishing.
+/// and swaps the bundle. Disabled in this fork: Info.plist has no `SUFeedURL` or `SUPublicEDKey`
+/// (scripts/app.ts) and `isEnabled` is false, so Sparkle never starts.
 @MainActor
 final class Updater {
     static let shared = Updater()
@@ -14,11 +14,8 @@ final class Updater {
     /// A debug build is the dev loop's bundle, rebuilt in place. The menu item and the settings
     /// rows leave themselves out there.
     nonisolated static let isEnabled: Bool = {
-        #if DEBUG
-            return false
-        #else
-            return true
-        #endif
+        // Fork build: upstream Sparkle feed removed, so updates stay off.
+        false
     }()
 
     nonisolated static var currentVersion: String {

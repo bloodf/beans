@@ -46,7 +46,7 @@ final class OfflineViewController: NSViewController {
         icon.translatesAutoresizingMaskIntoConstraints = false
 
         let title = Build.label(
-            L("The Lorca CLI isn't answering"), font: .systemFont(ofSize: 18, weight: .semibold),
+            L("The Beans CLI isn't answering"), font: .systemFont(ofSize: 18, weight: .semibold),
             alignment: .center)
         let body = Build.label(
             L("Your bots, keys and transcripts live in the CLI on this computer. The app starts it on its own; you can also run it from a terminal, and this window reconnects either way."),

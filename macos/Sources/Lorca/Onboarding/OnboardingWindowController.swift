@@ -431,7 +431,7 @@ final class OnboardingViewController: NSViewController {
             host.addSubview(note)
             note.pin(to: host)
             credentialLabel?.stringValue = L("Server")
-            setStatus(L("Lorca checks the server, then shares it with your paired Devices, encrypted."), color: .tertiaryLabelColor)
+            setStatus(L("Beans checks the server, then shares it with your paired Devices, encrypted."), color: .tertiaryLabelColor)
             if let button = findContinueButton() {
                 button.title = preset.map { L("Set Up %@…", $0.name) } ?? L("Set Up…")
                 button.isEnabled = true
@@ -547,7 +547,7 @@ final class OnboardingViewController: NSViewController {
         )
         subtitle.identifier = NSUserInterfaceItemIdentifier("doneSubtitle")
 
-        let open = primaryButton(L("Open Lorca"), action: #selector(finish))
+        let open = primaryButton(L("Open Beans"), action: #selector(finish))
 
         let column = Build.stack([icon, title, subtitle, open], spacing: 14)
         column.alignment = .centerX
@@ -801,7 +801,7 @@ final class OnboardingViewController: NSViewController {
         }
         guard store.isConnected else {
             presentError(
-                L("The Lorca CLI is not running. Start it with `lorca serve` and try again.")
+                L("The Beans CLI is not running. Start it with `lorca serve` and try again.")
                     .replacingOccurrences(of: "lorca serve", with: AppInfo.cliCommand))
             return
         }

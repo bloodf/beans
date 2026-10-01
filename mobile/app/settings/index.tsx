@@ -201,7 +201,7 @@ export default function SettingsScreen() {
             title={t("Relay")}
             detail={relayUrl?.replace(/^https?:\/\//, "") ?? "—"}
             // Why the last try to connect failed, as the core has it, until one goes through.
-            subtitle={relayUpdateRequired ? t("Update Lorca to sync") : relayConnected ? t("Connected") : relayError ? relayError.message : t("Connecting…")}
+            subtitle={relayUpdateRequired ? t("Update Beans to sync") : relayConnected ? t("Connected") : relayError ? relayError.message : t("Connecting…")}
             subtitleLines={3}
           />
         </Section>
@@ -210,7 +210,7 @@ export default function SettingsScreen() {
           title={t("Auto-review")}
           footer={
             autoReview.is_enabled
-              ? t('Lorca checks effectful plugin actions and every shell command before they run. Safe commands normally run automatically; risky commands ask you first. Add rules to customize what bots can do automatically; "Ask first" wins if rules conflict.')
+              ? t('Beans checks effectful plugin actions and every shell command before they run. Safe commands normally run automatically; risky commands ask you first. Add rules to customize what bots can do automatically; "Ask first" wins if rules conflict.')
               : t("Off: every shell command and effectful plugin action asks you first.")
           }
         >
@@ -323,7 +323,7 @@ export default function SettingsScreen() {
         </Section>
 
         <Text style={[styles.version, { color: p.tertiaryLabel }]}>
-          {Application.applicationName ?? "Lorca"} {Application.nativeApplicationVersion ?? ""} (
+          {Application.applicationName ?? "Beans"} {Application.nativeApplicationVersion ?? ""} (
           {Application.nativeBuildVersion ?? ""})
         </Text>
       </ScrollView>

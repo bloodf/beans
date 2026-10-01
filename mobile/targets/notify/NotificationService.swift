@@ -31,9 +31,9 @@ final class NotificationService: UNNotificationServiceExtension {
 
 /// The push key in the app group's keychain, written by the app (`LorcaCoreModule`).
 enum PushKey {
-  static let group = Bundle.main.bundleIdentifier?.hasPrefix("app.lorca.dev.") == true
-    ? "group.app.lorca.dev"
-    : "group.app.lorca"
+  static let group = Bundle.main.bundleIdentifier?.hasPrefix("ai.amoena.beans.dev.") == true
+    ? "group.ai.amoena.beans.dev"
+    : "group.ai.amoena.beans"
   static let account = "push-key"
 
   static func read() -> Data? {

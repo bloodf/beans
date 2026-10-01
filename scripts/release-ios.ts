@@ -30,7 +30,7 @@ for (const tool of ["cargo", "xcodebuild", "pod", "bunx", "plutil", "rsync"]) {
 }
 
 const TEAM_ID = "GJE9R5VE87"
-const BUNDLE_ID = "app.lorca"
+const BUNDLE_ID = "ai.amoena.beans"
 const MOBILE = join(ROOT, "mobile")
 const BUILD_DIR = join(ROOT, "dist", "ios")
 // The production project is generated in a copy, so mobile/ios stays the dev loop's Lorca Dev project.
@@ -40,7 +40,7 @@ const PROJECT = join(BUILD_DIR, "mobile")
 const IOS = join(PROJECT, "ios")
 // Pods and its lockfile wait here while prebuild writes a new ios/.
 const KEPT = join(BUILD_DIR, "kept")
-const ARCHIVE = join(BUILD_DIR, "Lorca.xcarchive")
+const ARCHIVE = join(BUILD_DIR, "Beans.xcarchive")
 const EXPORT = join(BUILD_DIR, "export")
 
 // App Store Connect wants every upload's build number above the last. Local time as YYYYMMDDHHmm
@@ -70,7 +70,7 @@ log(`${color.bold("core")} ${color.dim("release build for iOS")}`)
 await $`bun run core ios`.cwd(MOBILE).env(env)
 
 // ---- 2. production project
-log(`${color.bold("prebuild")} ${color.dim(`Lorca, ${BUNDLE_ID}, build ${buildNumber}`)}`)
+log(`${color.bold("prebuild")} ${color.dim(`Beans, ${BUNDLE_ID}, build ${buildNumber}`)}`)
 // The native projects and prebuild's cache in .expo are the copy's own.
 if (existsSync(join(PROJECT, "package.json"))) {
   // rsync copies only what changed, and leaves alone the xcframework that expo-modules-jsi's build
@@ -101,7 +101,7 @@ for (const name of KEEP) {
 }
 await $`pod install`.cwd(IOS).env(env)
 
-const pbxproj = await Bun.file(join(IOS, "Lorca.xcodeproj", "project.pbxproj")).text()
+const pbxproj = await Bun.file(join(IOS, "Beans.xcodeproj", "project.pbxproj")).text()
 const bundleIds = new Set([...pbxproj.matchAll(/PRODUCT_BUNDLE_IDENTIFIER = "?([^";]+)"?;/g)].map((m) => m[1]))
 if (!bundleIds.has(BUNDLE_ID)) die(`the project builds ${[...bundleIds].join(", ")}, not ${BUNDLE_ID}`)
 
@@ -117,16 +117,16 @@ if (!bundleIds.has(BUNDLE_ID)) die(`the project builds ${[...bundleIds].join(", 
 log(`${color.bold("archiving")} ${color.dim(ARCHIVE)}`)
 await rm(ARCHIVE, { recursive: true, force: true })
 await rm(EXPORT, { recursive: true, force: true })
-await $`xcodebuild -workspace ${join(IOS, "Lorca.xcworkspace")} -scheme Lorca -configuration Release -destination generic/platform=iOS -archivePath ${ARCHIVE} -allowProvisioningUpdates CURRENT_PROJECT_VERSION=${buildNumber} COMPILATION_CACHE_ENABLE_CACHING=YES archive -quiet`.env(env)
+await $`xcodebuild -workspace ${join(IOS, "Beans.xcworkspace")} -scheme Beans -configuration Release -destination generic/platform=iOS -archivePath ${ARCHIVE} -allowProvisioningUpdates CURRENT_PROJECT_VERSION=${buildNumber} COMPILATION_CACHE_ENABLE_CACHING=YES archive -quiet`.env(env)
 if (!existsSync(ARCHIVE)) die("xcodebuild produced no archive")
 
-const plist = join(ARCHIVE, "Products", "Applications", "Lorca.app", "Info.plist")
+const plist = join(ARCHIVE, "Products", "Applications", "Beans.app", "Info.plist")
 const version = (await $`plutil -extract CFBundleShortVersionString raw ${plist}`.text()).trim()
 const built = (await $`plutil -extract CFBundleVersion raw ${plist}`.text()).trim()
 if (built !== buildNumber) die(`the app carries build ${built}, expected ${buildNumber}`)
 
 if (local) {
-  log(`${color.green("archived")} Lorca ${version} (${buildNumber}); nothing was uploaded`)
+  log(`${color.green("archived")} Beans ${version} (${buildNumber}); nothing was uploaded`)
   console.log(`  archive ${ARCHIVE}`)
   process.exit(0)
 }
@@ -152,5 +152,5 @@ await Bun.write(
 log(`${color.bold("uploading")} ${color.dim("to App Store Connect")}`)
 await $`xcodebuild -exportArchive -archivePath ${ARCHIVE} -exportOptionsPlist ${exportOptions} -exportPath ${EXPORT} -allowProvisioningUpdates`.env(env)
 
-log(`${color.green("uploaded")} Lorca ${version} (${buildNumber})`)
+log(`${color.green("uploaded")} Beans ${version} (${buildNumber})`)
 console.log("  TestFlight lists it once App Store Connect finishes processing")

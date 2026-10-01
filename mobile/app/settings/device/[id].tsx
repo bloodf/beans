@@ -124,7 +124,7 @@ export default function DeviceScreen() {
           {!device.unknown && <Row title={t("OS")} detail={device.os_version || osName} />}
           <Row title={t("Role")} detail={runner ? t("Runner") : t("Device")} />
           <Row title={t("Last seen")} detail={online ? t("Active now") : lastSeen(seen)} />
-          <Row title={t("Relay")} detail={relay ? (relayUpdateRequired ? t("{relay} · update Lorca to sync", { relay }) : relayConnected ? relay : t("{relay} · offline", { relay })) : t("Not configured")} />
+          <Row title={t("Relay")} detail={relay ? (relayUpdateRequired ? t("{relay} · update Beans to sync", { relay }) : relayConnected ? relay : t("{relay} · offline", { relay })) : t("Not configured")} />
         </Section>
 
         {!isThis && (

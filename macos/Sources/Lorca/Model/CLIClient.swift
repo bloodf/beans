@@ -170,7 +170,7 @@ final class CLIClient: NSObject {
     /// Sends a request and returns the JSON-encoded `result`.
     func request(_ method: String, _ params: [String: Any] = [:]) async throws -> Data {
         guard let task, state != .disconnected else {
-            throw RequestError(message: L("The Lorca CLI is not running"))
+            throw RequestError(message: L("The Beans CLI is not running"))
         }
         let id = nextID
         nextID += 1

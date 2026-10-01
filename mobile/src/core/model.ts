@@ -120,7 +120,7 @@ export interface Routine {
   /** "Weekdays at 9:00 AM" */
   schedule_text: string;
   is_enabled: boolean;
-  /** Why Lorca paused it, when it did: "away". */
+  /** Why Beans paused it, when it did: "away". */
   paused_reason?: string;
   last_run_at?: number;
   /** "sent", "pass", or "error". */
@@ -328,7 +328,7 @@ export const PROVIDER_LABELS: Record<string, string> = {
   grok: "Grok",
 };
 
-/// The providers Lorca has built in, in the order the core lists them.
+/// The providers Beans has built in, in the order the core lists them.
 export const PROVIDER_KINDS = ["deepseek", "anthropic", "opencode", "opencode-go", "chatgpt", "grok"] as const;
 export type ProviderKind = (typeof PROVIDER_KINDS)[number];
 
@@ -346,7 +346,7 @@ export function isCustomProvider(kind: string): boolean {
 }
 
 /// The protocols a custom provider's server can speak: the product's name, the same in every
-/// language; the path Lorca adds to the base URL for a model call; and the base URL's example.
+/// language; the path Beans adds to the base URL for a model call; and the base URL's example.
 export const CUSTOM_APIS: readonly { id: CustomAPI; title: string; path: string; placeholder: string }[] = [
   { id: "chat-completions", title: "OpenAI Chat Completions", path: "/chat/completions", placeholder: "https://api.example.com/v1" },
   { id: "responses", title: "OpenAI Responses", path: "/responses", placeholder: "https://api.example.com/v1" },

@@ -15,7 +15,7 @@ import { Symbol } from "../src/ui/Symbol";
 import { Font, usePalette } from "../src/ui/theme";
 
 type Phase = "idle" | "posting" | "waiting";
-const appIcon = Application.applicationId === "app.lorca.dev" ? require("../assets/icon-dev.png") : require("../assets/icon.png");
+const appIcon = Application.applicationId === "ai.amoena.beans.dev" ? require("../assets/icon-dev.png") : require("../assets/icon.png");
 
 export default function PairScreen() {
   useLanguage();
@@ -56,7 +56,7 @@ export default function PairScreen() {
       return;
     }
     if (lastFailed.current === text.trim()) {
-      Alert.alert(t("Code already used"), t("Each code pairs one Device. Get a fresh code from Lorca on the other computer."));
+      Alert.alert(t("Code already used"), t("Each code pairs one Device. Get a fresh code from Beans on the other computer."));
       return;
     }
     inFlight.current = true;
@@ -95,7 +95,7 @@ export default function PairScreen() {
       setCode(text);
       void pair(text);
     } else {
-      Alert.alert(t("Nothing to paste"), t("Copy a pairing code from Lorca on another computer first."));
+      Alert.alert(t("Nothing to paste"), t("Copy a pairing code from Beans on another computer first."));
     }
   }
 

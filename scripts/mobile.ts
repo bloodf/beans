@@ -16,7 +16,7 @@ const MODULE = join(MOBILE, "modules", "lorca-core")
 const STAMPS = join(MOBILE, ".expo", "dev-stamps.json")
 const METRO_PORT = 8081
 const DEBOUNCE_MS = 500
-const APP_ID = "app.lorca.dev"
+const APP_ID = "ai.amoena.beans.dev"
 // CocoaPods dies on a non-UTF-8 locale, and the CommandLineTools SDK breaks the pod install
 // and the build with "unknown architecture" from tapi.
 const NATIVE_ENV = {
@@ -264,7 +264,7 @@ function lanAddress(): string | undefined {
  * this Mac on 127.0.0.1, the phone on its LAN address. */
 async function openApp() {
   const target = await device()
-  const client = (host: string) => `exp+lorca://expo-development-client/?url=${encodeURIComponent(`http://${host}:${METRO_PORT}`)}`
+  const client = (host: string) => `exp+beans-dev://expo-development-client/?url=${encodeURIComponent(`http://${host}:${METRO_PORT}`)}`
   if (target.simulator) {
     await run(["xcrun", "simctl", "openurl", target.id ?? "booted", client("127.0.0.1")], ROOT)
     return
@@ -296,7 +296,7 @@ process.on("SIGINT", () => void shutdown())
 process.on("SIGTERM", () => void shutdown())
 
 console.log()
-log(`${color.bold("Lorca Dev mobile")} — ${color.dim("a Rust save rebuilds the core and installs the app again")}`)
+log(`${color.bold("Beans Dev mobile")} — ${color.dim("a Rust save rebuilds the core and installs the app again")}`)
 building = true
 const ok = await build("initial build")
 building = false

@@ -15,7 +15,7 @@ export function parsePairingString(text: string): PairingTarget {
   const trimmed = text.trim();
   const index = trimmed.indexOf("pair?");
   if (!trimmed.startsWith("lorca://pair?") && index < 0) {
-    throw new Error(t("That is not a Lorca pairing string"));
+    throw new Error(t("That is not a Beans pairing string"));
   }
   const query = trimmed.slice(trimmed.indexOf("pair?") + "pair?".length);
   const fields: Record<string, string> = {};

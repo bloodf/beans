@@ -28,7 +28,7 @@ export function showRelayProblem(problem: RelayProblem, url: string | null) {
     );
     return;
   }
-  Alert.alert(t("Can’t connect to the relay"), t("The last try to reach the relay at {relay} failed:\n{error}\n\nLorca keeps trying.", { relay, error: problem.message }), [
+  Alert.alert(t("Can’t connect to the relay"), t("The last try to reach the relay at {relay} failed:\n{error}\n\nBeans keeps trying.", { relay, error: problem.message }), [
     { text: t("OK"), style: "cancel" },
     { text: t("Try Now"), onPress: () => engine.notify() },
   ]);

@@ -261,7 +261,7 @@ final class GeneralSettingsViewController: SettingsPaneViewController {
 
 final class AdvancedSettingsViewController: SettingsPaneViewController {
     private let relay = EditableRow(key: SettingsEntry.relayURL.row, placeholder: AppInfo.productionRelayURL)
-    private let port = EditableRow(key: SettingsEntry.cliPort.row, placeholder: "4862")
+    private let port = EditableRow(key: SettingsEntry.cliPort.row, placeholder: String(AppInfo.defaultCLIPort))
 
     override func viewDidLoad() {
         super.viewDidLoad()

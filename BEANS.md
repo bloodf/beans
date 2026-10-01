@@ -1,6 +1,6 @@
 # Beans fork
 
-Beans is the macOS and phone branding of Lorca. The Swift target, Rust crates, `lorca` binary, `LORCA_*` environment variables, pairing protocol (`lorca://pair`), and `~/.lorca` stay unchanged. The Windows and Linux app retains its upstream identity.
+Beans is the macOS and phone branding of Lorca. The Swift target, Rust crates, `lorca` binary, `LORCA_*` environment variables, and pairing protocol (`lorca://pair`) stay unchanged. The macOS bundles keep their CLI identities separate from upstream Lorca: Beans uses `~/.beans` on port `4864`; Beans Dev uses `~/.beans-dev` on port `4865`. The Windows and Linux app retains its upstream identity.
 
 ## Differences from upstream
 
@@ -9,10 +9,11 @@ Beans is the macOS and phone branding of Lorca. The Swift target, Rust crates, `
 | `scripts/app.ts` | Names the macOS bundles Beans / Beans Dev, assigns `ai.amoena.beans` / `.dev`, copies the unchanged Swift `Lorca` executable under the Beans bundle name, and omits the upstream Sparkle feed and key while disabling automatic checks. |
 | `package.json` | Uses the Beans Dev APNs topic for the standalone local relay script. |
 | `scripts/android-release.ts` | Rebuilds the Android core and generates a production release APK with external signing credentials. |
-| `scripts/dev.ts` | Uses the Beans Dev APNs topic for the local relay. |
+| `scripts/dev.ts` | Uses the Beans Dev APNs topic for the local relay and reports its CLI port. |
+| `scripts/reset.ts` | Limits macOS resets to the selected Beans CLI home and port. |
 | `scripts/mobile.ts` | Opens the Beans Dev phone app and its Expo development URL. |
 | `scripts/release-ios.ts` | Uses the Beans iOS bundle ID and generated Xcode project, scheme, and archive paths. |
-| `macos/Sources/Lorca/App/AppInfo.swift` | Recognizes the Beans Dev bundle, displays Beans when bundle metadata is missing, and sets the Beans release relay fallback. |
+| `macos/Sources/Lorca/App/AppInfo.swift` | Recognizes the Beans Dev bundle, displays Beans when bundle metadata is missing, sets separate CLI homes and ports, and sets the Beans release relay fallback. |
 | `macos/Sources/Lorca/App/Updater.swift` | Never starts Sparkle or exposes update controls without a Beans appcast. |
 | `macos/Sources/Lorca/App/AppDelegate.swift` | Names Beans in the relay update warning and product note. |
 | `macos/Sources/Lorca/App/MainMenu.swift` | Names Beans in the app and Help menus. |
@@ -49,7 +50,7 @@ Beans is the macOS and phone branding of Lorca. The Swift target, Rust crates, `
 | `mobile/modules/lorca-core/android/src/main/java/app/lorca/core/PushService.kt` | Selects the Beans Dev sandbox for push decryption. |
 | `mobile/targets/notify/NotificationService.swift` | Reads the push key from the matching Beans app group. |
 | `ARCHITECTURE.md` | Records the platform install identities. |
-| `docs/architecture/macos-app.md` | Describes the bundle, log location, and disabled updater. |
+| `docs/architecture/macos-app.md` | Describes the bundle, CLI home and port, log location, and disabled updater. |
 | `docs/architecture/phone-app.md` | Describes phone identifiers, push group, and optional Firebase setup. |
 
 The Rust core emits `lorca://pair` codes. Beans registers `lorca` as a secondary URL scheme alongside its primary `beans` / `beans-dev` scheme so a link from another Device can open pairing. If upstream Lorca or both Beans variants are installed, OS selection of the `lorca` link handler is not deterministic; scanning or pasting the code inside the intended app still works. Android push requires a Beans Firebase client file; without `BEANS_GOOGLE_SERVICES_FILE`, Firebase push configuration is omitted.
@@ -70,4 +71,4 @@ The signing keystore lives outside the repository at `~/.config/beans/android/be
 
 ## Merge upstream
 
-On branch `beans`, run `git fetch upstream` then `git merge upstream/main`. Resolve conflicts in the files listed above, keeping the Beans IDs, app groups, disabled upstream Sparkle feed, optional Firebase config, and unchanged `lorca` runtime identifiers. Re-run the platform builds and tests before shipping.
+On branch `beans`, run `git fetch upstream` then `git merge upstream/main`. Resolve conflicts in the files listed above, keeping the Beans IDs, app groups, isolated macOS CLI homes and ports, disabled upstream Sparkle feed, optional Firebase config, and unchanged `lorca` runtime identifiers. Re-run the platform builds and tests before shipping.

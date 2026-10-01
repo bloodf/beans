@@ -199,7 +199,7 @@ async function startApp() {
     },
   })
   const where = output.startsWith("/dev/") ? "" : ` · output in ${output}`
-  log(`${color.green("running")} ${color.dim(`via open · CLI 127.0.0.1:4863${where}`)}`)
+  log(`${color.green("running")} ${color.dim(`via open · CLI 127.0.0.1:4865${where}`)}`)
 }
 
 async function cycle(reason: string) {

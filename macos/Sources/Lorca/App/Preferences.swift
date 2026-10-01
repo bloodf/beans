@@ -87,14 +87,10 @@ enum Preferences {
         set { defaults.set(newValue, forKey: Key.relayURL) }
     }
 
-    /// `LORCA_PORT` wins, so a second app instance can run against its own CLI.
     static var cliPort: Int {
         get {
-            if let raw = ProcessInfo.processInfo.environment["LORCA_PORT"], let port = Int(raw), port > 0 {
-                return port
-            }
             let stored = defaults.integer(forKey: Key.cliPort)
-            return stored == 0 ? AppInfo.defaultCLIPort : stored
+            return stored == 0 || stored == 4862 || stored == 4863 ? AppInfo.defaultCLIPort : stored
         }
         set { defaults.set(newValue, forKey: Key.cliPort) }
     }

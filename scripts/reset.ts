@@ -1,5 +1,5 @@
-// Reset Lorca on this Mac: stop the app and CLI, wipe identity, keys, credentials, chats,
-// app preferences, and logs. Use --dev for Lorca Dev, --build to drop build output too,
+// Reset Beans on this Mac: stop the app and CLI, wipe identity, keys, credentials, chats,
+// app preferences, and logs. Use --dev for Beans Dev, --build to drop build output too,
 // --relay for the local relay database, and -y to skip the confirmation.
 import { rm } from "node:fs/promises"
 import { existsSync } from "node:fs"
@@ -15,8 +15,8 @@ const development = args.includes("--dev")
 
 const appName = development ? DEBUG_APP_NAME : APP_NAME
 const bundleID = development ? DEBUG_BUNDLE_ID : BUNDLE_ID
-const port = development ? 4863 : 4862
-const home = process.env.LORCA_HOME ?? join(homedir(), development ? ".lorca-dev" : ".lorca")
+const port = development ? 4865 : 4864
+const home = join(homedir(), development ? ".beans-dev" : ".beans")
 const logs = join(homedir(), "Library", "Logs", appName)
 
 const targets: { path: string; what: string; on: boolean }[] = [

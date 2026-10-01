@@ -849,7 +849,7 @@ struct CommandRun: Hashable {
     }
 }
 
-/// A file sent with a message. The bytes live under `~/.lorca/files/<id>` once this Device
+/// A file sent with a message. The bytes live under the CLI's data directory once this Device
 /// has them; `width` and `height` size an image's thumbnail before the file arrives.
 struct Attachment: Hashable, Identifiable {
     let id: String

@@ -37,9 +37,9 @@ Identity is a **key pair**. Devices pair. The relay stores public keys and ciphe
 - **CLI:** identity and machine keys, local websocket, encrypt/decrypt, agent loop, the account’s provider credentials, sync with the relay.
 - **Relay:** store-and-forward API. Rust, axum, SQLite or Postgres (`crates/relay`). Self-host it anywhere; clients point `LORCA_RELAY_URL` at it.
 
-Beans and Beans Dev installs on macOS, iOS, and Android use `ai.amoena.beans` and `ai.amoena.beans.dev`; the Windows and Linux app keeps its upstream identity. The production CLI stores its account under `~/.lorca` and listens on `4862`, while the macOS development build sets `LORCA_HOME=~/.lorca-dev` and listens on `4863`. On phones the distinct application ids give each build its own OS sandbox, and the core uses `lorca/core` or `lorca-dev/core` inside that sandbox. Their iOS keychain groups are `group.ai.amoena.beans` and `group.ai.amoena.beans.dev`.
+Beans and Beans Dev installs on macOS, iOS, and Android use `ai.amoena.beans` and `ai.amoena.beans.dev`; the Windows and Linux app keeps its upstream identity. The macOS Beans app runs its CLI with `--home ~/.beans --port 4864`, and Beans Dev uses `--home ~/.beans-dev --port 4865`. On phones the distinct application ids give each build its own OS sandbox, and the core uses `lorca/core` or `lorca-dev/core` inside that sandbox. Their iOS keychain groups are `group.ai.amoena.beans` and `group.ai.amoena.beans.dev`.
 
-If the CLI is down, the app shows a native empty state with the launcher’s status and the manual `lorca serve` command.
+If the CLI is down, the app shows a native empty state with the launcher’s status and the manual `lorca serve --home … --port …` command for that build.
 
 ## Domain model
 

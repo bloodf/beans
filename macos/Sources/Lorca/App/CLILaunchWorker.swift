@@ -86,7 +86,7 @@ final class CLILaunchWorker: @unchecked Sendable {
         StartupTrace.mark("CLI probe started")
         emit(.probing)
         let connection = NWConnection(
-            host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(configuration.port)) ?? 4862, using: .tcp)
+            host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(configuration.port)) ?? 4864, using: .tcp)
         probe = connection
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self, let connection, self.probe === connection else { return }

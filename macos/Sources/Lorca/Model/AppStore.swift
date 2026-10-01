@@ -866,7 +866,7 @@ final class AppStore {
     func botMemory(_ id: Bot.ID) async throws -> BotMemory {
         if isMock {
             return BotMemory(
-                botID: id, here: true, runner: "This computer", path: "~/.lorca/workspaces/\(id)",
+                botID: id, here: true, runner: "This computer", path: "~/\(AppInfo.isDevelopment ? ".beans-dev" : ".beans")/workspaces/\(id)",
                 text: "- 2026-09-10 · from your chat with the user · the user prefers short replies\n- 2026-09-12 · invoices are reconciled on Mondays\n",
                 hash: "mock", lines: 2, bytes: 128, truncated: false, maxLines: 200, maxBytes: 24_000,
                 topics: ["clients.md"], logs: ["2026-09-12", "2026-09-15"])

@@ -1,5 +1,9 @@
 node_modules
 dist
+# Source-distributed runtime required by native Blobatar consumers.
+!packages/beans-blobatar/dist/
+packages/beans-blobatar/dist/*
+!packages/beans-blobatar/dist/blobatar.jsc.js
 .DS_Store
 temp/
 .build/

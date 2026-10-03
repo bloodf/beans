@@ -1,0 +1,28 @@
+{
+  "name": "@beans/blobatar",
+  "version": "2.7.0-beans.1",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./index.ts",
+      "react-native": "./index.ts",
+      "default": "./index.js"
+    },
+    "./react-native": {
+      "types": "./vendor/react-native/index.tsx",
+      "react-native": "./vendor/react-native/index.tsx",
+      "default": "./vendor/react-native/index.tsx"
+    },
+    "./jsc": "./dist/blobatar.jsc.js"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-native-svg": ">=13"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true },
+    "react-native-svg": { "optional": true }
+  }
+}

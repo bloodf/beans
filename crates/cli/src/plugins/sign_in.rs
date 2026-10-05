@@ -25,16 +25,35 @@ pub const START_TIMEOUT: Duration = Duration::from_secs(75);
 /// never races it. The port is whatever was free; the client is registered with it.
 pub struct Callback {
     listener: TcpListener,
+    path: String,
+    fixed: Option<String>,
 }
 
 impl Callback {
     pub async fn bind() -> Result<Self, String> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| format!("Cannot listen for the sign-in callback: {e}"))?;
-        Ok(Callback { listener })
+        Ok(Callback { listener, path: "/callback".into(), fixed: None })
+    }
+
+    pub async fn bind_fixed(port: Option<u16>, url: Option<&str>) -> Result<Self, String> {
+        let parsed = url.map(reqwest::Url::parse).transpose().map_err(|e| format!("Invalid callback URL: {e}"))?;
+        if parsed.as_ref().is_some_and(|url| url.scheme() != "http" || !matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))) {
+            return Err("Callback must use loopback HTTP".into());
+        }
+        let port = parsed.as_ref().and_then(reqwest::Url::port).or(port).unwrap_or(0);
+        let host = if parsed.as_ref().and_then(|url| url.host_str()) == Some("[::1]") { "::1" } else { "127.0.0.1" };
+        let listener = TcpListener::bind((host, port)).await.map_err(|e| format!("Cannot listen for sign-in callback: {e}"))?;
+        let bound = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+        let (path, fixed) = match (parsed, url) {
+            (Some(parsed), Some(written)) if parsed.port().is_some() => (parsed.path().to_string(), Some(written.to_string())),
+            (Some(mut parsed), _) => { let _ = parsed.set_port(Some(bound)); (parsed.path().to_string(), Some(parsed.to_string())) },
+            _ => ("/callback".into(), None),
+        };
+        Ok(Callback { listener, path, fixed })
     }
 
     pub fn redirect_uri(&self) -> String {
-        format!("http://127.0.0.1:{}/callback", self.port())
+        self.fixed.clone().unwrap_or_else(|| format!("http://127.0.0.1:{}/callback", self.port()))
     }
 
     fn port(&self) -> u16 {
@@ -47,13 +66,13 @@ impl Callback {
     /// holds up the redirect.
     pub async fn wait(self, name: &str, timeout: Duration) -> Result<String, String> {
         let port = self.port();
-        let listener = self.listener;
+        let (listener, path) = (self.listener, self.path);
         let (landed, mut arrivals) = tokio::sync::mpsc::channel::<String>(1);
         let name = escape(name);
         let accepting = tokio::spawn(async move {
             loop {
                 let Ok((socket, _)) = listener.accept().await else { return };
-                tokio::spawn(serve(socket, port, name.clone(), landed.clone()));
+                tokio::spawn(serve(socket, port, path.clone(), name.clone(), landed.clone()));
             }
         });
         let arrived = tokio::time::timeout(timeout, arrivals.recv()).await;
@@ -86,7 +105,7 @@ pub fn denied(callback: &str) -> bool {
 }
 
 /// Serves one connection: the redirect, or anything else the browser asks for (a favicon).
-async fn serve(mut socket: tokio::net::TcpStream, port: u16, name: String, landed: tokio::sync::mpsc::Sender<String>) {
+async fn serve(mut socket: tokio::net::TcpStream, port: u16, expected: String, name: String, landed: tokio::sync::mpsc::Sender<String>) {
     let mut buffer = vec![0u8; 16 * 1024];
     let mut read = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -98,7 +117,7 @@ async fn serve(mut socket: tokio::net::TcpStream, port: u16, name: String, lande
     }
     let head = String::from_utf8_lossy(&buffer[..read]);
     let path = head.lines().next().and_then(|line| line.split_whitespace().nth(1)).unwrap_or("/").to_string();
-    if path != "/callback" && !path.starts_with("/callback?") {
+    if path != expected && !path.starts_with(&format!("{expected}?")) {
         let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
         return;
     }

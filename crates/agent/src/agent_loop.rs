@@ -136,6 +136,12 @@ pub trait LoopHooks: Send + Sync {
         None
     }
 
+    /// Synchronous authorization against current state, immediately before a prepared call
+    /// executes. Unlike `before_tool_call`, this must not ask for review again.
+    fn permit_prepared_call(&self, _ctx: BeforeToolCallContext<'_>) -> Option<String> {
+        None
+    }
+
     async fn after_tool_call(&self, _ctx: AfterToolCallContext<'_>) -> Option<AfterToolCallResult> {
         None
     }
@@ -588,7 +594,10 @@ async fn execute_sequential(
             Preparation::Immediate { result, is_error, .. } => FinalizedCall { tool_call, result, is_error },
             Preparation::Prepared { tool, args } => {
                 let runner = LoopRunner { context, assistant, config, parent: &tool_call };
-                let (result, is_error) = execute_prepared(&tool, &tool_call, &args, emit, cancel, &runner).await;
+                let (result, is_error) = match execution_denial(context, assistant, &tool_call, &args, config, cancel, None) {
+                    Some(reason) => (error_result(reason), true),
+                    None => execute_prepared(&tool, &tool_call, &args, emit, cancel, &runner).await,
+                };
                 finalize_executed(context, assistant, tool_call, args, result, is_error, config, None).await
             }
         };
@@ -653,9 +662,11 @@ async fn execute_parallel(
             }
             Slot::Pending { tool, tool_call, args } => {
                 let runner = LoopRunner { context, assistant, config, parent: &tool_call };
-                let (result, is_error) = execute_prepared(&tool, &tool_call, &args, emit, cancel, &runner).await;
-                let finalized =
-                    finalize_executed(context, assistant, tool_call, args, result, is_error, config, None).await;
+                let (result, is_error) = match execution_denial(context, assistant, &tool_call, &args, config, cancel, None) {
+                    Some(reason) => (error_result(reason), true),
+                    None => execute_prepared(&tool, &tool_call, &args, emit, cancel, &runner).await,
+                };
+                let finalized = finalize_executed(context, assistant, tool_call, args, result, is_error, config, None).await;
                 emit_tool_execution_end(&finalized, emit).await;
                 finalized
             }
@@ -747,6 +758,22 @@ pub(crate) fn checked_arguments(tool: &dyn Tool, arguments: &Value) -> Result<Va
         .and_then(|args| validate_tool_arguments(tool.name(), &tool.parameters(), &args))
 }
 
+/// Authorization remains current while another batch call waits for review.
+fn execution_denial(
+    context: &AgentContext,
+    assistant: &AssistantMessage,
+    tool_call: &ToolCall,
+    args: &Value,
+    config: &AgentLoopConfig,
+    cancel: &CancellationToken,
+    parent: Option<&ToolCall>,
+) -> Option<String> {
+    if cancel.is_cancelled() {
+        return Some("Operation aborted".into());
+    }
+    config.hooks.permit_prepared_call(BeforeToolCallContext { assistant_message: assistant, tool_call, args, context, cancel, parent })
+}
+
 /// The runner a tool gets for the calls it makes while it runs (`Tool::execute_with`), such as
 /// a codemode script's: each goes through the checks and hooks the model's own calls do, with
 /// the calling call as `parent`. Such calls send no events of their own; the calling tool
@@ -765,6 +792,9 @@ impl ToolRunner for LoopRunner<'_> {
         match prepare_call(tool, self.context, self.assistant, &tool_call, self.config, &cancel, Some(self.parent)).await {
             Preparation::Immediate { result, is_error, blocked } => ToolOutcome { result, is_error, blocked },
             Preparation::Prepared { tool, args } => {
+                if let Some(reason) = execution_denial(self.context, self.assistant, &tool_call, &args, self.config, &cancel, Some(self.parent)) {
+                    return ToolOutcome { result: error_result(reason), is_error: true, blocked: true };
+                }
                 let nested = LoopRunner { parent: &tool_call, ..*self };
                 let (result, is_error) = match tool.execute_with(&tool_call.id, args.clone(), cancel.clone(), Arc::new(|_| {}), &nested).await {
                     Ok(result) => {
@@ -773,8 +803,7 @@ impl ToolRunner for LoopRunner<'_> {
                     }
                     Err(error) => (error_result(error.0), true),
                 };
-                let finalized =
-                    finalize_executed(self.context, self.assistant, tool_call, args, result, is_error, self.config, Some(self.parent)).await;
+                let finalized = finalize_executed(self.context, self.assistant, tool_call, args, result, is_error, self.config, Some(self.parent)).await;
                 ToolOutcome { result: finalized.result, is_error: finalized.is_error, blocked: false }
             }
         }
@@ -1138,6 +1167,90 @@ mod tests {
         let (messages, _) = run(provider.clone(), vec![tool], Arc::new(BlockAndStop), CancellationToken::new()).await;
         assert_eq!(tool_results(&messages)[0].text(), "not allowed");
         assert_eq!(provider.requests.lock().unwrap().len(), 1, "the batch terminated the run");
+    }
+
+    struct RevocationGate {
+        allowed: std::sync::atomic::AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl LoopHooks for RevocationGate {
+        async fn before_tool_call(&self, ctx: BeforeToolCallContext<'_>) -> Option<BeforeToolCallResult> {
+            if ctx.tool_call.id == "review" || (ctx.tool_call.id == "revoked" && ctx.parent.is_some()) {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            None
+        }
+
+        fn permit_prepared_call(&self, ctx: BeforeToolCallContext<'_>) -> Option<String> {
+            (ctx.tool_call.id == "revoked" && !self.allowed.load(std::sync::atomic::Ordering::SeqCst))
+                .then(|| "Tool access removed".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn prepared_batch_call_rechecks_revocation_after_another_call_waits_for_review() {
+        let hooks = Arc::new(RevocationGate {
+            allowed: std::sync::atomic::AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let denied = Arc::new(Counter { runs: Mutex::new(vec![]), cancel_on_run: None });
+        let context = AgentContext { system_prompt: String::new(), messages: Vec::new(), tools: vec![denied.clone()], cache_points: Vec::new() };
+        let assistant = AssistantMessage::empty("p", "m");
+        let config = AgentLoopConfig::new(Scripted::new("p", vec![])).with_hooks(hooks.clone());
+        let (tx, _rx) = mpsc::channel(64);
+        let emit = Emitter::new(&tx, &config);
+        let calls = ["revoked", "review", "allowed"].into_iter().map(|id| ToolCall {
+            id: id.into(), name: "count".into(), arguments: json!({ "limit": 1 }),
+        }).collect();
+        let cancel = CancellationToken::new();
+        let pending = execute_parallel(&context, &assistant, calls, &config, &emit, &cancel);
+        tokio::pin!(pending);
+        tokio::select! {
+            _ = &mut pending => panic!("review gate was not reached"),
+            _ = hooks.entered.notified() => {},
+        }
+        hooks.allowed.store(false, std::sync::atomic::Ordering::SeqCst);
+        hooks.release.notify_one();
+        let batch = pending.await;
+        assert_eq!(batch.messages.len(), 3);
+        assert!(batch.messages[0].is_error);
+        assert_eq!(batch.messages[0].text(), "Tool access removed");
+        assert!(!batch.messages[1].is_error);
+        assert!(!batch.messages[2].is_error);
+        assert_eq!(denied.runs.lock().unwrap().len(), 2, "unaffected prepared calls continue");
+    }
+
+    #[tokio::test]
+    async fn nested_call_rechecks_permission_after_review_wait() {
+        let hooks = Arc::new(RevocationGate {
+            allowed: std::sync::atomic::AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let tool = Arc::new(Counter { runs: Mutex::new(vec![]), cancel_on_run: None });
+        let context = AgentContext { system_prompt: String::new(), messages: Vec::new(), tools: vec![], cache_points: Vec::new() };
+        let assistant = AssistantMessage::empty("p", "m");
+        let config = AgentLoopConfig::new(Scripted::new("p", vec![])).with_hooks(hooks.clone());
+        let parent = ToolCall { id: "script".into(), name: "codemode".into(), arguments: json!({}) };
+        let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &parent };
+        let cancel = CancellationToken::new();
+        let pending = runner.run(tool.clone(), "revoked".into(), json!({ "limit": 1 }), cancel);
+        tokio::pin!(pending);
+        tokio::select! {
+            _ = &mut pending => panic!("review gate was not reached"),
+            _ = hooks.entered.notified() => {},
+        }
+        hooks.allowed.store(false, std::sync::atomic::Ordering::SeqCst);
+        hooks.release.notify_one();
+        let denied = pending.await;
+        assert!(denied.blocked);
+        assert_eq!(denied.result.text_content(), "Tool access removed");
+        assert!(tool.runs.lock().unwrap().is_empty());
     }
 
     /// Records every call it sees with the call that made it, and blocks a script's call to

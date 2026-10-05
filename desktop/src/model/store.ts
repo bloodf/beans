@@ -48,6 +48,7 @@ import {
   type Routine,
   commandRunOf,
 } from "./models";
+import { parseLocally, type McpEntry, type McpFile, type McpServer, type ParsedServer } from "./mcp";
 import { ReplyEngine } from "./replies";
 import {
   toAutoReview,
@@ -57,7 +58,10 @@ import {
   toCustomModel,
   toDevice,
   toMarketplace,
+  toMcpFile,
+  toMcpServer,
   toMessage,
+  toParsedServers,
   toPlugin,
   toPluginDetail,
   toModels,
@@ -67,6 +71,7 @@ import {
   type WireChatUsage,
   type WireJobEvent,
   type WireJobRetry,
+  type WireMcpServer,
   type WireMessage,
   type WireMessagePage,
   type WireModelList,
@@ -148,6 +153,8 @@ export class AppStore {
   providers: ProviderCredential[] = [];
   /** The models the CLI's catalog offers, for the Model and Thinking pickers. */
   models: ProviderModel[] = [];
+  /** Pauses all account bot work on every Runner. */
+  paused = false;
 
   /** True when the CLI answers on localhost (mock: toggled from the Debug menu). */
   isConnected = false;
@@ -312,6 +319,7 @@ export class AppStore {
     this.relayConnected = snapshot.relay_connected;
     this.relayUpdateRequired = snapshot.relay_update_required ?? false;
     this.relayError = snapshot.relay_error?.message ?? null;
+    this.paused = snapshot.paused ?? false;
     this.devices = snapshot.devices.map(toDevice);
     this.bots = snapshot.bots.map(toBot);
     // A snapshot carries each chat's newest messages. Older pages this app already loaded stay
@@ -356,6 +364,7 @@ export class AppStore {
       case "roster.changed": {
         const roster = data as WireRosterChanged;
         this.devices = roster.devices.map(toDevice);
+        this.paused = roster.paused ?? false;
         this.bots = roster.bots.map(toBot);
         if (roster.routines) this.routines = roster.routines.map(toRoutine);
         if (roster.auto_review) this.autoReview = toAutoReview(roster.auto_review);
@@ -731,6 +740,7 @@ export class AppStore {
       provider: options.provider,
       model: options.model,
       thinking: options.thinking,
+      capabilities: { shell: true, write: true, plugins: null },
       createdAt: Date.now(),
     };
     this.bots = [...this.bots, bot];
@@ -845,6 +855,14 @@ export class AppStore {
     }
   }
 
+  /** Changes this bot's allowed local tools and installed plugins on its Runner. */
+  setBotCapabilities(id: string, capabilities: Bot["capabilities"]): void {
+    if (!this.bot(id)) return;
+    this.updateBot(id, (bot) => ({ ...bot, capabilities }));
+    this.emit({ kind: "rosterChanged" });
+    this.perform("bots.update", { id, capabilities });
+  }
+
   /** Provider, model, and thinking level a bot runs with. None means the provider's default. */
   setBotRuntime(id: string, provider: ProviderKind, model: string | undefined, thinking: string | undefined): void {
     if (!this.bot(id)) return;
@@ -922,6 +940,163 @@ export class AppStore {
   async connectPlugin(pluginID: string, runnerID: string): Promise<void> {
     if (this.isMock) return;
     await this.request("plugins.connect", { runner_id: runnerID, plugin_id: pluginID });
+  }
+
+  /** Forgets a plugin server's sign-in on its Runner. Nothing is revoked at the server; the
+   * plugin's next use asks for a sign-in again. */
+  async signOutPlugin(pluginID: string, runnerID: string, server: string): Promise<void> {
+    if (this.isMock) return;
+    await this.request("plugins.sign_out", { runner_id: runnerID, plugin_id: pluginID, server });
+  }
+
+  // MARK: - MCP servers
+
+  /** The demo's mcp.json files, by Runner. */
+  private mockMcp = new Map<string, McpServer[]>();
+
+  private async mockMcpServers(runnerID: string): Promise<McpServer[]> {
+    if (!this.mockMcp.has(runnerID)) {
+      const { mcpServers } = await import("./mock");
+      this.mockMcp.set(runnerID, runnerID === "dev-workbench" ? mcpServers() : []);
+    }
+    return this.mockMcp.get(runnerID)!;
+  }
+
+  /** The demo's Runner takes its servers as the CLI would: the ones that run are its plugins. */
+  private setMockMcpServers(runnerID: string, servers: McpServer[]): void {
+    this.mockMcp.set(runnerID, servers);
+    const device = this.device(runnerID);
+    if (!device) return;
+    const plugins = [...device.plugins.filter((plugin) => plugin.source !== "mcp.json"), ...servers.flatMap((server) => (server.enabled && server.status ? [server.status] : []))];
+    this.devices = this.devices.map((each) => (each.id === runnerID ? { ...each, plugins } : each));
+    this.emit({ kind: "rosterChanged" });
+  }
+
+  /** A Runner's mcp.json: every server in it, usable or not, here or sealed to that Runner. */
+  async mcpServers(runnerID: string): Promise<McpFile> {
+    if (this.isMock) return { path: "~/.lorca/mcp.json", servers: await this.mockMcpServers(runnerID) };
+    return toMcpFile(await this.request("mcp.list", { runner_id: runnerID }));
+  }
+
+  /** One server with the tools it offered when it last connected. */
+  async mcpServer(name: string, runnerID: string): Promise<McpServer> {
+    if (this.isMock) {
+      const server = (await this.mockMcpServers(runnerID)).find((each) => each.name === name);
+      if (!server) throw new RequestError(L("No server named %@ in mcp.json.", name));
+      return server;
+    }
+    return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.get", { runner_id: runnerID, name })).server);
+  }
+
+  /** Adds a server, or saves the one `previousName` names under `name`. The CLI checks the entry
+   * and writes it to the Runner's mcp.json, where the server starts once to list its tools. */
+  async saveMcpServer(runnerID: string, name: string, entry: McpEntry, previousName?: string): Promise<McpServer> {
+    if (this.isMock) {
+      const servers = await this.mockMcpServers(runnerID);
+      if ((previousName === undefined || previousName !== name) && servers.some((each) => each.name === name)) {
+        throw new RequestError(L("mcp.json already has a server named %@.", name));
+      }
+      const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "server";
+      const remote = typeof entry.url === "string";
+      const status: InstalledPlugin = { id, name, description: entry.description ?? "", version: "", icon: remote ? "globe" : "terminal", state: "ready", detail: "Ready", source: "mcp.json" };
+      const enabled = entry.disabled !== true;
+      const server: McpServer = { name, id, enabled, entry, status: enabled ? status : undefined, signsIn: false, signedIn: false, toolCount: 2, tools: [{ name: "echo", description: "Echo back what you send.", readOnly: true }, { name: "write_note", description: "Write a note.", readOnly: false }] };
+      const index = servers.findIndex((each) => each.name === (previousName ?? name));
+      this.setMockMcpServers(runnerID, index >= 0 ? servers.map((each, at) => (at === index ? server : each)) : [...servers, server]);
+      return server;
+    }
+    const reply = await this.request<{ server: WireMcpServer }>("mcp.save", { runner_id: runnerID, name, config: entry, ...(previousName ? { previous_name: previousName } : {}) });
+    return toMcpServer(reply.server);
+  }
+
+  /** Removes a server from the Runner's mcp.json, with its sign-in. */
+  async removeMcpServer(runnerID: string, name: string): Promise<void> {
+    if (this.isMock) {
+      this.setMockMcpServers(runnerID, (await this.mockMcpServers(runnerID)).filter((each) => each.name !== name));
+      return;
+    }
+    await this.request("mcp.remove", { runner_id: runnerID, name });
+  }
+
+  /** Turns a server on or off; off, no bot sees it and it never starts. */
+  async setMcpServerEnabled(runnerID: string, name: string, enabled: boolean): Promise<McpServer> {
+    if (this.isMock) {
+      const servers = await this.mockMcpServers(runnerID);
+      const updated = servers.map((each) => {
+        if (each.name !== name) return each;
+        const entry = { ...each.entry };
+        if (enabled) delete entry.disabled;
+        else entry.disabled = true;
+        const status: InstalledPlugin = each.status ?? { id: each.id, name, description: entry.description ?? "", version: "", icon: typeof entry.url === "string" ? "globe" : "terminal", state: "ready", detail: "Ready", source: "mcp.json" };
+        return { ...each, enabled, entry, status: enabled ? status : undefined };
+      });
+      this.setMockMcpServers(runnerID, updated);
+      return updated.find((each) => each.name === name)!;
+    }
+    return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.set_enabled", { runner_id: runnerID, name, enabled })).server);
+  }
+
+  /** Connects a server and waits for it: from scratch (`fresh`), or taking a connection it has or
+   * one under way. Its state says how it went. */
+  async reconnectMcpServer(runnerID: string, name: string, fresh = true): Promise<McpServer> {
+    if (this.isMock) {
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      return this.mcpServer(name, runnerID);
+    }
+    return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.reconnect", { runner_id: runnerID, name, fresh })).server);
+  }
+
+  /** Reads the Runner's mcp.json again, after an edit made outside Lorca, and answers the file as
+   * it reads now. */
+  async reloadMcpServers(runnerID: string): Promise<McpFile> {
+    if (this.isMock) return this.mcpServers(runnerID);
+    return toMcpFile(await this.request("mcp.reload", { runner_id: runnerID }));
+  }
+
+  /** Offers one of a server's tools to bots, or keeps it from them, in the Runner's mcp.json. The
+   * server keeps its connection. */
+  async setMcpToolHidden(runnerID: string, name: string, tool: string, hidden: boolean): Promise<McpServer> {
+    if (this.isMock) {
+      const servers = await this.mockMcpServers(runnerID);
+      const server = servers.find((each) => each.name === name);
+      if (!server) throw new RequestError(L("No server named %@ in mcp.json.", name));
+      const changed: McpServer = { ...server, tools: server.tools?.map((each) => (each.name === tool ? { ...each, hidden } : each)) };
+      this.setMockMcpServers(runnerID, servers.map((each) => (each.name === name ? changed : each)));
+      return changed;
+    }
+    return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.hide_tool", { runner_id: runnerID, name, tool, hidden })).server);
+  }
+
+  /** Browser sign-in starts on requesting Device, even when server runs on another Runner. */
+  async signInMcpServer(runnerID: string, pluginID: string): Promise<void> {
+    if (this.isMock) return;
+    await this.request("plugins.connect", { runner_id: runnerID, plugin_id: pluginID, server: "mcp" });
+  }
+
+  /** Forgets a remote server's sign-in on its Runner; its next use asks for one again. */
+  async signOutMcpServer(runnerID: string, name: string): Promise<McpServer> {
+    if (this.isMock) {
+      const servers = await this.mockMcpServers(runnerID);
+      const server = servers.find((each) => each.name === name);
+      if (!server) throw new RequestError(L("No server named %@ in mcp.json.", name));
+      const signedOut: McpServer = { ...server, signedIn: false, status: server.status && { ...server.status, state: "needs_auth", detail: "Sign in" } };
+      this.setMockMcpServers(runnerID, servers.map((each) => (each.name === name ? signedOut : each)));
+      return signedOut;
+    }
+    return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.sign_out", { runner_id: runnerID, name })).server);
+  }
+
+  /** The servers pasted JSON holds, in any app's spelling; the CLI on this computer reads it. */
+  async parseMcpJSON(text: string): Promise<ParsedServer[]> {
+    if (this.isMock) return parseLocally(text);
+    return toParsedServers(await this.request("mcp.parse", { text }));
+  }
+
+  /** Pauses or resumes the account across paired Devices. */
+  setAccountPaused(paused: boolean): void {
+    this.paused = paused;
+    this.emit({ kind: "rosterChanged" });
+    this.perform("account.pause", { paused });
   }
 
   /** Replaces Auto-review (the switch and the rules); the change shows at once and the CLI's roster
@@ -1505,6 +1680,14 @@ export class AppStore {
     await this.request("providers.disconnect", { kind });
   }
 
+  /** Refreshes saved custom-provider model lists without changing their credentials or bot picks.
+   * The CLI sends a roster event for changed catalogs. */
+  async refreshProviderModels(): Promise<number> {
+    if (this.isMock) return 0;
+    const reply = await this.request<{ updated: number }>("providers.refresh");
+    return reply.updated;
+  }
+
   /** The chat models a custom provider's server lists, in its order (`providers.list_models`), for
    * the sheet to pick from; the base URL is read as the CLI saves it. Null when the server publishes
    * no list. Throws why the server could not be asked: a key it refused, no answer, or an answer
@@ -1572,6 +1755,7 @@ export class AppStore {
       this.autoReview = mock.autoReview();
       this.providers = mock.providers();
       this.models = mock.models();
+      this.paused = false;
       this.sortChats();
       this.emit({ kind: "snapshotReplaced" });
     });

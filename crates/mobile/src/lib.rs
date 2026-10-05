@@ -256,6 +256,7 @@ mod tests {
                 is_error: false,
                 description: None,
                 target_bot_id: None,
+                script_command: None,
                 run: None,
             },
         );

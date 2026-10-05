@@ -465,7 +465,7 @@ final class SettingsPopUpButton: NSPopUpButton {
 
     override var intrinsicContentSize: NSSize {
         NSSize(
-            width: Self.leading + ceil(titleText.size().width) + Self.gap + Self.platter.width, height: 24)
+            width: Self.leading + ceil(titleText.size().width) + Self.gap + Self.platter.width + Self.overhang, height: 24)
     }
 
     override func updateTrackingAreas() {

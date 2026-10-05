@@ -491,7 +491,7 @@ fn supersede(tx: &Connection, identity_pubkey: &str, slot: &Slot) -> rusqlite::R
 /// Stores a blob under the identity's next sequence number. A known id returns its existing
 /// seq. `quota_bytes` of 0 means unlimited.
 pub fn insert_blob(connection: &mut Connection, blob: &NewBlob, quota_bytes: u64) -> ApiResult<Inserted> {
-    let NewBlob { identity_pubkey, id, kind, recipient_machine_pubkey, slot, group, payload } = blob;
+    let NewBlob { identity_pubkey, id, kind, recipient_machine_pubkey, slot, expected_slot_seq, group, payload } = blob;
     let (identity_pubkey, id, kind) = (identity_pubkey.as_str(), id.as_str(), kind.as_str());
     let (recipient_machine_pubkey, group) = (recipient_machine_pubkey.as_deref(), group.as_deref());
     let ciphertext: &[u8] = match payload {
@@ -508,6 +508,16 @@ pub fn insert_blob(connection: &mut Connection, blob: &NewBlob, quota_bytes: u64
     }
     if let Some(seq) = blob_seq(&tx, identity_pubkey, id)? {
         return Ok(Inserted { seq, existing: true });
+    }
+    if kind == "roster" {
+        let Some(expected) = expected_slot_seq else { return Err(ApiError::bad_request("Roster requires expected_slot_seq")) };
+        let actual: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM blobs WHERE identity_pubkey = ?1 AND slot = 'roster' AND kind = 'roster'",
+            params![identity_pubkey], |row| row.get(0),
+        )?;
+        if actual != *expected {
+            return Err(ApiError::conflict("Roster slot changed"));
+        }
     }
     if let Some(group) = group {
         if group_deleted(&tx, identity_pubkey, group)? {

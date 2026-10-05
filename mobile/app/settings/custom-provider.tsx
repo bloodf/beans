@@ -62,7 +62,10 @@ export default function CustomProviderScreen() {
   // An edited provider's key comes from the core before the server is first asked for models.
   const [keyLoaded, setKeyLoaded] = useState(!saved);
   const [working, setWorking] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshNote, setRefreshNote] = useState<string | null>(null);
+  const savedKey = useRef<string | null>(null);
   const [initialRows] = useState(() => savedModelRows(saved?.models ?? []));
   const rows = useModelDraft((s) => s.rows);
   const chosenDefault = useModelDraft((s) => s.chosenDefault);
@@ -84,6 +87,7 @@ export default function CustomProviderScreen() {
     engine
       .providerAPIKey(saved.kind)
       .then(({ api_key }) => {
+        if (current) savedKey.current = api_key ?? "";
         if (current && api_key) setAPIKey((typed) => typed || api_key);
       })
       .catch(() => {})
@@ -162,6 +166,28 @@ export default function CustomProviderScreen() {
     } catch (cause) {
       setError(messageOf(cause));
     } finally {
+      setWorking(false);
+    }
+  }
+
+  async function refreshModels() {
+    if (!kind || working || !keyLoaded) return;
+    ++asked.current;
+    setWorking(true);
+    setRefreshing(true);
+    setError(null);
+    setRefreshNote(null);
+    const before = useStore.getState().providers.find((provider) => provider.kind === kind)?.models;
+    try {
+      await engine.refreshCustomModels();
+      const after = useStore.getState().providers.find((provider) => provider.kind === kind)?.models;
+      setRefreshNote(JSON.stringify(before) === JSON.stringify(after) ? t("Models unchanged") : t("Models updated"));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      const after = useStore.getState().providers.find((provider) => provider.kind === kind)?.models;
+      if (after && api === saved?.api && baseURL.trim() === saved?.base_url && apiKey === savedKey.current) takeModelListing(true, after);
+      setRefreshing(false);
       setWorking(false);
     }
   }
@@ -252,6 +278,7 @@ export default function CustomProviderScreen() {
             chevron
             onPress={() => router.push("/settings/custom-models")}
           />
+          {saved?.is_connected ? <Row title={t("Refresh Models")} onPress={!working && keyLoaded ? () => void refreshModels() : undefined} accessory={refreshing ? <ActivityIndicator /> : undefined} /> : null}
           {defaultRow ? (
             <Row
               title={t("Default Model")}
@@ -267,10 +294,11 @@ export default function CustomProviderScreen() {
         </Section>
 
         <Section>
-          <Row title={kind ? t("Save") : t("Add")} onPress={canSave ? () => void save() : undefined} accessory={working ? <ActivityIndicator /> : undefined} />
+          <Row title={kind ? t("Save") : t("Add")} onPress={canSave ? () => void save() : undefined} accessory={working && !refreshing ? <ActivityIndicator /> : undefined} />
         </Section>
 
         {error ? <Text style={[styles.error, { color: p.red }]}>{error}</Text> : null}
+        {refreshNote ? <Text style={[styles.error, { color: p.secondaryLabel }]}>{refreshNote}</Text> : null}
 
         {kind ? (
           <Section>

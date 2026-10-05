@@ -85,7 +85,36 @@ pub fn cancel_chat(app: &Arc<App>, chat_id: &str) {
     // A command left waiting for input in this chat stops too, turn or no turn.
     #[cfg(feature = "runner")]
     app.shell_sessions.stop_chat(chat_id);
-    for (job_id, runner_id) in app.cancel_chat(chat_id) {
+    forward_cancellations(app, app.cancel_chat(chat_id));
+}
+
+/// Stops only removed bots' turns, leaving surviving group members' work alone.
+/// Includes queued local jobs and remote turns advertised by their Runner.
+pub fn cancel_removed_bots(app: &Arc<App>, removed_bot_ids: &[String]) {
+    if removed_bot_ids.is_empty() { return; }
+    let mut remote = Vec::new();
+    for (id, job) in app.running_jobs.lock().unwrap().iter() {
+        if removed_bot_ids.contains(&job.bot_id) {
+            job.cancel.cancel();
+            if let Some(runner_id) = &job.runner_id {
+                remote.push((id.clone(), runner_id.clone()));
+            }
+        }
+    }
+    let state = app.state.lock().unwrap();
+    for (device_id, turns) in state.device_turns.iter().filter(|(id, _)| state.turns_online.contains(*id)) {
+        for turn in turns.iter().filter(|turn| removed_bot_ids.contains(&turn.bot_id)) {
+            if !remote.iter().any(|(id, _)| id == &turn.job_id) {
+                remote.push((turn.job_id.clone(), device_id.clone()));
+            }
+        }
+    }
+    drop(state);
+    forward_cancellations(app, remote);
+}
+
+fn forward_cancellations(app: &Arc<App>, remote: Vec<(String, String)>) {
+    for (job_id, runner_id) in remote {
         let Some(runner) = app.device(&runner_id).filter(|runner| !runner.box_pubkey.is_empty()) else { continue };
         match crate::crypto::seal_json(&runner.box_pubkey, &JobCancel { job_id: job_id.clone() }) {
             Ok(ciphertext) => {
@@ -356,6 +385,7 @@ fn heard_count(app: &App, chat_id: &str, bot_id: &str) -> usize {
 
 /// Runs one member's turn here or on its Runner and waits for the outcome.
 async fn run_member_turn(app: &Arc<App>, job: Job, room_cancel: &CancellationToken) -> TurnOutcome {
+    if app.is_paused() { return TurnOutcome::Skipped; }
     let Some(bot) = app.bot(&job.bot_id) else { return TurnOutcome::Skipped };
     if app.this_device_id().as_deref() == Some(bot.runner_id.as_str()) {
         return run_job_here(app, job, room_cancel.child_token()).await;
@@ -483,6 +513,7 @@ pub fn deliver_job_result(app: &Arc<App>, result: JobResult) {
 /// Starts a turn wherever the bot runs: here in the background, or on its Runner with the
 /// wait for the result tracked here.
 pub fn start_turn(app: &Arc<App>, job: Job) {
+    if app.is_paused() { app.notice(&job.chat_id, "Account paused. Resume to run bots."); return; }
     let Some(bot) = app.bot(&job.bot_id) else { return };
     if app.this_device_id().as_deref() == Some(bot.runner_id.as_str()) {
         spawn_local_job(app.clone(), job, None);
@@ -515,6 +546,10 @@ pub enum Dispatch {
 
 /// Runs the job here when the bot's Runner is this Device; otherwise seals it to that Runner.
 pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
+    if app.is_paused() {
+        app.notice(&job.chat_id, "Account paused. Resume to run bots.");
+        return Dispatch::Deferred;
+    }
     let Some(bot) = app.bot(&job.bot_id) else { return Dispatch::Deferred };
     if app.this_device_id().as_deref() == Some(bot.runner_id.as_str()) {
         spawn_local_job(app.clone(), job, None);
@@ -550,6 +585,19 @@ pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
 /// outcome goes back to the requesting Device when the job came from another one. It registers
 /// before taking the lock, so hard Stop also cancels jobs waiting behind another turn.
 pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>) {
+    if app.is_paused() {
+        app.notice(&job.chat_id, "Account paused. Resume to run bots.");
+        if let Some(id) = remote_blob_id {
+            let app = app.clone();
+            tokio::spawn(async move {
+                crate::sync::delete_remote_blob(&app, &id).await;
+                if app.this_device_id().as_deref() != Some(job.requested_by.as_str()) {
+                    report_outcome(&app, &job, TurnOutcome::Skipped);
+                }
+            });
+        }
+        return;
+    }
     let cancel = CancellationToken::new();
     begin_job(
         &app,
@@ -685,8 +733,25 @@ mod tests {
             thinking: None,
             legacy_instructions: String::new(),
             workdir: None,
+            capabilities: Default::default(),
             created_at: 0.0,
         }
+    }
+
+    #[test]
+    fn paused_jobs_never_queue_on_relay() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        app.set_paused(true);
+        let job = Job {
+            id: "paused-job".into(), chat_id: "chat".into(), bot_id: "bot".into(),
+            kind: "turn".into(), trigger_message_id: String::new(), routine_id: None,
+            check: None, requested_by: String::new(), from_bot_id: None, hops: 0,
+            round: 0, is_winding_down: false, setup: None, created_at: 0.0,
+        };
+        assert!(matches!(dispatch_job(app, job), Dispatch::Deferred));
+        assert!(app.store.outbox().unwrap().iter().all(|item| item.kind != "job"));
+        assert!(app.running_jobs.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -784,6 +849,41 @@ mod tests {
         let payload: JobCancel =
             crate::crypto::unseal_json(&runner_keys.box_secret, &ciphertext).unwrap();
         assert_eq!(payload.job_id, "remote-job");
+    }
+
+    #[test]
+    fn removing_bot_cancels_only_its_jobs_in_surviving_group() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let runner_keys = crate::keys::Machine::generate();
+        app.state.lock().unwrap().devices.push(Device {
+            id: "runner".into(), name: "Runner".into(), model: String::new(), os: "macos".into(),
+            os_version: String::new(), box_pubkey: runner_keys.box_pubkey(), plugins: Vec::new(), updated_at: 1,
+        });
+        let removed = CancellationToken::new();
+        let survivor = CancellationToken::new();
+        let remote = CancellationToken::new();
+        for (id, bot_id, runner_id, cancel) in [
+            ("queued", "removed", None, removed.clone()),
+            ("survivor", "kept", None, survivor.clone()),
+            ("remote", "removed", Some("runner".to_string()), remote.clone()),
+        ] {
+            app.running_jobs.lock().unwrap().insert(id.into(), RunningJob {
+                chat_id: "group".into(), bot_id: bot_id.into(), routine_id: None,
+                runner_id, cancel, activity: None,
+            });
+        }
+
+        cancel_removed_bots(app, &["removed".into()]);
+
+        assert!(removed.is_cancelled());
+        assert!(remote.is_cancelled());
+        assert!(!survivor.is_cancelled());
+        let cancels: Vec<_> = app.store.outbox().unwrap().into_iter().filter(|item| item.kind == "job_cancel").collect();
+        let [queued] = cancels.try_into().unwrap();
+        assert_eq!(queued.recipient.as_deref(), Some("runner"));
+        let payload: JobCancel = crate::crypto::unseal_json(&runner_keys.box_secret, &queued.ciphertext).unwrap();
+        assert_eq!(payload.job_id, "remote");
     }
 
     fn turn_on_mac(job_id: &str, chat_id: &str) -> LiveTurn {

@@ -232,7 +232,7 @@ final class MarketplaceBotPage: MarketplacePage {
 
     private func header(for template: BotTemplate) -> NSView {
         let avatar = AvatarView(diameter: 64)
-        avatar.content = .bot(symbolName: template.symbolName, accent: template.accent)
+        avatar.content = .bot(id: template.id)
         avatar.translatesAutoresizingMaskIntoConstraints = false
         let name = Build.label(template.name, font: .systemFont(ofSize: 22, weight: .semibold))
         let byline = Build.label(

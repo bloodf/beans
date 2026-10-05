@@ -10,6 +10,7 @@ final class InspectorViewController: NSViewController {
     private let nameRow = EditableRow(key: L("Name"), placeholder: L("Name"))
     private let descriptionRow = SummaryActionRow(key: L("Description"), value: "", actionTitle: L("Edit…"))
     private let runtime = SectionView(title: L("Runs with"))
+    private let abilities = SectionView(title: L("Abilities"))
     private let memory = SectionView(title: L("Memory"))
     private let routines = SectionView(title: L("Routines"))
     private let plugins = SectionView(title: L("Plugins"))
@@ -81,6 +82,7 @@ final class InspectorViewController: NSViewController {
         column.addArrangedSubview(addButton)
         column.addArrangedSubview(profile)
         column.addArrangedSubview(runtime)
+        column.addArrangedSubview(abilities)
         column.addArrangedSubview(memory)
         column.addArrangedSubview(routines)
         column.addArrangedSubview(plugins)
@@ -117,6 +119,7 @@ final class InspectorViewController: NSViewController {
             participants.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             profile.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             runtime.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
+            abilities.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             memory.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             routines.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             plugins.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
@@ -216,12 +219,13 @@ final class InspectorViewController: NSViewController {
 
         // A direct chat is one bot, so its profile, provider, and model are edited right here.
         let single = chat.isDM && members.count == 1
-        for section in [profile, runtime, memory, routines, plugins] where section.isHidden == single {
+        for section in [profile, runtime, abilities, memory, routines, plugins] where section.isHidden == single {
             section.isHidden = !single
         }
         if single, let bot = members.first {
             showProfile(of: bot)
             showRuntime(of: bot, in: chat)
+            showAbilities(of: bot)
             showMemory(of: bot)
             showRoutines(of: bot)
             showPlugins(of: bot)
@@ -283,6 +287,48 @@ final class InspectorViewController: NSViewController {
             contextRow?.setValue(usage.contextSummary)
             spentRow?.setValue(usage.spendSummary)
         }
+    }
+
+    private func showAbilities(of bot: Bot) {
+        let runner = store.device(bot.runnerID)
+        let installed = runner?.plugins ?? []
+        guard changed(abilities, to: [bot.id, bot.capabilities, installed]) else { return }
+        func row(_ key: String, title: String, detail: String, enabled: Bool, change: @escaping (inout BotCapabilities, Bool) -> Void) -> SwitchRow {
+            let item: SwitchRow = keptRow("ability:\(bot.id):\(key)") { SwitchRow() }
+            item.configure(symbol: "checkmark.shield", tint: .secondaryLabelColor, title: title, detail: detail,
+                isOn: enabled, toggleTooltip: title, tooltip: detail)
+            item.onToggle = { [weak self] value in
+                guard let self, case let .chat(chatID) = self.selection,
+                    let chat = self.store.chat(chatID), chat.isDM, chat.botIDs == [bot.id],
+                    let current = self.store.bot(bot.id) else { return }
+                var capabilities = current.capabilities
+                change(&capabilities, value)
+                self.store.setBotCapabilities(bot.id, capabilities)
+            }
+            return item
+        }
+        var rows: [NSView] = [
+            row("shell", title: L("Shell commands"), detail: L("Shell commands can write files even when File writes is off."),
+                enabled: bot.capabilities.shell) { $0.shell = $1 },
+            row("write", title: L("File writes"), detail: L("Controls built-in file-writing tools, not shell or plugins."),
+                enabled: bot.capabilities.write) { $0.write = $1 },
+            row("all-plugins", title: L("All installed plugins"), detail: L("New plugins are allowed automatically when on"),
+                enabled: bot.capabilities.plugins == nil) { $0.plugins = $1 ? nil : [] },
+        ]
+        for plugin in installed {
+            rows.append(row("plugin:\(plugin.id)", title: plugin.name, detail: L("Allow this plugin"),
+                enabled: bot.capabilities.plugins?.contains(plugin.id) ?? true) { capabilities, enabled in
+                var allowed = capabilities.plugins ?? installed.map(\.id)
+                if enabled {
+                    if !allowed.contains(plugin.id) { allowed.append(plugin.id) }
+                } else {
+                    allowed.removeAll { $0 == plugin.id }
+                }
+                capabilities.plugins = allowed
+            })
+        }
+        rows.append(NoteRow(text: L("Allowed plugins may write files. Abilities control bot tools, not a process sandbox.")))
+        abilities.setRows(rows)
     }
 
     private func showMemory(of bot: Bot) {

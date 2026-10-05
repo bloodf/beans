@@ -25,6 +25,7 @@ pub(crate) const UPDATE_THROTTLE_MS: u64 = 250;
 
 const DESCRIPTION: &str = "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines \
      or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.";
+const SCRIPT_DESCRIPTION: &str = "Run a shell command on pipes with stdin closed. Returns output, truncation, optional full_output_path, exit_code, and wall_time_seconds. Commands that fail or time out retain their structured output.";
 
 const TERMINAL_DESCRIPTION: &str = "Execute a bash command in the current working directory, in a terminal of its own. Returns its output, stdout and \
      stderr together, with colors and other terminal codes removed. Output is truncated to last 2000 lines or 50KB (whichever is hit \
@@ -47,11 +48,18 @@ pub struct BashTool {
     shell: Option<String>,
     sessions: Option<Arc<dyn BashSessions>>,
     waiting_after: Duration,
+    script: bool,
+    extras: Arc<crate::login_shell::Extras>,
 }
 
 impl BashTool {
     pub fn new(cwd: PathBuf) -> Self {
-        BashTool { cwd, shell: shell(), sessions: None, waiting_after: WAITING_AFTER }
+        BashTool { cwd, shell: shell(), sessions: None, waiting_after: WAITING_AFTER, extras: Arc::default(), script: false }
+    }
+
+    /// Pipe-only bash for codemode. Never creates a terminal session or accepts interactive input.
+    pub fn for_script(cwd: PathBuf) -> Self {
+        BashTool { script: true, ..BashTool::new(cwd) }
     }
 
     /// Runs each command in a terminal session `sessions` keeps, so a command waiting for input
@@ -59,6 +67,12 @@ impl BashTool {
     /// with no input.
     pub fn with_sessions(cwd: PathBuf, sessions: Arc<dyn BashSessions>) -> Self {
         BashTool { sessions: Some(sessions), ..BashTool::new(cwd) }
+    }
+
+    /// Variables and PATH folders over the login shell's environment for each command.
+    pub fn with_extras(mut self, extras: crate::login_shell::Extras) -> Self {
+        self.extras = Arc::new(extras);
+        self
     }
 
     /// How long a command may print nothing before its call returns with the session id.
@@ -178,11 +192,29 @@ impl Tool for BashTool {
         "bash"
     }
     fn description(&self) -> &str {
-        match (&self.sessions, self.terminal()) {
-            (_, Some(_)) => TERMINAL_DESCRIPTION,
-            (Some(_), None) => NO_INPUT_DESCRIPTION,
-            (None, None) => DESCRIPTION,
+        if self.script { SCRIPT_DESCRIPTION } else {
+            match (&self.sessions, self.terminal()) {
+                (_, Some(_)) => TERMINAL_DESCRIPTION,
+                (Some(_), None) => NO_INPUT_DESCRIPTION,
+                (None, None) => DESCRIPTION,
+            }
         }
+    }
+    fn output_schema(&self) -> Option<Value> {
+        self.script.then(|| json!({
+            "type": "object",
+            "properties": {
+                "output": { "type": "string" },
+                "truncated": { "type": "boolean" },
+                "full_output_path": { "type": "string" },
+                "exit_code": { "type": ["integer", "null"] },
+                "wall_time_seconds": { "type": "number" }
+            },
+            "required": ["output", "truncated", "exit_code", "wall_time_seconds"]
+        }))
+    }
+    fn execution_mode(&self) -> Option<crate::agent_loop::ToolExecutionMode> {
+        self.script.then_some(crate::agent_loop::ToolExecutionMode::Sequential)
     }
     fn parameters(&self) -> Value {
         json!({
@@ -195,7 +227,7 @@ impl Tool for BashTool {
                 },
                 "timeout": { "type": "number", "description": "Timeout in seconds (optional, no default timeout)" }
             },
-            "required": ["command", "description"]
+            "required": if self.script { vec!["command"] } else { vec!["command", "description"] }
         })
     }
     async fn execute(&self, id: &str, args: Value, cancel: CancellationToken, on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
@@ -211,16 +243,18 @@ impl Tool for BashTool {
         }
         let shell = self.shell.as_deref().ok_or_else(|| ToolError(NO_SHELL.into()))?;
         if let Some(sessions) = self.terminal() {
-            return super::bash_session::run(shell, &command, &self.cwd, timeout, sessions, id, self.waiting_after, cancel, on_update).await;
+            return super::bash_session::run(shell, &command, &self.cwd, timeout, &self.extras, sessions, id, self.waiting_after, cancel, on_update).await;
         }
 
         let mut cmd = crate::login_shell::command(shell).await;
+        self.extras.apply(&mut cmd);
         cmd.arg("-c").arg(&command).current_dir(&self.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(unix)]
         {
             cmd.process_group(0);
         }
         let mut child = cmd.spawn().map_err(|e| ToolError(format!("Failed to start {shell}: {e}")))?;
+        let started = std::time::Instant::now();
         let pid = child.id().unwrap_or(0);
 
         let mut stdout = child.stdout.take();
@@ -261,7 +295,7 @@ impl Tool for BashTool {
                             output.extend_from_slice(&bytes);
                             if last_update.elapsed() >= std::time::Duration::from_millis(UPDATE_THROTTLE_MS) {
                                 last_update = tokio::time::Instant::now();
-                                let text = String::from_utf8_lossy(&output);
+                                let text = if self.script { super::sanitize::terminal_text(&output) } else { String::from_utf8_lossy(&output).into_owned() };
                                 let snapshot = truncate_tail(&text, TruncationOptions::default());
                                 on_update(ToolResult::text(snapshot.content));
                             }
@@ -280,7 +314,7 @@ impl Tool for BashTool {
             output.extend_from_slice(&bytes);
         }
 
-        let text = String::from_utf8_lossy(&output).into_owned();
+        let text = if self.script { super::sanitize::terminal_text(&output) } else { String::from_utf8_lossy(&output).into_owned() };
         let truncation = truncate_tail(&text, TruncationOptions::default());
         let full_output_path = if truncation.truncated {
             let path = std::env::temp_dir().join(format!("lorca-bash-{}-{}.log", std::process::id(), crate::now_ms()));
@@ -292,6 +326,28 @@ impl Tool for BashTool {
         let shown = describe(&truncation.content, &truncation, full_output_path.as_deref());
         let with_status = |status: &str| if shown.is_empty() { status.to_string() } else { format!("{shown}\n\n{status}") };
 
+        if self.script {
+            let code = status.and_then(|s| s.code());
+            let mut structured = json!({
+                "output": truncation.content,
+                "truncated": truncation.truncated,
+                "exit_code": code,
+                "wall_time_seconds": started.elapsed().as_secs_f64(),
+            });
+            if let Some(path) = &full_output_path {
+                structured["full_output_path"] = json!(path);
+            }
+            let failure = if aborted { Some("Command aborted".to_string()) }
+                else if timed_out { Some(format!("Command timed out after {} seconds", timeout.unwrap_or(0.0))) }
+                else if let Some(code) = code.filter(|code| *code != 0) { Some(format!("Command exited with code {code}")) }
+                else { None };
+            let body = failure.as_deref().map(with_status).unwrap_or_else(|| if shown.is_empty() { "(no output)".into() } else { shown.clone() });
+            return Ok(ToolResult {
+                structured: Some(structured),
+                is_error: failure.is_some(),
+                ..ToolResult::text(body)
+            });
+        }
         if aborted {
             return Err(ToolError(with_status("Command aborted")));
         }
@@ -318,6 +374,25 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_extras_select_runner_command_and_address() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lorca-bash-extras-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("lorca");
+        std::fs::write(&script, "#!/bin/sh\necho \"runner $LORCA_HOME $LORCA_PORT\"\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let extras = crate::login_shell::Extras {
+            variables: vec![("LORCA_HOME".into(), dir.clone().into_os_string()), ("LORCA_PORT".into(), "4899".into())],
+            path_first: vec![dir.clone()],
+        };
+        let result = BashTool::new(dir.clone()).with_extras(extras)
+            .execute("1", json!({ "command": "lorca" }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        assert!(result.text_content().contains(&format!("runner {} 4899", dir.display())), "{}", result.text_content());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[tokio::test]
     async fn runs_and_reports_exit_code() {
         let tool = BashTool::new(std::env::temp_dir());
@@ -327,6 +402,46 @@ mod tests {
         assert!(err.0.contains("boom") && err.0.contains("exited with code 3"), "{}", err.0);
         let timeout = tool.execute("3", json!({"command": "sleep 5", "timeout": 0.2}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap_err();
         assert!(timeout.0.contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn script_bash_returns_structured_output_on_success_failure_and_timeout() {
+        let tool = BashTool::for_script(std::env::temp_dir());
+        assert_eq!(tool.name(), "bash");
+        assert!(tool.output_schema().is_some());
+        assert_eq!(tool.execution_mode(), Some(crate::agent_loop::ToolExecutionMode::Sequential));
+        let updates: ToolUpdateFn = Arc::new(|_| {});
+        let ok = tool.execute("1", json!({"command": "printf 'hi\\nthere'"}), CancellationToken::new(), updates.clone()).await.unwrap();
+        let value = ok.structured.unwrap();
+        assert_eq!(value["output"], "hi\nthere");
+        assert_eq!(value["exit_code"], 0);
+        assert_eq!(value["truncated"], false);
+        assert!(value["wall_time_seconds"].as_f64().unwrap() >= 0.0);
+        assert!(value.get("full_output_path").is_none());
+
+        let failed = tool.execute("2", json!({"command": "printf '\\033[31mboom\\033[0m\\000\\377' >&2; exit 3"}), CancellationToken::new(), updates.clone()).await.unwrap();
+        assert!(failed.is_error);
+        let value = failed.structured.unwrap();
+        assert_eq!(value["output"], "boom�");
+        assert_eq!(value["exit_code"], 3);
+        assert_eq!(value["truncated"], false);
+
+        let timeout = tool.execute("3", json!({"command": "sleep 5", "timeout": 0.05}), CancellationToken::new(), updates).await.unwrap();
+        assert!(timeout.is_error);
+        let value = timeout.structured.as_ref().unwrap();
+        assert_eq!(value["truncated"], false);
+        assert!(value["exit_code"].is_null() || value["exit_code"].is_i64());
+        assert!(timeout.text_content().contains("timed out"));
+
+        let long = tool.execute("4", json!({"command": "printf 'é'; yes é | head -c 60000"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        let value = long.structured.unwrap();
+        assert_eq!(value["truncated"], true);
+        assert!(value["output"].as_str().unwrap().len() <= DEFAULT_MAX_BYTES);
+        assert!(!value["output"].as_str().unwrap().contains('�'));
+        let path = value["full_output_path"].as_str().unwrap();
+        assert!(!std::fs::read(path).unwrap().is_empty());
+        std::fs::remove_file(path).unwrap();
     }
 
     /// A drive root on Windows, `/` elsewhere, so the fixture paths are absolute where the test runs.

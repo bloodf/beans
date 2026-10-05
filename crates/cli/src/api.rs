@@ -20,6 +20,22 @@ fn opt_string(params: &Value, key: &str) -> Option<String> {
     params[key].as_str().map(str::to_string).filter(|s| !s.is_empty())
 }
 
+fn capabilities(params: &Value) -> Result<Option<Capabilities>, String> {
+    params.get("capabilities").map(|value| {
+        let object = value.as_object().ok_or("capabilities must be an object")?;
+        for (key, value) in object {
+            match key.as_str() {
+                "shell" | "write" if value.is_boolean() => {},
+                "plugins" if value.is_null() || value.as_array().is_some_and(|ids| ids.iter().all(Value::is_string)) => {},
+                _ => return Err(format!("invalid capabilities.{key}")),
+            }
+        }
+        let result: Capabilities = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+        result.validate()?;
+        Ok(result)
+    }).transpose()
+}
+
 /// A Runner opens provider OAuth in its browser. A phone emits the URL to the Expo app,
 /// whose in-app browser keeps the core alive for the localhost callback.
 #[cfg(feature = "provider-auth")]
@@ -69,7 +85,11 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             "relay_update_required": app.relay_update_required.load(std::sync::atomic::Ordering::Relaxed),
             "relay_error": app.relay_problem.lock().unwrap().clone(),
         })),
-        "bootstrap" => Ok(app.snapshot()),
+        "bootstrap" => {
+            crate::catalog::check_in_background(app);
+            crate::marketplace::check_in_background(app);
+            Ok(app.snapshot())
+        },
 
         "identity.create" => {
             let phrase = identity::create(app, opt_string(&params, "device_name")).map_err(|e| e.to_string())?;
@@ -169,6 +189,12 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({ "relay_url": app.relay_url() }))
         }
 
+        "account.pause" => {
+            let paused = params.get("paused").and_then(Value::as_bool).ok_or("paused must be a boolean")?;
+            app.set_paused(paused);
+            Ok(json!({ "paused": paused }))
+        }
+
         "bots.create" => {
             // A bot from the marketplace starts from its template's profile, with the routines
             // and the first turn `marketplace::welcome` gives it.
@@ -177,6 +203,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 None => None,
             };
             let from_template = |pick: fn(&crate::marketplace::BotTemplate) -> &String| template.as_ref().map(|(t, _)| pick(t).clone());
+            let capabilities = capabilities(&params)?.unwrap_or_default();
             let bot = Bot {
                 id: opt_string(&params, "id").unwrap_or_default(),
                 name: opt_string(&params, "name").or_else(|| from_template(|t| &t.name)).ok_or("missing name")?,
@@ -193,6 +220,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 legacy_instructions: opt_string(&params, "instructions").unwrap_or_default(),
                 workdir: opt_string(&params, "workdir"),
                 created_at: 0.0,
+                capabilities,
             };
             // Every bot has one direct chat; both land in a single roster change.
             let (bot, chat) = app.create_bot_with_dm(bot, opt_string(&params, "chat_id")).map_err(|e| e.to_string())?;
@@ -205,6 +233,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let id = string(&params, "id")?;
             // The image is copied and queued before the roster names it, so every Device can
             // fetch the blob by the time it reads the profile.
+            let capabilities = capabilities(&params)?;
             let avatar = store_avatar(app, &params)?;
             let bot = app.update_bot(&id, |bot| {
                 if let Some(v) = opt_string(&params, "name") { bot.name = v; }
@@ -223,6 +252,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 if let Some(v) = params["thinking"].as_str() { bot.thinking = Some(v.trim().to_string()).filter(|t| !t.is_empty()); }
                 if let Some(v) = opt_string(&params, "runner_id") { bot.runner_id = v; }
                 if let Some(v) = params["workdir"].as_str() { bot.workdir = Some(v.to_string()).filter(|w| !w.trim().is_empty()); }
+                if let Some(v) = capabilities { bot.capabilities = v; }
             })
             .map_err(|e| e.to_string())?;
             Ok(json!({ "bot": bot }))
@@ -484,7 +514,13 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         // template (`bots.create { template_id }`).
         "marketplace" => {
             let query = opt_string(&params, "query").unwrap_or_default();
-            let index = crate::marketplace::index(app).await;
+            let mut index = crate::marketplace::index(app).await;
+            if !query.trim().is_empty()
+                && crate::marketplace::search_plugins(&index.plugins, &query).is_empty()
+                && crate::marketplace::search_bots(&index.bots, &query).is_empty()
+                && crate::marketplace::check_for_missing(app).await {
+                index = crate::marketplace::current(app);
+            }
             let installed_on: Vec<(String, Vec<crate::model::PluginStatus>)> =
                 app.state.lock().unwrap().devices.iter().map(|d| (d.id.clone(), d.plugins.clone())).collect();
             let plugins: Vec<Value> = crate::marketplace::search_plugins(&index.plugins, &query)
@@ -509,6 +545,15 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 .collect();
             Ok(json!({ "plugins": plugins, "bots": bots }))
         }
+        "marketplace.reload" => {
+            let changed = crate::marketplace::check(app, true).await?;
+            Ok(json!({ "updated": crate::marketplace::current(app).updated, "changed": changed }))
+        }
+        "mcp.parse" => crate::plugins::mcp_json::parse_reply(&string(&params, "text")?),
+        verb if verb.starts_with("mcp.") => {
+            let runner_id = opt_string(&params, "runner_id");
+            crate::plugins::mcp_json::on_runner(app, runner_id.as_deref(), verb, params.clone()).await
+        }
         // Plugins are installed per Runner, here or through a sealed request to that Runner.
         "plugins.install" => {
             let runner_id = string(&params, "runner_id")?;
@@ -516,7 +561,11 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 Some(value) => crate::plugins::Manifest::parse(value)?,
                 None => {
                     let id = string(&params, "plugin_id")?;
-                    crate::marketplace::index(app).await.plugin(&id).cloned().ok_or_else(|| format!("No plugin {id} in the marketplace"))?
+                    let mut index = crate::marketplace::index(app).await;
+                    if index.plugin(&id).is_none() && crate::marketplace::check_for_missing(app).await {
+                        index = crate::marketplace::current(app);
+                    }
+                    index.plugin(&id).cloned().ok_or_else(|| format!("No plugin {id} in the marketplace"))?
                 }
             };
             let source = if params.get("plugin_id").is_some() { "marketplace" } else { "inline" };
@@ -550,6 +599,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "plugins.auth.cancel" => {
             app.cancel_plugin_sign_in(opt_string(&params, "sign_in").as_deref());
             Ok(Value::Null)
+        }
+        "plugins.sign_out" => {
+            let runner_id = string(&params, "runner_id")?;
+            crate::plugins::on_runner(app, &runner_id, "plugins.sign_out", json!({ "plugin_id": string(&params, "plugin_id")?, "server": opt_string(&params, "server") })).await
         }
         "plugins.detail" => {
             let runner_id = string(&params, "runner_id")?;
@@ -590,6 +643,9 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let message_id = string(&params, "message_id")?;
             let decision = string(&params, "decision")?;
             let message = app.message(&chat_id, &message_id).ok_or("Unknown message")?;
+            if matches!(&message.body, Body::Permission { tool, .. } if tool == "propose") && matches!(decision.as_str(), "always") {
+                return Err("Always allow is unavailable for proposals".into());
+            }
             let Author::Bot { bot_id } = &message.author else { return Err("Not a permission request".into()) };
             let bot = app.bot(bot_id).ok_or("Unknown bot")?;
             let body = json!({ "chat_id": chat_id, "message_id": message_id, "decision": decision });
@@ -659,6 +715,11 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
         // The chat models a custom provider's server lists, for the model picker.
         #[cfg(feature = "provider-auth")]
+        "providers.refresh" => {
+            let updated = provider_auth::refresh_custom_models(app).await?;
+            Ok(json!({ "updated": updated }))
+        }
+        #[cfg(feature = "provider-auth")]
         "providers.list_models" => {
             let str_param = |key: &str| params[key].as_str().unwrap_or_default().to_string();
             let listed = provider_auth::list_custom_models(app, &str_param("name"), &str_param("api"), &str_param("base_url"), &str_param("api_key")).await?;
@@ -710,6 +771,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             app.cancel_provider_auth();
             provider_auth::disconnect(app, &string(&params, "kind")?)?;
             Ok(json!({ "providers": app.credentials.lock().unwrap().statuses() }))
+        }
+        "models.reload" => {
+            let changed = crate::catalog::check(app, true).await?;
+            Ok(json!({ "updated": lorca_models::updated(), "changed": changed }))
         }
 
         other => Err(format!("unknown method {other}")),

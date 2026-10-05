@@ -168,7 +168,8 @@ class AppTransport implements Transport {
   }
 }
 
-/** A browser tab's own websocket to a CLI started by hand (`lorca serve`). */
+/** A browser tab's own websocket to a CLI started by hand (`lorca serve`). The CLI must
+ * explicitly allow this page's origin via LORCA_ALLOWED_ORIGINS (the desktop dev loop sets it). */
 class SocketTransport implements Transport {
   private socket: WebSocket | null = null;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();

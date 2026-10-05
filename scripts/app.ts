@@ -344,6 +344,12 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   const iconName = appIconName(config)
   await cp(join(RESOURCES_DIR, iconName), join(bundle, "Contents", "Resources", iconName))
 
+  // The same pinned offline generator ships in dev and release bundles.
+  await cp(
+    join(ROOT, "packages", "beans-blobatar", "dist", "blobatar.jsc.js"),
+    join(bundle, "Contents", "Resources", "blobatar.jsc.js"),
+  )
+
   // Unlink before writing: macOS refuses to overwrite a running executable in place.
   const destination = join(macos, APP_NAME)
   await rm(destination, { force: true })

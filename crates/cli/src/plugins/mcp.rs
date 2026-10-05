@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lorca_agent::codemode::{self, Entry, Exposure, Namespace};
+use lorca_agent::codemode::{self, Entry, Exposure, Namespace, NamespaceDetails};
 use lorca_agent::{BeforeToolCallContext, BeforeToolCallResult};
 use rmcp::model::{CallToolRequestParams, ClientConfig, ContentBlock, Implementation};
 use rmcp::service::RunningService;
@@ -26,11 +26,13 @@ use super::{fill, fill_if_set, pattern_matches, AuthSpec, Installed, ServerSpec}
 use crate::app::App;
 use crate::config::now_secs;
 use crate::model::*;
+#[cfg(windows)]
+#[path = "proposal_windows.rs"]
+mod proposal_windows;
+
 
 /// How long the user has to answer a permission card before the call is refused.
 pub const PERMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
-/// How long a tool call may run.
-const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// How long a server may take to start and answer the MCP handshake. A package runner such as
 /// `npx` may download the server first.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2 * 60);
@@ -39,6 +41,8 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2 * 
 const DEVICE_TOKEN_REFRESH_BUFFER_SECS: f64 = 5.0 * 60.0;
 /// The most text a tool result carries to the model.
 const MAX_RESULT_CHARS: usize = 50_000;
+/// A server response enters the script VM only after bounded serialization.
+const MAX_MCP_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// How much of a tool's description, schema, and server instructions `searchTools()` ranks by.
 const MAX_SEARCH_INDEX_DESCRIPTION_BYTES: usize = 2 * 1024;
 const MAX_SEARCH_SCHEMA_BYTES: usize = 4 * 1024;
@@ -52,14 +56,62 @@ const MAX_NAMESPACE_INSTRUCTIONS_BYTES: usize = 1024;
 pub struct Server {
     pub plugin_id: String,
     pub name: String,
-    service: RunningService<RoleClient, ClientConfig>,
-    pub tools: Vec<rmcp::model::Tool>,
+    service: RunningService<RoleClient, Client>,
+    tools: parking_lot::RwLock<Vec<rmcp::model::Tool>>,
+    pub resources: bool,
     pub instructions: Option<String>,
     /// The OAuth manager behind the transport, to persist tokens it refreshed.
     auth: Option<Arc<tokio::sync::Mutex<AuthorizationManager>>>,
     /// Device-flow tokens are plain bearers. Drop this pooled server before its bearer expires;
     /// the next connection refreshes and persists the rotating token pair itself.
     bearer_expires_at: Option<f64>,
+}
+
+impl Server {
+    pub fn tools(&self) -> Vec<rmcp::model::Tool> { self.tools.read().clone() }
+    fn is_closed(&self) -> bool { self.service.is_closed() || self.service.peer().is_transport_closed() }
+}
+
+pub struct Client {
+    info: ClientConfig,
+    app: std::sync::Weak<App>,
+    plugin_id: String,
+    server: String,
+    generation: u64,
+}
+
+impl rmcp::ClientHandler for Client {
+    fn get_info(&self) -> ClientConfig { self.info.clone() }
+
+    async fn on_tool_list_changed(&self, context: rmcp::service::NotificationContext<RoleClient>) {
+        let Some(app) = self.app.upgrade() else { return };
+        let (id, server, generation) = (self.plugin_id.clone(), self.server.clone(), self.generation);
+        tokio::spawn(async move {
+            if app.mcp.generation(&id) != generation { return; }
+            let Ok(tools) = all_tools(&context.peer).await else { return };
+            if let Some(pooled) = app.mcp.cached_server(&format!("{id}/{server}")) {
+                *pooled.tools.write() = tools.clone();
+                save_catalog(&app, &ServerCatalog { plugin_id: &id, name: &server, tools: &tools, instructions: pooled.instructions.as_deref(), resources: pooled.resources });
+            }
+        });
+    }
+}
+
+/// Stop on missing, empty, or repeated cursors, and bound even a changing server's pages.
+async fn all_tools(peer: &rmcp::service::Peer<RoleClient>) -> Result<Vec<rmcp::model::Tool>, rmcp::ServiceError> {
+    let mut tools = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor = None;
+    for _ in 0..100 {
+        let page = peer.list_tools(Some(rmcp::model::PaginatedRequestParams::default().with_cursor(cursor))).await?;
+        tools.extend(page.tools);
+        match page.next_cursor.filter(|next| !next.is_empty() && seen.insert(next.clone())) {
+            Some(next) => cursor = Some(next),
+            None => return Ok(tools),
+        }
+    }
+    tracing::warn!(tools = tools.len(), "MCP tool list exceeded 100 pages; using bounded listing");
+    Ok(tools)
 }
 
 /// Connected servers by `plugin/server`, connected on first use and dropped when the plugin
@@ -69,7 +121,7 @@ pub struct Pool {
     /// Bumped by `forget`, per plugin: a connection that started before a change of the
     /// plugin's settings is used for nothing once it answers.
     generations: Mutex<HashMap<String, u64>>,
-    connecting: tokio::sync::Mutex<()>,
+    connecting: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The HTTP client the MCP transports and the OAuth flow use (rmcp's reqwest, not the
     /// App's).
     http: mcp_http::Client,
@@ -86,7 +138,7 @@ impl Default for Pool {
 impl Pool {
     pub fn new() -> Self {
         let http = mcp_http::Client::builder().timeout(std::time::Duration::from_secs(600)).build().unwrap_or_default();
-        Pool { servers: Mutex::new(HashMap::new()), generations: Mutex::new(HashMap::new()), connecting: tokio::sync::Mutex::new(()), http, sign_ins: Mutex::new(HashMap::new()) }
+        Pool { servers: Mutex::new(HashMap::new()), generations: Mutex::new(HashMap::new()), connecting: Mutex::new(HashMap::new()), http, sign_ins: Mutex::new(HashMap::new()) }
     }
 
     /// Drops every connection of a plugin, so the next use reconnects with fresh settings.
@@ -101,11 +153,8 @@ impl Pool {
 
     fn cached_server(&self, key: &str) -> Option<Arc<Server>> {
         let mut servers = self.servers.lock().unwrap();
-        let expiring = servers
-            .get(key)
-            .and_then(|server| server.bearer_expires_at)
-            .is_some_and(|expires_at| expires_at <= now_secs() + DEVICE_TOKEN_REFRESH_BUFFER_SECS);
-        if expiring {
+        let stale = servers.get(key).is_some_and(|server| server.is_closed() || server.bearer_expires_at.is_some_and(|expires_at| expires_at <= now_secs() + DEVICE_TOKEN_REFRESH_BUFFER_SECS));
+        if stale {
             servers.remove(key);
             None
         } else {
@@ -119,7 +168,8 @@ impl Pool {
         if let Some(server) = self.cached_server(&key) {
             return Ok(server);
         }
-        let _guard = self.connecting.lock().await;
+        let gate = self.connecting.lock().unwrap().entry(key.clone()).or_default().clone();
+        let _guard = gate.lock().await;
         if let Some(server) = self.cached_server(&key) {
             return Ok(server);
         }
@@ -128,6 +178,7 @@ impl Pool {
             let plugin = store.get(plugin_id).cloned().ok_or_else(|| format!("{plugin_id} is not installed on this Runner"))?;
             (plugin, store.values(plugin_id))
         };
+        let values = template_values(&plugin, values).await;
         let spec = plugin.manifest.servers.get(name).cloned().ok_or_else(|| format!("{} has no server {name}", plugin.manifest.name))?;
         let generation = self.generation(plugin_id);
         super::note(app, plugin_id, Some(("connecting", "Connecting…")));
@@ -141,15 +192,21 @@ impl Pool {
                 Err(format!("{}'s settings changed while it connected. Try again.", plugin.manifest.name))
             }
             Ok(server) => {
-                save_catalog(app, &server);
+                let tools = server.tools();
+                save_catalog(app, &ServerCatalog { plugin_id, name, tools: &tools, instructions: server.instructions.as_deref(), resources: server.resources });
                 let server = Arc::new(server);
                 self.servers.lock().unwrap().insert(key, server.clone());
                 super::note(app, plugin_id, None);
                 Ok(server)
             }
             Err(error) => {
-                super::note(app, plugin_id, Some(("error", &error)));
-                Err(error)
+                let safe = if plugin.source == super::mcp_json::SOURCE && !error.contains("needs a sign-in") { format!("{} could not connect. Check its settings.", plugin.manifest.name) } else { error.clone() };
+                let waiting = {
+                    let store = app.plugins.lock().unwrap();
+                    store.get(plugin_id).and_then(|plugin| plugin.manifest.servers.get(name)).is_some_and(|spec| store.needs_sign_in(plugin_id, name, spec, &values))
+                };
+                super::note(app, plugin_id, if waiting { None } else { Some(("error", &safe)) });
+                Err(safe)
             }
         }
     }
@@ -174,29 +231,49 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
     implementation.version = crate::config::VERSION.into();
     let mut info = ClientConfig::default();
     info.client_info = implementation;
+    let generation = app.mcp.generation(&plugin.manifest.id);
+    let client = || Client { info: info.clone(), app: Arc::downgrade(app), plugin_id: plugin.manifest.id.clone(), server: name.to_string(), generation };
     let mut auth = None;
     let mut bearer_expires_at = None;
     let service = match spec {
-        ServerSpec::Stdio { command, args, env } => {
+        ServerSpec::Stdio { command, args, env, cwd, .. } => {
             // The login shell's environment, so `npx` or `uvx` resolve from the user's PATH, on
             // Windows as files the way a terminal finds them (`npx` is npm's `npx.cmd`).
-            let mut cmd = lorca_agent::login_shell::command(command).await;
-            cmd.args(args.iter().map(|a| fill(a, values)));
+            let command = expand_home(&fill(command, values));
+            let mut cmd = lorca_agent::login_shell::command(&command).await;
+            cmd.args(args.iter().map(|a| expand_home(&fill(a, values))));
             // A variable naming an optional key the user left unset is left out.
             for (key, value) in env {
                 if let Some(value) = fill_if_set(value, values) {
                     cmd.env(key, value);
                 }
             }
-            cmd.current_dir(app.config.plugins_dir().join(&plugin.manifest.id));
+            let dir = cwd.as_ref().map(|cwd| std::path::PathBuf::from(expand_home(&fill(cwd, values)))).unwrap_or_else(|| app.config.plugins_dir().join(&plugin.manifest.id));
+            if cwd.is_some() && !dir.is_dir() {
+                return Err(format!("{} cannot start: working folder does not exist.", plugin.manifest.name));
+            }
+            if cwd.is_none() { std::fs::create_dir_all(&dir).map_err(|_| format!("Cannot create working folder for {}", plugin.manifest.name))?; }
+            cmd.current_dir(dir);
             // On Windows a bare name starts a file found on PATH (npx.cmd), which the error names:
             // a batch file refuses an argument with a line break.
-            let program = std::path::Path::new(cmd.as_std().get_program()).display().to_string();
-            let starting = if program == *command { program } else { format!("{command} ({program})") };
-            let transport = TokioChildProcess::new(cmd).map_err(|e| format!("Cannot start {starting}: {e}"))?;
-            info.serve(transport).await.map_err(|e| format!("{command} did not answer the MCP handshake: {e}"))?
+            let mut wrapped = process_wrap::tokio::CommandWrap::from(cmd);
+            #[cfg(unix)]
+            wrapped.wrap(process_wrap::tokio::ProcessGroup::leader());
+            #[cfg(windows)]
+            wrapped.wrap(process_wrap::tokio::JobObject);
+            wrapped.wrap(process_wrap::tokio::KillOnDrop);
+            let (transport, stderr) = TokioChildProcess::builder(wrapped).stderr(std::process::Stdio::piped()).spawn().map_err(|_| format!("Cannot start {}", plugin.manifest.name))?;
+            let said = Stderr::follow(stderr, &plugin.manifest.id);
+            match client().serve(transport).await {
+                Ok(service) => service,
+                Err(error) => {
+                    let why = said.last_words().await.unwrap_or_else(|| error.to_string());
+                    return Err(format!("{command} did not answer the MCP handshake: {why}"));
+                }
+            }
         }
-        ServerSpec::Http { url, headers, auth: auth_spec } => {
+        ServerSpec::Http { url, headers, auth: auth_spec, .. } => {
+            let url = &fill(url, values);
             let mut config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
             let mut custom = HashMap::new();
             // A header naming an optional key the user left unset is left out: Context7 without its
@@ -213,11 +290,11 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                 Some(AuthSpec::Oauth { token_variable: Some(variable), .. }) => values.get(variable).cloned(),
                 _ => None,
             };
-            let tokens = app.plugins.lock().unwrap().secret(&plugin.manifest.id, &format!("oauth:{name}"));
+            let tokens = app.plugins.lock().unwrap().sign_in_secret(&plugin.manifest.id, "oauth", name);
             match (pasted, auth_spec, tokens) {
                 (Some(token), _, _) => {
-                    let transport = StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.auth_header(token));
-                    info.serve(transport).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
+                    let config = config.auth_header(token);
+                    serve_retrying(&client, || StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.clone())).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
                 }
                 (None, Some(oauth @ AuthSpec::Oauth { .. }), Some(stored)) => {
                     if stored["device_flow"].as_bool() == Some(true) {
@@ -229,34 +306,49 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                         };
                         let bearer = device_bearer(app, &plugin.manifest.id, name, &plugin.manifest.name, token_endpoint, &stored).await?;
                         bearer_expires_at = bearer.expires_at;
-                        let transport = StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.auth_header(bearer.access_token));
-                        info.serve(transport).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
+                        let config = config.auth_header(bearer.access_token);
+                        serve_retrying(&client, || StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.clone())).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
                     } else {
                         // A token whose server metadata cannot be found again, or which has no
                         // refresh token, is sent as a plain bearer.
                         let refreshable = stored["tokens"]["refresh_token"].as_str().is_some_and(|r| !r.is_empty());
-                        let restored = if refreshable { restore_manager(app, url, &stored).await } else { Err("no refresh token".into()) };
+                        let metadata_url = match oauth { AuthSpec::Oauth { auth_server_metadata_url, .. } => auth_server_metadata_url.as_deref(), _ => None };
+                        let restored = if refreshable { restore_manager(app, url, &stored, metadata_url).await } else { Err("no refresh token".into()) };
                         match restored {
                             Ok(manager) => {
-                                let client = AuthClient::new(app.mcp.http.clone(), manager);
-                                auth = Some(client.auth_manager.clone());
-                                let transport = StreamableHttpClientTransport::with_client(client, config);
-                                info.serve(transport).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
+                                let signed_in = AuthClient::new(app.mcp.http.clone(), manager);
+                                auth = Some(signed_in.auth_manager.clone());
+                                let transport = || StreamableHttpClientTransport::with_client(signed_in.clone(), config.clone());
+                                serve_retrying(&client, transport).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
                             }
                             Err(why) => {
                                 tracing::debug!(%why, plugin = %plugin.manifest.id, "using the saved access token as a bearer");
                                 let token = stored["tokens"]["access_token"].as_str().ok_or("The saved sign-in has no access token")?.to_string();
-                                let transport = StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.auth_header(token));
-                                info.serve(transport).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
+                                let config = config.auth_header(token);
+                                serve_retrying(&client, || StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.clone())).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
                             }
                         }
+                    }
+                }
+                (None, Some(AuthSpec::Oauth { optional: true, .. }), None) => {
+                    match serve_retrying(&client, || StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.clone())).await {
+                        Ok(service) => {
+                            app.plugins.lock().unwrap().forget_challenge(&app.config, &plugin.manifest.id, name);
+                            service
+                        }
+                        Err(error) => match auth_challenge(&error) {
+                            Some(challenge) => {
+                                app.plugins.lock().unwrap().note_challenge(&app.config, &plugin.manifest.id, name, &challenge);
+                                return Err(format!("{} needs a sign-in.", plugin.manifest.name));
+                            }
+                            None => return Err(describe_connect_error(&error.to_string(), url)),
+                        },
                     }
                 }
                 (None, Some(AuthSpec::Oauth { .. }), None) => return Err(format!("Sign in to {} first.", plugin.manifest.name)),
                 (None, Some(AuthSpec::Bearer { variable }), _) => return Err(format!("Set {variable} first.")),
                 (None, None, _) => {
-                    let transport = StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config);
-                    info.serve(transport).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
+                    serve_retrying(&client, || StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.clone())).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
                 }
             }
         }
@@ -267,24 +359,169 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
         persist_refreshed(app, &plugin.manifest.id, name, manager).await;
     }
     let instructions = service.peer_info().and_then(|i| i.instructions.clone());
-    let mut tools = service.list_all_tools().await.map_err(|e| format!("{} could not list its tools: {e}", plugin.manifest.name))?;
-    tools.retain(|t| !plugin.manifest.tools.hide.iter().any(|h| pattern_matches(h, &t.name)));
+    let resources = service.peer_info().is_some_and(|info| info.capabilities.resources.is_some());
+    let tools = all_tools(&service.peer()).await.map_err(|_| format!("{} could not list its tools", plugin.manifest.name))?;
     tracing::info!(plugin = %plugin.manifest.id, server = name, tools = tools.len(), "connected an MCP server");
-    Ok(Server { plugin_id: plugin.manifest.id.clone(), name: name.to_string(), service, tools, instructions, auth, bearer_expires_at })
+    Ok(Server { plugin_id: plugin.manifest.id.clone(), name: name.to_string(), service, tools: parking_lot::RwLock::new(tools), instructions, resources, auth, bearer_expires_at })
 }
 
-fn describe_connect_error(error: &str, url: &str) -> String {
-    if error.contains("401") || error.to_lowercase().contains("unauthorized") {
-        format!("{url} refused the credentials. Sign in again.")
-    } else {
-        format!("Could not connect to {url}: {error}")
+struct Stderr {
+    lines: Arc<Mutex<std::collections::VecDeque<String>>>,
+    reading: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Stderr {
+    fn follow(stderr: Option<tokio::process::ChildStderr>, plugin_id: &str) -> Self {
+        let lines = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let reading = stderr.map(|stderr| {
+            let (lines, plugin_id) = (lines.clone(), plugin_id.to_string());
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut reader = tokio::io::BufReader::new(stderr);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    match reader.read_until(b'\n', &mut line).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let text = String::from_utf8_lossy(&line).trim_end().to_string();
+                            tracing::debug!(plugin = %plugin_id, "server stderr line received");
+                            let mut lines = lines.lock().unwrap();
+                            if lines.len() == 40 { lines.pop_front(); }
+                            lines.push_back(text);
+                        }
+                    }
+                }
+            })
+        });
+        Self { lines, reading }
+    }
+
+    async fn last_words(self) -> Option<String> {
+        if let Some(reading) = self.reading { let _ = tokio::time::timeout(std::time::Duration::from_millis(500), reading).await; }
+        let lines = self.lines.lock().unwrap();
+        let mut words: Vec<&str> = lines.iter().rev().map(String::as_str).map(str::trim)
+            .filter(|line| !line.starts_with("at ") && !line.trim_start_matches('^').trim().is_empty()).take(4).collect();
+        words.reverse();
+        let words = words.join(" · ");
+        (!words.is_empty()).then(|| words.chars().rev().take(400).collect::<String>().chars().rev().collect())
     }
 }
 
+#[allow(clippy::result_large_err)]
+async fn serve_retrying<T, E, A>(client: &impl Fn() -> Client, transport: impl Fn() -> T) -> Result<RunningService<RoleClient, Client>, rmcp::service::ClientInitializeError>
+where
+    T: rmcp::transport::IntoTransport<RoleClient, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let mut waits = [250, 1000].into_iter();
+    loop {
+        match client().serve(transport()).await {
+            Err(error) if transient(&error) => match waits.next() {
+                Some(wait) => tokio::time::sleep(std::time::Duration::from_millis(wait)).await,
+                None => return Err(error),
+            },
+            done => return done,
+        }
+    }
+}
+
+fn transient(error: &rmcp::service::ClientInitializeError) -> bool {
+    use rmcp::transport::streamable_http_client::StreamableHttpError;
+    let passing = |status: u16| status == 408 || status == 429 || ((500..600).contains(&status) && status != 501);
+    let mut text = error.to_string();
+    if let rmcp::service::ClientInitializeError::TransportError { error, .. } = error {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error.error.as_ref());
+        while let Some(current) = cause {
+            if let Some(StreamableHttpError::Client(client)) = current.downcast_ref::<StreamableHttpError<mcp_http::Error>>() {
+                if client.is_connect() || client.is_timeout() { return true; }
+                if let Some(status) = client.status() { return passing(status.as_u16()); }
+            }
+            text.push('\n');
+            text.push_str(&current.to_string());
+            cause = current.source();
+        }
+    }
+    text.split("HTTP ").skip(1).filter_map(|rest| rest.get(..3)?.parse::<u16>().ok()).any(passing) || text.contains("error sending request")
+}
+
+fn auth_challenge(error: &rmcp::service::ClientInitializeError) -> Option<String> {
+    use rmcp::transport::streamable_http_client::StreamableHttpError;
+    if let rmcp::service::ClientInitializeError::TransportError { error, .. } = error {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error.error.as_ref());
+        while let Some(current) = cause {
+            if let Some(http) = current.downcast_ref::<StreamableHttpError<mcp_http::Error>>() {
+                if let Some(challenge) = http.auth_challenge() { return Some(challenge.to_string()); }
+                if let StreamableHttpError::Client(client) = http {
+                    if client.status().is_some_and(|status| status.as_u16() == 401) { return Some(String::new()); }
+                }
+            }
+            cause = current.source();
+        }
+    }
+    let text = error.to_string().to_lowercase();
+    (text.contains("auth required") || text.contains("401 unauthorized")).then(String::new)
+}
+
+fn describe_connect_error(error: &str, url: &str) -> String {
+    let shown = reqwest::Url::parse(url).ok().map(|url| url.origin().ascii_serialization()).unwrap_or_else(|| "the server".into());
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("401") || lower.contains("unauthorized") {
+        format!("{shown} refused the credentials. Sign in again.")
+    } else if lower.contains("403") || lower.contains("forbidden") {
+        format!("{shown} refused access.")
+    } else {
+        format!("Could not connect to {shown}. Check the server and its settings.")
+    }
+}
+
+async fn template_values(plugin: &Installed, own: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    if plugin.source != super::mcp_json::SOURCE { return own; }
+    let mut values: BTreeMap<String, String> = std::env::vars_os().map(|(name, value)| (name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())).collect();
+    for (name, value) in lorca_agent::login_shell::environment().await {
+        values.insert(name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned());
+    }
+    values.extend(own);
+    values
+}
+
+async fn auth_server_metadata(app: &Arc<App>, metadata_url: &str, name: &str) -> Result<rmcp::transport::auth::AuthorizationMetadata, String> {
+    let response = app.mcp.http.get(metadata_url).header("accept", "application/json").send().await.map_err(|_| format!("{name}'s authorization metadata did not load"))?;
+    if !response.status().is_success() { return Err(format!("{name}'s authorization metadata answered {}", response.status())); }
+    let body = response.bytes().await.map_err(|_| format!("{name}'s authorization metadata did not load"))?;
+    serde_json::from_slice(&body).map_err(|_| format!("{name}'s authorization metadata is invalid"))
+}
+
+fn expand_home(path: &str) -> String {
+    match (path.strip_prefix("~/"), dirs::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest).display().to_string(),
+        _ => path.to_string(),
+    }
+}
+
+fn tidy_tokens(tokens: &Value) -> Value {
+    let mut tokens = tokens.clone();
+    if let Some(fields) = tokens.as_object_mut() {
+        fields.retain(|key, value| !matches!(key.as_str(), "scope" | "refresh_token" | "id_token" | "expires_in" | "refresh_token_expires_in") || !(value.is_null() || value.as_str().is_some_and(|s| s.trim().is_empty())));
+    }
+    tokens
+}
+
 /// An authorization manager holding tokens saved by an earlier sign-in.
-async fn restore_manager(app: &Arc<App>, url: &str, stored: &Value) -> Result<AuthorizationManager, String> {
+async fn restore_manager(app: &Arc<App>, url: &str, stored: &Value, metadata_url: Option<&str>) -> Result<AuthorizationManager, String> {
     let client_id = stored["client_id"].as_str().ok_or("The saved sign-in has no client id")?;
-    let tokens = serde_json::from_value(stored["tokens"].clone()).map_err(|e| format!("The saved sign-in is unreadable: {e}"))?;
+    if let Some(metadata_url) = metadata_url {
+        use rmcp::transport::auth::CredentialStore;
+        let mut manager = AuthorizationManager::new(url).await.map_err(|e| e.to_string())?;
+        manager.with_client(app.mcp.http.clone()).map_err(|e| e.to_string())?;
+        manager.set_metadata(auth_server_metadata(app, metadata_url, url).await?);
+        let tokens = serde_json::from_value(tidy_tokens(&stored["tokens"])).map_err(|_| "The saved sign-in is unreadable".to_string())?;
+        let saved = rmcp::transport::auth::InMemoryCredentialStore::new();
+        saved.save(rmcp::transport::auth::StoredCredentials::new(client_id.to_string(), Some(tokens), Vec::new(), None)).await.map_err(|e| e.to_string())?;
+        manager.set_credential_store(saved);
+        return match manager.initialize_from_store().await.map_err(|e| e.to_string())? { true => Ok(manager), false => Err("Restoring the sign-in".into()) };
+    }
+    let tokens = serde_json::from_value(tidy_tokens(&stored["tokens"])).map_err(|_| "The saved sign-in is unreadable".to_string())?;
     let mut state = OAuthState::new(url, Some(app.mcp.http.clone())).await.map_err(|e| e.to_string())?;
     state.set_credentials(client_id, tokens).await.map_err(|e| format!("Restoring the sign-in: {e}"))?;
     state.into_authorization_manager().ok_or_else(|| "Restoring the sign-in".to_string())
@@ -419,6 +656,7 @@ pub struct SignInStart {
     pub message: String,
     pub url: Option<String>,
     pub id: Option<String>,
+    pub done: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
 }
 
 /// A browser sign-in another Device finishes: the authorization this Runner holds until that
@@ -493,6 +731,9 @@ pub fn post_sign_in_card(app: &Arc<App>, chat_id: &str, bot_id: &str, plugin_id:
             reason: None,
             rule: None,
             command: None,
+            title: None,
+            content: None,
+            path: None,
             link: None,
             code: None,
         },
@@ -525,11 +766,13 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
         let spec = plugin.manifest.servers.get(server).cloned().ok_or_else(|| format!("{} has no server {server}", plugin.manifest.name))?;
         (plugin, spec)
     };
+    let own = app.plugins.lock().unwrap().values(plugin_id);
+    let values = template_values(&plugin, own).await;
     let (url, scopes, client, device) = match &spec {
-        ServerSpec::Http { url, auth: Some(AuthSpec::Oauth { scopes, token_variable, client_id_variable, client_secret_variable, client_id, client_secret, device_authorization_endpoint, token_endpoint }), .. } => {
-            let values = app.plugins.lock().unwrap().values(plugin_id);
+        ServerSpec::Http { url, auth: Some(AuthSpec::Oauth { scopes, token_variable, client_id_variable, client_secret_variable, client_id, client_secret, device_authorization_endpoint, token_endpoint, client_name, callback_port, callback_url, auth_server_metadata_url, .. }), .. } => {
+            let values = &values;
             let set = |fixed: &Option<String>, variable: &Option<String>| {
-                fixed.clone().filter(|v| !v.trim().is_empty()).or_else(|| variable.as_ref().and_then(|v| values.get(v).cloned())).filter(|v| !v.trim().is_empty())
+                fixed.as_deref().map(|v| fill(v, &values)).filter(|v| !v.trim().is_empty()).or_else(|| variable.as_ref().and_then(|v| values.get(v).cloned())).filter(|v| !v.trim().is_empty())
             };
             let hint = ClientHint {
                 id: set(client_id, client_id_variable),
@@ -537,15 +780,25 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
                 token_variable: token_variable.clone(),
                 client_id_variable: client_id_variable.clone(),
                 client_secret_variable: client_secret_variable.clone(),
+                name: client_name.clone(),
+                callback_port: *callback_port,
+                callback_url: callback_url.clone(),
+                metadata_url: auth_server_metadata_url.clone(),
             };
             let device = match (device_authorization_endpoint, token_endpoint, &hint.id) {
                 (Some(device_endpoint), Some(token_endpoint), Some(_)) => Some((device_endpoint.clone(), token_endpoint.clone())),
                 _ => None,
             };
-            (url.clone(), scopes.clone(), hint, device)
+            let more = app.plugins.lock().unwrap().secret(plugin_id, &format!("scope:{server}"));
+            let mut scopes = scopes.clone();
+            for scope in more.as_ref().and_then(|more| more["scope"].as_str()).unwrap_or_default().split_whitespace() {
+                if !scopes.iter().any(|known| known == scope) { scopes.push(scope.to_string()); }
+            }
+            (fill(url, &values), scopes, hint, device)
         }
         _ => return Err(format!("{server} does not sign in with OAuth.")),
     };
+    let elsewhere = elsewhere.filter(|_| !client.has_fixed_redirect());
     let name = plugin.manifest.name.clone();
     // A device code works on any Device, so it is the sign-in wherever the user asked.
     let opens_on = match (&device, &elsewhere) {
@@ -565,7 +818,7 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
         return match begin_sign_in(app, &url, &scopes, &name, &client, elsewhere.redirect_uri).await {
             Ok((state, page)) => {
                 let id = hold_sign_in(app, plugin_id, Pending { state, server: server.to_string(), name: name.clone(), card });
-                Ok(SignInStart { message: format!("Open the {name} sign-in page on {}.", elsewhere.device), url: Some(page), id: Some(id) })
+                Ok(SignInStart { message: format!("Open the {name} sign-in page on {}.", elsewhere.device), url: Some(page), id: Some(id), done: None })
             }
             Err(error) => {
                 end_sign_in(app, plugin_id, server, &name, card, Err(error.clone()));
@@ -575,14 +828,17 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
     }
     let message = if device.is_some() { format!("Getting a {name} sign-in code.") } else { format!("Opened the {name} sign-in page in the browser on this Runner.") };
     let (app, plugin_id, server) = (app.clone(), plugin_id.to_string(), server.to_string());
+    let (ended, done) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let flow = match &device {
             Some((device_endpoint, token_endpoint)) => device_sign_in(&app, &plugin_id, &server, device_endpoint, token_endpoint, &scopes, &name, client.id.as_deref().unwrap_or(""), card.as_ref()).await,
             None => sign_in(&app, &url, &scopes, &name, &client).await,
         };
+        let outcome = flow.as_ref().map(|_| ()).map_err(Clone::clone);
         end_sign_in(&app, &plugin_id, &server, &name, card, flow);
+        let _ = ended.send(outcome);
     });
-    Ok(SignInStart { message, url: None, id: None })
+    Ok(SignInStart { message, url: None, id: None, done: Some(done) })
 }
 
 fn this_runner(app: &App) -> String {
@@ -814,6 +1070,14 @@ struct ClientHint {
     token_variable: Option<String>,
     client_id_variable: Option<String>,
     client_secret_variable: Option<String>,
+    name: Option<String>,
+    callback_port: Option<u16>,
+    callback_url: Option<String>,
+    metadata_url: Option<String>,
+}
+
+impl ClientHint {
+    fn has_fixed_redirect(&self) -> bool { self.callback_port.is_some() || self.callback_url.is_some() }
 }
 
 impl ClientHint {
@@ -853,7 +1117,7 @@ async fn challenge_of(app: &Arc<App>, url: &str) -> Option<String> {
 async fn begin_sign_in(app: &Arc<App>, url: &str, scopes: &[String], name: &str, client: &ClientHint, redirect: String) -> Result<(OAuthState, String), String> {
     let setup = async {
         let mut state = OAuthState::new(url, Some(app.mcp.http.clone())).await.map_err(|e| format!("{name}: {e}"))?;
-        let mut request = AuthorizationRequest::new(redirect).with_scopes(scopes.iter().cloned()).with_client_name("Lorca").with_application_type("native");
+        let mut request = AuthorizationRequest::new(redirect).with_scopes(scopes.iter().cloned()).with_client_name(client.name.as_deref().unwrap_or("Lorca")).with_application_type("native");
         if let Some(challenge) = challenge_of(app, url).await {
             request = request.with_challenge(challenge);
         }
@@ -863,10 +1127,18 @@ async fn begin_sign_in(app: &Arc<App>, url: &str, scopes: &[String], name: &str,
                 request = request.with_client_secret(secret.clone());
             }
         }
-        state.start_authorization(request).await.map_err(|e| match e {
+        let refused = |e: rmcp::transport::auth::AuthError| match e {
             rmcp::transport::auth::AuthError::RegistrationFailed(_) => client.no_registration_advice(name),
             other => format!("{name} does not offer a sign-in: {other}"),
-        })?;
+        };
+        if let Some(metadata_url) = &client.metadata_url {
+            let metadata = auth_server_metadata(app, metadata_url, name).await?;
+            let OAuthState::Unauthorized(mut manager) = state else { return Err(format!("{name}'s sign-in has already begun.")) };
+            manager.set_metadata(metadata);
+            state = OAuthState::Session(rmcp::transport::auth::AuthorizationSession::new(manager, request).await.map_err(|(_, e)| refused(e))?);
+        } else {
+            state.start_authorization(request).await.map_err(refused)?;
+        }
         let page = state.get_authorization_url().await.map_err(|e| e.to_string())?;
         Ok((state, page))
     };
@@ -886,7 +1158,7 @@ async fn complete_sign_in(mut state: OAuthState, callback: &str, name: &str) -> 
 
 /// A sign-in in this Runner's own browser, back to its own loopback.
 async fn sign_in(app: &Arc<App>, url: &str, scopes: &[String], name: &str, client: &ClientHint) -> Result<Value, String> {
-    let callback = super::sign_in::Callback::bind().await?;
+    let callback = if client.has_fixed_redirect() { super::sign_in::Callback::bind_fixed(client.callback_port, client.callback_url.as_deref()).await? } else { super::sign_in::Callback::bind().await? };
     let (state, page) = begin_sign_in(app, url, scopes, name, client, callback.redirect_uri()).await?;
     open_browser(app, &page)?;
     let landed = callback.wait(name, super::sign_in::TIMEOUT).await?;
@@ -932,23 +1204,48 @@ struct SavedServer {
     instructions: Option<String>,
     #[serde(default)]
     tools: Vec<rmcp::model::Tool>,
+    #[serde(default)]
+    resources: bool,
+}
+
+pub fn saved_tools(app: &App, plugin: &Installed) -> Vec<Value> {
+    let saved: SavedCatalog = crate::config::read_json(&catalog_path(app, &plugin.manifest.id)).unwrap_or_default();
+    saved.servers.into_iter().filter(|(name, _)| plugin.manifest.servers.contains_key(name)).flat_map(|(_, server)| server.tools).map(|tool| {
+        let about = tool.description.as_deref().and_then(|text| text.lines().find(|line| !line.trim().is_empty())).unwrap_or_default();
+        json!({
+            "name": tool.name,
+            "title": tool.title,
+            "description": utf8_prefix(about, 300),
+            "read_only": tool.annotations.as_ref().and_then(|a| a.read_only_hint).unwrap_or(false),
+            "hidden": plugin.manifest.tools.hides(&tool.name),
+        })
+    }).collect()
+}
+
+pub fn saved_tool_count(app: &App, plugin: &Installed) -> Option<usize> {
+    catalog_path(app, &plugin.manifest.id).is_file().then(|| saved_servers(app, plugin).iter().map(|(_, _, tools, resources)| tools.len() + if *resources { 3 } else { 0 }).sum())
 }
 
 fn catalog_path(app: &App, plugin_id: &str) -> std::path::PathBuf {
     app.config.plugins_dir().join(plugin_id).join("catalog.json")
 }
 
-/// Keeps what a server just offered, for the next turns' listings.
-fn save_catalog(app: &App, server: &Server) {
-    let path = catalog_path(app, &server.plugin_id);
+struct ServerCatalog<'a> {
+    plugin_id: &'a str,
+    name: &'a str,
+    tools: &'a [rmcp::model::Tool],
+    instructions: Option<&'a str>,
+    resources: bool,
+}
+
+fn save_catalog(app: &App, server: &ServerCatalog<'_>) {
+    let path = catalog_path(app, server.plugin_id);
     let mut saved: SavedCatalog = crate::config::read_json(&path).unwrap_or_default();
-    let fresh = SavedServer { instructions: server.instructions.clone(), tools: server.tools.clone() };
-    let changed = saved.servers.get(&server.name).is_none_or(|old| old.instructions != fresh.instructions || old.tools != fresh.tools);
+    let fresh = SavedServer { instructions: server.instructions.map(str::to_string), tools: server.tools.to_vec(), resources: server.resources };
+    let changed = saved.servers.get(server.name).is_none_or(|old| old.instructions != fresh.instructions || old.tools != fresh.tools || old.resources != fresh.resources);
     if changed {
-        saved.servers.insert(server.name.clone(), fresh);
-        if let Err(error) = crate::config::write_json_private(&path, &saved) {
-            tracing::warn!(%error, plugin = %server.plugin_id, "saving a plugin's tool list");
-        }
+        saved.servers.insert(server.name.to_string(), fresh);
+        if let Err(error) = crate::config::write_json_private(&path, &saved) { tracing::warn!(%error, plugin = %server.plugin_id, "saving a plugin's tool list"); }
     }
 }
 
@@ -967,17 +1264,12 @@ pub fn prefetch_tools(app: &Arc<App>, plugin_id: &str) {
 }
 
 /// The saved tool lists of a plugin's current servers, without the tools its manifest hides.
-fn saved_servers(app: &App, plugin: &Installed) -> Vec<(String, Option<String>, Vec<rmcp::model::Tool>)> {
+fn saved_servers(app: &App, plugin: &Installed) -> Vec<(String, Option<String>, Vec<rmcp::model::Tool>, bool)> {
     let saved: SavedCatalog = crate::config::read_json(&catalog_path(app, &plugin.manifest.id)).unwrap_or_default();
-    saved
-        .servers
-        .into_iter()
-        .filter(|(name, _)| plugin.manifest.servers.contains_key(name))
-        .map(|(name, server)| {
-            let tools = server.tools.into_iter().filter(|tool| !plugin.manifest.tools.hide.iter().any(|pattern| pattern_matches(pattern, &tool.name))).collect();
-            (name, server.instructions, tools)
-        })
-        .collect()
+    saved.servers.into_iter().filter(|(name, _)| plugin.manifest.servers.contains_key(name)).map(|(name, server)| {
+        let tools = server.tools.into_iter().filter(|tool| !plugin.manifest.tools.hides(&tool.name)).collect();
+        (name, server.instructions, tools, server.resources)
+    }).collect()
 }
 
 /// A tool of a plugin server, which scripts call as `tools.github__create_issue(args)`. The
@@ -985,6 +1277,7 @@ fn saved_servers(app: &App, plugin: &Installed) -> Vec<(String, Option<String>, 
 /// `before_tool_call` boundary ([`review_call`]).
 pub struct PluginTool {
     app: Arc<App>,
+    bot_id: Option<String>,
     plugin_id: String,
     plugin_name: String,
     server_name: String,
@@ -992,6 +1285,26 @@ pub struct PluginTool {
     name: String,
     description: String,
     read_only: bool,
+    kind: ToolKind,
+    timeout: std::time::Duration,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolKind { Call, ListResources, ListResourceTemplates, ReadResource }
+
+fn resource_tools(plugin_name: &str) -> Vec<(rmcp::model::Tool, ToolKind)> {
+    let paged = json!({ "type": "object", "properties": { "cursor": { "type": "string" } } });
+    let listing = |item: Value, key: &str| json!({ "type": "object", "properties": { key: { "type": "array", "items": item }, "nextCursor": { "type": "string" } } });
+    let resource = json!({ "type": "object", "properties": { "uri": { "type": "string" }, "name": { "type": "string" }, "mimeType": { "type": "string" } } });
+    let define = |name: &str, about: String, input: Value, output: Value| -> rmcp::model::Tool {
+        serde_json::from_value(json!({ "name": name, "description": about, "inputSchema": input, "outputSchema": output, "annotations": { "readOnlyHint": true } })).expect("resource schema")
+    };
+    vec![
+        (define("list_mcp_resources", format!("List resources {plugin_name} offers"), paged.clone(), listing(resource.clone(), "resources")), ToolKind::ListResources),
+        (define("list_mcp_resource_templates", format!("List resource URI templates {plugin_name} offers"), paged, listing(resource, "resourceTemplates")), ToolKind::ListResourceTemplates),
+        (define("read_mcp_resource", format!("Read a {plugin_name} resource by URI"), json!({ "type": "object", "properties": { "uri": { "type": "string" } }, "required": ["uri"] }), json!({ "type": "object", "properties": { "contents": { "type": "array" } } })), ToolKind::ReadResource),
+    ]
+
 }
 
 /// One plugin tool in the turn's catalog, with the bounded text search ranks it by.
@@ -1011,11 +1324,13 @@ struct CatalogTool {
 struct PluginGroup {
     id: String,
     description: String,
+    about: String,
 }
 
 #[derive(Default)]
 struct CatalogState {
     tools: BTreeMap<String, Arc<CatalogTool>>,
+    instructions: BTreeMap<(String, String), String>,
     /// Plugins whose servers connected during this turn, so their live tool lists are in.
     connected: std::collections::HashSet<String>,
 }
@@ -1026,30 +1341,45 @@ struct CatalogState {
 /// search or a call by name connects it.
 pub struct PluginCatalog {
     app: Arc<App>,
+    bot_id: Option<String>,
     local: Vec<Arc<dyn Tool>>,
     groups: Vec<PluginGroup>,
     state: Mutex<CatalogState>,
 }
 
 impl PluginCatalog {
-    fn new(app: Arc<App>, local: Vec<Arc<dyn Tool>>) -> Self {
-        let installed = app.plugins.lock().unwrap().installed().to_vec();
-        let mut catalog = PluginCatalog { app, local, groups: Vec::new(), state: Mutex::new(CatalogState::default()) };
+    fn new(app: Arc<App>, local: Vec<Arc<dyn Tool>>, bot_id: Option<String>) -> Self {
+        let policy = bot_id.as_deref().map(|id| app.bot(id).map(|bot| bot.capabilities));
+        let installed: Vec<Installed> = app.plugins.lock().unwrap().installed().iter()
+            .filter(|plugin| policy.as_ref().is_none_or(|bot| bot.as_ref().is_some_and(|caps| caps.permits("", Some(&plugin.manifest.id)))))
+            .cloned().collect();
+        let mut catalog = PluginCatalog { app, local, bot_id, groups: Vec::new(), state: Mutex::new(CatalogState::default()) };
         for plugin in &installed {
             let saved = saved_servers(&catalog.app, plugin);
             catalog.groups.push(plugin_group(&catalog.app, plugin, &saved));
-            for (server, instructions, tools) in &saved {
-                catalog.add_tools(plugin, server, instructions.as_deref(), tools);
+            for (server, instructions, tools, resources) in &saved {
+                catalog.add_tools(plugin, server, instructions.as_deref(), tools, *resources);
             }
         }
         catalog
     }
+    /// Discovery, connection, and listing use the current bot policy, not its turn-start copy.
+    fn permits_plugin(&self, plugin_id: &str) -> bool {
+        self.bot_id.as_deref().is_none_or(|id| self.app.bot(id).is_some_and(|bot| bot.capabilities.permits("", Some(plugin_id))))
+    }
 
-    fn add_tools(&self, plugin: &Installed, server_name: &str, instructions: Option<&str>, tools: &[rmcp::model::Tool]) {
+
+    fn add_tools(&self, plugin: &Installed, server_name: &str, instructions: Option<&str>, tools: &[rmcp::model::Tool], resources: bool) {
         let mut state = self.state.lock().unwrap();
+        let key = (plugin.manifest.id.clone(), server_name.to_string());
+        match instructions.map(str::trim).filter(|text| !text.is_empty()) {
+            Some(text) => { state.instructions.insert(key, text.to_string()); },
+            None => { state.instructions.remove(&key); },
+        }
         let server_instructions = instructions.map(|text| utf8_prefix(text, MAX_SERVER_INSTRUCTIONS_BYTES).to_string()).unwrap_or_default();
-        for tool in tools {
-            if plugin.manifest.tools.hide.iter().any(|pattern| pattern_matches(pattern, &tool.name)) {
+        let extra = if resources { resource_tools(&plugin.manifest.name) } else { Vec::new() };
+        for (tool, kind) in tools.iter().map(|tool| (tool, ToolKind::Call)).chain(extra.iter().map(|(tool, kind)| (tool, *kind))) {
+            if plugin.manifest.tools.hides(&tool.name) {
                 continue;
             }
             let original_name = tool.name.to_string();
@@ -1063,10 +1393,11 @@ impl PluginCatalog {
                 .map(str::to_string)
                 .or_else(|| tool.title.clone())
                 .unwrap_or_else(|| format!("{} tool {original_name}", plugin.manifest.name));
-            let read_only = tool.annotations.as_ref().and_then(|annotations| annotations.read_only_hint).unwrap_or(false)
+            let read_only = kind != ToolKind::Call || tool.annotations.as_ref().and_then(|annotations| annotations.read_only_hint).unwrap_or(false)
                 || plugin.manifest.tools.readonly.iter().any(|pattern| pattern_matches(pattern, &original_name));
             let executable = Arc::new(PluginTool {
                 app: self.app.clone(),
+                bot_id: self.bot_id.clone(),
                 plugin_id: plugin.manifest.id.clone(),
                 plugin_name: plugin.manifest.name.clone(),
                 server_name: server_name.to_string(),
@@ -1074,6 +1405,8 @@ impl PluginCatalog {
                 name: name.clone(),
                 description: description.clone(),
                 read_only,
+                kind,
+                timeout: plugin.manifest.servers.get(server_name).map(ServerSpec::call_timeout).unwrap_or(super::CALL_TIMEOUT),
             });
             let raw_search_schema = serde_json::to_string(&Value::Object((*tool.input_schema).clone())).unwrap_or_default();
             state.tools.insert(
@@ -1096,6 +1429,7 @@ impl PluginCatalog {
     /// Connects a plugin's servers and takes their live tool lists. The problems are why a
     /// server could not connect.
     async fn connect_plugin(&self, plugin: &Installed, cancel: &CancellationToken) -> Vec<String> {
+        if !self.permits_plugin(&plugin.manifest.id) { return Vec::new(); }
         if self.state.lock().unwrap().connected.contains(&plugin.manifest.id) {
             return Vec::new();
         }
@@ -1110,7 +1444,7 @@ impl PluginCatalog {
                 _ = cancel.cancelled() => return problems,
             };
             match server {
-                Ok(server) => self.add_tools(plugin, &server.name, server.instructions.as_deref(), &server.tools),
+                Ok(server) => self.add_tools(plugin, &server.name, server.instructions.as_deref(), &server.tools(), server.resources),
                 Err(error) => {
                     tracing::warn!(%error, plugin = %plugin.manifest.id, server = %server_name, "connecting a plugin server for a script");
                     problems.push(error);
@@ -1132,6 +1466,12 @@ impl PluginCatalog {
         self.state.lock().unwrap().tools.get(tool_name).map(|tool| tool.plugin_name.clone())
     }
 
+    pub fn bot_id(&self) -> Option<&str> { self.bot_id.as_deref() }
+
+    pub fn plugin_id(&self, tool_name: &str) -> Option<String> {
+        self.lookup(tool_name).map(|tool| tool.plugin_id.clone())
+    }
+
     fn entry(tool: &CatalogTool) -> Entry {
         Entry::new(tool.tool.clone(), Exposure::Listed).in_namespace(tool.plugin_id.clone())
     }
@@ -1146,7 +1486,7 @@ impl PluginCatalog {
 /// How the codemode description names a plugin: its id, its name and what it does, what it
 /// still needs, and the start of its servers' own instructions. Only the needs that last are
 /// named, so the description stays the same from turn to turn.
-fn plugin_group(app: &App, plugin: &Installed, saved: &[(String, Option<String>, Vec<rmcp::model::Tool>)]) -> PluginGroup {
+fn plugin_group(app: &App, plugin: &Installed, saved: &[(String, Option<String>, Vec<rmcp::model::Tool>, bool)]) -> PluginGroup {
     let manifest = &plugin.manifest;
     let mut description = manifest.name.clone();
     if let Some(about) = manifest.description.lines().map(str::trim).find(|line| !line.is_empty()) {
@@ -1158,25 +1498,33 @@ fn plugin_group(app: &App, plugin: &Installed, saved: &[(String, Option<String>,
         Some("needs_setup") => description.push_str(&format!("\nNot set up yet ({}): the user sets it up in the plugin's settings.", status.map(|status| status.detail).unwrap_or_default())),
         _ => {}
     }
-    for (_, instructions, _) in saved {
+    let about = description.clone();
+    for (_, instructions, _, _) in saved {
         if let Some(instructions) = instructions.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
             let shown = utf8_prefix(instructions, MAX_NAMESPACE_INSTRUCTIONS_BYTES);
-            description.push_str(&format!("\nServer instructions: {shown}{}", if shown.len() < instructions.len() { "…" } else { "" }));
+            let rest = if shown.len() < instructions.len() { format!("… (describeNamespace(\"{}\") has the rest)", manifest.id) } else { String::new() };
+            description.push_str(&format!("\nServer instructions: {shown}{rest}"));
         }
     }
-    PluginGroup { id: manifest.id.clone(), description }
+    PluginGroup { id: manifest.id.clone(), description, about }
 }
 
 #[async_trait]
 impl codemode::Catalog for PluginCatalog {
     fn entries(&self) -> Vec<Entry> {
         let mut entries: Vec<Entry> = self.local.iter().map(|tool| Entry::new(tool.clone(), Exposure::Direct)).collect();
-        entries.extend(self.state.lock().unwrap().tools.values().map(|tool| PluginCatalog::entry(tool)));
+        let policy = self.bot_id.as_deref().map(|id| self.app.bot(id).map(|bot| bot.capabilities));
+        let store = self.app.plugins.lock().unwrap();
+        entries.extend(self.state.lock().unwrap().tools.values().filter(|tool| {
+            policy.as_ref().is_none_or(|bot| bot.as_ref().is_some_and(|caps| caps.permits("", Some(&tool.plugin_id))))
+                && store.get(&tool.plugin_id).is_some_and(|plugin| !plugin.manifest.tools.hides(&tool.original_name))
+        }).map(|tool| PluginCatalog::entry(tool)));
         entries
     }
 
     fn namespaces(&self) -> Vec<Namespace> {
-        self.groups.iter().map(|group| Namespace { name: group.id.clone(), description: group.description.clone() }).collect()
+        self.groups.iter().filter(|group| self.permits_plugin(&group.id))
+            .map(|group| Namespace { name: group.id.clone(), description: group.description.clone() }).collect()
     }
 
     async fn find(&self, name: &str, cancel: &CancellationToken) -> Option<Entry> {
@@ -1184,20 +1532,44 @@ impl codemode::Catalog for PluginCatalog {
             return Some(Entry::new(tool.clone(), Exposure::Direct));
         }
         if let Some(tool) = self.lookup(name) {
-            return Some(PluginCatalog::entry(&tool));
+            if self.permits_plugin(&tool.plugin_id) && self.app.plugins.lock().unwrap().get(&tool.plugin_id).is_some_and(|plugin| !plugin.manifest.tools.hides(&tool.original_name)) {
+                return Some(PluginCatalog::entry(&tool));
+            }
         }
         // A tool of a plugin that has not connected yet: connect it and look again.
         let (prefix, _) = name.split_once("__")?;
         let plugin = self.app.plugins.lock().unwrap().installed().iter().find(|plugin| plugin.manifest.id == prefix || codemode::to_identifier(&plugin.manifest.id) == prefix).cloned()?;
+        if !self.permits_plugin(&plugin.manifest.id) { return None; }
         self.connect_plugin(&plugin, cancel).await;
-        self.lookup(name).map(|tool| PluginCatalog::entry(&tool))
+        self.lookup(name).filter(|tool| self.permits_plugin(&tool.plugin_id)
+            && self.app.plugins.lock().unwrap().get(&tool.plugin_id).is_some_and(|plugin| !plugin.manifest.tools.hides(&tool.original_name)))
+            .map(|tool| PluginCatalog::entry(&tool))
+    }
+
+    async fn describe_namespace(&self, name: &str, cancel: &CancellationToken) -> Result<Option<NamespaceDetails>, String> {
+        let plugin = self.app.plugins.lock().unwrap().installed().iter().find(|plugin| plugin.manifest.id == name || codemode::to_identifier(&plugin.manifest.id) == name).cloned();
+        let Some(plugin) = plugin else { return Ok(None) };
+        let id = plugin.manifest.id.clone();
+        let known = self.state.lock().unwrap().tools.values().any(|tool| tool.plugin_id == id);
+        if !self.permits_plugin(&id) { return Ok(None); }
+        if !known { self.connect_plugin(&plugin, cancel).await; }
+        if !self.permits_plugin(&id) { return Ok(None); }
+        let about = self.groups.iter().find(|group| group.id == id).map(|group| group.about.clone()).unwrap_or_else(|| plugin.manifest.name.clone());
+        let state = self.state.lock().unwrap();
+        let instructions = state.instructions.iter().filter(|((plugin_id, _), _)| *plugin_id == id).map(|(_, text)| text.as_str()).collect::<Vec<_>>().join("\n\n");
+        let tools = state.tools.values().filter(|tool| tool.plugin_id == id && !plugin.manifest.tools.hides(&tool.original_name))
+            .map(|tool| tool.name.clone()).collect();
+        Ok(Some(NamespaceDetails { name: id, description: about, instructions, tools }))
     }
 
     async fn search(&self, query: &str, namespace: Option<&str>, limit: usize, cancel: &CancellationToken) -> Result<Vec<Entry>, String> {
         if query.trim().is_empty() {
             return Err("searchTools() needs a non-empty query".into());
         }
-        let installed = self.app.plugins.lock().unwrap().installed().to_vec();
+        let policy = self.bot_id.as_deref().map(|id| self.app.bot(id).map(|bot| bot.capabilities));
+        let installed: Vec<Installed> = self.app.plugins.lock().unwrap().installed().iter()
+            .filter(|plugin| policy.as_ref().is_none_or(|bot| bot.as_ref().is_some_and(|caps| caps.permits("", Some(&plugin.manifest.id)))))
+            .cloned().collect();
         let plugins: Vec<Installed> = match namespace {
             Some(namespace) => {
                 let plugins: Vec<Installed> = installed.into_iter().filter(|plugin| plugin.manifest.id == namespace || codemode::to_identifier(&plugin.manifest.id) == namespace).collect();
@@ -1215,8 +1587,11 @@ impl codemode::Catalog for PluginCatalog {
                 self.connect_plugin(plugin, cancel).await;
             }
         }
-        let candidates: Vec<Arc<CatalogTool>> =
-            self.state.lock().unwrap().tools.values().filter(|tool| plugins.iter().any(|plugin| plugin.manifest.id == tool.plugin_id)).cloned().collect();
+        let policy = self.bot_id.as_deref().map(|id| self.app.bot(id).map(|bot| bot.capabilities));
+        let candidates: Vec<Arc<CatalogTool>> = self.state.lock().unwrap().tools.values()
+            .filter(|tool| policy.as_ref().is_none_or(|bot| bot.as_ref().is_some_and(|caps| caps.permits("", Some(&tool.plugin_id)))))
+            .filter(|tool| plugins.iter().any(|plugin| plugin.manifest.id == tool.plugin_id && !plugin.manifest.tools.hides(&tool.original_name)))
+            .cloned().collect();
         Ok(rank_tools(query, &candidates, namespace.is_some()).into_iter().take(limit).map(|tool| PluginCatalog::entry(&tool)).collect())
     }
 }
@@ -1224,15 +1599,19 @@ impl codemode::Catalog for PluginCatalog {
 /// The catalog behind a turn's `codemode` tool, with `local` (the bot's own read and write
 /// tools) callable from scripts too. No MCP process or HTTP connection starts here.
 pub fn turn_catalog(app: &Arc<App>, local: Vec<Arc<dyn Tool>>) -> Arc<PluginCatalog> {
-    Arc::new(PluginCatalog::new(app.clone(), local))
+    Arc::new(PluginCatalog::new(app.clone(), local, None))
+}
+
+pub fn turn_catalog_for_bot(app: &Arc<App>, local: Vec<Arc<dyn Tool>>, bot_id: &str) -> Arc<PluginCatalog> {
+    Arc::new(PluginCatalog::new(app.clone(), local, Some(bot_id.to_string())))
 }
 
 /// The installed plugins as the system prompt names them.
-pub fn plugin_briefs(app: &App) -> Vec<PluginBrief> {
+pub fn plugin_briefs(app: &App, bot_id: Option<&str>) -> Vec<PluginBrief> {
+    let policy = bot_id.map(|id| app.bot(id).map(|bot| bot.capabilities));
     let store = app.plugins.lock().unwrap();
-    store
-        .installed()
-        .iter()
+    store.installed().iter()
+        .filter(|plugin| policy.as_ref().is_none_or(|bot| bot.as_ref().is_some_and(|caps| caps.permits("", Some(&plugin.manifest.id)))))
         .map(|plugin| {
             let status = store.status(&plugin.manifest.id);
             PluginBrief {
@@ -1281,6 +1660,7 @@ enum Access {
 /// the bot can write that file; a server that cannot be reached says nothing, and the tool may
 /// change things.
 async fn access(app: &Arc<App>, tool: &PluginTool, cancel: &CancellationToken) -> Access {
+    if tool.kind != ToolKind::Call { return Access::ReadOnly; }
     let name = tool.tool.name.to_string();
     let manifest_read_only =
         app.plugins.lock().unwrap().get(&tool.plugin_id).is_some_and(|plugin| plugin.manifest.tools.readonly.iter().any(|pattern| pattern_matches(pattern, &name)));
@@ -1292,7 +1672,7 @@ async fn access(app: &Arc<App>, tool: &PluginTool, cancel: &CancellationToken) -
         _ = cancel.cancelled() => return Access::Stopped,
         server = app.mcp.server(app, &tool.plugin_id, &tool.server_name) => server.ok(),
     };
-    let live_tool = live.as_ref().and_then(|server| server.tools.iter().find(|candidate| candidate.name == tool.tool.name).cloned());
+    let live_tool = live.as_ref().and_then(|server| server.tools().into_iter().find(|candidate| candidate.name == tool.tool.name));
     if live_tool.as_ref().and_then(|live| live.annotations.as_ref()).and_then(|annotations| annotations.read_only_hint) == Some(true) {
         return Access::ReadOnly;
     }
@@ -1321,6 +1701,9 @@ pub async fn review_call(
     ctx: &BeforeToolCallContext<'_>,
 ) -> Option<BeforeToolCallResult> {
     let tool = catalog.plugin_tool(&ctx.tool_call.name)?;
+    if !app.bot(&bot.id).is_some_and(|current| current.capabilities.permits(&ctx.tool_call.name, Some(&tool.plugin_id))) {
+        return Some(crate::local_review::blocked(format!("{} is not permitted for this bot.", ctx.tool_call.name)));
+    }
     let name = tool.tool.name.to_string();
     let review_description = match access(app, &tool, ctx.cancel).await {
         Access::ReadOnly => return None,
@@ -1338,7 +1721,11 @@ pub async fn review_call(
         )));
     }
     let summary = call_summary(&name, ctx.args);
-    match ask(app, chat_id, &bot.id, &tool.plugin_id, &tool.plugin_name, &name, &summary, ctx.args.clone(), reason, ctx.cancel).await {
+    let decision = ask(app, chat_id, &bot.id, &tool.plugin_id, &tool.plugin_name, &name, &summary, ctx.args.clone(), reason, ctx.cancel).await;
+    if app.is_paused() || !app.bot(&bot.id).is_some_and(|current| current.capabilities.permits(&ctx.tool_call.name, Some(&tool.plugin_id))) {
+        return Some(crate::local_review::blocked("Account paused or plugin access removed.".into()));
+    }
+    match decision {
         Decision::Allowed | Decision::Always => None,
         Decision::Denied => Some(crate::local_review::blocked(format!("The user did not allow {name}. Do not retry it; ask what they want instead."))),
         Decision::Expired => Some(crate::local_review::blocked(format!("Nobody answered the permission request for {name} in time. Say what you needed and stop."))),
@@ -1530,35 +1917,173 @@ impl Tool for PluginTool {
         (!self.read_only).then_some(ToolExecutionMode::Sequential)
     }
     async fn execute(&self, _id: &str, args: Value, cancel: CancellationToken, _on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+        if self.app.is_paused() || self.bot_id.as_deref().is_some_and(|id| !self.app.bot(id).is_some_and(|bot| bot.capabilities.permits(&self.name, Some(&self.plugin_id))))
+            || !self.app.plugins.lock().unwrap().get(&self.plugin_id).is_some_and(|plugin| !plugin.manifest.tools.hides(&self.tool.name)) {
+            return Err(ToolError("Account paused or plugin access removed.".into()));
+        }
         let tool = self.tool.name.to_string();
         let server = tokio::select! {
             server = self.app.mcp.server(&self.app, &self.plugin_id, &self.server_name) => server.map_err(ToolError)?,
             _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
         };
+        if self.app.is_paused() || self.bot_id.as_deref().is_some_and(|id| !self.app.bot(id).is_some_and(|bot| bot.capabilities.permits(&self.name, Some(&self.plugin_id))))
+            || !self.app.plugins.lock().unwrap().get(&self.plugin_id).is_some_and(|plugin| !plugin.manifest.tools.hides(&self.tool.name)) {
+            return Err(ToolError("Account paused or plugin access removed.".into()));
+        }
+        if self.kind != ToolKind::Call { return self.resources(args, cancel, &server).await; }
         let mut params = CallToolRequestParams::default();
         params.name = tool.clone().into();
         params.arguments = args.as_object().cloned();
-        let call = server.service.call_tool(params);
-        let result = tokio::select! {
-            result = tokio::time::timeout(CALL_TIMEOUT, call) => result.map_err(|_| ToolError(format!("{tool} took too long")))?,
+        let request = rmcp::model::ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(params));
+        let options = rmcp::service::PeerRequestOptions::with_timeout(self.timeout).reset_timeout_on_progress();
+        let call = server.service.send_cancellable_request(request, options);
+        let handle = tokio::select! {
+            handle = call => handle.map_err(|e| ToolError(format!("{tool} failed: {e}")))?,
             _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
         };
-        if let Some(auth) = &server.auth {
-            persist_refreshed(&self.app, &self.plugin_id, &server.name, auth).await;
-        }
-        let result = result.map_err(|e| ToolError(format!("{tool} failed: {e}")))?;
+        let (peer, id) = (handle.peer.clone(), handle.id.clone());
+        let response = tokio::select! {
+            response = handle.await_response() => response,
+            _ = cancel.cancelled() => {
+                let cancelled = rmcp::model::CancelledNotification::new(rmcp::model::CancelledNotificationParam::new(Some(id), Some("Stopped".into())));
+                let _ = peer.send_notification(cancelled.into()).await;
+                return Err(ToolError("Stopped".into()));
+            }
+        };
+        if let Some(auth) = &server.auth { persist_refreshed(&self.app, &self.plugin_id, &server.name, auth).await; }
+        let result = match response {
+            Ok(rmcp::model::ServerResult::CallToolResult(result)) => result,
+            Ok(_) => return Err(ToolError(format!("{tool} answered with something other than a result"))),
+            Err(rmcp::ServiceError::Timeout { .. }) => return Err(ToolError(format!("{tool} took too long"))),
+            Err(error) => {
+                if let Some((scope, challenge)) = insufficient_scope(&error) {
+                    needs_more_access(&self.app, &self.plugin_id, &self.server_name, &scope, &challenge);
+                    return Err(ToolError(format!("{} needs more access for {tool}. Sign in again to grant it.", self.plugin_name)));
+                }
+                return Err(ToolError(format!("{tool} failed: {error}")));
+            },
+        };
         let is_error = result.is_error.unwrap_or(false);
-        let mut content = model_content(&result);
-        if is_error && content.iter().all(|part| part.as_text().is_none_or(|text| text.trim().is_empty())) {
-            content = vec![ContentPart::text(format!("{} {tool} reported an error", self.plugin_name))];
-        }
-        let mut structured = serde_json::to_value(&result).unwrap_or_else(|_| json!({ "content": [] }));
+        let mut structured = bounded_value(&result)?;
         if let Some(fields) = structured.as_object_mut() {
             fields.remove("_meta");
             fields.remove("resultType");
         }
+        let mut content = tokio::task::spawn_blocking(move || model_content(&result)).await.map_err(|_| ToolError("MCP result could not be prepared".into()))?;
+        if is_error && content.iter().all(|part| part.as_text().is_none_or(|text| text.trim().is_empty())) {
+            content = vec![ContentPart::text(format!("{} {tool} reported an error", self.plugin_name))];
+        }
         Ok(ToolResult { content, details: json!({ "plugin_id": self.plugin_id, "tool": tool }), structured: Some(structured), is_error, terminate: false })
     }
+}
+
+impl PluginTool {
+    async fn resources(&self, args: Value, cancel: CancellationToken, server: &Server) -> Result<ToolResult, ToolError> {
+        let tool = self.tool.name.to_string();
+        let peer = server.service.peer();
+        let page = args["cursor"].as_str().and_then(|cursor| serde_json::from_value::<rmcp::model::PaginatedRequestParams>(json!({"cursor":cursor})).ok());
+        let asked = async {
+            Ok::<Value, String>(match self.kind {
+                ToolKind::ListResources => listed(bounded_value(&peer.list_resources(page).await.map_err(|e| e.to_string())?).map_err(|e| e.0)?, "resources"),
+                ToolKind::ListResourceTemplates => listed(bounded_value(&peer.list_resource_templates(page).await.map_err(|e| e.to_string())?).map_err(|e| e.0)?, "resourceTemplates"),
+                ToolKind::ReadResource | ToolKind::Call => {
+                    let uri = args["uri"].as_str().filter(|s| !s.trim().is_empty()).ok_or("read_mcp_resource needs uri")?;
+                    let params = serde_json::from_value::<rmcp::model::ReadResourceRequestParams>(json!({"uri":uri})).map_err(|e| e.to_string())?;
+                    bounded_value(&peer.read_resource(params).await.map_err(|e| e.to_string())?).map_err(|e| e.0)?
+                }
+            })
+        };
+        let structured = tokio::select! {
+            answer = tokio::time::timeout(self.timeout, asked) => answer.map_err(|_| ToolError(format!("{tool} took too long")))?.map_err(ToolError)?,
+            _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
+        };
+        let (content, structured) = if self.kind == ToolKind::ReadResource {
+            tokio::task::spawn_blocking(move || read_contents(structured)).await.map_err(|_| ToolError("resource could not be prepared".into()))?
+        } else { (vec![ContentPart::text(serde_json::to_string_pretty(&structured).unwrap_or_default())], structured) };
+        let blocks: Vec<Value> = content.iter().map(|part| match part {
+            ContentPart::Image { data, mime_type } => json!({"type":"image","data":data,"mimeType":mime_type}),
+            other => json!({"type":"text","text":other.as_text().unwrap_or_default()}),
+        }).collect();
+        #[derive(Serialize)]
+        struct ScriptReply<'a> {
+            content: &'a [Value],
+            #[serde(rename = "structuredContent")]
+            structured_content: &'a Value,
+            #[serde(rename = "isError")]
+            is_error: bool,
+        }
+        let reply = bounded_value(&ScriptReply { content: &blocks, structured_content: &structured, is_error: false })?;
+        Ok(ToolResult { content, details: json!({"plugin_id":self.plugin_id,"tool":tool}), structured: Some(reply), is_error: false, terminate: false })
+    }
+}
+
+fn listed(page: Value, key: &str) -> Value {
+    let keep = ["uri", "uriTemplate", "name", "title", "description", "mimeType", "size"];
+    let items: Vec<Value> = page[key].as_array().into_iter().flatten()
+        .filter(|item| !item["uri"].as_str().is_some_and(|uri| uri.starts_with("ui://")) && !item["mimeType"].as_str().is_some_and(|mime| mime.contains("profile=mcp-app")))
+        .map(|item| Value::Object(keep.iter().filter_map(|field| item.get(*field).map(|value| (field.to_string(), value.clone()))).collect())).collect();
+    let mut out = json!({key:items});
+    if let Some(cursor) = page["nextCursor"].as_str().filter(|s| !s.is_empty()) { out["nextCursor"] = json!(cursor); }
+    out
+}
+
+fn read_contents(read: Value) -> (Vec<ContentPart>, Value) {
+    let mut content = Vec::new();
+    let mut contents = Vec::new();
+    for item in read["contents"].as_array().into_iter().flatten() {
+        let uri = item["uri"].as_str().unwrap_or_default();
+        let mime = item["mimeType"].as_str().unwrap_or("application/octet-stream");
+        if let Some(text) = item["text"].as_str() {
+            content.push(ContentPart::text(text.to_string()));
+            contents.push(json!({"uri":uri,"mimeType":mime,"text":text}));
+        } else if let Some(blob) = item["blob"].as_str() {
+            if mime.starts_with("image/") {
+                match model_image(blob) {
+                    Ok(image) => {
+                        let prepared = image.iter().find_map(|part| match part { ContentPart::Image { data, mime_type } => Some((data.clone(), mime_type.clone())), _ => None });
+                        content.extend(image);
+                        if let Some((data, mime_type)) = prepared { contents.push(json!({"uri":uri,"mimeType":mime_type,"blob":data})); }
+                    }
+                    Err(_) => content.push(ContentPart::text(format!("[{uri}: invalid image left out]"))),
+                }
+            } else if let Ok((path, size)) = save_blob(uri, blob) {
+                content.push(ContentPart::text(format!("[{uri}: {mime}, {size} bytes, saved to {}]", path.display())));
+                contents.push(json!({"uri":uri,"mimeType":mime,"path":path.display().to_string()}));
+            }
+        }
+    }
+    if content.is_empty() { content.push(ContentPart::text("(empty)")); }
+    (content, json!({"contents":contents}))
+}
+
+fn save_blob(uri: &str, blob: &str) -> Result<(std::path::PathBuf, usize), String> {
+    use base64::Engine;
+    if blob.len() > 64 * 1024 * 1024 { return Err("resource exceeds size limit".into()); }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(blob.trim()).map_err(|_| "invalid resource base64".to_string())?;
+    let dir = std::env::temp_dir().join("lorca-resources");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name: String = uri.rsplit(['/', '\\', ':']).next().unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).take(80).collect();
+    let path = dir.join(format!("{}-{}", uuid::Uuid::new_v4().simple(), if name.trim_matches('.').is_empty() { "resource" } else { &name }));
+    crate::config::write_private(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok((path, bytes.len()))
+}
+
+/// Stop serialization before an untrusted MCP reply duplicates unbounded content in the VM.
+fn bounded_value(value: &impl serde::Serialize) -> Result<Value, ToolError> {
+    struct Bounded(Vec<u8>);
+    impl std::io::Write for Bounded {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > MAX_MCP_RESPONSE_BYTES - self.0.len() {
+                return Err(std::io::Error::other("MCP response exceeds 8 MiB"));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let mut bytes = Bounded(Vec::new());
+    serde_json::to_writer(&mut bytes, value).map_err(|_| ToolError("MCP response exceeds 8 MiB or is invalid".into()))?;
+    serde_json::from_slice(&bytes.0).map_err(|_| ToolError("MCP response is invalid".into()))
 }
 
 /// A plugin result as text and images: text blocks cut at `MAX_RESULT_CHARS` in all, other
@@ -1582,16 +2107,25 @@ fn model_content(result: &rmcp::model::CallToolResult) -> Vec<ContentPart> {
                 text_len += text.len();
                 content.push(ContentPart::text(text));
             }
-            ContentBlock::Image(image) => content.push(ContentPart::Image { data: image.data.clone(), mime_type: image.mime_type.clone() }),
+            ContentBlock::Image(image) => match model_image(&image.data) {
+                Ok(parts) => content.extend(parts),
+                Err(_) => content.push(ContentPart::text("[image left out: invalid or too large]")),
+            },
+            ContentBlock::Audio(_) => content.push(ContentPart::text("[audio left out]")),
             ContentBlock::Resource(resource) => {
-                if let Ok(text) = serde_json::to_string(&resource.resource) {
-                    content.push(ContentPart::text(text));
+                use rmcp::model::ResourceContents;
+                match &resource.resource {
+                    ResourceContents::TextResourceContents { text, .. } => content.push(ContentPart::text(text.clone())),
+                    ResourceContents::BlobResourceContents { blob, mime_type: Some(mime), .. } if mime.starts_with("image/") => match model_image(blob) {
+                        Ok(parts) => content.extend(parts),
+                        Err(_) => content.push(ContentPart::text("[embedded image left out: invalid or too large]")),
+                    },
+                    _ => content.push(ContentPart::text("[binary resource left out]")),
                 }
             }
+            ContentBlock::ResourceLink(link) => content.push(ContentPart::text(format!("[{} ({})]", link.uri, link.name))),
             other => {
-                if let Ok(text) = serde_json::to_string(other) {
-                    content.push(ContentPart::text(text));
-                }
+                if let Ok(text) = serde_json::to_string(other) { content.push(ContentPart::text(text)); }
             }
         }
     }
@@ -1604,13 +2138,56 @@ fn model_content(result: &rmcp::model::CallToolResult) -> Vec<ContentPart> {
     content
 }
 
+fn model_image(data: &str) -> Result<Vec<ContentPart>, String> {
+    if data.len() > 16 * 1024 * 1024 { return Err("image input exceeds limit".into()); }
+    lorca_agent::images::prepare_base64(data).map(lorca_agent::images::Inline::into_parts)
+}
+
+/// A server's challenge naming the extra OAuth scope required by a refused call.
+fn insufficient_scope(error: &(dyn std::error::Error + 'static)) -> Option<(String, String)> {
+    let mut cause = Some(error);
+    while let Some(current) = cause {
+        let text = current.to_string();
+        if text.contains("insufficient_scope") || text.to_ascii_lowercase().contains("insufficient scope") {
+            let challenge = text.split_once("Bearer").map(|(_, rest)| format!("Bearer{rest}"))
+                .unwrap_or(text);
+            let scope = challenge.split("scope=\"").nth(1).and_then(|rest| rest.split('"').next()).unwrap_or_default().to_string();
+            return Some((scope, challenge));
+        }
+        cause = current.source();
+    }
+    None
+}
+
+/// Retain granted and newly requested scopes, but forget credentials that cannot call this tool.
+fn needs_more_access(app: &Arc<App>, plugin_id: &str, server: &str, required: &str, challenge: &str) {
+    {
+        let mut store = app.plugins.lock().unwrap();
+        let granted = store.sign_in_secret(plugin_id, "oauth", server)
+            .and_then(|saved| saved["tokens"]["scope"].as_str().map(str::to_string)).unwrap_or_default();
+        let earlier = store.secret(plugin_id, &format!("scope:{server}"))
+            .and_then(|saved| saved["scope"].as_str().map(str::to_string)).unwrap_or_default();
+        let mut scopes: Vec<&str> = Vec::new();
+        for scope in earlier.split_whitespace().chain(granted.split_whitespace()).chain(required.split_whitespace()) {
+            if !scopes.contains(&scope) { scopes.push(scope); }
+        }
+        store.set_secret(plugin_id, &format!("scope:{server}"), Some(json!({"scope":scopes.join(" ")})));
+        store.set_secret(plugin_id, &format!("oauth:{server}"), None);
+        store.note_challenge(&app.config, plugin_id, server, challenge);
+        if let Err(error) = store.save(&app.config) {
+            tracing::warn!(%error, "saving MCP sign-in that needs more access");
+        }
+    }
+    app.mcp.forget(plugin_id);
+    super::note(app, plugin_id, None);
+}
+
 /// Saves tokens the transport refreshed, so the next connection does not start from a stale
 /// refresh token.
 async fn persist_refreshed(app: &Arc<App>, plugin_id: &str, server: &str, auth: &Arc<tokio::sync::Mutex<AuthorizationManager>>) {
     let credentials = auth.lock().await.get_credentials().await;
     if let Ok((client_id, Some(tokens))) = credentials {
-        let key = format!("oauth:{server}");
-        let saved = app.plugins.lock().unwrap().secret(plugin_id, &key);
+        let saved = app.plugins.lock().unwrap().sign_in_secret(plugin_id, "oauth", server);
         let fresh = json!({ "client_id": client_id, "tokens": tokens, "signed_in_at": now_secs() });
         if saved.as_ref().map(|s| s["tokens"] != fresh["tokens"]).unwrap_or(true) {
             let _ = super::set_oauth(app, plugin_id, server, Some(fresh));
@@ -1715,6 +2292,9 @@ pub async fn ask_with_rule(
             reason,
             rule: always_rule.as_ref().filter(|rule| rule.tool.is_none()).map(|rule| rule.text.clone()),
             command: None,
+            title: None,
+            content: None,
+            path: None,
             link: None,
             code: None,
         },
@@ -1733,6 +2313,139 @@ pub async fn ask_with_rule(
         app.upsert_message(message, true);
     }
     decision
+}
+
+/// One model call has one durable card, even after a repeated turn or relay sync.
+pub async fn propose(app: &Arc<App>, chat_id: &str, bot_id: &str, call_id: &str, title: Option<String>, content: Option<String>, path: Option<String>, cancel: &CancellationToken) -> Result<bool, String> {
+    if title.as_deref().is_some_and(|text| text.chars().count() > 120 || text.contains('\0') || text.contains('\r'))
+        || path.as_deref().is_some_and(|text| text.chars().count() > 240 || text.chars().any(|ch| matches!(ch, '\0' | '\n' | '\r' | '\\')))
+        || content.as_deref().is_some_and(|text| text.chars().count() > 20_000 || text.len() > 65_536) {
+        return Err("Proposal exceeds its title, path, or content limit.".into());
+    }
+    let Some(path_value) = path.as_deref() else { return Err("Proposal path is required.".into()); };
+    let relative = std::path::Path::new(path_value);
+    if path_value.is_empty() || relative.is_absolute() || path_value.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || relative.components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
+        return Err("Proposal path must stay inside bot workspace.".into());
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{chat_id}\0{bot_id}\0{call_id}").as_bytes());
+    let card_id = format!("msg-propose-{digest:x}");
+    if let Some(card) = app.message(chat_id, &card_id) {
+        return match (&card.author, card.body) {
+            (Author::Bot { bot_id: author }, Body::Permission { plugin_id, tool, decision, title: existing_title, content: existing_content, path: existing_path, .. })
+                if author == bot_id && plugin_id == "computer" && tool == "propose" && existing_title == title && existing_content == content && existing_path == path && decision == "allowed" => Ok(true),
+            (Author::Bot { bot_id: author }, Body::Permission { plugin_id, tool, decision, title: existing_title, content: existing_content, path: existing_path, .. })
+                if author == bot_id && plugin_id == "computer" && tool == "propose" && existing_title == title && existing_content == content && existing_path == path && decision != "pending" => Ok(false),
+            _ => Err("Proposal already awaits review or its draft changed.".into()),
+        };
+    }
+    let label = title.as_deref().unwrap_or(path_value).chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch }).collect::<String>();
+    let summary = format!("Review draft: {label}");
+    let mut card = Message::new(chat_id, Author::Bot { bot_id: bot_id.to_string() }, Body::Permission {
+        plugin_id: "computer".into(), plugin_name: this_runner(app), tool: "propose".into(),
+        summary, arguments: Value::Null, decision: "pending".into(), reason: None,
+        rule: None, command: None, title: title.clone(), content: content.clone(), path: path.clone(), link: None, code: None,
+    });
+    card.id = card_id;
+    let choice = await_answer(app, chat_id, &card.id, None, cancel, || {
+        app.upsert_message(card.clone(), true);
+        crate::push::permission(app, &card);
+    }).await;
+    if let Some(mut current) = app.message(chat_id, &card.id) {
+        // A paired Device can replace the row while the Runner waits. Never approve a different
+        // draft, nor write the original draft based on an answer to a replaced card.
+        if current.author != card.author || current.body != card.body {
+            if current.author == card.author && matches!(&current.body, Body::Permission { plugin_id, tool, decision, .. }
+                if plugin_id == "computer" && tool == "propose" && decision == "pending") {
+                let mut failed = card;
+                if let Body::Permission { decision, summary, .. } = &mut failed.body {
+                    *decision = "failed".into();
+                    *summary = "Proposal changed while awaiting approval.".into();
+                }
+                app.upsert_message(failed, true);
+            }
+            return Ok(false);
+        }
+        let Body::Permission { decision, summary, .. } = &mut current.body else { unreachable!() };
+        let saved = if choice == Decision::Allowed && !cancel.is_cancelled() {
+            if app.is_paused() || !app.bot(bot_id).is_some_and(|bot| bot.runner_id == app.this_device_id().unwrap_or_default() && bot.capabilities.write) {
+                Err("Account paused or bot write access removed.".to_string())
+            } else {
+                match app.bot(bot_id) {
+                    Some(bot) => save_proposal(&bot.working_directory(&app.config.home), path_value, content.as_deref().unwrap_or("")),
+                    None => Err("Bot or valid proposal no longer exists.".into()),
+                }
+            }
+        } else { Ok(()) };
+        match saved {
+            Ok(()) => *decision = if choice == Decision::Always { "denied" } else if cancel.is_cancelled() && choice == Decision::Denied { "dismissed" } else { choice.as_str() }.into(),
+            Err(error) => { *decision = "failed".into(); *summary = error; }
+        }
+        let approved = *decision == "allowed";
+        app.upsert_message(current, true);
+        return Ok(approved);
+    }
+    Ok(false)
+}
+
+/// Open each ancestor by handle; publish without replacing existing content or following links.
+#[cfg(unix)]
+fn save_proposal(workdir: &std::path::Path, path: &str, content: &str) -> Result<(), String> {
+    use std::ffi::{CString, OsStr};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::io::Write;
+    fn name(s: &OsStr) -> Result<CString, String> { CString::new(s.as_bytes()).map_err(|_| "Path contains a NUL byte.".into()) }
+    let relative = std::path::Path::new(path);
+    if path.is_empty() || relative.is_absolute() || relative.components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
+        return Err("Proposal path must be relative, without traversal.".into());
+    }
+    std::fs::create_dir_all(workdir).map_err(|e| format!("Opening workspace: {e}"))?;
+    // The configured workspace is trusted; its canonical root bounds every child opened below.
+    let absolute = workdir.canonicalize().map_err(|e| format!("Opening workspace: {e}"))?;
+    let root = CString::new("/").unwrap();
+    let fd = unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if fd < 0 { return Err(format!("Opening workspace root: {}", std::io::Error::last_os_error())); }
+    let mut dir = unsafe { OwnedFd::from_raw_fd(fd) };
+    for part in absolute.components() {
+        let std::path::Component::Normal(segment) = part else { continue };
+        let segment = name(segment)?;
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), segment.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 { return Err(format!("Opening workspace: {}", std::io::Error::last_os_error())); }
+        dir = unsafe { OwnedFd::from_raw_fd(fd) };
+    }
+    let parts: Vec<_> = relative.components().collect();
+    for part in &parts[..parts.len() - 1] {
+        let std::path::Component::Normal(segment) = part else { unreachable!() };
+        let segment = name(segment)?;
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), segment.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 { return Err(format!("Opening proposal parent: {}", std::io::Error::last_os_error())); }
+        dir = unsafe { OwnedFd::from_raw_fd(fd) };
+    }
+    let std::path::Component::Normal(target) = parts[parts.len() - 1] else { unreachable!() };
+    let target = name(target)?;
+    let temp = name(OsStr::new(&format!(".lorca-propose-{}", uuid::Uuid::new_v4())))?;
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), temp.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+    if fd < 0 { return Err(format!("Creating draft: {}", std::io::Error::last_os_error())); }
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let result = (|| -> Result<(), String> {
+        file.write_all(content.as_bytes()).map_err(|e| format!("Writing draft: {e}"))?;
+        file.sync_all().map_err(|e| format!("Syncing draft: {e}"))?;
+        if unsafe { libc::linkat(dir.as_raw_fd(), temp.as_ptr(), dir.as_raw_fd(), target.as_ptr(), 0) } != 0 {
+            return Err(format!("Publishing draft without overwrite: {}", std::io::Error::last_os_error()));
+        }
+        let _ = unsafe { libc::fsync(dir.as_raw_fd()) };
+        Ok(())
+    })();
+    unsafe { libc::unlinkat(dir.as_raw_fd(), temp.as_ptr(), 0) };
+    result
+}
+
+#[cfg(windows)]
+fn save_proposal(workdir: &std::path::Path, path: &str, content: &str) -> Result<(), String> {
+    proposal_windows::save_proposal(workdir, path, content)
 }
 
 /// Waits for the answer to the question row `message_id` asks in `chat_id`, from this Device
@@ -1771,6 +2484,7 @@ pub async fn await_answer(app: &Arc<App>, chat_id: &str, message_id: &str, alway
 /// `chats.permission` reached the Runner: hands the answer to the waiting tool. False when
 /// nothing waits on that message (answered already, or expired).
 pub fn answer(app: &Arc<App>, message_id: &str, decision: Decision) -> bool {
+    if decision == Decision::Always && message_id.starts_with("msg-propose-") { return false; }
     match app.pending_permissions.lock().unwrap().remove(message_id) {
         Some((_, tx)) => tx.send(decision).is_ok(),
         None => false,
@@ -1812,6 +2526,162 @@ mod tests {
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
     }
+    #[cfg(unix)]
+    #[test]
+    fn proposal_write_rejects_traversal_symlink_and_existing_target() {
+        let scratch = scratch_app();
+        let workspace = scratch.1.join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).unwrap();
+        assert!(save_proposal(&workspace, "../escape", "bad").is_err());
+        std::os::unix::fs::symlink(&scratch.1, workspace.join("outside")).unwrap();
+        assert!(save_proposal(&workspace, "outside/escape", "bad").is_err());
+        assert!(!scratch.1.join("escape").exists());
+        std::os::unix::fs::symlink(scratch.1.join("escape"), workspace.join("notes/link.md")).unwrap();
+        assert!(save_proposal(&workspace, "notes/link.md", "bad").is_err());
+        assert!(!scratch.1.join("escape").exists());
+        let text = "draft 🌍\n";
+        save_proposal(&workspace, "notes/draft.md", text).unwrap();
+        assert!(save_proposal(&workspace, "notes/draft.md", "overwrite").is_err());
+        assert_eq!(std::fs::read(workspace.join("notes/draft.md")).unwrap(), text.as_bytes());
+        let alias = scratch.1.join("workspace-alias");
+        std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+        save_proposal(&alias, "notes/through-alias.md", "inside").unwrap();
+        assert_eq!(std::fs::read(workspace.join("notes/through-alias.md")).unwrap(), b"inside");
+    }
+    #[tokio::test]
+    async fn proposal_review_writes_once_and_decline_never_writes() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        let here = app.this_device_id().unwrap();
+        let bot: Bot = serde_json::from_value(json!({
+            "id": "draft-bot", "name": "Draft Bot", "description": "", "symbol_name": "", "accent": "",
+            "runner_id": here, "provider": "deepseek", "created_at": 0.0
+        })).unwrap();
+        app.state.lock().unwrap().bots.push(bot.clone());
+        app.state.lock().unwrap().chats.push(Chat {
+            meta: ChatMeta { id: "draft-chat".into(), kind: "dm".into(), title: None, bot_ids: vec!["draft-bot".into()], owner_bot_id: None, is_pinned: false, created_at: 0.0 },
+            unread_count: 0, usage: None, compactions: Vec::new(),
+        });
+        let workspace = bot.working_directory(&app.config.home);
+        let run = |id: &'static str, path: &'static str, response: Decision| {
+            let app = app.clone();
+            async move {
+                let job = tokio::spawn({
+                    let app = app.clone();
+                    async move { propose(&app, "draft-chat", "draft-bot", id, Some("Draft".into()), Some("Exact 🌍\n".into()), Some(path.into()), &CancellationToken::new()).await }
+                });
+                let card = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if let Some(card) = app.messages("draft-chat").into_iter().find(|card| matches!(&card.body, Body::Permission { tool, decision, path: p, .. } if tool == "propose" && decision == "pending" && p.as_deref() == Some(path))) {
+                            break card;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                }).await.unwrap();
+                if response == Decision::Allowed {
+                    let forged = json!({ "chat_id": "draft-chat", "message_id": card.id, "decision": "always" });
+                    assert!(super::super::serve_request(&app, "permission.answer", &forged, None).await.is_err());
+                    assert!(!answer(&app, &card.id, Decision::Always));
+                    assert!(matches!(app.message("draft-chat", &card.id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"));
+                    let request = json!({ "chat_id": "draft-chat", "message_id": card.id, "decision": "allow" });
+                    app.state.lock().unwrap().bots.iter_mut().find(|bot| bot.id == "draft-bot").unwrap().runner_id = "wrong-runner".into();
+                    assert!(super::super::serve_request(&app, "permission.answer", &request, None).await.is_err());
+                    app.state.lock().unwrap().bots.iter_mut().find(|bot| bot.id == "draft-bot").unwrap().runner_id = app.this_device_id().unwrap();
+                }
+                if path == "revoked.md" {
+                    app.state.lock().unwrap().bots.iter_mut().find(|bot| bot.id == "draft-bot").unwrap().capabilities.write = false;
+                }
+                if path == "paused.md" {
+                    app.state.lock().unwrap().paused = true;
+                }
+                assert!(answer(&app, &card.id, response));
+                let result = job.await.unwrap();
+                if path == "revoked.md" {
+                    app.state.lock().unwrap().bots.iter_mut().find(|bot| bot.id == "draft-bot").unwrap().capabilities.write = true;
+                }
+                if path == "paused.md" {
+                    app.state.lock().unwrap().paused = false;
+                }
+                result
+            }
+        };
+        assert!(run("first", "draft.md", Decision::Allowed).await.unwrap());
+        assert_eq!(std::fs::read(workspace.join("draft.md")).unwrap(), "Exact 🌍\n".as_bytes());
+        std::fs::write(workspace.join("draft.md"), "changed after approval").unwrap();
+        assert!(propose(app, "draft-chat", "draft-bot", "first", Some("Draft".into()), Some("Exact 🌍\n".into()), Some("draft.md".into()), &CancellationToken::new()).await.unwrap());
+        assert_eq!(std::fs::read(workspace.join("draft.md")).unwrap(), b"changed after approval");
+        assert!(run("different-job:same-call", "second-draft.md", Decision::Allowed).await.unwrap());
+        assert_eq!(std::fs::read(workspace.join("second-draft.md")).unwrap(), "Exact 🌍\n".as_bytes());
+        assert!(!run("second", "declined.md", Decision::Denied).await.unwrap());
+        assert!(!workspace.join("declined.md").exists());
+        assert!(!run("revoked", "revoked.md", Decision::Allowed).await.unwrap());
+        assert!(!workspace.join("revoked.md").exists());
+        assert!(app.messages("draft-chat").iter().any(|card| matches!(&card.body, Body::Permission { tool, decision, path, .. } if tool == "propose" && decision == "failed" && path.as_deref() == Some("revoked.md"))));
+        assert!(!run("paused", "paused.md", Decision::Allowed).await.unwrap());
+        assert!(!workspace.join("paused.md").exists());
+        assert!(app.messages("draft-chat").iter().any(|card| matches!(&card.body, Body::Permission { tool, decision, path, .. } if tool == "propose" && decision == "failed" && path.as_deref() == Some("paused.md"))));
+        std::fs::write(workspace.join("existing.md"), "keep").unwrap();
+        assert!(!run("existing", "existing.md", Decision::Allowed).await.unwrap());
+        assert_eq!(std::fs::read(workspace.join("existing.md")).unwrap(), b"keep");
+        assert!(propose(app, "draft-chat", "draft-bot", "too-big", None, Some("a".repeat(20_001)), Some("large.md".into()), &CancellationToken::new()).await.is_err());
+        assert!(propose(app, "draft-chat", "draft-bot", "too-many-bytes", None, Some("🌍".repeat(16_385)), Some("large.md".into()), &CancellationToken::new()).await.is_err());
+        assert!(propose(app, "draft-chat", "draft-bot", "missing-path", None, Some("bad".into()), None, &CancellationToken::new()).await.is_err());
+        assert!(propose(app, "draft-chat", "draft-bot", "traversal", None, Some("bad".into()), Some("../bad".into()), &CancellationToken::new()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn proposal_rejects_changed_card_after_answer_wait() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        let bot: Bot = serde_json::from_value(json!({
+            "id": "draft-bot", "name": "Draft Bot", "description": "", "symbol_name": "", "accent": "",
+            "runner_id": app.this_device_id().unwrap(), "provider": "deepseek", "created_at": 0.0
+        })).unwrap();
+        let workspace = bot.working_directory(&app.config.home);
+        {
+            let mut state = app.state.lock().unwrap();
+            state.bots.push(bot);
+            state.chats.push(Chat {
+                meta: ChatMeta { id: "draft-chat".into(), kind: "dm".into(), title: None, bot_ids: vec!["draft-bot".into()], owner_bot_id: None, is_pinned: false, created_at: 0.0 },
+                unread_count: 0, usage: None, compactions: Vec::new(),
+            });
+        }
+        for (call_id, changed_path, changed_content) in [
+            ("swapped-path", Some("swapped.md"), None),
+            ("swapped-content", None, Some("forged bytes")),
+        ] {
+            let app_for_job = app.clone();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let job = tokio::spawn(async move {
+                let _ = started.send(());
+                propose(&app_for_job, "draft-chat", "draft-bot", call_id, Some("Reviewed".into()), Some("reviewed bytes".into()), Some("reviewed.md".into()), &CancellationToken::new()).await
+            });
+            ready.await.unwrap();
+            let card = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if let Some(card) = app.messages("draft-chat").into_iter().find(|card| matches!(&card.body, Body::Permission { tool, decision, path, .. } if tool == "propose" && decision == "pending" && path.as_deref() == Some("reviewed.md"))) {
+                        break card;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            let mut altered = card.clone();
+            if let Body::Permission { path, content, .. } = &mut altered.body {
+                if let Some(value) = changed_path { *path = Some(value.into()); }
+                if let Some(value) = changed_content { *content = Some(value.into()); }
+            }
+            app.upsert_message(altered, false);
+            assert!(answer(app, &card.id, Decision::Allowed));
+            assert!(!job.await.unwrap().unwrap());
+            assert!(!workspace.join("reviewed.md").exists());
+            assert!(!workspace.join("swapped.md").exists());
+            assert!(matches!(app.message("draft-chat", &card.id).unwrap().body, Body::Permission { decision, .. } if decision == "failed"));
+        }
+    }
+
+
 
     fn mcp_tool(name: &str, description: &str, schema: &str) -> rmcp::model::Tool {
         serde_json::from_value(json!({ "name": name, "description": description, "inputSchema": serde_json::from_str::<Value>(schema).unwrap() })).unwrap()
@@ -1831,6 +2701,7 @@ mod tests {
             server_instructions: String::new(),
             tool: Arc::new(PluginTool {
                 app: app.clone(),
+                bot_id: None,
                 plugin_id: plugin_id.into(),
                 plugin_name: plugin_name.into(),
                 server_name: "test".into(),
@@ -1838,6 +2709,8 @@ mod tests {
                 name,
                 description: description.into(),
                 read_only: true,
+                kind: ToolKind::Call,
+                timeout: crate::plugins::CALL_TIMEOUT,
             }),
         })
     }
@@ -1962,15 +2835,15 @@ mod tests {
         let hidden = mcp_tool("secret_admin", "Never offered", r#"{"type":"object"}"#);
         let saved = SavedCatalog {
             servers: BTreeMap::from([
-                ("api".to_string(), SavedServer { instructions: Some("Use team keys like ENG.".into()), tools: vec![issues, comment, hidden] }),
-                ("gone".to_string(), SavedServer { instructions: None, tools: vec![mcp_tool("old", "A server the manifest no longer has", r#"{}"#)] }),
+                ("api".to_string(), SavedServer { instructions: Some("Use team keys like ENG.".into()), tools: vec![issues, comment, hidden], resources: false }),
+                ("gone".to_string(), SavedServer { instructions: None, tools: vec![mcp_tool("old", "A server the manifest no longer has", r#"{}"#)], resources: false }),
             ]),
         };
         crate::config::write_json_private(&catalog_path(app, "linear"), &saved).unwrap();
 
         let local: Vec<Arc<dyn Tool>> = lorca_agent::tools::coding_tools(scratch.1.clone()).into_iter().filter(|tool| tool.name() == "read").collect();
         let catalog = turn_catalog(app, local);
-        assert_eq!(plugin_briefs(app).len(), 2);
+        assert_eq!(plugin_briefs(app, None).len(), 2);
         let names: Vec<String> = catalog.entries().iter().map(|entry| entry.tool.name().to_string()).collect();
         assert_eq!(names, vec!["read", "linear__create_comment", "linear__list_issues"]);
         assert_eq!(catalog.plugin_name("linear__list_issues").as_deref(), Some("Linear"));
@@ -1982,10 +2855,77 @@ mod tests {
         let description = codemode.description().to_string();
         assert!(description.contains("## linear (2 tools)\nLinear: Linear for the team.\nServer instructions: Use team keys like ENG."), "{description}");
         assert!(description.contains("linear__list_issues(args: {\n  // Team key\n  team: string;\n}): Promise<CallToolResult>;"), "{description}");
-        assert!(description.contains("## notion (tools not known yet; searchTools() finds them)\nNotion: Notion for the team."), "{description}");
+        assert!(description.contains("## notion (tools not known yet; describeNamespace() lists them)\nNotion: Notion for the team."), "{description}");
         assert!(description.contains("Your own tools `read` are callable here too"), "{description}");
         assert!(!description.contains("secret_admin") && !description.contains("linear__old"), "{description}");
         assert_eq!(CodemodeTool::new(catalog, CodemodeOptions::default()).description(), description, "the same listing every time");
+    }
+
+    #[tokio::test]
+    async fn restricted_bot_cannot_discover_plugin_instructions_or_tools() {
+        use lorca_agent::codemode::Catalog;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let manifest = super::super::Manifest::parse(&json!({
+            "id": "linear", "name": "Linear", "description": "Team issues",
+            "servers": { "api": { "type": "stdio", "command": "false" } }
+        })).unwrap();
+        super::super::install(app, manifest, "inline").unwrap();
+        let saved = SavedCatalog { servers: BTreeMap::from([("api".into(), SavedServer {
+            instructions: Some("private team instructions".into()),
+            tools: vec![mcp_tool("list_issues", "Private issue listing", r#"{"type":"object"}"#)], resources: false,
+        })]) };
+        crate::config::write_json_private(&catalog_path(app, "linear"), &saved).unwrap();
+        let bot: Bot = serde_json::from_value(json!({
+            "id": "restricted", "name": "Restricted", "description": "", "symbol_name": "", "accent": "",
+            "runner_id": "runner", "provider": "deepseek", "created_at": 0.0,
+            "capabilities": { "shell": false, "write": false, "plugins": [] }
+        })).unwrap();
+        app.state.lock().unwrap().bots.push(bot);
+        let catalog = turn_catalog_for_bot(app, Vec::new(), "restricted");
+        let cancel = CancellationToken::new();
+        assert!(catalog.entries().is_empty() && catalog.namespaces().is_empty());
+        assert!(plugin_briefs(app, Some("restricted")).is_empty());
+        assert!(catalog.find("linear__list_issues", &cancel).await.is_none());
+        assert!(catalog.describe_namespace("linear", &cancel).await.unwrap().is_none());
+        assert!(catalog.search("issues", None, 10, &cancel).await.unwrap().is_empty());
+        app.state.lock().unwrap().bots[0].capabilities.plugins = Some(vec!["linear".into()]);
+        let allowed = turn_catalog_for_bot(app, Vec::new(), "restricted");
+        assert!(allowed.describe_namespace("linear", &cancel).await.unwrap().unwrap().instructions.contains("private team"));
+        app.state.lock().unwrap().bots[0].capabilities.plugins = Some(Vec::new());
+        assert!(allowed.describe_namespace("linear", &cancel).await.unwrap().is_none());
+        assert!(allowed.search("issues", None, 10, &cancel).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn oversized_mcp_response_never_enters_script_vm() {
+        let oversized = json!({ "content": "x".repeat(MAX_MCP_RESPONSE_BYTES) });
+        assert!(bounded_value(&oversized).unwrap_err().0.contains("8 MiB"));
+        assert_eq!(bounded_value(&json!({ "content": [{ "type": "text", "text": "ok" }] })).unwrap()["content"][0]["text"], "ok");
+    }
+
+    #[test]
+    fn insufficient_scope_forgets_old_token_and_requests_combined_scopes() {
+        let refusal = std::io::Error::other("403: Bearer error=\"insufficient_scope\", scope=\"read:org\"");
+        let (scope, challenge) = insufficient_scope(&refusal).unwrap();
+        assert_eq!(scope, "read:org");
+        assert!(insufficient_scope(&std::io::Error::other("connection refused")).is_none());
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let manifest = super::super::Manifest::parse(&json!({
+            "id": "hub", "name": "Hub", "servers": { "api": { "type": "http", "url": "https://hub.test/mcp", "auth": { "type": "oauth" } } }
+        })).unwrap();
+        super::super::install(app, manifest, "inline").unwrap();
+        {
+            let mut store = app.plugins.lock().unwrap();
+            store.set_secret("hub", "oauth:api", Some(json!({ "origin": "https://hub.test", "tokens": { "scope": "repo" } })));
+            store.save(&app.config).unwrap();
+        }
+        needs_more_access(app, "hub", "api", "admin:org read:org", &challenge);
+        let store = app.plugins.lock().unwrap();
+        assert_eq!(store.secret("hub", "scope:api").unwrap()["scope"], "repo admin:org read:org");
+        assert!(store.sign_in_secret("hub", "oauth", "api").is_none());
+        assert!(store.sign_in_secret("hub", "challenge", "api").is_some());
     }
 
     #[tokio::test]

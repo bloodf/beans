@@ -236,6 +236,55 @@ pub async fn list_custom_models(app: &Arc<App>, name: &str, api: &str, base_url:
     Ok(listed.map(|models| models.into_iter().filter(|(not_chat, _)| !not_chat).map(|(_, model)| model).collect()))
 }
 
+/// Refreshes saved custom-provider catalogs. Each fetch uses a snapshot, then commits only if
+/// that provider has not changed meanwhile; no response is allowed to restore a deleted or
+/// edited provider. Only actual model changes are stamped, saved and synced.
+pub async fn refresh_custom_models(app: &Arc<App>) -> Result<usize, String> {
+    let providers: Vec<(String, CustomProvider, Option<f64>)> = {
+        let credentials = app.credentials.lock().unwrap();
+        credentials.custom.iter().map(|(kind, provider)| (kind.clone(), provider.clone(), credentials.changed_at.get(kind).copied())).collect()
+    };
+    let mut changed = 0;
+    let mut failed = None;
+    for (kind, snapshot, stamp) in providers {
+        let listed = match list_models(app, &snapshot.name, snapshot.api, &snapshot.base_url, &snapshot.api_key).await {
+            Ok(Some(listed)) => listed,
+            Ok(None) => continue,
+            Err(_) => {
+                failed.get_or_insert_with(|| format!("Could not refresh models for {kind}"));
+                continue;
+            }
+        };
+        let models = listed.into_iter().filter(|(not_chat, _)| !not_chat).map(|(_, model)| model).collect();
+        let mut credentials = app.credentials.lock().unwrap();
+        if credentials.changed_at.get(&kind).copied() != stamp {
+            continue;
+        }
+        let Some(current) = credentials.custom.get_mut(&kind) else { continue };
+        if *current != snapshot {
+            continue;
+        }
+        let previous = current.clone();
+        if current.merge_discovered_models(models) {
+            let previous_stamp = credentials.changed_at.get(&kind).copied();
+            credentials.touch(&kind);
+            if credentials.save(&app.config).is_err() {
+                credentials.custom.insert(kind.clone(), previous);
+                match previous_stamp {
+                    Some(stamp) => { credentials.changed_at.insert(kind, stamp); }
+                    None => { credentials.changed_at.remove(&kind); }
+                }
+                return Err("Could not save refreshed models".into());
+            }
+            drop(credentials);
+            app.push_credentials();
+            app.emit(app.roster_summary());
+            changed += 1;
+        }
+    }
+    if let Some(error) = failed { Err(error) } else { Ok(changed) }
+}
+
 /// A new custom provider's kind: `custom:` and a slug of its name, with a number when another
 /// provider has it. A provider deleted under that slug gives it up, so its bots run again.
 fn custom_kind(credentials: &Credentials, name: &str) -> String {
@@ -586,6 +635,78 @@ mod tests {
         assert!(requests[0].starts_with("GET /v1/models ") && requests[0].contains("authorization: Bearer sk-1"), "{}", requests[0]);
         assert!(list_custom_models(app, "", "chat-completions", "ftp://lab", "").await.unwrap_err().contains("http://"));
         assert!(app.credentials.lock().unwrap().custom.is_empty(), "listing saves nothing");
+    }
+
+    #[tokio::test]
+    async fn refresh_adds_models_but_preserves_manual_ids_url_key_and_unchanged_stamp() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let list = json!({ "data": [{ "id": "new", "context_window": 128000 }, { "id": "nomic-embed-text" }] }).to_string();
+        let (root, server) = serve(vec![("404 Not Found", "{}".into()), ("200 OK", list.clone()), ("200 OK", list)]);
+        let mut provider = input("Lab", "responses", &root, &["picked"]);
+        provider.api_key = "secret".into();
+        let kind = connect_custom(app, provider).await.unwrap();
+        let before = app.credentials.lock().unwrap().changed_at[&kind];
+        assert_eq!(refresh_custom_models(app).await.unwrap(), 1);
+        let credentials = app.credentials.lock().unwrap().clone();
+        assert_eq!(credentials.custom[&kind].models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["picked", "new"]);
+        assert_eq!(credentials.custom[&kind].models[1].context_window, Some(128_000));
+        assert_eq!((credentials.custom[&kind].base_url.as_str(), credentials.custom[&kind].api_key.as_str()), (root.as_str(), "secret"));
+        assert!(credentials.changed_at[&kind] > before);
+        assert_eq!(refresh_custom_models(app).await.unwrap(), 0);
+        assert_eq!(app.credentials.lock().unwrap().changed_at[&kind], credentials.changed_at[&kind]);
+        assert_eq!(Credentials::load(&app.config).custom[&kind], credentials.custom[&kind]);
+        assert_eq!(server.join().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn missing_list_and_rejected_key_leave_catalog_untouched() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let (root, server) = serve(vec![("404 Not Found", "{}".into()), ("404 Not Found", "{}".into()), ("401 Unauthorized", "{}".into())]);
+        let kind = connect_custom(app, input("Lab", "responses", &root, &["picked"])).await.unwrap();
+        let before = app.credentials.lock().unwrap().changed_at[&kind];
+        assert_eq!(refresh_custom_models(app).await.unwrap(), 0);
+        assert_eq!(refresh_custom_models(app).await.unwrap_err(), format!("Could not refresh models for {kind}"));
+        let credentials = app.credentials.lock().unwrap();
+        assert_eq!(credentials.changed_at[&kind], before);
+        assert_eq!(credentials.custom[&kind].models[0].id, "picked");
+        server.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn in_flight_refresh_cannot_restore_a_deleted_provider() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let root = format!("http://{}", listener.local_addr().unwrap());
+        let kind = {
+            let (root, server) = serve(vec![("404 Not Found", "{}".into())]);
+            let kind = connect_custom(app, input("Lab", "responses", &root, &["picked"])).await.unwrap();
+            server.join().unwrap();
+            kind
+        };
+        app.update_credentials(&kind, |c| c.custom.get_mut(&kind).unwrap().base_url = root.clone()).unwrap();
+        let (requested, received) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).unwrap();
+            requested.send(()).unwrap();
+            proceed.recv().unwrap();
+            let body = json!({ "data": [{ "id": "new" }] }).to_string();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let app_for_refresh = app.clone();
+        let refresh = tokio::spawn(async move { refresh_custom_models(&app_for_refresh).await });
+        received.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        disconnect(app, &kind).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(refresh.await.unwrap().unwrap(), 0);
+        server.join().unwrap();
+        assert!(!app.credentials.lock().unwrap().custom.contains_key(&kind));
     }
 
     #[tokio::test]

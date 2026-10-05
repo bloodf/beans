@@ -60,9 +60,17 @@ impl CustomApi {
 /// id, else low, medium, and high, which every server with a reasoning setting understands. An
 /// unknown server has no one way to turn its thinking off, so Off is not among them; the
 /// provider's default sends nothing.
-pub fn custom_levels(model: &str) -> &'static [lorca_models::ThinkingLevel] {
+pub fn custom_levels(model: &str) -> Vec<lorca_models::ThinkingLevel> {
     use lorca_models::ThinkingLevel::{High, Low, Medium};
-    lorca_models::find_any(model).map(|known| known.levels).unwrap_or(&[Low, Medium, High])
+    lorca_models::find_any(model).map(|known| known.levels.clone()).unwrap_or_else(|| vec![Low, Medium, High])
+}
+
+/// A model offered to a bot, including its display name and supported thinking levels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OfferedModel {
+    pub id: String,
+    pub name: String,
+    pub levels: Vec<lorca_models::ThinkingLevel>,
 }
 
 /// A model a custom provider offers, with what its server's model list said about it.
@@ -93,6 +101,26 @@ pub struct CustomProvider {
     /// The models bots can pick, in the user's order; the first is the default.
     pub models: Vec<CustomModel>,
     pub created_at: i64,
+}
+
+impl CustomProvider {
+    /// Preserve the user's model order and manually entered ids while extending the server's
+    /// list. Refresh metadata for ids the server still advertises.
+    pub fn merge_discovered_models(&mut self, discovered: Vec<CustomModel>) -> bool {
+        let mut changed = false;
+        for model in discovered {
+            if let Some(existing) = self.models.iter_mut().find(|existing| existing.id == model.id) {
+                if *existing != model {
+                    *existing = model;
+                    changed = true;
+                }
+            } else {
+                self.models.push(model);
+                changed = true;
+            }
+        }
+        changed
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -228,6 +256,18 @@ impl Credentials {
         custom.into_iter().map(|(kind, _)| kind.clone()).collect()
     }
 
+    /// Built-in catalog or a custom provider's saved models, in default-first order.
+    pub fn models(&self, kind: &str) -> Vec<OfferedModel> {
+        if let Some(provider) = self.custom.get(kind) {
+            return provider
+                .models
+                .iter()
+                .map(|model| OfferedModel { id: model.id.clone(), name: model.name.clone().unwrap_or_else(|| model.id.clone()), levels: custom_levels(&model.id) })
+                .collect();
+        }
+        lorca_models::for_provider(kind).into_iter().map(|model| OfferedModel { id: model.id.clone(), name: model.name.clone(), levels: model.levels.clone() }).collect()
+    }
+
     /// The name people know a provider by: a custom provider's own, else the built-in's.
     pub fn label(&self, kind: &str) -> String {
         match self.custom.get(kind) {
@@ -277,7 +317,7 @@ impl Credentials {
                 base_url: Some(provider.base_url.clone()),
                 name: Some(provider.name.clone()),
                 api: Some(provider.api),
-                models: provider.models.iter().map(|model| StatusModel { model: model.clone(), levels: custom_levels(&model.id).to_vec() }).collect(),
+                models: provider.models.iter().map(|model| StatusModel { model: model.clone(), levels: custom_levels(&model.id) }).collect(),
             }
         });
         built_in.chain(custom).collect()
@@ -354,6 +394,47 @@ mod tests {
     fn custom(name: &str, created_at: i64) -> CustomProvider {
         let models = vec![CustomModel { id: "m".into(), name: None, context_window: None, max_output: None, images: None }];
         CustomProvider { name: name.into(), api: CustomApi::ChatCompletions, base_url: "http://lab/v1".into(), api_key: String::new(), models, created_at }
+    }
+    #[test]
+    fn discovered_models_extend_user_order_without_changing_connection() {
+        let mut provider = custom("Lab", 1);
+        provider.api_key = "secret".into();
+        let selected = provider.models[0].clone();
+        let new = CustomModel { id: "new".into(), name: Some("New".into()), context_window: Some(128_000), max_output: None, images: Some(true) };
+        assert!(provider.merge_discovered_models(vec![new.clone(), selected.clone(), new.clone()]));
+        assert_eq!(provider.models, [selected.clone(), new.clone()]);
+        assert_eq!((provider.base_url.as_str(), provider.api_key.as_str()), ("http://lab/v1", "secret"));
+        assert!(!provider.merge_discovered_models(vec![new.clone()]));
+        assert_eq!(provider.models, [selected, new]);
+    }
+
+    #[test]
+    fn later_user_edit_wins_against_stale_refreshed_catalog() {
+        let mut local = Credentials::default();
+        local.custom.insert("custom:lab".into(), custom("Lab", 1));
+        local.changed_at.insert("custom:lab".into(), 3.0);
+        let mut refreshed = local.clone();
+        refreshed.custom.get_mut("custom:lab").unwrap().merge_discovered_models(vec![CustomModel { id: "new".into(), name: None, context_window: None, max_output: None, images: None }]);
+        refreshed.changed_at.insert("custom:lab".into(), 4.0);
+        local.custom.get_mut("custom:lab").unwrap().name = "User edit".into();
+        local.changed_at.insert("custom:lab".into(), 5.0);
+        assert_eq!(local.merge(&refreshed), Merge { taken: vec![], is_ahead: true });
+        assert_eq!(local.custom["custom:lab"].name, "User edit");
+        assert_eq!(local.custom["custom:lab"].models.len(), 1);
+    }
+
+    #[test]
+    fn offered_models_follow_custom_order_and_catalog_levels() {
+        let mut credentials = Credentials::default();
+        let mut lab = custom("Lab", 1);
+        lab.models.push(CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus".into()), context_window: None, max_output: None, images: None });
+        credentials.custom.insert("custom:lab".into(), lab);
+        let models = credentials.models("custom:lab");
+        assert_eq!(models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["m", "anthropic/claude-opus-5"]);
+        assert_eq!(models[1].name, "Opus");
+        assert_eq!(models[1].levels, custom_levels("anthropic/claude-opus-5"));
+        assert_eq!(credentials.models("anthropic")[0].id, lorca_models::for_provider("anthropic")[0].id);
+        assert!(credentials.models("custom:gone").is_empty());
     }
 
     #[test]

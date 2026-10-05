@@ -20,8 +20,19 @@ impl Relay {
     }
 
     async fn start_with(quota_bytes: u64, pusher: crate::push::Pusher) -> Self {
+        Self::start_catalogs(quota_bytes, pusher, None).await
+    }
+
+    async fn start_catalogs(quota_bytes: u64, pusher: crate::push::Pusher, files: Option<(&[u8], &[u8])>) -> Self {
         let home = std::env::temp_dir().join(format!("lorca-binary-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
+        let catalog_dir = home.join("catalogs");
+        if let Some((models, marketplace)) = files {
+            std::fs::create_dir_all(catalog_dir.join("models")).unwrap();
+            std::fs::create_dir_all(catalog_dir.join("marketplace")).unwrap();
+            std::fs::write(catalog_dir.join("models/v1.json"), models).unwrap();
+            std::fs::write(catalog_dir.join("marketplace/v1.json"), marketplace).unwrap();
+        }
         let local = Arc::new(db::Local::default());
         let db = db::open(home.join("relay.db").to_str().unwrap(), local.clone()).await.unwrap();
         db.register_identity("identity", "content", "machine", "box", "attestation").await.unwrap();
@@ -35,6 +46,7 @@ impl Relay {
             trust_proxy: false,
             uploads: Some(Arc::new(tokio::sync::Semaphore::new(1))),
             min_protocol: PROTOCOL,
+            catalogs: Catalogs::load(Some(&catalog_dir)),
             metrics_token: None,
             stats: Arc::new(crate::metrics::StatsCache::default()),
             instance: "test".into(),
@@ -70,7 +82,7 @@ impl Relay {
     }
 
     async fn upload(&self, id: &str, group: Option<&str>, ciphertext: Vec<u8>) -> i64 {
-        self.client.put_blob(&self.url, &self.token, file(id, group, ciphertext)).await.unwrap()
+        self.client.put_blob(&self.url, &self.token, file(id, group, ciphertext), 0).await.unwrap()
     }
 }
 
@@ -90,6 +102,73 @@ fn file(id: &str, group: Option<&str>, ciphertext: Vec<u8>) -> OutboxItem {
         slot: None,
         group: group.map(str::to_string),
     }
+}
+
+#[tokio::test]
+async fn public_catalogs_are_plaintext_cached_and_independent_of_account_protocol() {
+    let models = br#"{"models":[{"id":"public-model"}]}"#;
+    let marketplace = br#"{"plugins":[{"id":"public-plugin"}]}"#;
+    let relay = Relay::start_catalogs(0, crate::push::Pusher::new(None, None), Some((models, marketplace))).await;
+    let old = reqwest::Client::builder().default_headers({
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("lorca-protocol", 2.into());
+        headers
+    }).build().unwrap();
+    for (route, expected) in [("/models/v1.json", models.as_slice()), ("/marketplace/v1.json", marketplace.as_slice())] {
+        let response = old.get(format!("{}{route}", relay.url)).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "public, max-age=300, must-revalidate");
+        let etag = response.headers()[header::ETAG].to_str().unwrap().to_owned();
+        let body = response.bytes().await.unwrap();
+        assert_eq!(body.as_ref(), expected);
+        assert!(!body.windows(b"identity".len()).any(|part| part == b"identity"));
+        let cached = old.get(format!("{}{route}", relay.url)).header(header::IF_NONE_MATCH, etag).send().await.unwrap();
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        assert!(cached.bytes().await.unwrap().is_empty());
+    }
+    assert_eq!(old.get(format!("{}/v1/machines", relay.url)).send().await.unwrap().status(), StatusCode::UPGRADE_REQUIRED);
+    assert_eq!(reqwest::get(format!("{}/models/v1.json", relay.url)).await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn unavailable_catalogs_fail_without_exposing_account_data() {
+    let missing = Relay::start(0).await;
+    for route in ["/models/v1.json", "/marketplace/v1.json"] {
+        let response = reqwest::get(format!("{}{route}", missing.url)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(!response.text().await.unwrap().contains("identity"));
+    }
+    let malformed = Relay::start_catalogs(0, crate::push::Pusher::new(None, None), Some((b"not JSON", b"{}"))).await;
+    assert_eq!(reqwest::get(format!("{}/models/v1.json", malformed.url)).await.unwrap().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(reqwest::get(format!("{}/marketplace/v1.json", malformed.url)).await.unwrap().status(), StatusCode::OK);
+    assert!(matches!(Catalog::load(Some(&malformed.home.join("catalogs/models/v1.json"))), Catalog::Invalid));
+    let large = malformed.home.join("catalogs/models/v1.json");
+    std::fs::write(&large, vec![b' '; MAX_CATALOG_BYTES as usize + 1]).unwrap();
+    assert!(matches!(Catalog::load(Some(&large)), Catalog::Invalid));
+}
+
+#[tokio::test]
+async fn roster_put_requires_expected_slot_seq_and_reports_conflict() {
+    let relay = Relay::start(0).await;
+    let put = |id: &str, expected: Option<i64>| {
+        let mut body = json!({ "id": id, "kind": "roster", "slot": "roster", "ciphertext": "AQ" });
+        if let Some(expected) = expected { body["expected_slot_seq"] = expected.into(); }
+        relay.http.put(format!("{}/v1/blobs", relay.url)).bearer_auth(&relay.token).json(&body)
+    };
+    assert_eq!(put("missing", None).send().await.unwrap().status(), StatusCode::BAD_REQUEST);
+    let first = put("one", Some(0)).send().await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let seq = first.json::<Value>().await.unwrap()["seq"].as_i64().unwrap();
+    assert_eq!(put("two", Some(0)).send().await.unwrap().status(), StatusCode::CONFLICT);
+    let existing = put("one", Some(0)).send().await.unwrap();
+    assert_eq!(existing.status(), StatusCode::OK);
+    let body = existing.json::<Value>().await.unwrap();
+    assert_eq!(body["seq"], seq);
+    assert_eq!(body["existing"], true);
+    let next = put("two", Some(seq)).send().await.unwrap();
+    assert_eq!(next.status(), StatusCode::OK);
+    assert_eq!(next.json::<Value>().await.unwrap()["seq"], seq + 1);
 }
 
 #[tokio::test]
@@ -116,7 +195,7 @@ async fn binary_attachment_round_trip_stays_encrypted_and_idempotent() {
         slot: None,
         group: Some("chat".into()),
     };
-    relay.client.put_blob(&relay.url, &relay.token, chat).await.unwrap();
+    relay.client.put_blob(&relay.url, &relay.token, chat, 0).await.unwrap();
     let (blobs, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, "").await.unwrap();
     assert_eq!(blobs.len(), 1);
     assert_eq!(lorca::keys::unb64(&blobs[0].ciphertext).unwrap(), [0, 255, 128]);
@@ -129,7 +208,7 @@ async fn binary_attachment_round_trip_stays_encrypted_and_idempotent() {
     assert!(!relay.home.join("files/identity/att-file").exists());
     let error = relay
         .client
-        .put_blob(&relay.url, &relay.token, file("att-late", Some("chat"), vec![1]))
+        .put_blob(&relay.url, &relay.token, file("att-late", Some("chat"), vec![1]), 0)
         .await
         .unwrap_err();
     assert_eq!(error.status, Some(409));
@@ -179,7 +258,7 @@ async fn binary_files_enforce_auth_metadata_quota_and_missing_objects() {
     );
     let error = relay
         .client
-        .put_blob(&relay.url, &relay.token, file("att-large", None, vec![1; 5]))
+        .put_blob(&relay.url, &relay.token, file("att-large", None, vec![1; 5]), 0)
         .await
         .unwrap_err();
     assert_eq!(error.status, Some(413));

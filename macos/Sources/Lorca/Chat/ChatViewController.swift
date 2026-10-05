@@ -669,6 +669,9 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
             case .notice:
                 identifier = NoticeCellView.identifier
                 cell = dequeue(identifier) { NoticeCellView() }
+            case let .permission(request) where request.isProposal:
+                identifier = ProposalCellView.identifier
+                cell = dequeue(identifier) { ProposalCellView() }
             case .permission:
                 identifier = PermissionCellView.identifier
                 cell = dequeue(identifier) { PermissionCellView() }
@@ -786,7 +789,9 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
             case let .notice(text):
                 return text
             case let .permission(request):
-                return PermissionCellView.spokenText(request: request, botName: botName(of: message))
+                return request.isProposal
+                    ? ProposalCellView.spokenText(request: request, botName: botName(of: message))
+                    : PermissionCellView.spokenText(request: request, botName: botName(of: message))
             }
         }
     }
@@ -873,6 +878,15 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     groupStart: groupStart,
                     metrics: layout.noticeMetrics(
                         for: message, tableWidth: max(tableView.bounds.width, 320)))
+
+            case let .permission(request) where request.isProposal:
+                guard let proposalCell = cell as? ProposalCellView else { return }
+                proposalCell.configure(
+                    request: request, messageID: message.id, botName: botName(of: message), avatar: cardAvatar(for: message),
+                    groupStart: groupStart)
+                proposalCell.onDecision = { [weak self] decision in
+                    self?.store.answerPermission(chatID: chat.id, messageID: message.id, decision: decision)
+                }
 
             case let .permission(request):
                 let permissionCell = cell as? PermissionCellView

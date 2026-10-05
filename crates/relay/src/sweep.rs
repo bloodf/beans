@@ -163,7 +163,7 @@ mod tests {
             let db = crate::db::open(path.to_str().unwrap(), Arc::new(Local::default())).await.unwrap();
             let who = format!("identity-{}", uuid::Uuid::new_v4().simple());
             db.register_identity(&who, "content", "machine", "box", "attestation").await.map_err(|e| format!("{e:?}")).unwrap();
-            let kept = NewBlob { identity_pubkey: who.clone(), id: "kept".into(), kind: "file".into(), recipient_machine_pubkey: None, slot: None, group: None, payload: Payload::InFileStore { size: 1 } };
+            let kept = NewBlob { identity_pubkey: who.clone(), id: "kept".into(), kind: "file".into(), recipient_machine_pubkey: None, slot: None, expected_slot_seq: None, group: None, payload: Payload::InFileStore { size: 1 } };
             db.insert_blob(kept, 0).await.map_err(|e| format!("{e:?}")).unwrap();
             for key in [store::key(&who, "kept"), store::key(&who, "lost"), store::key("stranger", "theirs")] {
                 files.put(&key, axum::body::Bytes::from_static(b"x")).await.map_err(|e| format!("{e:?}")).unwrap();

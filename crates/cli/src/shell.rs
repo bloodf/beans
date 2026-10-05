@@ -525,6 +525,26 @@ impl Sessions {
     }
 }
 
+/// Give bot commands this Runner's own CLI and address, ahead of another Lorca install.
+pub fn bot_shell_extras(app: &App) -> lorca_agent::login_shell::Extras {
+    let path_first = std::env::current_exe()
+        .ok()
+        .filter(|exe| exe.file_stem().and_then(|stem| stem.to_str()).is_some_and(|stem| stem.eq_ignore_ascii_case("lorca")))
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .into_iter()
+        .collect();
+    lorca_agent::login_shell::Extras {
+        variables: vec![("LORCA_HOME".into(), app.config.home.clone().into_os_string()), ("LORCA_PORT".into(), app.config.port.to_string().into())],
+        path_first,
+    }
+}
+/// A codemode shell call uses pipes, not the persistent terminals behind the direct bash tool.
+/// Its nested ToolRunner call must still pass the live bot shell gate and Auto-review hook.
+pub fn script_bash(app: &App, workdir: std::path::PathBuf) -> lorca_agent::tools::BashTool {
+    lorca_agent::tools::BashTool::for_script(workdir).with_extras(bot_shell_extras(app))
+}
+
+
 /// A turn's reach into the sessions: a bot reaches the ones it started, in the chat it runs in.
 pub struct TurnSessions {
     app: Arc<App>,

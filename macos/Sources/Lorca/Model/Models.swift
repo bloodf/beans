@@ -391,6 +391,13 @@ struct Device: Identifiable, Hashable {
 
 // MARK: - Bot
 
+/// nil plugins allows every installed plugin; an empty list allows none.
+struct BotCapabilities: Hashable {
+    var shell = true
+    var write = true
+    var plugins: [String]? = nil
+}
+
 struct Bot: Identifiable, Hashable {
     let id: String
     var name: String
@@ -407,6 +414,7 @@ struct Bot: Identifiable, Hashable {
     /// A custom profile image, kept as a `file` blob like a message attachment. Shown in place
     /// of the symbol and accent once this computer has the bytes.
     var avatar: Attachment? = nil
+    var capabilities = BotCapabilities()
     var createdAt: Date
 }
 
@@ -602,6 +610,10 @@ struct PermissionRequest: Hashable {
     var rule: String? = nil
     /// A shell card's whole command, where `summary` is its first line.
     var command: String? = nil
+    /// Draft metadata; the Runner writes only after approval.
+    var title: String? = nil
+    var content: String? = nil
+    var path: String? = nil
 
     /// The command as the card and its sheet show it, without the summary's `$ ` prompt.
     var fullCommand: String {
@@ -614,17 +626,30 @@ struct PermissionRequest: Hashable {
     var isShell: Bool { pluginID == "computer" }
     /// A sign-in card: Sign in starts the OAuth flow on the Runner.
     var isConnect: Bool { tool == "connect" }
+    var isProposal: Bool { tool == "propose" }
 
     /// "wants to use GitHub" / "wants to install GitHub" / "needs a sign-in to GitHub" /
     /// "wants to run a command on Workbench"
     var verbPhrase: String {
+        if isProposal { return L("proposes a draft") }
         if isConnect { return L("needs a sign-in to %@", pluginName) }
         if isShell { return L("wants to run a command on %@", pluginName) }
         return isInstall ? L("wants to install %@", pluginName) : L("wants to use %@", pluginName)
     }
 
     var decisionText: String {
-        switch decision {
+        if isProposal {
+            switch decision {
+            case .pending: return L("Waiting for review")
+            case .allowed: return path == nil ? L("Approved; not saved") : L("Approved and saved")
+            case .denied: return L("Declined")
+            case .expired: return L("No answer in time")
+            case .dismissed: return L("Dismissed")
+            case .failed: return L("Save failed")
+            default: return L("Not saved")
+            }
+        }
+        return switch decision {
         case .pending: L("Waiting for you")
         case .allowed: isConnect ? L("Signing in") : L("Allowed once")
         case .always: L("Always allowed")
@@ -639,6 +664,7 @@ struct PermissionRequest: Hashable {
     /// The buttons a pending card offers: (title, decision). A shell command offers Always
     /// allow only with a rule to add.
     var choices: [(String, String)] {
+        if isProposal { return [(L("Approve & save"), "allow"), (L("Decline"), "deny")] }
         if isConnect { return [(L("Sign in"), "allow"), (L("Not now"), "deny")] }
         if isInstall { return [(L("Allow"), "allow"), (L("Deny"), "deny")] }
         if isShell && rule == nil { return [(L("Allow once"), "allow"), (L("Deny"), "deny")] }
@@ -739,6 +765,8 @@ struct ToolInvocation: Hashable {
     var isRunning: Bool
     /// What the call does, in the bot's words: a shell command's "Install dependencies".
     var description: String?
+    /// The command currently running inside a codemode script, distinct from its plugin.
+    var scriptCommand: String? = nil
     /// The bot a message_bot call goes to.
     var targetBotID: Bot.ID?
     /// A shell command's card, which the transcript shows only while the command needs the user

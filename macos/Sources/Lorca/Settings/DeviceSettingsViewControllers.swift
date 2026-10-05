@@ -94,6 +94,8 @@ final class BotsSettingsViewController: DevicePaneViewController {
 final class ProvidersSettingsViewController: SettingsPaneViewController {
     private let store = AppStore.shared
     private let section = SectionView(title: L("Credentials"))
+    private var refreshingModels = false
+    private var refreshStatus = ""
 
     override func viewDidLoad() {
         title = L("Providers")
@@ -140,6 +142,14 @@ final class ProvidersSettingsViewController: SettingsPaneViewController {
             }
             return row
         }
+        if store.providers.contains(where: { $0.kind.isCustom && $0.isConnected }) {
+            let refresh = ActionRow(
+                key: L("Model lists"), value: refreshStatus, tint: .secondaryLabelColor,
+                actionTitle: L("Refresh Models"))
+            (refresh.actionView as? NSButton)?.isEnabled = !refreshingModels
+            refresh.onAction = { [weak self] in self?.refreshModels() }
+            rows.append(refresh)
+        }
         let add = ActionRow(key: L("Custom"), value: "", tint: .secondaryLabelColor, actionTitle: L("Add Provider…"))
         add.onAction = { [weak self, weak add] in
             guard let self, let button = add?.actionView else { return }
@@ -147,6 +157,26 @@ final class ProvidersSettingsViewController: SettingsPaneViewController {
         }
         rows.append(add)
         section.setRows(rows)
+    }
+
+    private func refreshModels() {
+        guard !refreshingModels else { return }
+        refreshingModels = true
+        refreshStatus = L("Refreshing models…")
+        reload()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let updated = try await store.refreshCustomModels()
+                refreshStatus = updated == 0 ? L("No model changes")
+                    : updated == 1 ? L("1 provider updated") : L("%d providers updated", updated)
+            } catch {
+                // The CLI reports provider kinds only; keep server and credential details off this pane.
+                refreshStatus = L("Couldn’t refresh models")
+            }
+            refreshingModels = false
+            reload()
+        }
     }
 
     /// The servers people often add, then any other. One the account has already opens it.
@@ -185,22 +215,28 @@ final class ProvidersSettingsViewController: SettingsPaneViewController {
 
 // MARK: - Plugins
 
-/// What the picked Runner has installed, with each plugin's state, and the marketplace.
+/// Marketplace plugins and user-managed MCP servers on selected Runner.
 final class PluginsSettingsViewController: DevicePaneViewController {
     private let section = SectionView(title: L("Plugins"))
+    private let mcpSection = SectionView(title: L("MCP Servers"))
+    private var mcpGeneration = 0
     var onOpenMarketplace: ((Device.ID) -> Void)?
 
     override func viewDidLoad() {
         title = L("Plugins")
         addSection(section)
+        addSection(mcpSection)
         addFootnote(L("Plugins are installed on a Runner, and the bots assigned to it use them. An action that changes something goes through Auto-review first."))
         super.viewDidLoad()
     }
 
     override func reload() {
         section.title = device.map { L("Plugins on %@", $0.name) } ?? L("Plugins")
+        mcpSection.title = device.map { L("MCP Servers on %@", $0.name) } ?? L("MCP Servers")
+        mcpGeneration += 1
         if let rows = placeholderRows(for: device) {
             section.setRows(rows)
+            mcpSection.setRows([])
             return
         }
         guard let device else { return }
@@ -218,6 +254,44 @@ final class PluginsSettingsViewController: DevicePaneViewController {
         add.onAction = { [weak self] in self?.onOpenMarketplace?(device.id) }
         rows.append(add)
         section.setRows(rows)
+        loadMCP(on: device)
+    }
+
+    private func loadMCP(on runner: Device, reload: Bool = false) {
+        mcpGeneration += 1
+        let generation = mcpGeneration
+        mcpSection.setRows([KeyValueRow(key: L("State"), value: L("Loading…"))])
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let list = try await store.mcpServers(on: runner.id, reload: reload)
+                guard generation == mcpGeneration, deviceID == runner.id else { return }
+                var rows: [NSView] = list.servers.map { server in
+                    let row = ActionRow(key: server.name, value: server.problem ?? server.status?.detail ?? server.transport ?? "",
+                                        tint: server.problem == nil ? .secondaryLabelColor : .systemRed, actionTitle: L("Edit…"))
+                    row.onAction = { [weak self] in self?.openMCP(server.name, on: runner) }
+                    return row
+                }
+                if let error = list.error { rows.insert(KeyValueRow(key: L("State"), value: error, tint: .systemRed), at: 0) }
+                if list.servers.isEmpty { rows.append(KeyValueRow(key: L("No MCP servers"), value: "")) }
+                let add = ActionRow(key: L("MCP Servers"), value: list.path, tint: .secondaryLabelColor, actionTitle: L("Add Server…"))
+                add.onAction = { [weak self] in self?.openMCP(nil, on: runner) }
+                rows.append(add)
+                let refresh = ActionRow(key: L("Reload configuration"), value: "", tint: .secondaryLabelColor, actionTitle: L("Reload"))
+                refresh.onAction = { [weak self] in self?.loadMCP(on: runner, reload: true) }
+                rows.append(refresh)
+                mcpSection.setRows(rows)
+            } catch {
+                guard generation == mcpGeneration else { return }
+                mcpSection.setRows([KeyValueRow(key: L("State"), value: error.localizedDescription, tint: .systemRed)])
+            }
+        }
+    }
+
+    private func openMCP(_ name: String?, on runner: Device) {
+        let sheet = MCPServerViewController(name: name, runner: runner)
+        sheet.onChange = { [weak self] in self?.loadMCP(on: runner) }
+        presentAsSheet(sheet)
     }
 
     @objc private func openPlugin(_ sender: NSClickGestureRecognizer) {

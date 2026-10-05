@@ -2,7 +2,7 @@ import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { chatTitle, engine } from "../../src/core/engine";
-import { providerKinds, providerLabel, providerModels, PROVIDER_KINDS, thinkingLabel, thinkingLevels, withCustomModels, type Bot, type Routine } from "../../src/core/model";
+import { botCapabilities, providerKinds, providerLabel, providerModels, PROVIDER_KINDS, thinkingLabel, thinkingLevels, withCustomModels, type Bot, type BotCapabilities, type Routine } from "../../src/core/model";
 import { deviceIsOnline, useBotMap, useChat, useRoutines, useStore, useWorkingBotIds } from "../../src/core/store";
 import { t, useLanguage } from "../../src/i18n";
 import { AvatarCluster, BotAvatar } from "../../src/ui/Avatar";
@@ -33,6 +33,7 @@ export default function ChatInfoScreen() {
   const [adding, setAdding] = useState(false);
   const [title, setTitle] = useState(chat?.title ?? "");
   const [botName, setBotName] = useState(bot?.name ?? "");
+  const [savingAbilities, setSavingAbilities] = useState(false);
   const routines = useRoutines(chat?.kind === "dm" ? chat.bot_ids[0] : undefined);
 
   useEffect(() => setBotName(bot?.name ?? ""), [bot?.id, bot?.name]);
@@ -70,6 +71,21 @@ export default function ChatInfoScreen() {
   // The built-ins, then the account's custom providers below a divider.
   const kinds = providerKinds(providers);
   const candidates = allBots.filter((b) => !chat.bot_ids.includes(b.id));
+
+  const capabilities = bot ? botCapabilities(bot) : undefined;
+  const installedPlugins = runner?.plugins ?? [];
+
+  async function saveAbilities(next: BotCapabilities) {
+    if (!bot || savingAbilities) return;
+    setSavingAbilities(true);
+    try {
+      await engine.setBotCapabilities(bot.id, next);
+    } catch (error) {
+      Alert.alert(t("Could not update the bot"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingAbilities(false);
+    }
+  }
 
   function commitTitle() {
     if ((title.trim() || null) !== (chat!.title?.trim() || null)) engine.renameGroup(chat!.id, title);
@@ -196,6 +212,26 @@ export default function ChatInfoScreen() {
         </Section>
       )}
 
+      {bot && capabilities && (
+        <Section title={t("Abilities")} footer={t("Choose which tools this bot may use. Changes sync to its Runner.")}>
+          <ToggleRow title={t("Shell commands")} value={capabilities.shell} onValueChange={(shell) => void saveAbilities({ ...capabilities, shell })} />
+          <ToggleRow title={t("Write files")} value={capabilities.write} onValueChange={(write) => void saveAbilities({ ...capabilities, write })} />
+          <ToggleRow
+            title={t("All installed plugins")}
+            value={capabilities.plugins === null}
+            onValueChange={(all) => void saveAbilities({ ...capabilities, plugins: all ? null : installedPlugins.map((plugin) => plugin.id) })}
+          />
+          {capabilities.plugins !== null && installedPlugins.map((plugin) => (
+            <ToggleRow
+              key={plugin.id}
+              title={plugin.name}
+              value={capabilities.plugins?.includes(plugin.id) ?? false}
+              onValueChange={(allowed) => void saveAbilities({ ...capabilities, plugins: allowed ? [...(capabilities.plugins ?? []), plugin.id] : (capabilities.plugins ?? []).filter((id) => id !== plugin.id) })}
+            />
+          ))}
+        </Section>
+      )}
+
       {bot && runner && (
         <Section title={t("Runs on")}>
           <Row
@@ -234,7 +270,7 @@ export default function ChatInfoScreen() {
       )}
 
       {bot && runner && (
-        <Section title={t("Plugins")} footer={(runner.plugins ?? []).length === 0 ? t("No plugins on {runner} yet. Add one from the desktop app, or ask {bot} to find one.", { runner: runner.name, bot: bot.name }) : t("Installed on {runner}, for {bot} and every other bot there.", { runner: runner.name, bot: bot.name })}>
+        <Section title={t("Plugins")} footer={(runner.plugins ?? []).length === 0 ? t("No plugins on {runner} yet. Add one from the desktop app, or ask {bot} to find one.", { runner: runner.name, bot: bot.name }) : t("Installed on {runner}. Each bot's Abilities control which it can use.", { runner: runner.name })}>
           {(runner.plugins ?? []).map((plugin) => (
             <Row
               key={plugin.id}

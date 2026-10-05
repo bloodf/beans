@@ -35,7 +35,7 @@ The tool takes one argument, `code`, the body of an async function: top-level `a
 
 `max_output_tokens` is the budget for the script's output (default `CodemodeOptions::max_output_tokens`, 10,000, and at most 50,000). Longer output keeps its start and end, and the whole text goes to a temp file the result names. `timeout_ms` shortens the deadline for the whole script, tool calls included, which is `CodemodeOptions::timeout` (30 minutes) at most; the run's cancel token stops a script at any time.
 
-The result starts with `Script completed`, `Script failed`, or `Script stopped`, the wall time, and then the output in the order the script produced it. A failure appends the error with its stack (`codemode.js:<line>`, which matches the script as written) and the calls made before it, which are not undone. A failed script is an error result (`ToolResult::is_error`) that keeps its partial output. `details.calls` lists the script's calls (name, arguments cut for display, status, duration, error), the first 256 of them.
+The result starts with `Script completed`, `Script failed`, or `Script stopped`, the wall time, and then the output in the order the script produced it. A failure appends the error with its stack (`codemode.js:<line>`, which matches the script as written) and the calls made before it, which are not undone. A failed script is an error result (`ToolResult::is_error`) that keeps its partial output. `details.calls` lists the script's calls (name, arguments cut for display, a caller-provided `description` when present, status, duration, error), the first 256 of them.
 
 A host can run a script itself, outside a model's turn: `codemode.run_script(call_id, code, cancel, &runner)` runs it as a call of the tool would, with `runner` (a `ToolRunner`) running its calls, and answers with a `ScriptRun`: the `result` a model would have read, and `returned`, the JSON the script returned when it finished and returned anything but `undefined`. A runner that answers a call with `blocked` ends the script, as a refusing hook does.
 
@@ -46,12 +46,13 @@ A host can run a script itself, outside a model's turn: `codemode.run_script(cal
 - `text(value)` and `console.log(...)` append output; `image(dataUrlOrMcpImage)` appends an image; `return value` appends the value; `exit()` ends the script successfully.
 - `store(key, value)` and `load(key)` keep JSON values across scripts through a `CodemodeStore` the host persists (`with_store`). A value may take 256 Ki characters of JSON and all of them together 1 Mi; a failed script writes nothing.
 - `ALL_TOOLS`, `await searchTools(query, { limit, namespace })` (BM25 over names, descriptions, schemas, and namespaces by default), and `await describeTool(name)`.
+- `await describeNamespace(name)` returns `{ name, description?, instructions?, tools }` for a namespace by name or JavaScript identifier. Its instructions are complete, and its tools include visible deferred tools; an unknown namespace returns `undefined`. The host decides which tools a script may see.
 - The host's functions (`with_functions`, below).
 - Nothing else: no timers, `fetch`, modules, file system, or network. `eval` and `Function` only make more code inside the same VM.
 
 A script that waits on a promise nothing can settle fails at once instead of hanging.
 
-The host holds a script to limits its VM's memory cap does not cover. Past 16 MB of output, or with more than 1,000 calls it started and has not seen finish, the script stops. An image must be PNG, JPEG, GIF, or WebP, in valid base64, of at most 5 MB, and ten at most; any other is left out with a note in the output. A call whose arguments are over 8 MB, or are not JSON the host can read, rejects without running. Strings are made well-formed before they cross, so a lone surrogate becomes U+FFFD. `store()` writes over their limits fail the script, whatever the script did to the prelude's own checks.
+The host holds a script to limits its VM's memory cap does not cover. Past 16 MB of output, or with more than 1,000 calls it started and has not seen finish, the script stops. Up to ten base64 images are decoded, resized and converted to a model-supported PNG or JPEG by `images::prepare_base64`; invalid or overlarge ones become notes in output. A call whose arguments are over 8 MB, or are not JSON the host can read, rejects without running. Strings are made well-formed before they cross, so a lone surrogate becomes U+FFFD. `store()` writes over their limits fail the script, whatever the script did to the prelude's own checks.
 
 ## Calls go through the loop
 
@@ -70,7 +71,7 @@ Calls run in parallel, up to `max_concurrent_calls` (8) at once. A tool whose `e
 - what a script has, and the limits;
 - the shared MCP result types, when an MCP tool is callable or `CodemodeOptions::mcp_types` is set, with how to read a `CallToolResult`;
 - the host's functions as TypeScript;
-- the tools the model can also call directly (`Exposure::Direct`), by name only;
+- the tools the model can also call directly (`Exposure::Direct`), by name, and the result shape for tools with an output schema (for example, `bash` resolves to structured output with `exit_code` and `output`);
 - every other tool as a TypeScript declaration built from its JSON Schemas, grouped by namespace, within `inline_budget` estimated tokens (3,000). Each round, every group places its cheapest remaining tool, so each namespace is represented before any is complete. `Exposure::Deferred` tools are never listed. The listing says whether it is complete, and every namespace is named with its tool count, including one with no tools known yet.
 
 A tool whose output schema is shaped like MCP's `CallToolResult` (a `content` array of objects and a boolean `isError`) renders as `Promise<CallToolResult<T>>`, with `T` from its `structuredContent` schema.
@@ -84,6 +85,7 @@ A `Catalog` says what scripts can reach:
 | `entries()` | The tools scripts can call now, each an `Entry { tool, exposure, namespace }`. The description and `ALL_TOOLS` list these. |
 | `namespaces()` | Every group, with a description, including ones whose tools are not known yet. |
 | `find(name, cancel)` | A tool `entries()` did not have, by its name or identifier, such as one of a server that connects on first use. Defaults to none. |
+| `describe_namespace(name, cancel)` | `describeNamespace()`: complete instructions and visible tool names in `NamespaceDetails`. Defaults to known namespaces and entries; hosts may resolve tools on demand. |
 | `search(query, namespace, limit, cancel)` | `searchTools()`. Defaults to BM25 over `entries()`. |
 
 `StaticCatalog` is a fixed list. Lorca's CLI implements its own over the plugins installed on a Runner, whose tool lists it keeps on disk so a turn lists them without starting a server.

@@ -119,6 +119,8 @@ class SettingsPaneViewController: NSViewController {
 // MARK: - General
 
 final class GeneralSettingsViewController: SettingsPaneViewController {
+    private let store = AppStore.shared
+    private let pauseSwitch = NSSwitch()
     private let appearance = SettingsPopUpButton()
     private let appLanguage = SettingsPopUpButton()
     private let dictationLanguage = SettingsPopUpButton()
@@ -130,6 +132,22 @@ final class GeneralSettingsViewController: SettingsPaneViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = L("General")
+        pauseSwitch.controlSize = .small
+        pauseSwitch.target = self
+        pauseSwitch.action = #selector(togglePause)
+        let account = SectionView(title: L("Account"))
+        account.setRows([
+            AccessoryRow(key: L("Pause all bots"), accessory: pauseSwitch),
+            NoteRow(text: L("Pausing stops new bot turns and routines on every paired Device.")),
+        ])
+        addSection(account)
+        store.observe(self) { [weak self] event in
+            switch event {
+            case .rosterChanged, .snapshotReplaced, .connectionChanged: self?.refreshPause()
+            default: break
+            }
+        }
+        refreshPause()
 
         let chats = SectionView(title: L("Chats"))
         chats.setRows([
@@ -202,8 +220,30 @@ final class GeneralSettingsViewController: SettingsPaneViewController {
         }
 
         addFootnote(
-            L("Beans talks only to the CLI on this computer. Nothing here is synced; each Device keeps its own settings.")
+            L("Appearance, chats, and dictation are local to this computer. Pause is shared with every paired Device.")
         )
+    }
+
+    private func refreshPause() {
+        pauseSwitch.state = store.paused ? .on : .off
+        pauseSwitch.isEnabled = store.hasIdentity == true && (store.isMock || store.isConnected)
+    }
+
+    @objc private func togglePause(_ sender: NSSwitch) {
+        let desired = sender.state == .on
+        sender.isEnabled = false
+        Task { [weak self] in
+            guard let self else { return }
+            do { try await store.setPaused(desired) }
+            catch {
+                let alert = NSAlert()
+                alert.messageText = L("Couldn’t change account pause")
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: L("OK"))
+                if let window = view.window { alert.beginSheetModal(for: window) { _ in } }
+            }
+            refreshPause()
+        }
     }
 
     private func toggle(_ isOn: Bool, _ action: Selector) -> NSSwitch {

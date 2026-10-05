@@ -59,7 +59,15 @@ pub struct State {
     pub chats: Vec<Chat>,
     pub routines: Vec<Routine>,
     pub auto_review: AutoReview,
+    pub paused: bool,
+    pub policy_clock: u64,
+    pub pause_version: PolicyVersion,
+    pub capability_versions: HashMap<String, PolicyVersion>,
+    pub policy_capabilities: HashMap<String, Capabilities>,
+    pub deleted_bot_versions: HashMap<String, PolicyVersion>,
     pub last_seq: i64,
+    /// Seq of the latest roster slot observed or accepted, independent of the log cursor.
+    pub roster_slot_seq: i64,
     /// Chats deleted here whose blobs the relay still has to drop.
     pub group_deletes: Vec<String>,
     /// Avatars dropped here whose `file` blobs the relay still has to drop.
@@ -152,6 +160,8 @@ pub struct App {
     pub machine: Mutex<Option<MachineFile>>,
     pub credentials: Mutex<Credentials>,
     pub state: Mutex<State>,
+    /// Serializes local roster edits through their queue write with sync's rebase and apply.
+    pub(crate) roster_edit: Mutex<()>,
     pub store: LocalStore,
     pub events: broadcast::Sender<Event>,
     pub relay: RelayClient,
@@ -212,8 +222,10 @@ pub struct App {
     pub shell_sessions: crate::shell::Sessions,
     /// What this Runner has installed, with the secrets kept apart.
     pub plugins: Mutex<crate::plugins::Store>,
-    /// The index fetched from `marketplace_url`: (fetched at, index).
-    pub marketplace_cache: Mutex<Option<(f64, crate::marketplace::Index)>>,
+    /// Public marketplace index from the selected relay, with bundled offline fallback.
+    pub marketplace: crate::marketplace::Updates,
+    /// Public built-in model catalog checks from the selected relay.
+    pub catalog: crate::catalog::Updates,
     /// Connected MCP servers.
     #[cfg(feature = "runner")]
     pub mcp: crate::plugins::mcp::Pool,
@@ -239,6 +251,7 @@ impl App {
         let machine: Option<MachineFile> = config::read_json(&config.machine_path());
         let credentials = Credentials::load(&config);
         let plugins = crate::plugins::Store::load(&config);
+        let marketplace = crate::marketplace::Updates::load(&config);
         let store = LocalStore::open(&config.database_path())?;
         let mut state = store.load_state()?;
         for bot in &mut state.bots {
@@ -259,6 +272,7 @@ impl App {
             machine: Mutex::new(machine),
             credentials: Mutex::new(credentials),
             state: Mutex::new(state),
+            roster_edit: Mutex::new(()),
             store,
             events,
             relay: RelayClient::new()?,
@@ -289,16 +303,40 @@ impl App {
             #[cfg(feature = "runner")]
             shell_sessions: crate::shell::Sessions::default(),
             plugins: Mutex::new(plugins),
-            marketplace_cache: Mutex::new(None),
+            marketplace,
+            catalog: crate::catalog::Updates::default(),
             #[cfg(feature = "runner")]
             mcp: crate::plugins::mcp::Pool::new(),
             #[cfg(feature = "runner")]
             routine_checks: crate::routines::Checks::default(),
             http,
         });
+        crate::marketplace::enable(&app);
+        crate::catalog::enable(&app);
         // Normalize and persist the in-memory view before background work begins.
         app.save_state_now();
         Ok(app)
+    }
+
+    /// Persisted proposals for bots on this Runner have no live tool call after restart.
+    /// Reconcile again after each pull: a newer remote card can replace startup's dismissal.
+    #[cfg(feature = "runner")]
+    pub fn close_orphan_proposals(&self) -> anyhow::Result<()> {
+        let Some(runner_id) = self.this_device_id() else { return Ok(()); };
+        let own_bots: std::collections::HashSet<String> = self.state.lock().unwrap().bots.iter()
+            .filter(|bot| bot.runner_id == runner_id).map(|bot| bot.id.clone()).collect();
+        for mut card in self.store.proposal_cards()? {
+            if !matches!(&card.author, Author::Bot { bot_id } if own_bots.contains(bot_id))
+                || !matches!(&card.body, Body::Permission { decision, .. } if decision == "pending")
+                || self.pending_permissions.lock().unwrap().contains_key(&card.id) {
+                continue;
+            }
+            if let Body::Permission { decision, .. } = &mut card.body {
+                *decision = "dismissed".into();
+            }
+            self.upsert_message(card, true);
+        }
+        Ok(())
     }
 
     // MARK: - Persistence
@@ -378,8 +416,8 @@ impl App {
             let mut credentials = self.credentials.lock().unwrap();
             update(&mut credentials);
             credentials.touch(kind);
+            credentials.save(&self.config)?;
         }
-        self.save_credentials()?;
         self.push_credentials();
         self.emit(self.roster_summary());
         Ok(())
@@ -411,16 +449,18 @@ impl App {
     /// Another Device's credentials arrived: the later change of each kind wins, and a set
     /// that lacks a change made here gets this Device's in return.
     pub fn apply_credentials(&self, incoming: &Credentials) {
-        let merge = self.credentials.lock().unwrap().merge(incoming);
-        if !merge.taken.is_empty() {
-            if let Err(error) = self.save_credentials() {
-                tracing::error!(%error, "saving credentials");
+        let merge = {
+            let mut credentials = self.credentials.lock().unwrap();
+            let merge = credentials.merge(incoming);
+            if !merge.taken.is_empty() {
+                if let Err(error) = credentials.save(&self.config) {
+                    tracing::error!(%error, "saving credentials");
+                }
             }
-            self.emit(self.roster_summary());
-        }
-        if merge.is_ahead {
-            self.push_credentials();
-        }
+            merge
+        };
+        if !merge.taken.is_empty() { self.emit(self.roster_summary()); }
+        if merge.is_ahead { self.push_credentials(); }
     }
 
     pub fn emit(&self, event: Event) {
@@ -480,6 +520,9 @@ impl App {
         settings.relay_url = url.map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
         settings.save(&self.config)?;
         drop(settings);
+        crate::catalog::enable(self);
+        crate::marketplace::enable(self);
+        self.emit(self.roster_summary());
         self.relay.forget_token();
         // Another relay may serve this build and know this Device; the sync loop wakes and
         // finds out.
@@ -609,6 +652,19 @@ impl App {
         self.outbox_notify.notify_waiters();
     }
 
+    fn next_policy_version(&self, state: &mut State) -> PolicyVersion {
+        state.policy_clock = state.policy_clock.saturating_add(1);
+        PolicyVersion { counter: state.policy_clock, device_id: self.this_device_id().unwrap_or_default() }
+    }
+
+    fn publish_policy(&self, policy: PolicyBlob) {
+        let Some(dek) = self.dek() else { return };
+        match crate::crypto::encrypt_json(&dek, "policy", &policy) {
+            Ok(ciphertext) => { self.push_blob("policy", None, ciphertext); }
+            Err(error) => tracing::error!(%error, "encrypting policy"),
+        }
+    }
+
     pub fn push_roster(&self) {
         let Some(dek) = self.dek() else { return };
         let roster = {
@@ -618,6 +674,12 @@ impl App {
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
                 routines: state.routines.clone(),
                 auto_review: state.auto_review.clone(),
+                paused: state.paused,
+                policy_clock: state.policy_clock,
+                pause_version: state.pause_version.clone(),
+                capability_versions: state.capability_versions.clone(),
+                policy_capabilities: state.policy_capabilities.clone(),
+                deleted_bot_versions: state.deleted_bot_versions.clone(),
                 updated_at: config::now_secs(),
             }
         };
@@ -916,6 +978,7 @@ impl App {
             chats: state.chats.iter().map(|c| ChatSummary { meta: c.meta.clone(), unread_count: c.unread_count, usage: c.usage.clone() }).collect(),
             routines: self.routines_out(&state),
             auto_review: state.auto_review.clone(),
+            paused: state.paused,
             providers: self.credentials.lock().unwrap().statuses(),
         }
     }
@@ -924,14 +987,43 @@ impl App {
         self.state.lock().unwrap().auto_review.clone()
     }
 
+    pub fn is_paused(&self) -> bool { self.state.lock().unwrap().paused }
+
+    pub fn set_paused(&self, paused: bool) {
+        let _edit = self.roster_edit.lock().unwrap();
+        let policy = {
+            let mut state = self.state.lock().unwrap();
+            if state.paused == paused { return; }
+            state.paused = paused;
+            let version = self.next_policy_version(&mut state);
+            state.pause_version = version.clone();
+            PolicyBlob { paused: Some(paused), bot_id: None, capabilities: None, removed: false, version }
+        };
+        if paused { self.stop_for_pause(); }
+        self.publish_policy(policy);
+        self.roster_changed(true);
+    }
+
+    pub fn stop_for_pause(&self) {
+        for job in self.running_jobs.lock().unwrap().values() { job.cancel.cancel(); }
+        #[cfg(feature = "runner")]
+        {
+            self.routine_checks.cancel_all();
+            let chats: Vec<String> = self.state.lock().unwrap().chats.iter().map(|chat| chat.meta.id.clone()).collect();
+            for chat in chats { self.shell_sessions.stop_chat(&chat); }
+        }
+    }
+
     /// Replaces the Auto-review setting and publishes the roster.
     pub fn set_auto_review(&self, auto_review: AutoReview) {
+        let _edit = self.roster_edit.lock().unwrap();
         self.state.lock().unwrap().auto_review = auto_review;
         self.roster_changed(true);
     }
 
     /// Adds a rule, replacing one for the same exact tool or with the same words.
     pub fn add_auto_review_rule(&self, rule: AutoReviewRule) {
+        let _edit = self.roster_edit.lock().unwrap();
         {
             let mut state = self.state.lock().unwrap();
             state.auto_review.rules.retain(|r| match &rule.tool {
@@ -982,27 +1074,77 @@ impl App {
 
     /// Creates the bot and its direct chat in one roster change, so other Devices (and the
     /// app's optimistic rows) never see a bot without its DM.
-    pub fn create_bot_with_dm(&self, bot: Bot, chat_id: Option<String>) -> anyhow::Result<(Bot, Chat)> {
-        let bot = self.insert_bot(bot)?;
-        let chat = self.dm_with(&bot.id, chat_id)?;
+    pub fn create_bot_with_dm(&self, mut bot: Bot, chat_id: Option<String>) -> anyhow::Result<(Bot, Chat)> {
+        let _edit = self.roster_edit.lock().unwrap();
+        bot.normalize_description();
+        let runner = self.device(&bot.runner_id).ok_or_else(|| anyhow::anyhow!("Unknown Runner"))?;
+        if !runner.is_runner() {
+            anyhow::bail!("{} runs {} and cannot run bots", runner.name, runner.os);
+        }
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
+        if bot.id.is_empty() {
+            loop {
+                bot.id = format!("bot-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                if !next.bots.iter().any(|b| b.id == bot.id) && !next.deleted_bot_versions.contains_key(&bot.id) { break; }
+            }
+        } else if next.bots.iter().any(|b| b.id == bot.id) || next.deleted_bot_versions.contains_key(&bot.id) {
+            anyhow::bail!("Bot id already exists or was deleted");
+        }
+        let mut id = chat_id.filter(|id| !id.is_empty()).unwrap_or_default();
+        if id.is_empty() {
+            loop {
+                id = format!("chat-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+                if !next.chats.iter().any(|c| c.meta.id == id) { break; }
+            }
+        } else if next.chats.iter().any(|c| c.meta.id == id) {
+            anyhow::bail!("Chat id already exists");
+        }
+        if bot.created_at == 0.0 { bot.created_at = config::now_secs(); }
+        let chat = Chat {
+            meta: ChatMeta { id, kind: "dm".into(), title: None, bot_ids: vec![bot.id.clone()], owner_bot_id: Some(bot.id.clone()), is_pinned: false, created_at: config::now_secs() },
+            unread_count: 0, usage: None, compactions: Vec::new(),
+        };
+        let policy = if bot.capabilities != Capabilities::default() {
+            let version = self.next_policy_version(&mut next);
+            next.capability_versions.insert(bot.id.clone(), version.clone());
+            next.policy_capabilities.insert(bot.id.clone(), bot.capabilities.clone());
+            Some(PolicyBlob { paused: None, bot_id: Some(bot.id.clone()), capabilities: Some(bot.capabilities.clone()), removed: false, version })
+        } else { None };
+        next.bots.push(bot.clone());
+        next.chats.insert(0, chat.clone());
+        self.store.save_state_creating_chat(&next, &chat.meta)?;
+        *state = next;
+        drop(state);
+        if let Some(policy) = policy { self.publish_policy(policy); }
+        self.roster_changed(true);
         Ok((bot, chat))
     }
 
     /// Applies a change to a bot's profile and publishes the roster. The next turn of that bot
     /// reads the new profile.
     pub fn update_bot(&self, id: &str, update: impl FnOnce(&mut Bot)) -> anyhow::Result<Bot> {
-        let bot = {
+        let _edit = self.roster_edit.lock().unwrap();
+        let (bot, policy) = {
             let mut state = self.state.lock().unwrap();
             let bot = state.bots.iter_mut().find(|b| b.id == id).ok_or_else(|| anyhow::anyhow!("Unknown bot"))?;
             let old_avatar = bot.avatar.as_ref().map(|avatar| avatar.id.clone());
+            let old_capabilities = bot.capabilities.clone();
             update(bot);
             bot.normalize_description();
             let bot = bot.clone();
             if let Some(old) = old_avatar.filter(|old| bot.avatar.as_ref().map(|avatar| &avatar.id) != Some(old)) {
                 self.drop_avatar(&mut state, &old);
             }
-            bot
+            let policy = if old_capabilities != bot.capabilities {
+                let version = self.next_policy_version(&mut state);
+                state.capability_versions.insert(id.to_string(), version.clone());
+                state.policy_capabilities.insert(id.to_string(), bot.capabilities.clone());
+                Some(PolicyBlob { paused: None, bot_id: Some(id.to_string()), capabilities: Some(bot.capabilities.clone()), removed: false, version })
+            } else { None };
+            (bot, policy)
         };
+        if let Some(policy) = policy { self.publish_policy(policy); }
         self.roster_changed(true);
         Ok(bot)
     }
@@ -1010,12 +1152,18 @@ impl App {
     /// Deletes a bot, its direct chat and routines, and its memberships in group chats. A
     /// group whose last bot was deleted goes with it; the other groups keep their transcript.
     pub fn delete_bot(&self, id: &str) -> anyhow::Result<()> {
-        let removed_chat_ids = {
+        let _edit = self.roster_edit.lock().unwrap();
+        let (removed_chat_ids, policy) = {
             let mut state = self.state.lock().unwrap();
             let deleted_bot = state.bots.iter().find(|bot| bot.id == id).cloned().ok_or_else(|| anyhow::anyhow!("Unknown bot"))?;
 
             state.bots.retain(|bot| bot.id != id);
             state.routines.retain(|routine| routine.bot_id != id);
+            let version = self.next_policy_version(&mut state);
+            state.deleted_bot_versions.insert(id.to_string(), version.clone());
+            state.capability_versions.remove(id);
+            state.policy_capabilities.remove(id);
+            let policy = PolicyBlob { paused: None, bot_id: Some(id.to_string()), capabilities: None, removed: true, version };
             if let Some(avatar) = &deleted_bot.avatar {
                 self.drop_avatar(&mut state, &avatar.id);
             }
@@ -1043,8 +1191,9 @@ impl App {
 
             state.chats.retain(|chat| !removed.contains(&chat.meta.id));
             queue_chat_deletes(&mut state, &removed);
-            removed
+            (removed, policy)
         };
+        self.publish_policy(policy);
         let snapshot = self.state.lock().unwrap().clone();
         self.store.save_state_deleting_chats(&snapshot, &removed_chat_ids)?;
 
@@ -1078,29 +1227,13 @@ impl App {
         }
     }
 
-    fn insert_bot(&self, mut bot: Bot) -> anyhow::Result<Bot> {
-        bot.normalize_description();
-        let runner = self.device(&bot.runner_id).ok_or_else(|| anyhow::anyhow!("Unknown Runner"))?;
-        if !runner.is_runner() {
-            anyhow::bail!("{} runs {} and cannot run bots", runner.name, runner.os);
-        }
-        if bot.id.is_empty() {
-            bot.id = format!("bot-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        }
-        if bot.created_at == 0.0 {
-            bot.created_at = config::now_secs();
-        }
-        {
-            let mut state = self.state.lock().unwrap();
-            if state.bots.iter().any(|b| b.id == bot.id) {
-                anyhow::bail!("Bot id already exists");
-            }
-            state.bots.push(bot.clone());
-        }
-        Ok(bot)
+
+    pub fn create_chat(&self, meta: ChatMeta) -> anyhow::Result<Chat> {
+        let _edit = self.roster_edit.lock().unwrap();
+        self.create_chat_unlocked(meta)
     }
 
-    pub fn create_chat(&self, mut meta: ChatMeta) -> anyhow::Result<Chat> {
+    fn create_chat_unlocked(&self, mut meta: ChatMeta) -> anyhow::Result<Chat> {
         if meta.id.is_empty() {
             meta.id = format!("chat-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         }
@@ -1135,6 +1268,7 @@ impl App {
             if let Some(existing) = state.chats.iter().find(|c| c.meta.id == chat.meta.id) {
                 return Ok(existing.clone());
             }
+            self.store.mark_chat_create_pending(&chat.meta)?;
             state.chats.insert(0, chat.clone());
         }
         self.roster_changed(true);
@@ -1143,6 +1277,11 @@ impl App {
 
     /// The one DM per bot.
     pub fn dm_with(&self, bot_id: &str, preferred_id: Option<String>) -> anyhow::Result<Chat> {
+        let _edit = self.roster_edit.lock().unwrap();
+        self.dm_with_unlocked(bot_id, preferred_id)
+    }
+
+    fn dm_with_unlocked(&self, bot_id: &str, preferred_id: Option<String>) -> anyhow::Result<Chat> {
         if let Some(existing) = self
             .state
             .lock()
@@ -1154,7 +1293,7 @@ impl App {
         {
             return Ok(existing);
         }
-        self.create_chat(ChatMeta {
+        self.create_chat_unlocked(ChatMeta {
             id: preferred_id.unwrap_or_default(),
             kind: "dm".into(),
             title: None,
@@ -1166,6 +1305,7 @@ impl App {
     }
 
     pub fn delete_chat(&self, chat_id: &str) {
+        let _edit = self.roster_edit.lock().unwrap();
         self.cancel_chat(chat_id);
         {
             let mut state = self.state.lock().unwrap();
@@ -1186,6 +1326,7 @@ impl App {
     }
 
     pub fn update_chat_meta(&self, chat_id: &str, update: impl FnOnce(&mut ChatMeta)) -> anyhow::Result<()> {
+        let _edit = self.roster_edit.lock().unwrap();
         {
             let mut state = self.state.lock().unwrap();
             let chat = state.chats.iter_mut().find(|c| c.meta.id == chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
@@ -1197,6 +1338,7 @@ impl App {
 
     /// Sets the optional title of a group. A direct chat is always named after its one bot.
     pub fn rename_chat(&self, chat_id: &str, title: Option<String>) -> anyhow::Result<()> {
+        let _edit = self.roster_edit.lock().unwrap();
         {
             let mut state = self.state.lock().unwrap();
             let chat = state.chats.iter_mut().find(|c| c.meta.id == chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
@@ -1213,6 +1355,7 @@ impl App {
 
     /// Adds a routine and publishes the roster.
     pub fn insert_routine(&self, mut routine: Routine) -> anyhow::Result<Routine> {
+        let _edit = self.roster_edit.lock().unwrap();
         if self.bot(&routine.bot_id).is_none() {
             anyhow::bail!("Unknown bot");
         }
@@ -1239,6 +1382,7 @@ impl App {
 
     /// Changes a routine and publishes the roster.
     pub fn update_routine(&self, id: &str, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+        let _edit = self.roster_edit.lock().unwrap();
         let routine = {
             let mut state = self.state.lock().unwrap();
             let routine = state.routines.iter_mut().find(|r| r.id == id).ok_or_else(|| anyhow::anyhow!("Unknown routine"))?;
@@ -1250,6 +1394,7 @@ impl App {
     }
 
     pub fn delete_routine(&self, id: &str) -> anyhow::Result<()> {
+        let _edit = self.roster_edit.lock().unwrap();
         {
             let mut state = self.state.lock().unwrap();
             let before = state.routines.len();
@@ -1643,6 +1788,7 @@ impl App {
             "chats": state.chats.iter().map(|chat| self.chat_for_app(chat)).collect::<Vec<_>>(),
             "routines": self.routines_out(&state),
             "auto_review": state.auto_review,
+            "paused": state.paused,
             "providers": self.credentials.lock().unwrap().statuses(),
             "models": models_out(),
             "running_chat_ids": self.running_chat_ids(),
@@ -1651,10 +1797,35 @@ impl App {
     }
 }
 
+/// One online Runner refreshes custom provider catalogs every six hours after sync settles.
+#[cfg(all(feature = "runner", feature = "provider-auth"))]
+pub async fn refresh_models_periodically(app: Arc<App>) {
+    let mut ticks = tokio::time::interval_at(
+        tokio::time::Instant::now() + std::time::Duration::from_secs(6 * 3600),
+        std::time::Duration::from_secs(6 * 3600),
+    );
+    loop {
+        ticks.tick().await;
+        let Some(this) = app.this_device_id() else { continue };
+        if !app.relay_connected.load(Ordering::Relaxed) { continue; }
+        let elected = {
+            let state = app.state.lock().unwrap();
+            state.caught_up && state.devices.iter()
+                .filter(|device| device.is_runner() && state.device_online.contains(&device.id))
+                .map(|device| device.id.as_str()).min() == Some(this.as_str())
+        };
+        if elected {
+            if let Err(error) = crate::provider_auth::refresh_custom_models(&app).await {
+                tracing::debug!(%error, "refreshing custom models");
+            }
+        }
+    }
+}
+
 /// The models the apps offer in their pickers, in the catalog's order, so each provider's first
 /// is its default: the provider, id, and name, and the thinking levels each one takes.
 fn models_out() -> Vec<Value> {
-    lorca_models::MODELS
+    lorca_models::models()
         .iter()
         .map(|model| json!({ "provider": model.provider, "id": model.id, "name": model.name, "levels": model.levels }))
         .collect()
@@ -1755,6 +1926,7 @@ mod tests {
             thinking: None,
             legacy_instructions: String::new(),
             workdir: None,
+            capabilities: Default::default(),
             created_at: 1.0,
         }
     }
@@ -1846,6 +2018,7 @@ mod tests {
             state.chats.push(chat("chat", "dm", &["b1"], Some("b1")));
             state.routines.push(routine("routine", "b1"));
             state.last_seq = 42;
+            state.roster_slot_seq = 37;
             state.group_deletes.push("deleted-chat".into());
             state.blob_deletes.push("old-avatar".into());
             state.machine_blob_hash = Some("machine-hash".into());
@@ -1867,6 +2040,7 @@ mod tests {
         assert_eq!(state.bots.iter().map(|bot| bot.id.as_str()).collect::<Vec<_>>(), vec!["b1"]);
         assert_eq!(state.routines.iter().map(|routine| routine.id.as_str()).collect::<Vec<_>>(), vec!["routine"]);
         assert_eq!(state.last_seq, 42);
+        assert_eq!(state.roster_slot_seq, 37);
         assert_eq!(state.group_deletes, vec!["deleted-chat"]);
         assert_eq!(state.blob_deletes, vec!["old-avatar"]);
         assert!(state.credentials_uploaded);
@@ -1877,6 +2051,58 @@ mod tests {
             Body::Text { text, .. } => Some(text),
             _ => None,
         }).as_deref(), Some("kept in SQLite"));
+    }
+
+    #[test]
+    fn bot_create_is_atomic_and_keeps_preferred_dm_id() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        let runner_id = app.this_device_id().unwrap();
+        let existing = app.state.lock().unwrap().bots[0].id.clone();
+        for kind in ["group", "dm"] {
+            app.create_chat(ChatMeta { id: format!("taken-{kind}"), kind: kind.into(), title: None, bot_ids: vec![existing.clone()], owner_bot_id: Some(existing.clone()), is_pinned: false, created_at: 1.0 }).unwrap();
+            let count = app.state.lock().unwrap().bots.len();
+            let pending = app.store.pending_chat_creates().unwrap();
+            let outbox = app.store.outbox().unwrap().len();
+            let mut candidate = bot(&format!("new-{kind}"));
+            candidate.runner_id = runner_id.clone();
+            candidate.capabilities.shell = false;
+            assert!(app.create_bot_with_dm(candidate, Some(format!("taken-{kind}"))).is_err());
+            assert_eq!(app.state.lock().unwrap().bots.len(), count);
+            assert_eq!(app.store.pending_chat_creates().unwrap(), pending);
+            assert_eq!(app.store.outbox().unwrap().len(), outbox);
+        }
+        let mut candidate = bot("new-bot");
+        candidate.runner_id = runner_id.clone();
+        candidate.capabilities.shell = false;
+        let (created, dm) = app.create_bot_with_dm(candidate, Some("optimistic-dm".into())).unwrap();
+        assert_eq!(dm.meta.id, "optimistic-dm");
+        assert_eq!(dm.meta.bot_ids, vec![created.id.clone()]);
+        assert_eq!(app.store.pending_chat_creates().unwrap().iter().filter(|id| *id == "optimistic-dm").count(), 1);
+        let queued = app.store.outbox().unwrap();
+        assert_eq!(queued.iter().filter(|item| item.kind == "roster").count(), 1);
+        let roster: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &queued.iter().find(|item| item.kind == "roster").unwrap().ciphertext).unwrap();
+        assert!(roster.bots.iter().any(|b| b.id == created.id));
+        assert!(roster.chats.iter().any(|c| c.id == dm.meta.id && c.bot_ids == vec![created.id.clone()]));
+        let connection = rusqlite::Connection::open(app.config.database_path()).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_new_chat BEFORE INSERT ON pending_chat_creates WHEN NEW.id = 'blocked' BEGIN SELECT RAISE(ABORT, 'blocked'); END;").unwrap();
+        let before = app.store.outbox().unwrap().len();
+        let policy_clock = app.state.lock().unwrap().policy_clock;
+        let mut failed = bot("blocked-bot");
+        failed.runner_id = runner_id;
+        failed.capabilities.shell = false;
+        assert!(app.create_bot_with_dm(failed, Some("blocked".into())).is_err());
+        assert!(app.bot("blocked-bot").is_none());
+        assert!(app.chat("blocked").is_none());
+        assert_eq!(app.store.outbox().unwrap().len(), before);
+        assert_eq!(app.state.lock().unwrap().policy_clock, policy_clock);
+        assert!(!app.store.pending_chat_creates().unwrap().contains(&"blocked".into()));
+        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert!(reloaded.bot("new-bot").is_some());
+        assert_eq!(reloaded.chat("optimistic-dm").unwrap().meta.bot_ids, vec!["new-bot"]);
+        assert!(reloaded.bot("blocked-bot").is_none());
+        assert_eq!(reloaded.state.lock().unwrap().policy_clock, policy_clock);
     }
 
     #[test]
@@ -2059,4 +2285,104 @@ mod tests {
         assert_eq!(read_mark_at(&messages, 0), messages.len());
         assert_eq!(read_mark_at(&messages, 9), 0);
     }
+    #[test]
+    fn pause_cancels_work_and_survives_restart() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        let token = CancellationToken::new();
+        app.running_jobs.lock().unwrap().insert("running".into(), RunningJob {
+            chat_id: "chat".into(), bot_id: "bot".into(), routine_id: None,
+            runner_id: None, cancel: token.clone(), activity: None,
+        });
+        app.set_paused(true);
+        assert!(token.is_cancelled());
+        assert_eq!(app.snapshot()["paused"], true);
+        assert!(matches!(app.roster_summary(), Event::RosterChanged { paused: true, .. }));
+        let dek = app.dek().unwrap();
+        let ciphertext = app.store.outbox().unwrap().into_iter().rfind(|item| item.kind == "roster").unwrap().ciphertext;
+        let roster: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &ciphertext).unwrap();
+        assert!(roster.paused);
+        assert!(App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap().is_paused());
+        app.set_paused(false);
+        assert!(!app.is_paused());
+    }
+
+    #[cfg(feature = "runner")]
+    #[tokio::test]
+    async fn restarted_runner_settles_only_orphan_proposals() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let mut owner = bot("b1");
+        owner.runner_id = app.this_device_id().unwrap();
+        app.state.lock().unwrap().bots.push(owner);
+        let mut foreign = bot("b2");
+        foreign.runner_id = crate::keys::Machine::generate().pubkey();
+        app.state.lock().unwrap().bots.push(foreign);
+        app.state.lock().unwrap().chats.push(chat("chat", "dm", &["b1"], Some("b1")));
+        let card = |id: &str, tool: &str| {
+            let mut message = Message::new("chat", Author::Bot { bot_id: "b1".into() }, Body::Permission {
+                plugin_id: "computer".into(), plugin_name: "Runner".into(), tool: tool.into(),
+                summary: "Review draft".into(), arguments: Value::Null, decision: "pending".into(),
+                reason: None, rule: None, command: None, title: Some("Draft".into()),
+                content: Some("Original".into()), path: Some("draft.md".into()), link: None, code: None,
+            });
+            message.id = id.into();
+            message
+        };
+        use sha2::{Digest, Sha256};
+        let old_id = format!("msg-propose-{:x}", Sha256::digest(b"chat\0b1\0old-call"));
+        app.upsert_message(card(&old_id, "propose"), true);
+        app.upsert_message(card("other-permission", "install"), true);
+        let mut foreign_card = card("foreign-proposal", "propose");
+        foreign_card.author = Author::Bot { bot_id: "b2".into() };
+        app.upsert_message(foreign_card, true);
+        app.save_state_now();
+
+        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        reloaded.close_orphan_proposals().unwrap();
+        assert!(matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "dismissed"));
+        assert!(matches!(reloaded.message("chat", "other-permission").unwrap().body, Body::Permission { decision, .. } if decision == "pending"));
+        assert!(matches!(reloaded.message("chat", "foreign-proposal").unwrap().body, Body::Permission { decision, .. } if decision == "pending"));
+        assert!(!crate::plugins::mcp::answer(&reloaded, &old_id, crate::plugins::mcp::Decision::Allowed));
+        assert!(!crate::plugins::mcp::propose(&reloaded, "chat", "b1", "old-call", Some("Draft".into()), Some("Original".into()), Some("draft.md".into()), &CancellationToken::new()).await.unwrap());
+        let dek = reloaded.dek().unwrap();
+        let settled = reloaded.store.outbox().unwrap().into_iter().filter(|item| item.kind == "chat")
+            .filter_map(|item| crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &item.ciphertext).ok())
+            .any(|op| matches!(op, ChatBlob::Upsert { message } if message.id == old_id && matches!(&message.body, Body::Permission { decision, .. } if decision == "dismissed")));
+        assert!(settled, "settled card must sync to paired Devices");
+        // A newer remote pending row can replace the startup dismissal before outbox drain.
+        let mut remote = card(&old_id, "propose");
+        if let Body::Permission { summary, .. } = &mut remote.body { *summary = "Newer remote draft".into(); }
+        reloaded.upsert_message(remote, false);
+        assert!(matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"));
+        reloaded.close_orphan_proposals().unwrap();
+        assert!(matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, summary, .. } if decision == "dismissed" && summary == "Newer remote draft"));
+        let queued = reloaded.store.outbox().unwrap().len();
+        reloaded.close_orphan_proposals().unwrap();
+        assert_eq!(reloaded.store.outbox().unwrap().len(), queued, "settled cards must not republish on each poll");
+        assert!(!crate::plugins::mcp::answer(&reloaded, &old_id, crate::plugins::mcp::Decision::Allowed));
+        assert!(reloaded.store.outbox().unwrap().into_iter().filter(|item| item.kind == "chat")
+            .filter_map(|item| crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &item.ciphertext).ok())
+            .any(|op| matches!(op, ChatBlob::Upsert { message } if message.id == old_id && matches!(&message.body, Body::Permission { decision, summary, .. } if decision == "dismissed" && summary == "Newer remote draft"))));
+
+        let pending = reloaded.clone();
+        let review = tokio::spawn(async move {
+            crate::plugins::mcp::propose(&pending, "chat", "b1", "new-call", Some("New".into()), Some("New bytes".into()), Some("new.md".into()), &CancellationToken::new()).await
+        });
+        let new_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(card) = reloaded.store.proposal_cards().unwrap().into_iter().find(|card| card.id.starts_with("msg-propose-") && card.id != old_id) {
+                    break card.id;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("new proposal must become reviewable");
+        reloaded.close_orphan_proposals().unwrap();
+        assert!(matches!(reloaded.message("chat", &new_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"));
+        assert!(crate::plugins::mcp::answer(&reloaded, &new_id, crate::plugins::mcp::Decision::Denied));
+        assert!(!review.await.unwrap().unwrap());
+    }
+
 }

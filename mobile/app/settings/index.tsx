@@ -33,12 +33,14 @@ export default function SettingsScreen() {
   const relayUrl = useStore((s) => s.relayUrl);
   const identity = useStore((s) => s.identityId);
   const autoReview = useStore((s) => s.auto_review);
+  const paused = useStore((s) => s.paused);
   const providers = useStore((s) => s.providers);
   const thisDevice = devices.find((d) => d.is_this_device);
   const [name, setName] = useState(thisDevice?.name ?? "");
   const [addingRule, setAddingRule] = useState(false);
   const [ruleText, setRuleText] = useState("");
   const [ruleBehavior, setRuleBehavior] = useState<"allow" | "ask">("allow");
+  const [savingPause, setSavingPause] = useState(false);
   const dictation = useDictationLanguage();
   const appLanguage = useLanguage();
 
@@ -160,6 +162,17 @@ export default function SettingsScreen() {
     );
   }
 
+  async function changePause(value: boolean) {
+    if (savingPause) return;
+    setSavingPause(true);
+    try {
+      await engine.setAccountPaused(value);
+    } catch (error) {
+      Alert.alert(t("Could not update pause"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingPause(false);
+    }
+  }
   return (
     <>
       <Stack.Screen options={{ title: t("Settings") }} />
@@ -195,7 +208,9 @@ export default function SettingsScreen() {
           <Row title={t("Language")} menu={{ title: t("Dictation Language"), value: dictation.setting ? languageName(dictation.setting) : automaticDictation, choices: dictationChoices }} />
         </Section>
 
+
         <Section title={t("Account")}>
+          <ToggleRow title={t("Pause all bots")} value={paused} onValueChange={(value) => void changePause(value)} />
           <Row title={t("Identity")} detail={identity ?? "—"} />
           <Row
             title={t("Relay")}

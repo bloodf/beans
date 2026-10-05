@@ -1,8 +1,16 @@
 # Beans fork
 
-Beans is the macOS and phone branding of Lorca. The Swift target, Rust crates, `lorca` binary, `LORCA_*` environment variables, and pairing protocol (`lorca://pair`) stay unchanged. The macOS bundles keep their CLI identities separate from upstream Lorca: Beans uses `~/.beans` on port `4864`; Beans Dev uses `~/.beans-dev` on port `4865`. The Windows and Linux app retains its upstream identity.
+Beans is a Lorca fork with Beans branding on macOS and phones and project-owned changes to avatars, bot controls, relay compatibility, local websocket access, and custom-provider model discovery. The Swift target, Rust crates, `lorca` binary, `LORCA_*` environment variables, and pairing protocol (`lorca://pair`) retain their upstream runtime identifiers. The macOS bundles keep their CLI identities separate from upstream Lorca: Beans uses `~/.beans` on port `4864`; Beans Dev uses `~/.beans-dev` on port `4865`. The Windows and Linux app retains its upstream identity while sharing functional UI changes.
 
 ## Differences from upstream
+
+The table below tracks branding and build configuration; it is not an exhaustive inventory of fork changes. The project-owned [`@beans/blobatar` package](packages/beans-blobatar/README.md) generates matching offline bot avatars across Mac, phone, and Windows/Linux. Its vendored Blobatar source retains Alain's MIT attribution and license in [`packages/beans-blobatar/LICENSE`](packages/beans-blobatar/LICENSE); bot images uploaded by users override the generated look.
+
+Account-wide Pause, per-bot shell/file/plugin capabilities, and user-approved file drafts change bot behavior, not just copy. Pause and capability edits sync as encrypted `policy` actions alongside roster state so stale offline roster uploads do not undo explicit restrictions. Runner enforcement begins when a Device receives those actions; an offline Runner cannot enforce a change it has not received. Local CLI websocket upgrades check loopback `Host` and restrict browser `Origin` to the CLI's own origin or exact configured origins. These are source-tree mechanisms, not claims that a relay or client build has been deployed. See [Bots](docs/architecture/bots.md), [Tools](docs/architecture/tools.md), [Protocols](docs/architecture/protocols.md), and [CLI runtime](docs/architecture/runtime.md).
+
+Shell Auto-review has no implicit workspace exemption. Only statically read-only commands skip review while Auto-review is enabled; mutations and opaque programs use the existing review and permission flow even inside a bot's workspace. Explicit user rules still apply, and an unavailable review fails closed for unattended work. See [Tools](docs/architecture/tools.md).
+
+Relay protocol 3 carries durable encrypted policy actions and conditional roster writes. Upgrade every relay replica first, then clients: the CLI refuses relays older than protocol 3, and a relay with minimum protocol 3 returns HTTP `426` to older clients on `/v1` routes (except health). If deployment overrides `LORCA_RELAY_MIN_PROTOCOL`, set it to 3. Mac, phone, and Windows/Linux UIs expose account and bot controls and refresh saved custom-provider model lists without replacing selected models; the CLI also refreshes catalogs periodically. Runner network restrictions are deployment configuration, not a guarantee provided by the application. See [Providers](docs/architecture/providers.md) and [Codemode and Plugins](docs/architecture/plugins.md).
 
 | File | Why |
 | --- | --- |
@@ -57,7 +65,7 @@ The Rust core emits `lorca://pair` codes. Beans registers `lorca` as a secondary
 
 ## Relay selection
 
-`macos/Sources/Lorca/App/AppInfo.swift` sets the release fallback to `https://cortex.tailfd052e.ts.net:8790` (the Beans relay, reachable on the tailnet); `macos/Sources/Lorca/App/CLILauncher.swift` passes it as `LORCA_DEFAULT_RELAY_URL` when launching the CLI. The phone inherits the relay URL in its pairing code. `crates/cli/src/config.rs` and `crates/cli/src/app.rs` resolve `LORCA_RELAY_URL` first, then saved settings, the paired Device URL, the development LAN relay, and finally `LORCA_DEFAULT_RELAY_URL`. Rust defaults remain unchanged; configure your relay explicitly before using the fork.
+`macos/Sources/Lorca/App/AppInfo.swift` sets the Beans release relay fallback; `macos/Sources/Lorca/App/CLILauncher.swift` passes it as `LORCA_DEFAULT_RELAY_URL` when launching the CLI. The phone inherits the relay URL in its pairing code. `crates/cli/src/config.rs` and `crates/cli/src/app.rs` resolve `LORCA_RELAY_URL` first, then saved settings, the paired Device URL, the development LAN relay, and finally `LORCA_DEFAULT_RELAY_URL`. Rust defaults remain unchanged; configure your relay explicitly before using the fork. Do not publish private relay addresses in this guide.
 
 ## Production notes
 
@@ -71,4 +79,6 @@ The signing keystore lives outside the repository at `~/.config/beans/android/be
 
 ## Merge upstream
 
-On branch `beans`, run `git fetch upstream` then `git merge upstream/main`. Resolve conflicts in the files listed above, keeping the Beans IDs, app groups, isolated macOS CLI homes and ports, disabled upstream Sparkle feed, optional Firebase config, and unchanged `lorca` runtime identifiers. Re-run the platform builds and tests before shipping.
+On branch `beans`, run `git fetch upstream` then `git merge upstream/main`. Resolve branding and build conflicts in the table above while keeping Beans IDs, app groups, isolated macOS CLI homes and ports, disabled upstream Sparkle feed, optional Firebase config, and unchanged `lorca` runtime identifiers. Also resolve functional conflicts in `packages/beans-blobatar`, the CLI, relay, agent/tools, and Mac, phone, and Windows/Linux app surfaces: retain encrypted policy reconciliation, conditional roster writes and protocol 3 compatibility, local websocket Host/Origin checks, bot controls and approval flow, avatar rendering, and custom-model refresh. Check actual Runner NIC ACL attachment and allow/deny evidence rather than assuming script staging describes live state.
+
+Before shipping, run CI checks and platform builds/tests for affected Rust, Mac, phone, and desktop paths; exercise app flows for pairing, Pause/capabilities, draft approval, avatars, and provider refresh on actual clients. Roll out relay replicas before protocol-3 clients, verify health and old-client `426` behavior against the intended environment, then verify live client sync and enforcement before claiming deployment or security protection. Never publish a private relay address, signing material, provider keys, or client credentials in merge notes.

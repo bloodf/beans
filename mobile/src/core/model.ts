@@ -87,6 +87,20 @@ export function deviceName(device: Device): string {
 }
 
 export type Accent = "indigo" | "blue" | "teal" | "green" | "orange" | "pink" | "purple" | "red";
+/** Per-bot tool access. Missing on older profiles means unrestricted. */
+export interface BotCapabilities {
+  shell: boolean;
+  write: boolean;
+  /** null allows all installed plugins; [] allows none. */
+  plugins: string[] | null;
+}
+
+export const DEFAULT_BOT_CAPABILITIES: BotCapabilities = { shell: true, write: true, plugins: null };
+
+export function botCapabilities(bot: Bot): BotCapabilities {
+  return bot.capabilities ?? DEFAULT_BOT_CAPABILITIES;
+}
+
 
 export interface Bot {
   id: string;
@@ -104,6 +118,7 @@ export interface Bot {
   /** How much the model thinks: off, minimal, low, medium, high, xhigh, max. */
   thinking?: string;
   workdir?: string;
+  capabilities?: BotCapabilities;
   created_at: number;
 }
 
@@ -185,6 +200,8 @@ export type Body =
       is_error?: boolean;
       /** What the call does, in the bot's words: a shell command's description. */
       description?: string;
+      /** The command currently running inside a codemode script, distinct from its plugin. */
+      script_command?: string;
       /** The bot a message_bot call goes to. */
       target_bot_id?: string;
       /** A bash call's card, from Auto-review's question to how the command ended. */
@@ -195,7 +212,7 @@ export type Body =
   /// The bot asks before a plugin or shell action, or before installing a plugin (`tool` is `install`).
   /// `rule` is the rule Always allow adds, which Auto-review proposed for a shell command (`plugin_id` is `computer`);
   /// `command` is that command in full, where `summary` is its first line.
-  | { kind: "permission"; plugin_id: string; plugin_name: string; tool: string; summary: string; decision: "pending" | "allowed" | "always" | "denied" | "expired" | "dismissed" | "connected" | "failed"; reason?: string; rule?: string; command?: string; link?: string; code?: string };
+  | { kind: "permission"; plugin_id: string; plugin_name: string; tool: string; summary: string; decision: "pending" | "allowed" | "always" | "denied" | "expired" | "dismissed" | "connected" | "failed"; reason?: string; rule?: string; command?: string; link?: string; code?: string; title?: string; content?: string; path?: string };
 
 /// Where a bash call's command stands: Auto-review checking it, the question it asks, the command
 /// running in its terminal, what the command asks, and that it ended. While it asks, its card takes

@@ -53,8 +53,9 @@ struct Args {
 
     /// Refuse clients that speak an older protocol than this with `426`, which their apps show
     /// as "update required". A client says which it speaks in `Lorca-Protocol`; one that says
-    /// nothing speaks 0. Raise it when the relay stops serving what old clients rely on.
-    #[usage(long, env = "LORCA_RELAY_MIN_PROTOCOL", default = "0")]
+    /// nothing speaks 0. Policy blobs require protocol 3 clients to keep stale roster writes
+    /// from undoing an account Pause or bot restriction.
+    #[usage(long, env = "LORCA_RELAY_MIN_PROTOCOL", default = "3")]
     min_protocol: u32,
 
     /// Delete an identity after this many days with no sign of life: no machine seen, no blob
@@ -83,6 +84,10 @@ struct Args {
     /// extension (`lorca-relay.files`).
     #[usage(long, env = "LORCA_RELAY_FILES_DIR", conflicts("--s3-bucket"))]
     files_dir: Option<std::path::PathBuf>,
+
+    /// Directory containing public models/v1.json and marketplace/v1.json feeds.
+    #[usage(long, env = "LORCA_RELAY_CATALOG_DIR")]
+    catalog_dir: Option<std::path::PathBuf>,
 
     /// Keep `file` ciphertext in this S3-compatible bucket (AWS, R2, MinIO) instead of a
     /// directory. Needs --s3-endpoint and the access keys.
@@ -207,6 +212,8 @@ pub struct AppState {
     /// Places for uploads over `limit::LARGE_UPLOAD`; `None` when they are not limited.
     pub uploads: Option<Arc<tokio::sync::Semaphore>>,
     pub min_protocol: u32,
+    /// Immutable public catalog snapshots loaded at startup, separate from account blobs.
+    pub catalogs: routes::Catalogs,
     pub metrics_token: Option<Arc<str>>,
     pub stats: Arc<metrics::StatsCache>,
     /// This process, as a label on what only it counted.
@@ -269,6 +276,7 @@ async fn main() -> anyhow::Result<()> {
         )),
         trust_proxy: args.trust_proxy,
         min_protocol: args.min_protocol,
+        catalogs: routes::Catalogs::load(args.catalog_dir.as_deref()),
         metrics_token: args.metrics_token.as_deref().filter(|token| !token.is_empty()).map(Arc::from),
         stats: Arc::default(),
         instance: uuid::Uuid::new_v4().simple().to_string()[..8].into(),

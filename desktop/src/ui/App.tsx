@@ -13,7 +13,7 @@ import { PageMenuHost } from "./menu";
 import { Onboarding } from "./onboarding";
 import { PopoverHost, SheetHost } from "./overlay";
 import { SettingsWindow } from "./settings/panes";
-import { setupWindow } from "./window";
+import { setupWindow, setWindowTitle } from "./window";
 
 // The menu bar keeps its items in step through a memo and an effect, so it is set up with the
 // window's page, not after it settles.
@@ -21,13 +21,13 @@ import { setupWindow } from "./window";
 // window of settings, as the Mac's.
 function OnboardingRoute() {
   onCleanup(setupWindow("other"));
-  document.title = hostInfo().name;
+  setWindowTitle(hostInfo().name);
   return <Onboarding />;
 }
 
 function SettingsWindowRoute() {
   onCleanup(setupWindow("other"));
-  document.title = L("Settings");
+  setWindowTitle(L("Settings"));
   return <SettingsWindow />;
 }
 

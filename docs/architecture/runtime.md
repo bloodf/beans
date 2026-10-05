@@ -8,9 +8,12 @@ Commands:
 - `lorca identity new` / `identity restore <phrase>` / `identity show`
 - `lorca pair` — show a pairing string and wait; `lorca pair <string>` joins
 - `lorca provider set <kind> [api-key] [--base-url <url>]` — connect DeepSeek, Anthropic, OpenCode Zen (`opencode`), or OpenCode Go (`opencode-go`) with an API key, or open the browser sign-in for `chatgpt` and `grok`. The key is checked against the API first and read from stdin when omitted. `provider add <name> <base-url> [--api chat-completions|responses|messages] [--model <id>]… [--api-key-stdin]` adds a custom provider, its server checked first; `provider remove <kind>` (a custom provider's kind deletes it) / `provider list`. A running `lorca serve` carries out the change over the local websocket; with none, the command changes `credentials.json` itself and runs one sync pass
+- `lorca mcp list|get|add|add-json|remove|enable|disable|hide|show|sign-in|sign-out|reload|import` — manage [custom MCP servers](mcp-servers.md) in this Runner's private `mcp.json`; use running `lorca serve` when available. `mcp add <name> <command> [args…]` or `mcp add <name> <url>` accepts `--transport stdio|http`, repeated `-e`/`--env NAME=VALUE` for commands, repeated `-H`/`--header NAME=VALUE` for HTTP, `--description`, and `--timeout` (seconds). `mcp import` discovers installed apps' MCP settings; `mcp import <file>` reads a specified file. Existing names are skipped. `mcp list` connects enabled servers if needed and exits nonzero when any enabled server is invalid or not ready; disabled servers do not fail health checks.
 - `lorca status` / `doctor`
 
 Bind: `127.0.0.1:4862` (`--port`, `LORCA_PORT`). Relay: `LORCA_RELAY_URL`. If the port is busy the CLI fails loudly.
+
+The `/ws` upgrade checks `Host` before opening the socket: only `localhost:<serve port>` or `127.0.0.1:<serve port>` is accepted, even though the listener binds to loopback. Native clients (the AppKit app and the Go desktop client) send no `Origin` and connect with either host. Browser clients send an `Origin`; the CLI accepts its own HTTP origin or one explicitly listed in `LORCA_ALLOWED_ORIGINS`, a comma-separated list of exact HTTP(S) origins. Invalid entries, paths, prefixes, wildcards, cross-site origins, and mismatched hosts or ports receive HTTP 403 before upgrade. The allowlist is for browser development, not a production default.
 
 ## Installing the CLI
 

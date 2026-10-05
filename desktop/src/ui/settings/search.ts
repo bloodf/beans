@@ -3,7 +3,9 @@
 
 import { hostInfo } from "../../host";
 import { L } from "../../l10n";
+import { isMcpServer } from "../../model/mcp";
 import {
+  isRunner,
   paneTitle,
   providerName,
   providerSubtitle,
@@ -40,6 +42,7 @@ export const Entries = {
   timestamps: () => entry("general", L("Show timestamps in transcripts"), { keywords: [L("time date messages chats")] }),
   appearance: () => entry("general", L("Appearance"), { keywords: [L("theme dark mode light mode system")] }),
   appLanguage: () => entry("general", L("App Language"), { keywords: [L("language locale english chinese translation")] }),
+  accountPause: () => entry("general", L("Pause all bots"), { keywords: [L("pause resume account bots runners")] }),
   version: () => entry("general", L("Check for Updates"), { row: L("Version"), keywords: [L("update upgrade release")] }),
   automaticChecks: () => entry("general", L("Check for updates automatically"), { keywords: [L("update upgrade background")] }),
   automaticDownloads: () => entry("general", L("Download and install updates automatically"), { keywords: [L("update upgrade background")] }),
@@ -54,6 +57,8 @@ export const Entries = {
   bot: (bot: Bot, providers: readonly ProviderCredential[]) =>
     entry("bots", bot.name, { keywords: [bot.description, providerName(bot.provider, providers), L("bot runner")] }),
   plugin: (plugin: InstalledPlugin) => entry("plugins", plugin.name, { keywords: [plugin.description, L("plugin mcp marketplace")] }),
+  mcpServers: (device: Device) => entry("plugins", L("MCP Servers"), { row: L("MCP Servers on %@", device.name), keywords: [L("mcp model context protocol server mcp.json custom command url json claude cursor")] }),
+  mcpServer: (plugin: InstalledPlugin) => entry("plugins", plugin.name, { keywords: [plugin.description, L("mcp server mcp.json")] }),
   // A custom provider goes by the name the user gave it, as its row on the pane does.
   provider: (kind: ProviderKind, providers: readonly ProviderCredential[]) =>
     entry("providers", providerName(kind, providers), { keywords: [providerSubtitle(kind), L("credential connect disconnect sign in model")] }),
@@ -72,7 +77,7 @@ export function matches(setting: SettingsEntry, query: string): boolean {
 export function entriesIn(pane: SettingsPane, device: Device | undefined, store: AppStore): SettingsEntry[] {
   switch (pane) {
     case "general":
-      return [Entries.sendOnReturn(), Entries.timestamps(), Entries.appearance(), Entries.appLanguage()].concat(
+      return [Entries.sendOnReturn(), Entries.timestamps(), Entries.appearance(), Entries.appLanguage(), ...(store.hasIdentity === true ? [Entries.accountPause()] : [])].concat(
         hostInfo().updatesEnabled ? [Entries.version(), Entries.automaticChecks(), Entries.automaticDownloads()] : [],
       );
     case "auto-review":
@@ -83,8 +88,11 @@ export function entriesIn(pane: SettingsPane, device: Device | undefined, store:
       return (device ? store.botsOn(device.id) : []).map((bot) => Entries.bot(bot, store.providers));
     case "providers":
       return store.providers.map((credential) => Entries.provider(credential.kind, store.providers));
-    case "plugins":
-      return (device?.plugins ?? []).map(Entries.plugin);
+    case "plugins": {
+      const plugins = device?.plugins ?? [];
+      const servers = device && isRunner(device) ? [Entries.mcpServers(device), ...plugins.filter(isMcpServer).map(Entries.mcpServer)] : [];
+      return [...plugins.filter((plugin) => !isMcpServer(plugin)).map(Entries.plugin), ...servers];
+    }
     case "device":
       return device ? [Entries.machineKey(), Entries.pairing()] : [Entries.machineKey()];
   }

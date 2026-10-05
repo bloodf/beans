@@ -939,7 +939,7 @@ mod tests {
     struct Scripted {
         script: Mutex<Vec<Turn>>,
         requests: Mutex<Vec<ModelRequest>>,
-        info: Option<&'static crate::models::ModelInfo>,
+        info: Option<Arc<crate::models::ModelInfo>>,
     }
 
     #[derive(Clone)]
@@ -966,8 +966,8 @@ mod tests {
         fn model_id(&self) -> &str {
             "s1"
         }
-        fn model_info(&self) -> Option<&'static crate::models::ModelInfo> {
-            self.info
+        fn model_info(&self) -> Option<&crate::models::ModelInfo> {
+            self.info.as_deref()
         }
         async fn stream(&self, request: ModelRequest, _cancel: CancellationToken) -> AssistantEventStream {
             self.requests.lock().unwrap().push(request);

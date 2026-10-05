@@ -7,17 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "runner")]
-use base64::Engine;
-#[cfg(feature = "runner")]
 use lorca_agent::ContentPart;
 
 use crate::app::App;
 use crate::model::Attachment;
 
 pub const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
-/// Images up to this size go to the model as pixels as well as a path.
-#[cfg(feature = "runner")]
-const MAX_IMAGE_PART_BYTES: u64 = 5 * 1024 * 1024;
 
 /// A file the app asked to send: a path on this machine, with the id the app already shows.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -155,8 +150,8 @@ pub fn materialize(app: &App, attachment: &Attachment, workdir: &Path) -> Option
     Some(target)
 }
 
-/// What the model sees for one attachment: a line naming the file, and, when `pixels` (the
-/// model takes images), an image up to 5 MB as an image part too.
+/// What the model sees for one attachment: a line naming the file and, when `pixels`,
+/// a prepared image part or a line saying why the image cannot be shown.
 #[cfg(feature = "runner")]
 pub fn content_parts(app: &App, attachment: &Attachment, workdir: &Path, pixels: bool) -> Vec<ContentPart> {
     let Some(path) = materialize(app, attachment, workdir) else {
@@ -169,15 +164,51 @@ pub fn content_parts(app: &App, attachment: &Attachment, workdir: &Path, pixels:
         human_size(attachment.size),
         path.display()
     ))];
-    if pixels && attachment.is_image() && attachment.size <= MAX_IMAGE_PART_BYTES {
-        if let Ok(bytes) = std::fs::read(&path) {
-            parts.push(ContentPart::Image {
-                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                mime_type: attachment.mime.clone(),
-            });
+    if pixels && attachment.is_image() {
+        match inline_image(app, attachment) {
+            Ok(image) => parts.extend(image.into_parts()),
+            Err(why) => parts.push(ContentPart::text(format!("[{} is not shown as an image: {why}]", attachment.name))),
         }
     }
     parts
+}
+
+/// Model-ready image cache stays local beside encrypted attachment bytes, never on relay.
+#[cfg(feature = "runner")]
+fn inline_image_path(app: &App, id: &str) -> PathBuf {
+    app.config.files_dir().join(format!("{id}.inline.json"))
+}
+
+#[cfg(feature = "runner")]
+pub fn inline_image(app: &App, attachment: &Attachment) -> Result<lorca_agent::images::Inline, String> {
+    let kept = inline_image_path(app, &attachment.id);
+    if let Some(made) = crate::config::read_json::<Result<lorca_agent::images::Inline, String>>(&kept) {
+        return made;
+    }
+    let bytes = std::fs::read(local_path(app, &attachment.id)).map_err(|e| format!("it could not be read: {e}"))?;
+    let made = lorca_agent::images::prepare(&bytes);
+    if let Err(error) = crate::config::write_json_private(&kept, &made) {
+        tracing::warn!(%error, name = %attachment.name, "keeping an attachment's image for the model");
+    }
+    made
+}
+
+/// Decode before building transcript, off async threads.
+#[cfg(feature = "runner")]
+pub async fn make_images(app: &Arc<App>, attachments: &[Attachment]) {
+    let pending: Vec<Attachment> = attachments.iter().filter(|attachment| attachment.is_image() && is_local(app, &attachment.id) && !inline_image_path(app, &attachment.id).is_file()).cloned().collect();
+    if pending.is_empty() {
+        return;
+    }
+    let app = app.clone();
+    let made = tokio::task::spawn_blocking(move || {
+        for attachment in &pending {
+            let _ = inline_image(&app, attachment);
+        }
+    });
+    if let Err(error) = made.await {
+        tracing::warn!(%error, "making attachments' images for the model");
+    }
 }
 
 fn safe_name(name: &str) -> String {
@@ -269,6 +300,27 @@ mod tests {
         png.extend_from_slice(&480u32.to_be_bytes());
         assert_eq!(image_size(&png), (Some(640), Some(480)));
         assert_eq!(image_size(b"nope"), (None, None));
+    }
+
+    #[cfg(feature = "runner")]
+    #[test]
+    fn attachment_image_uses_decoded_type_and_size_bounds() {
+        use base64::Engine;
+        let home = std::env::temp_dir().join(format!("lorca-files-{}", uuid::Uuid::new_v4()));
+        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        let image = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(2600, 100, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 60])));
+        let mut png = Vec::new();
+        image.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        write_local(&app, "image-1", &png).unwrap();
+        let attachment = Attachment { id: "image-1".into(), name: "wrong.jpg".into(), mime: "image/jpeg".into(), size: png.len() as u64, width: None, height: None };
+        let parts = content_parts(&app, &attachment, &home.join("work"), true);
+        assert!(parts[1].as_text().unwrap().contains("displayed at 2000x77"));
+        let ContentPart::Image { data, mime_type } = &parts[2] else { panic!("missing image") };
+        assert!(matches!(mime_type.as_str(), "image/png" | "image/jpeg"), "actual decoded bytes decide type");
+        assert_eq!(image::load_from_memory(&base64::engine::general_purpose::STANDARD.decode(data).unwrap()).unwrap().width(), 2000);
+        assert!(app.config.files_dir().join("image-1.inline.json").is_file());
+        drop(app);
+        let _ = std::fs::remove_dir_all(home);
     }
 
     #[test]

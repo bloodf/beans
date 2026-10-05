@@ -1,14 +1,18 @@
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use std::io::Read;
+use std::path::Path as FsPath;
+
 use axum::body::Bytes;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::handler::Handler;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::handler::Handler;
 use axum::{Json, Router};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::Digest;
 
 use crate::auth::{b64url_decode, b64url_encode, issue_token, verify_signature, Auth, SignedRequest};
 use crate::db::{self, now};
@@ -32,6 +36,81 @@ const PING_SECONDS: u64 = 25;
 const MAX_PAGE_BYTES: i64 = 8 * 1024 * 1024;
 /// APNs takes 4 KB in all; the ciphertext rides in it as base64url beside the fixed alert.
 const MAX_PUSH_BYTES: usize = 2560;
+const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone)]
+pub struct Catalogs {
+    models: Catalog,
+    marketplace: Catalog,
+}
+
+#[derive(Clone)]
+enum Catalog {
+    Missing,
+    Invalid,
+    Ready { bytes: Bytes, etag: String },
+}
+
+impl Catalogs {
+    pub fn load(dir: Option<&FsPath>) -> Self {
+        Self {
+            models: Catalog::load(dir.map(|dir| dir.join("models/v1.json")).as_deref()),
+            marketplace: Catalog::load(dir.map(|dir| dir.join("marketplace/v1.json")).as_deref()),
+        }
+    }
+}
+
+impl Catalog {
+    fn load(path: Option<&FsPath>) -> Self {
+        let Some(path) = path else { return Self::Missing };
+        let read = (|| -> std::io::Result<Vec<u8>> {
+            let mut file = std::fs::File::open(path)?;
+            let mut bytes = Vec::new();
+            file.by_ref().take(MAX_CATALOG_BYTES + 1).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })();
+        match read {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::Missing,
+            Ok(bytes) if bytes.len() as u64 <= MAX_CATALOG_BYTES && serde_json::from_slice::<Value>(&bytes).is_ok() => {
+                let digest = sha2::Sha256::digest(&bytes);
+                Self::Ready { bytes: Bytes::from(bytes), etag: format!("\"{digest:x}\"") }
+            }
+            Ok(_) => {
+                tracing::error!(path = %path.display(), "public catalog exceeds 1 MiB or is malformed JSON");
+                Self::Invalid
+            }
+            Err(error) => {
+                tracing::error!(path = %path.display(), %error, "cannot read public catalog");
+                Self::Invalid
+            }
+        }
+    }
+
+    fn serve(&self, headers: &HeaderMap) -> Response {
+        let Self::Ready { bytes, etag } = self else {
+            return match self {
+                Self::Missing => ApiError::not_found("Public catalog not found"),
+                _ => ApiError::internal("Public catalog unavailable"),
+            }.into_response();
+        };
+        let matches = headers.get_all(header::IF_NONE_MATCH).iter().filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .any(|value| value.trim() == "*" || value.trim().strip_prefix("W/").unwrap_or(value.trim()) == etag);
+        let mut response = if matches { StatusCode::NOT_MODIFIED.into_response() } else { bytes.clone().into_response() };
+        response.headers_mut().insert(header::ETAG, etag.parse().expect("SHA-256 ETag"));
+        response.headers_mut().insert(header::CACHE_CONTROL, "public, max-age=300, must-revalidate".parse().unwrap());
+        response.headers_mut().insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        response
+    }
+}
+
+async fn models_catalog(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    state.catalogs.models.serve(&headers)
+}
+
+async fn marketplace_catalog(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    state.catalogs.marketplace.serve(&headers)
+}
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -99,11 +178,11 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 /// The protocol this relay speaks, in `/v1/health`. A client sends the one it speaks as
 /// `Lorca-Protocol`. 1: group paging, `DELETE /v1/identity`. 2: `POST /v1/machines`.
-pub const PROTOCOL: u32 = 2;
+/// 3: durable encrypted policy events.
+pub const PROTOCOL: u32 = 3;
 
-/// Turns away a client older than `--min-protocol` before anything else looks at it. The
-/// answer is the same on every route, the sync socket's upgrade included, so a client learns
-/// it wherever it knocks first. `/`, the healthcheck, and `/metrics` are not clients.
+/// Turns away clients older than `--min-protocol` on account protocol routes.
+/// Public catalogs, `/`, the healthcheck, and `/metrics` need no client protocol.
 async fn require_protocol(State(state): State<AppState>, request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let speaks = request.headers().get("lorca-protocol").and_then(|value| value.to_str().ok()).and_then(|value| value.trim().parse::<u32>().ok()).unwrap_or(0);
     if speaks < state.min_protocol && request.uri().path().starts_with("/v1/") && request.uri().path() != "/v1/health" {
@@ -126,6 +205,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/v1/health", get(health))
+        .route("/models/v1.json", get(models_catalog))
+        .route("/marketplace/v1.json", get(marketplace_catalog))
         .route("/metrics", get(crate::metrics::serve))
         .route("/v1/sync", get(sync_socket))
         .route("/v1/identity", axum::routing::delete(delete_identity))
@@ -307,6 +388,8 @@ struct PutBlob {
     #[serde(default)]
     slot: Option<String>,
     #[serde(default)]
+    expected_slot_seq: Option<i64>,
+    #[serde(default)]
     keep_first: bool,
     /// What the blob belongs to, a chat to the Devices: `DELETE /v1/groups/{group}` takes
     /// every blob of it.
@@ -342,6 +425,18 @@ async fn put_blob(State(state): State<AppState>, auth: Auth, Json(body): Json<Pu
     if body.group.as_deref().is_some_and(|group| !valid_id(group)) {
         return Err(ApiError::bad_request("Group must be 1–64 characters of [A-Za-z0-9._-]"));
     }
+    if body.kind == "roster" {
+        if body.slot.as_deref() != Some("roster") || body.keep_first || body.group.is_some() || body.recipient_machine_pubkey.is_some() {
+            return Err(ApiError::bad_request("Roster requires unaddressed roster slot"));
+        }
+        if !matches!(body.expected_slot_seq, Some(0..)) {
+            return Err(ApiError::bad_request("Roster requires nonnegative expected_slot_seq"));
+        }
+    } else {
+        if body.expected_slot_seq.is_some() || body.slot.as_deref() == Some("roster") {
+            return Err(ApiError::bad_request("Roster slot and expected_slot_seq are only for roster"));
+        }
+    }
     let ciphertext = db::blocking(move || b64url_decode(&body.ciphertext)).await?;
     if ciphertext.is_empty() || ciphertext.len() > MAX_BLOB_BYTES {
         return Err(ApiError::bad_request("Ciphertext size out of range"));
@@ -353,6 +448,7 @@ async fn put_blob(State(state): State<AppState>, auth: Auth, Json(body): Json<Pu
         kind: body.kind.clone(),
         recipient_machine_pubkey: body.recipient_machine_pubkey.clone(),
         slot: body.slot.clone().map(|name| db::Slot { name, keep_first: body.keep_first }),
+        expected_slot_seq: body.expected_slot_seq,
         group: body.group.clone(),
         payload: db::Payload::Inline(ciphertext),
     };
@@ -394,6 +490,7 @@ async fn put_file(State(state): State<AppState>, auth: Auth, Path(id): Path<Stri
         kind: "file".into(),
         recipient_machine_pubkey: None,
         slot: None,
+        expected_slot_seq: None,
         group: query.group,
         payload: db::Payload::InFileStore { size },
     }, state.quota_bytes).await;

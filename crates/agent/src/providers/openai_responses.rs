@@ -2,6 +2,7 @@
 //!
 //! ChatGPT and Grok have their own subscription adapters. This adapter is for gateways that
 //! expose the same `/responses` wire shape with a bearer API key.
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -39,7 +40,7 @@ pub struct OpenAiResponsesProvider {
     /// other.
     pub thinking_level: Option<ThinkingLevel>,
     /// The catalog entry for the model, when it has one.
-    pub info: Option<&'static ModelInfo>,
+    pub info: Option<Arc<ModelInfo>>,
     client: reqwest::Client,
 }
 
@@ -51,7 +52,7 @@ impl OpenAiResponsesProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
-            supports_images: info.map(|model| model.images).unwrap_or(true),
+            supports_images: info.as_ref().map(|model| model.images).unwrap_or(true),
             tool_images: ToolImages::UserMessage,
             max_retries: 2,
             max_retry_delay_ms: DEFAULT_MAX_RETRY_DELAY_MS,
@@ -94,7 +95,7 @@ impl OpenAiResponsesProvider {
         if let Some(session_id) = &request.options.session_id {
             body["prompt_cache_key"] = Value::String(session_id.clone());
         }
-        let level = self.thinking_level.and_then(|level| match self.info {
+        let level = self.thinking_level.and_then(|level| match self.info.as_ref() {
             Some(info) => info.clamp_level(level),
             None if level == ThinkingLevel::Off => None,
             None => Some(level),
@@ -131,8 +132,8 @@ impl Provider for OpenAiResponsesProvider {
         self.supports_images
     }
 
-    fn model_info(&self) -> Option<&'static ModelInfo> {
-        self.info
+    fn model_info(&self) -> Option<&ModelInfo> {
+        self.info.as_deref()
     }
 
     async fn stream(
@@ -148,7 +149,7 @@ impl Provider for OpenAiResponsesProvider {
         let url = format!("{}/responses", self.base_url);
         let client = self.client.clone();
         let (max_retries, max_retry_delay_ms) = (self.max_retries, self.max_retry_delay_ms);
-        let info = self.info;
+        let info = self.info.clone();
         let provider = self.provider_id.clone();
 
         tokio::spawn(async move {

@@ -263,6 +263,8 @@ final class BotRow: NSView {
     private let accessory = NSButton()
     private var tracking: NSTrackingArea?
     private var isHovered = false { didSet { needsDisplay = true } }
+    private var textTrailingPlain: NSLayoutConstraint!
+    private var textTrailingAccessory: NSLayoutConstraint!
 
     var onAccessory: (() -> Void)?
     var onClick: (() -> Void)?
@@ -289,16 +291,18 @@ final class BotRow: NSView {
         addSubview(text)
         addSubview(accessory)
 
+        textTrailingPlain = text.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12)
+        textTrailingAccessory = text.trailingAnchor.constraint(lessThanOrEqualTo: accessory.leadingAnchor, constant: -8)
         NSLayoutConstraint.activate([
             heightAnchor.constraint(greaterThanOrEqualToConstant: 46),
             avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
             text.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: 9),
             text.centerYAnchor.constraint(equalTo: centerYAnchor),
-            text.trailingAnchor.constraint(lessThanOrEqualTo: accessory.leadingAnchor, constant: -8),
             accessory.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             accessory.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        textTrailingPlain.isActive = true
     }
 
     @available(*, unavailable)
@@ -317,8 +321,12 @@ final class BotRow: NSView {
             accessory.contentTintColor = .tertiaryLabelColor
             accessory.toolTip = tooltip
             accessory.isHidden = false
+            textTrailingPlain.isActive = false
+            textTrailingAccessory.isActive = true
         } else {
+            textTrailingAccessory.isActive = false
             accessory.isHidden = true
+            textTrailingPlain.isActive = true
         }
         return self
     }
@@ -566,6 +574,8 @@ final class ActionRow: NSView {
     private let key: NSTextField
     private let value: NSTextField
     private let button = CopyFeedbackButton()
+    private var valueTrailingPlain: NSLayoutConstraint!
+    private var valueTrailingAction: NSLayoutConstraint!
     var onAction: (() -> Void)?
 
     /// A monospaced value is something to copy (a sign-in code), so it is also selectable.
@@ -595,16 +605,18 @@ final class ActionRow: NSView {
         addSubview(key)
         addSubview(value)
         addSubview(button)
+        valueTrailingPlain = value.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12)
+        valueTrailingAction = button.leadingAnchor.constraint(equalTo: value.trailingAnchor, constant: 8)
         NSLayoutConstraint.activate([
             heightAnchor.constraint(greaterThanOrEqualToConstant: 32),
             key.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             key.centerYAnchor.constraint(equalTo: centerYAnchor),
             value.leadingAnchor.constraint(greaterThanOrEqualTo: key.trailingAnchor, constant: 10),
             value.centerYAnchor.constraint(equalTo: centerYAnchor),
-            button.leadingAnchor.constraint(equalTo: value.trailingAnchor, constant: actionTitle == nil ? 0 : 8),
             button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             button.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        (actionTitle == nil ? valueTrailingPlain : valueTrailingAction).isActive = true
     }
 
     @available(*, unavailable)

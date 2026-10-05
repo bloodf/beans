@@ -1,12 +1,11 @@
 //! Runtime providers built from the account's credentials. Credential setup lives in
 //! `provider_auth`, which is also linked by Devices that never run a bot.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use lorca_agent::models::{ModelInfo, Rates, ThinkingMode};
+use lorca_agent::models::{ModelInfo, Rates, ThinkingMode, Wire};
 use lorca_agent::providers::anthropic::ANTHROPIC_BASE_URL;
 use lorca_agent::providers::{
     AnthropicProvider, ChatGptProvider, ChatGptTokens, GrokProvider, GrokTokenSource, GrokTokens, OpenAiCompatProvider,
@@ -45,7 +44,7 @@ impl Provider for OpenCodeHeaders {
         self.inner.supports_images()
     }
 
-    fn model_info(&self) -> Option<&'static lorca_agent::models::ModelInfo> {
+    fn model_info(&self) -> Option<&lorca_agent::models::ModelInfo> {
         self.inner.model_info()
     }
 
@@ -97,7 +96,8 @@ pub fn supports_vision(app: &App, kind: &str, model: Option<&str>) -> bool {
         let credentials = app.credentials.lock().unwrap();
         let Some(provider) = credentials.custom.get(kind) else { return false };
         let model = model.map(str::trim).filter(|m| !m.is_empty()).or_else(|| provider.models.first().map(|m| m.id.as_str()));
-        return model.is_some_and(|model| custom_model_info(kind, provider, model).images);
+        return model.is_some_and(|model| provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.images)
+            .or_else(|| models::find_any(model).map(|entry| entry.images)).unwrap_or(false));
     }
     built_in_vision(kind, model)
 }
@@ -105,7 +105,8 @@ pub fn supports_vision(app: &App, kind: &str, model: Option<&str>) -> bool {
 /// Whether a built-in provider's model takes images: the catalog's word, else a guess from the
 /// model's name.
 fn built_in_vision(kind: &str, model: Option<&str>) -> bool {
-    let model = model.map(str::trim).filter(|m| !m.is_empty()).unwrap_or_else(|| default_model(kind));
+    let default = default_model(kind);
+    let model = model.map(str::trim).filter(|m| !m.is_empty()).unwrap_or(&default);
     if let Some(info) = models::find(kind, model) {
         return info.images;
     }
@@ -127,17 +128,9 @@ fn built_in_vision(kind: &str, model: Option<&str>) -> bool {
     }
 }
 
-/// The model a bot of `kind` runs without one of its own.
-pub fn default_model(kind: &str) -> &'static str {
-    match kind {
-        "deepseek" => lorca_agent::providers::openai_compat::DEEPSEEK_DEFAULT_MODEL,
-        "anthropic" => lorca_agent::providers::anthropic::ANTHROPIC_DEFAULT_MODEL,
-        "chatgpt" => lorca_agent::providers::chatgpt::CHATGPT_DEFAULT_MODEL,
-        "grok" => lorca_agent::providers::grok::GROK_DEFAULT_MODEL,
-        "opencode" => OPENCODE_DEFAULT_MODEL,
-        "opencode-go" => OPENCODE_GO_DEFAULT_MODEL,
-        _ => "",
-    }
+/// The first model the current validated catalog offers for a built-in provider.
+pub fn default_model(kind: &str) -> String {
+    models::default_model(kind).unwrap_or_default()
 }
 
 /// The model Auto-review runs on for bots of `kind`, and how much it thinks: a small, fast
@@ -154,16 +147,9 @@ pub fn review_model(app: &App, kind: &str) -> (String, Option<ThinkingLevel>) {
         let thinking = models::find_any(&model).and_then(|known| known.levels.first().copied());
         return (model, thinking);
     }
-    let model = match kind {
-        "deepseek" => "deepseek-flash",
-        "anthropic" => "claude-haiku-4-5",
-        "chatgpt" => "gpt-6-luna",
-        "grok" => "grok-4.7",
-        "opencode" | "opencode-go" => "deepseek-v4.1-flash",
-        _ => "",
-    };
-    let thinking = models::find(kind, model).and_then(|info| info.levels.first().copied()).unwrap_or(ThinkingLevel::Off);
-    (model.to_string(), Some(thinking))
+    let model = models::review_model(kind).unwrap_or_default();
+    let thinking = models::find(kind, &model).and_then(|info| info.levels.first().copied()).unwrap_or(ThinkingLevel::Off);
+    (model, Some(thinking))
 }
 
 /// A bot's thinking level as stored, or nothing for the provider's default.
@@ -188,10 +174,10 @@ pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: O
                 .deepseek
                 .clone()
                 .ok_or_else(|| "DeepSeek is not connected".to_string())?;
-            let model = model.or_else(|| std::env::var("LORCA_DEEPSEEK_MODEL").ok());
+            let model = model.or_else(|| std::env::var("LORCA_DEEPSEEK_MODEL").ok()).unwrap_or_else(|| default_model(kind));
             // The Anthropic-compatible endpoint: the one with DeepSeek's server-side web search.
             let base_url = deepseek_anthropic_url(&key.base_url.clone().unwrap_or_else(deepseek_base_url));
-            Ok(Arc::new(AnthropicProvider::deepseek(&key.api_key, model.as_deref()).with_base_url(&base_url).with_thinking(thinking)))
+            Ok(Arc::new(AnthropicProvider::deepseek(&key.api_key, Some(&model)).with_base_url(&base_url).with_thinking(thinking)))
         }
         "anthropic" => {
             let key = app
@@ -201,9 +187,9 @@ pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: O
                 .anthropic
                 .clone()
                 .ok_or_else(|| "Anthropic is not connected".to_string())?;
-            let model = model.or_else(|| std::env::var("LORCA_ANTHROPIC_MODEL").ok());
+            let model = model.or_else(|| std::env::var("LORCA_ANTHROPIC_MODEL").ok()).unwrap_or_else(|| default_model(kind));
             let base_url = key.base_url.clone().unwrap_or_else(anthropic_base_url);
-            Ok(Arc::new(AnthropicProvider::anthropic(&key.api_key, model.as_deref()).with_base_url(&base_url).with_thinking(thinking)))
+            Ok(Arc::new(AnthropicProvider::anthropic(&key.api_key, Some(&model)).with_base_url(&base_url).with_thinking(thinking)))
         }
         "opencode" => {
             let key = app
@@ -213,7 +199,7 @@ pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: O
                 .opencode
                 .clone()
                 .ok_or_else(|| "OpenCode Zen is not connected".to_string())?;
-            let model = model.or_else(|| std::env::var("LORCA_OPENCODE_MODEL").ok()).unwrap_or_else(|| OPENCODE_DEFAULT_MODEL.into());
+            let model = model.or_else(|| std::env::var("LORCA_OPENCODE_MODEL").ok()).unwrap_or_else(|| default_model(kind));
             let root = key.base_url.clone().or_else(|| env_url("LORCA_OPENCODE_BASE_URL")).unwrap_or_else(|| OPENCODE_BASE_URL.into());
             opencode_provider("opencode", &root, &key.api_key, &model, thinking)
         }
@@ -225,7 +211,7 @@ pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: O
                 .opencode_go
                 .clone()
                 .ok_or_else(|| "OpenCode Go is not connected".to_string())?;
-            let model = model.or_else(|| std::env::var("LORCA_OPENCODE_GO_MODEL").ok()).unwrap_or_else(|| OPENCODE_GO_DEFAULT_MODEL.into());
+            let model = model.or_else(|| std::env::var("LORCA_OPENCODE_GO_MODEL").ok()).unwrap_or_else(|| default_model(kind));
             let root = key
                 .base_url
                 .clone()
@@ -237,15 +223,15 @@ pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: O
             if app.credentials.lock().unwrap().chatgpt.is_none() {
                 return Err("ChatGPT is not connected".into());
             }
-            let model = model.or_else(|| std::env::var("LORCA_CHATGPT_MODEL").ok());
-            Ok(Arc::new(ChatGptProvider::new(Arc::new(AppTokenSource(app.clone())), model.as_deref()).with_thinking(thinking)))
+            let model = model.or_else(|| std::env::var("LORCA_CHATGPT_MODEL").ok()).unwrap_or_else(|| default_model(kind));
+            Ok(Arc::new(ChatGptProvider::new(Arc::new(AppTokenSource(app.clone())), Some(&model)).with_thinking(thinking)))
         }
         "grok" => {
             if app.credentials.lock().unwrap().grok.is_none() {
                 return Err("Grok is not connected".into());
             }
-            let model = model.or_else(|| std::env::var("LORCA_GROK_MODEL").ok());
-            let mut provider = GrokProvider::new(Arc::new(AppGrokTokenSource(app.clone())), model.as_deref()).with_thinking(thinking);
+            let model = model.or_else(|| std::env::var("LORCA_GROK_MODEL").ok()).unwrap_or_else(|| default_model(kind));
+            let mut provider = GrokProvider::new(Arc::new(AppGrokTokenSource(app.clone())), Some(&model)).with_thinking(thinking);
             if let Some(base_url) = env_url("LORCA_GROK_BASE_URL") {
                 provider = provider.with_base_url(&base_url);
             }
@@ -270,6 +256,12 @@ enum OpenCodeWire {
 /// for Qwen3.8 Max, which Zen serves on Chat Completions, while their GPT, Grok, and Muse
 /// families use Responses and the rest of their Qwen family uses Messages.
 fn opencode_wire(kind: &str, model: &str) -> OpenCodeWire {
+    match models::find(kind, model).and_then(|info| info.wire) {
+        Some(Wire::ChatCompletions) => return OpenCodeWire::ChatCompletions,
+        Some(Wire::Messages) => return OpenCodeWire::Messages,
+        Some(Wire::Responses) => return OpenCodeWire::Responses,
+        None => {}
+    }
     let model = model.to_ascii_lowercase();
     if (kind == "opencode" && model.starts_with("gemini-")) || model.starts_with("jev-") {
         return OpenCodeWire::Unsupported;
@@ -326,76 +318,58 @@ fn opencode_provider(
 /// A bot's adapter for a custom provider: the wire protocol the user picked, at the root they
 /// gave, with what is known about the model.
 fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking: Option<ThinkingLevel>) -> Arc<dyn Provider> {
-    let info = custom_model_info(kind, provider, model);
+    let info = Arc::new(custom_model_info(kind, provider, model));
     match provider.api {
         CustomApi::ChatCompletions => {
             let mut adapter = OpenAiCompatProvider::new(kind, &provider.base_url, &provider.api_key, model).with_thinking(thinking);
-            adapter.info = Some(info);
             adapter.supports_images = info.images;
+            adapter.info = Some(info);
             // OpenAI's own field; servers such as Gemini's refuse a request with one they lack.
             adapter.prompt_cache_key = false;
             Arc::new(adapter)
         }
         CustomApi::Responses => {
             let mut adapter = OpenAiResponsesProvider::new(kind, &provider.base_url, &provider.api_key, model).with_thinking(thinking);
-            adapter.info = Some(info);
             adapter.supports_images = info.images;
+            adapter.info = Some(info);
             Arc::new(adapter)
         }
         CustomApi::Messages => {
             let mut adapter = AnthropicProvider::new(kind, &provider.base_url, &provider.api_key, model).with_thinking(thinking);
-            adapter.info = Some(info);
             adapter.supports_images = info.images;
+            adapter.max_tokens = if info.max_output > 0 { 32_000 } else { 16_384 };
+            adapter.info = Some(info);
             // Arguments streamed as they are generated are Anthropic's own extension.
             adapter.eager_tool_streaming = false;
-            // Room for long replies where the model's cap is known; the API requires a cap.
-            adapter.max_tokens = if info.max_output > 0 { 32_000 } else { 16_384 };
             Arc::new(adapter)
         }
     }
 }
 
-/// What a custom provider's model takes: the window, output cap, and inputs its server's list
-/// gave, else the catalog's for that model id, else nothing known, which means no window to
-/// compact by, text only, and the common thinking levels. Its cost is zero, since Lorca does
-/// not know what the server charges. Kept per kind and model, so a turn reuses the entry
-/// until the provider changes.
-fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> &'static ModelInfo {
-    static INFO: LazyLock<Mutex<HashMap<(String, String), &'static ModelInfo>>> = LazyLock::new(Default::default);
-    let listed = provider.models.iter().find(|m| m.id == model);
+/// Custom metadata belongs to the adapter for one turn. It uses current catalog facts without
+/// retaining old catalog versions or leaking a static entry after a provider changes.
+fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> ModelInfo {
+    let listed = provider.models.iter().find(|entry| entry.id == model);
     let known = models::find_any(model);
-    let thinking = match known {
+    let thinking = match known.as_ref() {
         Some(known) => known.thinking,
-        // Messages servers that are not Anthropic take a token budget, not an effort.
         None if provider.api == CustomApi::Messages => ThinkingMode::Budget,
         None => ThinkingMode::Effort,
     };
-    let levels = crate::credentials::custom_levels(model);
-    let wanted = ModelInfo {
-        id: "",
-        name: "",
-        provider: "",
-        context_window: listed.and_then(|m| m.context_window).or(known.map(|k| k.context_window)).unwrap_or(0),
-        max_output: listed.and_then(|m| m.max_output).or(known.map(|k| k.max_output)).unwrap_or(0),
-        reasoning: known.is_some_and(|k| k.reasoning),
-        images: listed.and_then(|m| m.images).or(known.map(|k| k.images)).unwrap_or(false),
+    ModelInfo {
+        id: model.to_string(),
+        name: listed.and_then(|entry| entry.name.clone()).or_else(|| known.as_ref().map(|entry| entry.name.clone())).unwrap_or_else(|| model.to_string()),
+        provider: kind.to_string(),
+        context_window: listed.and_then(|entry| entry.context_window).or_else(|| known.as_ref().map(|entry| entry.context_window)).unwrap_or(0),
+        max_output: listed.and_then(|entry| entry.max_output).or_else(|| known.as_ref().map(|entry| entry.max_output)).unwrap_or(0),
+        reasoning: known.as_ref().is_some_and(|entry| entry.reasoning),
+        images: listed.and_then(|entry| entry.images).or_else(|| known.as_ref().map(|entry| entry.images)).unwrap_or(false),
         rates: Rates { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 },
-        tiers: &[],
+        tiers: Vec::new(),
         thinking,
-        levels,
-    };
-    let mut cache = INFO.lock().unwrap();
-    let key = (kind.to_string(), model.to_string());
-    if let Some(info) = cache.get(&key) {
-        if (ModelInfo { id: "", name: "", provider: "", ..**info }) == wanted {
-            return info;
-        }
+        levels: crate::credentials::custom_levels(model),
+        wire: None,
     }
-    let name = listed.and_then(|m| m.name.clone()).or(known.map(|k| k.name.to_string())).unwrap_or_else(|| model.to_string());
-    let leak = |text: String| -> &'static str { Box::leak(text.into_boxed_str()) };
-    let info: &'static ModelInfo = Box::leak(Box::new(ModelInfo { id: leak(model.to_string()), name: leak(name), provider: leak(kind.to_string()), ..wanted }));
-    cache.insert(key, info);
-    info
 }
 
 /// DeepSeek's API root when the credential has none: `LORCA_DEEPSEEK_BASE_URL` (a proxy or a
@@ -428,6 +402,7 @@ fn env_url(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use crate::credentials::CustomModel;
 
     struct CaptureProvider(Arc<Mutex<Option<ModelRequest>>>);
@@ -463,7 +438,7 @@ mod tests {
         // Every model the catalog offers on OpenCode has a wire Lorca speaks.
         for kind in ["opencode", "opencode-go"] {
             for model in models::for_provider(kind) {
-                assert_ne!(opencode_wire(kind, model.id), OpenCodeWire::Unsupported, "{kind}/{}", model.id);
+                assert_ne!(opencode_wire(kind, &model.id), OpenCodeWire::Unsupported, "{kind}/{}", model.id);
             }
         }
     }
@@ -555,11 +530,11 @@ mod tests {
         assert_eq!((info.context_window, info.images, info.clamp_level(ThinkingLevel::Max)), (0, false, Some(ThinkingLevel::High)));
         assert!(!supports_vision(app, "custom:vision-lab", Some("mystery")));
 
-        // The entry is kept until the provider changes.
-        let again = provider_for(app, "custom:vision-lab", None, None).unwrap();
-        assert!(std::ptr::eq(provider.model_info().unwrap(), again.model_info().unwrap()));
+        // A running provider holds its own metadata even after the custom catalog changes.
         app.credentials.lock().unwrap().custom.get_mut("custom:vision-lab").unwrap().models[0].context_window = Some(65_536);
-        assert_eq!(provider_for(app, "custom:vision-lab", None, None).unwrap().model_info().map(|info| info.context_window), Some(65_536));
+        assert_eq!(provider.model_info().unwrap().context_window, 32_768);
+        let updated = provider_for(app, "custom:vision-lab", None, None).unwrap();
+        assert_eq!(updated.model_info().unwrap().context_window, 65_536);
 
         app.credentials.lock().unwrap().custom.clear();
         assert_eq!(provider_for(app, "custom:vision-lab", None, None).err().unwrap(), "vision-lab is not connected");
@@ -617,7 +592,8 @@ mod tests {
         let scratch = scratch_app();
         let app = &scratch.0;
         add_custom(app, "custom:proxy", CustomApi::Messages, vec![model("glm-6"), model("claude-opus-5")]);
-        let info = provider_for(app, "custom:proxy", None, None).unwrap().model_info().unwrap();
+        let provider = provider_for(app, "custom:proxy", None, None).unwrap();
+        let info = provider.model_info().unwrap();
         assert_eq!(info.thinking, ThinkingMode::Budget);
         let claude = provider_for(app, "custom:proxy", Some("claude-opus-5"), None).unwrap();
         assert_eq!(claude.model_info().unwrap().thinking, ThinkingMode::Adaptive);

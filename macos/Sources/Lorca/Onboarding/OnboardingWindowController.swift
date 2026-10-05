@@ -321,7 +321,8 @@ final class OnboardingViewController: NSViewController {
         )
 
         let avatar = AvatarView(diameter: 40)
-        avatar.content = firstBot.map { AvatarView.content(for: $0) } ?? .bot(symbolName: "sparkles", accent: .indigo)
+        avatar.content = firstBot.map { AvatarView.content(for: $0) } ?? .system
+        avatar.isHidden = firstBot == nil
 
         let nameField = NSTextField()
         // Localize the CLI's default profile while preserving any saved edits.

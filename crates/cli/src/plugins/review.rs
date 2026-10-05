@@ -443,7 +443,7 @@ mod tests {
         });
         let bot = |id: &str, name: &str| Bot {
             id: id.into(), name: name.into(), description: String::new(), symbol_name: String::new(), accent: String::new(), avatar: None,
-            runner_id: "runner".into(), provider: "deepseek".into(), model: None, thinking: None, legacy_instructions: String::new(), workdir: None, created_at: 0.0,
+            runner_id: "runner".into(), provider: "deepseek".into(), model: None, thinking: None, legacy_instructions: String::new(), workdir: None, capabilities: Default::default(), created_at: 0.0,
         };
         let (devops, dm) = app.create_bot_with_dm(bot("bot-devops", "DevOps"), None).unwrap();
         app.create_bot_with_dm(bot("bot-chef", "Chef"), None).unwrap();
@@ -460,6 +460,7 @@ mod tests {
         let ran = |command: &str, decision: Option<&str>, is_running: bool| Body::Tool {
             name: "bash".into(), summary: format!("$ {command}"), detail: String::new(), is_running, call_id: String::new(),
             arguments: serde_json::json!({ "command": command }), result: None, is_error: false, description: None, target_bot_id: None,
+            script_command: None,
             run: Some(CommandRun { command: command.into(), state: "exited".into(), decision: decision.map(str::to_string), ..Default::default() }),
         };
         let at = |message_id: &str| Trigger { message_id: message_id.into(), routine: None };

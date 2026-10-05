@@ -20,6 +20,7 @@ use crate::routes::{ApiError, ApiResult};
 
 pub const KINDS: &[&str] = &[
     "roster",
+    "policy",
     "chat",
     "job",
     "job_cancel",
@@ -151,6 +152,8 @@ pub struct NewBlob {
     pub kind: String,
     pub recipient_machine_pubkey: Option<String>,
     pub slot: Option<Slot>,
+    /// Required for roster snapshots: latest roster slot seq, or 0 if absent.
+    pub expected_slot_seq: Option<i64>,
     /// What the blob belongs to, a chat to the Devices. A deleted group takes no more blobs.
     pub group: Option<String>,
     pub payload: Payload,

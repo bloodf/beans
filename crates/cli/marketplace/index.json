@@ -1,4 +1,6 @@
 {
+  "version": 1,
+  "updated": "2026-10-02T00:00:00Z",
   "plugins": [
     {
       "id": "github",
@@ -111,7 +113,7 @@
       "homepage": "https://github.com/microsoft/playwright-mcp",
       "tags": ["browser", "web", "scrape", "screenshot", "playwright"],
       "servers": {
-        "browser": { "type": "stdio", "command": "npx", "args": ["-y", "@playwright/mcp@latest", "--headless"] }
+        "browser": { "type": "stdio", "command": "npx", "args": ["-y", "@playwright/mcp@0.0.83", "--headless"] }
       },
       "tools": { "readonly": ["browser_snapshot", "browser_take_screenshot", "browser_console_messages", "browser_network_requests"] },
       "skills": [

@@ -29,6 +29,7 @@ enum Wire {
         var relayConnected: Bool
         var relayUpdateRequired: Bool?
         var relayError: RelayProblem?
+        var paused: Bool?
         var devices: [Device]
         var bots: [Bot]
         var chats: [Chat]
@@ -318,6 +319,16 @@ enum Wire {
         }
     }
 
+    struct BotCapabilities: Decodable {
+        var shell: Bool
+        var write: Bool
+        var plugins: [String]?
+
+        func toModel() -> Lorca.BotCapabilities {
+            Lorca.BotCapabilities(shell: shell, write: write, plugins: plugins)
+        }
+    }
+
     struct Bot: Decodable {
         var id: String
         var name: String
@@ -329,6 +340,7 @@ enum Wire {
         var model: String?
         var thinking: String?
         var avatar: Attachment?
+        var capabilities: BotCapabilities?
         var createdAt: Double
     }
 
@@ -458,6 +470,7 @@ enum Wire {
         var detail: String?
         var isRunning: Bool?
         var description: String?
+        var scriptCommand: String?
         var targetBotId: String?
         var from: String?
         var to: String?
@@ -470,6 +483,9 @@ enum Wire {
         var code: String?
         var rule: String?
         var command: String?
+        var title: String?
+        var content: String?
+        var path: String?
         var run: Run?
     }
 
@@ -506,6 +522,7 @@ enum Wire {
         var routines: [Routine]?
         var autoReview: AutoReview?
         var providers: [Provider]?
+        var paused: Bool?
     }
 
     struct MessageEvent: Decodable {
@@ -623,6 +640,7 @@ extension Wire.Bot {
             model: model,
             thinking: thinking,
             avatar: avatar.map { Attachment(id: $0.id, name: $0.name, mime: $0.mime, size: $0.size, width: $0.width, height: $0.height) },
+            capabilities: capabilities?.toModel() ?? BotCapabilities(),
             createdAt: Date(timeIntervalSince1970: createdAt)
         )
     }
@@ -647,6 +665,7 @@ extension Wire.Message {
                     detail: self.body.detail ?? "",
                     isRunning: self.body.isRunning ?? false,
                     description: self.body.description,
+                    scriptCommand: self.body.scriptCommand,
                     targetBotID: self.body.targetBotId,
                     run: self.body.run.map {
                         CommandRun(
@@ -667,7 +686,7 @@ extension Wire.Message {
                     pluginID: self.body.pluginId ?? "", pluginName: self.body.pluginName ?? "", tool: self.body.tool ?? "",
                     summary: self.body.summary ?? "", decision: PermissionRequest.Decision(rawValue: self.body.decision ?? "") ?? .pending,
                     link: self.body.link, code: self.body.code, reason: self.body.reason, rule: self.body.rule,
-                    command: self.body.command))
+                    command: self.body.command, title: self.body.title, content: self.body.content, path: self.body.path))
         default:
             body = .text(self.body.text ?? "")
         }

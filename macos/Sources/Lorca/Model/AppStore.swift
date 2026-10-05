@@ -70,6 +70,8 @@ final class AppStore {
     private(set) var routines: [Routine] = []
     /// Auto-review, shared through the roster.
     private(set) var autoReview = AutoReview()
+    /// Account-wide pause, synchronized through the roster.
+    private(set) var paused = false
     /// The account's provider credentials, the same on every Device.
     private(set) var providers: [ProviderCredential] = []
     /// The models the CLI's catalog offers, for the Model and Thinking pickers.
@@ -274,6 +276,7 @@ final class AppStore {
         }
         routines = (snapshot.routines ?? []).map { $0.toModel() }
         autoReview = snapshot.autoReview?.toModel() ?? AutoReview()
+        paused = snapshot.paused ?? false
         providers = (snapshot.providers ?? []).compactMap { $0.toModel() }
         catalog = (snapshot.models ?? []).compactMap { $0.toModel() }
         runningJobs = (snapshot.runningTurns ?? []).map { ($0.jobId, $0.chatId, $0.botId, $0.routineId) }
@@ -301,6 +304,7 @@ final class AppStore {
             bots = roster.bots.map { $0.toModel() }
             if let incoming = roster.routines { routines = incoming.map { $0.toModel() } }
             if let incoming = roster.autoReview { autoReview = incoming.toModel() }
+            paused = roster.paused ?? false
             if let incoming = roster.providers { providers = incoming.compactMap { $0.toModel() } }
             var merged: [Chat] = []
             var changed: [Chat.ID] = []
@@ -680,6 +684,29 @@ final class AppStore {
         perform("bots.update", params)
     }
 
+    /// Changes one bot's abilities without writing another bot's policy.
+    func setBotCapabilities(_ id: Bot.ID, _ capabilities: BotCapabilities) {
+        guard let index = bots.firstIndex(where: { $0.id == id }) else { return }
+        bots[index].capabilities = capabilities
+        emit(.rosterChanged)
+        perform("bots.update", ["id": id, "capabilities": [
+            "shell": capabilities.shell, "write": capabilities.write,
+            "plugins": capabilities.plugins.map { $0 as Any } ?? NSNull(),
+        ]])
+    }
+
+    func setPaused(_ value: Bool) async throws {
+        if isMock {
+            paused = value
+        } else {
+            let result = try await client.request("account.pause", ["paused": value], as: PauseResult.self)
+            paused = result.paused
+        }
+        emit(.rosterChanged)
+    }
+
+    private struct PauseResult: Decodable { let paused: Bool }
+
     /// The bot's symbol and accent, the look under and behind its image.
     func setBotLook(_ id: Bot.ID, symbolName: String, accent: Accent) {
         guard let index = bots.firstIndex(where: { $0.id == id }) else { return }
@@ -768,6 +795,36 @@ final class AppStore {
         _ = try await client.request("plugins.connect", ["runner_id": runnerID, "plugin_id": pluginID])
     }
 
+    func mcpServers(on runnerID: Device.ID, reload: Bool = false) async throws -> MCPServerList {
+        try await client.request(reload ? "mcp.reload" : "mcp.list", ["runner_id": runnerID], as: MCPServerList.self)
+    }
+
+    func mcpServer(_ name: String, on runnerID: Device.ID) async throws -> MCPServerDetail {
+        try await client.request("mcp.get", ["runner_id": runnerID, "name": name], as: MCPServerDetail.self)
+    }
+
+    func parseMCPServers(_ text: String) async throws -> MCPParsedServers {
+        try await client.request("mcp.parse", ["text": text], as: MCPParsedServers.self)
+    }
+
+    func saveMCPServer(_ name: String, previousName: String?, config: [String: MCPJSON], on runnerID: Device.ID) async throws -> MCPServerDetail {
+        var params: [String: Any] = ["runner_id": runnerID, "name": name, "config": config.mapValues(\.requestValue)]
+        if let previousName { params["previous_name"] = previousName }
+        return try await client.request("mcp.save", params, as: MCPServerDetail.self)
+    }
+
+    func removeMCPServer(_ name: String, on runnerID: Device.ID) async throws {
+        _ = try await client.request("mcp.remove", ["runner_id": runnerID, "name": name])
+    }
+
+    func changeMCPServer(_ name: String, on runnerID: Device.ID, method: String, values: [String: Any] = [:]) async throws -> MCPServerDetail {
+        try await client.request(method, values.merging(["runner_id": runnerID, "name": name]) { _, new in new }, as: MCPServerDetail.self)
+    }
+
+    func signInMCPServer(_ server: MCPServer, on runnerID: Device.ID) async throws {
+        _ = try await client.request("plugins.connect", ["runner_id": runnerID, "plugin_id": server.id, "server": "mcp"])
+    }
+
     /// Replaces Auto-review (the switch and the rules); the change shows at once and the CLI's
     /// roster event confirms it. A new rule gets its id from the CLI.
     func setAutoReview(_ value: AutoReview) {
@@ -787,6 +844,8 @@ final class AppStore {
         update(messageID, in: chatID) { message in
             switch message.body {
             case var .permission(request):
+                // A proposal reports saved only after the Runner confirms the write.
+                if request.isProposal { return }
                 request.decision = decision == "always" ? .always : (decision == "deny" ? .denied : .allowed)
                 if request.isConnect, request.decision == .allowed { request.summary = L("Starting the sign-in…") }
                 message.body = .permission(request)
@@ -1377,6 +1436,13 @@ final class AppStore {
         return listing.listed ? listing.models.map { $0.toModel() } : nil
     }
 
+    /// Refreshes every saved custom provider's model list; the count is providers changed, not models added.
+    func refreshCustomModels() async throws -> Int {
+        if isMock { return 0 }
+        struct Result: Decodable { let updated: Int }
+        return try await client.request("providers.refresh", as: Result.self).updated
+    }
+
     /// Adds a custom provider, or saves the one `kind` names, once the CLI has heard from its
     /// server. `models` lists the ids bots can pick, the default first. Answers the provider's kind.
     @discardableResult
@@ -1415,6 +1481,7 @@ final class AppStore {
         chats = MockData.chats()
         routines = MockData.routines()
         autoReview = MockData.autoReview()
+        paused = false
         providers = MockData.providers()
         catalog = MockData.models()
         sortChats()

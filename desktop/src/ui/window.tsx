@@ -9,6 +9,12 @@ import { commands, installMenuBar } from "./commands";
 import { popupMenu } from "./menu";
 import { alert } from "./overlay";
 
+/** The taskbar title names the current page and the app, without doubling the app name. */
+export function setWindowTitle(text: string): void {
+  const name = hostInfo().name;
+  document.title = text === name ? name : `${text} - ${name}`;
+}
+
 function presentNote(title: string, body: string): void {
   void alert({ message: title, informative: body, style: "informational", buttons: [{ title: L("OK") }], width: 420 });
 }

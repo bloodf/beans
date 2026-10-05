@@ -1,6 +1,7 @@
 //! OpenAI-compatible `/chat/completions` streaming. DeepSeek uses this as is.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -37,7 +38,7 @@ pub struct OpenAiCompatProvider {
     /// catalog says can stop thinking, and sends nothing on any other.
     pub thinking_level: Option<ThinkingLevel>,
     /// The catalog entry for the model, when it has one.
-    pub info: Option<&'static ModelInfo>,
+    pub info: Option<Arc<ModelInfo>>,
     /// Sends the session id as `prompt_cache_key`, OpenAI's routing hint for its prompt cache.
     /// Off for a server that refuses fields it does not know.
     pub prompt_cache_key: bool,
@@ -93,7 +94,7 @@ impl OpenAiCompatProvider {
         if let Some(session_id) = request.options.session_id.as_ref().filter(|_| self.prompt_cache_key) {
             body["prompt_cache_key"] = Value::String(session_id.clone());
         }
-        let level = self.thinking_level.and_then(|level| match self.info {
+        let level = self.thinking_level.and_then(|level| match self.info.as_ref() {
             Some(info) => info.clamp_level(level),
             None if level == ThinkingLevel::Off => None,
             None => Some(level),
@@ -366,8 +367,8 @@ impl Provider for OpenAiCompatProvider {
         self.supports_images
     }
 
-    fn model_info(&self) -> Option<&'static ModelInfo> {
-        self.info
+    fn model_info(&self) -> Option<&ModelInfo> {
+        self.info.as_deref()
     }
 
     async fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream {
@@ -379,7 +380,7 @@ impl Provider for OpenAiCompatProvider {
         let url = format!("{}/chat/completions", self.base_url);
         let client = self.client.clone();
         let (max_retries, max_retry_delay_ms) = (self.max_retries, self.max_retry_delay_ms);
-        let info = self.info;
+        let info = self.info.clone();
 
         tokio::spawn(async move {
             let build = || options.apply_to(bearer_auth(client.post(&url), &api_key).header("User-Agent", USER_AGENT)).json(&body);

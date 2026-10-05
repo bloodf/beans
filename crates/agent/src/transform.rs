@@ -1,13 +1,17 @@
 //! What every adapter does to the transcript before converting it, after pi's
 //! `transformMessages`: images a model cannot see become a note, another model's thinking
 //! becomes plain text, tool call ids get the shape the API wants, failed turns are left out,
-//! and a call that never got a result gets one.
+//! a call that never got a result gets one, and a request carries only its latest images.
 
 use crate::types::{AssistantMessage, AssistantPart, ContentPart, LlmMessage, StopReason, ToolResultMessage};
 
 pub const NON_VISION_USER_IMAGE_PLACEHOLDER: &str = "(image omitted: model does not support images)";
 pub const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str = "(tool image omitted: model does not support images)";
+pub const OLDER_IMAGE_PLACEHOLDER: &str = "(older image omitted: a request carries only the latest images)";
 pub const NO_RESULT_PROVIDED: &str = "No result provided";
+pub const MAX_REQUEST_IMAGES: usize = 20;
+pub const MAX_REQUEST_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+const IMAGE_DROP_STEP: usize = 10;
 
 pub struct TransformOptions<'a> {
     /// The provider and model the request goes to. A message from the same pair is "own":
@@ -139,7 +143,73 @@ pub fn transform_messages_with_origins(messages: &[LlmMessage], options: &Transf
         }
     }
     settle(&mut result, &mut pending, &mut answered);
+    if options.supports_images {
+        leave_out_older_images(&mut result);
+    }
     result
+}
+
+/// Keep newest images within provider request limits. Drop older images in stable batches when
+/// count exceeds the limit, preserving the latest and replacing dropped content with a note.
+fn leave_out_older_images(messages: &mut [(usize, LlmMessage)]) {
+    fn content(message: &LlmMessage) -> Option<&Vec<ContentPart>> {
+        match message {
+            LlmMessage::User(user) => Some(&user.content),
+            LlmMessage::ToolResult(result) => Some(&result.content),
+            LlmMessage::Assistant(_) => None,
+        }
+    }
+    let sizes: Vec<usize> = messages.iter().filter_map(|(_, message)| content(message)).flatten().filter_map(|part| match part {
+        ContentPart::Image { data, .. } => Some(data.len()),
+        ContentPart::Text { .. } => None,
+    }).collect();
+    let total = sizes.len();
+    let mut fitting = 0;
+    let mut bytes = 0usize;
+    for size in sizes.iter().rev() {
+        if fitting > 0 && bytes.saturating_add(*size) > MAX_REQUEST_IMAGE_BYTES {
+            break;
+        }
+        fitting += 1;
+        bytes = bytes.saturating_add(*size);
+    }
+    let by_count = if total > MAX_REQUEST_IMAGES { (total - MAX_REQUEST_IMAGES).div_ceil(IMAGE_DROP_STEP) * IMAGE_DROP_STEP } else { 0 };
+    let dropped = by_count.max(total - fitting).min(total.saturating_sub(1));
+    if dropped == 0 {
+        return;
+    }
+    let mut seen = 0;
+    for (_, message) in messages.iter_mut() {
+        if seen == dropped {
+            break;
+        }
+        let content = match message {
+            LlmMessage::User(user) => &mut user.content,
+            LlmMessage::ToolResult(result) => &mut result.content,
+            LlmMessage::Assistant(_) => continue,
+        };
+        if !content.iter().any(|part| matches!(part, ContentPart::Image { .. })) {
+            continue;
+        }
+        let mut kept = Vec::with_capacity(content.len());
+        let mut previous_was_placeholder = false;
+        for part in content.drain(..) {
+            match part {
+                ContentPart::Image { .. } if seen < dropped => {
+                    seen += 1;
+                    if !previous_was_placeholder {
+                        kept.push(ContentPart::text(OLDER_IMAGE_PLACEHOLDER));
+                    }
+                    previous_was_placeholder = true;
+                }
+                part => {
+                    previous_was_placeholder = part.as_text() == Some(OLDER_IMAGE_PLACEHOLDER);
+                    kept.push(part);
+                }
+            }
+        }
+        *content = kept;
+    }
 }
 
 fn replace_images(content: &[ContentPart], placeholder: &str) -> Vec<ContentPart> {
@@ -232,6 +302,26 @@ mod tests {
         assert_eq!(a.tool_calls()[0].id, "call_weird");
         let LlmMessage::ToolResult(r) = &out[1] else { panic!() };
         assert_eq!(r.tool_call_id, "call_weird");
+    }
+
+    #[test]
+    fn request_keeps_latest_images_within_count_and_bytes() {
+        let shots = |count: usize, size: usize| -> Vec<LlmMessage> {
+            (0..count).map(|index| LlmMessage::User(UserMessage {
+                content: vec![ContentPart::text(format!("shot {index}")), ContentPart::Image { data: "A".repeat(size), mime_type: "image/png".into() }],
+                timestamp: 0,
+            })).collect()
+        };
+        let count = |messages: &[LlmMessage]| messages.iter().map(|message| match message {
+            LlmMessage::User(user) => user.content.iter().filter(|part| matches!(part, ContentPart::Image { .. })).count(),
+            _ => 0,
+        }).sum::<usize>();
+        let out = transform_messages(&shots(21, 4), &options());
+        assert_eq!(count(&out), 11);
+        let LlmMessage::User(first) = &out[0] else { panic!() };
+        assert_eq!(first.content, vec![ContentPart::text("shot 0"), ContentPart::text(OLDER_IMAGE_PLACEHOLDER)]);
+        assert_eq!(count(&transform_messages(&shots(30, 4), &options())), 20);
+        assert_eq!(count(&transform_messages(&shots(3, 7 * 1024 * 1024), &options())), 2);
     }
 
     #[test]

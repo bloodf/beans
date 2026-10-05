@@ -1,26 +1,25 @@
-// Avatars, after the macOS app's AvatarView: a bot's SF-named symbol on its accent gradient, or its
-// own image aspect-filled in the circle, the gray "you" and system discs, and the breathing green
-// dot while the bot has a turn running, sitting on a ring cut out of the circle.
+// Bot avatars are deterministic local SVGs keyed by bot ID, or the user's uploaded image.
+// You and system keep their own discs; working dots and group layouts use the same circles.
 
+import { blobatar } from "@beans/blobatar";
 import { For, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { L } from "../l10n";
-import type { Accent, Author, Bot } from "../model/models";
+import type { Author, Bot } from "../model/models";
 import { store } from "../model/store";
 import { Icon } from "./icons";
 
 export type AvatarContent =
-  | { kind: "bot"; symbolName: string; accent: Accent }
+  | { kind: "bot"; id: string }
   | { kind: "image"; url: string }
   | { kind: "you" }
   | { kind: "system" };
 
-/** The bot's image when this computer has the bytes (the store fetches them and redraws
- * otherwise), else its symbol on its accent. */
+/** Uploaded image when fetched locally, otherwise the bot's deterministic SVG. */
 export function botAvatar(bot: Bot): AvatarContent {
   const url = store.avatarURL(bot);
   if (url) return { kind: "image", url };
-  return { kind: "bot", symbolName: bot.symbolName, accent: bot.accent };
+  return { kind: "bot", id: bot.id };
 }
 
 export function authorAvatar(author: Author): AvatarContent {
@@ -32,9 +31,21 @@ export function authorAvatar(author: Author): AvatarContent {
 
 export function sameAvatar(a: AvatarContent, b: AvatarContent): boolean {
   if (a.kind !== b.kind) return false;
-  if (a.kind === "bot" && b.kind === "bot") return a.symbolName === b.symbolName && a.accent === b.accent;
+  if (a.kind === "bot" && b.kind === "bot") return a.id === b.id;
   if (a.kind === "image" && b.kind === "image") return a.url === b.url;
   return true;
+}
+
+const svgURLs = new Map<string, string>();
+
+function botSVGURL(id: string): string {
+  let url = svgURLs.get(id);
+  if (!url) {
+    // SVG is generated in-package from the ID; encoding keeps markup out of the DOM.
+    url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(blobatar(id))}`;
+    svgURLs.set(id, url);
+  }
+  return url;
 }
 
 /** Where the working dot sits: over the bottom-right edge of a circle `size` across. */
@@ -58,19 +69,17 @@ function AvatarDisc(props: { content: AvatarContent; size: number; working?: boo
       style={{
         width: `${props.size}px`,
         height: `${props.size}px`,
-        ...(props.content.kind === "bot" ? { "--tint": `var(--${props.content.accent})` } : {}),
         ...mask(),
       }}
     >
-      <Show when={props.content.kind === "image" && (props.content as { url: string }).url}>
-        {(url) => <img src={url()} alt="" draggable="false" />}
+      <Show when={props.content.kind === "image"}>
+        <img src={props.content.kind === "image" ? props.content.url : undefined} alt="" draggable="false" />
       </Show>
-      <Show when={props.content.kind !== "image"}>
-        <Icon
-          name={props.content.kind === "bot" ? props.content.symbolName : props.content.kind === "you" ? "person.fill" : "gearshape.fill"}
-          size={Math.round(props.size * (props.content.kind === "bot" ? 0.52 : 0.5))}
-          strokeWidth={props.size >= 40 ? 2 : 2.4}
-        />
+      <Show when={props.content.kind === "bot"}>
+        <img src={props.content.kind === "bot" ? botSVGURL(props.content.id) : undefined} alt="" draggable="false" />
+      </Show>
+      <Show when={props.content.kind === "you" || props.content.kind === "system"}>
+        <Icon name={props.content.kind === "you" ? "person.fill" : "gearshape.fill"} size={Math.round(props.size * 0.5)} strokeWidth={props.size >= 40 ? 2 : 2.4} />
       </Show>
     </span>
   );

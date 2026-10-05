@@ -1,9 +1,8 @@
-// Bot avatars: an accent gradient disc with the bot's SF Symbol, or the bot's own image once
-// this phone has it, a breathing green dot while the bot works (as in Grok Bot: 7 px,
-// bottom-right, scale 1 → 0.8 over 2.4 s), and a cluster for group chats.
+// Bot avatars use the shared deterministic look, or the bot's own encrypted image once
+// this phone has it. Presence and group clustering stay local to the phone UI.
 
+import { Blobatar } from "@beans/blobatar/react-native";
 import { Image } from "expo-image";
-import { LinearGradient } from "expo-linear-gradient";
 import { useEffect } from "react";
 import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import Animated, { Easing, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from "react-native-reanimated";
@@ -11,7 +10,7 @@ import { engine } from "../core/engine";
 import type { Bot } from "../core/model";
 import { useStore } from "../core/store";
 import { Symbol } from "./Symbol";
-import { accentColors, usePalette } from "./theme";
+import { usePalette } from "./theme";
 
 /// The file URI of the bot's profile image, once this phone has the bytes; asks the core for
 /// them the first time. Undefined while they are on their way or when the bot has none.
@@ -24,10 +23,9 @@ export function useBotAvatarUri(bot: Bot | undefined): string | undefined {
   return avatar ? uri : undefined;
 }
 
-/// The look as a symbol on an accent, or an image; the picker previews a pending choice this way.
-export function AvatarDisc({ symbol, accent, uri, size, style }: { symbol: string; accent: string; uri?: string; size: number; style?: StyleProp<ViewStyle> }) {
+/// A custom image overrides the shared look. Generated looks need no file fetch.
+export function AvatarDisc({ name, uri, size, style }: { name: string; uri?: string; size: number; style?: StyleProp<ViewStyle> }) {
   const p = usePalette();
-  const colors = accentColors(accent, p.dark);
   if (uri) {
     return (
       <View style={[styles.disc, { width: size, height: size, borderRadius: size / 2, overflow: "hidden", backgroundColor: p.fill }, style]}>
@@ -35,11 +33,7 @@ export function AvatarDisc({ symbol, accent, uri, size, style }: { symbol: strin
       </View>
     );
   }
-  return (
-    <LinearGradient colors={colors} start={{ x: 0.3, y: 0 }} end={{ x: 0.7, y: 1 }} style={[styles.disc, { width: size, height: size, borderRadius: size / 2 }, style]}>
-      <Symbol name={symbol} size={size * 0.5} color="#FFFFFF" weight="semibold" />
-    </LinearGradient>
-  );
+  return <View style={[styles.disc, { width: size, height: size }, style]}><Blobatar name={name} size={size} /></View>;
 }
 
 export function BotAvatar({ bot, size = 40, working = false, style }: { bot: Bot | undefined; size?: number; working?: boolean; style?: StyleProp<ViewStyle> }) {
@@ -47,7 +41,7 @@ export function BotAvatar({ bot, size = 40, working = false, style }: { bot: Bot
   const uri = useBotAvatarUri(bot);
   return (
     <View style={[{ width: size, height: size }, style]}>
-      <AvatarDisc symbol={bot?.symbol_name ?? "sparkles"} accent={bot?.accent ?? "indigo"} uri={uri} size={size} />
+      <AvatarDisc name={bot?.id ?? ""} uri={uri} size={size} />
       {working && <PresenceDot size={size} ring={p.background} />}
     </View>
   );

@@ -178,8 +178,8 @@ fn tls() -> Arc<rustls::ClientConfig> {
 
 /// The relay protocol this client speaks, sent as `Lorca-Protocol` with every request. A
 /// relay may refuse one it no longer serves with `426`. 1: group paging, `DELETE /v1/identity`.
-/// 2: `POST /v1/machines`.
-pub const PROTOCOL: u32 = 2;
+/// 2: `POST /v1/machines`. 3: durable encrypted policy events.
+pub const PROTOCOL: u32 = 3;
 
 const FILE_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
@@ -303,7 +303,7 @@ impl RelayClient {
         self.authenticate(url, machine).await
     }
 
-    pub async fn put_blob(&self, url: &str, token: &str, item: crate::app::OutboxItem) -> RelayResult<i64> {
+    pub async fn put_blob(&self, url: &str, token: &str, item: crate::app::OutboxItem, expected_slot_seq: i64) -> RelayResult<i64> {
         if item.kind == "file" {
             let mut request = self.http().put(format!("{url}/v1/files/{}", item.id))
                 .bearer_auth(token)
@@ -319,6 +319,9 @@ impl RelayClient {
         if let Some(slot) = &item.slot {
             body["slot"] = json!(slot.name);
             body["keep_first"] = json!(slot.keep_first);
+        }
+        if item.kind == "roster" {
+            body["expected_slot_seq"] = json!(expected_slot_seq);
         }
         if let Some(group) = &item.group {
             body["group"] = json!(group);

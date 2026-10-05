@@ -6,7 +6,20 @@ Sparkle shows it in the update window. The Windows and Linux app's are in
 
 ## [Unreleased]
 
+- Bots show deterministic, offline Blobatar portraits across Mac, phone, Windows, and Linux; an encrypted photo still overrides each portrait.
+- Pause stops bot turns and routines account-wide after Devices sync. Each bot can restrict shell, built-in file writes, and plugins; shell and allowed plugins remain capable of writing files.
+- Bots can propose a draft for review. Approve & save writes it to a new workspace file only after confirmation; Decline writes nothing.
+- Custom providers discover new models automatically and offer Refresh Models in Settings without replacing a bot's chosen model.
+- The local websocket rejects foreign browser origins and hostnames. Protocol-3 relays reconcile encrypted bot policies and guard concurrent roster writes; upgrade the relay and paired Devices together.
+- Recovering a lost roster upload response preserves other Devices' newly created bots and chats alongside newer local edits, including after restarting the Device. A routine deleted after its creation upload stays deleted even when that upload's reply is lost.
+- Shell mutations and opaque programs require Auto-review even in bot workspaces; read-only commands still run automatically. File-writing flags and executable filter programs no longer inherit a read-only classification.
+- Allow on a pending shell command card resumes its command on the assigned Runner; stale, duplicate, wrong-chat, and wrong-Runner answers are rejected.
+- Unpairing this Device also clears pending chat ownership and stored script values before another identity uses its data directory.
+- Add MCP servers from Settings or `lorca mcp` using this Runner's `mcp.json`; manage their tools, sign-in, and access through the existing review controls. Bots can select a teammate's provider, model, and supported thinking level with `edit_bot`.
+- Built-in models and marketplace entries refresh from the selected Beans relay's public, versioned catalogs without sending account credentials to an upstream service. Bundled catalogs remain available offline. The Runner's `lorca` command is available to bots with shell access; changes still go through Auto-review.
+- Codemode scripts can run reviewed commands on the bot's Runner, edit files, read MCP resources, and request a plugin's complete server instructions; their command output includes an exit code, and the working row names the command. Shell, file, and plugin restrictions still apply to each nested call.
 - Bots on ChatGPT, Grok, and OpenCode's GPT, Grok, and Muse Spark models see the images their tools return, such as a browser plugin's screenshot or an image file they read. They used to get only the text beside the image.
+- Contributor instructions use the current phone scripts and separate Runner and phone-core checks. The source-distributed JavaScriptCore avatar bundle is included in clean checkouts.
 - Pairing a Mac or restoring your identity no longer asks you to connect a provider your account already has. Onboarding waits until the account's providers arrive from the relay, which a slow connection or a long list of chats used to outlast.
 - Onboarding's last step says the Mac is paired, or that your identity is restored, instead of calling it your first Device.
 - Pair a Device works on every paired Mac. On a Mac that had joined by pairing it showed an error, since only the Mac that created or restored your identity could pair others. If you run your own relay, update it first.

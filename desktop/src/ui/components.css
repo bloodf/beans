@@ -752,10 +752,6 @@ textarea::placeholder {
   color: #ffffff;
 }
 
-.avatar-disc.bot {
-  background: linear-gradient(to bottom, color-mix(in srgb, var(--tint) 72%, #ffffff), var(--tint));
-}
-
 .avatar-disc.you {
   background: var(--label-3);
 }

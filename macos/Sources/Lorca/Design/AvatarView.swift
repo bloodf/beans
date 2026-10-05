@@ -1,5 +1,7 @@
 import AppKit
 
+import JavaScriptCore
+
 enum Glyph {
     static func symbol(_ name: String, pointSize: CGFloat, weight: NSFont.Weight = .semibold, color: NSColor)
         -> NSImage?
@@ -11,11 +13,11 @@ enum Glyph {
     }
 }
 
-/// Circular gradient badge with the bot's SF Symbol, or the bot's own image. Also renders
+/// Circular bot portrait from bundled Blobatar, or the bot's own image. Also renders
 /// "you" and devices.
 final class AvatarView: NSView {
     enum Content: Hashable {
-        case bot(symbolName: String, accent: Accent)
+        case bot(id: String)
         /// A custom profile image, drawn aspect-filled inside the circle.
         case image(NSImage)
         case you
@@ -124,10 +126,12 @@ final class AvatarView: NSView {
         let path = NSBezierPath(ovalIn: box)
 
         switch content {
-        case let .bot(symbolName, accent):
-            let gradient = NSGradient(starting: accent.highlight, ending: accent.color)
-            gradient?.draw(in: path, angle: -90)
-            renderSymbol(symbolName, in: box, color: .white, scale: 0.52)
+        case let .bot(id):
+            let image = BlobatarImage.image(for: id)
+            NSGraphicsContext.saveGraphicsState()
+            path.addClip()
+            image.draw(in: box, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
+            NSGraphicsContext.restoreGraphicsState()
 
         case let .image(image):
             NSGraphicsContext.saveGraphicsState()
@@ -180,11 +184,38 @@ final class AvatarView: NSView {
     }
 
     /// The bot's image when it has one and this computer has the bytes (the store fetches them and
-    /// redraws otherwise), else its symbol on its accent.
+    /// redraws otherwise), else its deterministic portrait from the bot ID.
     @MainActor
     static func content(for bot: Bot, store: AppStore? = nil) -> Content {
         if let image = (store ?? AppStore.shared).avatarImage(for: bot) { return .image(image) }
-        return .bot(symbolName: bot.symbolName, accent: bot.accent)
+        return .bot(id: bot.id)
+    }
+}
+
+/// One JavaScriptCore instance and decoded image per bot ID; bundled SVG never leaves the app.
+@MainActor
+private enum BlobatarImage {
+    private static let context: JSContext = {
+        guard let url = Bundle.main.url(forResource: "blobatar.jsc", withExtension: "js"),
+              let script = try? String(contentsOf: url, encoding: .utf8),
+              let context = JSContext() else {
+            preconditionFailure("Bundled Blobatar generator missing")
+        }
+        context.evaluateScript(script)
+        precondition(context.exception == nil, "Bundled Blobatar generator failed: \(context.exception!)")
+        return context
+    }()
+    private static var images: [String: NSImage] = [:]
+
+    static func image(for id: String) -> NSImage {
+        if let image = images[id] { return image }
+        let svg = context.objectForKeyedSubscript("blobatar").call(withArguments: [id])
+        guard context.exception == nil, let text = svg?.toString(),
+              let image = NSImage(data: Data(text.utf8)) else {
+            preconditionFailure("Blobatar could not render bot \(id)")
+        }
+        images[id] = image
+        return image
     }
 }
 

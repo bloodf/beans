@@ -246,6 +246,8 @@ export function ActionRow(props: {
   actionCopied?: boolean;
   /** Gets the click, whose target a menu can pop up under. */
   onAction?: (event: MouseEvent) => void;
+  secondActionTitle?: string;
+  onSecondAction?: () => void;
 }) {
   return (
     <div class="row action-row" data-label={props.label} title={props.tooltip}>
@@ -253,6 +255,9 @@ export function ActionRow(props: {
       <span class={["row-value", "truncate", { mono: !!props.monospaced, selectable: !!props.monospaced }]} style={props.tint ? { color: props.tint } : undefined}>
         {props.value ?? ""}
       </span>
+      <Show when={props.secondActionTitle}>
+        <LinkButton onClick={() => props.onSecondAction?.()}>{props.secondActionTitle}</LinkButton>
+      </Show>
       <Show when={props.actionTitle}>
         <LinkButton class={props.actionCopied ? "copied" : undefined} onClick={(event) => props.onAction?.(event)}>
           <Show when={props.actionCopied}>
@@ -359,11 +364,11 @@ export function SwitchRow(props: {
   );
 }
 
-/** A sentence inside a card, for an empty state. */
-export function NoteRow(props: { text: string }) {
+/** A sentence inside a card, optionally colored for errors. */
+export function NoteRow(props: { text: string; tint?: string }) {
   return (
     <div class="row note-row">
-      <span>{props.text}</span>
+      <span style={props.tint ? { color: props.tint } : undefined}>{props.text}</span>
     </div>
   );
 }

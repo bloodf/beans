@@ -299,7 +299,7 @@ extension MarketplaceViewController {
 
     func row(for template: BotTemplate) -> MarketplaceRow {
         let avatar = AvatarView(diameter: 40)
-        avatar.content = .bot(symbolName: template.symbolName, accent: template.accent)
+        avatar.content = .bot(id: template.id)
         let add = ActionButton(title: L("Add")) { [weak self] in self?.add(template) }
         add.isEnabled = runner != nil
         add.toolTip = runner.map { L("Add %@ to %@", template.name, $0.name) } ?? L("Pair a Runner first.")

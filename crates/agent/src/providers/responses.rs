@@ -3,6 +3,7 @@
 //! apart from where a tool result's images go ([`ToolImages`]), and stream the same events.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use futures::StreamExt;
 use serde_json::{json, Value};
@@ -309,7 +310,7 @@ pub(crate) async fn pump(
     response: reqwest::Response,
     tx: mpsc::Sender<AssistantEvent>,
     cancel: CancellationToken,
-    info: Option<&'static ModelInfo>,
+    info: Option<Arc<ModelInfo>>,
     provider: &str,
 ) {
     let _ = tx.send(AssistantEvent::Start).await;

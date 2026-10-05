@@ -115,3 +115,52 @@ async fn a_failed_bind_exits_without_announcing_readiness() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
 }
+
+fn mcp_command(home: &Home, args: &[&str]) -> std::process::Output {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_lorca"));
+    command.env("RUST_LOG", "off").arg("--home").arg(&home.0).arg("--port").arg("0").arg("mcp").args(args);
+    command.output().unwrap()
+}
+
+#[test]
+fn mcp_add_flags_and_import_skip_existing_without_exposing_secrets() {
+    let home = Home::new();
+    let output = mcp_command(&home, &["add", "remote", "--transport", "http", "--header", "Authorization=Bearer private-token", "-H", "X-Test=value", "--description", "Remote tools", "--timeout", "42", "https://example.com/mcp"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private-token"));
+    let output = mcp_command(&home, &["add", "local", "--transport", "stdio", "--env", "TOKEN=private-token", "-e", "MODE=test", "--", "does-not-run", "--flag"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let path = home.0.join("mcp.json");
+    let saved: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(saved["mcpServers"]["remote"]["headers"]["Authorization"], "Bearer private-token");
+    assert_eq!(saved["mcpServers"]["remote"]["timeout"], 42);
+    assert_eq!(saved["mcpServers"]["local"]["env"]["TOKEN"], "private-token");
+    assert_eq!(saved["mcpServers"]["local"]["args"][0], "--flag");
+
+    let source = home.0.join("source.json");
+    std::fs::write(&source, r#"{"mcpServers":{"remote":{"type":"http","url":"https://other.example/mcp"},"new":{"command":"new-command"}}}"#).unwrap();
+    let path = source.to_str().unwrap();
+    let output = mcp_command(&home, &["import", path]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Skipped remote"));
+    let output = mcp_command(&home, &["import", path]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Skipped new"));
+    let saved: Value = serde_json::from_slice(&std::fs::read(home.0.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(saved["mcpServers"]["remote"]["url"], "https://example.com/mcp");
+    assert_eq!(saved["mcpServers"]["new"]["command"], "new-command");
+}
+
+#[test]
+fn mcp_list_fails_for_enabled_invalid_entries_but_not_disabled_ones() {
+    let home = Home::new();
+    std::fs::create_dir_all(&home.0).unwrap();
+    std::fs::write(home.0.join("mcp.json"), r#"{"mcpServers":{"broken":{"command":""}}}"#).unwrap();
+    let output = mcp_command(&home, &["list"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("broken:"));
+    std::fs::write(home.0.join("mcp.json"), r#"{"mcpServers":{"broken":{"command":"","disabled":true}}}"#).unwrap();
+    let output = mcp_command(&home, &["list"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("broken: off"));
+}

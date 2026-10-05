@@ -47,6 +47,27 @@ pub async fn environment() -> &'static [(OsString, OsString)] {
     ENVIRONMENT.get_or_init(load).await
 }
 
+/// Host-specific environment for a bot command, layered over the login shell's variables.
+#[derive(Debug, Clone, Default)]
+pub struct Extras {
+    pub variables: Vec<(OsString, OsString)>,
+    pub path_first: Vec<PathBuf>,
+}
+
+impl Extras {
+    pub fn apply(&self, command: &mut Command) {
+        command.envs(self.variables.iter().map(|(name, value)| (name, value)));
+        if self.path_first.is_empty() {
+            return;
+        }
+        let login = ENVIRONMENT.get().and_then(|environment| environment.iter().rev().find(|(name, _)| name.to_str() == Some("PATH")).map(|(_, value)| value.clone()));
+        let path = login.or_else(|| std::env::var_os("PATH")).unwrap_or_default();
+        if let Ok(path) = std::env::join_paths(self.path_first.iter().cloned().chain(std::env::split_paths(&path))) {
+            command.env("PATH", path);
+        }
+    }
+}
+
 fn command_with(program: impl AsRef<OsStr>, environment: &[(OsString, OsString)]) -> Command {
     #[cfg(windows)]
     let program = windows_program(program.as_ref(), environment);

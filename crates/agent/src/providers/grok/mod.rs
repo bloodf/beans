@@ -40,7 +40,7 @@ pub struct GrokProvider {
     /// Sent as `reasoning.effort` (`Off` sends nothing).
     pub thinking_level: Option<ThinkingLevel>,
     /// The catalog entry for the model, when it has one.
-    pub info: Option<&'static ModelInfo>,
+    pub info: Option<Arc<ModelInfo>>,
     /// Where tool results' images go: a user message after the outputs, since xAI documents
     /// only a string `output`.
     pub tool_images: ToolImages,
@@ -156,8 +156,8 @@ impl Provider for GrokProvider {
         &self.model
     }
 
-    fn model_info(&self) -> Option<&'static ModelInfo> {
-        self.info
+    fn model_info(&self) -> Option<&ModelInfo> {
+        self.info.as_deref()
     }
 
     async fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream {
@@ -166,7 +166,7 @@ impl Provider for GrokProvider {
         let options = request.options.clone();
         options.before_payload(&mut body);
         let client = self.client.clone();
-        let info = self.info;
+        let info = self.info.clone();
         let url = format!("{}/responses", self.base_url);
         let tokens = match self.fresh_tokens().await {
             Ok(tokens) => tokens,

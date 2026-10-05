@@ -279,8 +279,10 @@ final class WorkingCellView: TranscriptCellView {
         case "install_plugin": return L("Installing a plugin")
         case "bash_input": return L("Answering a command")
         case "bash_output": return L("Waiting on a command")
-        // A codemode script: the plugin of its latest plugin call, which the CLI names.
-        case "codemode": return tool.description.map { L("Using %@", $0) } ?? L("Working")
+        // A codemode script shows its active command ahead of the latest plugin.
+        case "codemode":
+            if tool.isRunning, let command = tool.scriptCommand { return L("Running command: %@", command) }
+            return tool.description.map { L("Using %@", $0) } ?? L("Working")
         default:
             // A plugin tool: "Using GitHub", whether the call is running or just finished, so
             // a run of quick calls never flashes back to "Working" between them.
@@ -608,7 +610,8 @@ final class PermissionCellView: TranscriptCellView {
     /// The box's height at `rowWidth`, starting at `indent`. The table's row height and the
     /// cell's own layout come from the same `Layout`, so a card is exactly as tall as what it shows.
     static func height(for request: PermissionRequest, rowWidth: CGFloat, indent: CGFloat) -> CGFloat {
-        Layout(request: request, rowWidth: rowWidth, indent: indent).height
+        if request.isProposal { return ProposalCellView.height(for: request, rowWidth: rowWidth, indent: indent) }
+        return Layout(request: request, rowWidth: rowWidth, indent: indent).height
     }
 
     /// The line under the title: the call while it waits, the answer and the call once
@@ -921,5 +924,196 @@ final class CommandBlockView: NSView {
     override func accessibilityPerformPress() -> Bool {
         onClick?()
         return true
+    }
+}
+
+// MARK: - Draft proposal
+
+/// The complete draft scrolls inside a bounded card. Links render as text, never as actions.
+final class ProposalCellView: TranscriptCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("ProposalCell")
+    private static let previewLimit: CGFloat = 240
+    private static let inset: CGFloat = 14
+    private static let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
+    private static let pathFont = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+    private static let statusFont = NSFont.systemFont(ofSize: 11.5)
+    private static func statusText(_ request: PermissionRequest) -> String {
+        request.decision == .failed && !request.summary.isEmpty
+            ? L("Save failed: %@", request.summary) : request.decisionText
+    }
+    private static func labelHeight(_ text: String, font: NSFont, width: CGFloat, lines: Int = 0) -> CGFloat {
+        let full = TextMeasure.labelSize(of: NSAttributedString(string: text, attributes: [.font: font]), width: width).height
+        guard lines > 0 else { return full }
+        let sample = String(repeating: "X\n", count: lines - 1) + "X"
+        return min(full, TextMeasure.labelSize(of: NSAttributedString(string: sample, attributes: [.font: font]), width: width).height)
+    }
+
+
+    @MainActor private struct Layout {
+        let width: CGFloat
+        let title: NSRect
+        let path: NSRect
+        let preview: NSRect
+        let status: NSRect
+        let buttons: NSRect?
+        let height: CGFloat
+        let segments: [MessageSegment]
+        let textLayout: SegmentLayout
+
+        init(_ request: PermissionRequest, rowWidth: CGFloat, indent: CGFloat) {
+            width = min(PermissionCellView.width, rowWidth - indent - ChatMetrics.horizontalInset)
+            let inner = max(24, width - ProposalCellView.inset * 2)
+            let titleText = request.title ?? L("Untitled draft")
+            let pathText = request.path ?? L("No destination")
+            let titleHeight = ProposalCellView.labelHeight(titleText, font: ProposalCellView.titleFont, width: inner, lines: 2)
+            title = NSRect(x: ProposalCellView.inset, y: 12, width: inner, height: titleHeight)
+            let pathHeight = ProposalCellView.labelHeight(pathText, font: ProposalCellView.pathFont, width: inner)
+            path = NSRect(x: ProposalCellView.inset, y: title.maxY + 6, width: inner, height: pathHeight)
+            let content = request.content ?? L("Draft content unavailable")
+            let original = RenderedMessage(content, textColor: .labelColor)
+            let safeSegments: [MessageSegment] = original.segments.map { segment in
+                switch segment {
+                case let .text(text, top, bottom):
+                    let copy = NSMutableAttributedString(attributedString: text)
+                    copy.removeAttribute(.link, range: NSRange(location: 0, length: copy.length))
+                    return .text(copy, topInset: top, bottomInset: bottom)
+                case let .table(table):
+                    let cells = table.cells.map { row in row.map { text -> NSAttributedString in
+                        let copy = NSMutableAttributedString(attributedString: text)
+                        copy.removeAttribute(.link, range: NSRange(location: 0, length: copy.length))
+                        return copy
+                    } }
+                    return .table(TableContent(cells: cells, columns: table.columns))
+                }
+            }
+            segments = safeSegments
+            textLayout = SegmentLayout(safeSegments, width: inner)
+            preview = NSRect(x: ProposalCellView.inset, y: path.maxY + 10, width: inner,
+                             height: min(ProposalCellView.previewLimit, max(32, textLayout.height)))
+            let statusHeight = ProposalCellView.labelHeight(ProposalCellView.statusText(request), font: ProposalCellView.statusFont, width: inner)
+            status = NSRect(x: ProposalCellView.inset, y: preview.maxY + 8, width: inner, height: statusHeight)
+            buttons = request.isPending ? NSRect(x: ProposalCellView.inset, y: status.maxY + 8, width: inner, height: 24) : nil
+            height = (buttons?.maxY ?? status.maxY) + 12
+        }
+    }
+
+    static func height(for request: PermissionRequest, rowWidth: CGFloat, indent: CGFloat) -> CGFloat {
+        Layout(request, rowWidth: rowWidth, indent: indent).height
+    }
+
+    static func spokenText(request: PermissionRequest, botName: String) -> String {
+        let content = request.content.map { RenderedMessage($0, textColor: .labelColor).plainText } ?? L("Draft content unavailable")
+        return L("%@ proposes a draft: %@. Path: %@. %@. Content: %@", botName,
+                 request.title ?? L("Untitled draft"), request.path ?? L("No destination"), statusText(request), content)
+    }
+
+    private let avatar = AvatarView(diameter: ChatMetrics.avatarSize)
+    private let box = BackgroundView()
+    private let title = Build.label("", font: ProposalCellView.titleFont, lines: 2)
+    private let path = Build.label("", font: ProposalCellView.pathFont, color: .secondaryLabelColor, lines: 0)
+    private let status = Build.label("", font: ProposalCellView.statusFont, color: .secondaryLabelColor, lines: 0)
+    private let scroll = NSScrollView()
+    private let content = SegmentedTextView()
+    private let approve = NSButton(title: L("Approve & save"), target: nil, action: nil)
+    private let decline = NSButton(title: L("Decline"), target: nil, action: nil)
+    private var request: PermissionRequest?
+    private var messageID: Message.ID?
+    private var groupStart = true
+    private var answering = false
+    private var cachedLayout: (request: PermissionRequest, width: CGFloat, indent: CGFloat, value: Layout)?
+
+    private func layout(for request: PermissionRequest, width: CGFloat, indent: CGFloat) -> Layout {
+        if let cachedLayout, cachedLayout.request == request,
+           cachedLayout.width == width, cachedLayout.indent == indent { return cachedLayout.value }
+        let value = Layout(request, rowWidth: width, indent: indent)
+        cachedLayout = (request, width, indent, value)
+        return value
+    }
+    var onDecision: ((String) -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        box.cornerRadius = 12
+        box.fillColor = Theme.botBubble
+        box.borderColor = Theme.botBubbleBorder
+        title.lineBreakMode = .byTruncatingTail
+        path.lineBreakMode = .byWordWrapping
+        scroll.drawsBackground = false
+        scroll.setAccessibilityLabel(L("Draft content; scroll to read before approving"))
+        scroll.hasVerticalScroller = true
+        scroll.verticalScrollElasticity = .none
+        scroll.documentView = content
+        for view in [avatar, box, title, path, scroll, status, approve, decline] as [NSView] {
+            addSubview(view.framePositioned())
+        }
+        for button in [approve, decline] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.target = self
+            button.action = #selector(decide(_:))
+        }
+        approve.identifier = NSUserInterfaceItemIdentifier("allow")
+        decline.identifier = NSUserInterfaceItemIdentifier("deny")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+
+    func configure(request: PermissionRequest, messageID: Message.ID, botName: String, avatar avatarContent: AvatarView.Content?, groupStart: Bool) {
+        if self.messageID != messageID || self.request != request { answering = false }
+        self.messageID = messageID
+        self.request = request
+        self.groupStart = groupStart
+        avatar.isHidden = avatarContent == nil
+        if let avatarContent { avatar.content = avatarContent }
+        title.stringValue = request.title ?? L("Untitled draft")
+        title.toolTip = title.stringValue
+        path.stringValue = request.path ?? L("No destination")
+        path.toolTip = path.stringValue
+        path.setAccessibilityLabel(L("Destination: %@", path.stringValue))
+        status.stringValue = answering && request.isPending ? L("Waiting for Runner…") : Self.statusText(request)
+        let metrics = layout(for: request, width: max(bounds.width, 320), indent: ChatMetrics.indent(showsAvatar: avatarContent != nil))
+        content.configure(metrics.segments, layout: metrics.textLayout, textColor: .labelColor)
+        approve.isHidden = !request.isPending
+        approve.isEnabled = !answering && request.path?.isEmpty == false
+        decline.isHidden = !request.isPending
+        decline.isEnabled = !answering
+        setAccessibilityLabel(Self.spokenText(request: request, botName: botName))
+        needsLayout = true
+    }
+
+    @objc private func decide(_ sender: NSButton) {
+        guard request?.isPending == true, !answering, let choice = sender.identifier?.rawValue else { return }
+        answering = true
+        status.stringValue = choice == "allow" ? L("Saving…") : L("Declining…")
+        approve.isEnabled = false
+        decline.isEnabled = false
+        onDecision?(choice)
+    }
+
+    override func layout() {
+        super.layout()
+        guard let request else { return }
+        let top = groupStart ? ChatMetrics.groupTopPadding : ChatMetrics.tightTopPadding
+        let x = ChatMetrics.indent(showsAvatar: !avatar.isHidden)
+        let metrics = layout(for: request, width: bounds.width, indent: x)
+        func place(_ rect: NSRect) -> NSRect { rect.offsetBy(dx: x, dy: top) }
+        box.frame = NSRect(x: x, y: top, width: metrics.width, height: metrics.height)
+        avatar.frame = NSRect(x: ChatMetrics.horizontalInset, y: top + metrics.height - ChatMetrics.avatarSize,
+                              width: ChatMetrics.avatarSize, height: ChatMetrics.avatarSize)
+        title.frame = place(metrics.title)
+        path.frame = place(metrics.path)
+        scroll.frame = place(metrics.preview)
+        content.frame = NSRect(x: 0, y: 0, width: metrics.preview.width,
+                               height: max(metrics.preview.height, metrics.textLayout.height))
+        status.frame = place(metrics.status)
+        if let buttons = metrics.buttons {
+            let first = approve.intrinsicContentSize.width + 6
+            approve.frame = NSRect(x: x + buttons.minX, y: top + buttons.minY, width: first, height: 24)
+            decline.frame = NSRect(x: approve.frame.maxX + 8, y: approve.frame.minY,
+                                   width: decline.intrinsicContentSize.width + 6, height: 24)
+        }
     }
 }

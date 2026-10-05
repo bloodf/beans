@@ -1,8 +1,7 @@
-// A new bot, after the macOS app's NewBotViewController: its name, what it does, a look, the Runner
-// it runs on, and the provider, model, and thinking level. Every bot gets a direct chat, which opens
-// when it is made.
+// New bot form: its ID determines its avatar after creation; the legacy look fields stay on wire.
+// It gets one Runner and a direct chat.
 
-import { createMemo, createSignal, For, Show } from "solid-js";
+import { createMemo, createSignal, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { L } from "../../l10n";
 import {
@@ -12,25 +11,12 @@ import {
   providerSubtitle,
   thinkingLevels,
   withCustomModels,
-  type Accent,
   type ProviderKind,
 } from "../../model/models";
 import { track } from "../../model/reactive";
 import { store } from "../../model/store";
-import { Avatar } from "../avatar";
 import { PopUpButton, TextArea, TextField } from "../controls";
 import { presentSheet, Sheet } from "../overlay";
-
-const looks: { symbolName: string; accent: Accent }[] = [
-  { symbolName: "sparkles", accent: "indigo" },
-  { symbolName: "chevron.left.forwardslash.chevron.right", accent: "blue" },
-  { symbolName: "binoculars.fill", accent: "teal" },
-  { symbolName: "pencil.and.scribble", accent: "pink" },
-  { symbolName: "bolt.horizontal.fill", accent: "orange" },
-  { symbolName: "leaf.fill", accent: "green" },
-  { symbolName: "wand.and.stars", accent: "purple" },
-  { symbolName: "flame.fill", accent: "red" },
-];
 
 /** `onCreate` gets the new bot's id. */
 export function presentNewBot(onCreate: (botID: string) => void): void {
@@ -49,7 +35,6 @@ function LabeledRow(props: { label: string; top?: boolean; children: JSX.Element
 function NewBotSheet(props: { onCreate: (botID: string) => void; dismiss: () => void }) {
   const [name, setName] = createSignal("");
   const [description, setDescription] = createSignal("");
-  const [look, setLook] = createSignal(0);
   const [runnerID, setRunnerID] = createSignal(store.runners[0]?.id ?? "");
   const [provider, setProvider] = createSignal<ProviderKind>(providerKinds[0]!);
   const [model, setModel] = createSignal("");
@@ -83,12 +68,11 @@ function NewBotSheet(props: { onCreate: (botID: string) => void; dismiss: () => 
     const host = runner();
     const trimmed = name().trim();
     if (!host || trimmed === "") return;
-    const chosen = looks[look()]!;
     const botID = store.createBot({
       name: trimmed,
       description: description().trim(),
-      symbolName: chosen.symbolName,
-      accent: chosen.accent,
+      symbolName: "sparkles",
+      accent: "indigo",
       runnerID: host.id,
       provider: provider(),
       model: model() || undefined,
@@ -134,17 +118,6 @@ function NewBotSheet(props: { onCreate: (botID: string) => void; dismiss: () => 
             }
           }}
         />
-      </LabeledRow>
-      <LabeledRow label={L("Look")}>
-        <div class="look-row">
-          <For each={looks}>
-            {(each, index) => (
-              <button class={["look-choice", { selected: index() === look() }]} aria-pressed={index() === look() ? "true" : "false"} onClick={() => setLook(index())}>
-                <Avatar content={{ kind: "bot", symbolName: each.symbolName, accent: each.accent }} size={26} />
-              </button>
-            )}
-          </For>
-        </div>
       </LabeledRow>
       <LabeledRow label={L("Runner")}>
         <PopUpButton

@@ -203,48 +203,56 @@ export function NoticeRow({ row }: { row: Extract<Row, { type: "notice" }> }) {
   );
 }
 
-/// A bot asking before a plugin tool runs, a shell command runs, or a plugin is installed. While
-/// it waits: the question, the call (a shell command in a code block that opens the whole
-/// command on tap), why Auto-review paused it, the answers, and under them the rule Always allow
-/// adds. A shell command offers Always allow only with a rule. Once answered, the answer and the
-/// call; an Always allow keeps its rule. In a group the card sits in the bubbles' column, the bot's
-/// avatar beside its bottom edge.
+/// Permission cards for plugin calls, commands, installs, sign-ins, and draft proposals.
+/// Drafts show a bounded Markdown preview and open the full document before approval.
 export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { type: "permission" }>; isGroup: boolean; onDecide: (decision: "allow" | "always" | "deny") => void }) {
   useLanguage();
   const p = usePalette();
   const [copied, setCopied] = useState(false);
   const [showCommand, setShowCommand] = useState(false);
+  const [showDraft, setShowDraft] = useState(false);
+  const paneWidth = usePaneWidth();
   const showsAvatar = isGroup && row.message.author.kind === "bot";
   const pending = row.body.decision === "pending";
   const connect = row.body.tool === "connect";
+  const proposal = row.body.tool === "propose";
   const shell = row.body.plugin_id === "computer";
   const who = row.bot?.name ?? t("The bot");
   const plugin = row.body.plugin_name;
-  const title = connect
-    ? t("{who} needs a sign-in to {plugin}", { who, plugin })
-    : row.body.tool === "install"
-      ? t("{who} wants to install {plugin}", { who, plugin })
-      : shell
-        ? t("{who} wants to run a command on {plugin}", { who, plugin })
-        : t("{who} wants to use {plugin}", { who, plugin });
+  const title = proposal
+    ? t("{who} wants to save a draft", { who })
+    : connect
+      ? t("{who} needs a sign-in to {plugin}", { who, plugin })
+      : row.body.tool === "install"
+        ? t("{who} wants to install {plugin}", { who, plugin })
+        : shell
+          ? t("{who} wants to run a command on {plugin}", { who, plugin })
+          : t("{who} wants to use {plugin}", { who, plugin });
   const command = row.body.command ?? row.body.summary.replace(/^\$ /, "");
-  const ruleNote = !row.body.rule
+  const ruleNote = proposal || !row.body.rule
     ? undefined
     : pending
       ? t("Always allow adds the rule “{rule}”.", { rule: row.body.rule })
       : row.body.decision === "always"
         ? t("Added the rule “{rule}” to Auto-review.", { rule: row.body.rule })
         : undefined;
-  const decided: Record<string, string> = connect
-    ? { allowed: t("Signing in"), denied: t("Not now"), dismissed: t("Dismissed"), connected: t("Signed in"), failed: t("Sign-in failed") }
-    : { allowed: t("Allowed once"), always: t("Always allowed"), denied: t("Denied"), expired: t("No answer in time"), dismissed: t("Dismissed") };
-  const choices: [string, "allow" | "always" | "deny"][] = connect
-    ? [[t("Sign in"), "allow"], [t("Not now"), "deny"]]
-    : row.body.tool === "install"
-      ? [[t("Allow"), "allow"], [t("Deny"), "deny"]]
-      : shell && !row.body.rule
-        ? [[t("Allow once"), "allow"], [t("Deny"), "deny"]]
-        : [[t("Allow once"), "allow"], [t("Always allow"), "always"], [t("Deny"), "deny"]];
+  const decided: Record<string, string> = proposal
+    ? { allowed: t("Approved for saving"), denied: t("Declined"), expired: t("No answer in time"), dismissed: t("Dismissed") }
+    : connect
+      ? { allowed: t("Signing in"), denied: t("Not now"), dismissed: t("Dismissed"), connected: t("Signed in"), failed: t("Sign-in failed") }
+      : { allowed: t("Allowed once"), always: t("Always allowed"), denied: t("Denied"), expired: t("No answer in time"), dismissed: t("Dismissed") };
+  const choices: [string, "allow" | "always" | "deny"][] = proposal
+    ? [[t("Approve & save"), "allow"], [t("Decline"), "deny"]]
+    : connect
+      ? [[t("Sign in"), "allow"], [t("Not now"), "deny"]]
+      : row.body.tool === "install"
+        ? [[t("Allow"), "allow"], [t("Deny"), "deny"]]
+        : shell && !row.body.rule
+          ? [[t("Allow once"), "allow"], [t("Deny"), "deny"]]
+          : [[t("Allow once"), "allow"], [t("Always allow"), "always"], [t("Deny"), "deny"]];
+  const draft = row.body.content ?? "";
+  const preview = draft.length > 800 ? `${draft.slice(0, 800)}…` : draft;
+  const draftWidth = Math.max(160, Math.min(394, paneWidth - INSET * 2 - (showsAvatar ? AVATAR + GUTTER : 0) - 24));
   useEffect(() => {
     if (!copied) return;
     const timer = setTimeout(() => setCopied(false), 1500);
@@ -259,12 +267,37 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
       )}
       <View style={[styles.permission, { backgroundColor: p.cell, borderColor: p.separator }]}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <Symbol name={connect ? "person.crop.circle.badge.checkmark" : row.body.tool === "install" ? "puzzlepiece.extension" : "hand.raised"} size={16} color={row.body.decision === "failed" ? p.red : row.body.decision === "connected" ? p.green : p.tint} />
+          <Symbol name={proposal ? "doc.text" : connect ? "person.crop.circle.badge.checkmark" : row.body.tool === "install" ? "puzzlepiece.extension" : "hand.raised"} size={16} color={row.body.decision === "failed" ? p.red : row.body.decision === "connected" ? p.green : p.tint} />
           <Text style={[styles.permissionTitle, { color: p.label }]} numberOfLines={2}>
             {title}
           </Text>
         </View>
-        {pending && shell ? (
+        {proposal ? (
+          <View style={{ gap: 6 }}>
+            {row.body.title ? <Text style={[styles.permissionTitle, { color: p.label }]}>{row.body.title}</Text> : null}
+            {row.body.path ? (
+              <View>
+                <Text style={[styles.ruleNote, { color: p.secondaryLabel }]}>{t("Target path")}</Text>
+                <Text selectable numberOfLines={2} style={[styles.commandText, { color: p.label }]}>{row.body.path}</Text>
+              </View>
+            ) : null}
+            {draft ? (
+              <Pressable
+                onPress={() => setShowDraft(true)}
+                accessibilityRole="button"
+                accessibilityLabel={`${t("Draft preview")}: ${preview}`}
+                accessibilityHint={t("Show full draft")}
+                style={({ pressed }) => [styles.command, { backgroundColor: p.code, opacity: pressed ? 0.7 : 1 }]}
+              >
+                <Markdown text={preview} color={p.label} maxWidth={draftWidth - 20} size={Font.caption} />
+                {draft.length > 800 ? <Text style={[styles.ruleNote, { color: p.tint }]}>{t("Show full draft")}</Text> : null}
+              </Pressable>
+            ) : null}
+            <Text style={[styles.caption, { color: p.secondaryLabel }]}>
+              {pending ? row.body.summary : `${decided[row.body.decision] ?? row.body.decision} · ${row.body.summary}`}
+            </Text>
+          </View>
+        ) : pending && shell ? (
           <Pressable
             onPress={() => setShowCommand(true)}
             style={({ pressed }) => [styles.command, { backgroundColor: p.code, opacity: pressed ? 0.6 : 1 }]}
@@ -283,7 +316,7 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
         {pending && row.body.reason ? (
           <Text style={[styles.reasonText, { color: p.secondaryLabel }]}>{row.body.reason}</Text>
         ) : null}
-        {row.body.decision === "allowed" && row.body.code ? (
+        {!proposal && row.body.decision === "allowed" && row.body.code ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginTop: 4 }}>
             <Text selectable style={{ color: p.label, fontSize: 17, fontWeight: "700", fontFamily: "Menlo" }}>{row.body.code}</Text>
             <Pressable
@@ -310,7 +343,7 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
         {pending ? (
           <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
             {choices.map(([label, decision]) => (
-              <Pressable key={decision} onPress={() => onDecide(decision)} style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]}>
+              <Pressable key={decision} onPress={() => onDecide(decision)} accessibilityRole="button" style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]}>
                 <Text style={{ color: decision === "deny" ? p.label : p.tint, fontSize: 13, fontWeight: "600" }}>
                   {label}
                 </Text>
@@ -321,6 +354,7 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
         {ruleNote ? <Text style={[styles.ruleNote, { color: p.secondaryLabel }]}>{ruleNote}</Text> : null}
       </View>
       {shell ? <CommandSheet visible={showCommand} title={title} command={command} onClose={() => setShowCommand(false)} /> : null}
+      {proposal && draft ? <DraftSheet visible={showDraft} title={row.body.title ?? title} path={row.body.path} content={draft} onClose={() => setShowDraft(false)} /> : null}
     </View>
   );
 }
@@ -484,6 +518,29 @@ function OutputBlock({ text }: { text: string }) {
       {fade && edges.above ? <LinearGradient pointerEvents="none" colors={[fade[0], fade[1]]} style={[styles.outputFade, { top: 0 }]} /> : null}
       {fade && edges.below ? <LinearGradient pointerEvents="none" colors={[fade[1], fade[0]]} style={[styles.outputFade, { bottom: 0 }]} /> : null}
     </View>
+  );
+}
+
+/// Full proposal remains readable when the transcript preview is capped.
+function DraftSheet({ visible, title, path, content, onClose }: { visible: boolean; title: string; path?: string; content: string; onClose: () => void }) {
+  useLanguage();
+  const p = usePalette();
+  const paneWidth = usePaneWidth();
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <View style={[styles.sheet, { backgroundColor: p.groupedBackground }]}>
+        <Text style={[styles.sheetTitle, { color: p.label }]}>{title}</Text>
+        {path ? <Text selectable style={[styles.commandText, { color: p.secondaryLabel }]}>{path}</Text> : null}
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={[styles.sheetCommand, { backgroundColor: p.cell }]}>
+          <Markdown text={content} color={p.label} maxWidth={Math.max(160, paneWidth - 64)} />
+        </ScrollView>
+        <View style={styles.sheetButtons}>
+          <Pressable onPress={onClose} accessibilityRole="button" style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]}>
+            <Text style={{ color: p.tint, fontSize: 15, fontWeight: "600" }}>{t("Done")}</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
   );
 }
 

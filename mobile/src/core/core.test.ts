@@ -440,6 +440,8 @@ describe("format", () => {
     // A script reads as the plugin its latest call used, which the CLI puts in its description.
     expect(activity([you, tool("codemode")])).toBe("Working…");
     expect(activity([you, tool("codemode", { description: "Linear", is_running: false })])).toBe("Using Linear…");
+    expect(activity([you, tool("codemode", { description: "Linear", script_command: "Install dependencies" })])).toBe("Running command: Install dependencies…");
+    expect(activity([you, tool("codemode", { description: "Linear", script_command: "Install dependencies", is_running: false })])).toBe("Using Linear…");
     // What the bot said since is the news; its thinking and a retry outrank the last call.
     expect(activity([you, tool("read"), msg({ kind: "bot", bot_id: "b1" }, { kind: "text", text: "Done" })])).toBeNull();
     expect(activity([you, tool("read")], { thinking: { c: "b1" } })).toBe("Thinking…");

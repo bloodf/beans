@@ -57,7 +57,7 @@ import {
 import { SettingsPage } from "./settings/panes";
 import { chatForShortcut, ChatsSidebar, SettingsSidebar } from "./sidebar";
 import { Loading, Offline, Placeholder } from "./states";
-import { setupWindow } from "./window";
+import { setupWindow, setWindowTitle } from "./window";
 
 /** The narrowest the content gets before the side panes give way. */
 const contentMinWidth = 460;
@@ -195,7 +195,7 @@ export function MainWindow(props: RouteSectionProps) {
   createEffect(
     () => title().title,
     (text) => {
-      document.title = text;
+      setWindowTitle(text);
     },
   );
 

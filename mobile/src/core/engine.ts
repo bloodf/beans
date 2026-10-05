@@ -8,7 +8,7 @@ import { AppState, Platform, type AppStateStatus } from "react-native";
 import * as core from "../../modules/lorca-core";
 import { t } from "../i18n";
 import { hostFacts } from "./host";
-import { providerConnectMethod, type Attachment, type AutoReview, type Bot, type Chat, type ChatMeta, type ChatSearchResults, type ChatUsage, type CustomAPI, type CustomModel, type Message, type ProviderKind, type ProviderStatus } from "./model";
+import { providerConnectMethod, type Attachment, type AutoReview, type Bot, type BotCapabilities, type Chat, type ChatMeta, type ChatSearchResults, type ChatUsage, type CustomAPI, type CustomModel, type Message, type ProviderKind, type ProviderStatus } from "./model";
 import { coreHome, loadPrefs, pathOf, wipePrefs } from "./prefs";
 import { clearPushes, installPushHandlers, registerForPushes } from "./push";
 import {
@@ -277,6 +277,15 @@ class Engine {
     return bot;
   }
 
+  /** Core emits roster.changed for accepted changes; avoid presenting unconfirmed permissions. */
+  async setBotCapabilities(id: string, capabilities: BotCapabilities): Promise<void> {
+    await core.request("bots.update", { id, capabilities });
+  }
+
+  async setAccountPaused(paused: boolean): Promise<void> {
+    await core.request("account.pause", { paused });
+  }
+
   /// Provider, model, and thinking level a bot runs with. Missing model/thinking means the
   /// provider default; empty strings on the wire clear a value the bot previously stored.
   setBotRuntime(id: string, provider: string, model?: string, thinking?: string) {
@@ -288,11 +297,6 @@ class Engine {
     void core.request("bots.update", { id, provider, model: model ?? "", thinking: thinking ?? "" }).catch((error) => {
       console.warn("updating bot runtime", error instanceof Error ? error.message : error);
     });
-  }
-
-  /// The bot's symbol and accent, the look under and behind its image.
-  async setBotLook(id: string, look: { symbol_name?: string; accent?: string }): Promise<void> {
-    await core.request("bots.update", { id, ...look });
   }
 
   /// A custom profile image from a picked file (null removes it). The core copies the file,
@@ -379,6 +383,16 @@ class Engine {
     const params = { ...(input.name ? { name: input.name } : {}), api: input.api, base_url: input.baseURL, api_key: input.apiKey };
     const { listed, models } = await core.request<{ listed: boolean; models?: CustomModel[] }>("providers.list_models", params);
     return { listed: !!listed, models: models ?? [] };
+  }
+
+  /// Refreshes saved custom providers through the core, then reads the latest model catalogs
+  /// for this Device's pickers. `updated` counts providers whose models changed, not models.
+  async refreshCustomModels(): Promise<{ updated: number }> {
+    try {
+      return await core.request<{ updated: number }>("providers.refresh");
+    } finally {
+      await this.bootstrap();
+    }
   }
 
   /// The saved key and base URL of an API-key or custom provider, for its form. Statuses carry

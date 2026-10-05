@@ -30,6 +30,7 @@ import {
   type ProviderModel,
   type Routine,
 } from "./models";
+import type { McpEntry, McpFile, McpServer, ParsedServer } from "./mcp";
 
 /** Why the last try to connect to the relay failed. */
 export interface WireRelayProblem {
@@ -57,6 +58,30 @@ export interface WirePluginStatus {
   icon?: string;
   state: string;
   detail?: string;
+  source?: string | null;
+}
+
+export interface WireMcpServer {
+  name: string;
+  id: string;
+  enabled: boolean;
+  config: Record<string, unknown> | null;
+  problem?: string | null;
+  status?: WirePluginStatus | null;
+  signs_in?: boolean | null;
+  signed_in?: boolean | null;
+  tool_count?: number | null;
+  tools?: { name: string; title?: string | null; description?: string | null; read_only?: boolean | null; hidden?: boolean | null }[] | null;
+}
+
+export interface WireMcpFile {
+  path: string;
+  error?: string | null;
+  servers: WireMcpServer[];
+}
+
+export interface WireParsedServers {
+  servers: { name?: string | null; config: Record<string, unknown> | null; problem?: string | null }[];
 }
 
 export interface WireDevice {
@@ -93,6 +118,7 @@ export interface WireBot {
   provider: string;
   model?: string | null;
   thinking?: string | null;
+  capabilities?: { shell?: boolean; write?: boolean; plugins?: string[] | null } | null;
   avatar?: WireAttachment | null;
   created_at: number;
 }
@@ -118,6 +144,7 @@ export interface WireBody {
   detail?: string | null;
   is_running?: boolean | null;
   description?: string | null;
+  script_command?: string | null;
   target_bot_id?: string | null;
   from?: string | null;
   to?: string | null;
@@ -131,6 +158,9 @@ export interface WireBody {
   rule?: string | null;
   command?: string | null;
   run?: WireRun | null;
+  title?: string | null;
+  content?: string | null;
+  path?: string | null;
 }
 
 export interface WireAuthor {
@@ -239,6 +269,7 @@ export interface WireSnapshot {
   relay_connected: boolean;
   relay_update_required?: boolean | null;
   relay_error?: WireRelayProblem | null;
+  paused?: boolean;
   devices: WireDevice[];
   bots: WireBot[];
   chats: WireChat[];
@@ -261,6 +292,7 @@ export interface WireModel {
 
 export interface WireRosterChanged {
   devices: WireDevice[];
+  paused?: boolean;
   bots: WireBot[];
   chats: WireChat[];
   routines?: WireRoutine[] | null;
@@ -382,7 +414,48 @@ export function toPlugin(wire: WirePluginStatus): InstalledPlugin {
     icon: wire.icon ?? "",
     state: (states as string[]).includes(wire.state) ? (wire.state as PluginState) : "unknown",
     detail: wire.detail ?? "",
+    source: optional(wire.source),
   };
+}
+
+/** Preserve unknown mcp.json fields while normalizing editable fields. */
+export function toMcpEntry(wire: Record<string, unknown> | null | undefined): McpEntry {
+  const entry: McpEntry = { ...(wire ?? {}) };
+  const text = (value: unknown) => (typeof value === "string" ? value : value === undefined || value === null ? undefined : String(value));
+  const map = (value: unknown) =>
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, each]) => [key, text(each) ?? ""]))
+      : undefined;
+  for (const key of ["type", "command", "cwd", "url", "description"] as const) entry[key] = text(entry[key]);
+  entry.args = Array.isArray(entry.args) ? entry.args.map((arg) => text(arg) ?? "") : undefined;
+  entry.env = map(entry.env);
+  entry.headers = map(entry.headers);
+  entry.disabled = entry.disabled === true ? true : undefined;
+  for (const key of Object.keys(entry)) if (entry[key] === undefined) delete entry[key];
+  return entry;
+}
+
+export function toMcpServer(wire: WireMcpServer): McpServer {
+  return {
+    name: wire.name,
+    id: wire.id,
+    enabled: wire.enabled,
+    entry: toMcpEntry(wire.config),
+    problem: optional(wire.problem),
+    status: wire.status ? toPlugin(wire.status) : undefined,
+    signsIn: wire.signs_in ?? false,
+    signedIn: wire.signed_in ?? false,
+    toolCount: optional(wire.tool_count),
+    tools: wire.tools?.map((tool) => ({ name: tool.name, title: optional(tool.title), description: tool.description ?? "", readOnly: tool.read_only ?? false, hidden: tool.hidden ?? false })),
+  };
+}
+
+export function toMcpFile(wire: WireMcpFile): McpFile {
+  return { path: wire.path, error: optional(wire.error), servers: wire.servers.map(toMcpServer) };
+}
+
+export function toParsedServers(wire: WireParsedServers): ParsedServer[] {
+  return wire.servers.map((server) => ({ name: optional(server.name), entry: server.config ? toMcpEntry(server.config) : undefined, problem: optional(server.problem) }));
 }
 
 export function toDevice(wire: WireDevice): Device {
@@ -423,6 +496,11 @@ export function toBot(wire: WireBot): Bot {
     provider: isProviderKind(wire.provider) ? wire.provider : "deepseek",
     model: optional(wire.model) || undefined,
     thinking: optional(wire.thinking) || undefined,
+    capabilities: {
+      shell: wire.capabilities?.shell ?? true,
+      write: wire.capabilities?.write ?? true,
+      plugins: wire.capabilities?.plugins ?? null,
+    },
     avatar: wire.avatar ? toAttachment(wire.avatar) : undefined,
     createdAt: seconds(wire.created_at),
   };
@@ -457,6 +535,7 @@ export function toMessage(wire: WireMessage): Message {
           detail: body.detail ?? "",
           isRunning: body.is_running ?? false,
           description: optional(body.description),
+          scriptCommand: optional(body.script_command),
           targetBotID: optional(body.target_bot_id),
           run,
         },
@@ -484,6 +563,9 @@ export function toMessage(wire: WireMessage): Message {
           reason: optional(body.reason),
           rule: optional(body.rule),
           command: optional(body.command),
+          title: optional(body.title),
+          content: optional(body.content),
+          path: optional(body.path),
         },
       };
       break;

@@ -54,6 +54,8 @@ pub struct Device {
 pub struct PluginStatus {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -72,6 +74,38 @@ pub struct PluginStatus {
 impl Device {
     pub fn is_runner(&self) -> bool {
         matches!(self.os.as_str(), "macos" | "linux" | "windows")
+    }
+}
+
+/// Bot-level tool permissions. Missing fields preserve pre-policy bot behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Capabilities {
+    pub shell: bool,
+    pub write: bool,
+    /// None allows every installed plugin; Some restricts calls to these plugin ids.
+    pub plugins: Option<Vec<String>>,
+}
+
+impl Default for Capabilities {
+    fn default() -> Self { Self { shell: true, write: true, plugins: None } }
+}
+
+impl Capabilities {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.plugins.as_ref().is_some_and(|ids| ids.iter().any(|id| !crate::plugins::is_id(id) || ids.iter().filter(|other| *other == id).count() != 1)) {
+            return Err("capabilities.plugins must contain unique plugin ids".into());
+        }
+        Ok(())
+    }
+
+    pub fn permits(&self, tool: &str, plugin_id: Option<&str>) -> bool {
+        if let Some(id) = plugin_id { return self.plugins.as_ref().is_none_or(|ids| ids.iter().any(|allowed| allowed == id)); }
+        match tool {
+            "bash" | "bash_input" | "bash_output" => self.shell,
+            "write" | "edit" | "propose" => self.write,
+            _ => true,
+        }
     }
 }
 
@@ -106,6 +140,8 @@ pub struct Bot {
     /// `<LORCA_HOME>/workspaces/<bot id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
+    #[serde(default)]
+    pub capabilities: Capabilities,
     pub created_at: f64,
 }
 
@@ -241,6 +277,9 @@ pub enum Body {
         /// runs and show the finished row as "Messaged ◉ Scout".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_bot_id: Option<String>,
+        /// The latest command inside a running codemode script, for the working status line.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        script_command: Option<String>,
         /// A `bash` call's card, from Auto-review's question to how the command ended. Every
         /// `bash` row has one; the apps show it in place of the row.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -257,9 +296,9 @@ pub enum Body {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         routine_id: Option<String>,
     },
-    /// The bot asks before a reviewed plugin or shell action (or before installing a
-    /// plugin, with `tool` = `install`). The turn waits for `decision`: `pending`, `allowed`
-    /// (once), `always`, `denied`, or `expired`.
+    /// The bot asks before a reviewed plugin or shell action, an install, or a proposal.
+    /// The turn waits for `decision`: `pending`, `allowed`, `always` (never for proposals),
+    /// `denied`, `expired`, or `failed` if an approved proposal could not be saved.
     Permission {
         plugin_id: String,
         plugin_name: String,
@@ -280,6 +319,13 @@ pub enum Body {
         /// fills it with the first `APP_COMMAND_CHARS` characters.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
+        /// Full reviewed draft; app views keep these bytes intact, unlike tool arguments.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
         /// A sign-in card mid-flow: where to go and the code to enter there (device flow).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         link: Option<String>,
@@ -392,8 +438,8 @@ impl Message {
     /// The message as the apps get it. A tool row keeps what they show (the name, the summary,
     /// whether it runs) and drops what only a later turn's context needs: the arguments and
     /// the result, which run to hundreds of kilobytes for a file read or a command's output.
-    /// Permission cards likewise keep their summary and decision, not their reviewed payload,
-    /// except a shell command's text, which the card shows in full on request.
+    /// Permission cards drop arguments, but keep the reviewed proposal content and target
+    /// verbatim; shell command text is bounded separately for the app.
     pub fn for_app(&self) -> Message {
         let mut message = self.clone();
         match &mut message.body {
@@ -592,8 +638,28 @@ pub struct CheckReport {
 
 // MARK: - Blob payloads
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PolicyVersion {
+    pub counter: u64,
+    pub device_id: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PolicyBlob {
+    #[serde(default)]
+    pub paused: Option<bool>,
+    #[serde(default)]
+    pub bot_id: Option<String>,
+    #[serde(default)]
+    pub capabilities: Option<Capabilities>,
+    #[serde(default)]
+    pub removed: bool,
+    pub version: PolicyVersion,
+}
+
+
 /// `kind = roster`: bots, chat metadata, and routines. Latest wins.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
 pub struct RosterBlob {
     pub bots: Vec<Bot>,
     pub chats: Vec<ChatMeta>,
@@ -601,6 +667,18 @@ pub struct RosterBlob {
     pub routines: Vec<Routine>,
     #[serde(default)]
     pub auto_review: AutoReview,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub policy_clock: u64,
+    #[serde(default)]
+    pub pause_version: PolicyVersion,
+    #[serde(default)]
+    pub capability_versions: std::collections::HashMap<String, PolicyVersion>,
+    #[serde(default)]
+    pub policy_capabilities: std::collections::HashMap<String, Capabilities>,
+    #[serde(default)]
+    pub deleted_bot_versions: std::collections::HashMap<String, PolicyVersion>,
     pub updated_at: f64,
 }
 
@@ -982,7 +1060,7 @@ mod app_view_tests {
         let tool = Message::new("c", Author::Bot { bot_id: "b".into() }, Body::Tool {
             name: "read".into(), summary: "Read a file".into(), detail: "x".repeat(5000), is_running: false,
             call_id: "call".into(), arguments: serde_json::json!({ "path": "big" }), result: Some("y".repeat(100_000)), is_error: false, description: None, target_bot_id: None,
-            run: None,
+            script_command: None, run: None,
         });
         let Body::Tool { detail, arguments, result, summary, .. } = tool.for_app().body else { panic!() };
         assert_eq!((detail.len(), arguments.is_null(), result, summary.as_str()), (400, true, None, "Read a file"));
@@ -992,7 +1070,7 @@ mod app_view_tests {
     fn permission_cards_drop_the_reviewed_payload() {
         let permission = Message::new("c", Author::Bot { bot_id: "b".into() }, Body::Permission {
             plugin_id: "computer".into(), plugin_name: "Mac".into(), tool: "bash".into(), summary: "Run a command".into(),
-            arguments: serde_json::json!({ "command": "secret" }), decision: "pending".into(), reason: None, rule: None, command: None, link: None, code: None,
+            arguments: serde_json::json!({ "command": "secret" }), decision: "pending".into(), reason: None, rule: None, command: None, title: None, content: None, path: None, link: None, code: None,
         });
         let app = permission.for_app();
         let Body::Permission { arguments, summary, command, .. } = &app.body else { panic!() };
@@ -1002,6 +1080,21 @@ mod app_view_tests {
         // A phone stores the app view; reading it again keeps the command.
         let Body::Permission { command, .. } = app.for_app().body else { panic!() };
         assert_eq!(command.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn proposal_card_preserves_reviewed_bytes_for_apps() {
+        let text = "🌍".repeat(20_000);
+        let card = Message::new("c", Author::Bot { bot_id: "b".into() }, Body::Permission {
+            plugin_id: "computer".into(), plugin_name: "Runner".into(), tool: "propose".into(),
+            summary: "Review draft".into(), arguments: serde_json::json!({ "content": "hidden" }), decision: "pending".into(),
+            reason: None, rule: None, command: None, title: Some("Draft".into()), content: Some(text.clone()),
+            path: Some("notes/draft.md".into()), link: None, code: None,
+        });
+        let Body::Permission { content, arguments, path, .. } = card.for_app().for_app().body else { panic!() };
+        assert_eq!(content.as_deref(), Some(text.as_str()));
+        assert_eq!(path.as_deref(), Some("notes/draft.md"));
+        assert!(arguments.is_null());
     }
 }
 
@@ -1024,5 +1117,32 @@ mod host_tests {
     fn the_host_name_is_what_hostname_prints() {
         let printed = std::process::Command::new("hostname").output().unwrap().stdout;
         assert_eq!(host_name().as_deref(), Some(String::from_utf8_lossy(&printed).trim()));
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_bots_keep_tools_and_restricted_bots_deny_calls() {
+        let bot: Bot = serde_json::from_value(serde_json::json!({
+            "id": "bot", "name": "Bot", "description": "", "symbol_name": "", "accent": "",
+            "runner_id": "runner", "provider": "deepseek", "created_at": 0.0
+        })).unwrap();
+        assert!(bot.capabilities.permits("bash", None));
+        assert!(bot.capabilities.permits("write", None));
+        assert!(bot.capabilities.permits("plugin__tool", Some("plugin")));
+
+        let limited: Capabilities = serde_json::from_value(serde_json::json!({
+            "shell": false, "write": false, "plugins": ["calendar"]
+        })).unwrap();
+        assert!(!limited.permits("bash_input", None));
+        assert!(!limited.permits("edit", None));
+        assert!(!limited.permits("github__read", Some("github")));
+        assert!(limited.permits("calendar__read", Some("calendar")));
+        assert!(limited.permits("read", None));
+        assert!(serde_json::from_value::<Capabilities>(serde_json::json!({"plugins": ["calendar", "calendar"]})).unwrap().validate().is_err());
+        assert!(!serde_json::from_value::<RosterBlob>(serde_json::json!({"bots": [], "chats": [], "updated_at": 1.0})).unwrap().paused);
     }
 }

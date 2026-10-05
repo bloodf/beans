@@ -6,6 +6,12 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- Bots show stable offline Blobatar portraits on Windows and Linux, matching the Mac and phone; encrypted uploaded photos still override them.
+- Settings can pause the account and refresh custom-provider model lists. Each bot's inspector controls shell, built-in file writes, and installed-plugin access.
+- A proposed draft appears as a review card with full content and destination; Approve & save creates a new workspace file only after confirmation.
+- Manage MCP servers in Settings › Plugins: add a command or URL, edit its configuration, sign in, toggle tools, and reload `mcp.json`. Taskbar titles name the current chat or pane followed by the app name.
+- Built-in model and marketplace catalogs update from the selected Beans relay, with a bundled offline fallback; bots can change their own or a teammate's model and supported thinking level.
+- A running codemode script shows its latest command in the working row; reviewed script commands and MCP resources use the same per-bot controls as direct tools.
 - Custom providers: Add Provider… in Settings' Providers pane adds OpenAI, OpenRouter, Gemini,
   Groq, Together AI, Ollama, LM Studio, or any other server that speaks OpenAI's Chat Completions
   or Responses API or Anthropic's Messages API, such as a gateway or a model server on your

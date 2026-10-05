@@ -514,6 +514,13 @@ export function isAccent(value: string): value is Accent {
   return (accents as string[]).includes(value);
 }
 
+/** Null permits every installed plugin; an empty list permits none. */
+export interface BotCapabilities {
+  shell: boolean;
+  write: boolean;
+  plugins: string[] | null;
+}
+
 export interface Bot {
   id: string;
   name: string;
@@ -527,6 +534,7 @@ export interface Bot {
   model?: string;
   /** How much the model thinks; none means the provider's default. */
   thinking?: string;
+  capabilities: BotCapabilities;
   /** A custom profile image, kept as a `file` blob like a message attachment. Shown in place of
    * the symbol and accent once this computer has the bytes. */
   avatar?: Attachment;
@@ -570,6 +578,8 @@ export interface InstalledPlugin {
   icon: string;
   state: PluginState;
   detail: string;
+  /** One of Runner's own mcp.json servers, rather than marketplace plugin. */
+  source?: string;
 }
 
 export function pluginSymbol(plugin: { icon: string }): string {
@@ -684,6 +694,10 @@ export interface PermissionRequest {
   rule?: string;
   /** A shell card's whole command, where `summary` is its first line. */
   command?: string;
+  /** Proposed draft, shown for review before writing to the bot's workdir. */
+  title?: string;
+  content?: string;
+  path?: string;
 }
 
 /** The command as the card and its sheet show it, without the summary's `$ ` prompt. */
@@ -693,6 +707,7 @@ export function fullCommand(request: PermissionRequest): string {
 
 export const isPending = (request: PermissionRequest) => request.decision === "pending";
 export const isInstall = (request: PermissionRequest) => request.tool === "install";
+export const isPropose = (request: PermissionRequest) => request.tool === "propose";
 /** A shell command on the bot's Runner. */
 export const isShell = (request: PermissionRequest) => request.pluginID === "computer";
 /** A sign-in card: Sign in starts the OAuth flow on the Runner. */
@@ -701,6 +716,7 @@ export const isConnect = (request: PermissionRequest) => request.tool === "conne
 /** "wants to use GitHub" / "wants to install GitHub" / "needs a sign-in to GitHub" /
  * "wants to run a command on Workbench" */
 export function verbPhrase(request: PermissionRequest): string {
+  if (isPropose(request)) return L("wants to save a draft");
   if (isConnect(request)) return L("needs a sign-in to %@", request.pluginName);
   if (isShell(request)) return L("wants to run a command on %@", request.pluginName);
   return isInstall(request) ? L("wants to install %@", request.pluginName) : L("wants to use %@", request.pluginName);
@@ -711,7 +727,7 @@ export function decisionText(request: PermissionRequest): string {
     case "pending":
       return L("Waiting for you");
     case "allowed":
-      return isConnect(request) ? L("Signing in") : L("Allowed once");
+      return isConnect(request) ? L("Signing in") : isPropose(request) ? L("Approved") : L("Allowed once");
     case "always":
       return L("Always allowed");
     case "denied":
@@ -730,6 +746,7 @@ export function decisionText(request: PermissionRequest): string {
 /** The buttons a pending card offers: [title, decision]. A shell command offers Always allow only
  * with a rule to add. */
 export function permissionChoices(request: PermissionRequest): [string, string][] {
+  if (isPropose(request)) return [[L("Approve & save"), "allow"], [L("Decline"), "deny"]];
   if (isConnect(request)) return [[L("Sign in"), "allow"], [L("Not now"), "deny"]];
   if (isInstall(request)) return [[L("Allow"), "allow"], [L("Deny"), "deny"]];
   if (isShell(request) && request.rule === undefined) return [[L("Allow once"), "allow"], [L("Deny"), "deny"]];
@@ -908,6 +925,8 @@ export interface ToolInvocation {
   isRunning: boolean;
   /** What the call does, in the bot's words: a shell command's "Install dependencies". */
   description?: string;
+  /** The command currently running inside a codemode script, distinct from its plugin. */
+  scriptCommand?: string;
   /** The bot a message_bot call goes to. */
   targetBotID?: string;
   /** A shell command's card, which the transcript shows only while the command needs the user

@@ -802,11 +802,12 @@ mod tests {
     struct Conversation {
         replies: std::sync::Mutex<Vec<&'static str>>,
         requests: std::sync::Mutex<Vec<ModelRequest>>,
+        info: Option<std::sync::Arc<crate::models::ModelInfo>>,
     }
 
     impl Conversation {
         fn answering(replies: Vec<&'static str>) -> Self {
-            Conversation { replies: std::sync::Mutex::new(replies), requests: Default::default() }
+            Conversation { replies: std::sync::Mutex::new(replies), requests: Default::default(), info: crate::models::find("anthropic", "claude-haiku-4-5") }
         }
     }
 
@@ -818,8 +819,8 @@ mod tests {
         fn model_id(&self) -> &str {
             "m"
         }
-        fn model_info(&self) -> Option<&'static crate::models::ModelInfo> {
-            crate::models::find("anthropic", "claude-haiku-4-5")
+        fn model_info(&self) -> Option<&crate::models::ModelInfo> {
+            self.info.as_deref()
         }
         async fn stream(&self, request: ModelRequest, _cancel: CancellationToken) -> crate::provider::AssistantEventStream {
             self.requests.lock().unwrap().push(request);

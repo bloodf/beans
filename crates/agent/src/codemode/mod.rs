@@ -62,6 +62,15 @@ pub struct Namespace {
     pub description: String,
 }
 
+/// Complete instructions and visible tools for a namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceDetails {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    pub tools: Vec<String>,
+}
+
 /// One tool scripts can call.
 #[derive(Clone)]
 pub struct Entry {
@@ -119,6 +128,24 @@ pub trait Catalog: Send + Sync {
         let namespaces = self.namespaces();
         let entries: Vec<Entry> = self.entries().into_iter().filter(|entry| namespace.is_none() || entry.namespace.as_deref() == namespace).collect();
         Ok(rank_entries(query, entries, &namespaces, limit))
+    }
+
+    /// Full namespace instructions and visible tool names, or `None` for an unknown namespace.
+    async fn describe_namespace(&self, name: &str, cancel: &CancellationToken) -> Result<Option<NamespaceDetails>, String> {
+        let _ = cancel;
+        let entries = self.entries();
+        let named = |candidate: &str| candidate == name || to_identifier(candidate) == name;
+        let namespace = self.namespaces().into_iter().find(|namespace| named(&namespace.name)).or_else(|| {
+            let found = entries.iter().filter_map(|entry| entry.namespace.as_deref()).find(|namespace| named(namespace))?;
+            Some(Namespace { name: found.to_string(), description: String::new() })
+        });
+        Ok(namespace.map(|namespace| NamespaceDetails {
+            tools: entries.iter().filter(|entry| entry.namespace.as_deref() == Some(namespace.name.as_str()) && entry.tool.name() != CODEMODE_TOOL_NAME)
+                .map(|entry| entry.tool.name().to_string()).collect(),
+            name: namespace.name,
+            description: namespace.description,
+            instructions: String::new(),
+        }))
     }
 }
 
@@ -245,6 +272,9 @@ pub struct NestedCall {
     pub name: String,
     /// Compact JSON of the arguments, cut for display.
     pub args: String,
+    /// Caller-provided action label for a host's status line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub status: CallStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
@@ -277,8 +307,7 @@ const WIND_DOWN: Duration = Duration::from_secs(10);
 /// arguments. Past the first or the third, the script stops.
 const MAX_OUTPUT_CHARS: usize = 16 * 1024 * 1024;
 const MAX_IMAGES: usize = 10;
-const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
-const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const MAX_IMAGE_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PENDING_CALLS: usize = 1000;
 const MAX_ARGUMENT_CHARS: usize = 8 * 1024 * 1024;
 /// The largest output budget an options line may ask for: the result is a chat row, which must
@@ -319,7 +348,7 @@ impl CodemodeTool {
 }
 
 /// The helpers every script has, which a host function may not replace.
-const BUILT_INS: [&str; 11] = ["tools", "ALL_TOOLS", "console", "text", "image", "exit", "store", "load", "searchTools", "describeTool", "globalThis"];
+const BUILT_INS: [&str; 12] = ["tools", "ALL_TOOLS", "console", "text", "image", "exit", "store", "load", "searchTools", "describeTool", "describeNamespace", "globalThis"];
 
 fn valid_function_name(name: &str) -> bool {
     let parts: Vec<&str> = name.split('.').collect();
@@ -477,7 +506,7 @@ impl<'a> Run<'a> {
         let script = Script {
             code: parsed.code,
             tools: script_tools,
-            globals: ["searchTools", "describeTool"]
+            globals: ["searchTools", "describeTool", "describeNamespace"]
                 .into_iter()
                 .map(str::to_string)
                 .chain(self.tool.functions.iter().map(|function| function.name().to_string()))
@@ -555,13 +584,21 @@ impl<'a> Run<'a> {
                         }
                         output.push(ContentPart::text(text));
                     }
-                    Some(Event::Image { data, mime_type }) => match check_image(&data, &mime_type, images) {
-                        Ok(()) => {
+                    Some(Event::Image(_data)) if images >= MAX_IMAGES => {
+                        output.push(ContentPart::text(format!("[An image was left out: a script's output holds at most {MAX_IMAGES} images]")));
+                    }
+                    Some(Event::Image(data)) => {
+                        if data.len() > MAX_IMAGE_INPUT_BYTES {
+                            output.push(ContentPart::text("[An image was left out: its encoded data is too large]"));
+                        } else {
+                            output_chars += data.len();
+                            if output_chars > MAX_OUTPUT_CHARS {
+                                break End::Limit(format!("Its output passed {} MB, so it was stopped.", MAX_OUTPUT_CHARS / (1024 * 1024)));
+                            }
                             images += 1;
-                            output.push(ContentPart::Image { data, mime_type });
+                            output.push(ContentPart::Image { data, mime_type: String::new() });
                         }
-                        Err(why) => output.push(ContentPart::text(format!("[An image was left out: {why}]"))),
-                    },
+                    }
                     Some(Event::Done { value, writes }) => {
                         if output_chars + value.as_ref().map_or(0, String::len) > MAX_OUTPUT_CHARS {
                             break End::Limit(format!("Its output passed {} MB, so it was stopped.", MAX_OUTPUT_CHARS / (1024 * 1024)));
@@ -594,6 +631,7 @@ impl<'a> Run<'a> {
             id: call_id.to_string(),
             name: self.lookup(name).map(|entry| entry.tool.name().to_string()).unwrap_or_else(|| name.to_string()),
             args: clipped(&serde_json::to_string(args).unwrap_or_default(), ARGS_PREVIEW_CHARS),
+            description: args.get("description").and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty()).map(|text| clipped(text, ARGS_PREVIEW_CHARS)),
             status: CallStatus::Running,
             duration_ms: None,
             error: None,
@@ -684,7 +722,7 @@ impl<'a> Run<'a> {
         Reply::Throw("The script ended before this call started".into())
     }
 
-    /// `searchTools()`, `describeTool()`, and the host's functions.
+    /// `searchTools()`, `describeTool()`, `describeNamespace()`, and host functions.
     async fn global(&self, name: &str, args: Result<Value, String>) -> Reply {
         let args: Vec<Value> = match args {
             Ok(Value::Array(args)) => args,
@@ -729,6 +767,20 @@ impl<'a> Run<'a> {
                     None => Reply::Value(None),
                 }
             }
+            "describeNamespace" => {
+                let Some(name) = args.first().and_then(Value::as_str) else { return Reply::Throw("describeNamespace() expects a namespace name".into()) };
+                match self.tool.catalog.describe_namespace(name, &self.calls_cancel).await {
+                    Ok(Some(details)) => {
+                        let tools: Vec<String> = details.tools.iter().filter(|tool| *tool != CODEMODE_TOOL_NAME).map(|tool| to_identifier(tool)).collect();
+                        let mut value = json!({ "name": details.name, "tools": tools });
+                        if !details.description.trim().is_empty() { value["description"] = json!(details.description); }
+                        if !details.instructions.trim().is_empty() { value["instructions"] = json!(details.instructions); }
+                        Reply::Value(Some(value.to_string()))
+                    }
+                    Ok(None) => Reply::Value(None),
+                    Err(error) => Reply::Throw(error),
+                }
+            }
             other => {
                 let Some(function) = self.tool.functions.iter().find(|function| function.name() == other).cloned() else {
                     return Reply::Throw(format!("Unknown global \"{other}\""));
@@ -757,7 +809,8 @@ impl<'a> Run<'a> {
         }
     }
 
-    async fn finish(&self, end: End, mut items: Vec<ContentPart>, max_output_tokens: Option<u64>, stored: &BTreeMap<String, String>, started: Instant) -> ScriptRun {
+    async fn finish(&self, end: End, items: Vec<ContentPart>, max_output_tokens: Option<u64>, stored: &BTreeMap<String, String>, started: Instant) -> ScriptRun {
+        let mut items = inline_images(items).await;
         let calls = self.calls.lock().unwrap().clone();
         let mut returned = None;
         // The store's limits hold here too, whatever the script did to its own copy of them.
@@ -856,23 +909,18 @@ fn read_arguments(name: &str, json: Option<&str>, absent: Value) -> Result<Value
     }
 }
 
-/// An image the result can carry: a type every provider takes, valid base64, and not too many or
-/// too large. The error says why it was left out.
-fn check_image(data: &str, mime_type: &str, images: usize) -> Result<(), String> {
-    if images >= MAX_IMAGES {
-        return Err(format!("a script's output holds at most {MAX_IMAGES} images"));
-    }
-    if !IMAGE_TYPES.contains(&mime_type) {
-        return Err(format!("{mime_type} is not an image type the model takes (PNG, JPEG, GIF, or WebP)"));
-    }
-    let valid = data.len().is_multiple_of(4) && data.bytes().enumerate().all(|(index, byte)| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/' || (byte == b'=' && index + 2 >= data.len()));
-    if !valid || data.is_empty() {
-        return Err("its data is not base64".into());
-    }
-    if data.len() / 4 * 3 > MAX_IMAGE_BYTES {
-        return Err(format!("it is over {} MB", MAX_IMAGE_BYTES / (1024 * 1024)));
-    }
-    Ok(())
+/// Prepare image bytes off async threads; report invalid or unsupported data as text.
+async fn inline_images(items: Vec<ContentPart>) -> Vec<ContentPart> {
+    if !items.iter().any(|item| matches!(item, ContentPart::Image { .. })) { return items; }
+    tokio::task::spawn_blocking(move || {
+        items.into_iter().flat_map(|item| match item {
+            ContentPart::Image { data, .. } => match crate::images::prepare_base64(&data) {
+                Ok(image) => image.into_parts(),
+                Err(why) => vec![ContentPart::text(format!("[An image was left out: {why}]"))],
+            },
+            other => vec![other],
+        }).collect()
+    }).await.unwrap_or_else(|_| vec![ContentPart::text("[The script's image could not be prepared]")])
 }
 
 /// A successful script's `store()` writes, from `[[key, json], [key], …]`. Anything else is an
@@ -1022,7 +1070,7 @@ Helpers:
 - `store(key, value)` and `load(key)` keep JSON values for later scripts in this conversation. Storing `undefined` deletes a key. Writes count only when the script succeeds.
 - `ALL_TOOLS` lists `{ name, description }` of every tool known when the script starts.
 - `await searchTools(query, { limit?, namespace? })` resolves to the tools that best match the query (default limit 8), as `{ name, description }` with their declarations. It also finds tools that are not listed below.
-- `await describeTool(name)` resolves to a tool's description and declaration, or `undefined`.";
+- `await describeTool(name)` resolves to a tool's description and declaration, or `undefined`. `describeNamespace(name)` gives its description, whole instructions, and visible tools, or `undefined`.";
 
 const MCP_RESULT_GUIDANCE: &str = "Shared MCP types. An MCP tool resolves to its whole `CallToolResult`, never to the data alone: \
 read `structuredContent` when the declaration types it, and otherwise `content`, usually one text block whose text is often \
@@ -1050,7 +1098,7 @@ fn describe(entries: &[Entry], namespaces: &[Namespace], functions: &[Arc<dyn Ho
     let mut sections = vec![intro];
 
     let callable: Vec<&Entry> = entries.iter().filter(|entry| entry.tool.name() != CODEMODE_TOOL_NAME).collect();
-    let direct: Vec<&str> = callable.iter().filter(|entry| entry.exposure == Exposure::Direct).map(|entry| entry.tool.name()).collect();
+    let direct: Vec<&Entry> = callable.iter().copied().filter(|entry| entry.exposure == Exposure::Direct).collect();
     let listable: Vec<&Entry> = callable.iter().copied().filter(|entry| entry.exposure != Exposure::Direct).collect();
 
     // Groups: tools in no namespace first, then namespaces by name, with every known namespace
@@ -1097,10 +1145,14 @@ fn describe(entries: &[Entry], namespaces: &[Namespace], functions: &[Arc<dyn Ho
         sections.push(format!("Host functions:\n```ts\n{}\n```", render_functions(functions)));
     }
     if !direct.is_empty() {
-        sections.push(format!(
-            "Your own tools {} are callable here too, with the same arguments, and resolve to their text output.",
-            direct.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>().join(", ")
-        ));
+        let names = direct.iter().map(|entry| format!("`{}`", entry.tool.name())).collect::<Vec<_>>().join(", ");
+        let typed: Vec<String> = direct.iter().filter_map(|entry| entry.tool.output_schema().map(|schema| format!("`{}` resolves to `{}`", entry.tool.name(), declarations::output_summary(&schema)))).collect();
+        sections.push(if typed.is_empty() {
+            format!("Your own tools {names} are callable here too, with the same arguments, and resolve to their text output.")
+        } else {
+            let others = if typed.len() < direct.len() { "; the others resolve to their text output" } else { "" };
+            format!("Your own tools {names} are callable here too, with the same arguments. {}{others}.", typed.join("; "))
+        });
     }
 
     let mut listing = vec![if total == 0 {
@@ -1114,7 +1166,7 @@ fn describe(entries: &[Entry], namespaces: &[Namespace], functions: &[Arc<dyn Ho
         let visible: Vec<&CatalogEntry> = members.iter().filter(|member| shown.contains(&member.name)).collect();
         if let Some(namespace) = namespace {
             let count = if members.is_empty() {
-                "tools not known yet; searchTools() finds them".to_string()
+                "tools not known yet; describeNamespace() lists them".to_string()
             } else {
                 let mut count = format!("{} tool{}", members.len(), if members.len() == 1 { "" } else { "s" });
                 if visible.is_empty() {

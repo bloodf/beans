@@ -28,7 +28,7 @@ import { onStoreEvent, track } from "../model/reactive";
 import { errorText, store } from "../model/store";
 import { addBotToChat, presentMarketplace } from "./actions";
 import { box } from "./box";
-import { Button } from "./controls";
+import { Button, Switch } from "./controls";
 import { chatActions, openDevice } from "./root";
 import { ActionRow, BotRow, EditableRow, KeyValueRow, NoteRow, PluginRow, PopUpRow, Section, StatusRow, SummaryActionRow, SwitchRow } from "./sections";
 import { presentBotDescription } from "./sheets/botDescription";
@@ -135,6 +135,7 @@ export function Inspector(props: { chatID: string }) {
                   <>
                     <Profile bot={bot()} />
                     <Runtime bot={bot()} chat={current()} />
+                    <Abilities bot={bot()} />
                     <Memory bot={bot()} />
                     <Routines bot={bot()} />
                     <Plugins bot={bot()} />
@@ -166,7 +167,7 @@ function Participants(props: { chat: Chat; members: Bot[] }) {
               accessorySymbol={canRemoveBot(props.chat) ? "minus.circle" : undefined}
               accessoryTooltip={L("Remove from chat")}
               onAccessory={() => store.removeBot(bot().id, props.chat.id)}
-              // The avatar is the way to a bot's look: symbol, color, or an image.
+              // The avatar opens the bot's uploaded-image override.
               onAvatarClick={() => presentBotLook(bot().id)}
             />
           );
@@ -355,6 +356,58 @@ function Routines(props: { bot: Bot }) {
             />
           )}
         </For>
+      </Show>
+    </Section>
+  );
+}
+
+/** Limits this bot's local tools and the plugins installed on its Runner. */
+function Abilities(props: { bot: Bot }) {
+  const installed = () => {
+    track.roster();
+    return store.device(props.bot.runnerID)?.plugins ?? [];
+  };
+  const save = (patch: Partial<Bot["capabilities"]>) => {
+    const bot = store.bot(props.bot.id);
+    if (bot) store.setBotCapabilities(bot.id, { ...bot.capabilities, ...patch });
+  };
+  return (
+    <Section title={L("Abilities")}>
+      <div class="row accessory-row" data-label={L("Run shell commands")}>
+        <span class="row-label">{L("Run shell commands")}</span>
+        <span class="row-control"><Switch small checked={props.bot.capabilities.shell} label={L("Run shell commands")} onChange={(shell) => save({ shell })} /></span>
+      </div>
+      <div class="row accessory-row" data-label={L("Write files")}>
+        <span class="row-label">{L("Write files")}</span>
+        <span class="row-control"><Switch small checked={props.bot.capabilities.write} label={L("Write files")} onChange={(write) => save({ write })} /></span>
+      </div>
+      <PopUpRow
+        label={L("Plugin access")}
+        options={[{ value: "all", label: L("All installed plugins") }, { value: "selected", label: L("Selected plugins") }]}
+        value={props.bot.capabilities.plugins === null ? "all" : "selected"}
+        onChange={(value) => save({ plugins: value === "all" ? null : installed().map((plugin) => plugin.id) })}
+      />
+      <Show when={props.bot.capabilities.plugins !== null}>
+        <For each={installed()} keyed={(plugin) => plugin.id}>
+          {(plugin) => (
+            <div class="row accessory-row" data-label={plugin().name}>
+              <span class="row-label">{plugin().name}</span>
+              <span class="row-control">
+                <Switch
+                  small
+                  checked={props.bot.capabilities.plugins?.includes(plugin().id) ?? false}
+                  label={L("Allow %@", plugin().name)}
+                  onChange={(allowed) => {
+                    const current = store.bot(props.bot.id)?.capabilities.plugins;
+                    if (current === null || !current) return;
+                    save({ plugins: allowed ? [...current, plugin().id] : current.filter((id) => id !== plugin().id) });
+                  }}
+                />
+              </span>
+            </div>
+          )}
+        </For>
+        <Show when={installed().length === 0}><NoteRow text={L("No plugins installed on this Runner.")} /></Show>
       </Show>
     </Section>
   );

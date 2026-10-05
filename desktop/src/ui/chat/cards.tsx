@@ -15,6 +15,7 @@ import {
   fullCommand,
   isConnect,
   isInstall,
+  isPropose,
   isLive,
   isPending,
   isShell,
@@ -28,6 +29,7 @@ import { errorText } from "../../model/store";
 import { Avatar, type AvatarContent } from "../avatar";
 import { Button, CopyButton, TextField } from "../controls";
 import { Icon } from "../icons";
+import { Markdown } from "../markdown";
 import { alert, presentSheet, Sheet } from "../overlay";
 import { ChatMetrics } from "./cells";
 
@@ -156,12 +158,12 @@ export function PermissionCard(props: {
       <span class="card-icon" style={{ color: tint() }}>
         <Icon name={icon()} size={17} strokeWidth={1.9} />
       </span>
-      <div class="card-body" aria-label={permissionSpokenText(request(), props.botName)}>
+      <div class="card-body" aria-label={isPropose(request()) ? undefined : permissionSpokenText(request(), props.botName)}>
         <div class="card-title truncate" title={`${props.botName} ${verbPhrase(request())}`}>
           {props.botName} {verbPhrase(request())}
         </div>
         <Show
-          when={isPending(request()) && isShell(request())}
+          when={isPending(request()) && isShell(request()) && !isPropose(request())}
           fallback={
             <div class={["card-summary", isPending(request()) ? "clamp-2" : "clamp-3"]} title={request().summary}>
               {permissionSummary(request())}
@@ -169,6 +171,19 @@ export function PermissionCard(props: {
           }
         >
           <CommandBlock text={fullCommand(request())} lines={2} onClick={props.onShowCommand} />
+        </Show>
+        <Show when={isPropose(request())}>
+          <Show when={request().title}>
+            {(title) => <div class="card-draft-title selectable" tabindex="0">{title()}</div>}
+          </Show>
+          <Show when={request().path}>
+            {(path) => <div class="card-draft-path selectable" role="region" aria-label={L("Draft path")} tabindex="0">{path()}</div>}
+          </Show>
+          <Show when={request().content !== undefined}>
+            <div class="card-draft-content" role="region" aria-label={L("Draft")} tabindex="0">
+              <Markdown text={request().content ?? ""} />
+            </div>
+          </Show>
         </Show>
         <Show when={hasCode()}>
           <div class="card-code-row">

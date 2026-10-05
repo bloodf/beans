@@ -144,8 +144,11 @@ final class SidebarViewController: NSViewController {
         rebuild()
         store.observe(self) { [weak self] event in
             switch event {
-            case .chatsChanged, .snapshotReplaced, .chatChanged:
+            case .chatsChanged, .chatChanged:
                 self?.rebuild()
+            case .snapshotReplaced:
+                self?.rebuild()
+                self?.footer.update()
             case .connectionChanged, .rosterChanged:
                 self?.footer.update()
             default:
@@ -563,6 +566,7 @@ final class SidebarFooterView: NSView {
     /// The marketplace, at the footer's other end.
     private lazy var marketplace = HoverButton(
         symbol: "circle.grid.2x2", tooltip: L("Marketplace (⇧⌘M)"), target: self, action: #selector(openMarketplace))
+    private let pausedLabel = Build.label(L("Paused"), font: .systemFont(ofSize: 11, weight: .medium), color: .secondaryLabelColor)
 
     var onSettings: (() -> Void)?
     var onDevice: (() -> Void)?
@@ -579,12 +583,20 @@ final class SidebarFooterView: NSView {
         addSubview(buttons)
         marketplace.translatesAutoresizingMaskIntoConstraints = false
         addSubview(marketplace)
+        pausedLabel.toolTip = L("All bots are paused")
+        pausedLabel.setAccessibilityLabel(L("All bots are paused"))
+        pausedLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(pausedLabel)
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 38),
             buttons.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             buttons.centerYAnchor.constraint(equalTo: centerYAnchor),
             marketplace.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            pausedLabel.leadingAnchor.constraint(greaterThanOrEqualTo: buttons.trailingAnchor, constant: 8),
+            pausedLabel.trailingAnchor.constraint(lessThanOrEqualTo: marketplace.leadingAnchor, constant: -8),
+            pausedLabel.centerYAnchor.constraint(equalTo: buttons.centerYAnchor),
+            pausedLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
             marketplace.centerYAnchor.constraint(equalTo: buttons.centerYAnchor),
         ])
     }
@@ -594,6 +606,7 @@ final class SidebarFooterView: NSView {
 
     func update() {
         let store = AppStore.shared
+        pausedLabel.isHidden = !store.paused
         let connected = store.isConnected
         let name = store.thisDevice?.name ?? L("This computer")
         let relayError = connected ? store.relayError : nil

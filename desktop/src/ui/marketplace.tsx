@@ -9,6 +9,7 @@ import type { JSX } from "@solidjs/web";
 import { host } from "../host";
 import { L, Lc } from "../l10n";
 import * as Format from "../model/format";
+import { isMcpServer } from "../model/mcp";
 import {
   deviceSymbol,
   pluginStateColor,
@@ -208,14 +209,15 @@ function MarketplaceSheet(props: { runnerID: string | null; width: number; heigh
     installedPlugin: (id) => {
       const on = runner();
       if (!on) return undefined;
-      return on.plugins.find((plugin) => plugin.id === id) ?? installed.read()[on.id]?.[id];
+      return on.plugins.find((plugin) => plugin.id === id && !isMcpServer(plugin)) ?? installed.read()[on.id]?.[id];
     },
     /** Everything the picked Runner has, the marketplace's and the rest, in its own order. */
     installedPlugins: () => {
       const on = runner();
       if (!on) return [];
-      const extra = Object.values(installed.read()[on.id] ?? {}).filter((plugin) => !on.plugins.some((each) => each.id === plugin.id));
-      return [...on.plugins, ...extra.sort((a, b) => a.name.localeCompare(b.name))];
+      const marketplacePlugins = on.plugins.filter((plugin) => !isMcpServer(plugin));
+      const extra = Object.values(installed.read()[on.id] ?? {}).filter((plugin) => !marketplacePlugins.some((each) => each.id === plugin.id));
+      return [...marketplacePlugins, ...extra.sort((a, b) => a.name.localeCompare(b.name))];
     },
     load,
     show: (page) => pages.set([...pages.get(), page]),
@@ -465,7 +467,7 @@ function ItemRow(props: { item: Item; market: Market }) {
   const template = item.bot;
   return (
     <MarketRow
-      media={<Avatar content={{ kind: "bot", symbolName: template.symbolName, accent: template.accent }} size={40} />}
+      media={<Avatar content={{ kind: "bot", id: template.id || template.name }} size={40} />}
       title={template.name}
       byline={template.author === "" ? undefined : L("by %@", template.author)}
       subtitle={template.summary}
@@ -903,7 +905,7 @@ function BotPage(props: { market: Market; templateID: string }) {
         return (
           <div class="market-stack bot-page">
             <div class="market-bot-header">
-              <Avatar content={{ kind: "bot", symbolName: current().symbolName, accent: current().accent }} size={64} />
+              <Avatar content={{ kind: "bot", id: current().id || current().name }} size={64} />
               <div class="market-bot-title-row">
                 <div class="market-detail-titles">
                   <span class="market-bot-name">{current().name}</span>

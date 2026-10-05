@@ -3,7 +3,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::app::{remember_applied, upsert_device, App};
+use crate::app::{remember_applied, upsert_device, App, OutboxItem, Slot};
 use crate::events::{Event, RelayProblem};
 use crate::keys::unb64;
 use crate::model::*;
@@ -14,7 +14,7 @@ const BULK_BLOBS: usize = 20;
 
 /// What a pull takes. `file` blobs are left out: a transcript fetches them by id when it
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
-pub const POLL_KINDS: &str = "roster,chat,machine,credentials,job,job_cancel,job_result,request,response";
+pub const POLL_KINDS: &str = "roster,policy,chat,machine,credentials,job,job_cancel,job_result,request,response";
 
 pub async fn run(app: Arc<App>) {
     let mut failures: u32 = 0;
@@ -139,6 +139,10 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         }
         return Ok(());
     };
+    // A relay without durable policy blobs must not accept a roster that could erase Pause.
+    if app.relay.health(&url).await? < crate::relay::PROTOCOL {
+        return Err(RelayError { status: Some(426), message: "Relay update required for encrypted policy sync".into() });
+    }
     let machine = machine_file.machine().map_err(|e| RelayError { status: None, message: e.to_string() })?;
 
     if !machine_file.registered {
@@ -162,7 +166,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         state.caught_up = false;
     }
 
-    let (mut pull, mut refresh) = (true, true);
+    let mut refresh = true;
     let mut credentials_due = true;
     let mut wakes = app.sync_wakes.load(Ordering::Relaxed);
     loop {
@@ -178,6 +182,30 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         queued.as_mut().enable();
 
         let token = token_or_register(app, &url, &machine).await?;
+        // Reconcile encrypted policy events before a queued roster can supersede the relay's
+        // latest roster. The relay itself cannot inspect either payload.
+        let queued_roster = app.store.queued_roster().map_err(|error| RelayError { status: None, message: error.to_string() })?;
+        // Check the latest roster slot before applying it: legacy queues have no baseline,
+        // and an impossible group merge must not purge local transcripts or upload anything.
+        if let Some(item) = &queued_roster {
+            if let Err(conflict) = preview_roster_conflict(app, &url, &token, &machine_file, item).await {
+                pull_policy_only(app, &url, &token, &machine_file).await?;
+                return Err(conflict);
+            }
+        }
+        if let Err(conflict) = pull_blobs(app, &url, &token, &machine_file).await {
+            if conflict.message.starts_with("Roster conflict:") {
+                pull_policy_only(app, &url, &token, &machine_file).await?;
+            }
+            return Err(conflict);
+        }
+        if queued_roster.is_some() {
+            if let Some(current) = app.store.queued_roster().map_err(|error| RelayError { status: None, message: error.to_string() })? {
+                rebase_queued_roster(app, &machine_file, current)?;
+            }
+        }
+        #[cfg(feature = "runner")]
+        app.close_orphan_proposals().map_err(|error| RelayError { status: None, message: error.to_string() })?;
         app.push_machine_blob_if_changed();
         drain_outbox(app, &url, &token).await?;
         drain_group_deletes(app, &url, &token).await?;
@@ -185,12 +213,8 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         if refresh {
             refresh_presence(app, &url, &token).await?;
         }
-        if pull {
-            pull_blobs(app, &url, &token, &machine_file).await?;
-            // Once per session, so a relay that refuses the kind is not asked in a loop.
-            if std::mem::take(&mut credentials_due) {
-                app.push_credentials_if_owed();
-            }
+        if std::mem::take(&mut credentials_due) {
+            app.push_credentials_if_owed();
         }
         if app.presence_stale.swap(false, Ordering::Relaxed) {
             refresh_presence(app, &url, &token).await?;
@@ -199,28 +223,25 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         app.turns_changed();
         *failures = 0;
 
-        (pull, refresh) = tokio::select! {
+        refresh = tokio::select! {
             signal = socket.next() => match signal? {
-                Signal::Blobs => (true, false),
-                Signal::Machines => (false, true),
+                Signal::Blobs => false,
+                Signal::Machines => true,
             },
-            // The outbox, or a wake from a phone that came back to the foreground: its socket
-            // may have died unnoticed while the app was suspended, so the relay is asked to
-            // answer on it, and a pull costs one request.
             _ = &mut queued => {
                 let woken = app.sync_wakes.load(Ordering::Relaxed);
                 if woken != wakes {
                     wakes = woken;
                     socket.probe().await?;
                 }
-                (true, false)
+                false
             }
         };
     }
 }
 
 /// Everything a Device polls for but the messages.
-const NOT_CHAT_KINDS: &str = "roster,machine,credentials,job,job_cancel,job_result,request,response";
+const NOT_CHAT_KINDS: &str = "roster,policy,machine,credentials,job,job_cancel,job_result,request,response";
 /// How much of each chat a Device takes when it first syncs: what a bot's turn reads.
 const FIRST_SYNC_MESSAGES: usize = 400;
 /// Messages to a page when reading a chat backwards.
@@ -266,7 +287,11 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
             break;
         };
         for blob in &blobs {
-            apply_blob(app, machine_file, blob);
+            apply_incoming_blob(app, machine_file, blob, true)?;
+            if blob.kind == "roster" {
+                let mut state = app.state.lock().unwrap();
+                state.roster_slot_seq = state.roster_slot_seq.max(blob.seq);
+            }
         }
         since = last;
     }
@@ -340,14 +365,23 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
     if app.state.lock().unwrap().last_seq == 0 && first_sync(app, url, token, machine_file).await? == FirstSync::CannotPage {
         // A relay that cannot page a chat: replay its log. It keeps the latest roster, which
         // in a replay comes after the messages, so that is taken first as a preview.
-        let (blobs, _head) = app.relay.list_blobs(url, token, 0, "roster,machine").await?;
+        let (blobs, _head) = app.relay.list_blobs(url, token, 0, "roster,policy,machine").await?;
         for blob in blobs {
-            apply_blob_contents(app, machine_file, &blob);
+            apply_incoming_blob(app, machine_file, &blob, false)?;
         }
     }
     loop {
         let since = app.state.lock().unwrap().last_seq;
         let (blobs, _head) = app.relay.list_blobs(url, token, since, POLL_KINDS).await?;
+        for blob in &blobs {
+            if blob.kind == "roster" {
+                // Validation happens again under roster_edit at application time.
+                // This pass prevents applying earlier blobs in a conflicting page.
+                if let Some(item) = app.store.queued_roster().map_err(local_relay_error)? {
+                    validate_roster_blob(app, machine_file, &item, blob)?;
+                }
+            }
+        }
         if blobs.is_empty() {
             // Caught up, the replay of a relay that cannot page a chat included.
             mark_account_pulled(app, machine_file);
@@ -366,12 +400,16 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
         let mut results = Vec::new();
         for blob in blobs {
             let seq = blob.seq;
+            let is_roster = blob.kind == "roster";
             if bulk && blob.kind == "job_result" {
                 results.push(blob);
             } else {
-                apply_blob(app, machine_file, &blob);
+                apply_incoming_blob(app, machine_file, &blob, true)?;
             }
             let mut state = app.state.lock().unwrap();
+            if is_roster {
+                state.roster_slot_seq = state.roster_slot_seq.max(seq);
+            }
             state.last_seq = state.last_seq.max(seq);
         }
         app.bulk_sync.store(false, Ordering::Relaxed);
@@ -447,6 +485,7 @@ pub async fn ensure_registered(app: &Arc<App>, url: &str) -> Result<(), RelayErr
         if again {
             // It numbers its log from one, so the place held in the old log means nothing.
             state.last_seq = 0;
+            state.roster_slot_seq = 0;
         }
     }
     // A relay that knew this machine before and lost the account (a reset, or the identity
@@ -478,7 +517,46 @@ async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), Rela
             return Ok(());
         };
         let (id, kind) = (item.id.clone(), item.kind.clone());
-        match app.relay.put_blob(url, token, item).await {
+        let accepted_roster = if kind == "roster" {
+            app.dek().and_then(|dek| crate::crypto::decrypt_json::<RosterBlob>(&dek, "roster", &item.ciphertext).ok())
+        } else { None };
+        let expected_slot_seq = app.state.lock().unwrap().roster_slot_seq;
+        if let Some(roster) = &accepted_roster {
+            app.store.record_submitted_roster(expected_slot_seq, roster).map_err(local_relay_error)?;
+        }
+        match app.relay.put_blob(url, token, item, expected_slot_seq).await {
+            Ok(seq) if kind == "roster" => {
+                let _edit = app.roster_edit.lock().unwrap();
+                let published_chat_ids = accepted_roster.as_ref().map(|roster| {
+                    let pending = app.store.pending_chat_creates().map_err(local_relay_error)?;
+                    Ok::<Vec<String>, RelayError>(roster.chats.iter().filter(|chat| pending.contains(&chat.id))
+                        .map(|chat| chat.id.clone()).collect())
+                }).transpose()?.unwrap_or_default();
+                let snapshot = {
+                    let mut state = app.state.lock().unwrap();
+                    state.roster_slot_seq = state.roster_slot_seq.max(seq);
+                    state.clone()
+                };
+                if let Some(roster) = accepted_roster {
+                    let newer = app.store.queued_roster().map_err(local_relay_error)?
+                        .filter(|current| current.id != id);
+                    let baseline = if newer.is_some() { app.store.roster_baseline("queued").map_err(local_relay_error)? } else { None };
+                    app.store.observe_roster(seq, &roster).map_err(local_relay_error)?;
+                    if let (Some(current), Some((_, base))) = (newer, baseline) {
+                        let dek = app.dek().ok_or_else(|| roster_conflict("account key unavailable"))?;
+                        let local: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &current.ciphertext).map_err(local_relay_error)?;
+                        let base = accepted_roster_baseline(base, &roster);
+                        let merged = merge_rosters(roster, &base, &local);
+                        validate_merged_groups(&merged)?;
+                        let rebased = OutboxItem { id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
+                            ciphertext: crate::crypto::encrypt_json(&dek, "roster", &merged).map_err(local_relay_error)?,
+                            slot: Some(Slot::latest("roster")), group: None };
+                        app.store.rebase_queued_roster_with_state(&current.id, &rebased, &snapshot).map_err(local_relay_error)?;
+                    }
+                }
+                app.store.remove_outbox_roster_with_state(&id, &snapshot, &published_chat_ids).map_err(local_relay_error)?;
+                continue;
+            }
             Ok(_) => {}
             // Over the relay's budget for this identity, as a history uploaded again is: the
             // same blob goes after a second.
@@ -486,8 +564,13 @@ async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), Rela
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 continue;
             }
+            // Keep the exact queued roster and its creation markers. Next sync round pulls
+            // the winner, rebases the queued edit, then retries after the outer backoff.
+            Err(error) if kind == "roster" && error.status == Some(409) => return Err(error),
+            Err(error) if kind == "policy" => return Err(error),
             Err(error) if error.is_client_error() && !error.is_unauthorized() => {
                 tracing::warn!(%error, %kind, "relay rejected blob; dropping");
+                if kind == "roster" { return Err(error); }
                 if kind == "credentials" {
                     app.state.lock().unwrap().credentials_uploaded = false;
                 }
@@ -495,9 +578,7 @@ async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), Rela
             Err(error) => return Err(error),
         }
         let snapshot = app.state.lock().unwrap().clone();
-        app.store
-            .remove_outbox_with_state(&id, &snapshot)
-            .map_err(|error| RelayError { status: None, message: error.to_string() })?;
+        app.store.remove_outbox_with_state(&id, &snapshot).map_err(local_relay_error)?;
     }
 }
 
@@ -710,7 +791,97 @@ pub async fn delete_remote_blob(app: &Arc<App>, id: &str) {
 
 // MARK: - Applying blobs
 
+fn local_relay_error(error: anyhow::Error) -> RelayError {
+    RelayError { status: None, message: error.to_string() }
+}
+
+fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn,
+    remember: bool) -> Result<(), RelayError> {
+    if blob.kind != "roster" {
+        if remember { apply_blob(app, machine_file, blob); }
+        else { apply_blob_contents(app, machine_file, blob); }
+        return Ok(());
+    }
+    let _edit = app.roster_edit.lock().unwrap();
+    let already_applied = app.state.lock().unwrap().applied_blob_ids.contains(&blob.id);
+    if remember && already_applied && app.store.roster_baseline("observed").map_err(local_relay_error)?
+        .is_some_and(|(seq, _)| seq >= blob.seq) { return Ok(()); }
+    let dek = machine_file.dek().map_err(local_relay_error)?;
+    let roster: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &unb64(&blob.ciphertext).map_err(local_relay_error)?)
+        .map_err(local_relay_error)?;
+    // Reload queue and markers while edits cannot change them; validate before observing,
+    // changing state, or deleting any transcript.
+    let queue = app.store.queued_roster().map_err(local_relay_error)?;
+    if let Some(item) = &queue { validate_roster_blob(app, machine_file, item, blob)?; }
+    else {
+        validate_pending_chat_identities(app, &roster)?;
+    }
+    let markers = app.store.pending_chat_identities().map_err(local_relay_error)?;
+    let accepted_ids: Vec<String> = markers.iter().filter_map(|(id, original)| {
+        let expected = original.as_ref()?;
+        roster.chats.iter().any(|remote| remote.id == *id && remote.kind == expected.kind
+            && remote.bot_ids == expected.bot_ids && remote.owner_bot_id == expected.owner_bot_id).then(|| id.clone())
+    }).collect();
+    let omitted_deleted_ids: Vec<String> = markers.iter().filter(|(id, _)|
+        !roster.chats.iter().any(|chat| chat.id == *id)
+        && !app.state.lock().unwrap().chats.iter().any(|chat| chat.meta.id == *id))
+        .map(|(id, _)| id.clone()).collect();
+    let resolved_ids: Vec<String> = accepted_ids.iter().chain(&omitted_deleted_ids).cloned().collect();
+    let own_accepted = already_applied;
+    let baseline = app.store.roster_baseline("queued").map_err(local_relay_error)?;
+    let submitted = if queue.is_some() && baseline.is_some() && !own_accepted {
+        app.store.roster_baseline("submitted").map_err(local_relay_error)?
+    } else { None };
+    // Routines have no chat creation marker. A submitted new routine present in a
+    // later slot establishes its creation without claiming unrelated remote additions.
+    let routine_creation_accepted = baseline.as_ref().zip(submitted.as_ref()).is_some_and(
+        |((_, base), (submitted_seq, sent))| blob.seq > *submitted_seq
+            && sent.routines.iter().any(|routine| !base.routines.iter().any(|old| old.id == routine.id)
+                && roster.routines.iter().any(|remote| remote.id == routine.id && remote.bot_id == routine.bot_id)));
+    let recovering = own_accepted || !accepted_ids.is_empty() || routine_creation_accepted;
+    let projection = match (&queue, baseline) {
+        (Some(item), Some((_, base))) => {
+            let queued: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &item.ciphertext).map_err(local_relay_error)?;
+            let base = if !recovering { base }
+                else if own_accepted { accepted_roster_baseline(base, &roster) }
+                else {
+                    let (_, submitted) = submitted
+                        .ok_or_else(|| roster_conflict("accepted creation lacks its original submitted roster"))?;
+                    accepted_roster_baseline(base, &submitted)
+                };
+            let projected = merge_rosters(roster.clone(), &base, &queued);
+            validate_merged_groups(&projected)?;
+            if recovering {
+                let rebased = OutboxItem { id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
+                    ciphertext: crate::crypto::encrypt_json(&dek, "roster", &projected).map_err(local_relay_error)?,
+                    slot: Some(Slot::latest("roster")), group: None };
+                app.store.observe_roster(blob.seq, &roster).map_err(local_relay_error)?;
+                app.store.rebase_queued_roster_with_state(&item.id, &rebased, &app.state.lock().unwrap().clone()).map_err(local_relay_error)?;
+                app.store.acknowledge_chat_creates(&resolved_ids).map_err(local_relay_error)?;
+            } else {
+                app.store.observe_roster(blob.seq, &roster).map_err(local_relay_error)?;
+                app.store.acknowledge_chat_creates(&omitted_deleted_ids).map_err(local_relay_error)?;
+            }
+            projected
+        }
+        _ => {
+            app.store.observe_roster(blob.seq, &roster).map_err(local_relay_error)?;
+            app.store.acknowledge_chat_creates(&resolved_ids).map_err(local_relay_error)?;
+            roster
+        }
+    };
+    apply_roster(app, projection);
+    if remember { remember_applied(&mut app.state.lock().unwrap(), &blob.id); }
+    Ok(())
+}
+
 pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
+    if blob.kind == "roster" {
+        if let Err(error) = apply_incoming_blob(app, machine_file, blob, true) {
+            tracing::warn!(%error, "applying roster blob");
+        }
+        return;
+    }
     let already = {
         let mut state = app.state.lock().unwrap();
         if state.applied_blob_ids.iter().any(|id| id == &blob.id) {
@@ -720,10 +891,7 @@ pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob:
             false
         }
     };
-    if already {
-        return;
-    }
-    apply_blob_contents(app, machine_file, blob);
+    if !already { apply_blob_contents(app, machine_file, blob); }
 }
 
 /// Applies a blob whether or not it was applied before, and leaves no record of it.
@@ -732,9 +900,12 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
     let Ok(dek) = machine_file.dek() else { return };
 
     match blob.kind.as_str() {
-        "roster" => match crate::crypto::decrypt_json::<RosterBlob>(&dek, "roster", &ciphertext) {
-            Ok(roster) => apply_roster(app, roster),
-            Err(error) => tracing::warn!(%error, "roster blob"),
+        "roster" => {
+            // Roster application uses apply_incoming_blob to validate under roster_edit.
+        },
+        "policy" => match crate::crypto::decrypt_json::<PolicyBlob>(&dek, "policy", &ciphertext) {
+            Ok(policy) => apply_policy(app, policy),
+            Err(error) => tracing::warn!(%error, "policy blob"),
         },
         "chat" => match crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &ciphertext) {
             Ok(op) => apply_chat_op(app, op),
@@ -824,45 +995,390 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
     }
 }
 
-fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
-    let removed: Vec<String>;
-    let normalized_descriptions = roster.bots.iter_mut().fold(false, |changed, bot| bot.normalize_description() || changed);
-    let this_device = app.this_device_id();
-    let kept_checks;
+fn apply_policy(app: &Arc<App>, policy: PolicyBlob) {
+    let _edit = app.roster_edit.lock().unwrap();
+    if policy.version.counter == 0 || policy.version.device_id.is_empty() { return; }
+    let mut roster_changed = false;
+    let mut removed = Vec::new();
+    let mut removed_bots = Vec::new();
+    let mut newly_paused = false;
     {
         let mut state = app.state.lock().unwrap();
-        let local_updated = state.chats.iter().map(|_| 0.0).fold(0.0, f64::max);
-        let _ = local_updated;
-        kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
+        state.policy_clock = state.policy_clock.max(policy.version.counter);
+        if let Some(paused) = policy.paused {
+            if policy.version > state.pause_version {
+                newly_paused = paused && !state.paused;
+                state.paused = paused;
+                state.pause_version = policy.version.clone();
+                roster_changed = true;
+            }
+        } else if let Some(id) = policy.bot_id {
+            if policy.removed {
+                if policy.version > *state.deleted_bot_versions.get(&id).unwrap_or(&PolicyVersion::default()) {
+                    state.deleted_bot_versions.insert(id.clone(), policy.version);
+                    state.capability_versions.remove(&id);
+                    state.policy_capabilities.remove(&id);
+                    removed_bots.push(id.clone());
+                    state.bots.retain(|bot| bot.id != id);
+                    state.routines.retain(|routine| routine.bot_id != id);
+                    for chat in &mut state.chats {
+                        if chat.meta.bot_ids.iter().any(|member| member == &id) {
+                            if !chat.meta.is_group() { removed.push(chat.meta.id.clone()); continue; }
+                            chat.meta.bot_ids.retain(|member| member != &id);
+                            if chat.meta.owner_bot_id.as_deref() == Some(id.as_str()) { chat.meta.owner_bot_id = chat.meta.bot_ids.first().cloned(); }
+                            if chat.meta.bot_ids.is_empty() { removed.push(chat.meta.id.clone()); }
+                        }
+                    }
+                    state.chats.retain(|chat| !removed.contains(&chat.meta.id));
+                    roster_changed = true;
+                }
+            } else if let Some(capabilities) = policy.capabilities {
+                if capabilities.validate().is_ok() && policy.version > *state.capability_versions.get(&id).unwrap_or(&PolicyVersion::default()) && !state.deleted_bot_versions.contains_key(&id) {
+                    state.capability_versions.insert(id.clone(), policy.version);
+                    state.policy_capabilities.insert(id.clone(), capabilities.clone());
+                    if let Some(bot) = state.bots.iter_mut().find(|bot| bot.id == id) { bot.capabilities = capabilities; }
+                    roster_changed = true;
+                }
+            }
+        }
+    }
+    if newly_paused { app.stop_for_pause(); }
+    if !removed.is_empty() {
+        let snapshot = app.state.lock().unwrap().clone();
+        if let Err(error) = app.store.save_state_deleting_chats(&snapshot, &removed) { tracing::error!(%error, "saving policy removal"); }
+        for chat_id in removed { app.cancel_chat(&chat_id); app.emit(Event::ChatRemoved { chat_id }); }
+    }
+    crate::runtime::cancel_removed_bots(app, &removed_bots);
+    if roster_changed {
+        // A policy event changes the projection, not the queued offline edit. Rebase that
+        // ciphertext with current policy rather than replacing it with the projection.
+        let upload = match app.store.queued_roster() {
+            Ok(item) => item.is_none(),
+            Err(error) => { tracing::error!(%error, "reading queued roster for policy"); false }
+        };
+        app.roster_changed(upload);
+    }
+}
+
+fn roster_conflict(reason: &str) -> RelayError {
+    RelayError { status: None, message: format!("Roster conflict: {reason}. Local changes remain queued; reconcile the conflicting chat on a paired Device before retrying") }
+}
+
+async fn preview_roster_conflict(app: &Arc<App>, url: &str, token: &str,
+    machine_file: &crate::keys::MachineFile, _item: &OutboxItem) -> Result<(), RelayError> {
+    let (blobs, _) = app.relay.list_blobs(url, token, 0, "roster").await?;
+    let Some(item) = app.store.queued_roster().map_err(|error| RelayError { status: None, message: error.to_string() })? else { return Ok(()); };
+    if let Some(blob) = blobs.last() { validate_roster_blob(app, machine_file, &item, blob)?; }
+    else if legacy_roster_conflict(app.store.roster_baseline("queued").map_err(|error| RelayError { status: None, message: error.to_string() })?.as_ref().map(|(seq, _)| *seq),
+        app.state.lock().unwrap().roster_slot_seq, 0) {
+        return Err(roster_conflict("queued roster lacks its original baseline and remote roster changed"));
+    }
+    Ok(())
+}
+
+fn validate_roster_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
+    item: &OutboxItem, remote_blob: &BlobIn) -> Result<(), RelayError> {
+    let local = |error: anyhow::Error| RelayError { status: None, message: error.to_string() };
+    let baseline = app.store.roster_baseline("queued").map_err(local)?;
+    let queued_seq = app.state.lock().unwrap().roster_slot_seq;
+    if legacy_roster_conflict(baseline.as_ref().map(|(seq, _)| *seq), queued_seq, remote_blob.seq) {
+        return Err(roster_conflict("queued roster lacks its original baseline and remote roster changed"));
+    }
+    let dek = machine_file.dek().map_err(local)?;
+    let remote: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &unb64(&remote_blob.ciphertext).map_err(local)?)
+        .map_err(local)?;
+    validate_pending_chat_identities(app, &remote)?;
+    if let Some((_, base)) = baseline {
+        let queued: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &item.ciphertext).map_err(local)?;
+        validate_merged_groups(&merge_rosters(remote, &base, &queued))?;
+    }
+    Ok(())
+}
+
+// A locally created chat owns its id until its roster lands. Merging by id would otherwise
+// replace its DM (and possibly strand its bot) with a different remote chat.
+
+fn validate_pending_chat_identities(app: &Arc<App>, remote: &RosterBlob) -> Result<(), RelayError> {
+    for (id, original) in app.store.pending_chat_identities().map_err(local_relay_error)? {
+        if let Some(other) = remote.chats.iter().find(|other| other.id == id) {
+            let Some(expected) = original else {
+                return Err(roster_conflict(&format!("chat {} has an older creation marker without its original identity", id)));
+            };
+            if expected.kind != other.kind || expected.bot_ids != other.bot_ids || expected.owner_bot_id != other.owner_bot_id {
+                return Err(roster_conflict(&format!("chat {} has different remote kind, members, or owner", id)));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn pull_policy_only(app: &Arc<App>, url: &str, token: &str,
+    machine_file: &crate::keys::MachineFile) -> Result<(), RelayError> {
+    let mut since = 0;
+    loop {
+        let (blobs, _) = app.relay.list_blobs(url, token, since, "policy").await?;
+        if blobs.is_empty() { return Ok(()); }
+        for blob in blobs {
+            since = blob.seq;
+            apply_blob(app, machine_file, &blob);
+        }
+    }
+}
+
+fn validate_merged_groups(roster: &RosterBlob) -> Result<(), RelayError> {
+    for chat in &roster.chats {
+        if chat.is_group() && (chat.bot_ids.is_empty() || chat.bot_ids.len() > MAX_GROUP_BOTS) {
+            return Err(roster_conflict(&format!("group {} would have {} members (allowed 1–{})", chat.id, chat.bot_ids.len(), MAX_GROUP_BOTS)));
+        }
+    }
+    Ok(())
+}
+
+fn legacy_roster_conflict(base_seq: Option<i64>, queued_seq: i64, remote_seq: i64) -> bool {
+    base_seq != Some(queued_seq) && remote_seq != queued_seq
+}
+
+fn merge_ids(remote: &mut Vec<String>, base: &[String], local: &[String]) {
+    remote.retain(|id| local.contains(id) || !base.contains(id));
+    for id in local {
+        if !base.contains(id) && !remote.contains(id) { remote.push(id.clone()); }
+    }
+}
+
+// The queued snapshot describes intent relative to the last roster this Device observed.
+// Compare fields, not whole entities: remote changes to other fields remain intact.
+fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob) -> RosterBlob {
+    macro_rules! merge_entities {
+        ($field:ident, $($member:ident),+ $(,)?) => {
+            for old in &base.$field {
+                let local = queued.$field.iter().find(|entry| entry.id == old.id);
+                if local.is_none() {
+                    remote.$field.retain(|entry| entry.id != old.id);
+                } else if let Some(current) = remote.$field.iter_mut().find(|entry| entry.id == old.id) {
+                    let local = local.unwrap();
+                    $(if local.$member != old.$member { current.$member = local.$member.clone(); })+
+                }
+            }
+            for local in &queued.$field {
+                if !base.$field.iter().any(|entry| entry.id == local.id)
+                    && !remote.$field.iter().any(|entry| entry.id == local.id) {
+                    remote.$field.push(local.clone());
+                }
+            }
+        };
+    }
+    merge_entities!(bots, name, description, symbol_name, accent, avatar, runner_id, provider,
+        model, thinking, legacy_instructions, workdir, capabilities);
+    merge_entities!(chats, kind, title, owner_bot_id, is_pinned);
+    for chat in &mut remote.chats {
+        if let (Some(old), Some(local)) = (base.chats.iter().find(|entry| entry.id == chat.id),
+            queued.chats.iter().find(|entry| entry.id == chat.id)) {
+            merge_ids(&mut chat.bot_ids, &old.bot_ids, &local.bot_ids);
+        }
+    }
+    merge_entities!(routines, bot_id, name, prompt, schedule, is_enabled, enabled_at,
+        last_run_at, last_outcome, paused_reason, check);
+    if queued.auto_review.is_enabled != base.auto_review.is_enabled {
+        remote.auto_review.is_enabled = queued.auto_review.is_enabled;
+    }
+    remote.auto_review.rules.retain(|rule| queued.auto_review.rules.iter().any(|local| local.id == rule.id)
+        || !base.auto_review.rules.iter().any(|old| old.id == rule.id));
+    for local in &queued.auto_review.rules {
+        if let Some(old) = base.auto_review.rules.iter().find(|old| old.id == local.id) {
+            if let Some(current) = remote.auto_review.rules.iter_mut().find(|rule| rule.id == local.id) {
+                if local != old { *current = local.clone(); }
+            }
+        } else if !remote.auto_review.rules.iter().any(|rule| rule.id == local.id) {
+            remote.auto_review.rules.push(local.clone());
+        }
+    }
+    remote
+}
+
+// Only creations from our submitted snapshot have become a common ancestor.
+// A later remote roster can also contain unrelated creations by other Devices.
+fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob) -> RosterBlob {
+    macro_rules! accept_creations {
+        ($field:ident) => {
+            for entry in &submitted.$field {
+                if !base.$field.iter().any(|old| old.id == entry.id) {
+                    base.$field.push(entry.clone());
+                }
+            }
+        };
+    }
+    accept_creations!(bots);
+    accept_creations!(chats);
+    accept_creations!(routines);
+    base
+}
+
+fn rebase_queued_roster(app: &Arc<App>, machine_file: &crate::keys::MachineFile, mut item: OutboxItem) -> Result<(), RelayError> {
+    let _edit = app.roster_edit.lock().unwrap();
+    // Capture may predate a local edit made during network awaits.
+    match app.store.queued_roster().map_err(|error| RelayError { status: None, message: error.to_string() })? {
+        Some(current) if current.id != item.id => item = current,
+        Some(_) => {}
+        None => return Ok(()),
+    }
+    let local = |error: anyhow::Error| RelayError { status: None, message: error.to_string() };
+    let dek = machine_file.dek().map_err(local)?;
+    loop {
+    let original = crate::crypto::decrypt_json::<RosterBlob>(&dek, "roster", &item.ciphertext).map_err(local)?;
+    let base = app.store.roster_baseline("queued").map_err(local)?;
+    let remote = app.store.roster_baseline("observed").map_err(local)?
+        .map(|(_, remote)| remote).unwrap_or_default();
+    if base.is_some() {
+        validate_pending_chat_identities(app, &remote)?;
+    }
+    let mut queued = if let Some((_, base)) = base {
+        merge_rosters(remote, &base, &original)
+    } else {
+        // Pre-baseline outbox: only upload if relay slot stayed put. Session guards that;
+        // queued ciphertext is sole surviving evidence of local changes.
+        original
+    };
+    validate_merged_groups(&queued)?;
+    let pending = app.store.pending_chat_creates().map_err(local)?;
+    let state = app.state.lock().unwrap();
+    queued.paused = state.paused;
+    queued.pause_version = state.pause_version.clone();
+    queued.policy_clock = state.policy_clock;
+    queued.capability_versions = state.capability_versions.clone();
+    queued.policy_capabilities = state.policy_capabilities.clone();
+    queued.deleted_bot_versions = state.deleted_bot_versions.clone();
+    queued.bots.retain(|bot| !state.deleted_bot_versions.contains_key(&bot.id));
+    for bot in &mut queued.bots {
+        if let Some(capabilities) = state.policy_capabilities.get(&bot.id) { bot.capabilities = capabilities.clone(); }
+    }
+    queued.chats.retain(|chat| !chat.bot_ids.iter().all(|id| state.deleted_bot_versions.contains_key(id))
+        && !state.group_deletes.contains(&crate::model::relay_name(&chat.id)));
+    for chat in &mut queued.chats {
+        chat.bot_ids.retain(|id| !state.deleted_bot_versions.contains_key(id));
+        if chat.owner_bot_id.as_ref().is_some_and(|id| !chat.bot_ids.contains(id)) { chat.owner_bot_id = chat.bot_ids.first().cloned(); }
+    }
+    // Creation markers outlive a pull where the remote roster omitted this new chat.
+    for chat in &state.chats {
+        if pending.contains(&chat.meta.id) && !queued.chats.iter().any(|local| local.id == chat.meta.id)
+            && !state.group_deletes.contains(&crate::model::relay_name(&chat.meta.id)) {
+            queued.chats.push(chat.meta.clone());
+        }
+    }
+    drop(state);
+    validate_merged_groups(&queued)?;
+    let ciphertext = crate::crypto::encrypt_json(&dek, "roster", &queued).map_err(local)?;
+    let rebased = OutboxItem { id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
+        ciphertext, slot: Some(Slot::latest("roster")), group: None };
+    let snapshot = {
+        let mut state = app.state.lock().unwrap();
+        remember_applied(&mut state, &rebased.id);
+        state.clone()
+    };
+    if app.store.rebase_queued_roster_with_state(&item.id, &rebased, &snapshot).map_err(local)? {
+        app.outbox_notify.notify_waiters();
+        apply_roster(app, queued);
+        return Ok(());
+    }
+    app.state.lock().unwrap().applied_blob_ids.retain(|id| id != &rebased.id);
+    item = match app.store.queued_roster().map_err(local)? {
+        Some(current) => current,
+        None => return Ok(()),
+    };
+    }
+}
+
+fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
+    // Only creations still awaiting their first roster upload survive a remote omission.
+    // A deleted existing chat must still lose its local transcript and outbox.
+    let pending = match app.store.pending_chat_creates() {
+        Ok(pending) => pending,
+        Err(error) => { tracing::error!(%error, "reading pending chat creations"); return; }
+    };
+    let queued_ids = match app.store.queued_roster() {
+        Ok(item) => item.and_then(|item| app.dek().and_then(|dek| crate::crypto::decrypt_json::<RosterBlob>(&dek, "roster", &item.ciphertext).ok()))
+            .map(|queued| queued.chats.into_iter().map(|chat| chat.id).collect::<Vec<_>>()).unwrap_or_default(),
+        Err(error) => { tracing::error!(%error, "reading queued roster"); return; }
+    };
+    let normalized_descriptions = roster.bots.iter_mut().fold(false, |changed, bot| bot.normalize_description() || changed);
+    let this_device = app.this_device_id();
+    let (removed, removed_bots, corrected, newly_paused, kept_checks) = {
+        let mut state = app.state.lock().unwrap();
+        state.policy_clock = state.policy_clock.max(roster.policy_clock);
+        let mut corrected = false;
+        let was_paused = state.paused;
+        if roster.pause_version > state.pause_version || (roster.pause_version == PolicyVersion::default() && state.pause_version == PolicyVersion::default()) {
+            state.pause_version = roster.pause_version.clone();
+            state.paused = roster.paused;
+        } else if roster.pause_version < state.pause_version || roster.paused != state.paused {
+            corrected = true;
+        }
+        let newly_paused = !was_paused && state.paused;
+        for (id, version) in roster.deleted_bot_versions {
+            let known = state.deleted_bot_versions.entry(id).or_default();
+            if version > *known { *known = version; }
+        }
+        for (id, version) in roster.capability_versions {
+            if version > *state.capability_versions.get(&id).unwrap_or(&PolicyVersion::default()) {
+                if let Some(value) = roster.policy_capabilities.get(&id).filter(|value| value.validate().is_ok()) {
+                    state.policy_capabilities.insert(id.clone(), value.clone());
+                    state.capability_versions.insert(id, version);
+                }
+            }
+        }
+        for bot in &mut roster.bots {
+            if let Some(value) = state.policy_capabilities.get(&bot.id) {
+                if bot.capabilities != *value { corrected = true; bot.capabilities = value.clone(); }
+            }
+        }
+        let before: Vec<String> = state.bots.iter().map(|bot| bot.id.clone()).collect();
+        roster.bots.retain(|bot| {
+            let deleted = state.deleted_bot_versions.contains_key(&bot.id);
+            if deleted { corrected = true; }
+            !deleted
+        });
+        roster.chats.retain(|chat| !chat.bot_ids.iter().all(|id| state.deleted_bot_versions.contains_key(id))
+            && !state.group_deletes.contains(&crate::model::relay_name(&chat.id)));
+        for chat in &mut roster.chats {
+            chat.bot_ids.retain(|id| !state.deleted_bot_versions.contains_key(id));
+            if chat.owner_bot_id.as_ref().is_some_and(|id| !chat.bot_ids.contains(id)) { chat.owner_bot_id = chat.bot_ids.first().cloned(); }
+        }
+        roster.routines.retain(|routine| !state.deleted_bot_versions.contains_key(&routine.bot_id));
+        let removed_bots: Vec<String> = before.into_iter().filter(|id| !roster.bots.iter().any(|bot| bot.id == *id)).collect();
+        let kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
         state.bots = roster.bots;
         state.routines = roster.routines;
         state.auto_review = roster.auto_review;
         let incoming_ids: Vec<String> = roster.chats.iter().map(|c| c.id.clone()).collect();
-        removed = state.chats.iter().filter(|c| !incoming_ids.contains(&c.meta.id)).map(|c| c.meta.id.clone()).collect();
-        state.chats.retain(|c| incoming_ids.contains(&c.meta.id));
+        let removed: Vec<String> = state.chats.iter().filter(|c| !incoming_ids.contains(&c.meta.id)
+            && !(pending.contains(&c.meta.id) && queued_ids.contains(&c.meta.id)
+                && !state.group_deletes.contains(&crate::model::relay_name(&c.meta.id))))
+            .map(|c| c.meta.id.clone()).collect();
+        state.chats.retain(|c| !removed.contains(&c.meta.id));
         for meta in roster.chats {
             match state.chats.iter_mut().find(|c| c.meta.id == meta.id) {
                 Some(chat) => chat.meta = meta,
                 None => state.chats.push(Chat { meta, unread_count: 0, usage: None, compactions: Vec::new() }),
             }
         }
-    }
+        (removed, removed_bots, corrected, newly_paused, kept_checks)
+    };
+    if newly_paused { app.stop_for_pause(); }
     let snapshot = app.state.lock().unwrap().clone();
     if let Err(error) = app.store.save_state_deleting_chats(&snapshot, &removed) {
         tracing::error!(%error, "saving synced roster");
     }
-    // Bots deleted on another Device take their scripts' values along here too.
     let bot_ids: Vec<String> = snapshot.bots.iter().map(|bot| bot.id.clone()).collect();
     if let Err(error) = app.store.retain_codemode_bots(&bot_ids) {
         tracing::warn!(%error, "forgetting deleted bots' script values");
     }
+    crate::runtime::cancel_removed_bots(app, &removed_bots);
     for chat_id in removed {
         app.cancel_chat(&chat_id);
         app.emit(Event::ChatRemoved { chat_id });
     }
     #[cfg(feature = "runner")]
     app.shell_sessions.close_orphans(app);
-    app.roster_changed(normalized_descriptions || kept_checks);
+    app.roster_changed(normalized_descriptions || kept_checks || corrected);
 }
 
 fn apply_chat_op(app: &Arc<App>, op: ChatBlob) {
@@ -1002,4 +1518,1078 @@ mod tests {
         app.state.lock().unwrap().listed_machines.remove(&fresh);
         assert!(unknown().is_empty(), "unpaired from another Device");
     }
+    fn bot(id: &str) -> Bot {
+        Bot {
+            id: id.into(), name: id.into(), description: String::new(), symbol_name: String::new(), accent: String::new(), avatar: None,
+            runner_id: "runner".into(), provider: "deepseek".into(), model: None, thinking: None,
+            legacy_instructions: String::new(), workdir: None, capabilities: Capabilities::default(), created_at: 1.0,
+        }
+    }
+
+    fn roster(bot: Bot) -> RosterBlob {
+        RosterBlob { bots: vec![bot], ..Default::default() }
+    }
+
+    fn policy(device: &str, counter: u64, paused: Option<bool>, capabilities: Option<Capabilities>) -> PolicyBlob {
+        PolicyBlob { paused, bot_id: capabilities.as_ref().map(|_| "bot".into()), capabilities, removed: false,
+            version: PolicyVersion { counter, device_id: device.into() } }
+    }
+
+    #[test]
+    fn two_devices_reconcile_pause_and_explicit_newer_resume_after_stale_roster_upload() {
+        let a = scratch_app();
+        let b = scratch_app();
+        let stale = roster(bot("bot"));
+        apply_roster(&a.0, stale.clone());
+        apply_roster(&b.0, stale.clone());
+        let pause = policy("A", 1, Some(true), None);
+        apply_policy(&a.0, pause.clone());
+        apply_policy(&b.0, pause);
+        apply_roster(&b.0, stale.clone()); // B's offline edit lands after A's Pause.
+        assert!(a.0.is_paused() && b.0.is_paused());
+        let resume = policy("B", 2, Some(false), None);
+        apply_policy(&b.0, resume.clone());
+        apply_policy(&a.0, resume);
+        apply_roster(&a.0, RosterBlob { paused: true, pause_version: PolicyVersion { counter: 1, device_id: "A".into() }, ..stale });
+        assert!(!a.0.is_paused() && !b.0.is_paused(), "only newer explicit resume lifts Pause");
+    }
+
+    #[test]
+    fn two_devices_preserve_restricted_capabilities_through_stale_roster() {
+        let a = scratch_app();
+        let b = scratch_app();
+        let stale = roster(bot("bot"));
+        apply_roster(&a.0, stale.clone());
+        apply_roster(&b.0, stale.clone());
+        let restricted = Capabilities { shell: false, write: false, plugins: Some(vec![]) };
+        let restriction = policy("A", 1, None, Some(restricted.clone()));
+        apply_policy(&a.0, restriction.clone());
+        apply_policy(&b.0, restriction);
+        apply_roster(&b.0, stale.clone());
+        assert_eq!(b.0.bot("bot").unwrap().capabilities, restricted);
+        let relaxed = policy("B", 2, None, Some(Capabilities::default()));
+        apply_policy(&a.0, relaxed.clone());
+        apply_policy(&b.0, relaxed);
+        apply_roster(&b.0, stale);
+        assert!(b.0.bot("bot").unwrap().capabilities.shell, "newer explicit relax wins");
+    }
+
+    #[test]
+    fn removed_bot_does_not_return_from_stale_surviving_group_roster() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let mut stale = roster(bot("bot"));
+        stale.bots.push(bot("other"));
+        stale.chats.push(ChatMeta { id: "group".into(), kind: "group".into(), title: None,
+            bot_ids: vec!["bot".into(), "other".into()], owner_bot_id: Some("bot".into()), is_pinned: false, created_at: 1.0 });
+        apply_roster(app, stale.clone());
+        apply_policy(app, PolicyBlob { paused: None, bot_id: Some("bot".into()), capabilities: None, removed: true,
+            version: PolicyVersion { counter: 1, device_id: "A".into() } });
+        apply_roster(app, stale);
+        assert!(app.bot("bot").is_none());
+        let group = app.chat("group").unwrap();
+        assert_eq!(group.meta.bot_ids, vec!["other".to_string()]);
+        assert_eq!(group.meta.owner_bot_id.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn queued_offline_bot_edit_keeps_profile_but_not_stale_policy() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial_upload = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial_upload.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        app.store.observe_roster(1, &roster(bot("bot"))).unwrap();
+        let mut queued = roster(bot("bot"));
+        queued.bots[0].name = "Offline edit".into();
+        queued.paused = false;
+        let dek = app.dek().unwrap();
+        let ciphertext = crate::crypto::encrypt_json(&dek, "roster", &queued).unwrap();
+        app.push_slot_blob("roster", Slot::latest("roster"), None, ciphertext);
+        let pending = app.store.queued_roster().unwrap().unwrap();
+        apply_policy(app, policy("A", 1, Some(true), None));
+        apply_policy(app, policy("A", 2, None, Some(Capabilities { shell: false, write: false, plugins: None })));
+        rebase_queued_roster(app, &app.machine_file().unwrap(), pending).unwrap();
+        let published = app.store.queued_roster().unwrap().unwrap();
+        let projected: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &published.ciphertext).unwrap();
+        assert_eq!(projected.bots[0].name, "Offline edit");
+        assert!(projected.paused);
+        assert!(!projected.bots[0].capabilities.shell);
+        assert_eq!(app.bot("bot").unwrap().name, "Offline edit");
+        assert!(app.is_paused());
+    }
+    #[test]
+    fn pre_baseline_queued_roster_keeps_edit_and_refuses_remote_conflict() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let queued = app.store.queued_roster().unwrap().unwrap();
+        app.store.forget_queued_roster_base().unwrap();
+        assert!(app.store.roster_baseline("queued").unwrap().is_none());
+        assert!(!legacy_roster_conflict(None, 0, 0));
+        assert!(legacy_roster_conflict(None, 0, 7));
+        let original: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &queued.ciphertext).unwrap();
+        rebase_queued_roster(app, &app.machine_file().unwrap(), queued).unwrap();
+        let rebased = app.store.queued_roster().unwrap().unwrap();
+        let projected: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &rebased.ciphertext).unwrap();
+        assert_eq!(projected.bots, original.bots);
+    }
+
+    #[test]
+    fn local_group_edit_during_pull_rebases_newest_slot_and_preserves_transcript() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial_upload = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial_upload.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let mut base = roster(bot("A"));
+        base.bots.extend([bot("B"), bot("C")]);
+        base.chats.push(ChatMeta { id: "group".into(), kind: "group".into(), title: None,
+            bot_ids: vec!["A".into(), "B".into(), "C".into()], owner_bot_id: Some("C".into()), is_pinned: false, created_at: 1.0 });
+        app.store.observe_roster(1, &base).unwrap();
+        apply_roster(app, base.clone());
+        let message = Message::new("group", Author::You, Body::text("keep transcript"));
+        app.upsert_message(message.clone(), true);
+        app.update_chat_meta("group", |chat| chat.bot_ids.retain(|id| id != "A")).unwrap();
+        let captured = app.store.queued_roster().unwrap().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let editor = std::thread::spawn({
+            let app = app.clone();
+            let barrier = barrier.clone();
+            move || {
+                barrier.wait();
+                app.update_chat_meta("group", |chat| chat.bot_ids.retain(|id| id != "B")).unwrap();
+            }
+        });
+        barrier.wait();
+        editor.join().unwrap();
+        let latest = app.store.queued_roster().unwrap().unwrap();
+        assert_ne!(captured.id, latest.id);
+        let mut remote = base;
+        remote.bots.push(bot("D"));
+        app.store.observe_roster(2, &remote).unwrap();
+        rebase_queued_roster(app, &app.machine_file().unwrap(), captured).unwrap();
+        let published = app.store.queued_roster().unwrap().unwrap();
+        let merged: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &published.ciphertext).unwrap();
+        assert_eq!(merged.chats[0].bot_ids, ["C"]);
+        assert_eq!(app.chat("group").unwrap().meta.bot_ids, ["C"]);
+        assert!(merged.bots.iter().any(|bot| bot.id == "D"));
+        assert!(app.message("group", &message.id).is_some());
+    }
+
+    #[test]
+    fn rebase_cas_rejects_stale_slot_without_advancing_baseline() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let stale = app.store.queued_roster().unwrap().unwrap();
+        let replacement = crate::crypto::encrypt_json(&app.dek().unwrap(), "roster", &roster(bot("new"))).unwrap();
+        app.push_slot_blob("roster", Slot::latest("roster"), None, replacement.clone());
+        let mut remote = roster(bot("remote"));
+        remote.updated_at = 2.0;
+        app.store.observe_roster(5, &remote).unwrap();
+        let queued_base = app.store.roster_baseline("queued").unwrap();
+        let candidate = OutboxItem { id: "rebased".into(), kind: "roster".into(), recipient: None,
+            ciphertext: stale.ciphertext, slot: Some(Slot::latest("roster")), group: None };
+        assert!(!app.store.rebase_queued_roster_with_state(&stale.id, &candidate, &app.state.lock().unwrap().clone()).unwrap());
+        assert_eq!(app.store.queued_roster().unwrap().unwrap().ciphertext, replacement);
+        assert_eq!(app.store.roster_baseline("queued").unwrap().unwrap().0, queued_base.unwrap().0);
+    }
+
+    #[test]
+    fn incoming_policy_during_rebase_preserves_newer_pause() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial_upload = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial_upload.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let base = roster(bot("bot"));
+        app.store.observe_roster(1, &base).unwrap();
+        apply_roster(app, base);
+        app.update_bot("bot", |bot| bot.name = "Offline name".into()).unwrap();
+        let captured = app.store.queued_roster().unwrap().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let policy_thread = std::thread::spawn({
+            let app = app.clone();
+            let barrier = barrier.clone();
+            move || {
+                barrier.wait();
+                apply_policy(&app, policy("remote", 5, Some(true), None));
+            }
+        });
+        barrier.wait();
+        policy_thread.join().unwrap();
+        rebase_queued_roster(app, &app.machine_file().unwrap(), captured).unwrap();
+        let item = app.store.queued_roster().unwrap().unwrap();
+        let merged: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &item.ciphertext).unwrap();
+        assert!(merged.paused);
+        assert_eq!(merged.pause_version.counter, 5);
+        assert_eq!(merged.bots[0].name, "Offline name");
+        assert!(app.is_paused());
+    }
+
+    #[test]
+    fn offline_chat_and_queued_message_file_survive_remote_roster_without_chat() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        apply_roster(app, roster(bot("bot")));
+        let chat = app.create_chat(ChatMeta { id: "offline".into(), kind: "dm".into(), title: None,
+            bot_ids: vec!["bot".into()], owner_bot_id: Some("bot".into()), is_pinned: false, created_at: 1.0 }).unwrap();
+        let message = Message::new(&chat.meta.id, Author::You, Body::text("offline transcript"));
+        app.upsert_message(message.clone(), true);
+        let file = OutboxItem { id: "offline-file".into(), kind: "file".into(), recipient: None,
+            ciphertext: b"encrypted-file".to_vec(), slot: None, group: Some(crate::model::relay_name("offline")) };
+        app.store.queue_outbox(&file).unwrap();
+        let pending = app.store.queued_roster().unwrap().unwrap();
+        apply_policy(app, policy("A", 1, Some(true), None));
+        apply_roster(app, roster(bot("bot"))); // Remote pull before any upload.
+        assert!(app.message("offline", &message.id).is_some());
+        assert!(app.store.outbox().unwrap().iter().any(|item| item.id == file.id));
+        rebase_queued_roster(app, &app.machine_file().unwrap(), pending).unwrap();
+        let published = app.store.queued_roster().unwrap().unwrap();
+        let roster: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &published.ciphertext).unwrap();
+        assert!(roster.chats.iter().any(|chat| chat.id == "offline"));
+        assert!(roster.paused && app.is_paused());
+        assert!(app.message("offline", &message.id).is_some());
+        let waiting = app.store.outbox().unwrap();
+        assert!(waiting.iter().any(|item| item.kind == "chat" && item.group == file.group));
+        assert!(waiting.iter().any(|item| item.id == file.id && item.ciphertext == file.ciphertext));
+        assert!(app.store.pending_chat_creates().unwrap().contains(&"offline".to_string()));
+        app.store.remove_outbox_roster_with_state(&published.id, &app.state.lock().unwrap().clone(), &["offline".into()]).unwrap();
+        // Server acceptance acknowledges creation despite a newer queued slot.
+        if let Some(latest) = app.store.queued_roster().unwrap() {
+            assert!(!app.store.pending_chat_creates().unwrap().contains(&"offline".to_string()));
+            app.store.remove_outbox_roster_with_state(&latest.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        }
+        assert!(!app.store.pending_chat_creates().unwrap().contains(&"offline".to_string()));
+    }
+
+    #[test]
+    fn offline_existing_edits_survive_remote_additions_and_restart() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial_upload = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial_upload.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let mut initial = roster(bot("lead"));
+        initial.chats.push(ChatMeta { id: "group".into(), kind: "group".into(), title: Some("Old".into()),
+            bot_ids: vec!["lead".into()], owner_bot_id: Some("lead".into()), is_pinned: false, created_at: 1.0 });
+        initial.routines.push(Routine { id: "routine".into(), bot_id: "lead".into(), name: "Daily".into(),
+            prompt: "Check".into(), schedule: "every 1d".into(), is_enabled: true, enabled_at: 1.0,
+            last_run_at: None, last_outcome: None, paused_reason: None, check: None, created_at: 1.0 });
+        app.store.observe_roster(4, &initial).unwrap();
+        apply_roster(app, initial.clone());
+        let message = Message::new("group", Author::You, Body::text("keep transcript"));
+        app.upsert_message(message.clone(), true);
+        {
+            let mut state = app.state.lock().unwrap();
+            let group = state.chats.iter_mut().find(|chat| chat.meta.id == "group").unwrap();
+            group.meta.title = Some("Renamed".into());
+            group.meta.is_pinned = true;
+            state.routines.clear();
+        }
+        app.push_roster();
+        let reopened = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let mut remote = initial;
+        remote.bots.push(bot("new-bot"));
+        remote.chats.push(ChatMeta { id: "new-chat".into(), kind: "dm".into(), title: None,
+            bot_ids: vec!["new-bot".into()], owner_bot_id: Some("new-bot".into()), is_pinned: false, created_at: 2.0 });
+        reopened.store.observe_roster(8, &remote).unwrap();
+        let pending = reopened.store.queued_roster().unwrap().unwrap();
+        let queued: RosterBlob = crate::crypto::decrypt_json(&reopened.dek().unwrap(), "roster", &pending.ciphertext).unwrap();
+        apply_roster(&reopened, merge_rosters(remote, &reopened.store.roster_baseline("queued").unwrap().unwrap().1, &queued));
+        rebase_queued_roster(&reopened, &reopened.machine_file().unwrap(), pending).unwrap();
+        let uploaded = reopened.store.queued_roster().unwrap().unwrap();
+        let result: RosterBlob = crate::crypto::decrypt_json(&reopened.dek().unwrap(), "roster", &uploaded.ciphertext).unwrap();
+        assert_eq!(result.chats.iter().find(|chat| chat.id == "group").unwrap().title.as_deref(), Some("Renamed"));
+        assert!(result.chats.iter().find(|chat| chat.id == "group").unwrap().is_pinned);
+        assert!(!result.routines.iter().any(|routine| routine.id == "routine"));
+        assert!(result.bots.iter().any(|bot| bot.id == "new-bot"));
+        assert!(result.chats.iter().any(|chat| chat.id == "new-chat"));
+        assert!(reopened.message("group", &message.id).is_some());
+    }
+
+    #[test]
+    fn remote_deletion_of_existing_chat_removes_transcript_and_queued_blobs() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial_upload = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial_upload.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let mut remote = roster(bot("bot"));
+        remote.chats.push(ChatMeta { id: "existing".into(), kind: "dm".into(), title: None,
+            bot_ids: vec!["bot".into()], owner_bot_id: Some("bot".into()), is_pinned: false, created_at: 1.0 });
+        app.store.observe_roster(1, &remote).unwrap();
+        apply_roster(app, remote);
+        let message = Message::new("existing", Author::You, Body::text("must delete"));
+        app.upsert_message(message.clone(), true);
+        app.store.queue_outbox(&OutboxItem { id: "existing-file".into(), kind: "file".into(), recipient: None,
+            ciphertext: b"encrypted-file".to_vec(), slot: None, group: Some(crate::model::relay_name("existing")) }).unwrap();
+        app.push_roster(); // A queued edit is not evidence of a locally created chat.
+        let pending = app.store.queued_roster().unwrap().unwrap();
+        app.store.observe_roster(2, &roster(bot("bot"))).unwrap();
+        apply_roster(app, roster(bot("bot")));
+        rebase_queued_roster(app, &app.machine_file().unwrap(), pending).unwrap();
+        assert!(app.chat("existing").is_none());
+        assert!(app.message("existing", &message.id).is_none());
+        assert!(!app.store.outbox().unwrap().iter().any(|item| item.group.as_deref() == Some("existing")));
+        let published = app.store.queued_roster().unwrap().unwrap();
+        let roster: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &published.ciphertext).unwrap();
+        assert!(!roster.chats.iter().any(|chat| chat.id == "existing"));
+    }
+
+    #[test]
+    fn remote_deleted_existing_chat_stays_deleted_despite_offline_rename() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial_upload = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial_upload.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let mut initial = roster(bot("bot"));
+        initial.chats.push(ChatMeta { id: "old".into(), kind: "group".into(), title: Some("Before".into()),
+            bot_ids: vec!["bot".into()], owner_bot_id: Some("bot".into()), is_pinned: false, created_at: 1.0 });
+        app.store.observe_roster(1, &initial).unwrap();
+        apply_roster(app, initial);
+        let message = Message::new("old", Author::You, Body::text("deleted with group"));
+        app.upsert_message(message.clone(), true);
+        app.state.lock().unwrap().chats[0].meta.title = Some("Offline rename".into());
+        app.push_roster();
+        let remote = roster(bot("bot"));
+        app.store.observe_roster(2, &remote).unwrap();
+        apply_roster(app, remote);
+        let pending = app.store.queued_roster().unwrap().unwrap();
+        rebase_queued_roster(app, &app.machine_file().unwrap(), pending).unwrap();
+        let result = app.store.queued_roster().unwrap().unwrap();
+        let projected: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &result.ciphertext).unwrap();
+        assert!(!projected.chats.iter().any(|chat| chat.id == "old"));
+        assert!(app.message("old", &message.id).is_none());
+    }
+
+    #[test]
+    fn queued_group_deletion_does_not_resurrect_from_remote_roster() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        apply_roster(app, roster(bot("bot")));
+        let chat = ChatMeta { id: "deleted".into(), kind: "dm".into(), title: None,
+            bot_ids: vec!["bot".into()], owner_bot_id: Some("bot".into()), is_pinned: false, created_at: 1.0 };
+        app.create_chat(chat.clone()).unwrap();
+        let queued = app.store.queued_roster().unwrap().unwrap();
+        app.delete_chat("deleted");
+        let mut remote = roster(bot("bot"));
+        remote.chats.push(chat);
+        apply_roster(app, remote);
+        rebase_queued_roster(app, &app.machine_file().unwrap(), queued).unwrap();
+        assert!(app.chat("deleted").is_none());
+        assert!(app.state.lock().unwrap().group_deletes.contains(&crate::model::relay_name("deleted")));
+        let published = app.store.queued_roster().unwrap().unwrap();
+        let roster: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &published.ciphertext).unwrap();
+        assert!(!roster.chats.iter().any(|chat| chat.id == "deleted"));
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn stale_roster_conflicts_and_preserves_other_devices_chat() {
+        use axum::{extract::{Query, State as HttpState}, http::StatusCode, routing::put, Json, Router};
+        use serde_json::{json, Value};
+        use tokio::sync::Mutex;
+
+        #[derive(Default)]
+        struct RelaySlot { seq: i64, roster: Option<Value> }
+        async fn upload(HttpState(slot): HttpState<Arc<Mutex<RelaySlot>>>, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+            let mut slot = slot.lock().await;
+            if body["kind"] == "roster" {
+                if slot.roster.as_ref().is_some_and(|current| current["id"] == body["id"]) {
+                    return (StatusCode::OK, Json(json!({ "seq": slot.seq })));
+                }
+                if body["expected_slot_seq"].as_i64() != Some(slot.roster.as_ref().map_or(0, |current| current["seq"].as_i64().unwrap())) {
+                    return (StatusCode::CONFLICT, Json(json!({ "error": "Roster slot changed" })));
+                }
+            }
+            slot.seq += 1;
+            let seq = slot.seq;
+            if body["kind"] == "roster" {
+                slot.roster = Some(json!({ "id": body["id"], "kind": "roster", "recipient_machine_pubkey": null,
+                    "ciphertext": body["ciphertext"], "seq": seq, "created_at": 1 }));
+            }
+            (StatusCode::OK, Json(json!({ "seq": seq })))
+        }
+        async fn list(HttpState(slot): HttpState<Arc<Mutex<RelaySlot>>>, Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            let slot = slot.lock().await;
+            let since: i64 = query["since"].parse().unwrap();
+            let blobs: Vec<Value> = slot.roster.iter().filter(|blob| blob["seq"].as_i64().unwrap() > since).cloned().collect();
+            Json(json!({ "blobs": blobs, "seq": slot.seq }))
+        }
+        let slot = Arc::new(Mutex::new(RelaySlot { seq: 1, roster: None }));
+        let server = Router::new().route("/v1/blobs", put(upload).get(list)).with_state(slot);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let a = scratch_app();
+        let b = scratch_app();
+        crate::identity::create(&a.0, Some("A".into())).unwrap();
+        *b.0.machine.lock().unwrap() = a.0.machine_file(); // Account DEK shared between Devices.
+        let runner = b.0.local_device().unwrap();
+        b.0.state.lock().unwrap().devices.push(runner);
+        let mut baseline = roster(bot("bot"));
+        baseline.chats.push(ChatMeta { id: "group".into(), kind: "group".into(), title: Some("Original".into()),
+            bot_ids: vec!["bot".into()], owner_bot_id: Some("bot".into()), is_pinned: false, created_at: 1.0 });
+        baseline.routines.push(Routine { id: "routine".into(), bot_id: "bot".into(), name: "Daily".into(),
+            prompt: "Check".into(), schedule: "every 1d".into(), is_enabled: true, enabled_at: 1.0,
+            last_run_at: None, last_outcome: None, paused_reason: None, check: None, created_at: 1.0 });
+        let initial_queue = a.0.store.queued_roster().unwrap().unwrap();
+        a.0.store.remove_outbox_roster_with_state(&initial_queue.id, &a.0.state.lock().unwrap().clone(), &[]).unwrap();
+        for app in [&a.0, &b.0] {
+            apply_roster(app, baseline.clone());
+            app.state.lock().unwrap().last_seq = 1; // Focus on roster pull, not initial transcript paging.
+        }
+        a.0.store.observe_roster(0, &baseline).unwrap();
+        b.0.store.observe_roster(0, &baseline).unwrap();
+        let group_message = Message::new("group", Author::You, Body::text("G transcript"));
+        a.0.upsert_message(group_message.clone(), true);
+        {
+            let mut state = a.0.state.lock().unwrap();
+            let group = state.chats.iter_mut().find(|chat| chat.meta.id == "group").unwrap();
+            group.meta.title = Some("Offline rename".into());
+            group.meta.is_pinned = true;
+            state.routines.clear();
+        }
+        a.0.push_roster();
+        for (app, id) in [(&a.0, "offline"), (&b.0, "x")] {
+            app.create_chat(ChatMeta { id: id.into(), kind: "dm".into(), title: None,
+                bot_ids: vec!["bot".into()], owner_bot_id: Some("bot".into()), is_pinned: false, created_at: 1.0 }).unwrap();
+        }
+        let mut new_bot = bot("new-bot");
+        new_bot.runner_id = b.0.this_device_id().unwrap();
+        b.0.create_bot_with_dm(new_bot, None).unwrap();
+        let b_roster = b.0.store.queued_roster().unwrap().unwrap();
+        let b_seq = b.0.relay.put_blob(&url, "token", b_roster.clone(), 0).await.unwrap();
+        b.0.state.lock().unwrap().roster_slot_seq = b_seq;
+        b.0.store.remove_outbox_roster_with_state(&b_roster.id, &b.0.state.lock().unwrap().clone(), &["x".into()]).unwrap();
+        assert!(!b.0.store.pending_chat_creates().unwrap().contains(&"x".to_string()));
+        let message = Message::new("x", Author::You, Body::text("X remains"));
+        b.0.upsert_message(message.clone(), true);
+        let file = OutboxItem { id: "x-file".into(), kind: "file".into(), recipient: None,
+            ciphertext: b"encrypted".to_vec(), slot: None, group: Some(crate::model::relay_name("x")) };
+        b.0.store.queue_outbox(&file).unwrap();
+        let stale = a.0.store.queued_roster().unwrap().unwrap();
+        assert_eq!(a.0.relay.put_blob(&url, "token", stale.clone(), 0).await.unwrap_err().status, Some(409));
+        let offline = Message::new("offline", Author::You, Body::text("offline"));
+        a.0.upsert_message(offline.clone(), true);
+        let offline_file = OutboxItem { id: "offline-file".into(), kind: "file".into(), recipient: None,
+            ciphertext: b"encrypted".to_vec(), slot: None, group: Some(crate::model::relay_name("offline")) };
+        a.0.store.queue_outbox(&offline_file).unwrap();
+        assert!(a.0.store.pending_chat_creates().unwrap().contains(&"offline".to_string()));
+        pull_blobs(&a.0, &url, "token", &a.0.machine_file().unwrap()).await.unwrap();
+        rebase_queued_roster(&a.0, &a.0.machine_file().unwrap(), stale).unwrap();
+        let merged = a.0.store.queued_roster().unwrap().unwrap();
+        let roster: RosterBlob = crate::crypto::decrypt_json(&a.0.dek().unwrap(), "roster", &merged.ciphertext).unwrap();
+        assert!(roster.chats.iter().any(|chat| chat.id == "x"));
+        assert!(roster.chats.iter().any(|chat| chat.id == "offline"));
+        assert_eq!(roster.chats.iter().find(|chat| chat.id == "group").unwrap().title.as_deref(), Some("Offline rename"));
+        assert!(roster.chats.iter().find(|chat| chat.id == "group").unwrap().is_pinned);
+        assert!(!roster.routines.iter().any(|routine| routine.id == "routine"));
+        assert!(roster.bots.iter().any(|bot| bot.name == "new-bot"));
+        let expected = a.0.state.lock().unwrap().roster_slot_seq;
+        let seq = a.0.relay.put_blob(&url, "token", merged.clone(), expected).await.unwrap();
+        a.0.state.lock().unwrap().roster_slot_seq = seq;
+        a.0.store.remove_outbox_roster_with_state(&merged.id, &a.0.state.lock().unwrap().clone(), &["offline".into(), "x".into()]).unwrap();
+        assert!(!a.0.store.pending_chat_creates().unwrap().contains(&"offline".to_string()));
+        pull_blobs(&b.0, &url, "token", &b.0.machine_file().unwrap()).await.unwrap();
+        assert!(b.0.chat("x").is_some());
+        assert!(b.0.message("x", &message.id).is_some());
+        assert!(b.0.store.outbox().unwrap().iter().any(|item| item.id == file.id));
+        assert!(a.0.message("offline", &offline.id).is_some());
+        assert_eq!(b.0.chat("group").unwrap().meta.title.as_deref(), Some("Offline rename"));
+        assert!(!b.0.state.lock().unwrap().routines.iter().any(|routine| routine.id == "routine"));
+        assert!(a.0.message("group", &group_message.id).is_some());
+        assert!(a.0.store.outbox().unwrap().iter().any(|item| item.id == offline_file.id));
+        task.abort();
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn cas_membership_conflicts_preserve_local_and_remote() {
+        use axum::{extract::{Query, State as HttpState}, http::StatusCode, routing::put, Json, Router};
+        use serde_json::{json, Value};
+        use tokio::sync::Mutex;
+        async fn upload(HttpState(slot): HttpState<Arc<Mutex<(i64, Option<Value>)>>>, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+            let mut slot = slot.lock().await;
+            if body["expected_slot_seq"].as_i64() != Some(slot.0) {
+                return (StatusCode::CONFLICT, Json(json!({"error":"Roster slot changed"})));
+            }
+            slot.0 += 1;
+            let seq = slot.0;
+            slot.1 = Some(json!({"id":body["id"],"kind":"roster","recipient_machine_pubkey":null,
+                "ciphertext":body["ciphertext"],"seq":seq,"created_at":1}));
+            (StatusCode::OK, Json(json!({"seq":seq})))
+        }
+        async fn list(HttpState(slot): HttpState<Arc<Mutex<(i64, Option<Value>)>>>, Query(query): Query<std::collections::HashMap<String,String>>) -> Json<Value> {
+            let slot = slot.lock().await;
+            Json(json!({"blobs":slot.1.iter().filter(|blob| blob["seq"].as_i64().unwrap() > query["since"].parse::<i64>().unwrap()).cloned().collect::<Vec<_>>(),"seq":slot.0}))
+        }
+        for case in ["removals", "additions", "legacy"] {
+            let slot = Arc::new(Mutex::new((0, None)));
+            let server = Router::new().route("/v1/blobs", put(upload).get(list)).with_state(slot.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+            let scratch = scratch_app();
+            let app = &scratch.0;
+            crate::identity::create(app, Some("Runner".into())).unwrap();
+            let initial = app.store.queued_roster().unwrap().unwrap();
+            app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+            let ids: Vec<String> = (0..if case == "additions" { 5 } else { 2 }).map(|n| format!("bot{n}")).collect();
+            let mut base = roster(bot(&ids[0]));
+            base.bots = ids.iter().map(|id| bot(id)).collect();
+            base.chats.push(ChatMeta { id: "group".into(), kind: "group".into(), title: None,
+                bot_ids: ids.clone(), owner_bot_id: Some(ids[0].clone()), is_pinned: false, created_at: 1.0 });
+            apply_roster(app, base.clone());
+            app.store.observe_roster(0, &base).unwrap();
+            let message = Message::new("group", Author::You, Body::text("preserved"));
+            app.upsert_message(message.clone(), true);
+            app.store.queue_outbox(&OutboxItem { id: "group-file".into(), kind: "file".into(), recipient: None,
+                ciphertext: b"encrypted".to_vec(), slot: None, group: Some(crate::model::relay_name("group")) }).unwrap();
+            let mut local = base.clone();
+            let mut remote = base;
+            if case == "additions" {
+                local.chats[0].bot_ids.push("local-sixth".into());
+                remote.chats[0].bot_ids.push("remote-sixth".into());
+                local.bots.push(bot("local-sixth"));
+                remote.bots.push(bot("remote-sixth"));
+            } else {
+                local.chats[0].bot_ids.remove(0);
+                if case == "legacy" { remote.chats.clear(); }
+                else { remote.chats[0].bot_ids.remove(1); }
+            }
+            let dek = app.dek().unwrap();
+            app.push_slot_blob("roster", Slot::latest("roster"), None, crate::crypto::encrypt_json(&dek, "roster", &local).unwrap());
+            let queued = app.store.queued_roster().unwrap().unwrap();
+            if case == "legacy" { app.store.forget_queued_roster_base().unwrap(); }
+            let remote_item = OutboxItem { id: "remote-roster".into(), kind: "roster".into(), recipient: None,
+                ciphertext: crate::crypto::encrypt_json(&dek, "roster", &remote).unwrap(), slot: Some(Slot::latest("roster")), group: None };
+            app.relay.put_blob(&url, "token", remote_item, 0).await.unwrap();
+            assert_eq!(app.relay.put_blob(&url, "token", queued.clone(), 0).await.unwrap_err().status, Some(409));
+            let error = preview_roster_conflict(app, &url, "token", &app.machine_file().unwrap(), &queued).await.unwrap_err();
+            assert!(error.message.contains(if case == "legacy" { "lacks its original baseline" } else if case == "additions" { "7 members" } else { "0 members" }));
+            assert!(pull_blobs(app, &url, "token", &app.machine_file().unwrap()).await.unwrap_err().message.contains("Roster conflict:"));
+            assert!(app.message("group", &message.id).is_some());
+            assert!(app.store.outbox().unwrap().iter().any(|item| item.id == "group-file"));
+            assert_eq!(app.store.queued_roster().unwrap().unwrap().ciphertext, queued.ciphertext);
+            let relay = slot.lock().await;
+            assert_eq!(relay.0, 1);
+            let ciphertext = relay.1.as_ref().unwrap()["ciphertext"].as_str().unwrap();
+            let published: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &unb64(ciphertext).unwrap()).unwrap();
+            assert_eq!(published.chats, remote.chats);
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn two_offline_bots_claiming_same_dm_id_keep_local_intent_on_conflict() {
+        use axum::{extract::{Query, State as HttpState}, http::StatusCode, routing::put, Json, Router};
+        use serde_json::{json, Value};
+        use tokio::sync::Mutex;
+
+        async fn upload(HttpState(slot): HttpState<Arc<Mutex<(i64, Option<Value>)>>>, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+            let mut slot = slot.lock().await;
+            if body["expected_slot_seq"].as_i64() != Some(slot.0) {
+                return (StatusCode::CONFLICT, Json(json!({"error":"Roster slot changed"})));
+            }
+            slot.0 += 1;
+            slot.1 = Some(json!({"id":body["id"],"kind":"roster","recipient_machine_pubkey":null,
+                "ciphertext":body["ciphertext"],"seq":slot.0,"created_at":1}));
+            (StatusCode::OK, Json(json!({"seq":slot.0})))
+        }
+        async fn list(HttpState(slot): HttpState<Arc<Mutex<(i64, Option<Value>)>>>, Query(query): Query<std::collections::HashMap<String,String>>) -> Json<Value> {
+            let slot = slot.lock().await;
+            Json(json!({"blobs":slot.1.iter().filter(|blob| blob["seq"].as_i64().unwrap() > query["since"].parse::<i64>().unwrap()).cloned().collect::<Vec<_>>(),"seq":slot.0}))
+        }
+        let slot = Arc::new(Mutex::new((0, None)));
+        let server = Router::new().route("/v1/blobs", put(upload).get(list)).with_state(slot.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let a = scratch_app();
+        let b = scratch_app();
+        crate::identity::create(&a.0, Some("A".into())).unwrap();
+        *b.0.machine.lock().unwrap() = a.0.machine_file();
+        let runner = b.0.local_device().unwrap();
+        b.0.state.lock().unwrap().devices.push(runner);
+        let initial = a.0.store.queued_roster().unwrap().unwrap();
+        a.0.store.remove_outbox_roster_with_state(&initial.id, &a.0.state.lock().unwrap().clone(), &[]).unwrap();
+        for app in [&a.0, &b.0] {
+            app.store.observe_roster(0, &RosterBlob::default()).unwrap();
+            let mut candidate = bot(if Arc::ptr_eq(app, &a.0) { "bot-A" } else { "bot-B" });
+            candidate.runner_id = app.this_device_id().unwrap();
+            candidate.capabilities.shell = false;
+            app.create_bot_with_dm(candidate, Some("X".into())).unwrap();
+        }
+        let message = Message::new("X", Author::You, Body::text("A stays A"));
+        a.0.upsert_message(message.clone(), true);
+        a.0.store.queue_outbox(&OutboxItem { id: "X-file".into(), kind: "file".into(), recipient: None,
+            ciphertext: b"encrypted".to_vec(), slot: None, group: Some(crate::model::relay_name("X")) }).unwrap();
+        let queued = a.0.store.queued_roster().unwrap().unwrap();
+        let b_roster = b.0.store.queued_roster().unwrap().unwrap();
+        b.0.relay.put_blob(&url, "token", b_roster.clone(), 0).await.unwrap();
+        assert_eq!(a.0.relay.put_blob(&url, "token", queued.clone(), 0).await.unwrap_err().status, Some(409));
+        let local: RosterBlob = crate::crypto::decrypt_json(&a.0.dek().unwrap(), "roster", &queued.ciphertext).unwrap();
+        let mut matching = local.clone();
+        matching.bots.push(bot("remote-extra"));
+        validate_pending_chat_identities(&a.0, &matching).unwrap();
+        let merged = merge_rosters(matching, &RosterBlob::default(), &local);
+        assert!(merged.bots.iter().any(|bot| bot.id == "remote-extra"));
+        assert_eq!(merged.chats.iter().find(|chat| chat.id == "X").unwrap().bot_ids, ["bot-A"]);
+        for _ in 0..2 {
+            let error = preview_roster_conflict(&a.0, &url, "token", &a.0.machine_file().unwrap(), &queued).await.unwrap_err();
+            assert!(error.message.contains("chat X"));
+            assert!(pull_blobs(&a.0, &url, "token", &a.0.machine_file().unwrap()).await.unwrap_err().message.contains("chat X"));
+            assert_eq!(a.0.chat("X").unwrap().meta.bot_ids, ["bot-A"]);
+            assert!(a.0.bot("bot-A").is_some());
+            assert!(a.0.bot("bot-B").is_none());
+            assert!(a.0.message("X", &message.id).is_some());
+            let outbox = a.0.store.outbox().unwrap();
+            assert!(outbox.iter().any(|item| item.id == "X-file"));
+            assert!(outbox.iter().any(|item| item.kind == "policy"));
+            assert_eq!(a.0.store.queued_roster().unwrap().unwrap().ciphertext, queued.ciphertext);
+            assert!(a.0.store.pending_chat_creates().unwrap().contains(&"X".into()));
+        }
+        let remote_ciphertext = slot.lock().await.1.as_ref().unwrap()["ciphertext"].as_str().unwrap().to_string();
+        let remote: RosterBlob = crate::crypto::decrypt_json(&a.0.dek().unwrap(), "roster", &unb64(&remote_ciphertext).unwrap()).unwrap();
+        a.0.store.observe_roster(1, &remote).unwrap();
+        assert!(rebase_queued_roster(&a.0, &a.0.machine_file().unwrap(), queued.clone()).unwrap_err().message.contains("chat X"));
+        assert_eq!(a.0.store.queued_roster().unwrap().unwrap().ciphertext, queued.ciphertext);
+        let relay = slot.lock().await;
+        assert_eq!(relay.0, 1);
+        assert_eq!(unb64(relay.1.as_ref().unwrap()["ciphertext"].as_str().unwrap()).unwrap(), b_roster.ciphertext);
+        task.abort();
+    }
+
+    #[test]
+    fn incoming_roster_rechecks_creation_after_preflight() {
+        let a = scratch_app();
+        let b = scratch_app();
+        crate::identity::create(&a.0, Some("A".into())).unwrap();
+        *b.0.machine.lock().unwrap() = a.0.machine_file();
+        let runner = b.0.local_device().unwrap();
+        b.0.state.lock().unwrap().devices.push(runner);
+        let initial = a.0.store.queued_roster().unwrap().unwrap();
+        a.0.store.remove_outbox_roster_with_state(&initial.id, &a.0.state.lock().unwrap().clone(), &[]).unwrap();
+        let mut remote_bot = bot("bot-B");
+        remote_bot.runner_id = b.0.this_device_id().unwrap();
+        b.0.create_bot_with_dm(remote_bot, Some("X".into())).unwrap();
+        let remote = b.0.store.queued_roster().unwrap().unwrap();
+        let incoming = BlobIn { id: remote.id.clone(), kind: "roster".into(), recipient_machine_pubkey: None,
+            ciphertext: crate::keys::b64(&remote.ciphertext), seq: 1, created_at: 1 };
+        assert!(a.0.store.queued_roster().unwrap().is_none()); // Preflight saw no local edit.
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let worker = std::thread::spawn({
+            let app = a.0.clone();
+            let barrier = barrier.clone();
+            move || {
+                barrier.wait();
+                let mut local_bot = bot("bot-A");
+                local_bot.runner_id = app.this_device_id().unwrap();
+                local_bot.capabilities.shell = false;
+                app.create_bot_with_dm(local_bot, Some("X".into())).unwrap();
+                let message = Message::new("X", Author::You, Body::text("keep local"));
+                app.upsert_message(message.clone(), true);
+                message
+            }
+        });
+        barrier.wait();
+        let message = worker.join().unwrap();
+        for remember in [false, true] {
+            let error = apply_incoming_blob(&a.0, &a.0.machine_file().unwrap(), &incoming, remember).unwrap_err();
+            assert!(error.message.contains("chat X"));
+            assert_eq!(a.0.chat("X").unwrap().meta.bot_ids, ["bot-A"]);
+            assert!(a.0.bot("bot-A").is_some() && a.0.bot("bot-B").is_none());
+            assert!(a.0.message("X", &message.id).is_some());
+            assert!(a.0.store.queued_roster().unwrap().is_some());
+            assert!(a.0.store.outbox().unwrap().iter().any(|item| item.kind == "policy"));
+            assert!(a.0.store.roster_baseline("observed").unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn first_sync_and_normal_pull_recheck_chat_created_while_fetching() {
+        use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
+        use serde_json::{json, Value};
+        use tokio::sync::Notify;
+
+        struct PullGate { blob: Value, entered: Notify, release: Notify }
+        async fn list(HttpState(gate): HttpState<Arc<PullGate>>,
+            Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+            let since: i64 = query["since"].parse().unwrap();
+            let seq = gate.blob["seq"].as_i64().unwrap();
+            Json(json!({"blobs": if since < seq { vec![gate.blob.clone()] } else { Vec::new() }, "seq":seq}))
+        }
+        for first in [true, false] {
+            let a = scratch_app();
+            let b = scratch_app();
+            crate::identity::create(&a.0, Some("A".into())).unwrap();
+            *b.0.machine.lock().unwrap() = a.0.machine_file();
+            let runner = b.0.local_device().unwrap();
+            b.0.state.lock().unwrap().devices.push(runner);
+            let initial = a.0.store.queued_roster().unwrap().unwrap();
+            a.0.store.remove_outbox_roster_with_state(&initial.id, &a.0.state.lock().unwrap().clone(), &[]).unwrap();
+            let mut remote_bot = bot("bot-B");
+            remote_bot.runner_id = b.0.this_device_id().unwrap();
+            b.0.create_bot_with_dm(remote_bot, Some("X".into())).unwrap();
+            let remote = b.0.store.queued_roster().unwrap().unwrap();
+            let seq = if first { 1 } else { 2 };
+            if !first { a.0.state.lock().unwrap().last_seq = 1; }
+            let gate = Arc::new(PullGate { blob: json!({"id":remote.id,"kind":"roster",
+                "recipient_machine_pubkey":null,"ciphertext":crate::keys::b64(&remote.ciphertext),
+                "seq":seq,"created_at":1}), entered: Notify::new(), release: Notify::new() });
+            let server = Router::new().route("/v1/blobs", get(list)).with_state(gate.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server_task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+            let pulling = tokio::spawn({
+                let app = a.0.clone();
+                async move { pull_blobs(&app, &url, "token", &app.machine_file().unwrap()).await }
+            });
+            gate.entered.notified().await;
+            let mut local_bot = bot("bot-A");
+            local_bot.runner_id = a.0.this_device_id().unwrap();
+            local_bot.capabilities.shell = false;
+            a.0.create_bot_with_dm(local_bot, Some("X".into())).unwrap();
+            let message = Message::new("X", Author::You, Body::text("keep local"));
+            a.0.upsert_message(message.clone(), true);
+            gate.release.notify_one();
+            let error = pulling.await.unwrap().unwrap_err();
+            assert!(error.message.contains("chat X"));
+            assert_eq!(a.0.chat("X").unwrap().meta.bot_ids, ["bot-A"]);
+            assert!(a.0.bot("bot-A").is_some() && a.0.bot("bot-B").is_none());
+            assert!(a.0.message("X", &message.id).is_some());
+            assert!(a.0.store.queued_roster().unwrap().is_some());
+            assert!(a.0.store.pending_chat_creates().unwrap().contains(&"X".into()));
+            server_task.abort();
+        }
+    }
+
+    #[test]
+    fn migrated_id_only_marker_rejects_matching_edited_foreign_group() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let mut base = roster(bot("A"));
+        base.bots.push(bot("B"));
+        apply_roster(app, base);
+        app.create_chat(ChatMeta { id: "G".into(), kind: "group".into(), title: None,
+            bot_ids: vec!["A".into()], owner_bot_id: Some("A".into()), is_pinned: false, created_at: 1.0 }).unwrap();
+        app.update_chat_meta("G", |chat| chat.bot_ids.push("B".into())).unwrap();
+        app.store.forget_chat_create_identity("G").unwrap();
+        let mut foreign = roster(bot("A"));
+        foreign.bots.push(bot("B"));
+        foreign.chats.push(ChatMeta { id: "G".into(), kind: "group".into(), title: Some("Foreign".into()),
+            bot_ids: vec!["A".into(), "B".into()], owner_bot_id: Some("A".into()), is_pinned: false, created_at: 2.0 });
+        let before = app.chat("G").unwrap();
+        let blob = BlobIn { id: "foreign-roster".into(), kind: "roster".into(), recipient_machine_pubkey: None,
+            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&app.dek().unwrap(), "roster", &foreign).unwrap()),
+            seq: 1, created_at: 1 };
+        assert!(apply_incoming_blob(app, &app.machine_file().unwrap(), &blob, true).unwrap_err().message.contains("older creation marker"));
+        assert_eq!(app.chat("G").unwrap().meta, before.meta);
+        assert!(app.store.pending_chat_creates().unwrap().contains(&"G".into()));
+    }
+
+    #[test]
+    fn never_uploaded_deleted_chat_marker_clears_on_remote_omission() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let mut base = roster(bot("A"));
+        base.bots.push(bot("B"));
+        apply_roster(app, base.clone());
+        app.store.observe_roster(0, &base).unwrap();
+        app.create_chat(ChatMeta { id: "G".into(), kind: "group".into(), title: None,
+            bot_ids: vec!["A".into()], owner_bot_id: Some("A".into()), is_pinned: false, created_at: 1.0 }).unwrap();
+        app.delete_chat("G");
+        assert!(app.store.pending_chat_creates().unwrap().contains(&"G".into()));
+        let remote = BlobIn { id: "remote-empty".into(), kind: "roster".into(), recipient_machine_pubkey: None,
+            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&app.dek().unwrap(), "roster", &base).unwrap()),
+            seq: 1, created_at: 1 };
+        apply_incoming_blob(app, &app.machine_file().unwrap(), &remote, true).unwrap();
+        assert!(app.chat("G").is_none());
+        assert!(!app.store.pending_chat_creates().unwrap().contains(&"G".into()));
+    }
+
+    #[tokio::test]
+    async fn lost_roster_response_recovers_original_group_identity() {
+        use axum::{extract::{Query, State as HttpState}, http::StatusCode, routing::put, Json, Router};
+        use serde_json::{json, Value};
+        use tokio::sync::{Mutex, Notify};
+        struct LostReply { roster: Option<Value>, accepted: Arc<Notify>, release: Arc<Notify> }
+        async fn upload(HttpState(slot): HttpState<Arc<Mutex<LostReply>>>, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+            if body["kind"] != "roster" {
+                return (StatusCode::OK, Json(json!({"seq":0})));
+            }
+            let (accepted, release) = {
+                let mut slot = slot.lock().await;
+                slot.roster = Some(json!({"id":body["id"],"kind":"roster","recipient_machine_pubkey":null,
+                    "ciphertext":body["ciphertext"],"seq":1,"created_at":1}));
+                (slot.accepted.clone(), slot.release.clone())
+            };
+            accepted.notify_one();
+            release.notified().await;
+            (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"reply lost"})))
+        }
+        async fn list(HttpState(slot): HttpState<Arc<Mutex<LostReply>>>, Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            let slot = slot.lock().await;
+            let since: i64 = query["since"].parse().unwrap();
+            Json(json!({"blobs": if since == 0 { slot.roster.iter().cloned().collect::<Vec<_>>() } else { Vec::new() }, "seq":1}))
+        }
+        let slot = Arc::new(Mutex::new(LostReply { roster: None, accepted: Arc::new(Notify::new()), release: Arc::new(Notify::new()) }));
+        let server = Router::new().route("/v1/blobs", put(upload).get(list)).with_state(slot.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        for case in ["group_edit", "bot_edit", "bot_delete"] {
+        slot.lock().await.roster = None;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let mut base = roster(bot("A"));
+        base.bots.push(bot("B"));
+        apply_roster(app, base.clone());
+        app.store.observe_roster(0, &base).unwrap();
+        if case == "group_edit" {
+            app.create_chat(ChatMeta { id: "G".into(), kind: "group".into(), title: None,
+                bot_ids: vec!["A".into()], owner_bot_id: Some("A".into()), is_pinned: false, created_at: 1.0 }).unwrap();
+        } else {
+            let mut new_bot = bot("new-bot");
+            new_bot.runner_id = app.this_device_id().unwrap();
+            app.create_bot_with_dm(new_bot, Some("G".into())).unwrap();
+        }
+        let accepted = slot.lock().await.accepted.clone();
+        let release = slot.lock().await.release.clone();
+        let upload_task = tokio::spawn({ let app = app.clone(); let url = url.clone();
+            async move { drain_outbox(&app, &url, "token").await } });
+        accepted.notified().await;
+        match case {
+            "group_edit" => app.update_chat_meta("G", |chat| chat.bot_ids.push("B".into())).unwrap(),
+            "bot_edit" => { app.update_bot("new-bot", |bot| bot.name = "Renamed".into()).unwrap(); }
+            _ => { app.delete_bot("new-bot").unwrap(); }
+        }
+        release.notify_one();
+        assert!(upload_task.await.unwrap().is_err());
+        let queued = app.store.queued_roster().unwrap().unwrap();
+        preview_roster_conflict(app, &url, "token", &app.machine_file().unwrap(), &queued).await.unwrap();
+        pull_blobs(app, &url, "token", &app.machine_file().unwrap()).await.unwrap();
+        assert!(app.store.pending_chat_creates().unwrap().is_empty());
+        let queued = app.store.queued_roster().unwrap().unwrap();
+        let result: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &queued.ciphertext).unwrap();
+        match case {
+            "group_edit" => assert_eq!(result.chats.iter().find(|chat| chat.id == "G").unwrap().bot_ids, ["A", "B"]),
+            "bot_edit" => assert_eq!(result.bots.iter().find(|bot| bot.id == "new-bot").unwrap().name, "Renamed"),
+            _ => assert!(!result.bots.iter().any(|bot| bot.id == "new-bot")),
+        }
+        assert_eq!(app.store.roster_baseline("queued").unwrap().unwrap().0, 1, "{case}");
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn accepted_group_creation_with_newer_membership_edit_drains() {
+        use axum::{extract::State as HttpState, http::StatusCode, routing::put, Json, Router};
+        use serde_json::{json, Value};
+        use tokio::sync::{Mutex, Notify};
+
+        struct RelaySlot {
+            seq: i64,
+            roster: Option<Value>,
+            accepted: Arc<Notify>,
+            release: Arc<Notify>,
+        }
+        async fn upload(HttpState(slot): HttpState<Arc<Mutex<RelaySlot>>>, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+            let (seq, accepted, release) = {
+                let mut slot = slot.lock().await;
+                if body["kind"] == "roster" && body["expected_slot_seq"].as_i64() != Some(slot.roster.as_ref().map_or(0, |previous| previous["seq"].as_i64().unwrap())) {
+                    return (StatusCode::CONFLICT, Json(json!({"error":"Roster slot changed"})));
+                }
+                slot.seq += 1;
+                let seq = slot.seq;
+                let first_roster = body["kind"] == "roster" && slot.roster.is_none();
+                if body["kind"] == "roster" {
+                    slot.roster = Some(json!({"id":body["id"],"kind":"roster","recipient_machine_pubkey":null,
+                        "ciphertext":body["ciphertext"],"seq":seq,"created_at":1}));
+                }
+                (seq, first_roster.then(|| slot.accepted.clone()), first_roster.then(|| slot.release.clone()))
+            };
+            if let (Some(accepted), Some(release)) = (accepted, release) {
+                accepted.notify_one();
+                release.notified().await;
+            }
+            (StatusCode::OK, Json(json!({"seq":seq})))
+        }
+        for case in ["add_member", "remove_owner", "delete", "bot_edit", "bot_delete"] {
+        let slot = Arc::new(Mutex::new(RelaySlot { seq: 0, roster: None, accepted: Arc::new(Notify::new()), release: Arc::new(Notify::new()) }));
+        let server = Router::new().route("/v1/blobs", put(upload)).with_state(slot.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        app.store.acknowledge_chat_creates(&app.store.pending_chat_creates().unwrap()).unwrap();
+        let mut base = roster(bot("A"));
+        base.bots.push(bot("B"));
+        apply_roster(app, base.clone());
+        app.store.observe_roster(0, &base).unwrap();
+        if case.starts_with("bot_") {
+            let mut new_bot = bot("new-bot");
+            new_bot.runner_id = app.this_device_id().unwrap();
+            app.create_bot_with_dm(new_bot, Some("G".into())).unwrap();
+        } else {
+            app.create_chat(ChatMeta { id: "G".into(), kind: "group".into(), title: None,
+                bot_ids: if case == "add_member" { vec!["A".into()] } else { vec!["A".into(), "B".into()] },
+                owner_bot_id: Some("A".into()), is_pinned: false, created_at: 1.0 }).unwrap();
+        }
+        let accepted = app.store.queued_roster().unwrap().unwrap();
+        let accepted_signal = slot.lock().await.accepted.clone();
+        let release = slot.lock().await.release.clone();
+        let draining = tokio::spawn({
+            let app = app.clone();
+            let url = url.clone();
+            async move { drain_outbox(&app, &url, "token").await }
+        });
+        accepted_signal.notified().await;
+        // Server accepted G. Client has not received response. Replace queued snapshot.
+        match case {
+            "add_member" => app.update_chat_meta("G", |chat| chat.bot_ids.push("B".into())).unwrap(),
+            "remove_owner" => app.update_chat_meta("G", |chat| {
+                chat.bot_ids.retain(|id| id != "A");
+                chat.owner_bot_id = Some("B".into());
+            }).unwrap(),
+            "delete" => app.delete_chat("G"),
+            "bot_edit" => { app.update_bot("new-bot", |bot| bot.name = "Renamed".into()).unwrap(); }
+            _ => { app.delete_bot("new-bot").unwrap(); }
+        }
+        assert_ne!(accepted.id, app.store.queued_roster().unwrap().unwrap().id);
+        release.notify_one();
+        draining.await.unwrap().unwrap();
+        assert!(app.store.pending_chat_creates().unwrap().is_empty(), "{case}: {:?}", app.store.pending_chat_creates().unwrap());
+        assert!(app.store.queued_roster().unwrap().is_none());
+        let published = slot.lock().await.roster.clone().unwrap();
+        let final_roster: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster",
+            &unb64(published["ciphertext"].as_str().unwrap()).unwrap()).unwrap();
+        match case {
+            "add_member" => assert_eq!(final_roster.chats.iter().find(|chat| chat.id == "G").unwrap().bot_ids, ["A", "B"]),
+            "remove_owner" => {
+                let chat = final_roster.chats.iter().find(|chat| chat.id == "G").unwrap();
+                assert_eq!(chat.bot_ids, ["B"]);
+                assert_eq!(chat.owner_bot_id.as_deref(), Some("B"));
+            }
+            "delete" | "bot_delete" => assert!(!final_roster.chats.iter().any(|chat| chat.id == "G")),
+            _ => assert!(final_roster.chats.iter().any(|chat| chat.id == "G")),
+        }
+        if case == "bot_edit" {
+            assert_eq!(final_roster.bots.iter().find(|bot| bot.id == "new-bot").unwrap().name, "Renamed");
+        }
+        if case == "bot_delete" { assert!(!final_roster.bots.iter().any(|bot| bot.id == "new-bot")); }
+        assert_eq!(app.chat("G").is_some(), case != "delete" && case != "bot_delete");
+        task.abort();
+        }
+    }
+
+    #[test]
+    fn lost_roster_reply_preserves_unrelated_remote_creations() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        app.store.acknowledge_chat_creates(&app.store.pending_chat_creates().unwrap()).unwrap();
+        let base = roster(bot("A"));
+        apply_roster(app, base.clone());
+        app.store.observe_roster(0, &base).unwrap();
+        app.store.advance_queued_roster_base().unwrap();
+        app.create_chat(ChatMeta { id: "G".into(), kind: "group".into(), title: None,
+            bot_ids: vec!["A".into()], owner_bot_id: Some("A".into()), is_pinned: false, created_at: 1.0 }).unwrap();
+        let accepted_chat = app.chat("G").unwrap().meta;
+        let submitted = app.store.queued_roster().unwrap().unwrap();
+        let submitted: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &submitted.ciphertext).unwrap();
+        app.store.record_submitted_roster(0, &submitted).unwrap();
+        app.update_chat_meta("G", |chat| chat.title = Some("Local edit after upload".into())).unwrap();
+        let reopened = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let app = &reopened;
+
+        // Another Device publishes its own creations after accepting G, before this
+        // Device recovers the lost upload response.
+        let mut remote = base;
+        remote.chats.push(accepted_chat);
+        remote.bots.push(bot("remote-bot"));
+        remote.chats.push(ChatMeta { id: "remote-group".into(), kind: "group".into(), title: None,
+            bot_ids: vec!["remote-bot".into()], owner_bot_id: Some("remote-bot".into()), is_pinned: false, created_at: 2.0 });
+        let blob = BlobIn { id: "other-device-roster".into(), kind: "roster".into(), recipient_machine_pubkey: None,
+            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&app.dek().unwrap(), "roster", &remote).unwrap()),
+            seq: 2, created_at: 2 };
+        apply_incoming_blob(app, &app.machine_file().unwrap(), &blob, true).unwrap();
+
+        assert!(app.bot("remote-bot").is_some(), "recovery dropped another Device's new bot");
+        assert!(app.chat("remote-group").is_some(), "recovery dropped another Device's new group");
+        assert_eq!(app.chat("G").unwrap().meta.title.as_deref(), Some("Local edit after upload"));
+        let queued = app.store.queued_roster().unwrap().unwrap();
+        let recovered: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &queued.ciphertext).unwrap();
+        assert!(recovered.bots.iter().any(|bot| bot.id == "remote-bot"));
+        assert!(recovered.chats.iter().any(|chat| chat.id == "remote-group"));
+        assert_eq!(recovered.chats.iter().find(|chat| chat.id == "G").unwrap().title.as_deref(), Some("Local edit after upload"));
+    }
+
+    #[test]
+    fn lost_routine_creation_reply_preserves_later_deletion_and_remote_edits() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        app.store.acknowledge_chat_creates(&app.store.pending_chat_creates().unwrap()).unwrap();
+        let base = roster(bot("A"));
+        apply_roster(app, base.clone());
+        app.store.observe_roster(0, &base).unwrap();
+        app.store.advance_queued_roster_base().unwrap();
+        let routine = crate::routines::create(app, "A", "Owned routine", "every 1d", "Never run", None, false).unwrap();
+        let submitted = app.store.queued_roster().unwrap().unwrap();
+        let submitted: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &submitted.ciphertext).unwrap();
+        app.store.record_submitted_roster(0, &submitted).unwrap();
+        crate::routines::delete(app, &routine.id).unwrap();
+        assert!(app.store.pending_chat_creates().unwrap().is_empty());
+
+        let mut remote = submitted;
+        remote.bots[0].name = "Remote profile edit".into();
+        let blob = BlobIn { id: "other-device-after-routine".into(), kind: "roster".into(), recipient_machine_pubkey: None,
+            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&app.dek().unwrap(), "roster", &remote).unwrap()),
+            seq: 2, created_at: 2 };
+        apply_incoming_blob(app, &app.machine_file().unwrap(), &blob, true).unwrap();
+        assert!(app.routine(&routine.id).is_none(), "lost creation response resurrected a locally deleted routine");
+        assert_eq!(app.bot("A").unwrap().name, "Remote profile edit");
+        let queued = app.store.queued_roster().unwrap().unwrap();
+        let recovered: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &queued.ciphertext).unwrap();
+        assert!(!recovered.routines.iter().any(|entry| entry.id == routine.id));
+        assert_eq!(recovered.bots[0].name, "Remote profile edit");
+    }
+
+    #[test]
+    fn forgetting_identity_removes_pending_chat_ownership() {
+        let scratch = scratch_app();
+        crate::identity::create(&scratch.0, Some("Runner".into())).unwrap();
+        assert!(!scratch.0.store.pending_chat_identities().unwrap().is_empty());
+        let values = std::collections::BTreeMap::from([("private".into(), serde_json::json!("old account data"))]);
+        scratch.0.store.save_codemode_writes("old-chat", "old-bot", &values, &[]).unwrap();
+        scratch.0.forget_identity().unwrap();
+        assert!(scratch.0.store.pending_chat_identities().unwrap().is_empty(), "forgotten account retained pending chat identities");
+        assert!(scratch.0.store.codemode_values("old-chat", "old-bot").unwrap().is_empty(),
+            "forgotten account retained script values");
+        crate::identity::create(&scratch.0, Some("New account".into())).unwrap();
+        let reopened = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert!(reopened.store.codemode_values("old-chat", "old-bot").unwrap().is_empty());
+        let current_chats: Vec<String> = reopened.state.lock().unwrap().chats.iter().map(|chat| chat.meta.id.clone()).collect();
+        assert!(reopened.store.pending_chat_identities().unwrap().iter().all(|(id, _)| current_chats.contains(id)),
+            "new account inherited pending ownership from the forgotten account");
+    }
+
 }

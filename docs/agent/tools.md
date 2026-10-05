@@ -172,13 +172,15 @@ Output limits are applied so a single call cannot flood the context: 2,000 lines
 
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
-| `read` | `path`, `offset?` (1-indexed line), `limit?` (lines) | Returns text from the start of the file or from `offset`, keeping the first lines that fit. JPEG, PNG, GIF, WebP, and BMP files (detected by content) come back as an image part. |
+| `read` | `path`, `offset?` (1-indexed line), `limit?` (lines) | Returns text from the start of the file or from `offset`, keeping the first lines that fit. JPEG, PNG, GIF, WebP, BMP, and TIFF files, and HEIC and AVIF on a Mac (detected by content), return an image part made one a model takes: converted, turned upright, or scaled down to fit 2000×2000, with a note; one that cannot be read returns a line saying why it is not attached. |
 | `write` | `path`, `content` | Creates or overwrites the file, creating parent directories. |
 | `edit` | `path`, `edits: [{ oldText, newText }]` | Exact text replacement. Each `oldText` must match exactly once in the original file, and edits must not overlap; all edits are matched against the original, not one after another. Preserves a UTF-8 BOM and CRLF line endings. |
 | `bash` | `command`, `timeout?` (seconds) | Runs `bash -c` (or `sh -c` where bash is missing) in the working directory with stdin closed and the login shell's environment (`login_shell::command`). stdout and stderr are combined and truncated at the tail; when truncated, the full output is saved to a temp file whose path is in the note. Streams the output tail as updates, at most every 250 ms. A non-zero exit, timeout, or abort is an error result that includes the output. Timeout and abort kill the command's process group. |
 | `grep` | `pattern`, `path?`, `glob?`, `ignoreCase?`, `literal?`, `context?`, `limit?` (default 100) | Regex search (or literal with `literal: true`) that respects `.gitignore` and skips binary files. Prints `path:line: text`, context lines as `path-line- text`. Lines longer than 500 characters are cut. |
 | `find` | `pattern`, `path?`, `limit?` (default 1000) | Glob search that respects `.gitignore` and includes hidden files except `.git`. A pattern without `/` matches at any depth. Directories end with `/`. |
 | `ls` | `path?`, `limit?` (default 500) | Directory entries including dotfiles, sorted case-insensitively, directories ending with `/`. |
+
+Codemode may use `tools.bash({ command, timeout? })` when the host includes `BashTool::for_script(cwd)` in its catalog. This mode runs on pipes with closed stdin, never creates a terminal session, and runs sequentially with other script calls. It returns `{ output, truncated, full_output_path?, exit_code, wall_time_seconds }`; `output` is UTF-8 text with terminal escapes and control characters removed, and the optional path points to raw complete output when the text was truncated. A non-zero exit or timeout retains that structured result; the call is marked as an error. The host still gates each nested call through `before_tool_call`, including shell capability and permission review. Direct `bash` retains its terminal/session behavior.
 
 `write`, `edit`, `bash`, `grep`, `find`, and `ls` put a one-line `summary` in `details` (for example `Edited src/main.rs` or `12 matches for TODO`) for display next to the call.
 

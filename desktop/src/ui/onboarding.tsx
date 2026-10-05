@@ -581,7 +581,7 @@ function FirstBot(props: {
       <div class="onboarding-card">
         <div class="form-grid">
           <FormRow label="">
-            <Avatar content={props.bot ? botAvatar(props.bot) : { kind: "bot", symbolName: "sparkles", accent: "indigo" }} size={40} />
+            <Avatar content={props.bot ? botAvatar(props.bot) : { kind: "system" }} size={40} />
           </FormRow>
           <FormRow label={L("Name")}>
             <input class="text-field" placeholder={L("Name")} value={name()} spellcheck="false" onInput={(event) => setName(event.currentTarget.value)} />

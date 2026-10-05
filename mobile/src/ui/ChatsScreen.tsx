@@ -38,6 +38,7 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
   const searchInset = useSidebarSearchInset();
   const chats = useStore((s) => s.chats);
   const running = useStore((s) => s.running);
+  const paused = useStore((s) => s.paused);
   const connecting = useConnecting();
   const updateRequired = useStore((s) => s.relayUpdateRequired);
   const relayError = useStore((s) => s.relayError);
@@ -217,6 +218,13 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
             <Text style={[styles.statusText, { color: p.secondaryLabel }]} numberOfLines={1}>
               {t("Connecting…")}
             </Text>
+          </View>
+        </Stack.Title>
+      ) : paused ? (
+        <Stack.Title asChild>
+          <View style={styles.status} accessibilityRole="header" accessibilityLabel={t("Bots paused")}>
+            <Symbol name="pause.circle.fill" size={14} color={p.secondaryLabel} />
+            <Text style={[styles.statusText, { color: p.secondaryLabel }]} numberOfLines={1}>{t("Bots paused")}</Text>
           </View>
         </Stack.Title>
       ) : null}

@@ -88,7 +88,7 @@ pub trait Provider: Send + Sync {
         true
     }
     /// What the catalog knows about the model: window, output cap, rates, thinking levels.
-    fn model_info(&self) -> Option<&'static crate::models::ModelInfo> {
+    fn model_info(&self) -> Option<&crate::models::ModelInfo> {
         None
     }
     async fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream;

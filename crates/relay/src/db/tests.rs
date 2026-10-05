@@ -31,6 +31,7 @@ fn blob(identity: &str, id: &str, bytes: &[u8]) -> NewBlob {
         kind: "chat".into(),
         recipient_machine_pubkey: None,
         slot: None,
+        expected_slot_seq: None,
         group: None,
         payload: Payload::Inline(bytes.to_vec()),
     }
@@ -83,10 +84,45 @@ async fn a_slot_keeps_its_first_and_latest_blob() {
 async fn a_refused_put_leaves_the_slot_alone() {
     for (store, _) in backends().await {
         let who = name("identity");
-        ok!(store.insert_blob(NewBlob { slot: slot("roster", false), ..blob(&who, "v1", b"abc") }, 4));
-        assert!(store.insert_blob(NewBlob { slot: slot("roster", false), ..blob(&who, "v2", b"abcde") }, 4).await.is_err());
+        ok!(store.insert_blob(NewBlob { kind: "roster".into(), expected_slot_seq: Some(0), slot: slot("roster", false), ..blob(&who, "v1", b"abc") }, 4));
+        assert!(store.insert_blob(NewBlob { kind: "roster".into(), expected_slot_seq: Some(1), slot: slot("roster", false), ..blob(&who, "v2", b"abcde") }, 4).await.is_err());
         assert_eq!(ids(&store, &who, "m", 0, i64::MAX).await, ["v1"], "{}", store.describe());
         assert!(used(&store, &who, 1, 4).await && !used(&store, &who, 2, 4).await);
+    }
+}
+
+#[tokio::test]
+async fn concurrent_roster_writers_cannot_replace_one_another() {
+    for (store, _) in backends().await {
+        let who = name("identity");
+        let roster = |id: &str, expected: i64| NewBlob {
+            kind: "roster".into(), slot: slot("roster", false), expected_slot_seq: Some(expected),
+            ..blob(&who, id, id.as_bytes())
+        };
+        let first = ok!(store.insert_blob(roster("first", 0), 0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let mut tasks = Vec::new();
+        for id in ["second", "third"] {
+            let (store, barrier, candidate) = (store.clone(), barrier.clone(), roster(id, first.seq));
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store.insert_blob(candidate, 0).await
+            }));
+        }
+        barrier.wait().await;
+        let outcomes = [tasks.remove(0).await.unwrap(), tasks.remove(0).await.unwrap()];
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1, "{}", store.describe());
+        let winner = outcomes.into_iter().find_map(Result::ok).unwrap();
+        assert_eq!(winner.seq, first.seq + 1);
+        let kept = ids(&store, &who, "m", 0, i64::MAX).await;
+        assert_eq!(kept.len(), 1);
+        assert_ne!(kept[0], "first");
+        let failed = if kept[0] == "second" { "third" } else { "second" };
+        let retry = ok!(store.insert_blob(roster(&kept[0], first.seq), 0));
+        assert!(retry.existing && retry.seq == winner.seq);
+        let next = ok!(store.insert_blob(roster(failed, winner.seq), 0));
+        assert_eq!(next.seq, winner.seq + 1, "conflict must not advance sequence");
+        assert_eq!(ids(&store, &who, "m", 0, i64::MAX).await, [failed]);
     }
 }
 

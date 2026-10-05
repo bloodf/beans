@@ -61,7 +61,11 @@ async function dev(): Promise<number> {
   }
   const binary = process.platform === "win32" ? `${cli.path}.exe` : cli.path
   log(`${color.bold("running")} ${color.dim("mygo dev")}`)
-  return await run([MYGO, "dev"], { cwd: DESKTOP, env: { LORCA_CLI: binary, LORCA_DEV: "1" } })
+  return await run([MYGO, "dev"], { cwd: DESKTOP, env: {
+    LORCA_CLI: binary,
+    LORCA_DEV: "1",
+    LORCA_ALLOWED_ORIGINS: "http://localhost:5178,http://127.0.0.1:5178",
+  } })
 }
 
 /** The CLI for `platform`, built for its Rust target and placed where the app finds it. */

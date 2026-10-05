@@ -1,6 +1,6 @@
 {
   "name": "lorca-desktop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,6 +13,7 @@
     "test": "bun test src"
   },
   "dependencies": {
+    "@beans/blobatar": "file:../packages/beans-blobatar",
     "@solidjs/router": "2.0.0-next.30",
     "@solidjs/web": "2.0.0-rc.10",
     "lucide": "1.48.0",

@@ -45,8 +45,11 @@ impl LocalStore {
                  id                       INTEGER PRIMARY KEY CHECK (id = 1),
                  auto_review_json         TEXT NOT NULL,
                  last_seq                 INTEGER NOT NULL,
+                 roster_slot_seq          INTEGER NOT NULL DEFAULT 0,
                  machine_blob_hash        TEXT,
-                 credentials_uploaded     INTEGER NOT NULL
+                 credentials_uploaded     INTEGER NOT NULL,
+                 paused                   INTEGER NOT NULL DEFAULT 0,
+                 policy_json              TEXT NOT NULL DEFAULT '{}'
              );
              CREATE TABLE IF NOT EXISTS devices (
                  id       TEXT PRIMARY KEY NOT NULL,
@@ -71,6 +74,15 @@ impl LocalStore {
              CREATE TABLE IF NOT EXISTS group_deletes (
                  id       TEXT PRIMARY KEY NOT NULL,
                  position INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS pending_chat_creates (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 original_json TEXT
+             );
+             CREATE TABLE IF NOT EXISTS roster_baseline (
+                 name TEXT PRIMARY KEY NOT NULL,
+                 seq INTEGER NOT NULL,
+                 json TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS blob_deletes (
                  id       TEXT PRIMARY KEY NOT NULL,
@@ -141,6 +153,18 @@ impl LocalStore {
              );
              PRAGMA user_version = 1;",
         )?;
+        if !connection.prepare("SELECT paused FROM metadata").is_ok() {
+            connection.execute("ALTER TABLE metadata ADD COLUMN paused INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+        if connection.prepare("SELECT policy_json FROM metadata").is_err() {
+            connection.execute("ALTER TABLE metadata ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'", [])?;
+        }
+        if connection.prepare("SELECT roster_slot_seq FROM metadata").is_err() {
+            connection.execute("ALTER TABLE metadata ADD COLUMN roster_slot_seq INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+        if connection.prepare("SELECT original_json FROM pending_chat_creates").is_err() {
+            connection.execute("ALTER TABLE pending_chat_creates ADD COLUMN original_json TEXT", [])?;
+        }
         crate::config::set_private(path)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -149,30 +173,41 @@ impl LocalStore {
 
     pub fn load_state(&self) -> anyhow::Result<State> {
         let connection = self.connection.lock().unwrap();
-        let metadata: Option<(String, i64, Option<String>, bool)> = connection
+        let metadata: Option<(String, i64, i64, Option<String>, bool, bool, String)> = connection
             .query_row(
-                "SELECT auto_review_json, last_seq, machine_blob_hash, credentials_uploaded
+                "SELECT auto_review_json, last_seq, roster_slot_seq, machine_blob_hash, credentials_uploaded, paused, policy_json
                  FROM metadata WHERE id = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
             )
             .optional()?;
-        let (auto_review, last_seq, machine_blob_hash, credentials_uploaded) = match metadata {
-            Some((json, last_seq, machine_blob_hash, credentials_uploaded)) => (
+        let (auto_review, last_seq, roster_slot_seq, machine_blob_hash, credentials_uploaded, paused, policy_json) = match metadata {
+            Some((json, last_seq, roster_slot_seq, machine_blob_hash, credentials_uploaded, paused, policy_json)) => (
                 serde_json::from_str(&json).context("decoding Auto-review state")?,
                 last_seq,
+                roster_slot_seq,
                 machine_blob_hash,
                 credentials_uploaded,
+                paused,
+                policy_json,
             ),
-            None => (Default::default(), 0, None, false),
+            None => (Default::default(), 0, 0, None, false, false, "{}".into()),
         };
+        let policy: crate::model::RosterBlob = serde_json::from_str(&policy_json).context("decoding policy state")?;
         Ok(State {
             devices: load_json_table(&connection, "devices")?,
             bots: load_json_table(&connection, "bots")?,
             chats: load_json_table(&connection, "chats")?,
             routines: load_json_table(&connection, "routines")?,
             auto_review,
+            paused,
+            policy_clock: policy.policy_clock,
+            pause_version: policy.pause_version,
+            capability_versions: policy.capability_versions,
+            policy_capabilities: policy.policy_capabilities,
+            deleted_bot_versions: policy.deleted_bot_versions,
             last_seq,
+            roster_slot_seq,
             group_deletes: load_ordered_ids(&connection, "group_deletes")?,
             blob_deletes: load_ordered_ids(&connection, "blob_deletes")?,
             machine_blob_hash,
@@ -194,6 +229,54 @@ impl LocalStore {
         save_state_tx(&tx, state)?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn save_state_creating_chat(&self, state: &State, chat: &crate::model::ChatMeta) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        tx.execute("INSERT INTO pending_chat_creates (id, original_json) VALUES (?1, ?2)",
+            params![chat.id, serde_json::to_string(chat)?])?;
+        save_state_tx(&tx, state)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn mark_chat_create_pending(&self, chat: &crate::model::ChatMeta) -> anyhow::Result<()> {
+        self.connection.lock().unwrap().execute("INSERT OR IGNORE INTO pending_chat_creates (id, original_json) VALUES (?1, ?2)",
+            params![chat.id, serde_json::to_string(chat)?])?;
+        Ok(())
+    }
+
+    pub fn pending_chat_identities(&self) -> anyhow::Result<Vec<(String, Option<crate::model::ChatMeta>)>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT id, original_json FROM pending_chat_creates")?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?;
+        let identities = rows.map(|result| {
+            let (id, json) = result?;
+            Ok((id, json.map(|json| serde_json::from_str(&json)).transpose()?))
+        }).collect();
+        identities
+    }
+
+    pub fn acknowledge_chat_creates(&self, ids: &[String]) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        for id in ids { tx.execute("DELETE FROM pending_chat_creates WHERE id = ?1", [id])?; }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn forget_chat_create_identity(&self, id: &str) -> anyhow::Result<()> {
+        self.connection.lock().unwrap().execute("UPDATE pending_chat_creates SET original_json = NULL WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn pending_chat_creates(&self) -> anyhow::Result<Vec<String>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT id FROM pending_chat_creates")?;
+        let ids = statement.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
     }
 
     pub fn save_state_deleting_chats(
@@ -520,6 +603,16 @@ impl LocalStore {
         let mut statement = connection.prepare("SELECT message_json FROM messages WHERE body_kind = 'tool' AND message_json LIKE '%\"run\":{%'")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
         collect_messages(rows)
+    }
+
+    /// Proposal cards persisted across Runner restarts; the caller checks their decision and waiter.
+    pub fn proposal_cards(&self) -> anyhow::Result<Vec<Message>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT message_json FROM messages WHERE body_kind = 'permission' AND message_json LIKE '%\"tool\":\"propose\"%'",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(collect_messages(rows)?.into_iter().filter(|message| matches!(&message.body, Body::Permission { tool, .. } if tool == "propose")).collect())
     }
 
     /// A plugin's sign-in cards (`Body::Permission` with `tool` `connect`) in one chat, or in
@@ -883,9 +976,62 @@ impl LocalStore {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn forget_queued_roster_base(&self) -> anyhow::Result<()> {
+        self.connection.lock().unwrap().execute("DELETE FROM roster_baseline WHERE name = 'queued'", [])?;
+        Ok(())
+    }
+
+    pub fn roster_baseline(&self, name: &str) -> anyhow::Result<Option<(i64, crate::model::RosterBlob)>> {
+        let connection = self.connection.lock().unwrap();
+        let row: Option<(i64, String)> = connection.query_row(
+            "SELECT seq, json FROM roster_baseline WHERE name = ?1", [name],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        row.map(|(seq, json)| Ok((seq, serde_json::from_str(&json)?))).transpose()
+    }
+
+    pub fn observe_roster(&self, seq: i64, roster: &crate::model::RosterBlob) -> anyhow::Result<()> {
+        self.save_roster_baseline("observed", seq, roster)
+    }
+
+    /// Keep the exact snapshot sent before awaiting its response. The outbox may
+    /// already contain a newer local edit when a lost response is recovered.
+    pub fn record_submitted_roster(&self, seq: i64, roster: &crate::model::RosterBlob) -> anyhow::Result<()> {
+        self.save_roster_baseline("submitted", seq, roster)
+    }
+
+    fn save_roster_baseline(&self, name: &str, seq: i64, roster: &crate::model::RosterBlob) -> anyhow::Result<()> {
+        self.connection.lock().unwrap().execute(
+            "INSERT INTO roster_baseline (name, seq, json) VALUES (?1, ?2, ?3)
+             ON CONFLICT(name) DO UPDATE SET seq = excluded.seq, json = excluded.json
+             WHERE excluded.seq >= roster_baseline.seq",
+            params![name, seq, serde_json::to_string(roster)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn advance_queued_roster_base(&self) -> anyhow::Result<()> {
+        self.connection.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO roster_baseline (name, seq, json)
+             SELECT 'queued', seq, json FROM roster_baseline WHERE name = 'observed'", [],
+        )?;
+        Ok(())
+    }
+
     pub fn queue_outbox_with_state(&self, item: &OutboxItem, state: &State) -> anyhow::Result<()> {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
+        if item.kind == "roster" {
+            tx.execute(
+                "INSERT OR IGNORE INTO roster_baseline (name, seq, json)
+                 SELECT 'queued', seq, json FROM roster_baseline WHERE name = 'observed'", [],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO roster_baseline (name, seq, json) VALUES ('queued', 0, ?1)",
+                [serde_json::to_string(&crate::model::RosterBlob::default())?],
+            )?;
+        }
         save_metadata_tx(&tx, state)?;
         sync_json_table(
             &tx,
@@ -902,11 +1048,54 @@ impl LocalStore {
         tx.commit()?;
         Ok(())
     }
+    /// Replace a queued roster only if its snapshot is still current. Keep the baseline and
+    /// ciphertext in the same transaction so a local edit cannot be overwritten by a rebase.
+    pub fn rebase_queued_roster_with_state(&self, expected_id: &str, item: &OutboxItem, state: &State) -> anyhow::Result<bool> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        let current: Option<String> = tx.query_row(
+            "SELECT id FROM outbox WHERE slot_name = 'roster'", [], |row| row.get(0),
+        ).optional()?;
+        if current.as_deref() != Some(expected_id) { return Ok(false); }
+        save_metadata_tx(&tx, state)?;
+        append_applied_blob_tx(&tx, &item.id)?;
+        queue_outbox_tx(&tx, item)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO roster_baseline (name, seq, json)
+             SELECT 'queued', seq, json FROM roster_baseline WHERE name = 'observed'", [],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
 
     /// Drops what the outbox still holds for a relay group: a chat's messages, read marks,
     /// and attachments.
     pub fn drop_outbox_group(&self, group: &str) -> anyhow::Result<()> {
         self.connection.lock().unwrap().execute("DELETE FROM outbox WHERE group_name = ?1", [group])?;
+        Ok(())
+    }
+
+    pub fn remove_outbox_roster_with_state(&self, id: &str, state: &State, published_chat_ids: &[String]) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        save_metadata_tx(&tx, state)?;
+        let removed = tx.execute("DELETE FROM outbox WHERE id = ?1", [id])?;
+        tx.execute("DELETE FROM roster_baseline WHERE name = 'submitted'", [])?;
+        for chat_id in published_chat_ids {
+            // A successful PUT publishes these creations even if a newer local edit replaced
+            // its outbox slot during the network request.
+            tx.execute("DELETE FROM pending_chat_creates WHERE id = ?1", [chat_id])?;
+        }
+        if removed != 0 {
+            tx.execute("DELETE FROM roster_baseline WHERE name = 'queued'", [])?;
+        }
+        else {
+            tx.execute(
+                "INSERT OR REPLACE INTO roster_baseline (name, seq, json)
+                 SELECT 'queued', seq, json FROM roster_baseline WHERE name = 'observed'", [],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -917,6 +1106,14 @@ impl LocalStore {
         tx.execute("DELETE FROM outbox WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn queued_roster(&self) -> anyhow::Result<Option<OutboxItem>> {
+        let connection = self.connection.lock().unwrap();
+        connection.query_row(
+            "SELECT id, kind, recipient, ciphertext, slot_name, slot_keep_first, group_name FROM outbox WHERE slot_name = 'roster'",
+            [], outbox_row,
+        ).optional().map_err(Into::into)
     }
 
     pub fn first_outbox(&self) -> anyhow::Result<Option<OutboxItem>> {
@@ -1013,6 +1210,9 @@ impl LocalStore {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
         for table in [
+            "roster_baseline",
+            "pending_chat_creates",
+            "codemode_store",
             "metadata",
             "devices",
             "bots",
@@ -1116,18 +1316,31 @@ fn save_state_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
 
 fn save_metadata_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
     tx.execute(
-        "INSERT INTO metadata (id, auto_review_json, last_seq, machine_blob_hash, credentials_uploaded)
-         VALUES (1, ?1, ?2, ?3, ?4)
+        "INSERT INTO metadata (id, auto_review_json, last_seq, roster_slot_seq, machine_blob_hash, credentials_uploaded, paused, policy_json)
+         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO UPDATE SET
              auto_review_json = excluded.auto_review_json,
              last_seq = excluded.last_seq,
+             roster_slot_seq = excluded.roster_slot_seq,
              machine_blob_hash = excluded.machine_blob_hash,
-             credentials_uploaded = excluded.credentials_uploaded",
+             credentials_uploaded = excluded.credentials_uploaded,
+             paused = excluded.paused,
+             policy_json = excluded.policy_json",
         params![
             serde_json::to_string(&state.auto_review)?,
             state.last_seq,
+            state.roster_slot_seq,
             state.machine_blob_hash,
             state.credentials_uploaded,
+            state.paused,
+            serde_json::to_string(&crate::model::RosterBlob {
+                policy_clock: state.policy_clock,
+                pause_version: state.pause_version.clone(),
+                capability_versions: state.capability_versions.clone(),
+                policy_capabilities: state.policy_capabilities.clone(),
+                deleted_bot_versions: state.deleted_bot_versions.clone(),
+                ..Default::default()
+            })?,
         ],
     )?;
     Ok(())

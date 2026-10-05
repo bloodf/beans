@@ -11,8 +11,8 @@
 // Apple finishes processing it, usually within half an hour.
 import { $ } from "bun"
 import { existsSync } from "node:fs"
-import { mkdir, readdir, rename, rm } from "node:fs/promises"
-import { join } from "node:path"
+import { mkdir, readdir, rename, rm, symlink } from "node:fs/promises"
+import { dirname, join, relative } from "node:path"
 import { color, log, ROOT } from "./app.ts"
 
 function die(message: string): never {
@@ -37,6 +37,9 @@ const BUILD_DIR = join(ROOT, "dist", "ios")
 // The copy stays between releases at the same path: Xcode's compilation cache keys hold absolute
 // paths, and the pods installed in it are used again.
 const PROJECT = join(BUILD_DIR, "mobile")
+const BLOBATAR = join(ROOT, "packages", "beans-blobatar")
+const COPIED_BLOBATAR = join(BUILD_DIR, "packages", "beans-blobatar")
+const LINKED_BLOBATAR = join(PROJECT, "node_modules", "@beans", "blobatar")
 const IOS = join(PROJECT, "ios")
 // Pods and its lockfile wait here while prebuild writes a new ios/.
 const KEPT = join(BUILD_DIR, "kept")
@@ -77,6 +80,8 @@ if (existsSync(join(PROJECT, "package.json"))) {
   // phase makes in its package and keys to this copy's Pods path.
   const jsi = "/node_modules/expo-modules-jsi/apple"
   await $`rsync -a --delete --exclude /ios --exclude /android --exclude /.expo --exclude ${`${jsi}/.*`} --exclude ${`${jsi}/Products`} ${`${MOBILE}/`} ${`${PROJECT}/`}`
+  await mkdir(dirname(COPIED_BLOBATAR), { recursive: true })
+  await $`rsync -a --delete ${`${BLOBATAR}/`} ${`${COPIED_BLOBATAR}/`}`
 } else {
   // -c clones on APFS, so node_modules costs next to nothing to copy.
   await rm(PROJECT, { recursive: true, force: true })
@@ -84,7 +89,14 @@ if (existsSync(join(PROJECT, "package.json"))) {
   for (const name of await readdir(MOBILE)) {
     if (!["ios", "android", ".expo"].includes(name)) await $`cp -cR ${join(MOBILE, name)} ${PROJECT}`
   }
+  await mkdir(dirname(COPIED_BLOBATAR), { recursive: true })
+  await $`cp -cR ${BLOBATAR} ${dirname(COPIED_BLOBATAR)}`
 }
+// Bun's file: install puts absolute per-file links in node_modules. Point the copied dependency at
+// the copied source instead, so Metro sees one Blobatar outside its project root and its React
+// imports resolve against this mobile project's node_modules.
+await rm(LINKED_BLOBATAR, { recursive: true, force: true })
+await symlink(relative(dirname(LINKED_BLOBATAR), COPIED_BLOBATAR), LINKED_BLOBATAR, "dir")
 // A clean prebuild writes ios/ from the Expo config. The pods installed last time go back in, so
 // pod install uses them again and installs only what changed.
 const KEEP = ["Pods", "Podfile.lock"]

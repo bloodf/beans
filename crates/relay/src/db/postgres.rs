@@ -618,7 +618,7 @@ impl Store for Postgres {
     }
 
     async fn insert_blob(&self, blob: NewBlob, quota_bytes: u64) -> ApiResult<Inserted> {
-        let NewBlob { identity_pubkey, id, kind, recipient_machine_pubkey, slot, group, payload } = &blob;
+        let NewBlob { identity_pubkey, id, kind, recipient_machine_pubkey, slot, expected_slot_seq, group, payload } = &blob;
         let size = payload.size();
         let ciphertext: &[u8] = match payload {
             Payload::Inline(bytes) => bytes,
@@ -635,6 +635,16 @@ impl Store for Postgres {
         }
         if let Some(row) = tx.query_opt("SELECT seq FROM blobs WHERE id = $1 AND identity_pubkey = $2", &[id, identity_pubkey]).await? {
             return Ok(Inserted { seq: row.get(0), existing: true });
+        }
+        if kind == "roster" {
+            let Some(expected) = expected_slot_seq else { return Err(ApiError::bad_request("Roster requires expected_slot_seq")) };
+            let actual: i64 = tx.query_one(
+                "SELECT COALESCE(MAX(seq), 0) FROM blobs WHERE identity_pubkey = $1 AND slot = 'roster' AND kind = 'roster'",
+                &[identity_pubkey],
+            ).await?.get(0);
+            if actual != *expected {
+                return Err(ApiError::conflict("Roster slot changed"));
+            }
         }
         if let Some(group) = group {
             if tx.query_opt("SELECT 1 FROM deleted_groups WHERE identity_pubkey = $1 AND group_id = $2", &[identity_pubkey, group]).await?.is_some() {

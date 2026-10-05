@@ -1,19 +1,8 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// How a bot looks: a symbol on an accent gradient, or an image of the user's own. The image
-/// wins while it is set; the symbol and accent stay underneath for when it is removed and for
-/// Devices that have not fetched it yet.
+/// A bot's generated portrait or an image of the user's own; custom image wins until removed.
 final class BotLookViewController: SheetViewController {
-    /// The symbols offered, the same list the phone app shows.
-    static let symbols: [String] = [
-        "sparkles", "wand.and.stars", "hammer.fill", "book.fill",
-        "paintbrush.fill", "chart.bar.fill", "terminal.fill", "globe",
-        "brain.head.profile", "magnifyingglass", "envelope.fill", "calendar",
-        "flask.fill", "bolt.fill", "leaf.fill", "shield.fill",
-        "binoculars.fill", "chevron.left.forwardslash.chevron.right", "pencil.and.scribble", "bolt.horizontal.fill",
-        "flame.fill",
-    ]
 
     /// Longest side of a stored profile image. Small enough to sync in a moment, large enough
     /// for the biggest avatar any screen draws.
@@ -27,27 +16,18 @@ final class BotLookViewController: SheetViewController {
 
     private let store = AppStore.shared
     private let botID: Bot.ID
-    private var symbolName: String
-    private var accent: Accent
     private var imageChange: ImageChange = .keep
 
     private let preview = AvatarView(diameter: 72)
-    private let symbolGrid = NSGridView()
-    private let accentRow = Build.stack([], orientation: .horizontal, spacing: 8)
     private let chooseButton = NSButton()
     private let removeButton = NSButton()
     private let caption = Build.label("", font: Theme.Font.caption, color: .tertiaryLabelColor, lines: 0)
-    private var symbolTiles: [LookTile] = []
-    private var accentTiles: [LookTile] = []
 
     init(botID: Bot.ID) {
         self.botID = botID
-        let bot = AppStore.shared.bot(botID)
-        symbolName = bot?.symbolName ?? "sparkles"
-        accent = bot?.accent ?? .indigo
         super.init(
             title: L("Look"),
-            subtitle: L("Pick a symbol and a color, or use an image of your own. Paired Devices see the same look."),
+            subtitle: L("Your bot's portrait is generated from its ID. Use your own image instead; paired Devices see the same look."),
             width: 400
         )
     }
@@ -78,20 +58,6 @@ final class BotLookViewController: SheetViewController {
             preview.bottomAnchor.constraint(equalTo: previewRow.bottomAnchor),
         ])
 
-        buildSymbolGrid()
-        buildAccentRow()
-
-        // The grid keeps its own width inside a full-width row; stretched to the sheet, a grid
-        // spreads its columns out.
-        let symbolRow = NSView()
-        symbolRow.translatesAutoresizingMaskIntoConstraints = false
-        symbolRow.addSubview(symbolGrid)
-        NSLayoutConstraint.activate([
-            symbolGrid.leadingAnchor.constraint(equalTo: symbolRow.leadingAnchor),
-            symbolGrid.trailingAnchor.constraint(lessThanOrEqualTo: symbolRow.trailingAnchor),
-            symbolGrid.topAnchor.constraint(equalTo: symbolRow.topAnchor),
-            symbolGrid.bottomAnchor.constraint(equalTo: symbolRow.bottomAnchor),
-        ])
 
         chooseButton.title = L("Choose Image…")
         chooseButton.bezelStyle = .rounded
@@ -109,27 +75,13 @@ final class BotLookViewController: SheetViewController {
 
         let imageRow = Build.stack([chooseButton, removeButton], orientation: .horizontal, spacing: 8)
 
-        let rows: [NSView] = [
-            previewRow,
-            heading(L("Symbol")),
-            symbolRow,
-            heading(L("Color")),
-            accentRow,
-            heading(L("Image")),
-            imageRow,
-            caption,
-        ]
+        let rows: [NSView] = [previewRow, heading(L("Image")), imageRow, caption]
         for row in rows {
             contentStack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
         }
         contentStack.setCustomSpacing(18, after: previewRow)
         contentStack.setCustomSpacing(6, after: rows[1])
-        contentStack.setCustomSpacing(16, after: symbolRow)
-        contentStack.setCustomSpacing(6, after: rows[3])
-        contentStack.setCustomSpacing(16, after: accentRow)
-        contentStack.setCustomSpacing(6, after: rows[5])
-
         setButtons(confirm: L("Save"))
         refresh()
     }
@@ -138,83 +90,26 @@ final class BotLookViewController: SheetViewController {
         Build.label(text.uppercased(), font: .systemFont(ofSize: 10, weight: .semibold), color: .tertiaryLabelColor)
     }
 
-    private func buildSymbolGrid() {
-        let perRow = 8
-        symbolGrid.translatesAutoresizingMaskIntoConstraints = false
-        symbolGrid.rowSpacing = 6
-        symbolGrid.columnSpacing = 6
-        symbolGrid.xPlacement = .leading
-        symbolGrid.yPlacement = .center
-        for name in Self.symbols {
-            let tile = LookTile(size: NSSize(width: 38, height: 34), cornerRadius: 8)
-            tile.symbolName = name
-            tile.symbolPointSize = 15
-            tile.toolTip = name
-            tile.onClick = { [weak self] in
-                self?.symbolName = name
-                self?.refresh()
-            }
-            symbolTiles.append(tile)
-        }
-        // Whole rows at a time: a grid grows its columns from the longest row it is given.
-        for start in stride(from: 0, to: symbolTiles.count, by: perRow) {
-            symbolGrid.addRow(with: Array(symbolTiles[start..<min(start + perRow, symbolTiles.count)]))
-        }
-    }
-
-    private func buildAccentRow() {
-        for accent in Accent.allCases {
-            let tile = LookTile(size: NSSize(width: 26, height: 26), cornerRadius: 13)
-            tile.fill = accent.color
-            tile.toolTip = Self.title(for: accent)
-            tile.onClick = { [weak self] in
-                self?.accent = accent
-                self?.refresh()
-            }
-            accentTiles.append(tile)
-            accentRow.addArrangedSubview(tile)
-        }
-    }
-
-    private static func title(for accent: Accent) -> String {
-        switch accent {
-        case .indigo: L("Indigo")
-        case .blue: L("Blue")
-        case .teal: L("Teal")
-        case .green: L("Green")
-        case .orange: L("Orange")
-        case .pink: L("Pink")
-        case .purple: L("Purple")
-        case .red: L("Red")
-        }
-    }
 
     private func refresh() {
         switch imageChange {
         case let .set(_, image):
             preview.content = .image(image)
         case .remove:
-            preview.content = .bot(symbolName: symbolName, accent: accent)
+            preview.content = .bot(id: botID)
         case .keep:
             if let bot, let image = store.avatarImage(for: bot) {
                 preview.content = .image(image)
             } else {
-                preview.content = .bot(symbolName: symbolName, accent: accent)
+                preview.content = .bot(id: botID)
             }
         }
 
-        for (index, tile) in symbolTiles.enumerated() {
-            let selected = Self.symbols[index] == symbolName
-            tile.fill = selected ? accent.color : NSColor.labelColor.withAlphaComponent(0.06)
-            tile.symbolColor = selected ? .white : .labelColor
-        }
-        for (index, tile) in accentTiles.enumerated() {
-            tile.borderWidth = Accent.allCases[index] == accent ? 2.5 : 0
-        }
+
 
         removeButton.isHidden = !hasImage
         caption.stringValue = hasImage
-            ? L("The image shows in place of the symbol and color. It is resized to %d px and shared encrypted, like an attachment.", Int(Self.imageSide))
+            ? L("The image shows in place of the generated portrait. It is resized to %d px and shared encrypted, like an attachment.", Int(Self.imageSide))
             : L("Images are resized to %d px and shared encrypted, like an attachment.", Int(Self.imageSide))
         fitSheetToContent()
     }
@@ -245,12 +140,9 @@ final class BotLookViewController: SheetViewController {
     }
 
     override func confirmTapped() {
-        guard let bot else {
+        guard bot != nil else {
             dismiss(nil)
             return
-        }
-        if symbolName != bot.symbolName || accent != bot.accent {
-            store.setBotLook(botID, symbolName: symbolName, accent: accent)
         }
         switch imageChange {
         case .keep:
@@ -302,66 +194,5 @@ final class BotLookViewController: SheetViewController {
         let image = NSImage(size: bitmap.size)
         image.addRepresentation(bitmap)
         return (target, image)
-    }
-}
-
-/// A clickable rounded tile the sheet draws itself. Its frame is exactly its size, where an
-/// NSButton's frame carries its bezel's alignment insets even with no border, which ate the
-/// grid's row gap.
-final class LookTile: NSView {
-    private let size: NSSize
-    private let cornerRadius: CGFloat
-    var onClick: (() -> Void)?
-
-    var fill: NSColor = .clear { didSet { needsDisplay = true } }
-    var borderWidth: CGFloat = 0 { didSet { needsDisplay = true } }
-    var symbolName: String? { didSet { needsDisplay = true } }
-    var symbolPointSize: CGFloat = 15 { didSet { needsDisplay = true } }
-    var symbolColor: NSColor = .labelColor { didSet { needsDisplay = true } }
-
-    init(size: NSSize, cornerRadius: CGFloat) {
-        self.size = size
-        self.cornerRadius = cornerRadius
-        super.init(frame: NSRect(origin: .zero, size: size))
-        translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: size.width),
-            heightAnchor.constraint(equalToConstant: size.height),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    override var intrinsicContentSize: NSSize { size }
-    override var allowsVibrancy: Bool { false }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: .pointingHand)
-    }
-
-    override func mouseDown(with event: NSEvent) {}
-
-    override func mouseUp(with event: NSEvent) {
-        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath(roundedRect: bounds, xRadius: cornerRadius, yRadius: cornerRadius)
-        fill.setFill()
-        path.fill()
-        if borderWidth > 0 {
-            let inset = NSBezierPath(
-                roundedRect: bounds.insetBy(dx: borderWidth / 2, dy: borderWidth / 2),
-                xRadius: max(0, cornerRadius - borderWidth / 2), yRadius: max(0, cornerRadius - borderWidth / 2))
-            inset.lineWidth = borderWidth
-            NSColor.labelColor.setStroke()
-            inset.stroke()
-        }
-        if let symbolName, let image = Glyph.symbol(symbolName, pointSize: symbolPointSize, weight: .semibold, color: symbolColor) {
-            let imageSize = image.size
-            image.draw(in: NSRect(x: bounds.midX - imageSize.width / 2, y: bounds.midY - imageSize.height / 2, width: imageSize.width, height: imageSize.height))
-        }
     }
 }

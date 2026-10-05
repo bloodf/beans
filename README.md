@@ -29,7 +29,7 @@ Beans is a GPL-3.0 fork of [Lorca](https://github.com/egoist/lorca): a Rust agen
 - **Fork development.** Matching client avatars, account-wide Pause, per-bot capabilities, reviewed file drafts, protocol-3 reconciliation and custom-provider catalog refresh are being integrated.
 - **Clients.** macOS (AppKit), Windows and Linux (MyGo), iOS and Android (Expo).
 
-> **Development status:** the avatar library is committed; some newer client controls and protocol changes are still in the development worktree and are not yet published on `beans`. Build and deployment acceptance are separate. Do not rely on an unpublished feature or assume a local build has upgraded your relay.
+> **Development status:** this source includes the avatar library, client controls and protocol-3 changes. Build and deployment acceptance are separate: a local build does not upgrade your relay or establish live-client acceptance. Upgrade the relay before protocol-3 Runners and clients.
 
 ## Interface reference
 
@@ -140,7 +140,7 @@ cargo run -q -p lorca-relay -- --bind 127.0.0.1:8787 --db lorca-relay.db
 
 - The relay cannot read content, but it sees public keys, ciphertext sizes and timing. Do not publish relay addresses, signing material or provider keys.
 - Bots run tools on their Runner with your user's permissions. Auto-review **does not sandbox** a bot; a workspace is context, not a filesystem boundary. Bots on one Runner share the operating-system user.
-- The in-progress fork hardening adds local websocket Host/Origin checks, per-bot capabilities, account Pause and file-draft approval. These are not claims about the published or deployed baseline. An offline Runner cannot enforce changes it has not received. See [tools](./docs/architecture/tools.md) and [bots](./docs/architecture/bots.md).
+- The fork includes local websocket Host/Origin checks, per-bot capabilities, account Pause and file-draft approval. These source mechanisms are not claims about deployed services. An offline Runner cannot enforce changes it has not received. See [tools](./docs/architecture/tools.md) and [bots](./docs/architecture/bots.md).
 - Beans builds do not start Sparkle or the upstream update feed. The upstream scripts `release-mac`, `release-ios`, `release-desktop` and `generate-appcast` and their `docs/releasing-*.md` guides name upstream hosting and are **not** Beans release channels.
 
 ## Repository map

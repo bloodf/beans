@@ -1,22 +1,6 @@
 import AppKit
 
 final class NewBotViewController: SheetViewController {
-    private struct Look {
-        let symbolName: String
-        let accent: Accent
-    }
-
-    private static let looks: [Look] = [
-        Look(symbolName: "sparkles", accent: .indigo),
-        Look(symbolName: "chevron.left.forwardslash.chevron.right", accent: .blue),
-        Look(symbolName: "binoculars.fill", accent: .teal),
-        Look(symbolName: "pencil.and.scribble", accent: .pink),
-        Look(symbolName: "bolt.horizontal.fill", accent: .orange),
-        Look(symbolName: "leaf.fill", accent: .green),
-        Look(symbolName: "wand.and.stars", accent: .purple),
-        Look(symbolName: "flame.fill", accent: .red),
-    ]
-
     private let store = AppStore.shared
     private let nameField = NSTextField()
     private let descriptionField = WrappingTextField()
@@ -28,12 +12,7 @@ final class NewBotViewController: SheetViewController {
     private var thinkingRow: NSView?
     /// The levels in the thinking pop-up after its Default item.
     private var shownLevels: [(id: String, label: String)] = []
-    private let lookRow = Build.stack([], orientation: .horizontal, spacing: 8)
     private let note = Build.label("", font: Theme.Font.caption, color: .tertiaryLabelColor, lines: 0)
-
-    private var lookButtons: [NSButton] = []
-    private var selectedLook = 0
-
     private let onCreate: (Bot.ID) -> Void
 
     init(onCreate: @escaping (Bot.ID) -> Void) {
@@ -82,15 +61,11 @@ final class NewBotViewController: SheetViewController {
         modelPopup.target = self
         modelPopup.action = #selector(modelChanged)
         thinkingPopup.translatesAutoresizingMaskIntoConstraints = false
-
-        buildLookRow()
-
         let thinkingRow = labeled(L("Thinking"), thinkingPopup)
         self.thinkingRow = thinkingRow
         let rows = [
             labeled(L("Name"), nameField),
             labeled(L("Description"), descriptionField, topAligned: true),
-            labeled(L("Look"), lookRow),
             labeled(L("Runner"), runnerPopup),
             labeled(L("Provider"), providerPopup),
             labeled(L("Model"), modelPopup),
@@ -133,43 +108,6 @@ final class NewBotViewController: SheetViewController {
             control.heightAnchor.constraint(greaterThanOrEqualToConstant: 54).isActive = true
         }
         return container
-    }
-
-    private func buildLookRow() {
-        for (index, look) in Self.looks.enumerated() {
-            let button = NSButton()
-            button.isBordered = false
-            button.title = ""
-            button.target = self
-            button.action = #selector(pickLook(_:))
-            button.tag = index
-            button.translatesAutoresizingMaskIntoConstraints = false
-
-            let avatar = AvatarView(diameter: 26)
-            avatar.content = .bot(symbolName: look.symbolName, accent: look.accent)
-            button.addSubview(avatar)
-            avatar.pin(to: button)
-
-            NSLayoutConstraint.activate([
-                button.widthAnchor.constraint(equalToConstant: 26),
-                button.heightAnchor.constraint(equalToConstant: 26),
-            ])
-
-            lookButtons.append(button)
-            lookRow.addArrangedSubview(button)
-        }
-        updateLookSelection()
-    }
-
-    @objc private func pickLook(_ sender: NSButton) {
-        selectedLook = sender.tag
-        updateLookSelection()
-    }
-
-    private func updateLookSelection() {
-        for (index, button) in lookButtons.enumerated() {
-            button.alphaValue = index == selectedLook ? 1 : 0.35
-        }
     }
 
     /// The providers as the sheet opened, the built-in ones and then the custom ones, so the
@@ -261,14 +199,13 @@ final class NewBotViewController: SheetViewController {
     override func confirmTapped() {
         let name = trimmedName
         guard !name.isEmpty, let runner = selectedRunner else { return }
-        let look = Self.looks[selectedLook]
         let description = descriptionField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let botID = store.createBot(
             name: name,
             description: description,
-            symbolName: look.symbolName,
-            accent: look.accent,
+            symbolName: "sparkles",
+            accent: .indigo,
             runnerID: runner.id,
             provider: selectedProvider,
             model: selectedModel,

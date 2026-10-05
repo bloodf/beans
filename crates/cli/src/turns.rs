@@ -19,13 +19,14 @@ use lorca_agent::retry::{is_context_overflow, RetryPolicy};
 use lorca_agent::{LlmMessage, Provider};
 use lorca_agent::{
     AgentEvent, AgentMessage, AgentMessageQueue, AssistantMessage, AssistantPart, ContentPart, QueueMode,
-    StopReason, Tool, ToolCall, ToolError, ToolResult, ToolResultMessage, ToolUpdateFn, UserMessage,
+    StopReason, ThinkingLevel, Tool, ToolCall, ToolError, ToolResult, ToolResultMessage, ToolUpdateFn, UserMessage,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::App;
 use crate::config::now_secs;
+use crate::credentials::OfferedModel;
 use crate::memory::{self, MemoryStore};
 use crate::model::*;
 use crate::plugins::review::Trigger;
@@ -58,6 +59,7 @@ fn memory_flush_enabled() -> bool {
 // MARK: - The turn
 
 pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken) -> TurnOutcome {
+    if app.is_paused() || cancel.is_cancelled() { return TurnOutcome::Skipped; }
     let Some(bot) = app.bot(&job.bot_id) else { return TurnOutcome::Skipped };
     if app.chat(&job.chat_id).is_none() {
         return TurnOutcome::Skipped;
@@ -91,6 +93,7 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         None => None,
     };
 
+    crate::catalog::check_for_model(app, &bot.provider, bot.model.as_deref()).await;
     let provider = match providers::provider_for(app, &bot.provider, bot.model.as_deref(), providers::thinking_level(&bot)) {
         Ok(provider) => provider,
         Err(reason) => {
@@ -117,13 +120,14 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         .flatten()
         .collect();
     crate::files::prefetch(app, &attachments).await;
+    crate::files::make_images(app, &attachments).await;
 
     let window = provider.model_info().map(|i| i.context_window).unwrap_or(0);
     let settings = compaction_settings(window);
     let store = MemoryStore::for_bot(&app.config.home, &bot);
     // The prompt names the installed plugins; their tools are in the codemode tool's description,
     // and their servers stay dormant until a script calls them.
-    let plugin_briefs = crate::plugins::mcp::plugin_briefs(app);
+    let plugin_briefs = crate::plugins::mcp::plugin_briefs(app, Some(&bot.id));
     let system_prompt = system_prompt(app, &chat, &bot, job, &store, routine.as_ref(), &plugin_briefs);
 
     let unattended = routine.is_some();
@@ -136,23 +140,27 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         Arc::new(SearchPlugins { app: app.clone() }),
         Arc::new(InstallPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), unattended }),
         Arc::new(ConnectPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }),
+        Arc::new(Propose { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), job_id: job.id.clone(), unattended }),
     ];
     tools.extend(memory_tools(app, &store, &chat));
     tools.push(Arc::new(Recall { app: app.clone(), store: store.clone(), bot: bot.clone() }));
     // Commands run in terminals of their own, kept on this Runner past the turn when they
     // wait for input.
     let sessions = Arc::new(crate::shell::TurnSessions::new(app, &chat.meta.id, &bot.id));
-    tools.extend(lorca_agent::tools::coding_tools_with_sessions(workdir.clone(), sessions));
-    // Plugin tools are called from codemode scripts, with the bot's own file tools. The tool
-    // list stays the same for the whole turn, and so does its prompt cache.
-    let scriptable: Vec<Arc<dyn Tool>> = tools.iter().filter(|tool| SCRIPTABLE_TOOLS.contains(&tool.name())).cloned().collect();
-    let plugin_tools = crate::plugins::mcp::turn_catalog(app, scriptable);
+    tools.extend(lorca_agent::tools::coding_tools_with_sessions(workdir.clone(), sessions, crate::shell::bot_shell_extras(app)));
+    // Scripts can call the bot's file and memory tools. Shell is a pipe-only tool of its own,
+    // advertised only to shell-enabled bots; nested calls recheck the live capability and review.
+    let mut scriptable: Vec<Arc<dyn Tool>> = tools.iter().filter(|tool| SCRIPTABLE_TOOLS.contains(&tool.name())).cloned().collect();
+    if bot.capabilities.shell {
+        scriptable.push(Arc::new(crate::shell::script_bash(app, workdir.clone())));
+    }
+    let plugin_tools = crate::plugins::mcp::turn_catalog_for_bot(app, scriptable, &bot.id);
     let script_store = Arc::new(crate::scripts::ScriptStore { app: app.clone(), chat_id: chat.meta.id.clone(), bot_id: bot.id.clone() });
     let functions: Vec<Arc<dyn HostFunction>> =
         crate::scripts::ModelsAsk::new(app, &chat.meta.id, &bot.provider).map(|ask| Arc::new(ask) as Arc<dyn HostFunction>).into_iter().collect();
     // A routine's script has nobody to press Stop, so it gets less time.
     let timeout = std::time::Duration::from_secs(if unattended { 10 * 60 } else { 30 * 60 });
-    let options = CodemodeOptions { mcp_types: !plugin_briefs.is_empty(), timeout, ..CodemodeOptions::default() };
+    let options = CodemodeOptions { mcp_types: !plugin_briefs.is_empty(), timeout, guidance: Some(SCRIPT_GUIDANCE.into()), ..CodemodeOptions::default() };
     tools.push(Arc::new(CodemodeTool::new(plugin_tools.clone(), options).with_store(script_store).with_functions(functions)));
 
     // A transcript that no longer fits, or that has outgrown what a turn rebuilds, is
@@ -495,6 +503,7 @@ async fn materialize_steering_messages(
             _ => &[],
         };
         crate::files::prefetch(app, attachments).await;
+        crate::files::make_images(app, attachments).await;
         if let Some(message) = steering_message(app, &chat_message, workdir, pixels) {
             out.push(message);
         }
@@ -524,6 +533,15 @@ impl LoopHooks for QuietHooks {
     }
 }
 
+/// Reads live roster policy, never the bot snapshot captured when the turn started.
+fn tool_denial(app: &App, bot_id: &str, name: &str, plugin_id: Option<&str>, cancel: &CancellationToken) -> Option<String> {
+    if app.is_paused() || cancel.is_cancelled() {
+        return Some("Account paused or turn cancelled.".into());
+    }
+    let Some(bot) = app.bot(bot_id) else { return Some("Bot removed.".into()) };
+    (!bot.capabilities.permits(name, plugin_id)).then(|| format!("{name} is not permitted for this bot."))
+}
+
 #[async_trait]
 impl LoopHooks for TurnHooks {
     async fn transform_context(&self, messages: Vec<AgentMessage>, _cancel: &CancellationToken) -> Vec<AgentMessage> {
@@ -538,11 +556,22 @@ impl LoopHooks for TurnHooks {
         self.steering.as_ref().map(AgentMessageQueue::drain).unwrap_or_default()
     }
 
+    fn permit_prepared_call(&self, ctx: BeforeToolCallContext<'_>) -> Option<String> {
+        let plugin_id = self.plugin_tools.plugin_id(&ctx.tool_call.name);
+        tool_denial(&self.app, &self.bot.id, &ctx.tool_call.name, plugin_id.as_deref(), ctx.cancel)
+    }
+
     async fn before_tool_call(&self, ctx: BeforeToolCallContext<'_>) -> Option<BeforeToolCallResult> {
+        let plugin_id = self.plugin_tools.plugin_id(&ctx.tool_call.name);
+        if let Some(reason) = tool_denial(&self.app, &self.bot.id, &ctx.tool_call.name, plugin_id.as_deref(), ctx.cancel) {
+            return Some(crate::local_review::blocked(reason));
+        }
         if let Some(refused) = crate::plugins::mcp::review_call(&self.app, &self.plugin_tools, &self.chat_id, &self.trigger, &self.bot, self.unattended, &ctx).await {
             return Some(refused);
         }
-        crate::local_review::before_tool_call(
+        let cancel = ctx.cancel;
+        let tool_name = ctx.tool_call.name.clone();
+        let review = crate::local_review::before_tool_call(
             &self.app,
             &self.chat_id,
             &self.trigger,
@@ -550,8 +579,11 @@ impl LoopHooks for TurnHooks {
             &self.workdir,
             self.unattended,
             ctx,
-        )
-        .await
+        ).await;
+        if let Some(reason) = tool_denial(&self.app, &self.bot.id, &tool_name, self.plugin_tools.plugin_id(&tool_name).as_deref(), cancel) {
+            return Some(crate::local_review::blocked(reason));
+        }
+        review
     }
 
     async fn prepare_next_turn(&self, ctx: PrepareNextTurnContext<'_>) -> Option<TurnUpdate> {
@@ -1028,6 +1060,7 @@ impl TurnState {
                         is_error: false,
                         description: None,
                         target_bot_id: None,
+                        script_command: None,
                         run: None,
                     },
                 );
@@ -1119,6 +1152,7 @@ impl TurnState {
                         is_error: false,
                         description,
                         target_bot_id,
+                        script_command: None,
                         run,
                     },
                 );
@@ -1132,27 +1166,28 @@ impl TurnState {
                 self.start_tool(message.clone());
                 self.tool_messages.push((tool_call_id, message.id));
             }
-            // A script's progress: the plugin of its latest plugin call names the working row, as
-            // "Using Linear…", and keeps it between calls.
+            // The latest nested command or plugin names a script's working row.
             AgentEvent::ToolExecutionUpdate { tool_call_id, tool_name, partial_result, .. } if tool_name == CODEMODE_TOOL_NAME => {
                 let Some((_, message_id)) = self.tool_messages.iter().find(|(id, _)| *id == tool_call_id).cloned() else { return };
                 let using = self.latest_plugin(&partial_result.details);
+                let command = self.latest_command(&partial_result.details);
                 let Some(mut message) = self.app.message(&self.chat_id, &message_id) else { return };
-                let Body::Tool { summary, description, is_running: true, .. } = &mut message.body else { return };
-                if *description == using {
-                    return;
-                }
-                *summary = match &using {
-                    Some(plugin) => format!("Using {plugin}…"),
-                    None => format!("Running {}…", tool_label(&tool_name)),
+                let Body::Tool { summary, description, script_command, is_running: true, .. } = &mut message.body else { return };
+                if *description == using && *script_command == command { return; }
+                *summary = match (&command, &using) {
+                    (Some(command), _) => format!("Running command: {command}…"),
+                    (None, Some(plugin)) => format!("Using {plugin}…"),
+                    (None, None) => format!("Running {}…", tool_label(&tool_name)),
                 };
                 *description = using;
+                *script_command = command;
                 self.start_tool(message);
             }
             AgentEvent::ToolExecutionEnd { tool_call_id, tool_name, result, is_error } => {
                 let Some((_, message_id)) = self.tool_messages.iter().find(|(id, _)| *id == tool_call_id).cloned() else { return };
                 let text = result.details["message"].as_str().map(str::to_string).unwrap_or_else(|| result.text_content());
                 let last_plugin = if tool_name == CODEMODE_TOOL_NAME { self.latest_plugin(&result.details) } else { None };
+                let last_command = if tool_name == CODEMODE_TOOL_NAME { self.latest_command(&result.details) } else { None };
                 let summary = if tool_name == CODEMODE_TOOL_NAME {
                     let plugins = self.script_plugins(&result.details);
                     for plugin in &plugins {
@@ -1169,7 +1204,7 @@ impl TurnState {
                 };
                 let summary = if is_error && tool_name != CODEMODE_TOOL_NAME { format!("{} failed", tool_label(&tool_name)) } else { summary };
                 let finish = |message: &mut Message| {
-                    if let Body::Tool { summary: s, detail, is_running, result: r, is_error: e, description, name, .. } = &mut message.body {
+                    if let Body::Tool { summary: s, detail, is_running, result: r, is_error: e, description, script_command, name, .. } = &mut message.body {
                         *s = summary;
                         *detail = text.clone();
                         *is_running = false;
@@ -1178,6 +1213,7 @@ impl TurnState {
                         if name == CODEMODE_TOOL_NAME {
                             // The row keeps reading "Using Linear" until the bot says something.
                             *description = last_plugin.clone();
+                            *script_command = last_command.clone();
                         }
                     }
                     message.state = MessageState::Complete;
@@ -1205,6 +1241,15 @@ impl TurnState {
             .rev()
             .filter(|(_, status)| matches!(status.as_str(), "running" | "ok" | "error"))
             .find_map(|(name, _)| self.plugin_tools.plugin_name(&name))
+    }
+
+    /// The last command to run in a script, unless a plugin call superseded it.
+    fn latest_command(&self, details: &Value) -> Option<String> {
+        let latest = details["calls"].as_array()?.iter().rev()
+            .filter(|call| matches!(call["status"].as_str(), Some("running" | "ok" | "error")))
+            .find(|call| call["name"] == "bash" || call["name"].as_str().is_some_and(|name| self.plugin_tools.plugin_name(name).is_some()))?;
+        if latest["name"] != "bash" { return None; }
+        latest["description"].as_str().and_then(|description| first_line(description, 80))
     }
 
     /// The plugins a script's calls used, by name, in the order it first used each. A call that
@@ -1366,9 +1411,11 @@ fn script_summary(plugins: &[String], failed: bool) -> String {
     }
 }
 
-/// What codemode scripts call besides plugin tools: the bot's own file tools. `bash` stays out:
-/// its review and card belong to a call of its own.
-const SCRIPTABLE_TOOLS: [&str; 5] = ["read", "write", "grep", "find", "ls"];
+/// Codemode scripts may call the bot's file and memory tools. Shell uses a separate pipe-mode
+/// tool; team, routine, and install actions remain direct tools with their own reviews.
+const SCRIPTABLE_TOOLS: [&str; 9] = ["read", "write", "edit", "grep", "find", "ls", "memory_update", "memory_log", "recall"];
+
+const SCRIPT_GUIDANCE: &str = "In a script, `bash` runs one command at a time on pipes with no stdin. Pass answers as flags or files. A nonzero exit resolves too; check `exit_code`.";
 
 fn first_line(text: &str, max: usize) -> Option<String> {
     let line = text.lines().next()?.trim();
@@ -1851,7 +1898,7 @@ impl Tool for ListTeammates {
         "list_teammates"
     }
     fn description(&self) -> &str {
-        "List the other bots on this account: their id, name, what they are good at, which Runner they run on, and whether that Runner is online."
+        "List the other bots on this account: their id, name, work, Runner, online state, provider, model, and thinking."
     }
     fn parameters(&self) -> Value {
         json!({ "type": "object", "properties": {}, "additionalProperties": false })
@@ -1869,6 +1916,8 @@ impl Tool for ListTeammates {
                     "description": bot.description,
                     "runner": runner.as_ref().map(|d| d.name.clone()).unwrap_or_else(|| "unassigned".into()),
                     "provider": bot.provider,
+                    "model": bot.model.clone().or_else(|| self.app.credentials.lock().unwrap().models(&bot.provider).first().map(|m| m.id.clone())),
+                    "thinking": bot.thinking.as_deref().unwrap_or("default"),
                     "online": self.app.device_is_online(&bot.runner_id),
                     "in_this_chat": chat.as_ref().map(|c| c.meta.bot_ids.contains(&bot.id)).unwrap_or(false),
                 })
@@ -2172,6 +2221,98 @@ fn check_provider(app: &App, provider: &str) -> Result<(), ToolError> {
     Err(ToolError(format!("Unknown provider {provider}. Use one of: {}.", kinds.join(", "))))
 }
 
+/// Runtime selection is validated before either tool mutates the roster.
+struct Runs {
+    provider: String,
+    model: Option<String>,
+    thinking: Option<String>,
+}
+
+impl Runs {
+    fn of(bot: &Bot) -> Self {
+        Self { provider: bot.provider.clone(), model: bot.model.clone(), thinking: bot.thinking.clone() }
+    }
+
+    fn change(mut self, app: &App, provider: Option<&str>, model: Option<&str>, thinking: Option<&str>) -> Result<Self, ToolError> {
+        if provider.is_none() && model.is_none() && thinking.is_none() {
+            return Ok(self);
+        }
+        if let Some(provider) = provider.filter(|provider| *provider != self.provider) {
+            self = Self { provider: provider.into(), model: None, thinking: None };
+        }
+        check_provider(app, &self.provider)?;
+        let offered = app.credentials.lock().unwrap().models(&self.provider);
+        if let Some(wanted) = model {
+            let selected = pick_model(&offered, wanted)?;
+            if selected != self.model {
+                let levels = levels_of(&offered, selected.as_deref());
+                if !self.thinking.as_deref().and_then(|level| level.parse().ok()).is_some_and(|level| levels.contains(&level)) {
+                    self.thinking = None;
+                }
+                self.model = selected;
+            }
+        }
+        if let Some(wanted) = thinking {
+            self.thinking = pick_thinking(&offered, self.model.as_deref(), wanted)?;
+        }
+        Ok(self)
+    }
+
+    fn describe(&self, app: &App) -> String {
+        let credentials = app.credentials.lock().unwrap();
+        let offered = credentials.models(&self.provider);
+        let name = model_name(&offered, self.model.as_deref());
+        let model = if self.model.is_none() { format!("{name} (the default)") } else { name };
+        let thinking = match &self.thinking {
+            Some(level) => format!(", thinking {level}"),
+            None if levels_of(&offered, self.model.as_deref()).is_empty() => String::new(),
+            None => ", thinking at its default".into(),
+        };
+        format!("{model} on {}{thinking}", credentials.label(&self.provider))
+    }
+}
+
+fn pick_model(offered: &[OfferedModel], wanted: &str) -> Result<Option<String>, ToolError> {
+    if wanted.eq_ignore_ascii_case("default") {
+        return Ok(None);
+    }
+    let matches = |model: &OfferedModel| {
+        model.id.eq_ignore_ascii_case(wanted) || model.name.eq_ignore_ascii_case(wanted)
+            || model.id.rsplit('/').next().is_some_and(|id| id.eq_ignore_ascii_case(wanted))
+    };
+    if let Some(model) = offered.iter().find(|model| model.id == wanted).or_else(|| offered.iter().find(|model| matches(model))) {
+        return Ok(Some(model.id.clone()));
+    }
+    let choices = offered.iter().take(40).map(|model| model.id.as_str()).collect::<Vec<_>>().join(", ");
+    Err(ToolError(format!("Unknown model {wanted}. Use one of: {choices}; or default.")))
+}
+
+fn levels_of(offered: &[OfferedModel], model: Option<&str>) -> Vec<ThinkingLevel> {
+    let id = model.or(offered.first().map(|model| model.id.as_str()));
+    match offered.iter().find(|offered| Some(offered.id.as_str()) == id) {
+        Some(found) => found.levels.clone(),
+        None => ThinkingLevel::ALL.into_iter().filter(|level| offered.iter().any(|model| model.levels.contains(level))).collect(),
+    }
+}
+
+fn model_name(offered: &[OfferedModel], model: Option<&str>) -> String {
+    let id = model.or(offered.first().map(|model| model.id.as_str())).unwrap_or("the default model");
+    offered.iter().find(|model| model.id == id).map_or_else(|| id.to_string(), |model| model.name.clone())
+}
+
+fn pick_thinking(offered: &[OfferedModel], model: Option<&str>, wanted: &str) -> Result<Option<String>, ToolError> {
+    if wanted.eq_ignore_ascii_case("default") {
+        return Ok(None);
+    }
+    let level: ThinkingLevel = wanted.parse().map_err(ToolError)?;
+    let levels = levels_of(offered, model);
+    if levels.contains(&level) {
+        return Ok(Some(level.to_string()));
+    }
+    let choices = levels.iter().map(ThinkingLevel::as_str).collect::<Vec<_>>().join(", ");
+    Err(ToolError(format!("{} does not think at {level}. Use one of: {choices}; or default.", model_name(offered, model))))
+}
+
 struct CreateBot {
     app: Arc<App>,
     chat_id: String,
@@ -2195,7 +2336,8 @@ impl Tool for CreateBot {
                 "name": { "type": "string", "description": "Short name, one or two words" },
                 "description": { "type": "string", "description": "What it does and how it should work: scope, standards, tone, constraints, and what to ask before acting" },
                 "provider": { "type": "string", "enum": self.app.credentials.lock().unwrap().kinds(), "description": "Defaults to your own provider" },
-                "thinking": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "How much the model thinks. Defaults to the provider's default" },
+                "model": { "type": "string", "description": "A model offered by the provider, or default" },
+                "thinking": { "type": "string", "enum": ["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "A thinking level the model supports, or default" },
                 "workdir": { "type": "string", "description": "Working directory for its tools. Defaults to a private workspace under the CLI home; give it your own path to share files" }
             },
             "required": ["name", "description"],
@@ -2219,6 +2361,10 @@ impl Tool for CreateBot {
         }
         let provider = args["provider"].as_str().map(str::to_string).unwrap_or_else(|| self.bot.provider.clone());
         check_provider(&self.app, &provider)?;
+        let field = |key: &str| args[key].as_str().map(str::trim).filter(|value| !value.is_empty());
+        let (model, thinking) = (field("model"), field("thinking"));
+        let runs = Runs { provider, model: None, thinking: None }.change(&self.app, None, model, thinking)?;
+        let runs_with = (args["provider"].is_string() || model.is_some() || thinking.is_some()).then(|| runs.describe(&self.app));
         let (symbol_name, accent) = look_for(&name);
         let bot = Bot {
             id: String::new(),
@@ -2228,11 +2374,12 @@ impl Tool for CreateBot {
             accent,
             avatar: None,
             runner_id: self.bot.runner_id.clone(),
-            provider,
-            model: None,
-            thinking: args["thinking"].as_str().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+            provider: runs.provider,
+            model: runs.model,
+            thinking: runs.thinking,
             legacy_instructions: String::new(),
             workdir: args["workdir"].as_str().map(|w| w.trim().to_string()).filter(|w| !w.is_empty()),
+            capabilities: self.bot.capabilities.clone(),
             created_at: 0.0,
         };
         let (created, _dm) = self.app.create_bot_with_dm(bot, None).map_err(|e| ToolError(e.to_string()))?;
@@ -2254,7 +2401,7 @@ impl Tool for CreateBot {
         }
 
         let runner = self.app.device(&created.runner_id).map(|d| d.name).unwrap_or_else(|| "this Runner".into());
-        let text = if joined_here {
+        let mut text = if joined_here {
             format!("Created {} (id {}) on {runner}. They are in this chat now and take turns after you.", created.name, created.id)
         } else {
             format!(
@@ -2262,6 +2409,9 @@ impl Tool for CreateBot {
                 created.name, created.id
             )
         };
+        if let Some(runs) = runs_with {
+            text.push_str(&format!(" They run {runs}."));
+        }
         Ok(ToolResult::text(text).with_details(json!({ "summary": format!("Created {}", created.name), "bot_id": created.id })))
     }
 }
@@ -2278,9 +2428,8 @@ impl Tool for EditBot {
         "edit_bot"
     }
     fn description(&self) -> &str {
-        "Change a teammate's profile: name, description, provider, or working directory. Only the fields you \
-         pass change. Description is the complete account of what the bot does and how it works. You can edit \
-         yourself. Changes apply from that bot's next turn. Edit only when the user asks or agrees."
+        "Change a teammate's profile: name, description, provider, model, thinking, or working directory. Only fields you \
+         pass change. You can edit yourself. Changes apply from the bot's next turn. Edit only when the user asks or agrees."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -2289,8 +2438,9 @@ impl Tool for EditBot {
                 "bot_id": { "type": "string", "description": "The bot's id, from the user's @mention or list_teammates" },
                 "name": { "type": "string", "description": "New name, one or two words" },
                 "description": { "type": "string", "description": "New complete description of what it does and how it should work" },
-                "provider": { "type": "string", "enum": self.app.credentials.lock().unwrap().kinds() },
-                "thinking": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "How much the model thinks" },
+                "provider": { "type": "string", "enum": self.app.credentials.lock().unwrap().kinds(), "description": "Another provider resets model and thinking to defaults" },
+                "model": { "type": "string", "description": "A model offered by the provider, or default" },
+                "thinking": { "type": "string", "enum": ["default", "off", "minimal", "low", "medium", "high", "xhigh", "max"], "description": "A thinking level the model supports, or default" },
                 "workdir": { "type": "string", "description": "New working directory for its tools" }
             },
             "required": ["bot_id"],
@@ -2312,6 +2462,7 @@ impl Tool for EditBot {
         let new_name = field("name").map(|n| n.trim_start_matches('@').to_string());
         let description = field("description");
         let provider = field("provider");
+        let model = field("model");
         let thinking = field("thinking");
         let workdir = field("workdir");
         if let Some(n) = &new_name {
@@ -2322,13 +2473,12 @@ impl Tool for EditBot {
                 return Err(ToolError(format!("A bot named {n} already exists. Pick another name.")));
             }
         }
-        if let Some(p) = &provider {
-            check_provider(&self.app, p)?;
-        }
+        let runs = Runs::of(&target).change(&self.app, provider.as_deref(), model.as_deref(), thinking.as_deref())?;
         let changed: Vec<&str> = [
             ("name", new_name.is_some()),
             ("description", description.is_some()),
             ("provider", provider.is_some()),
+            ("model", model.is_some()),
             ("thinking", thinking.is_some()),
             ("working directory", workdir.is_some()),
         ]
@@ -2336,8 +2486,10 @@ impl Tool for EditBot {
         .filter_map(|(label, set)| set.then_some(label))
         .collect();
         if changed.is_empty() {
-            return Err("Pass at least one field to change: name, description, provider, thinking, or workdir".into());
+            return Err("Pass at least one field to change: name, description, provider, model, thinking, or workdir".into());
         }
+        let runtime = provider.is_some() || model.is_some() || thinking.is_some();
+        let runs_with = runtime.then(|| runs.describe(&self.app));
 
         let updated = self
             .app
@@ -2348,11 +2500,10 @@ impl Tool for EditBot {
                 if let Some(v) = description {
                     bot.description = v;
                 }
-                if let Some(v) = provider {
-                    bot.provider = v;
-                }
-                if let Some(v) = thinking {
-                    bot.thinking = Some(v);
+                if runtime {
+                    bot.provider = runs.provider;
+                    bot.model = runs.model;
+                    bot.thinking = runs.thinking;
                 }
                 if let Some(v) = workdir {
                     bot.workdir = Some(v);
@@ -2361,10 +2512,11 @@ impl Tool for EditBot {
             .map_err(|e| ToolError(e.to_string()))?;
 
         let what = changed.join(", ");
-        let text = if target.id == self.bot.id {
-            format!("Updated your own profile ({what}). The new profile applies from your next turn; finish this one as you are.")
-        } else {
-            format!("Updated {} ({what}). The new profile applies from their next turn.", updated.name)
+        let text = match (target.id == self.bot.id, runs_with) {
+            (true, Some(runs)) => format!("Updated your own profile ({what}). From your next turn you run {runs}; finish this one as you are."),
+            (true, None) => format!("Updated your own profile ({what}). The new profile applies from your next turn; finish this one as you are."),
+            (false, Some(runs)) => format!("Updated {} ({what}). From their next turn they run {runs}.", updated.name),
+            (false, None) => format!("Updated {} ({what}). The new profile applies from their next turn.", updated.name),
         };
         Ok(ToolResult::text(text).with_details(json!({ "summary": format!("Updated {}", updated.name), "bot_id": updated.id, "changed": changed })))
     }
@@ -2542,8 +2694,12 @@ impl Tool for SearchPlugins {
     }
     async fn execute(&self, _id: &str, args: Value, _cancel: CancellationToken, _on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
         let query = args["query"].as_str().unwrap_or("");
-        let all = crate::marketplace::index(&self.app).await.plugins;
-        let found = crate::marketplace::search_plugins(&all, query);
+        let mut index = crate::marketplace::index(&self.app).await;
+        if !query.trim().is_empty() && crate::marketplace::search_plugins(&index.plugins, query).is_empty()
+            && crate::marketplace::check_for_missing(&self.app).await {
+            index = crate::marketplace::current(&self.app);
+        }
+        let found = crate::marketplace::search_plugins(&index.plugins, query);
         let rows: Vec<Value> = found
             .iter()
             .map(|m| {
@@ -2605,12 +2761,15 @@ impl Tool for InstallPlugin {
         if self.app.this_device_id().as_deref() != Some(self.bot.runner_id.as_str()) {
             return Err("Plugins are installed on your Runner, which is not this Device.".into());
         }
-        let all = crate::marketplace::index(&self.app).await.plugins;
-        let manifest = all
-            .iter()
-            .find(|m| m.id.eq_ignore_ascii_case(&wanted) || m.name.eq_ignore_ascii_case(&wanted))
-            .cloned()
-            .ok_or_else(|| ToolError(format!("No plugin {wanted:?} in the marketplace. Use search_plugins to see what exists.")))?;
+        let find = |index: &crate::marketplace::Index| index.plugins.iter()
+            .find(|manifest| manifest.id.eq_ignore_ascii_case(&wanted) || manifest.name.eq_ignore_ascii_case(&wanted)).cloned();
+        let mut index = crate::marketplace::index(&self.app).await;
+        let mut manifest = find(&index);
+        if manifest.is_none() && crate::marketplace::check_for_missing(&self.app).await {
+            index = crate::marketplace::current(&self.app);
+            manifest = find(&index);
+        }
+        let manifest = manifest.ok_or_else(|| ToolError(format!("No plugin {wanted:?} in the marketplace. Use search_plugins to see what exists.")))?;
         let runner = self.app.device(&self.bot.runner_id).map(|d| d.name).unwrap_or_else(|| "this Runner".into());
         if let Some(status) = self.app.plugins.lock().unwrap().status(&manifest.id) {
             let next = match status.state.as_str() {
@@ -2697,6 +2856,58 @@ impl Tool for ConnectPlugin {
         let Body::Permission { plugin_name, .. } = &message.body else { unreachable!() };
         Ok(ToolResult::text(format!("A sign-in card for {plugin_name} is in the chat. Ask the user to tap Sign in on it, then to tell you when it is done."))
             .with_details(json!({ "summary": format!("Asked to sign in to {plugin_name}"), "plugin_id": id })))
+    }
+}
+
+/// A reviewed draft stays in the chat until a user saves it to this bot's workspace.
+struct Propose {
+    app: Arc<App>,
+    chat_id: String,
+    bot: Bot,
+    job_id: String,
+    unattended: bool,
+}
+
+#[async_trait]
+impl Tool for Propose {
+    fn name(&self) -> &str { "propose" }
+    fn description(&self) -> &str {
+        "Propose a draft to the user for review. Give optional title and content, and a required relative workspace path. The user can approve and save or decline. Never writes before approval."
+    }
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {
+            "title": { "type": "string" }, "content": { "type": "string" }, "path": { "type": "string" }
+        }, "required": ["path"], "additionalProperties": false })
+    }
+    fn execution_mode(&self) -> Option<ToolExecutionMode> { Some(ToolExecutionMode::Sequential) }
+    async fn execute(&self, id: &str, args: Value, cancel: CancellationToken, _on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+        if self.unattended { return Err("Nobody is here to review this draft. Ask in a chat with the user.".into()); }
+        let field = |name| -> Result<Option<String>, ToolError> {
+            match args.get(name) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(text)) => Ok(Some(text.clone())),
+                _ => Err(ToolError(format!("{name} must be a string"))),
+            }
+        };
+        let title = field("title")?;
+        let content = field("content")?;
+        let path = Some(field("path")?.filter(|path| !path.is_empty()).ok_or("path is required")?);
+        if title.as_deref().is_some_and(|s| s.chars().count() > 120 || s.contains('\0') || s.contains('\r'))
+            || path.as_deref().is_some_and(|s| s.chars().count() > 240) {
+            return Err("Proposal title or path is too long or contains invalid characters.".into());
+        }
+        if content.as_deref().is_some_and(|s| s.chars().count() > 20_000 || s.len() > 65_536) {
+            return Err("Proposal content exceeds 20,000 characters or 64 KiB.".into());
+        }
+        if let Some(path) = &path {
+            let relative = std::path::Path::new(path);
+            if path.is_empty() || path.split(['/', '\\']).any(|part| part == "." || part == ".." || part.is_empty()) || relative.is_absolute() || relative.components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
+                return Err("Proposal path must stay inside bot workspace.".into());
+            }
+        }
+        let call_id = format!("{}:{id}", self.job_id);
+        let approved = crate::plugins::mcp::propose(&self.app, &self.chat_id, &self.bot.id, &call_id, title, content, path, &cancel).await.map_err(ToolError)?;
+        Ok(ToolResult::text(if approved { "User approved draft and saved it." } else { "Draft was not saved." }))
     }
 }
 
@@ -2916,13 +3127,30 @@ mod tests {
             symbol_name: String::new(),
             accent: String::new(),
             avatar: None,
+
             runner_id: "dev".into(),
             provider: "deepseek".into(),
             model: None,
             thinking: None,
             legacy_instructions: String::new(),
             workdir: None,
+            capabilities: Default::default(),
             created_at: 0.0,
+        }
+    }
+    #[test]
+    fn removed_bot_cannot_use_tools_even_with_legacy_capabilities() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        app.state.lock().unwrap().bots.push(bot("removed", "Chef"));
+        let cancel = CancellationToken::new();
+        assert_eq!(tool_denial(app, "removed", "bash", None, &cancel), None);
+        assert_eq!(tool_denial(app, "removed", "write", None, &cancel), None);
+        assert_eq!(tool_denial(app, "removed", "github__create_issue", Some("github"), &cancel), None);
+
+        app.state.lock().unwrap().bots.clear();
+        for (name, plugin) in [("bash", None), ("write", None), ("github__create_issue", Some("github"))] {
+            assert_eq!(tool_denial(app, "removed", name, plugin, &cancel).as_deref(), Some("Bot removed."));
         }
     }
 
@@ -3148,6 +3376,33 @@ mod tests {
         assert_eq!(turn.tools_used, vec!["codemode".to_string(), "Linear".to_string()]);
         assert_eq!(script_summary(&["Linear".into(), "GitHub".into(), "Notion".into()], false), "Used Linear and 2 more");
         assert_eq!(script_summary(&[], true), "The script failed");
+    }
+
+    #[test]
+    fn nested_command_status_yields_to_later_plugin_call() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let chef = bot("b1", "Chef");
+        {
+            let mut state = app.state.lock().unwrap();
+            state.bots.push(chef.clone());
+            state.chats.push(chat("chat", "dm", None, &["b1"]));
+        }
+        let mut turn = turn_state(app, &chef, "");
+        turn.plugin_tools = linear_catalog(app);
+        let args = json!({ "code": "await tools.bash({command:'cargo test',description:'Run the tests'}); await tools.linear__list_issues({})" });
+        let call = |name: &str, status: &str| json!({ "name": name, "status": status, "description": "Run the tests" });
+        let row = |turn: &TurnState| {
+            let message_id = &turn.tool_messages.iter().find(|(id, _)| id == "c1").unwrap().1;
+            let Body::Tool { summary, script_command, .. } = app.message("chat", message_id).unwrap().body else { unreachable!() };
+            (summary, script_command)
+        };
+        let update = |calls: Value| ToolResult { details: json!({ "calls": calls }), ..ToolResult::default() };
+        turn.handle(AgentEvent::ToolExecutionStart { tool_call_id: "c1".into(), tool_name: "codemode".into(), args: args.clone() });
+        turn.handle(AgentEvent::ToolExecutionUpdate { tool_call_id: "c1".into(), tool_name: "codemode".into(), args: args.clone(), partial_result: update(json!([call("bash", "running")])) });
+        assert_eq!(row(&turn).1.as_deref(), Some("Run the tests"));
+        turn.handle(AgentEvent::ToolExecutionUpdate { tool_call_id: "c1".into(), tool_name: "codemode".into(), args: args.clone(), partial_result: update(json!([call("bash", "ok"), call("linear__list_issues", "running")])) });
+        assert_eq!(row(&turn), ("Using Linear…".into(), None));
     }
 
     #[test]
@@ -3696,6 +3951,7 @@ mod tests {
             let mut message = Message::new("chat", Author::Bot { bot_id: bot.id.clone() }, Body::Tool {
                 name: "bash".into(), summary: "Waiting for input".into(), detail: String::new(), is_running: false, call_id: format!("call-{}", bot.id),
                 arguments: json!({}), result: Some("…".into()), is_error: false, description: None, target_bot_id: None,
+                script_command: None,
                 run: Some(CommandRun { session_id: Some(format!("bash-{}", bot.id)), command: "sudo -v".into(), state: state.into(), prompt: Some("Password:".into()), ..CommandRun::default() }),
             });
             message.state = MessageState::Complete;
@@ -3869,6 +4125,71 @@ mod tests {
         let Body::Tool { run: Some(run), .. } = &finished.body else { panic!("a command's card") };
         assert_eq!((run.state.as_str(), run.output.as_deref()), ("exited", Some("done")));
         assert_eq!(arguments["command"], "bun install");
+    }
+
+    #[tokio::test]
+    async fn edit_bot_rejects_invalid_model_without_mutation_and_resets_on_switch() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let chef = bot("b1", "Chef");
+        let scout = Bot { provider: "anthropic".into(), model: Some("claude-haiku-4-5".into()), thinking: Some("minimal".into()), ..bot("b2", "Scout") };
+        app.state.lock().unwrap().bots = vec![chef.clone(), scout];
+        let tool = EditBot { app: app.clone(), bot: chef };
+        let updates: ToolUpdateFn = Arc::new(|_| {});
+        let run = |mut args: Value| {
+            args["bot_id"] = json!("b2");
+            tool.execute("call", args, CancellationToken::new(), updates.clone())
+        };
+        assert!(run(json!({ "model": "not-offered", "name": "Ranger" })).await.is_err());
+        let scout = app.bot("b2").unwrap();
+        assert_eq!((scout.name.as_str(), scout.model.as_deref(), scout.thinking.as_deref()), ("Scout", Some("claude-haiku-4-5"), Some("minimal")));
+        run(json!({ "model": "Claude Opus 5.5" })).await.unwrap();
+        let scout = app.bot("b2").unwrap();
+        assert_eq!((scout.model.as_deref(), scout.thinking.as_deref()), (Some("claude-opus-5-5"), None));
+        assert!(run(json!({ "thinking": "off" })).await.is_err());
+        assert_eq!(app.bot("b2").unwrap().model.as_deref(), Some("claude-opus-5-5"));
+        let rows = ListTeammates { app: app.clone(), chat_id: "chat".into() }
+            .execute("call", json!({}), CancellationToken::new(), updates.clone()).await.unwrap();
+        let rows: Value = serde_json::from_str(rows.content[0].as_text().unwrap()).unwrap();
+        assert_eq!((rows["teammates"][1]["provider"].as_str(), rows["teammates"][1]["model"].as_str(), rows["teammates"][1]["thinking"].as_str()),
+            (Some("anthropic"), Some("claude-opus-5-5"), Some("default")));
+        run(json!({ "provider": "deepseek" })).await.unwrap();
+        let scout = app.bot("b2").unwrap();
+        assert_eq!((scout.provider.as_str(), scout.model.as_deref(), scout.thinking.as_deref()), ("deepseek", None, None));
+        let rows = ListTeammates { app: app.clone(), chat_id: "chat".into() }
+            .execute("call", json!({}), CancellationToken::new(), updates.clone()).await.unwrap();
+        let rows: Value = serde_json::from_str(rows.content[0].as_text().unwrap()).unwrap();
+        assert_eq!(rows["teammates"][1]["model"], json!(app.credentials.lock().unwrap().models("deepseek")[0].id));
+        run(json!({ "description": "Finds sources" })).await.unwrap();
+        assert_eq!(app.bot("b2").unwrap().model, None);
+        use crate::credentials::{CustomApi, CustomModel, CustomProvider};
+        app.credentials.lock().unwrap().custom.insert("custom:router".into(), CustomProvider {
+            name: "Router".into(), api: CustomApi::ChatCompletions, base_url: "http://router/v1".into(), api_key: String::new(),
+            models: vec![CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus".into()), context_window: None, max_output: None, images: None }], created_at: 1,
+        });
+        run(json!({ "provider": "custom:router", "model": "claude-opus-5", "thinking": "max" })).await.unwrap();
+        let scout = app.bot("b2").unwrap();
+        assert_eq!((scout.model.as_deref(), scout.thinking.as_deref()), (Some("anthropic/claude-opus-5"), Some("max")));
+        app.credentials.lock().unwrap().custom.clear();
+        assert!(run(json!({ "model": "claude-opus-5" })).await.is_err());
+        run(json!({ "description": "Updated sources" })).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_bot_validates_model_before_creating_dm() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let chef = Bot { runner_id: app.this_device_id().unwrap(), ..bot("b1", "Chef") };
+        app.state.lock().unwrap().bots = vec![chef.clone()];
+        let tool = CreateBot { app: app.clone(), chat_id: "chat".into(), bot: chef };
+        let updates: ToolUpdateFn = Arc::new(|_| {});
+        let run = |args: Value| tool.execute("call", args, CancellationToken::new(), updates.clone());
+        assert!(run(json!({ "name": "Scout", "description": "Finds sources", "model": "claude-opus-5-5" })).await.is_err());
+        assert!(app.state.lock().unwrap().bots.iter().all(|bot| bot.name != "Scout"));
+        run(json!({ "name": "Scout", "description": "Finds sources", "provider": "anthropic", "model": "claude-opus-5-5", "thinking": "high" })).await.unwrap();
+        let scout = app.state.lock().unwrap().bots.iter().find(|bot| bot.name == "Scout").cloned().unwrap();
+        assert_eq!((scout.provider.as_str(), scout.model.as_deref(), scout.thinking.as_deref()), ("anthropic", Some("claude-opus-5-5"), Some("high")));
     }
 
     #[tokio::test]

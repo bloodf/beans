@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod app;
+pub mod catalog;
 pub mod config;
 pub mod credentials;
 pub mod crypto;
@@ -34,6 +35,7 @@ pub mod scripts;
 #[cfg(feature = "runner")]
 pub mod shell;
 pub mod sync;
+pub mod served;
 pub mod local_store;
 #[cfg(feature = "runner")]
 pub mod turns;

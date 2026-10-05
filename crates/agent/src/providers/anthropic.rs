@@ -3,6 +3,7 @@
 //! on the server (its OpenAI-compatible endpoint takes only `function` tools).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -45,7 +46,7 @@ pub struct AnthropicProvider {
     /// way the catalog says the model takes it (an effort, a token budget, or off).
     pub thinking_level: Option<ThinkingLevel>,
     /// The catalog entry for the model, when it has one: rates for cost, the window, levels.
-    pub info: Option<&'static ModelInfo>,
+    pub info: Option<Arc<ModelInfo>>,
     pub max_tokens: u64,
     /// Whether the model takes images; a text-only model gets a note in their place.
     pub supports_images: bool,
@@ -107,7 +108,7 @@ impl AnthropicProvider {
         let mut provider = Self::new("deepseek", DEEPSEEK_ANTHROPIC_BASE_URL, api_key, model);
         provider.server_tools = vec![json!({ "type": "web_search_20250305", "name": "web_search" })];
         let lower = model.to_ascii_lowercase();
-        provider.supports_images = provider.info.map(|i| i.images).unwrap_or(lower.contains("vl") || lower.contains("vision"));
+        provider.supports_images = provider.info.as_ref().map(|i| i.images).unwrap_or(lower.contains("vl") || lower.contains("vision"));
         provider
     }
 
@@ -125,8 +126,8 @@ impl AnthropicProvider {
     /// room for a token budget.
     fn thinking_fields(&self, max_tokens: u64) -> (Option<Value>, Option<Value>, u64) {
         let Some(level) = self.thinking_level else { return (self.thinking.clone(), None, max_tokens) };
-        let mode = self.info.map(|i| i.thinking).unwrap_or(if legacy_model(&self.model) { ThinkingMode::Budget } else { ThinkingMode::Adaptive });
-        let level = match self.info {
+        let mode = self.info.as_ref().map(|i| i.thinking).unwrap_or(if legacy_model(&self.model) { ThinkingMode::Budget } else { ThinkingMode::Adaptive });
+        let level = match self.info.as_ref() {
             Some(info) => match info.clamp_level(level) {
                 Some(level) => level,
                 None => return (self.thinking.clone(), None, max_tokens),
@@ -212,7 +213,7 @@ impl AnthropicProvider {
 
         let requested = request.max_tokens.unwrap_or(self.max_tokens);
         let (thinking, output_config, max_tokens) = self.thinking_fields(requested);
-        let max_tokens = match self.info.map(|i| i.max_output).filter(|cap| *cap > 0) {
+        let max_tokens = match self.info.as_ref().map(|i| i.max_output).filter(|cap| *cap > 0) {
             Some(cap) => max_tokens.min(cap),
             None => max_tokens,
         };
@@ -623,8 +624,8 @@ impl Provider for AnthropicProvider {
         self.supports_images
     }
 
-    fn model_info(&self) -> Option<&'static ModelInfo> {
-        self.info
+    fn model_info(&self) -> Option<&ModelInfo> {
+        self.info.as_deref()
     }
 
     async fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream {
@@ -636,7 +637,7 @@ impl Provider for AnthropicProvider {
         let url = format!("{}/v1/messages", self.base_url);
         let client = self.client.clone();
         let (max_retries, max_retry_delay_ms) = (self.max_retries, self.max_retry_delay_ms);
-        let info = self.info;
+        let info = self.info.clone();
 
         tokio::spawn(async move {
             let build = || {

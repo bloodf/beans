@@ -39,6 +39,15 @@ impl Config {
     pub fn settings_path(&self) -> PathBuf {
         self.home.join("settings.json")
     }
+    /// A validated public model catalog cached from this Device's selected relay.
+    pub fn catalog_path(&self) -> PathBuf {
+        self.home.join("catalog.json")
+    }
+
+    /// A validated public marketplace index cached from this Device's selected relay.
+    pub fn marketplace_path(&self) -> PathBuf {
+        self.home.join("marketplace.json")
+    }
 
     /// Attachment bytes by id, sent from here or fetched from the relay.
     pub fn files_dir(&self) -> PathBuf {
@@ -48,6 +57,10 @@ impl Config {
     /// Installed plugins: `installed.json`, `secrets.json`, and a folder per plugin.
     pub fn plugins_dir(&self) -> PathBuf {
         self.home.join("plugins")
+    }
+
+    pub fn mcp_path(&self) -> PathBuf {
+        self.home.join("mcp.json")
     }
 
     pub fn ensure_home(&self) -> anyhow::Result<()> {
@@ -148,10 +161,13 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
 
 /// Writes atomically with mode 0600.
 pub fn write_json_private<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    write_private(path, &serde_json::to_vec_pretty(value)?)
+}
+
+pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(value)?;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));

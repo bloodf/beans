@@ -184,6 +184,7 @@ pub fn describe(schedule_text: &str) -> Result<Value, String> {
 /// Starts a run of the routine now, here or on the bot's Runner through the relay. Refuses
 /// while a run is going on.
 pub fn run_now(app: &Arc<App>, id: &str) -> Result<(), String> {
+    if app.is_paused() { return Err("Account paused. Resume to run routines.".into()); }
     let routine = app.routine(id).ok_or("Unknown routine")?;
     if app.is_routine_running(&routine.id) {
         return Err(format!("{} is running right now.", routine.name));
@@ -243,6 +244,7 @@ pub async fn run(app: Arc<App>) {
 /// away, in which case the due ones are paused with a notice instead.
 #[cfg(feature = "runner")]
 pub fn tick(app: &Arc<App>) {
+    if app.is_paused() { return; }
     let Some(this) = app.this_device_id() else { return };
     let now = now_unix();
     let enabled: Vec<Routine> = app.state.lock().unwrap().routines.iter().filter(|r| r.is_enabled).cloned().collect();
@@ -291,10 +293,11 @@ const CHECK_FILE_TOOLS: [&str; 4] = ["read", "grep", "find", "ls"];
 pub struct Checks(std::sync::Mutex<std::collections::HashMap<String, CheckState>>);
 
 #[cfg(feature = "runner")]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone)]
 struct CheckState {
     last_at: Option<i64>,
     running: bool,
+    cancel: Option<CancellationToken>,
 }
 
 #[cfg(feature = "runner")]
@@ -309,16 +312,19 @@ impl Checks {
     }
 
     /// Marks the routine's check running; false when it already is.
-    fn start(&self, id: &str) -> bool {
+    fn start(&self, id: &str, cancel: &CancellationToken) -> bool {
         let mut checks = self.0.lock().unwrap();
         let state = checks.entry(id.to_string()).or_default();
-        !std::mem::replace(&mut state.running, true)
+        if state.running { return false; }
+        state.running = true;
+        state.cancel = Some(cancel.clone());
+        true
     }
 
     /// Marks the routine's check running once no other check of it runs; false when `cancel`
     /// stops the wait.
     async fn start_when_free(&self, id: &str, cancel: &CancellationToken) -> bool {
-        while !self.start(id) {
+        while !self.start(id, cancel) {
             tokio::select! {
                 _ = cancel.cancelled() => return false,
                 _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
@@ -327,8 +333,14 @@ impl Checks {
         true
     }
 
+    pub fn cancel_all(&self) {
+        for state in self.0.lock().unwrap().values() {
+            if let Some(cancel) = &state.cancel { cancel.cancel(); }
+        }
+    }
+
     fn finish(&self, id: &str, at: i64) {
-        self.0.lock().unwrap().insert(id.to_string(), CheckState { last_at: Some(at), running: false });
+        self.0.lock().unwrap().insert(id.to_string(), CheckState { last_at: Some(at), running: false, cancel: None });
     }
 }
 
@@ -378,15 +390,14 @@ pub fn next_run_shown(app: &App, routine: &Routine) -> Option<i64> {
 /// at a time.
 #[cfg(feature = "runner")]
 fn check_then_run(app: &Arc<App>, routine: Routine) {
-    if !app.routine_checks.start(&routine.id) {
-        return;
-    }
+    let cancel = CancellationToken::new();
+    if !app.routine_checks.start(&routine.id, &cancel) { return; }
     let app = app.clone();
     tokio::spawn(async move {
-        let found = run_check(&app, &routine, &CancellationToken::new()).await;
+        let found = run_check(&app, &routine, &cancel).await;
         checked(&app, &routine.id);
         // A routine paused, deleted, or given another check meanwhile does not run on this one.
-        let Some(current) = app.routine(&routine.id).filter(|current| current.is_enabled && current.check == routine.check) else { return };
+        let Some(current) = app.routine(&routine.id).filter(|current| !cancel.is_cancelled() && !app.is_paused() && current.is_enabled && current.check == routine.check) else { return };
         let Some(report) = found.report() else { return };
         started(&app, &current.id);
         match job_for(&app, &current) {
@@ -423,6 +434,7 @@ impl CheckRun {
 /// the routine already running, and counted like a due one, so the schedule counts from it.
 #[cfg(feature = "runner")]
 pub async fn check_now(app: &Arc<App>, routine: &Routine, cancel: &CancellationToken) -> CheckRun {
+    if app.is_paused() { return CheckRun { found: None, error: Some("Account paused.".into()), result: "Account paused.".into() }; }
     if !app.routine_checks.start_when_free(&routine.id, cancel).await {
         let stopped = "Stopped before the check ran.".to_string();
         return CheckRun { found: None, error: Some(stopped.clone()), result: stopped };
@@ -439,6 +451,7 @@ pub async fn check_now(app: &Arc<App>, routine: &Routine, cancel: &CancellationT
 #[cfg(feature = "runner")]
 pub async fn run_check(app: &Arc<App>, routine: &Routine, cancel: &CancellationToken) -> CheckRun {
     let failed = |error: String| CheckRun { found: None, error: Some(error.clone()), result: error };
+    if app.is_paused() || cancel.is_cancelled() { return failed("Account paused.".into()); }
     let Some(code) = routine.check.as_deref() else { return CheckRun { found: None, error: None, result: String::new() } };
     let Some(bot) = app.bot(&routine.bot_id) else { return failed("The routine's bot is gone.".into()) };
     let dm = match app.dm_with(&bot.id, None) {
@@ -447,11 +460,11 @@ pub async fn run_check(app: &Arc<App>, routine: &Routine, cancel: &CancellationT
     };
     let files: Vec<Arc<dyn Tool>> =
         lorca_agent::tools::coding_tools(bot.working_directory(&app.config.home)).into_iter().filter(|tool| CHECK_FILE_TOOLS.contains(&tool.name())).collect();
-    let catalog = crate::plugins::mcp::turn_catalog(app, files);
+    let catalog = crate::plugins::mcp::turn_catalog_for_bot(app, files, &bot.id);
     let store = Arc::new(crate::scripts::ScriptStore { app: app.clone(), chat_id: dm.meta.id.clone(), bot_id: bot.id.clone() });
     let functions: Vec<Arc<dyn HostFunction>> =
         crate::scripts::ModelsAsk::new(app, &dm.meta.id, &bot.provider).map(|ask| Arc::new(ask) as Arc<dyn HostFunction>).into_iter().collect();
-    let options = CodemodeOptions { mcp_types: !crate::plugins::mcp::plugin_briefs(app).is_empty(), timeout: CHECK_TIMEOUT, ..CodemodeOptions::default() };
+    let options = CodemodeOptions { mcp_types: !crate::plugins::mcp::plugin_briefs(app, Some(&bot.id)).is_empty(), timeout: CHECK_TIMEOUT, ..CodemodeOptions::default() };
     let codemode = CodemodeTool::new(catalog.clone(), options).with_store(store).with_functions(functions);
     let runner = CheckRunner { app: app.clone(), catalog };
     match codemode.run_script(&format!("check-{}", routine.id), code, cancel.clone(), &runner).await {
@@ -501,10 +514,18 @@ struct CheckRunner {
 #[async_trait::async_trait]
 impl ToolRunner for CheckRunner {
     async fn run(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken) -> ToolOutcome {
+        if self.app.is_paused() || cancel.is_cancelled() {
+            return ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text("Account paused.") }, is_error: true, blocked: true };
+        }
         let reads = CHECK_FILE_TOOLS.contains(&tool.name()) || crate::plugins::mcp::is_read_only(&self.app, &self.catalog, tool.name(), &cancel).await;
         if !reads {
             let refusal = format!("{} can change things, and a check only looks: leave it to the run the check starts.", tool.name());
             return ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text(refusal) }, is_error: true, blocked: true };
+        }
+        let plugin_id = self.catalog.plugin_id(tool.name());
+        let allowed = self.app.bot(&self.catalog.bot_id().unwrap_or_default()).is_some_and(|bot| bot.capabilities.permits(tool.name(), plugin_id.as_deref()));
+        if self.app.is_paused() || !allowed {
+            return ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text("Account paused or tool access removed.") }, is_error: true, blocked: true };
         }
         DirectRunner.run(tool, tool_call_id, args, cancel).await
     }
@@ -579,6 +600,7 @@ mod tests {
                 thinking: None,
                 legacy_instructions: String::new(),
                 workdir: None,
+                capabilities: Default::default(),
                 created_at: 0.0,
             });
         }
@@ -876,7 +898,7 @@ mod tests {
         let watch = create(app, "b1", "Watch", "every 10m", "Tell me what is new.", Some("return 'new';"), true).unwrap();
         app.update_routine(&watch.id, |r| r.enabled_at = now_secs() - 7200.0).unwrap();
         let watch = app.routine(&watch.id).unwrap();
-        assert!(app.routine_checks.start(&watch.id), "a due check holds the routine");
+        assert!(app.routine_checks.start(&watch.id, &CancellationToken::new()), "a due check holds the routine");
         let waiting = {
             let (app, watch) = (app.clone(), watch.clone());
             tokio::spawn(async move { check_now(&app, &watch, &CancellationToken::new()).await })

@@ -153,7 +153,7 @@ async fn searches_and_lookups_reach_tools_the_catalog_finds_late() {
     let codemode = CodemodeTool::new(Arc::new(Late), CodemodeOptions::default());
     let description = codemode.description();
     assert!(description.contains("Your own tools `echo` are callable here too"), "{description}");
-    assert!(description.contains("## late (tools not known yet; searchTools() finds them)\nConnects on first use"), "{description}");
+    assert!(description.contains("## late (tools not known yet; describeNamespace() lists them)\nConnects on first use"), "{description}");
     let code = "const found = await searchTools('lookup things');\nconst described = await describeTool(found[0].name);\n\
                 const missing = await describeTool('nothing');\nconst { id } = await tools[found[0].name]({ id: 7 });\n\
                 return [found.length, found[0].name, described.includes('codemode tool declaration'), missing === undefined, id, ALL_TOOLS.length];";
@@ -196,10 +196,11 @@ async fn stored_values_reach_later_scripts_and_failed_scripts_write_nothing() {
 #[tokio::test]
 async fn exit_ends_early_and_output_keeps_its_order() {
     let codemode = tool(vec![]);
-    let result = run(&codemode, "console.log('a', { b: 1 });\nimage('data:image/png;base64,AAAA');\ntext(2);\nexit();\ntext('never');").await;
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    let result = run(&codemode, &format!("console.log('a', {{ b: 1 }});\nimage('data:image/png;base64,{png}');\ntext(2);\nexit();\ntext('never');")).await;
     assert!(!result.is_error);
     assert_eq!(result.content[1], ContentPart::text("a {\"b\":1}"));
-    assert_eq!(result.content[2], ContentPart::Image { data: "AAAA".into(), mime_type: "image/png".into() });
+    assert_eq!(result.content[2], ContentPart::Image { data: png.into(), mime_type: "image/png".into() });
     assert_eq!(result.content[3], ContentPart::text("2"));
     assert_eq!(result.content.len(), 4);
     let remote = run(&codemode, "image('https://example.com/a.png');").await;
@@ -297,7 +298,7 @@ fn the_description_lists_tools_by_namespace_within_its_budget() {
     assert!(complete.contains("Shared MCP types. An MCP tool resolves to its whole `CallToolResult`"));
     assert!(complete.contains("## github (2 tools)\nGitHub: issues and pull requests"), "{complete}");
     assert!(complete.contains("## linear (2 tools, 1 shown)"), "{complete}");
-    assert!(complete.contains("## notion (tools not known yet; searchTools() finds them)\nNotion"), "{complete}");
+    assert!(complete.contains("## notion (tools not known yet; describeNamespace() lists them)\nNotion"), "{complete}");
     assert!(complete.contains("github__create_issue(args: { q: string; }): Promise<CallToolResult>;"), "{complete}");
     assert!(!complete.contains("### `read`"), "a direct tool is named, not listed");
 
@@ -310,6 +311,58 @@ fn the_description_lists_tools_by_namespace_within_its_budget() {
     assert!(tight.contains("Nested tools: PARTIAL - 2 of 4 shown."), "each namespace gets one tool in first: {tight}");
     assert!(tight.contains("## github (2 tools, 1 shown)") && tight.contains("## linear (2 tools, 1 shown)"), "{tight}");
     assert!(tight.contains(PARTIAL_GUIDANCE));
+}
+
+#[tokio::test]
+async fn describe_namespace_returns_visible_tools_and_unknown_is_undefined() {
+    let entries = vec![
+        Entry::new(Probe::tool("my-tools__lookup", Mode::Structured), Exposure::Listed).in_namespace("my-tools"),
+        Entry::new(Probe::tool("my-tools__echo", Mode::Echo), Exposure::Deferred).in_namespace("my-tools"),
+        Entry::new(Probe::tool("other__echo", Mode::Echo), Exposure::Listed).in_namespace("other"),
+    ];
+    let catalog = StaticCatalog::with_entries(entries, vec![Namespace { name: "my-tools".into(), description: "Tools of mine".into() }]);
+    let codemode = CodemodeTool::new(Arc::new(catalog), CodemodeOptions::default());
+    let result = run(&codemode, "return [await describeNamespace('my_tools'), await describeNamespace('other'), await describeNamespace('nothing')];").await;
+    assert_eq!(result.text_content().lines().last(), Some(r#"[{"description":"Tools of mine","name":"my-tools","tools":["my_tools__lookup","my_tools__echo"]},{"name":"other","tools":["other__echo"]},null]"#));
+    let failed = run(&codemode, "return await describeNamespace();").await;
+    assert!(failed.is_error && text_of(&failed).contains("describeNamespace() expects a namespace name"));
+}
+
+struct Instructed;
+
+#[async_trait]
+impl Catalog for Instructed {
+    fn entries(&self) -> Vec<Entry> { Vec::new() }
+    async fn describe_namespace(&self, name: &str, _: &CancellationToken) -> Result<Option<NamespaceDetails>, String> {
+        Ok((name == "service").then(|| NamespaceDetails {
+            name: "service".into(), description: "Service".into(),
+            instructions: "First step.\nSecond step: keep complete instructions.".into(),
+            tools: vec!["service__read".into()],
+        }))
+    }
+}
+
+#[tokio::test]
+async fn describe_namespace_returns_complete_catalog_instructions() {
+    let codemode = CodemodeTool::new(Arc::new(Instructed), CodemodeOptions::default());
+    let result = run(&codemode, "const ns = await describeNamespace('service'); return [ns.instructions, ns.tools];").await;
+    assert_eq!(result.text_content().lines().last(), Some(r#"["First step.\nSecond step: keep complete instructions.",["service__read"]]"#));
+}
+
+#[tokio::test]
+async fn nested_call_reports_action_description() {
+    let codemode = tool(vec![Probe::tool("echo", Mode::Echo)]);
+    let result = run(&codemode, "await tools.echo({ id: 1, description: '  Run tests ' }); await tools.echo({ id: 2 });").await;
+    assert_eq!(result.details["calls"][0]["description"], "Run tests");
+    assert!(result.details["calls"][1].get("description").is_none());
+}
+
+#[test]
+fn direct_tools_explain_structured_output() {
+    let entries = vec![Entry::new(Probe::tool("read", Mode::Echo), Exposure::Direct), Entry::new(Probe::tool("lookup", Mode::Structured), Exposure::Direct)];
+    let description = describe(&entries, &[], &[], &CodemodeOptions::default());
+    assert!(description.contains("`lookup` resolves to `{ id? }`; the others resolve to their text output."));
+    assert_eq!(declarations::output_summary(&json!({ "type": "object", "properties": { "exit_code": { "type": "integer" }, "output": { "type": "string" } }, "required": ["exit_code", "output"] })), "{ exit_code, output }");
 }
 
 /// `models.ask` as a host might give it: the prompt back in capitals, or a failure.
@@ -421,15 +474,14 @@ async fn a_script_cannot_flood_the_host() {
 #[tokio::test]
 async fn images_the_model_cannot_take_are_left_out() {
     let codemode = tool(vec![]);
-    let code = "image('data:image/svg+xml;base64,PHN2Zz4=');\nimage('data:image/png;base64,not base64!');\nimage({ type: 'image', data: 'AAAA' });\n\
-                for (let i = 0; i < 11; i++) image('data:image/png;base64,AAAA');";
-    let result = run(&codemode, code).await;
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    let code = format!("image('data:image/png;base64,not base64!');\nimage({{ type: 'image', data: 'AAAA' }});\nfor (let i = 0; i < 11; i++) image('data:image/png;base64,{png}');");
+    let result = run(&codemode, &code).await;
     let images = result.content.iter().filter(|part| matches!(part, ContentPart::Image { .. })).count();
     let text = text_of(&result);
-    assert_eq!(images, 10, "{text}");
-    assert!(text.contains("image/svg+xml is not an image type the model takes"), "{text}");
+    assert_eq!(images, 8, "{text}");
     assert!(text.contains("its data is not base64"), "{text}");
-    assert!(text.contains("application/octet-stream is not an image type"), "{text}");
+    assert!(text.contains("it is not an image Lorca can read"), "{text}");
     assert!(text.contains("at most 10 images"), "{text}");
 }
 

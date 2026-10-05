@@ -37,6 +37,8 @@ export interface StoreState {
   relayUpdateRequired: boolean;
   /** Why the last try to connect to the relay failed, until one goes through. */
   relayError: RelayProblem | null;
+  /** Account-wide bot pause, from encrypted roster. */
+  paused: boolean;
   devices: Device[];
   /// Device id → last seen (unix seconds), from the devices list.
   device_seen: Record<string, number>;
@@ -82,6 +84,7 @@ function empty(): Omit<StoreState, "ready" | "dictation_lang" | "appActive" | "a
     relayConnected: false,
     relayUpdateRequired: false,
     relayError: null,
+    paused: false,
     devices: [],
     device_seen: {},
     bots: [],
@@ -147,6 +150,7 @@ export function replaceSnapshot(snapshot: {
   relay_connected: boolean;
   relay_update_required?: boolean;
   relay_error?: RelayProblem | null;
+  paused?: boolean;
   devices: Device[];
   bots: Bot[];
   chats: Chat[];
@@ -169,6 +173,7 @@ export function replaceSnapshot(snapshot: {
     relayConnected: snapshot.relay_connected,
     relayUpdateRequired: !!snapshot.relay_update_required,
     relayError: snapshot.relay_error ?? null,
+    paused: snapshot.paused ?? false,
     devices: snapshot.devices,
     device_seen: seenOf(snapshot.devices),
     bots: snapshot.bots,
@@ -200,7 +205,7 @@ function seenOf(devices: Device[]): Record<string, number> {
 
 /// `roster.changed`: bots replace, chat metadata merges over kept messages, chats not named
 /// are gone.
-export function applyRoster(roster: { devices: Device[]; bots: Bot[]; chats: (ChatMeta & { unread_count: number; usage?: ChatUsage })[]; routines?: Routine[]; auto_review?: AutoReview; providers?: ProviderStatus[] }): { removed: string[] } {
+export function applyRoster(roster: { devices: Device[]; bots: Bot[]; chats: (ChatMeta & { unread_count: number; usage?: ChatUsage })[]; paused?: boolean; routines?: Routine[]; auto_review?: AutoReview; providers?: ProviderStatus[] }): { removed: string[] } {
   const removed: string[] = [];
   useStore.setState((s) => {
     const incoming = new Set(roster.chats.map((c) => c.id));
@@ -210,7 +215,7 @@ export function applyRoster(roster: { devices: Device[]; bots: Bot[]; chats: (Ch
       const old = existing.get(meta.id);
       return { ...meta, is_pinned: meta.is_pinned ?? false, messages: old?.messages ?? [], has_more: old?.has_more, unread_count: meta.unread_count ?? old?.unread_count ?? 0, usage: meta.usage ?? old?.usage };
     });
-    return { devices: roster.devices, device_seen: seenOf(roster.devices), bots: roster.bots, chats, routines: roster.routines ?? s.routines, auto_review: roster.auto_review ?? s.auto_review, providers: roster.providers ?? s.providers };
+    return { devices: roster.devices, device_seen: seenOf(roster.devices), bots: roster.bots, chats, paused: roster.paused ?? false, routines: roster.routines ?? s.routines, auto_review: roster.auto_review ?? s.auto_review, providers: roster.providers ?? s.providers };
   });
   return { removed };
 }

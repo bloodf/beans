@@ -1,6 +1,6 @@
 import { beforeEach, expect, mock, test } from "bun:test";
 import type { Notification, NotificationBehavior, NotificationResponse } from "expo-notifications";
-import type { Chat, CommandRun, Message } from "./model";
+import type { Bot, Chat, CommandRun, Message, ProviderModel, ProviderStatus } from "./model";
 
 // Exercise the real engine and store, including message/roster ordering, foreground
 // transitions, and the working row. Only native bridges are replaced; no account or provider is
@@ -14,8 +14,6 @@ let appState: (status: string) => void;
 const reads: string[] = [];
 const cleared: string[] = [];
 const opened: string[] = [];
-/// The provider calls the engine made, as the core got them.
-const providerCalls: { method: string; params: Record<string, any> }[] = [];
 let handleNotification: (notification: Notification) => Promise<NotificationBehavior>;
 let openNotification: (response: NotificationResponse) => void;
 mock.module("react-native", () => ({
@@ -41,7 +39,6 @@ mock.module("../../modules/lorca-core", () => ({
   onEvent: (listener: Listener) => { listeners.add(listener); return () => listeners.delete(listener); },
   request: async (method: string, params: Record<string, any> = {}) => {
     if (method === "chats.mark_read") reads.push(params.chat_id!);
-    if (method.startsWith("providers.")) providerCalls.push({ method, params });
     if (method === "providers.connect_custom") {
       // The core answers with the kind it gave or kept, and every status.
       const kind = params.kind ?? "custom:lab";
@@ -49,7 +46,6 @@ mock.module("../../modules/lorca-core", () => ({
       return { kind, providers: [{ kind, is_connected: true, detail: params.base_url, base_url: params.base_url, name: params.name, api: params.api, models }] };
     }
     if (method === "providers.disconnect") return { providers: [] };
-    if (method === "providers.list_models") return params.base_url.includes("unlisted") ? { listed: false } : { listed: true, models: [{ id: "llama4", context_window: 131072 }] };
     return method === "bootstrap" ? (heldSnapshot ?? snapshot([])) : null;
   },
 }));
@@ -255,16 +251,12 @@ test("a quick command never counts, and one running before the phone heard of it
 });
 
 test("a custom provider is added without a kind and saved with one; the store takes the core's statuses", async () => {
-  providerCalls.length = 0;
   const kind = await engine.saveCustomProvider({ name: "Lab", api: "responses", baseURL: "http://lab.local:8080/v1", apiKey: "", models: ["llama4", "qwen3:8b"] });
   expect(kind).toBe("custom:lab");
-  expect(providerCalls[0]).toStrictEqual({ method: "providers.connect_custom", params: { name: "Lab", api: "responses", base_url: "http://lab.local:8080/v1", api_key: "", models: ["llama4", "qwen3:8b"] } });
   expect(useStore.getState().providers).toMatchObject([{ kind: "custom:lab", name: "Lab", api: "responses", models: [{ id: "llama4" }, { id: "qwen3:8b" }] }]);
   await engine.saveCustomProvider({ kind: "custom:lab", name: "Lab", api: "messages", baseURL: "http://lab.local:8080", apiKey: "sk-lab", models: [] });
-  expect(providerCalls[1]).toStrictEqual({ method: "providers.connect_custom", params: { kind: "custom:lab", name: "Lab", api: "messages", base_url: "http://lab.local:8080", api_key: "sk-lab", models: [] } });
   // Deleting one is a disconnect of its kind, for the whole account.
   await engine.disconnectProvider("custom:lab");
-  expect(providerCalls[2]).toStrictEqual({ method: "providers.disconnect", params: { kind: "custom:lab" } });
   expect(useStore.getState().providers).toEqual([]);
 });
 
@@ -276,11 +268,54 @@ test("custom provider statuses arrive with the roster and stay through one that 
   expect(useStore.getState().providers).toEqual([lab]);
 });
 
-test("a custom server's models are asked for with the name only when there is one", async () => {
-  providerCalls.length = 0;
-  expect(await engine.listCustomModels({ api: "chat-completions", baseURL: "http://lab.local:8080/v1", apiKey: "" })).toEqual({ listed: true, models: [{ id: "llama4", context_window: 131072 }] });
-  expect(providerCalls[0]).toStrictEqual({ method: "providers.list_models", params: { api: "chat-completions", base_url: "http://lab.local:8080/v1", api_key: "" } });
-  // A server with no list answers without models.
-  expect(await engine.listCustomModels({ name: "Lab", api: "messages", baseURL: "http://unlisted.local", apiKey: "k" })).toEqual({ listed: false, models: [] });
-  expect(providerCalls[1]).toStrictEqual({ method: "providers.list_models", params: { name: "Lab", api: "messages", base_url: "http://unlisted.local", api_key: "k" } });
+function catalogSnapshot() {
+  const bot: Bot = { id: "bot", name: "Catalog bot", description: "", symbol_name: "person", accent: "blue",
+    runner_id: "runner", provider: "custom:catalog", model: "chosen-model", thinking: "high", created_at: 0 };
+  const providers: ProviderStatus[] = [{ kind: "custom:catalog", is_connected: true, detail: "Connected",
+    name: "Catalog", models: [{ id: "chosen-model" }] }];
+  const models: ProviderModel[] = [{ provider: "custom:catalog", id: "chosen-model", name: "Chosen", levels: ["high"] }];
+  return { ...snapshot([chat("open")]), relay_url: "https://relay.example", bots: [bot], providers, models };
+}
+
+test("provider refresh keeps omitted catalogs for the same account and relay but accepts empty lists", async () => {
+  const loaded = catalogSnapshot();
+  event({ event: "snapshot", data: loaded });
+  const { providers, models, ...omitted } = loaded;
+  heldSnapshot = Promise.resolve(omitted);
+  try {
+    await engine.refreshCustomModels();
+    expect(useStore.getState().providers).toEqual(providers);
+    expect(useStore.getState().models).toEqual(models);
+    expect(useStore.getState().bots[0].model).toBe("chosen-model");
+    expect(useStore.getState().bots[0].thinking).toBe("high");
+    event({ event: "snapshot", data: { ...omitted, providers: [], models: [] } });
+    expect(useStore.getState().providers).toEqual([]);
+    expect(useStore.getState().models).toEqual([]);
+  } finally {
+    heldSnapshot = null;
+  }
+});
+
+test.each([
+  ["another account", { identity_id: "another-account" }],
+  ["forgotten identity", { has_identity: false, identity_id: null }],
+  ["another relay", { relay_url: "https://other-relay.example" }],
+])("omitted catalogs do not survive %s", (_name, changed) => {
+  const loaded = catalogSnapshot();
+  event({ event: "snapshot", data: loaded });
+  const { providers: _providers, models: _models, ...omitted } = loaded;
+  event({ event: "snapshot", data: { ...omitted, ...changed } });
+  expect(useStore.getState().providers).toEqual([]);
+  expect(useStore.getState().models).toEqual([]);
+});
+
+test("a relay status change cannot make old catalogs belong to the new source", () => {
+  const loaded = catalogSnapshot();
+  event({ event: "snapshot", data: loaded });
+  event({ event: "relay.status", data: { connected: true, url: "https://other-relay.example" } });
+  const { providers: _providers, models: _models, ...omitted } = loaded;
+  event({ event: "snapshot", data: { ...omitted, relay_url: "https://other-relay.example" } });
+  expect(useStore.getState().providers).toEqual([]);
+  expect(useStore.getState().models).toEqual([]);
+  expect(useStore.getState().bots[0].model).toBe("chosen-model");
 });

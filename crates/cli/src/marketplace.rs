@@ -22,6 +22,7 @@ const MISSING_EVERY: Duration = Duration::from_secs(300);
 /// What the marketplace offers, in index order.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Index {
+    /// When it last changed, as `YYYY-MM-DDTHH:MM:SSZ`; of two indexes the later one wins.
     pub updated: String,
     pub plugins: Vec<Manifest>,
     pub bots: Vec<BotTemplate>,
@@ -51,7 +52,6 @@ impl Index {
             }
         }
     }
-
 }
 
 /// A bot to add from the marketplace: the profile it starts with, the plugins it works with,
@@ -129,6 +129,7 @@ impl BotTemplate {
 
 /// Current index, checking configured feed when its hourly TTL expires.
 pub async fn index(app: &Arc<App>) -> Index {
+    refresh_selected(app);
     if source(app).is_some() {
         if let Err(error) = check(app, false).await {
             tracing::warn!(%error, "checking marketplace index");
@@ -148,11 +149,12 @@ pub struct Updates {
     source: Mutex<Option<String>>,
     checking: tokio::sync::Mutex<()>,
     missing_checked: Mutex<Option<Instant>>,
+    refresh_selected: Mutex<bool>,
 }
 
 impl Updates {
     pub fn load(_config: &Config) -> Self {
-        Self { current: RwLock::new(bundled()), source: Mutex::new(None), checking: tokio::sync::Mutex::new(()), missing_checked: Mutex::new(None) }
+        Self { current: RwLock::new(bundled()), source: Mutex::new(None), checking: tokio::sync::Mutex::new(()), missing_checked: Mutex::new(None), refresh_selected: Mutex::new(false) }
     }
 }
 
@@ -196,10 +198,21 @@ pub fn enable(app: &App) {
         }
     }
     *app.marketplace.current.write() = index;
+    *app.marketplace.refresh_selected.lock() = true;
+}
+
+fn refresh_selected(app: &Arc<App>) {
+    let mut pending = app.marketplace.refresh_selected.lock();
+    if *pending {
+        let plugins = app.marketplace.current.read().plugins.clone();
+        crate::plugins::refresh_installed(app, &plugins);
+        *pending = false;
+    }
 }
 
 pub fn check_in_background(app: &Arc<App>) {
     enable(app);
+    refresh_selected(app);
     if app.marketplace.source.lock().is_none() { return; }
     let app = app.clone();
     tokio::spawn(async move {
@@ -224,6 +237,7 @@ pub async fn check_for_missing(app: &Arc<App>) -> bool {
 pub async fn check(app: &Arc<App>, force: bool) -> Result<bool, String> {
     let _guard = app.marketplace.checking.lock().await;
     enable(app);
+    refresh_selected(app);
     let Some(url) = source(app) else { return Err("Marketplace updates are off".into()) };
     let parsed = reqwest::Url::parse(&url).map_err(|e| format!("Invalid marketplace URL: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") || !parsed.username().is_empty() || parsed.password().is_some() {
@@ -466,17 +480,23 @@ mod tests {
         let config = Config { home: home.clone(), port: 0 };
         let mut cached: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
         cached["updated"] = Value::from("2999-01-01T00:00:00Z");
+        cached["plugins"].as_array_mut().unwrap().iter_mut().find(|plugin| plugin["id"] == "github").unwrap()["description"] = Value::from("Selected feed GitHub");
         let newer = Cache { source: "https://one.test/marketplace/v1.json".into(), etag: Some("\"new\"".into()), checked_at: 1, index: cached };
         config::write_json_private(&home.join("marketplace.json"), &newer).unwrap();
         let app = App::load(config).unwrap();
+        crate::plugins::install(&app, bundled().plugin("github").unwrap().clone(), "marketplace").unwrap();
         assert_eq!(current(&app).updated, bundled().updated);
         assert!(bundled().plugin("playwright").unwrap().servers.values().any(|server| matches!(server, crate::plugins::ServerSpec::Stdio { args, .. } if args.iter().any(|arg| arg == "@playwright/mcp@0.0.83"))));
         app.settings.lock().unwrap().marketplace_url = Some(newer.source.clone());
         enable(&app);
         assert_eq!(current(&app).updated, "2999-01-01T00:00:00Z");
+        refresh_selected(&app);
+        assert_eq!(app.plugins.lock().unwrap().get("github").unwrap().manifest.description, "Selected feed GitHub");
         app.settings.lock().unwrap().marketplace_url = Some("https://two.test/marketplace/v1.json".into());
         enable(&app);
         assert_eq!(current(&app).updated, bundled().updated);
+        refresh_selected(&app);
+        assert_eq!(app.plugins.lock().unwrap().get("github").unwrap().manifest.description, bundled().plugin("github").unwrap().description);
         let _ = std::fs::remove_dir_all(home);
     }
 

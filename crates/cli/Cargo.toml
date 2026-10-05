@@ -67,9 +67,9 @@ mcp_http = { package = "reqwest", version = "0.13", default-features = false, fe
 rmcp = { version = "3.4.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth", "reqwest"], optional = true }
 process-wrap = { version = "10", features = ["tokio1"], optional = true }
 
+[target.'cfg(windows)'.dependencies]
+# Native handle-relative draft paths and parent process watches need NT file APIs.
+windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading"] }
+
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-
-[target.'cfg(windows)'.dependencies]
-# Native handle-relative draft paths need NT file APIs and Win32 file inspection.
-windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading"] }

@@ -73,6 +73,10 @@ export function log(message: string) {
 
 function infoPlist(version: string, config: Config) {
   const name = appName(config)
+  const relay = config === "release" ? process.env.LORCA_DEFAULT_RELAY_URL?.trim() ?? "" : ""
+  const relayEntry = relay
+    ? `\n\t<key>BeansRelayURL</key>\n\t<string>${relay.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</string>`
+    : ""
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -84,7 +88,7 @@ function infoPlist(version: string, config: Config) {
 	<key>CFBundleExecutable</key>
 	<string>${APP_NAME}</string>
 	<key>CFBundleIdentifier</key>
-	<string>${bundleId(config)}</string>
+	<string>${bundleId(config)}</string>${relayEntry}
 	<key>CFBundleIconFile</key>
 	<string>${appIconName(config)}</string>
 	<key>CFBundleLocalizations</key>

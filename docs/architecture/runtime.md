@@ -4,11 +4,13 @@
 
 Commands:
 
-- `lorca serve` — default; the app connects here
+- `lorca serve` — the app connects here; `lorca` alone lists the commands and starts nothing, so a bot's `lorca` never starts a second service
 - `lorca identity new` / `identity restore <phrase>` / `identity show`
 - `lorca pair` — show a pairing string and wait; `lorca pair <string>` joins
 - `lorca provider set <kind> [api-key] [--base-url <url>]` — connect DeepSeek, Anthropic, OpenCode Zen (`opencode`), or OpenCode Go (`opencode-go`) with an API key, or open the browser sign-in for `chatgpt` and `grok`. The key is checked against the API first and read from stdin when omitted. `provider add <name> <base-url> [--api chat-completions|responses|messages] [--model <id>]… [--api-key-stdin]` adds a custom provider, its server checked first; `provider remove <kind>` (a custom provider's kind deletes it) / `provider list`. A running `lorca serve` carries out the change over the local websocket; with none, the command changes `credentials.json` itself and runs one sync pass
-- `lorca mcp list|get|add|add-json|remove|enable|disable|hide|show|sign-in|sign-out|reload|import` — manage [custom MCP servers](mcp-servers.md) in this Runner's private `mcp.json`; use running `lorca serve` when available. `mcp add <name> <command> [args…]` or `mcp add <name> <url>` accepts `--transport stdio|http`, repeated `-e`/`--env NAME=VALUE` for commands, repeated `-H`/`--header NAME=VALUE` for HTTP, `--description`, and `--timeout` (seconds). `mcp import` discovers installed apps' MCP settings; `mcp import <file>` reads a specified file. Existing names are skipped. `mcp list` connects enabled servers if needed and exits nonzero when any enabled server is invalid or not ready; disabled servers do not fail health checks.
+- `lorca mcp list|get|add|add-json|remove|enable|disable|hide|show|sign-in|sign-out|reload|import` — manage [custom MCP servers](mcp-servers.md) in this Runner's private `mcp.json`, through a running local service when available. `mcp add` accepts a command and arguments or a URL, `--transport stdio|http`, repeated `-e`/`--env NAME=VALUE`, repeated `-H`/`--header "Name: value"` for HTTP, `--description` and `--timeout` in seconds. Import skips existing names; explicitly named invalid files or entries fail. List and reload connect enabled servers before reporting health and exit nonzero for invalid or unready servers; disabled servers do not fail health checks.
+- `lorca marketplace reload` / `lorca models reload` — force a check of the configured public feed through the running service, or update its source-bound cache for the next startup. Bundled catalogs remain available offline.
+- `lorca chats list` / `lorca chats set-owner <group> <bot>` — list chats and group owners, or choose a member as owner by case-insensitive title/name or exact id. Ambiguous names require an id. Changes reach the running service over its websocket, or update the local store and run one sync pass.
 - `lorca status` / `doctor`
 
 Bind: `127.0.0.1:4862` (`--port`, `LORCA_PORT`). Relay: `LORCA_RELAY_URL`. If the port is busy the CLI fails loudly.

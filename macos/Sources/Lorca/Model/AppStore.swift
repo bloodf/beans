@@ -306,6 +306,7 @@ final class AppStore {
             if let incoming = roster.autoReview { autoReview = incoming.toModel() }
             paused = roster.paused ?? false
             if let incoming = roster.providers { providers = incoming.compactMap { $0.toModel() } }
+            if let incoming = roster.models { catalog = incoming.compactMap { $0.toModel() } }
             var merged: [Chat] = []
             var changed: [Chat.ID] = []
             for summary in roster.chats {
@@ -795,34 +796,205 @@ final class AppStore {
         _ = try await client.request("plugins.connect", ["runner_id": runnerID, "plugin_id": pluginID])
     }
 
-    func mcpServers(on runnerID: Device.ID, reload: Bool = false) async throws -> MCPServerList {
-        try await client.request(reload ? "mcp.reload" : "mcp.list", ["runner_id": runnerID], as: MCPServerList.self)
+    /// Forgets a plugin server's sign-in on its Runner. Nothing is revoked at the server; the
+    /// plugin's next use asks for a sign-in again.
+    func signOutPlugin(_ pluginID: String, server: String, on runnerID: Device.ID) async throws {
+        guard !isMock else { return }
+        _ = try await client.request("plugins.sign_out", ["runner_id": runnerID, "plugin_id": pluginID, "server": server])
     }
 
-    func mcpServer(_ name: String, on runnerID: Device.ID) async throws -> MCPServerDetail {
-        try await client.request("mcp.get", ["runner_id": runnerID, "name": name], as: MCPServerDetail.self)
+    // MARK: - MCP servers
+
+    /// The demo's mcp.json files, by Runner.
+    private var mockMcp: [Device.ID: [McpServer]] = [:]
+
+    private func mockMcpServers(_ runnerID: Device.ID) -> [McpServer] {
+        if let servers = mockMcp[runnerID] { return servers }
+        let servers = runnerID == "dev-workbench" ? MockData.mcpServers() : []
+        mockMcp[runnerID] = servers
+        return servers
     }
 
-    func parseMCPServers(_ text: String) async throws -> MCPParsedServers {
-        try await client.request("mcp.parse", ["text": text], as: MCPParsedServers.self)
+    /// The demo's Runner takes its servers as the CLI would: the ones that run are its plugins.
+    private func setMockMcpServers(_ servers: [McpServer], on runnerID: Device.ID) {
+        mockMcp[runnerID] = servers
+        guard let index = devices.firstIndex(where: { $0.id == runnerID }) else { return }
+        devices[index].plugins = devices[index].plugins.filter { !$0.isMcpServer } + servers.compactMap { $0.isEnabled ? $0.status : nil }
+        emit(.rosterChanged)
     }
 
-    func saveMCPServer(_ name: String, previousName: String?, config: [String: MCPJSON], on runnerID: Device.ID) async throws -> MCPServerDetail {
-        var params: [String: Any] = ["runner_id": runnerID, "name": name, "config": config.mapValues(\.requestValue)]
+    /// An `mcp.*` reply as JSON objects. Not through `Wire.decoder`, whose snake-case keys would
+    /// rename the variables and headers of an entry.
+    private func mcpReply(_ method: String, _ params: [String: Any]) async throws -> [String: Any] {
+        let data = try await client.request(method, params)
+        return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    private func mcpServer(in reply: [String: Any]) throws -> McpServer {
+        guard let server = (reply["server"] as? [String: Any]).flatMap(McpServer.init(json:)) else {
+            throw CLIClient.RequestError(message: L("Request failed"))
+        }
+        return server
+    }
+
+    /// A Runner's mcp.json: every server in it, usable or not, here or sealed to that Runner.
+    func mcpServers(on runnerID: Device.ID) async throws -> McpFile {
+        if isMock { return McpFile(path: "~/.lorca/mcp.json", servers: mockMcpServers(runnerID)) }
+        return McpFile(json: try await mcpReply("mcp.list", ["runner_id": runnerID]))
+    }
+
+    /// One server with the tools it offered when it last connected.
+    func mcpServer(_ name: String, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            guard let server = mockMcpServers(runnerID).first(where: { $0.name == name }) else {
+                throw CLIClient.RequestError(message: L("No server named %@ in mcp.json.", name))
+            }
+            return server
+        }
+        return try mcpServer(in: try await mcpReply("mcp.get", ["runner_id": runnerID, "name": name]))
+    }
+
+    /// Adds a server, or saves the one `previousName` names under `name`. The CLI checks the
+    /// entry and writes it to the Runner's mcp.json, where the server starts once to list its tools.
+    func saveMcpServer(_ name: String, entry: McpEntry, previousName: String? = nil, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            var servers = mockMcpServers(runnerID)
+            if previousName != name, servers.contains(where: { $0.name == name }) {
+                throw CLIClient.RequestError(message: L("mcp.json already has a server named %@.", name))
+            }
+            let id = name.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }.joined(separator: "-")
+            let status = InstalledPlugin(
+                id: id, name: name, description: entry.about, version: "", icon: entry.symbolName, state: .ready, detail: "Ready", source: "mcp.json")
+            let tools = [McpTool(name: "echo", about: "Echo back what you send.", isReadOnly: true), McpTool(name: "write_note", about: "Write a note.", isReadOnly: false)]
+            let server = McpServer(name: name, id: id, isEnabled: !entry.isDisabled, entry: entry, status: entry.isDisabled ? nil : status, toolCount: tools.count, tools: tools)
+            if let index = servers.firstIndex(where: { $0.name == (previousName ?? name) }) {
+                servers[index] = server
+            } else {
+                servers.append(server)
+            }
+            setMockMcpServers(servers, on: runnerID)
+            return server
+        }
+        var params: [String: Any] = ["runner_id": runnerID, "name": name, "config": entry.fields]
         if let previousName { params["previous_name"] = previousName }
-        return try await client.request("mcp.save", params, as: MCPServerDetail.self)
+        return try mcpServer(in: try await mcpReply("mcp.save", params))
     }
 
-    func removeMCPServer(_ name: String, on runnerID: Device.ID) async throws {
+    /// Removes a server from the Runner's mcp.json, with its sign-in.
+    func removeMcpServer(_ name: String, on runnerID: Device.ID) async throws {
+        if isMock {
+            setMockMcpServers(mockMcpServers(runnerID).filter { $0.name != name }, on: runnerID)
+            return
+        }
         _ = try await client.request("mcp.remove", ["runner_id": runnerID, "name": name])
     }
 
-    func changeMCPServer(_ name: String, on runnerID: Device.ID, method: String, values: [String: Any] = [:]) async throws -> MCPServerDetail {
-        try await client.request(method, values.merging(["runner_id": runnerID, "name": name]) { _, new in new }, as: MCPServerDetail.self)
+    /// Turns a server on or off; off, no bot sees it and it never starts.
+    func setMcpServer(_ name: String, enabled: Bool, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            var servers = mockMcpServers(runnerID)
+            guard let index = servers.firstIndex(where: { $0.name == name }) else {
+                throw CLIClient.RequestError(message: L("No server named %@ in mcp.json.", name))
+            }
+            var server = servers[index]
+            server.isEnabled = enabled
+            if enabled {
+                server.entry.fields.removeValue(forKey: "disabled")
+            } else {
+                server.entry.fields["disabled"] = true
+            }
+            if enabled, server.status == nil {
+                server.status = InstalledPlugin(
+                    id: server.id, name: name, description: server.entry.about, version: "", icon: server.entry.symbolName, state: .ready,
+                    detail: "Ready", source: "mcp.json")
+            }
+            servers[index] = server
+            setMockMcpServers(servers, on: runnerID)
+            return server
+        }
+        return try mcpServer(in: try await mcpReply("mcp.set_enabled", ["runner_id": runnerID, "name": name, "enabled": enabled]))
     }
 
-    func signInMCPServer(_ server: MCPServer, on runnerID: Device.ID) async throws {
-        _ = try await client.request("plugins.connect", ["runner_id": runnerID, "plugin_id": server.id, "server": "mcp"])
+    /// Connects a server and waits for it: from scratch (`fresh`), or taking a connection it has
+    /// or one under way. Its state says how it went.
+    /// Has a Runner read its mcp.json again, after an edit made outside Lorca, and answers the file
+    /// as it reads now.
+    func reloadMcpFile(on runnerID: Device.ID) async throws -> McpFile {
+        if isMock { return try await mcpServers(on: runnerID) }
+        return McpFile(json: try await mcpReply("mcp.reload", ["runner_id": runnerID]))
+    }
+
+    /// Offers one of a server's tools to bots, or keeps it from them, in the Runner's mcp.json. The
+    /// server keeps its connection.
+    func setMcpTool(_ tool: String, shown: Bool, server name: String, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            var servers = mockMcpServers(runnerID)
+            guard let index = servers.firstIndex(where: { $0.name == name }) else {
+                throw CLIClient.RequestError(message: L("No server named %@ in mcp.json.", name))
+            }
+            if let toolIndex = servers[index].tools?.firstIndex(where: { $0.name == tool }) {
+                servers[index].tools?[toolIndex].isHidden = !shown
+            }
+            setMockMcpServers(servers, on: runnerID)
+            return servers[index]
+        }
+        return try mcpServer(in: try await mcpReply("mcp.hide_tool", ["runner_id": runnerID, "name": name, "tool": tool, "hidden": !shown]))
+    }
+
+    /// Forgets a remote server's sign-in on its Runner. Nothing is revoked at the server; the
+    /// server's next use asks for a sign-in again.
+    func signOutMcpServer(_ name: String, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            var servers = mockMcpServers(runnerID)
+            guard let index = servers.firstIndex(where: { $0.name == name }) else {
+                throw CLIClient.RequestError(message: L("No server named %@ in mcp.json.", name))
+            }
+            var server = servers[index]
+            server.isSignedIn = false
+            if var status = server.status {
+                status.state = .needsAuth
+                status.detail = "Sign in"
+                server.status = status
+            }
+            servers[index] = server
+            setMockMcpServers(servers, on: runnerID)
+            return server
+        }
+        return try mcpServer(in: try await mcpReply("mcp.sign_out", ["runner_id": runnerID, "name": name]))
+    }
+
+    func reconnectMcpServer(_ name: String, fresh: Bool, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            try await Task.sleep(nanoseconds: 900_000_000)
+            return try await mcpServer(name, on: runnerID)
+        }
+        return try mcpServer(in: try await mcpReply("mcp.reconnect", ["runner_id": runnerID, "name": name, "fresh": fresh]))
+    }
+
+    /// The servers pasted JSON holds, in any app's spelling; the CLI on this Mac reads it.
+    func parseMcpJSON(_ text: String) async throws -> [ParsedServer] {
+        let reply: [String: Any]
+        if isMock {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else {
+                throw CLIClient.RequestError(message: L("Not a server's JSON: expected an object."))
+            }
+            let servers: [String: Any] = (object["mcpServers"] as? [String: Any]) ?? (object["servers"] as? [String: Any]) ?? [:]
+            var entries: [[String: Any]] = []
+            if object["command"] != nil || object["url"] != nil {
+                entries = [["config": object]]
+            } else {
+                for key in servers.keys.sorted() {
+                    entries.append(["name": key, "config": servers[key] ?? [String: Any]()])
+                }
+            }
+            reply = ["servers": entries]
+        } else {
+            reply = try await mcpReply("mcp.parse", ["text": text])
+        }
+        return (reply["servers"] as? [[String: Any]] ?? []).map { server in
+            ParsedServer(
+                name: server["name"] as? String, entry: (server["config"] as? [String: Any]).map { McpEntry($0) }, problem: server["problem"] as? String)
+        }
     }
 
     /// Replaces Auto-review (the switch and the rules); the change shows at once and the CLI's
@@ -979,6 +1151,7 @@ final class AppStore {
                     removedChatIDs.insert(existing.id)
                     return nil
                 }
+                if updated.ownerBotID == botID { updated.ownerBotID = updated.botIDs.first }
                 changedChatIDs.append(existing.id)
                 return updated
             }
@@ -1088,9 +1261,22 @@ final class AppStore {
             chats[index].canRemoveBot
         else { return }
         chats[index].botIDs.removeAll { $0 == botID }
+        if chats[index].ownerBotID == botID { chats[index].ownerBotID = chats[index].botIDs.first }
         emit(.chatChanged(chatID))
         emit(.chatsChanged)
         perform("chats.remove_bot", ["chat_id": chatID, "bot_id": botID])
+    }
+
+    /// Makes a group member the bot holding the work.
+    func setOwner(_ botID: Bot.ID, of chatID: Chat.ID) {
+        guard let index = chats.firstIndex(where: { $0.id == chatID }),
+            chats[index].isGroup,
+            chats[index].botIDs.contains(botID),
+            chats[index].owner != botID
+        else { return }
+        chats[index].ownerBotID = botID
+        emit(.chatChanged(chatID))
+        perform("chats.set_owner", ["chat_id": chatID, "bot_id": botID])
     }
 
     // MARK: - Messages

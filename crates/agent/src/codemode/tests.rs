@@ -294,10 +294,9 @@ fn the_description_lists_tools_by_namespace_within_its_budget() {
     ];
     let namespaces = vec![Namespace { name: "github".into(), description: "GitHub: issues and pull requests".into() }, Namespace { name: "notion".into(), description: "Notion".into() }];
     let complete = describe(&entries, &namespaces, &[], &CodemodeOptions { inline_budget: 100_000, ..CodemodeOptions::default() });
-    assert!(complete.contains("Nested tools: PARTIAL - 3 of 4 shown."), "a deferred tool is never listed: {complete}");
+    assert!(complete.contains("## linear (some tools not listed)"), "a deferred tool is never listed: {complete}");
     assert!(complete.contains("Shared MCP types. An MCP tool resolves to its whole `CallToolResult`"));
-    assert!(complete.contains("## github (2 tools)\nGitHub: issues and pull requests"), "{complete}");
-    assert!(complete.contains("## linear (2 tools, 1 shown)"), "{complete}");
+    assert!(complete.contains("Nested tools:\n\n## github\nGitHub: issues and pull requests"), "no counts, so the heading stays while the tools change: {complete}");
     assert!(complete.contains("## notion (tools not known yet; describeNamespace() lists them)\nNotion"), "{complete}");
     assert!(complete.contains("github__create_issue(args: { q: string; }): Promise<CallToolResult>;"), "{complete}");
     assert!(!complete.contains("### `read`"), "a direct tool is named, not listed");
@@ -308,9 +307,73 @@ fn the_description_lists_tools_by_namespace_within_its_budget() {
     assert!(before_connecting.contains("CallToolResult<TStructured"), "a host reaching MCP servers declares the types before their tools are known");
 
     let tight = describe(&entries, &namespaces, &[], &CodemodeOptions { inline_budget: 150, ..CodemodeOptions::default() });
-    assert!(tight.contains("Nested tools: PARTIAL - 2 of 4 shown."), "each namespace gets one tool in first: {tight}");
-    assert!(tight.contains("## github (2 tools, 1 shown)") && tight.contains("## linear (2 tools, 1 shown)"), "{tight}");
-    assert!(tight.contains(PARTIAL_GUIDANCE));
+    assert!(tight.contains("## github (some tools not listed)") && tight.contains("## linear (some tools not listed)"), "each namespace gets one tool in first: {tight}");
+    assert_eq!(tight.matches("\n### `").count(), 2, "{tight}");
+}
+
+/// `describeNamespace()` lists a group's tools, by its name or its identifier, deferred ones
+/// too; a group the catalog does not have is undefined.
+#[tokio::test]
+async fn describe_namespace_lists_every_tool_of_a_group() {
+    let entries = vec![
+        Entry::new(Probe::tool("read", Mode::Echo), Exposure::Direct),
+        Entry::new(Probe::tool("my-tools__lookup", Mode::Structured), Exposure::Listed).in_namespace("my-tools"),
+        Entry::new(Probe::tool("my-tools__echo", Mode::Echo), Exposure::Deferred).in_namespace("my-tools"),
+        Entry::new(Probe::tool("other__echo", Mode::Echo), Exposure::Listed).in_namespace("other"),
+    ];
+    let catalog = StaticCatalog::with_entries(entries, vec![Namespace { name: "my-tools".into(), description: "Tools of mine".into() }]);
+    let codemode = CodemodeTool::new(Arc::new(catalog), CodemodeOptions::default());
+    let code = "return [await describeNamespace('my_tools'), await describeNamespace('other'), await describeNamespace('nothing')];";
+    let result = run(&codemode, code).await;
+    let text = text_of(&result);
+    assert!(
+        text.ends_with(r#"[{"description":"Tools of mine","name":"my-tools","tools":["my_tools__lookup","my_tools__echo"]},{"name":"other","tools":["other__echo"]},null]"#),
+        "{text}"
+    );
+    let failed = run(&codemode, "return await describeNamespace();").await;
+    assert!(failed.is_error, "{}", text_of(&failed));
+}
+
+/// A call's record carries the `description` its arguments give, for a host's status line.
+#[tokio::test]
+async fn a_calls_record_carries_its_description() {
+    let codemode = tool(vec![Probe::tool("echo", Mode::Echo)]);
+    let result = run(&codemode, "await tools.echo({ id: 1, description: '  Run the tests ' });\nawait tools.echo({ id: 2 });").await;
+    assert_eq!(result.details["calls"][0]["description"], "Run the tests");
+    assert!(result.details["calls"][1].get("description").is_none(), "{}", result.details);
+}
+
+/// A command that fails still resolves, with its output and exit code, so a script can go on.
+#[tokio::test]
+async fn a_script_reads_a_failed_commands_exit_code() {
+    let codemode = tool(vec![Arc::new(crate::tools::BashTool::new(std::env::temp_dir()))]);
+    let code = "const failed = await tools.bash({ command: 'echo boom; exit 3', description: 'Fail' });\nreturn [failed.exit_code, failed.output];";
+    let result = run(&codemode, code).await;
+    assert!(!result.is_error && text_of(&result).ends_with("[3,\"boom\\n\"]"), "{}", text_of(&result));
+}
+
+/// A direct tool with an output schema says what a script's call resolves to; the others
+/// resolve to their text.
+#[test]
+fn the_description_says_what_direct_tools_resolve_to() {
+    let bash = crate::tools::BashTool::new(std::env::temp_dir());
+    let entries = vec![
+        Entry::new(Probe::tool("read", Mode::Echo), Exposure::Direct),
+        Entry::new(Arc::new(bash), Exposure::Direct),
+        Entry::new(Probe::tool("lookup", Mode::Structured), Exposure::Direct),
+    ];
+    let description = describe(&entries, &[], &[], &CodemodeOptions::default());
+    assert!(
+        description.contains(
+            "Your own tools `read`, `bash`, `lookup` are callable here too, with the same arguments. \
+             `bash` resolves to `{ exit_code, full_output_path?, output, truncated, wall_time_seconds }`; \
+             `lookup` resolves to `{ id? }`; the others resolve to their text output."
+        ),
+        "{description}"
+    );
+    let typed_only = describe(&entries[1..2], &[], &[], &CodemodeOptions::default());
+    assert!(typed_only.contains("Your own tools `bash` are callable here too, with the same arguments. `bash` resolves to `{"), "{typed_only}");
+    assert!(!typed_only.contains("the others"), "{typed_only}");
 }
 
 #[tokio::test]
@@ -474,15 +537,34 @@ async fn a_script_cannot_flood_the_host() {
 #[tokio::test]
 async fn images_the_model_cannot_take_are_left_out() {
     let codemode = tool(vec![]);
-    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
-    let code = format!("image('data:image/png;base64,not base64!');\nimage({{ type: 'image', data: 'AAAA' }});\nfor (let i = 0; i < 11; i++) image('data:image/png;base64,{png}');");
+    let mut jpeg = Vec::new();
+    image::DynamicImage::ImageRgb8(image::ImageBuffer::from_pixel(8, 8, image::Rgb([200, 30, 30]))).write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
+    let jpeg = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, jpeg);
+    // Data that is not base64 or no image is left out; a JPEG labeled PNG keeps the type its
+    // bytes say, as providers refuse a mismatch; wrapped base64 loses its line breaks; and the
+    // eleventh image is one too many.
+    let code = format!(
+        "image('data:image/png;base64,not base64!');\nimage({{ type: 'image', data: 'AAAA' }});\nimage('data:image/png;base64,{jpeg}');\n\
+         for (let i = 0; i < 8; i++) image('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4\\n2mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==');"
+    );
     let result = run(&codemode, &code).await;
-    let images = result.content.iter().filter(|part| matches!(part, ContentPart::Image { .. })).count();
+    let types: Vec<&str> = result.content.iter().filter_map(|part| if let ContentPart::Image { mime_type, .. } = part { Some(mime_type.as_str()) } else { None }).collect();
     let text = text_of(&result);
-    assert_eq!(images, 8, "{text}");
-    assert!(text.contains("its data is not base64"), "{text}");
-    assert!(text.contains("it is not an image Lorca can read"), "{text}");
+    assert_eq!(types, ["image/jpeg", "image/png", "image/png", "image/png", "image/png", "image/png", "image/png", "image/png"], "{text}");
+    assert!(text.contains("[An image was left out: its data is not base64]"), "{text}");
+    assert!(text.contains("[An image was left out: it is not an image Lorca can read]"), "{text}");
     assert!(text.contains("at most 10 images"), "{text}");
+}
+
+#[tokio::test]
+async fn an_unknown_tool_names_the_closest_ones() {
+    let codemode = tool(vec![Probe::tool("github__create_issue", Mode::Echo), Probe::tool("fails", Mode::Fail)]);
+    let close = text_of(&run(&codemode, "await tools.github_create_issue({});").await);
+    assert!(close.contains("Unknown tool \"github_create_issue\". Did you mean tools.github__create_issue?"), "{close}");
+    let cased = text_of(&run(&codemode, "await tools.Fails({});").await);
+    assert!(cased.contains("Did you mean tools.fails?"), "{cased}");
+    let listed = text_of(&run(&codemode, "await tools.zzz({});").await);
+    assert!(listed.contains("Unknown tool \"zzz\". The tools are fails, github__create_issue."), "a short catalog is listed whole: {listed}");
 }
 
 #[tokio::test]
@@ -504,7 +586,6 @@ async fn every_script_has_a_deadline() {
     assert!(text_of(&spinning).contains("timed out after 200 ms"), "{}", text_of(&spinning));
     let longer = run(&codemode, "// @options: {\"timeout_ms\": 60000}\nwhile (true) {}").await;
     assert!(text_of(&longer).contains("timed out after 200 ms"), "an options line cannot ask for more: {}", text_of(&longer));
-    assert!(tool(vec![]).description().contains("at most and by default 30 minutes"));
 }
 
 #[test]

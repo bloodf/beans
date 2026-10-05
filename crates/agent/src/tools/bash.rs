@@ -4,8 +4,10 @@
 //! the process tree).
 //!
 //! Built with [`BashTool::new`], it is pi's bash: pipes, nothing on stdin, and the call lasts
-//! as long as the command. Built with [`BashTool::with_sessions`], a command runs in a terminal
-//! of its own that can outlive the call and take input ([`super::bash_session`]).
+//! as long as the command. Its results carry structured output for codemode scripts: the output
+//! up to 1 MB, the exit code, and the wall time, also when the command fails. Built with
+//! [`BashTool::with_sessions`], a command runs in a terminal of its own that can outlive the
+//! call and take input ([`super::bash_session`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -22,6 +24,9 @@ use super::truncate::{format_size, truncate_tail, TruncatedBy, TruncationOptions
 use crate::tool::{Tool, ToolError, ToolResult, ToolUpdateFn};
 
 pub(crate) const UPDATE_THROTTLE_MS: u64 = 250;
+
+/// The most of a command's output a script receives in `output`, as pi's bash gives it.
+const SCRIPT_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
 
 const DESCRIPTION: &str = "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 lines \
      or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.";
@@ -75,7 +80,6 @@ impl BashTool {
         self
     }
 
-    /// How long a command may print nothing before its call returns with the session id.
     pub fn waiting_after(mut self, after: Duration) -> Self {
         self.waiting_after = after;
         self
@@ -186,6 +190,43 @@ fn describe(text: &str, truncation: &super::truncate::TruncationResult, full_out
     out
 }
 
+/// The output a script receives: all of it up to `max` bytes, else its start and end around a
+/// note of what was left out, cut between characters. The second value says whether it was cut.
+fn script_output(output: &[u8], max: usize) -> (String, bool) {
+    if output.len() <= max {
+        return (String::from_utf8_lossy(output).into_owned(), false);
+    }
+    let continues = |index: usize| output.get(index).is_some_and(|byte| byte & 0xC0 == 0x80);
+    let mut head = max / 2;
+    while head > 0 && continues(head) {
+        head -= 1;
+    }
+    let mut tail = output.len() - (max - max / 2);
+    while continues(tail) {
+        tail += 1;
+    }
+    let text = format!(
+        "{}\n\n[... {} bytes omitted ...]\n\n{}",
+        String::from_utf8_lossy(&output[..head]),
+        tail - head,
+        String::from_utf8_lossy(&output[tail..])
+    );
+    (text, true)
+}
+
+/// How a command with no exit code ended: killed by a signal, on Unix.
+fn ended_without_code(status: Option<&std::process::ExitStatus>) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.and_then(|status| status.signal()) {
+            return format!("Command terminated by signal {signal}");
+        }
+    }
+    let _ = status;
+    "Command terminated without an exit code".into()
+}
+
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
@@ -201,7 +242,7 @@ impl Tool for BashTool {
         }
     }
     fn output_schema(&self) -> Option<Value> {
-        self.script.then(|| json!({
+        self.terminal().is_none().then(|| json!({
             "type": "object",
             "properties": {
                 "output": { "type": "string" },
@@ -325,47 +366,58 @@ impl Tool for BashTool {
         };
         let shown = describe(&truncation.content, &truncation, full_output_path.as_deref());
         let with_status = |status: &str| if shown.is_empty() { status.to_string() } else { format!("{shown}\n\n{status}") };
-
         if self.script {
-            let code = status.and_then(|s| s.code());
+            let code = status.as_ref().and_then(|status| status.code());
+            let (script_text, script_truncated) = script_output(text.as_bytes(), SCRIPT_OUTPUT_MAX_BYTES);
             let mut structured = json!({
-                "output": truncation.content,
-                "truncated": truncation.truncated,
+                "output": script_text,
+                "truncated": script_truncated,
                 "exit_code": code,
                 "wall_time_seconds": started.elapsed().as_secs_f64(),
             });
-            if let Some(path) = &full_output_path {
+            if let Some(path) = full_output_path.as_ref().filter(|_| script_truncated) {
                 structured["full_output_path"] = json!(path);
             }
             let failure = if aborted { Some("Command aborted".to_string()) }
                 else if timed_out { Some(format!("Command timed out after {} seconds", timeout.unwrap_or(0.0))) }
                 else if let Some(code) = code.filter(|code| *code != 0) { Some(format!("Command exited with code {code}")) }
+                else if code.is_none() { Some(ended_without_code(status.as_ref())) }
                 else { None };
             let body = failure.as_deref().map(with_status).unwrap_or_else(|| if shown.is_empty() { "(no output)".into() } else { shown.clone() });
-            return Ok(ToolResult {
-                structured: Some(structured),
-                is_error: failure.is_some(),
-                ..ToolResult::text(body)
-            });
+            return Ok(ToolResult { structured: Some(structured), is_error: failure.is_some(), ..ToolResult::text(body) });
         }
+
         if aborted {
             return Err(ToolError(with_status("Command aborted")));
         }
         if timed_out {
             return Err(ToolError(with_status(&format!("Command timed out after {} seconds", timeout.unwrap_or(0.0)))));
         }
-        let code = status.and_then(|s| s.code());
-        if let Some(code) = code.filter(|c| *c != 0) {
-            return Err(ToolError(with_status(&format!("Command exited with code {code}"))));
+        let Some(code) = status.as_ref().and_then(|s| s.code()) else {
+            return Err(ToolError(with_status(&ended_without_code(status.as_ref()))));
+        };
+        let (script_text, script_truncated) = script_output(text.as_bytes(), SCRIPT_OUTPUT_MAX_BYTES);
+        let mut structured = json!({
+            "output": script_text,
+            "truncated": script_truncated,
+            "exit_code": code,
+            "wall_time_seconds": (started.elapsed().as_secs_f64() * 10.0).round() / 10.0,
+        });
+        if let Some(path) = full_output_path.as_ref().filter(|_| script_truncated) {
+            structured["full_output_path"] = json!(path);
         }
-        let body = if shown.is_empty() { "(no output)".to_string() } else { shown };
         let details = json!({
             "summary": format!("$ {}", command.lines().next().unwrap_or("").chars().take(60).collect::<String>()),
             "exit_code": code,
             "truncation": if truncation.truncated { serde_json::to_value(&truncation).unwrap_or(Value::Null) } else { Value::Null },
             "full_output_path": full_output_path,
         });
-        Ok(ToolResult::text(body).with_details(details))
+        let result = if code != 0 {
+            ToolResult { is_error: true, ..ToolResult::text(with_status(&format!("Command exited with code {code}"))) }
+        } else {
+            ToolResult::text(if shown.is_empty() { "(no output)".to_string() } else { shown })
+        };
+        Ok(ToolResult { structured: Some(structured), ..result.with_details(details) })
     }
 }
 
@@ -394,54 +446,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_host_puts_its_own_command_first_and_its_variables_in() {
+        let dir = std::env::temp_dir().join(format!("lorca-bash-extras-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("lorca");
+        std::fs::write(&script, "#!/bin/sh\necho \"this Runner's lorca on $LORCA_PORT\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let extras = crate::login_shell::Extras { variables: vec![("LORCA_PORT".into(), "4899".into())], path_first: vec![dir.clone()] };
+        let tool = BashTool::new(std::env::temp_dir()).with_extras(extras);
+        let result = tool.execute("1", json!({ "command": "lorca" }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        let text = result.text_content();
+        assert!(text.contains("this Runner's lorca on 4899"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn runs_and_reports_exit_code() {
         let tool = BashTool::new(std::env::temp_dir());
         let ok = tool.execute("1", json!({"command": "printf 'hi\\nthere'"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
         assert_eq!(ok.text_content(), "hi\nthere");
-        let err = tool.execute("2", json!({"command": "echo boom >&2; exit 3"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap_err();
-        assert!(err.0.contains("boom") && err.0.contains("exited with code 3"), "{}", err.0);
+        assert!(!ok.is_error);
+        let failed = tool.execute("2", json!({"command": "echo boom >&2; exit 3"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        let text = failed.text_content();
+        assert!(failed.is_error && text.contains("boom") && text.ends_with("Command exited with code 3"), "{text}");
         let timeout = tool.execute("3", json!({"command": "sleep 5", "timeout": 0.2}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap_err();
         assert!(timeout.0.contains("timed out"));
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn script_bash_returns_structured_output_on_success_failure_and_timeout() {
+    async fn script_bash_preserves_failure_and_timeout_output() {
         let tool = BashTool::for_script(std::env::temp_dir());
-        assert_eq!(tool.name(), "bash");
-        assert!(tool.output_schema().is_some());
         assert_eq!(tool.execution_mode(), Some(crate::agent_loop::ToolExecutionMode::Sequential));
-        let updates: ToolUpdateFn = Arc::new(|_| {});
-        let ok = tool.execute("1", json!({"command": "printf 'hi\\nthere'"}), CancellationToken::new(), updates.clone()).await.unwrap();
-        let value = ok.structured.unwrap();
-        assert_eq!(value["output"], "hi\nthere");
-        assert_eq!(value["exit_code"], 0);
-        assert_eq!(value["truncated"], false);
-        assert!(value["wall_time_seconds"].as_f64().unwrap() >= 0.0);
-        assert!(value.get("full_output_path").is_none());
-
-        let failed = tool.execute("2", json!({"command": "printf '\\033[31mboom\\033[0m\\000\\377' >&2; exit 3"}), CancellationToken::new(), updates.clone()).await.unwrap();
+        let failed = tool.execute("1", json!({"command": "printf '\\033[31mboom\\033[0m' >&2; exit 3"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
         assert!(failed.is_error);
-        let value = failed.structured.unwrap();
-        assert_eq!(value["output"], "boom�");
-        assert_eq!(value["exit_code"], 3);
-        assert_eq!(value["truncated"], false);
+        assert_eq!(failed.structured.as_ref().unwrap()["output"], "boom");
+        assert_eq!(failed.structured.as_ref().unwrap()["exit_code"], 3);
+        let timed_out = tool.execute("2", json!({"command": "echo before; sleep 5", "timeout": 0.05}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        assert!(timed_out.is_error);
+        assert_eq!(timed_out.structured.as_ref().unwrap()["exit_code"], Value::Null);
+        assert!(timed_out.structured.as_ref().unwrap()["output"].as_str().unwrap().contains("before"));
+    }
 
-        let timeout = tool.execute("3", json!({"command": "sleep 5", "timeout": 0.05}), CancellationToken::new(), updates).await.unwrap();
-        assert!(timeout.is_error);
-        let value = timeout.structured.as_ref().unwrap();
-        assert_eq!(value["truncated"], false);
-        assert!(value["exit_code"].is_null() || value["exit_code"].is_i64());
-        assert!(timeout.text_content().contains("timed out"));
+    /// What a codemode script receives: the output whole, the exit code, and the time, for a
+    /// command that failed too.
+    #[tokio::test]
+    async fn gives_scripts_structured_output() {
+        let tool = BashTool::new(std::env::temp_dir());
+        assert!(tool.output_schema().is_some());
+        let ok = tool.execute("1", json!({"command": "printf 'hi\\nthere'"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        let structured = ok.structured.unwrap();
+        assert_eq!((&structured["output"], &structured["truncated"], &structured["exit_code"]), (&json!("hi\nthere"), &json!(false), &json!(0)));
+        assert!(structured["wall_time_seconds"].is_number() && structured.get("full_output_path").is_none(), "{structured}");
 
-        let long = tool.execute("4", json!({"command": "printf 'é'; yes é | head -c 60000"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
-        let value = long.structured.unwrap();
-        assert_eq!(value["truncated"], true);
-        assert!(value["output"].as_str().unwrap().len() <= DEFAULT_MAX_BYTES);
-        assert!(!value["output"].as_str().unwrap().contains('�'));
-        let path = value["full_output_path"].as_str().unwrap();
-        assert!(!std::fs::read(path).unwrap().is_empty());
-        std::fs::remove_file(path).unwrap();
+        let failed = tool.execute("2", json!({"command": "echo boom; exit 3"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        let structured = failed.structured.unwrap();
+        assert_eq!((&structured["output"], &structured["exit_code"]), (&json!("boom\n"), &json!(3)));
+
+        // Past what the model reads, a script still gets the whole output.
+        let long = tool.execute("3", json!({"command": "seq 1 5000"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        assert!(long.text_content().contains("[Showing lines"), "the model's copy is cut");
+        let output = long.structured.unwrap()["output"].as_str().unwrap().to_string();
+        assert!(output.starts_with("1\n2\n") && output.ends_with("4999\n5000\n"), "{}", &output[..20]);
+    }
+
+    #[test]
+    fn script_output_keeps_the_start_and_end_past_its_limit() {
+        assert_eq!(script_output(b"short", 10), ("short".to_string(), false));
+        let (text, truncated) = script_output("aaaaé€bbbbb".as_bytes(), 8);
+        assert!(truncated);
+        assert_eq!(text, "aaaa\n\n[... 6 bytes omitted ...]\n\nbbbb");
+        // A cut inside a character moves to its edge instead of splitting it.
+        let (text, _) = script_output("aaé€€bb".as_bytes(), 6);
+        assert_eq!(text, "aa\n\n[... 8 bytes omitted ...]\n\nbb");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_killed_by_a_signal_fails() {
+        let tool = BashTool::new(std::env::temp_dir());
+        let err = tool.execute("1", json!({"command": "echo before; kill -9 $$"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap_err();
+        assert!(err.0.contains("before") && err.0.ends_with("Command terminated by signal 9"), "{}", err.0);
     }
 
     /// A drive root on Windows, `/` elsewhere, so the fixture paths are absolute where the test runs.

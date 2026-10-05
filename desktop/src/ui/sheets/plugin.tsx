@@ -14,6 +14,7 @@ import { alert, presentSheet, Sheet } from "../overlay";
 import { ActionRow, KeyValueRow, Section } from "../sections";
 import { presentMcpServer } from "./mcpServer";
 
+/** A plugin's sheet, or for one of the Runner's mcp.json servers, the server's own. */
 export function presentPlugin(pluginID: string, runner: Device): void {
   const installed = runner.plugins.find((plugin) => plugin.id === pluginID);
   if (installed && isMcpServer(installed)) {
@@ -131,6 +132,7 @@ function PluginSheet(props: { pluginID: string; runner: Device; dismiss: () => v
     }
   };
 
+  /** Forgets a server's sign-in on the Runner; the plugin's next use asks again. */
   const signOut = async (server: string) => {
     try {
       await store.signOutPlugin(props.pluginID, props.runner.id, server);

@@ -279,7 +279,7 @@ final class WorkingCellView: TranscriptCellView {
         case "install_plugin": return L("Installing a plugin")
         case "bash_input": return L("Answering a command")
         case "bash_output": return L("Waiting on a command")
-        // A codemode script shows its active command ahead of the latest plugin.
+        // An active codemode command takes precedence over its latest plugin call.
         case "codemode":
             if tool.isRunning, let command = tool.scriptCommand { return L("Running command: %@", command) }
             return tool.description.map { L("Using %@", $0) } ?? L("Working")

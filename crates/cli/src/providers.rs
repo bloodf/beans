@@ -18,9 +18,7 @@ use crate::app::App;
 use crate::credentials::{is_custom, CustomApi, CustomProvider};
 
 pub const OPENCODE_BASE_URL: &str = "https://opencode.ai/zen";
-pub const OPENCODE_DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
 pub const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go";
-pub const OPENCODE_GO_DEFAULT_MODEL: &str = "glm-5.3-flash";
 
 const USER_AGENT: &str = concat!("lorca/", env!("CARGO_PKG_VERSION"));
 
@@ -133,9 +131,10 @@ pub fn default_model(kind: &str) -> String {
     models::default_model(kind).unwrap_or_default()
 }
 
-/// The model Auto-review runs on for bots of `kind`, and how much it thinks: a small, fast
-/// model on the same account whatever the bot itself runs, with thinking off where the model
-/// allows it and at its lowest effort where it does not. A custom provider's is its first
+/// The model Auto-review runs on for bots of `kind`, and how much it thinks: the catalog's
+/// `review` model for the provider, a small, fast one on the same account whatever the bot
+/// itself runs, with thinking off where the model allows it and at its lowest effort where it
+/// does not. A custom provider's is its first
 /// model, the one the user put at the top, at the catalog's lowest level for a model the
 /// catalog knows and the server's default for any other. Empty when `kind` has none.
 pub fn review_model(app: &App, kind: &str) -> (String, Option<ThinkingLevel>) {
@@ -252,9 +251,10 @@ enum OpenCodeWire {
     Unsupported,
 }
 
-/// OpenCode publishes the wire protocol beside every model. Zen and Go differ for MiniMax and
-/// for Qwen3.8 Max, which Zen serves on Chat Completions, while their GPT, Grok, and Muse
-/// families use Responses and the rest of their Qwen family uses Messages.
+/// OpenCode publishes the wire protocol beside every model, and the catalog carries it. A model
+/// the catalog lacks goes by its family: Zen and Go differ for MiniMax and for Qwen3.8 Max,
+/// which Zen serves on Chat Completions, while their GPT, Grok, and Muse families use Responses
+/// and the rest of their Qwen family uses Messages.
 fn opencode_wire(kind: &str, model: &str) -> OpenCodeWire {
     match models::find(kind, model).and_then(|info| info.wire) {
         Some(Wire::ChatCompletions) => return OpenCodeWire::ChatCompletions,
@@ -455,10 +455,13 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_the_first_catalog_models_and_roots_accept_v1() {
+    fn every_provider_has_a_default_and_roots_accept_v1() {
         for kind in ["deepseek", "anthropic", "chatgpt", "grok", "opencode", "opencode-go"] {
-            assert_eq!(models::for_provider(kind)[0].id, default_model(kind), "{kind}");
+            assert!(models::find(kind, &default_model(kind)).is_some(), "{kind}");
         }
+        assert_eq!(default_model("custom:lab"), "");
+        // A model the catalog lacks goes by its family.
+        assert_eq!(opencode_wire("opencode-go", "claude-unlisted-9"), OpenCodeWire::Messages);
         assert_eq!(opencode_root("https://opencode.ai/zen/v1/"), OPENCODE_BASE_URL);
         assert_eq!(opencode_root("https://opencode.ai/zen"), OPENCODE_BASE_URL);
     }

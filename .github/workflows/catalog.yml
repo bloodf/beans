@@ -1,0 +1,24 @@
+# Checks a change to what lorca.app serves Devices: the model catalog (crates/models/catalog.json)
+# and the marketplace index (crates/cli/marketplace/index.json) each move their "updated" time
+# forward whenever anything else in them changes, as Devices keep whichever copy is later. The
+# rules each must read by are checked by the lorca-models and lorca tests in the Tests workflow.
+# scripts/check-catalog.ts is the check; `bun run check:catalog` runs it locally.
+name: Catalog
+
+on:
+  pull_request:
+    paths: ["crates/models/catalog.json", "crates/cli/marketplace/index.json", "scripts/check-catalog.ts", ".github/workflows/catalog.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: git fetch --depth=1 origin "+refs/heads/$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+      - run: bun run check:catalog
+        env:
+          CATALOG_BASE: origin/${{ github.base_ref }}

@@ -2,8 +2,9 @@
 //! servers, variables, skills, tool hints) that a Runner installs; the Runner keeps the
 //! package, the variables, the secrets, and the OAuth tokens, and advertises what it has in
 //! its machine blob. Every bot on the Runner may use every plugin installed there. The
-//! manifests on offer are the marketplace's (`crate::marketplace`). The MCP side, with the
-//! permission gate, is `mcp` under the `runner` feature.
+//! manifests on offer are the marketplace's (`crate::marketplace`); the servers the user adds
+//! themselves live in the Runner's `mcp.json` (`mcp_json`), each a plugin of its own. The MCP
+//! side, with the permission gate, is `mcp` under the `runner` feature.
 
 #[cfg(feature = "runner")]
 pub mod mcp;
@@ -61,6 +62,8 @@ pub struct Manifest {
     pub tools: ToolHints,
 }
 
+// A manifest's own settings, a few per plugin: their size never matters.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerSpec {
@@ -100,6 +103,7 @@ impl ServerSpec {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthSpec {
@@ -173,10 +177,13 @@ pub struct ToolHints {
     /// Never offered to the bot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hide: Vec<String>,
+    /// Tools shown or hidden by name or pattern, in order, as pi reads an `mcp.json` entry's
+    /// `toolExposure`: an exact name decides first, then the first pattern that matches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exposure: Vec<ToolRule>,
 }
 
+/// One `toolExposure` entry: a tool's name or a pattern ending in `*`, and whether it is hidden.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolRule {
     pub pattern: String,
@@ -256,6 +263,7 @@ pub fn slug(name: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
+
 fn placeholder(inner: &str) -> (&str, Option<&str>) {
     match inner.split_once(":-") {
         Some((name, default)) => (name, Some(default)),
@@ -279,7 +287,8 @@ pub fn fill_if_set(template: &str, values: &BTreeMap<String, String>) -> Option<
     Some(fill(template, values))
 }
 
-/// Fills `${VAR}` from the plugin's variables and secrets; an unknown name stays as it is.
+/// Fills `${VAR}` from the plugin's variables and secrets, and `${VAR:-default}` with the default
+/// when the variable has no value; an unknown name with no default stays as it is.
 pub fn fill(template: &str, values: &BTreeMap<String, String>) -> String {
     let mut out = String::new();
     let mut rest = template;
@@ -341,6 +350,7 @@ pub struct Store {
     /// the flow ends. The plugin's detail carries it, so the app that started the sign-in
     /// without a card can show it.
     pub codes: BTreeMap<String, SignInCode>,
+
     pub mcp: mcp_json::McpFile,
 }
 
@@ -367,6 +377,7 @@ impl Store {
         let dir = config.plugins_dir();
         std::fs::create_dir_all(&dir)?;
         config::set_private(&dir)?;
+
         let plugins = self.installed.iter().filter(|plugin| plugin.source != mcp_json::SOURCE).cloned().collect();
         config::write_json_private(&dir.join("installed.json"), &InstalledFile { plugins })?;
         config::write_json_private(&dir.join("secrets.json"), &self.secrets)?;
@@ -481,7 +492,8 @@ impl Store {
         }
     }
 
-    /// An OAuth server with no tokens and no pasted token.
+    /// An OAuth server with no tokens and no pasted token. One that signs in only when asked
+    /// needs it once the server has answered with its challenge.
     pub fn needs_sign_in(&self, id: &str, server: &str, spec: &ServerSpec, values: &BTreeMap<String, String>) -> bool {
         match spec {
             ServerSpec::Http { auth: Some(AuthSpec::Oauth { token_variable, .. }), .. } => {
@@ -491,6 +503,7 @@ impl Store {
             _ => false,
         }
     }
+
 }
 
 // MARK: - Installing
@@ -531,7 +544,8 @@ pub fn install(app: &Arc<App>, manifest: Manifest, source: &str) -> Result<Plugi
     Ok(status)
 }
 
-/// Removes a plugin, its secrets, and its folder; every bot on this Runner loses it.
+/// Removes a plugin, its secrets, and its folder; every bot on this Runner loses it. A server
+/// from `mcp.json` leaves that file.
 pub fn uninstall(app: &Arc<App>, id: &str) -> Result<(), String> {
     if app.plugins.lock().unwrap().get(id).is_some_and(|plugin| plugin.source == mcp_json::SOURCE) {
         return Err("That plugin is managed in mcp.json.".into());
@@ -599,6 +613,38 @@ pub fn set_variables(app: &Arc<App>, id: &str, variables: &BTreeMap<String, Stri
     Ok(status)
 }
 
+/// Forgets the sign-in of a plugin's OAuth servers, or of the one named: the saved tokens and a
+/// device code waiting for one. A server that is off is no plugin now, but its sign-in is
+/// forgotten all the same. Nothing is revoked at the server, which honors a token until it
+/// expires; the next use asks for a sign-in again.
+pub fn sign_out(app: &Arc<App>, id: &str, server: Option<&str>) -> Result<Option<PluginStatus>, String> {
+    let status = {
+        let mut store = app.plugins.lock().unwrap();
+        let servers: Vec<String> = match store.get(id) {
+            Some(plugin) => plugin
+                .manifest
+                .servers
+                .iter()
+                .filter(|(name, spec)| server.is_none_or(|server| server == name.as_str()) && matches!(spec, ServerSpec::Http { auth: Some(AuthSpec::Oauth { .. }), .. }))
+                .map(|(name, _)| name.clone())
+                .collect(),
+            None => server.map(|server| vec![server.to_string()]).unwrap_or_default(),
+        };
+        for name in &servers {
+            store.set_secret(id, &format!("oauth:{name}"), None);
+            store.set_secret(id, &format!("challenge:{name}"), None);
+        }
+        store.codes.remove(id);
+        store.notes.remove(id);
+        store.save(&app.config).map_err(|e| e.to_string())?;
+        store.status(id)
+    };
+    #[cfg(feature = "runner")]
+    app.mcp.forget(id);
+    announce(app);
+    Ok(status)
+}
+
 /// Keeps OAuth tokens for a server, or drops them.
 pub fn set_oauth(app: &Arc<App>, id: &str, server: &str, tokens: Option<Value>) -> Result<(), String> {
     let mut store = app.plugins.lock().unwrap();
@@ -618,21 +664,6 @@ pub fn set_oauth(app: &Arc<App>, id: &str, server: &str, tokens: Option<Value>) 
     store.save(&app.config).map_err(|e| e.to_string())
 }
 
-pub fn sign_out(app: &Arc<App>, id: &str, server: Option<&str>) -> Result<(), String> {
-    let mut store = app.plugins.lock().unwrap();
-    let names: Vec<String> = store.get(id).ok_or("Unknown plugin")?.manifest.servers.keys().filter(|name| server.is_none_or(|server| server == *name)).cloned().collect();
-    for name in names {
-        store.set_secret(id, &format!("oauth:{name}"), None);
-        store.set_secret(id, &format!("challenge:{name}"), None);
-    }
-    store.notes.remove(id);
-    store.save(&app.config).map_err(|e| e.to_string())?;
-    drop(store);
-    #[cfg(feature = "runner")]
-    app.mcp.forget(id);
-    announce(app);
-    Ok(())
-}
 
 /// Notes a connection state on a plugin (`connecting`, or `error` with the reason), cleared
 /// by the next install, variable change, or successful connection.
@@ -652,7 +683,7 @@ pub fn note(app: &Arc<App>, id: &str, state: Option<(&str, &str)>) {
 }
 
 /// The Runner's plugin list changed: the machine blob and the local app hear.
-fn announce(app: &Arc<App>) {
+pub(crate) fn announce(app: &Arc<App>) {
     app.push_machine_blob_if_changed();
     app.emit(app.roster_summary());
 }
@@ -673,12 +704,19 @@ pub fn detail(app: &Arc<App>, id: &str) -> Result<Value, String> {
                 ServerSpec::Stdio { command, .. } => ("stdio", json!({ "command": command })),
                 ServerSpec::Http { url, auth, .. } => {
                     let waiting = store.codes.get(id).filter(|code| &code.server == name);
+                    // A server that signs in only when asked shows its sign-in once it has asked.
+                    let tokens = store.sign_in_secret(id, "oauth", name).is_some();
+                    let oauth = match auth {
+                        Some(AuthSpec::Oauth { optional: true, .. }) => tokens || store.sign_in_secret(id, "challenge", name).is_some(),
+                        Some(AuthSpec::Oauth { .. }) => true,
+                        _ => false,
+                    };
                     (
                         "http",
                         json!({
                             "url": url,
-                            "oauth": matches!(auth, Some(AuthSpec::Oauth { .. })),
-                            "signed_in": matches!(auth, Some(AuthSpec::Oauth { .. })) && !store.needs_sign_in(id, name, spec, &values),
+                            "oauth": oauth,
+                            "signed_in": oauth && !store.needs_sign_in(id, name, spec, &values),
                             "code": waiting.map(|code| &code.code),
                             "link": waiting.map(|code| &code.link),
                         }),
@@ -868,6 +906,12 @@ mod tests {
         assert_eq!(fill_if_set("Bearer ${MISSING:-fallback}", &values).as_deref(), Some("Bearer fallback"));
         values.insert("BLANK".to_string(), " ".to_string());
         assert_eq!(fill_if_set("${BLANK}", &values), None, "a blank value is no value");
+        // A default, as mcp.json files write it.
+        assert_eq!(fill("${MISSING:-8080}/${TOKEN:-x}", &values), "8080/abc");
+        values.insert("EMPTY".to_string(), String::new());
+        assert_eq!(fill("${EMPTY:-fallback}", &values), "fallback", "an empty value takes the default, as a shell's :- does");
+        assert_eq!(fill("${EMPTY}", &values), "");
+        assert_eq!(fill_if_set("Bearer ${MISSING:-anonymous}", &values).as_deref(), Some("Bearer anonymous"));
         assert_eq!(slug("  GitHub  Server! "), "github-server");
         assert!(pattern_matches("search_*", "search_issues") && !pattern_matches("search_*", "create_issue") && pattern_matches("get_me", "get_me"));
     }

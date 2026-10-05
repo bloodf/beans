@@ -277,7 +277,9 @@ pub enum Body {
         /// runs and show the finished row as "Messaged ◉ Scout".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_bot_id: Option<String>,
-        /// The latest command inside a running codemode script, for the working status line.
+        /// A codemode script's latest command, by its `description`, while no plugin call came
+        /// after it: the status line reads "Running command: Run the tests…" instead of the
+        /// plugin `description` names.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         script_command: Option<String>,
         /// A `bash` call's card, from Auto-review's question to how the command ended. Every
@@ -516,8 +518,8 @@ pub struct ChatMeta {
     #[serde(default)]
     pub title: Option<String>,
     pub bot_ids: Vec<String>,
-    /// The bot that owns the work in this chat right now. Unaddressed messages go to it; a
-    /// handoff can pass it on. Empty means the members decide.
+    /// A group's member holding the work, marked as the owner in every member's system prompt.
+    /// Empty means the first member; `chats.set_owner` changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_bot_id: Option<String>,
     #[serde(default)]
@@ -528,6 +530,14 @@ pub struct ChatMeta {
 impl ChatMeta {
     pub fn is_group(&self) -> bool {
         self.kind == "group"
+    }
+
+    /// A group's owner: the one set while it is a member, else the first member.
+    pub fn owner(&self) -> Option<&str> {
+        if !self.is_group() {
+            return None;
+        }
+        self.owner_bot_id.as_deref().filter(|id| self.bot_ids.iter().any(|member| member == id)).or(self.bot_ids.first().map(String::as_str))
     }
 }
 

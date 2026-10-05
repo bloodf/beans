@@ -65,7 +65,7 @@ The Rust core emits `lorca://pair` codes. Beans registers `lorca` as a secondary
 
 ## Relay selection
 
-`macos/Sources/Lorca/App/AppInfo.swift` sets the Beans release relay fallback; `macos/Sources/Lorca/App/CLILauncher.swift` passes it as `LORCA_DEFAULT_RELAY_URL` when launching the CLI. The phone inherits the relay URL in its pairing code. `crates/cli/src/config.rs` and `crates/cli/src/app.rs` resolve `LORCA_RELAY_URL` first, then saved settings, the paired Device URL, the development LAN relay, and finally `LORCA_DEFAULT_RELAY_URL`. Rust defaults remain unchanged; configure your relay explicitly before using the fork. Do not publish private relay addresses in this guide.
+Release packaging in `scripts/app.ts` embeds an optional `LORCA_DEFAULT_RELAY_URL` as `BeansRelayURL` bundle metadata. `macos/Sources/Lorca/App/AppInfo.swift` reads that value; `CLILauncher.swift` passes it to the CLI only when the launch environment does not already set a fallback. Development bundles omit it. A release built without the variable has no preset relay. The phone inherits the relay URL in its pairing code. `crates/cli/src/config.rs` and `crates/cli/src/app.rs` resolve `LORCA_RELAY_URL` first, then saved settings, the paired Device URL, the development LAN relay, and finally `LORCA_DEFAULT_RELAY_URL`. Configure your relay explicitly before using the fork. Keep private build values outside source and contribution notes.
 
 ## Production notes
 

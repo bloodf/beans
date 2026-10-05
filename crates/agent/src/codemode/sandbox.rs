@@ -56,6 +56,7 @@ pub(crate) enum Event {
     /// A tool call (`global` false) or a host global, with its arguments as JSON.
     Call { id: u64, global: bool, name: String, args: Option<String> },
     Text(String),
+    /// An image's base64 data, whatever type the script gave it: the host reads its type from the bytes.
     Image(String),
     /// The script returned: its value as JSON, and the keys it stored as a JSON array of
     /// `[key, json]` and `[key]` for a deletion.

@@ -47,7 +47,9 @@ pub async fn environment() -> &'static [(OsString, OsString)] {
     ENVIRONMENT.get_or_init(load).await
 }
 
-/// Host-specific environment for a bot command, layered over the login shell's variables.
+/// What a host adds for the commands a bot runs, over the login shell's environment: variables,
+/// and folders that go first on `PATH`, such as the host's own command, so the bot reaches it
+/// before another install of it.
 #[derive(Debug, Clone, Default)]
 pub struct Extras {
     pub variables: Vec<(OsString, OsString)>,
@@ -55,6 +57,8 @@ pub struct Extras {
 }
 
 impl Extras {
+    /// Sets them on `command`, made by [`command`]: the variables, and `PATH` as the folders and
+    /// then the `PATH` it had.
     pub fn apply(&self, command: &mut Command) {
         command.envs(self.variables.iter().map(|(name, value)| (name, value)));
         if self.path_first.is_empty() {

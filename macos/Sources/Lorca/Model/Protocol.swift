@@ -179,11 +179,12 @@ enum Wire {
         var icon: String?
         var state: String
         var detail: String?
+        var source: String?
 
         func toModel() -> InstalledPlugin {
             InstalledPlugin(
                 id: id, name: name, description: description ?? "", version: version ?? "", icon: icon ?? "",
-                state: InstalledPlugin.State(rawValue: state) ?? .unknown, detail: detail ?? "")
+                state: InstalledPlugin.State(rawValue: state) ?? .unknown, detail: detail ?? "", source: source)
         }
     }
 
@@ -349,6 +350,7 @@ enum Wire {
         var kind: String
         var title: String?
         var botIds: [String]
+        var ownerBotId: String?
         var isPinned: Bool
         var createdAt: Double
         var messages: [Message]?
@@ -523,6 +525,8 @@ enum Wire {
         var autoReview: AutoReview?
         var providers: [Provider]?
         var paused: Bool?
+        /// The catalog's models again, so a newer catalog the CLI installs reaches the pickers.
+        var models: [Model]?
     }
 
     struct MessageEvent: Decodable {
@@ -721,7 +725,8 @@ extension Wire.Chat {
             isPinned: isPinned,
             createdAt: Date(timeIntervalSince1970: createdAt),
             usage: usage?.toModel(),
-            hasMore: hasMore ?? existingHasMore
+            hasMore: hasMore ?? existingHasMore,
+            ownerBotID: ownerBotId
         )
     }
 }

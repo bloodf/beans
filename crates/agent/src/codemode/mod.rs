@@ -67,7 +67,10 @@ pub struct Namespace {
 pub struct NamespaceDetails {
     pub name: String,
     pub description: String,
+    /// Guidance for the group's tools, such as its servers' instructions, whole: the listing
+    /// may carry only their start. Empty when there is none.
     pub instructions: String,
+    /// Its tools' names.
     pub tools: Vec<String>,
 }
 
@@ -302,9 +305,10 @@ const ERROR_PREVIEW_CHARS: usize = 500;
 const CHARS_PER_TOKEN: usize = 4;
 /// How long calls still running when a script ends get to wind down after their cancel.
 const WIND_DOWN: Duration = Duration::from_secs(10);
-/// What one script may send the host, whatever its memory limit: the text it outputs, its
-/// images and their size, the calls it has started and not seen finish, and one call's
-/// arguments. Past the first or the third, the script stops.
+/// What one script may send the host, whatever its memory limit: the text it outputs, how many
+/// images, the calls it has started and not seen finish, and one call's arguments. Past the
+/// first or the third, the script stops. Each image is made one a model takes as it ends
+/// (`images::prepare`).
 const MAX_OUTPUT_CHARS: usize = 16 * 1024 * 1024;
 const MAX_IMAGES: usize = 10;
 const MAX_IMAGE_INPUT_BYTES: usize = 16 * 1024 * 1024;
@@ -373,7 +377,7 @@ impl Tool for CodemodeTool {
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Raw JavaScript source. Top-level await and return work. May start with a `// @options: {\"max_output_tokens\": 1000}` line."
+                    "description": "Raw JavaScript source."
                 }
             },
             "required": ["code"],
@@ -476,6 +480,35 @@ impl<'a> Run<'a> {
 
     fn lookup(&self, name: &str) -> Option<Entry> {
         self.known.lock().unwrap().get(name).cloned()
+    }
+
+    /// Why a call names no tool, with the known tools whose names come closest, after pi:
+    /// `tools.Bash` suggests `tools.bash`, and `tools.github_create_issue`
+    /// `tools.github__create_issue`. A short catalog is listed whole instead.
+    fn unknown_tool(&self, name: &str) -> String {
+        let mut names: Vec<String> = self.known.lock().unwrap().values().map(|entry| to_identifier(entry.tool.name())).collect();
+        names.sort();
+        names.dedup();
+        let comparable = |name: &str| name.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+        let wanted = comparable(name);
+        let mut close: Vec<&String> = names.iter().filter(|known| comparable(known) == wanted).collect();
+        if close.is_empty() && !wanted.is_empty() {
+            close = names
+                .iter()
+                .filter(|known| {
+                    let known = comparable(known);
+                    !known.is_empty() && (known.contains(&wanted) || wanted.contains(&known))
+                })
+                .collect();
+        }
+        let mut message = format!("Unknown tool \"{name}\".");
+        if !close.is_empty() {
+            message.push_str(&format!(" Did you mean {}?", close.iter().take(5).map(|known| format!("tools.{known}")).collect::<Vec<_>>().join(", ")));
+        } else if !names.is_empty() && names.len() <= 20 {
+            message.push_str(&format!(" The tools are {}.", names.join(", ")));
+        }
+        message.push_str(" ALL_TOOLS lists every tool, and searchTools(query) finds one by what it does.");
+        message
     }
 
     async fn resolve(&self, name: &str) -> Option<Entry> {
@@ -666,7 +699,7 @@ impl<'a> Run<'a> {
     async fn call(&self, name: &str, call_id: String, args: Value, record: Option<usize>) -> Reply {
         let started = Instant::now();
         let Some(entry) = self.resolve(name).await else {
-            let message = format!("Unknown tool \"{name}\". Use a name from the declarations, ALL_TOOLS, or searchTools().");
+            let message = self.unknown_tool(name);
             self.update(record, |call| {
                 call.status = CallStatus::Error;
                 call.error = Some(clipped(&message, ERROR_PREVIEW_CHARS));
@@ -909,18 +942,25 @@ fn read_arguments(name: &str, json: Option<&str>, absent: Value) -> Result<Value
     }
 }
 
-/// Prepare image bytes off async threads; report invalid or unsupported data as text.
+/// The script's images as a model takes them (`images::prepare`), made off the async threads;
+/// one that cannot go becomes a line saying why.
 async fn inline_images(items: Vec<ContentPart>) -> Vec<ContentPart> {
-    if !items.iter().any(|item| matches!(item, ContentPart::Image { .. })) { return items; }
-    tokio::task::spawn_blocking(move || {
-        items.into_iter().flat_map(|item| match item {
-            ContentPart::Image { data, .. } => match crate::images::prepare_base64(&data) {
-                Ok(image) => image.into_parts(),
-                Err(why) => vec![ContentPart::text(format!("[An image was left out: {why}]"))],
-            },
-            other => vec![other],
-        }).collect()
-    }).await.unwrap_or_else(|_| vec![ContentPart::text("[The script's image could not be prepared]")])
+    if !items.iter().any(|item| matches!(item, ContentPart::Image { .. })) {
+        return items;
+    }
+    let made = tokio::task::spawn_blocking(move || {
+        items
+            .into_iter()
+            .flat_map(|item| match item {
+                ContentPart::Image { data, .. } => match crate::images::prepare_base64(&data) {
+                    Ok(image) => image.into_parts(),
+                    Err(why) => vec![ContentPart::text(format!("[An image was left out: {why}]"))],
+                },
+                other => vec![other],
+            })
+            .collect()
+    });
+    made.await.unwrap_or_else(|error| vec![ContentPart::text(format!("[The script's output was lost making its images: {error}]"))])
 }
 
 /// A successful script's `store()` writes, from `[[key, json], [key], …]`. Anything else is an
@@ -1051,17 +1091,13 @@ async fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
 
 // MARK: - Description
 
-const DESCRIPTION_INTRO: &str = "Run JavaScript that calls tools: chain calls, run them in parallel, loop over results, and filter large \
-results down to what you need. Only what the script outputs or returns reaches you, never the results of the calls it makes.
-- The code is the body of an async function in a fresh QuickJS sandbox: top-level `await` and `return` work.
-- Call tools as `await tools.<name>(args)`. Names are JavaScript identifiers: characters that are not valid in one become `_`. Each tool takes one object argument.
-- A tool resolves to an object or a string, as its declaration says. A call that fails or gets invalid arguments rejects with an Error carrying the tool's error text.
-- A call a permission check refuses ends the whole script: the calls after it do not run.
-- Plain JavaScript only: no Node, file system, network, timers, or modules.
-- The input is raw JavaScript source, not JSON, a quoted string, or a markdown code fence.
-- It may start with a line like `// @options: {\"max_output_tokens\": 1000, \"timeout_ms\": 60000}`: `max_output_tokens` is the token budget for the output (default {max_output_tokens}, at most 50000), `timeout_ms` a hard deadline for the whole script, at most and by default {timeout} minutes.
-- Calls still running when the script ends are cancelled. Tool calls are real and have side effects: a script that fails partway does not undo the calls it already made.
-- Scripts have a {memory} MB memory limit. Filter or aggregate large data instead of accumulating it.
+// After pi 1.0's: one line per global, and what errors teach left to the errors, which name the
+// closest tools, the limits a script ran into, and the calls made before a failure.
+const DESCRIPTION_INTRO: &str = "Run JavaScript that calls other tools. Only what the script outputs or returns reaches you, never the \
+results of the calls it makes. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS \
+sandbox: top-level `await` and `return` work. No Node, file system, network, or timers.
+- `await tools.<name>({ ...args })` resolves to a string, or an object if the tool's declaration says so, and rejects with an Error on failure. Calls still running when the script ends are cancelled.
+- Optional first line: `// @options: {\"max_output_tokens\": {max_output_tokens}, \"timeout_ms\": 60000}`
 
 Helpers:
 - `text(value)` appends a text item; a value that is not a string is written as JSON. `console.log(...)` and the other `console` methods do the same, and so does `return value`.
@@ -1072,12 +1108,9 @@ Helpers:
 - `await searchTools(query, { limit?, namespace? })` resolves to the tools that best match the query (default limit 8), as `{ name, description }` with their declarations. It also finds tools that are not listed below.
 - `await describeTool(name)` resolves to a tool's description and declaration, or `undefined`. `describeNamespace(name)` gives its description, whole instructions, and visible tools, or `undefined`.";
 
-const MCP_RESULT_GUIDANCE: &str = "Shared MCP types. An MCP tool resolves to its whole `CallToolResult`, never to the data alone: \
-read `structuredContent` when the declaration types it, and otherwise `content`, usually one text block whose text is often \
-JSON (`JSON.parse(result.content[0].text)`). `isError: true` means the tool reported a failure.";
-
-const PARTIAL_GUIDANCE: &str = "Some tools are not listed below. They are still callable on `tools`: find them with `await searchTools(query)`, \
-or filter `ALL_TOOLS` by name and description.";
+const MCP_RESULT_GUIDANCE: &str = "Shared MCP types. An MCP tool resolves to its whole `CallToolResult`: `structuredContent` when \
+its declaration types it, else `content`, usually one text block of JSON (`JSON.parse(result.content[0].text)`). `isError: true` \
+means it failed.";
 
 struct CatalogEntry {
     name: String,
@@ -1086,16 +1119,11 @@ struct CatalogEntry {
     deferred: bool,
 }
 
-/// The description: the helpers, the shared MCP types when an MCP tool is callable, the direct
+/// The description: the globals, the shared MCP types when an MCP tool is callable, the direct
 /// tools by name, and a section per tool, grouped by namespace, within the budget. Every
-/// namespace is named with its tool count either way, and the listing says whether it is
-/// complete.
+/// namespace is named either way, marked when some of its tools are not listed, as in pi.
 fn describe(entries: &[Entry], namespaces: &[Namespace], functions: &[Arc<dyn HostFunction>], options: &CodemodeOptions) -> String {
-    let intro = DESCRIPTION_INTRO
-        .replace("{max_output_tokens}", &options.max_output_tokens.to_string())
-        .replace("{memory}", &(options.memory_limit / (1024 * 1024)).to_string())
-        .replace("{timeout}", &options.timeout.as_secs().div_ceil(60).to_string());
-    let mut sections = vec![intro];
+    let mut sections = vec![DESCRIPTION_INTRO.replace("{max_output_tokens}", &options.max_output_tokens.to_string())];
 
     let callable: Vec<&Entry> = entries.iter().filter(|entry| entry.tool.name() != CODEMODE_TOOL_NAME).collect();
     let direct: Vec<&Entry> = callable.iter().copied().filter(|entry| entry.exposure == Exposure::Direct).collect();
@@ -1133,11 +1161,6 @@ fn describe(entries: &[Entry], namespaces: &[Namespace], functions: &[Arc<dyn Ho
     }
 
     let shown = select_catalog(&groups, options.inline_budget);
-    let total = listable.len();
-    let complete = shown.len() == total;
-    if !complete {
-        sections.push(PARTIAL_GUIDANCE.into());
-    }
     if options.mcp_types || listable.iter().any(|entry| mcp_structured_content_schema(entry.tool.output_schema().as_ref()).is_some()) {
         sections.push(format!("{MCP_RESULT_GUIDANCE}\n```ts\n{MCP_TYPESCRIPT_PREAMBLE}\n```"));
     }
@@ -1155,35 +1178,28 @@ fn describe(entries: &[Entry], namespaces: &[Namespace], functions: &[Arc<dyn Ho
         });
     }
 
-    let mut listing = vec![if total == 0 {
-        "Nested tools: none known yet. searchTools() finds the tools of the groups below.".to_string()
-    } else if complete {
-        format!("Nested tools: COMPLETE list ({total} tool{}).", if total == 1 { "" } else { "s" })
-    } else {
-        format!("Nested tools: PARTIAL - {} of {total} shown.", shown.len())
-    }];
+    let mut listing = vec!["Nested tools:".to_string()];
     for (namespace, members) in &groups {
         let visible: Vec<&CatalogEntry> = members.iter().filter(|member| shown.contains(&member.name)).collect();
         if let Some(namespace) = namespace {
-            let count = if members.is_empty() {
-                "tools not known yet; describeNamespace() lists them".to_string()
+            // Only what is missing is marked, so the heading stays the same while the tools do.
+            let marker = if members.is_empty() {
+                " (tools not known yet; describeNamespace() lists them)"
+            } else if visible.is_empty() {
+                " (tools not listed)"
+            } else if visible.len() < members.len() {
+                " (some tools not listed)"
             } else {
-                let mut count = format!("{} tool{}", members.len(), if members.len() == 1 { "" } else { "s" });
-                if visible.is_empty() {
-                    count.push_str(", none shown");
-                } else if visible.len() < members.len() {
-                    count.push_str(&format!(", {} shown", visible.len()));
-                }
-                count
+                ""
             };
             let description = namespace.description.trim();
-            listing.push(if description.is_empty() { format!("## {} ({count})", namespace.name) } else { format!("## {} ({count})\n{description}", namespace.name) });
+            listing.push(if description.is_empty() { format!("## {}{marker}", namespace.name) } else { format!("## {}{marker}\n{description}", namespace.name) });
         }
         for member in visible {
             listing.push(member.section.clone());
         }
     }
-    if total > 0 || !named.is_empty() {
+    if !listable.is_empty() || !named.is_empty() {
         sections.push(listing.join("\n\n"));
     }
     if let Some(guidance) = options.guidance.as_deref().map(str::trim).filter(|guidance| !guidance.is_empty()) {

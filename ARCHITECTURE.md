@@ -52,7 +52,7 @@ Identity 1──* Chat
 Chat     *──* Bot          (kind dm: exactly 1 bot, fixed · kind group: 1–6 bots, members change)
 Chat     1──* Message
 Bot      1──* Routine      (a scheduled task, run in the bot's DM on its Runner)
-Device   1──* Plugin       (an MCP server installed on a Runner, for every bot there)
+Device   1──* Plugin       (an MCP server installed on a Runner or in its mcp.json, for every bot there)
 Bot      1──* Job          (a turn on the bot's Runner)
 ```
 
@@ -84,8 +84,9 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Protocols](docs/architecture/protocols.md) | The app ↔ CLI websocket and the CLI ↔ relay requests and blobs |
 | [CLI (runtime)](docs/architecture/runtime.md) | The `lorca` binary and its data directory, installing it, the agent loop and a turn on a Runner, notifications |
 | [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, terminal sessions and command cards, running tasks, Auto-review |
-| [Codemode and Plugins](docs/architecture/plugins.md) | Scripts that call plugin tools, MCP plugins and their installs, the marketplace and bot templates, sign-in, plugin calls at turn time |
-| [MCP servers](docs/architecture/mcp-servers.md) | Custom MCP servers in `mcp.json`, Runner management, authentication, and tool visibility |
+| [Codemode and Plugins](docs/architecture/plugins.md) | Scripts that call plugin tools, MCP plugins and their installs, sign-in, plugin calls at turn time |
+| [Marketplace](docs/architecture/marketplace.md) | The relay-backed index of plugins and bot templates, offline fallback and updates, bots added from a template, the marketplace sheet |
+| [MCP servers](docs/architecture/mcp-servers.md) | The user's own MCP servers in a Runner's `mcp.json`: the file and other apps' spellings, sign-in, the `mcp.*` methods and `lorca mcp`, the apps' MCP Servers section and server sheet |
 | [Bots, Routines, and Memory](docs/architecture/bots.md) | The lead bot, DMs and groups, who answers, handoffs between bots, routines and their checks, a bot's memory |
 | [Providers](docs/architecture/providers.md) | Each model provider and its sign-in, custom providers, thinking levels, the model catalog and cost, compaction, retries |
 | [macOS app](docs/architecture/macos-app.md) | The AppKit app: launching the CLI, windows and onboarding, settings, updates, the command palette, sidebar, inspector, Blobatar |
@@ -105,7 +106,7 @@ lorca/
   docs/agent/          # lorca-agent's own documentation
   Cargo.toml           # workspace
   crates/agent/        # lorca-agent: loop, tools, codemode (QuickJS), and Messages, Chat Completions, Responses, ChatGPT, and Grok providers
-  crates/models/       # lorca-models: the model catalog (windows, thinking levels, rates), on every Device and in every app's pickers
+  crates/models/       # lorca-models: the model catalog (catalog.json: windows, thinking levels, rates), on every Device and in every app's pickers; lorca.app serves it so Devices update without a release
   crates/provider-auth/ # OAuth token types and PKCE flows shared by every Device
   crates/cli/          # lorca: the Device core as a library (keys, relay sync, jobs, the JSON API) + runner and server features + the binary
   crates/mobile/       # lorca-mobile: the core for the phone over UniFFI
@@ -125,7 +126,7 @@ lorca/
 
 ## Status
 
-Done: crypto and blob protocol, relay, CLI (identity, pairing, restore, local WS, API-key and subscription providers, server-side web search, agent loop, encrypt-before-upload, group chats, cross-Runner jobs and handoffs, steering and stop, routines, plugins over MCP with a marketplace and permission cards, encrypted pushes for replies, failures, and pending confirmations), app wiring and the bundled CLI launcher.
+Done: crypto and blob protocol, relay, CLI (identity, pairing, restore, local WS, API-key and subscription providers, server-side web search, agent loop, encrypt-before-upload, group chats, cross-Runner jobs and handoffs, steering and stop, routines, plugins over MCP with a marketplace, the user's own servers in `mcp.json`, and permission cards, encrypted pushes for replies, failures, and pending confirmations), app wiring and the bundled CLI launcher.
 
 Next: keychain storage, a cost budget per chat.
 

@@ -32,10 +32,10 @@ pub mod runtime;
 pub mod schedule;
 #[cfg(feature = "runner")]
 pub mod scripts;
+pub mod served;
 #[cfg(feature = "runner")]
 pub mod shell;
 pub mod sync;
-pub mod served;
 pub mod local_store;
 #[cfg(feature = "runner")]
 pub mod turns;

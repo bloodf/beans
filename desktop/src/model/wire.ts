@@ -61,6 +61,7 @@ export interface WirePluginStatus {
   source?: string | null;
 }
 
+/** A server of a Runner's mcp.json, as `mcp.list` and `mcp.get` answer. */
 export interface WireMcpServer {
   name: string;
   id: string;
@@ -80,6 +81,7 @@ export interface WireMcpFile {
   servers: WireMcpServer[];
 }
 
+/** `mcp.parse`: the servers pasted JSON holds. */
 export interface WireParsedServers {
   servers: { name?: string | null; config: Record<string, unknown> | null; problem?: string | null }[];
 }
@@ -144,8 +146,8 @@ export interface WireBody {
   detail?: string | null;
   is_running?: boolean | null;
   description?: string | null;
-  script_command?: string | null;
   target_bot_id?: string | null;
+  script_command?: string | null;
   from?: string | null;
   to?: string | null;
   reason?: string | null;
@@ -193,6 +195,7 @@ export interface WireChat {
   kind: string;
   title?: string | null;
   bot_ids: string[];
+  owner_bot_id?: string | null;
   is_pinned: boolean;
   created_at: number;
   messages?: WireMessage[] | null;
@@ -298,6 +301,8 @@ export interface WireRosterChanged {
   routines?: WireRoutine[] | null;
   auto_review?: WireAutoReview | null;
   providers?: WireProvider[] | null;
+  /** The catalog's models again, so a newer catalog the CLI installs reaches the pickers. */
+  models?: WireModel[] | null;
 }
 
 export interface WireMessagePage {
@@ -535,8 +540,8 @@ export function toMessage(wire: WireMessage): Message {
           detail: body.detail ?? "",
           isRunning: body.is_running ?? false,
           description: optional(body.description),
-          scriptCommand: optional(body.script_command),
           targetBotID: optional(body.target_bot_id),
+          scriptCommand: optional(body.script_command),
           run,
         },
       };
@@ -619,6 +624,7 @@ export function toChat(wire: WireChat, existing?: { messages: Message[]; unreadC
     createdAt: seconds(wire.created_at),
     usage: wire.usage ? toUsage(wire.usage) : undefined,
     hasMore: wire.has_more ?? existing?.hasMore ?? false,
+    ownerBotID: optional(wire.owner_bot_id),
   };
 }
 

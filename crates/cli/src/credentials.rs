@@ -73,6 +73,7 @@ pub struct OfferedModel {
     pub levels: Vec<lorca_models::ThinkingLevel>,
 }
 
+
 /// A model a custom provider offers, with what its server's model list said about it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CustomModel {
@@ -470,6 +471,23 @@ mod tests {
         assert_eq!(mine.models[0].levels, [Low, Medium, High]);
         assert_eq!(custom_levels("anthropic/claude-opus-5"), lorca_models::find("anthropic", "claude-opus-5").unwrap().levels);
         assert!(ours.connected_kinds().contains(&"custom:router".to_string()));
+    }
+
+    #[test]
+    fn each_provider_offers_the_models_its_menu_lists() {
+        let mut credentials = Credentials::default();
+        let mut lab = custom("Lab", 1);
+        lab.models.push(CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus 5".into()), context_window: None, max_output: None, images: None });
+        credentials.custom.insert("custom:lab".into(), lab);
+
+        // The catalog's, its default first.
+        let anthropic = credentials.models("anthropic");
+        assert_eq!(anthropic.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), lorca_models::for_provider("anthropic").iter().map(|m| m.id.as_str()).collect::<Vec<_>>());
+        // A custom provider's, named as its server names them, with the levels each takes.
+        let lab = credentials.models("custom:lab");
+        assert_eq!(lab.iter().map(|m| (m.id.as_str(), m.name.as_str())).collect::<Vec<_>>(), [("m", "m"), ("anthropic/claude-opus-5", "Opus 5")]);
+        assert_eq!(lab[1].levels, custom_levels("anthropic/claude-opus-5"));
+        assert!(credentials.models("custom:gone").is_empty());
     }
 
     #[test]

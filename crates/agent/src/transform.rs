@@ -9,8 +9,17 @@ pub const NON_VISION_USER_IMAGE_PLACEHOLDER: &str = "(image omitted: model does 
 pub const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str = "(tool image omitted: model does not support images)";
 pub const OLDER_IMAGE_PLACEHOLDER: &str = "(older image omitted: a request carries only the latest images)";
 pub const NO_RESULT_PROVIDED: &str = "No result provided";
+
+/// The most images one request carries. Anthropic refuses an image over 2000 pixels on a side in
+/// a request with more than 20, and every image costs its tokens again on each request.
 pub const MAX_REQUEST_IMAGES: usize = 20;
+
+/// The most image data, in base64, one request carries: under the 20 MB a Gemini request takes
+/// and the 32 MB an Anthropic one does, with room for the text.
 pub const MAX_REQUEST_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Past the image count, older images leave ten at a time, so the prompt's cached prefix breaks
+/// once in ten new images rather than at each.
 const IMAGE_DROP_STEP: usize = 10;
 
 pub struct TransformOptions<'a> {
@@ -149,8 +158,10 @@ pub fn transform_messages_with_origins(messages: &[LlmMessage], options: &Transf
     result
 }
 
-/// Keep newest images within provider request limits. Drop older images in stable batches when
-/// count exceeds the limit, preserving the latest and replacing dropped content with a note.
+/// Replaces the oldest images with a note when the request would carry more than
+/// `MAX_REQUEST_IMAGES` of them or more than `MAX_REQUEST_IMAGE_BYTES`. Past the count they go
+/// ten at a time, so the same ones stay out from one request to the next; past the bytes, only
+/// as many as must, and never the latest. A file the transcript names can be read again.
 fn leave_out_older_images(messages: &mut [(usize, LlmMessage)]) {
     fn content(message: &LlmMessage) -> Option<&Vec<ContentPart>> {
         match message {
@@ -305,23 +316,35 @@ mod tests {
     }
 
     #[test]
-    fn request_keeps_latest_images_within_count_and_bytes() {
-        let shots = |count: usize, size: usize| -> Vec<LlmMessage> {
-            (0..count).map(|index| LlmMessage::User(UserMessage {
-                content: vec![ContentPart::text(format!("shot {index}")), ContentPart::Image { data: "A".repeat(size), mime_type: "image/png".into() }],
-                timestamp: 0,
-            })).collect()
+    fn a_request_carries_only_its_latest_images() {
+        let image = |data: &str| ContentPart::Image { data: data.into(), mime_type: "image/png".into() };
+        let shots = |count: usize| -> Vec<LlmMessage> {
+            (0..count).map(|index| LlmMessage::User(UserMessage { content: vec![ContentPart::text(format!("shot {index}")), image("AAAA")], timestamp: 0 })).collect()
         };
-        let count = |messages: &[LlmMessage]| messages.iter().map(|message| match message {
-            LlmMessage::User(user) => user.content.iter().filter(|part| matches!(part, ContentPart::Image { .. })).count(),
-            _ => 0,
-        }).sum::<usize>();
-        let out = transform_messages(&shots(21, 4), &options());
-        assert_eq!(count(&out), 11);
+        let images = |messages: &[LlmMessage]| -> usize {
+            messages
+                .iter()
+                .map(|message| match message {
+                    LlmMessage::User(user) => user.content.iter().filter(|part| matches!(part, ContentPart::Image { .. })).count(),
+                    _ => 0,
+                })
+                .sum()
+        };
+        assert_eq!(images(&transform_messages(&shots(20), &options())), 20);
+        let out = transform_messages(&shots(21), &options());
+        assert_eq!(images(&out), 11, "ten leave at once");
         let LlmMessage::User(first) = &out[0] else { panic!() };
         assert_eq!(first.content, vec![ContentPart::text("shot 0"), ContentPart::text(OLDER_IMAGE_PLACEHOLDER)]);
-        assert_eq!(count(&transform_messages(&shots(30, 4), &options())), 20);
-        assert_eq!(count(&transform_messages(&shots(3, 7 * 1024 * 1024), &options())), 2);
+        assert_eq!(images(&transform_messages(&shots(30), &options())), 20, "the same ten stay out until ten more come");
+        assert_eq!(images(&transform_messages(&shots(31), &options())), 11);
+
+        let large = "A".repeat(7 * 1024 * 1024);
+        let heavy: Vec<LlmMessage> = (0..3).map(|_| LlmMessage::User(UserMessage { content: vec![image(&large)], timestamp: 0 })).collect();
+        assert_eq!(images(&transform_messages(&heavy, &options())), 2, "as many as fit 16 MB");
+        let alone = [LlmMessage::User(UserMessage { content: vec![image(&"A".repeat(17 * 1024 * 1024))], timestamp: 0 })];
+        assert_eq!(images(&transform_messages(&alone, &options())), 1, "never the latest");
+        let opts = TransformOptions { supports_images: false, ..options() };
+        assert!(transform_messages(&shots(25), &opts).iter().all(|message| !matches!(message, LlmMessage::User(user) if user.content.iter().any(|part| part.as_text() == Some(OLDER_IMAGE_PLACEHOLDER)))));
     }
 
     #[test]

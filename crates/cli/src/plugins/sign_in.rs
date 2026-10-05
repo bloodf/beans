@@ -22,10 +22,13 @@ pub const SETUP_TIMEOUT: Duration = Duration::from_secs(45);
 pub const START_TIMEOUT: Duration = Duration::from_secs(75);
 
 /// A loopback listener for the browser's redirect, bound before the page opens so the redirect
-/// never races it. The port is whatever was free; the client is registered with it.
+/// never races it. The port is whatever was free, and the client is registered with it, unless a
+/// preregistered client names its own (`bind_fixed`).
 pub struct Callback {
     listener: TcpListener,
+    /// The path the browser comes back to.
     path: String,
+    /// A preregistered client's redirect, sent as written.
     fixed: Option<String>,
 }
 
@@ -194,6 +197,27 @@ fn open_page(app: &Arc<App>, plugin_id: &str, id: &str, url: &str) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_preregistered_redirect_is_served_where_it_was_registered() {
+        // A port of its own: the redirect a client was registered with.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let callback = Callback::bind_fixed(Some(free), None).await.unwrap();
+        assert_eq!(callback.redirect_uri(), format!("http://127.0.0.1:{free}/callback"));
+        drop(callback);
+        // A whole URL, with a path of its own; one without a port takes a free one.
+        let callback = Callback::bind_fixed(None, Some("http://localhost/oauth/done")).await.unwrap();
+        let redirect = callback.redirect_uri();
+        assert!(redirect.starts_with("http://localhost:") && redirect.ends_with("/oauth/done"), "{redirect}");
+        let port = reqwest::Url::parse(&redirect).unwrap().port().unwrap();
+        let waiting = tokio::spawn(callback.wait("Docs", Duration::from_secs(5)));
+        assert_eq!(reqwest::get(format!("http://127.0.0.1:{port}/callback?code=x")).await.unwrap().status(), 404, "only its own path is the redirect");
+        assert_eq!(reqwest::get(format!("http://127.0.0.1:{port}/oauth/done?code=abc&state=s")).await.unwrap().status(), 200);
+        assert!(waiting.await.unwrap().unwrap().ends_with("/oauth/done?code=abc&state=s"));
+        // One written with its port is sent as written.
+        let callback = Callback::bind_fixed(None, Some(&format!("http://127.0.0.1:{free}/cb"))).await.unwrap();
+        assert_eq!(callback.redirect_uri(), format!("http://127.0.0.1:{free}/cb"));
+    }
 
     #[tokio::test]
     async fn the_callback_hands_back_where_the_browser_landed() {

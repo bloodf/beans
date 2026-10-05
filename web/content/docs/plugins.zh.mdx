@@ -8,9 +8,9 @@ icon: Plug
 
 ## 市场
 
-点按侧边栏右下角的市场图标（四个圆点），或选择 **文件 › 市场…**（⇧⌘M，Windows 和 Linux 上是 Ctrl+Shift+M）。最前面是 **精选插件** 和 **精选智能体**，然后按类别列出其余内容。精选分组下的 **查看全部** 会列出所有插件或所有智能体。搜索会同时查找插件和智能体。
+点按侧边栏右下角的市场图标（四个圆点），或选择 **文件 › 市场…**（⇧⌘M，Windows 和 Linux 上是 Ctrl+Shift+M）。最前面是 **精选插件** 和 **精选智能体**，然后按类别列出其余内容。精选分组下的 **查看全部** 会列出所有插件或所有智能体。搜索会同时查找插件和智能体。市场内容来自 lorca.app，所以新的插件和智能体无需更新 Lorca 就会出现。
 
-Lorca 自带这些插件：
+市场里有这些插件：
 
 | 类别 | 插件 |
 | --- | --- |
@@ -55,3 +55,43 @@ Browser、Context7、DeepWiki、Exa 和 Hugging Face 不需要账号。这里没
 ## 管理插件
 
 插件的面板会显示它的状态、登录、设置、你已经始终允许的操作（带 **还原**），以及 **移除**。市场里的插件会自动更新，并保留你的设置和登录状态。
+
+## 你自己的 MCP 服务器
+
+任何 [MCP](https://modelcontextprotocol.io) 服务器都可以当作插件：由 Runner 启动的命令，比如 `npx -y @modelcontextprotocol/server-filesystem ~/Notes`、`uvx mcp-server-fetch` 或 `docker run`；也可以是使用 streamable HTTP 的远程服务器的 URL。
+
+**设置 › 插件** 会在 **MCP 服务器** 下列出工具栏里选中的 Runner 上的这些服务器。**添加服务器…** 需要一个名称，以及命令（和它的环境变量）或 URL（和它的请求头）。把服务器 README 中的 JSON，或 Claude Desktop、Cursor 的整个 `mcpServers` 配置块粘贴到任意一栏，表单就会读懂它；多个服务器会一次添加。保存之后，表单会显示服务器是否启动成功、提供了哪些工具，并提供 **重新连接**、关闭它的开关和 **移除**。关闭的服务器会保留设置和登录信息，但智能体看不到它。
+
+需要账号的远程服务器会在 Lorca 第一次连接时要求登录：服务器会显示 **需要登录**，在它的表单里或智能体发出的卡片上点 **登录**，就会像市场插件一样通过 OAuth 登录；在它的表单里点 **退出登录** 会忘掉这次登录。如果服务器接受令牌，可以把令牌放在请求头里，比如 `Authorization: Bearer …`。
+
+这些服务器保存在 Lorca 文件夹里的 `mcp.json`（`~/.lorca/mcp.json`），格式与 Claude Desktop、Cursor 和 Claude Code 相同，你可以从它们的配置里复制，也可以直接手动编辑。编辑之后，在 **设置 › 插件** 里它那一行点按 **重新载入**，或运行 `lorca mcp reload`：
+
+```json
+{
+  "mcpServers": {
+    "notes": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/Notes"],
+      "description": "我的笔记文件夹"
+    },
+    "linear": {
+      "type": "http",
+      "url": "https://mcp.linear.app/mcp"
+    },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": { "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}" },
+      "disabled": true
+    }
+  }
+}
+```
+
+`${VAR}` 会读取你的 shell 环境中的变量，`${VAR:-default}` 在变量没有值时使用默认值；值没有设置的请求头或变量会被省略。`description` 告诉智能体这个服务器的用途，`cwd` 是命令启动时所在的文件夹，`timeout` 是一次调用最多可以多少秒没有回应（不设置时为十分钟），`"oauth": false` 让远程服务器不要登录。Lorca 会保留它不认识的字段，也会保持你写的顺序。
+
+想让智能体用不到服务器的某些工具，可以在服务器的表单里关掉它们旁边的开关，也可以像 pi 一样写在 `toolExposure` 里：`{ "delete_*": "hidden", "delete_draft": "codemode" }` 会隐藏名字以 `delete_` 开头的所有工具，`delete_draft` 除外，因为写明的名字优先于模式。`"exposure": "hidden"` 会隐藏 `toolExposure` 没有写到的所有工具。
+
+不支持即时注册应用的服务器，可以在 `oauth` 里使用你在它那里注册的应用：`clientId`、`clientSecret`（可以写成 `${SECRET}`），以及注册时填写的 `callbackPort` 或 `callbackUrl`，这样的登录会在 Runner 自己的浏览器里打开。`clientName` 让 Lorca 用另一个名字注册，用于只接受它认识的名字的服务器；`scope` 请求更多权限；服务器指错授权服务器时，`authServerMetadataUrl` 指向正确的那个。服务器回复某次调用需要比当前登录更多的权限时，会请你重新登录，一并授予这些权限。
+
+智能体按服务器的名称调用它的工具，比如 `notes__read_file`。读取类工具立即执行，其余的和其他插件一样要经过[自动审查](/zh/docs/auto-review)。提供资源（比如文件或记录）的服务器还会多出列出和读取资源的工具 `notes__list_mcp_resources` 和 `notes__read_mcp_resource`；二进制资源会存成文件，智能体可以打开。[命令行](/zh/docs/cli#mcp-服务器)管理的也是同一个文件：`lorca mcp add`、`list`、`get`、`remove`、`reload`、`sign-out`，以及从其他应用 `import`。

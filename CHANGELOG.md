@@ -6,6 +6,13 @@ Sparkle shows it in the update window. The Windows and Linux app's are in
 
 ## [Unreleased]
 
+- Group inspectors offer Make Owner, and `lorca chats list` / `chats set-owner` expose the same group ownership from the terminal.
+- Lossless PNG optimizations reduce bundled image sizes without changing their decoded pixels.
+- MCP CLI import and health checks preserve failure exit codes; diagnostic views mask short secret values as well as long ones.
+- MCP resources keep unsupported image formats available as private files instead of dropping their bytes.
+- MCP list waits for an enabled server's in-progress connection before reporting health; invalid enabled servers still fail the check.
+- Mac release builds can bundle a configured relay through `LORCA_DEFAULT_RELAY_URL` without embedding deployment addresses in source; development builds omit that fallback.
+- Phone provider refresh keeps omitted picker catalogs for the same account and relay without replacing selected models; account and relay changes discard old catalog metadata.
 - Bots show deterministic, offline Blobatar portraits across Mac, phone, Windows, and Linux; an encrypted photo still overrides each portrait.
 - Pause stops bot turns and routines account-wide after Devices sync. Each bot can restrict shell, built-in file writes, and plugins; shell and allowed plugins remain capable of writing files.
 - Bots can propose a draft for review. Approve & save writes it to a new workspace file only after confirmation; Decline writes nothing.

@@ -54,24 +54,37 @@ export function BotRow(props: {
   accessorySymbol?: string;
   accessoryTooltip?: string;
   onAccessory?: () => void;
-  onClick?: () => void;
+  onClick?: (event: MouseEvent) => void;
+  onContextMenu?: (event: MouseEvent) => void;
   onAvatarClick?: () => void;
   working?: boolean;
 }) {
   return (
-    <div class={["row", "bot-row", { clickable: !!props.onClick }]} data-label={props.bot.name} onClick={() => props.onClick?.()}>
-      <Avatar
-        content={botAvatar(props.bot)}
-        size={28}
-        working={props.working}
-        onClick={
-          props.onAvatarClick
-            ? () => {
-                props.onAvatarClick?.();
-              }
-            : undefined
-        }
-      />
+    <div
+      class={["row", "bot-row", { clickable: !!props.onClick }]}
+      data-label={props.bot.name}
+      onClick={(event) => props.onClick?.(event)}
+      onContextMenu={(event) => {
+        if (!props.onContextMenu) return;
+        event.preventDefault();
+        event.stopPropagation();
+        props.onContextMenu(event);
+      }}
+    >
+      <span onClick={(event) => event.stopPropagation()}>
+        <Avatar
+          content={botAvatar(props.bot)}
+          size={28}
+          working={props.working}
+          onClick={
+            props.onAvatarClick
+              ? () => {
+                  props.onAvatarClick?.();
+                }
+              : undefined
+          }
+        />
+      </span>
       <div class="row-text">
         <span class="row-title truncate">{props.bot.name}</span>
         <span class="row-subtitle truncate">{props.detail}</span>
@@ -246,6 +259,7 @@ export function ActionRow(props: {
   actionCopied?: boolean;
   /** Gets the click, whose target a menu can pop up under. */
   onAction?: (event: MouseEvent) => void;
+  /** An action before the main one, when the row has two. */
   secondActionTitle?: string;
   onSecondAction?: () => void;
 }) {

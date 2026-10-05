@@ -85,6 +85,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             "relay_update_required": app.relay_update_required.load(std::sync::atomic::Ordering::Relaxed),
             "relay_error": app.relay_problem.lock().unwrap().clone(),
         })),
+        // An app connecting checks for newer public catalogs, unless checked within the hour.
         "bootstrap" => {
             crate::catalog::check_in_background(app);
             crate::marketplace::check_in_background(app);
@@ -386,12 +387,14 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "chats.set_owner" => {
             let chat_id = string(&params, "chat_id")?;
             let bot_id = string(&params, "bot_id")?;
-            app.update_chat_meta(&chat_id, |meta| {
-                if meta.bot_ids.contains(&bot_id) {
-                    meta.owner_bot_id = Some(bot_id.clone());
-                }
-            })
-            .map_err(|e| e.to_string())?;
+            let chat = app.chat(&chat_id).ok_or("Unknown chat")?;
+            if !chat.meta.is_group() {
+                return Err("Only a group has an owner".into());
+            }
+            if !chat.meta.bot_ids.contains(&bot_id) {
+                return Err(format!("{} is not in {}", crate::runtime::name_of(app, &bot_id), app.chat_title(&chat.meta)));
+            }
+            app.update_chat_meta(&chat_id, |meta| meta.owner_bot_id = Some(bot_id.clone())).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "chats.search" => {
@@ -527,7 +530,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 .into_iter()
                 .map(|m| {
                     let mut out = serde_json::to_value(m).unwrap_or_default();
-                    out["installed_on"] = json!(installed_on.iter().filter(|(_, p)| p.iter().any(|s| s.id == m.id)).map(|(id, _)| id.clone()).collect::<Vec<_>>());
+                    // A server from a Runner's mcp.json that happens to share the id is not this plugin.
+                    out["installed_on"] = json!(installed_on.iter().filter(|(_, p)| p.iter().any(|s| s.id == m.id && s.source != crate::plugins::mcp_json::SOURCE)).map(|(id, _)| id.clone()).collect::<Vec<_>>());
                     out
                 })
                 .collect();
@@ -545,6 +549,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 .collect();
             Ok(json!({ "plugins": plugins, "bots": bots }))
         }
+        // Checks the configured marketplace feed now, even within the last check's hour.
         "marketplace.reload" => {
             let changed = crate::marketplace::check(app, true).await?;
             Ok(json!({ "updated": crate::marketplace::current(app).updated, "changed": changed }))
@@ -552,7 +557,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "mcp.parse" => crate::plugins::mcp_json::parse_reply(&string(&params, "text")?),
         verb if verb.starts_with("mcp.") => {
             let runner_id = opt_string(&params, "runner_id");
-            crate::plugins::mcp_json::on_runner(app, runner_id.as_deref(), verb, params.clone()).await
+            Box::pin(crate::plugins::mcp_json::on_runner(app, runner_id.as_deref(), verb, params)).await
         }
         // Plugins are installed per Runner, here or through a sealed request to that Runner.
         "plugins.install" => {
@@ -772,6 +777,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             provider_auth::disconnect(app, &string(&params, "kind")?)?;
             Ok(json!({ "providers": app.credentials.lock().unwrap().statuses() }))
         }
+        // Checks the configured model catalog now, even within the last check's hour.
         "models.reload" => {
             let changed = crate::catalog::check(app, true).await?;
             Ok(json!({ "updated": lorca_models::updated(), "changed": changed }))

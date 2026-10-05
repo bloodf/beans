@@ -21,7 +21,6 @@ impl ReadTool {
     }
 }
 
-
 #[async_trait]
 impl Tool for ReadTool {
     fn name(&self) -> &str {
@@ -55,6 +54,7 @@ impl Tool for ReadTool {
         }
 
         if let Some(mime) = crate::images::file_type(&bytes) {
+            // As a model takes it: converted, turned upright, or scaled down with a note.
             let prepared = tokio::task::spawn_blocking(move || crate::images::prepare(&bytes)).await.map_err(|e| ToolError(e.to_string()))?;
             let content = match prepared {
                 Ok(image) => {
@@ -122,29 +122,43 @@ impl Tool for ReadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
+    use std::sync::Arc;
+
+    /// What reading a file with these bytes gives the model.
+    async fn read(dir: &std::path::Path, name: &str, bytes: &[u8]) -> Vec<ContentPart> {
+        std::fs::write(dir.join(name), bytes).unwrap();
+        ReadTool::new(dir.to_path_buf()).execute("call-1", json!({ "path": name }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap().content
+    }
+
+    fn picture(width: u32, height: u32, format: ImageFormat) -> Vec<u8> {
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(width, height, |x, y| Rgb([(x % 256) as u8, (y % 256) as u8, 90])));
+        let mut bytes = Vec::new();
+        image.write_to(&mut std::io::Cursor::new(&mut bytes), format).unwrap();
+        bytes
+    }
+
+    fn text(parts: &[ContentPart]) -> &str {
+        parts[0].as_text().unwrap()
+    }
 
     #[tokio::test]
-    async fn read_converts_images_and_refuses_truncated_data() {
+    async fn images_go_as_a_model_takes_them() {
         let dir = std::env::temp_dir().join(format!("lorca-read-images-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(2600, 100, |x, y| Rgb([(x % 256) as u8, (y % 256) as u8, 90])));
-        let mut png = Vec::new();
-        image.write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png).unwrap();
-        std::fs::write(dir.join("page.png"), &png).unwrap();
-        let tool = ReadTool::new(dir.clone());
-        let call = |path| tool.execute("call", json!({ "path": path }), CancellationToken::new(), Arc::new(|_| {}));
-        let read = call("page.png").await.unwrap();
-        assert!(read.content[0].as_text().unwrap().contains("displayed at 2000x77"));
-        let ContentPart::Image { data, mime_type } = &read.content[1] else { panic!("missing image") };
-        assert!(matches!(mime_type.as_str(), "image/png" | "image/jpeg"));
-        let decoded = crate::images::prepare_base64(data).unwrap();
-        assert_eq!(decoded.data, *data);
-        std::fs::write(dir.join("cut.png"), &png[..40]).unwrap();
-        let cut = call("cut.png").await.unwrap();
-        assert_eq!(cut.content.len(), 1);
-        assert!(cut.content[0].as_text().unwrap().contains("not attached"));
-        let _ = std::fs::remove_dir_all(dir);
+        let small = read(&dir, "small.png", &picture(64, 48, ImageFormat::Png)).await;
+        assert_eq!(text(&small), "Read image file [image/png]");
+        assert!(matches!(&small[1], ContentPart::Image { mime_type, .. } if mime_type == "image/png"), "{small:?}");
+        let bmp = read(&dir, "old.bmp", &picture(64, 48, ImageFormat::Bmp)).await;
+        assert!(text(&bmp).contains("\n[Image converted from image/bmp to image/"), "{}", text(&bmp));
+        assert!(matches!(&bmp[1], ContentPart::Image { .. }));
+        let page = read(&dir, "page.png", &picture(2600, 100, ImageFormat::Png)).await;
+        assert!(text(&page).ends_with("\n[Image: original 2600x100, displayed at 2000x77. Multiply coordinates by 1.30 to map to original image.]"), "{}", text(&page));
+        let cut = read(&dir, "cut.png", &picture(64, 48, ImageFormat::Png)[..40]).await;
+        assert_eq!(cut.len(), 1, "{cut:?}");
+        assert!(text(&cut).starts_with("Read image file [image/png]: ") && text(&cut).ends_with(", so it is not attached."), "{}", text(&cut));
+        let notes = read(&dir, "cars.txt", b"BMW and Audi\nVolvo").await;
+        assert_eq!(notes, [ContentPart::text("BMW and Audi\nVolvo")], "a text file that starts with BM is text");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

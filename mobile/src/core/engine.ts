@@ -180,7 +180,12 @@ class Engine {
         setChatUsage(data.chat_id, data.usage as ChatUsage);
         break;
       case "relay.status":
-        useStore.setState((s) => ({ relayConnected: !!data.connected, relayUpdateRequired: !!data.update_required, relayError: data.error ?? null, relayUrl: data.url ?? s.relayUrl }));
+        useStore.setState((s) => {
+          const relayUrl = data.url ?? s.relayUrl;
+          const sourceChanged = relayUrl !== s.relayUrl;
+          return { relayConnected: !!data.connected, relayUpdateRequired: !!data.update_required, relayError: data.error ?? null, relayUrl,
+            providers: sourceChanged ? [] : s.providers, models: sourceChanged ? [] : s.models };
+        });
         break;
       case "provider.auth":
         void this.openAuthPage(data.url, "provider", () => core.request("providers.auth.cancel"));

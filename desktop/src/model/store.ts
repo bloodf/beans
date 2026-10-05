@@ -13,6 +13,7 @@ import {
   authorBotID,
   canAddBot,
   canRemoveBot,
+  chatOwner,
   isCustomKind,
   isDM,
   isGroup,
@@ -369,6 +370,7 @@ export class AppStore {
         if (roster.routines) this.routines = roster.routines.map(toRoutine);
         if (roster.auto_review) this.autoReview = toAutoReview(roster.auto_review);
         if (roster.providers) this.providers = toProviders(roster.providers);
+        if (roster.models) this.models = toModels(roster.models);
         const changed: string[] = [];
         this.chats = roster.chats.map((summary) => {
           const existing = this.chat(summary.id);
@@ -1364,6 +1366,15 @@ export class AppStore {
     this.emit({ kind: "chatChanged", chatID });
     this.emit({ kind: "chatsChanged" });
     this.perform("chats.remove_bot", { chat_id: chatID, bot_id: botID });
+  }
+
+  /** Makes a group member the bot holding the work. */
+  setOwner(botID: string, chatID: string): void {
+    const chat = this.chat(chatID);
+    if (!chat || !isGroup(chat) || !chat.botIDs.includes(botID) || chatOwner(chat) === botID) return;
+    this.replaceChat({ ...chat, ownerBotID: botID });
+    this.emit({ kind: "chatChanged", chatID });
+    this.perform("chats.set_owner", { chat_id: chatID, bot_id: botID });
   }
 
   // MARK: - Messages

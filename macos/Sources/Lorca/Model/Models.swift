@@ -465,8 +465,11 @@ struct InstalledPlugin: Identifiable, Hashable {
     var icon: String
     var state: State
     var detail: String
+    /// `mcp.json` for one of the Runner's own MCP servers, which the server sheet edits.
+    var source: String? = nil
 
     var symbolName: String { icon.isEmpty ? "puzzlepiece.extension" : icon }
+    var isMcpServer: Bool { source == "mcp.json" }
 
     var stateColor: NSColor {
         switch state {
@@ -1002,8 +1005,17 @@ struct Chat: Identifiable, Hashable {
     var usage: ChatUsage? = nil
     /// The CLI holds messages older than the ones here; the transcript asks for them by page.
     var hasMore = false
+    /// The group member holding the work, as the CLI last said.
+    var ownerBotID: Bot.ID? = nil
 
     var isGroup: Bool { kind == .group }
+
+    /// A group's owner: the one set, else the first member, as the CLI picks.
+    var owner: Bot.ID? {
+        guard isGroup else { return nil }
+        if let ownerBotID, botIDs.contains(ownerBotID) { return ownerBotID }
+        return botIDs.first
+    }
     var isDM: Bool { kind == .dm }
 
     /// Whether another bot may join. Only groups grow, and never past the cap.

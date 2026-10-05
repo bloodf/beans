@@ -66,7 +66,7 @@ final class CLILauncher {
         var environment = ProcessInfo.processInfo.environment
         environment["RUST_LOG"] = environment["RUST_LOG"] ?? "lorca=info"
         environment["LORCA_HOME"] = AppInfo.defaultCLIHome.path
-        if !AppInfo.isDevelopment, environment["LORCA_DEFAULT_RELAY_URL"] == nil {
+        if !AppInfo.isDevelopment, environment["LORCA_DEFAULT_RELAY_URL"] == nil, !AppInfo.productionRelayURL.isEmpty {
             environment["LORCA_DEFAULT_RELAY_URL"] = AppInfo.productionRelayURL
         }
         worker.ensureRunning(.init(

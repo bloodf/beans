@@ -59,6 +59,7 @@ impl Config {
         self.home.join("plugins")
     }
 
+    /// The MCP servers the user adds themselves, in the format Claude Desktop and Cursor share.
     pub fn mcp_path(&self) -> PathBuf {
         self.home.join("mcp.json")
     }
@@ -75,7 +76,7 @@ impl Config {
 pub struct Settings {
     #[serde(default)]
     pub relay_url: Option<String>,
-    /// A marketplace index to list beside the bundled one.
+    /// An explicit marketplace feed override; otherwise use the selected relay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marketplace_url: Option<String>,
 }
@@ -164,6 +165,7 @@ pub fn write_json_private<T: Serialize>(path: &Path, value: &T) -> anyhow::Resul
     write_private(path, &serde_json::to_vec_pretty(value)?)
 }
 
+/// Writes `bytes` atomically with mode 0600.
 pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

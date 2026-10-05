@@ -181,7 +181,7 @@ export function MainWindow(props: RouteSectionProps) {
     paneLayout.open = undefined;
   });
 
-  // The window's title: the chat's, the pane's, or the app's.
+  // The title: the chat's, the pane's, or the app's; the window's adds " - Lorca".
   const title = createMemo(() => {
     track.chats();
     const current = selection.read();

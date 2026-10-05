@@ -179,6 +179,10 @@ fn inline_image_path(app: &App, id: &str) -> PathBuf {
     app.config.files_dir().join(format!("{id}.inline.json"))
 }
 
+/// The image an attachment shows a model (`images::prepare`): a HEIC photo converted on a Mac, a
+/// rotated one turned upright, a large one scaled down with a note, or why it cannot go. Made
+/// once and kept beside the attachment, failures too, since every turn builds its messages again
+/// and a photo takes a moment to make.
 #[cfg(feature = "runner")]
 pub fn inline_image(app: &App, attachment: &Attachment) -> Result<lorca_agent::images::Inline, String> {
     let kept = inline_image_path(app, &attachment.id);

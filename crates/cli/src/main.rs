@@ -58,10 +58,21 @@ enum Command {
         #[usage(subcommand)]
         command: McpCommand,
     },
-    /// Manage model catalog updates from configured Beans relay.
-    Models { #[usage(subcommand)] command: ReloadCommand },
-    /// Manage marketplace updates from configured Beans relay.
-    Marketplace { #[usage(subcommand)] command: ReloadCommand },
+    /// The marketplace: the plugins and bots Lorca offers to add.
+    Marketplace {
+        #[usage(subcommand)]
+        command: MarketplaceCommand,
+    },
+    /// The model catalog: the models Lorca offers, with their windows, thinking levels, and rates.
+    Models {
+        #[usage(subcommand)]
+        command: ModelsCommand,
+    },
+    /// The account's chats, and the owner of each group.
+    Chats {
+        #[usage(subcommand)]
+        command: ChatsCommand,
+    },
     /// Show identity, Devices, bots, and relay state.
     Status,
     /// Check the local setup.
@@ -122,60 +133,113 @@ enum ProviderCommand {
 }
 
 #[derive(Subcommands, Debug)]
-enum ReloadCommand {
+enum McpCommand {
+    /// List the servers in mcp.json and how each one stands.
+    List,
+    /// Show a server's settings, connect it, and list the tools it offers.
+    Get { name: String },
+    /// Add a server: a command this computer runs, or the URL of a remote server.
+    ///
+    ///   lorca mcp add filesystem npx -y @modelcontextprotocol/server-filesystem ~/Documents
+    ///   lorca mcp add linear https://mcp.linear.app/mcp
+    ///   lorca mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=ghp_… -- docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server
+    #[usage(verbatim_doc_comment)]
+    Add {
+        /// The server's name. Bots call its tools as name__tool.
+        name: String,
+        /// stdio runs a command and http connects to a URL; by default, a URL is http.
+        #[usage(long, short = 't', choices("stdio", "http"))]
+        transport: Option<String>,
+        /// An environment variable for the command, as KEY=value. Repeat it for more.
+        #[usage(long, short = 'e', var)]
+        env: Vec<String>,
+        /// A header for the URL, as "Name: value". Repeat it for more.
+        #[usage(long, short = 'H', var)]
+        header: Vec<String>,
+        /// What the server is for, which bots read beside its tools.
+        #[usage(long)]
+        description: Option<String>,
+        /// Seconds a call may go without an answer or progress; ten minutes when unset.
+        #[usage(long)]
+        timeout: Option<u64>,
+        /// The command and its arguments, or the URL.
+        #[usage(double_dash = "automatic")]
+        target: Vec<String>,
+    },
+    /// Add a server from its JSON, as a README or another app's config writes it.
+    AddJson {
+        name: String,
+        /// One server's JSON, such as {"command": "npx", "args": ["-y", "…"]}.
+        json: String,
+    },
+    /// Remove a server, with its sign-in.
+    Remove { name: String },
+    /// Turn a server on.
+    Enable { name: String },
+    /// Turn a server off: bots no longer see it, and it never starts. Its settings stay.
+    Disable { name: String },
+    /// Sign in to a remote server that asks for it, in this computer's browser.
+    SignIn { name: String },
+    /// Forget the sign-in of a remote server. Its next use asks for a sign-in again.
+    SignOut { name: String },
+    /// Keep one of a server's tools from bots: its name, or a pattern ending in * (delete_*).
+    Hide { name: String, tool: String },
+    /// Offer a tool that was hidden to bots again.
+    Show { name: String, tool: String },
+    /// Read mcp.json again after editing it by hand, so the running lorca serve takes the change.
+    Reload,
+    /// Add the servers from another app's MCP config: Claude Desktop, Claude Code, Cursor,
+    /// Windsurf, VS Code, or Gemini CLI. With no file, from every one of them this computer has.
+    Import { file: Option<PathBuf> },
+}
+
+#[derive(Subcommands, Debug)]
+enum ChatsCommand {
+    /// List the chats: each one's id and bots, and a group's owner.
+    List,
+    /// Make a bot the owner of a group, the member holding the work.
+    ///
+    ///   lorca chats set-owner "Launch room" Developer
+    #[usage(verbatim_doc_comment)]
+    SetOwner {
+        /// The group's title or id, as `lorca chats list` shows it.
+        group: String,
+        /// The bot's name or id.
+        bot: String,
+    },
+}
+
+#[derive(Subcommands, Debug)]
+enum MarketplaceCommand {
+    /// Fetch the configured marketplace feed now, rather than at the next hourly check.
     Reload,
 }
 
 #[derive(Subcommands, Debug)]
-enum McpCommand {
-    /// List server health; exits nonzero if an enabled server is unhealthy.
-    List,
-    Get { name: String },
-    /// Add a command or remote URL. Command arguments follow the command (use -- if needed).
-    Add {
-        name: String,
-        #[usage(double_dash = "automatic")]
-        target: Vec<String>,
-        #[usage(long, choices("stdio", "http"))]
-        transport: Option<String>,
-        /// Set NAME=VALUE in the command environment; repeat for more.
-        #[usage(short = 'e', long)]
-        env: Vec<String>,
-        /// Set NAME=VALUE in HTTP headers; repeat for more.
-        #[usage(short = 'H', long)]
-        header: Vec<String>,
-        #[usage(long)]
-        description: Option<String>,
-        /// Per-call timeout in seconds.
-        #[usage(long)]
-        timeout: Option<u64>,
-    },
-    AddJson { name: String, json: String },
-    Remove { name: String },
-    Enable { name: String },
-    Disable { name: String },
-    Hide { name: String, tool: String },
-    Show { name: String, tool: String },
-    SignIn { name: String },
-    SignOut { name: String },
+enum ModelsCommand {
+    /// Fetch the configured model catalog now, rather than at the next hourly check.
     Reload,
-    /// Import installed apps' MCP servers, or servers from a specified file.
-    Import { file: Option<PathBuf> },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Bare `lorca` lists the commands and touches nothing: the service is `lorca serve`, as the
+    // apps start it, so `lorca` typed to see what it does, a bot's included, never starts a second
+    // one or makes a data folder.
     let Some(command) = cli.command else {
         print!("{}", Cli::render_help(Cli::command(), false).unwrap_or_default());
         return Ok(());
     };
-    let quiet = matches!(command, Command::Mcp { .. } | Command::Models { .. } | Command::Marketplace { .. });
+    // `lorca mcp` and `lorca chats` say how each step went in their own words; the log keeps to
+    // warnings.
+    let quiet = matches!(command, Command::Mcp { .. } | Command::Marketplace { .. } | Command::Models { .. } | Command::Chats { .. });
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| if quiet { "lorca=warn,lorca_agent=warn".into() } else { "lorca=info,lorca_agent=info".into() }))
         .with_target(false)
         .with_writer(std::io::stderr)
         .init();
+
     let config = Config::load(cli.home, cli.port);
     let app = App::load(config)?;
 
@@ -266,9 +330,15 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::Provider { command } => provider(&app, command).await,
-        Command::Mcp { command } => mcp(&app, command).await,
-        Command::Models { command: ReloadCommand::Reload } => reload_feed(&app, "models.reload", lorca::catalog::enable, "model catalog").await,
-        Command::Marketplace { command: ReloadCommand::Reload } => reload_feed(&app, "marketplace.reload", lorca::marketplace::enable, "marketplace").await,
+        // A server's connection runs deep: on a runtime thread, whose stack is twice the main
+        // thread's megabyte on Windows.
+        Command::Mcp { command } => {
+            let app = app.clone();
+            tokio::spawn(async move { mcp(&app, command).await }).await?
+        }
+        Command::Marketplace { command: MarketplaceCommand::Reload } => reload(&app, "marketplace.reload", lorca::marketplace::enable, "marketplace").await,
+        Command::Models { command: ModelsCommand::Reload } => reload(&app, "models.reload", lorca::catalog::enable, "model catalog").await,
+        Command::Chats { command } => chats(&app, command).await,
         Command::Status => {
             let snapshot = app.snapshot();
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
@@ -320,7 +390,7 @@ async fn provider(app: &std::sync::Arc<App>, command: ProviderCommand) -> anyhow
     let result = match serve_call(app.config.port, &method, &params).await? {
         Some(result) => result,
         None => {
-            let result = lorca::api::dispatch(app, &method, params).await;
+            let result = Box::pin(lorca::api::dispatch(app, &method, params)).await;
             flush_outbox_once(app).await;
             result
         }
@@ -328,6 +398,71 @@ async fn provider(app: &std::sync::Arc<App>, command: ProviderCommand) -> anyhow
     let result = result.map_err(|message| anyhow::anyhow!(message))?;
     print_providers(&result["providers"]);
     Ok(())
+}
+
+/// Names groups and bots as the apps show them. A change goes through the running `lorca serve`
+/// when there is one, so the apps see it at once; otherwise here, followed by one sync pass.
+async fn chats(app: &std::sync::Arc<App>, command: ChatsCommand) -> anyhow::Result<()> {
+    match command {
+        ChatsCommand::List => {
+            print_chats(app);
+            Ok(())
+        }
+        ChatsCommand::SetOwner { group, bot } => {
+            let chat = app.find_group(&group).map_err(|message| anyhow::anyhow!("{message} `lorca chats list` shows the groups."))?;
+            let bot = app.find_member(&chat, &bot).map_err(|message| anyhow::anyhow!(message))?;
+            let title = app.chat_title(&chat.meta);
+            if chat.meta.owner() == Some(bot.id.as_str()) {
+                println!("{} is already the owner of {title}.", bot.name);
+                return Ok(());
+            }
+            let params = serde_json::json!({ "chat_id": chat.meta.id, "bot_id": bot.id });
+            let result = match serve_call(app.config.port, "chats.set_owner", &params).await? {
+                Some(result) => result,
+                None => {
+                    let result = Box::pin(lorca::api::dispatch(app, "chats.set_owner", params)).await;
+                    flush_outbox_once(app).await;
+                    result
+                }
+            };
+            result.map_err(|message| anyhow::anyhow!(message))?;
+            println!("{} is now the owner of {title}.", bot.name);
+            Ok(())
+        }
+    }
+}
+
+/// The groups, then the direct chats, each by title: id, title, and a group's bots with its owner.
+fn print_chats(app: &App) {
+    let chats: Vec<lorca::model::ChatMeta> = app.state.lock().unwrap().chats.iter().map(|chat| chat.meta.clone()).collect();
+    if chats.is_empty() {
+        println!("No chats yet.");
+        return;
+    }
+    let mut rows: Vec<(bool, String, String, String)> = chats
+        .iter()
+        .map(|chat| {
+            let detail = if chat.is_group() {
+                chat.bot_ids
+                    .iter()
+                    .map(|id| {
+                        let name = runtime::name_of(app, id);
+                        if chat.owner() == Some(id.as_str()) { format!("{name} (owner)") } else { name }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                "direct chat".to_string()
+            };
+            (!chat.is_group(), app.chat_title(chat), chat.id.clone(), detail)
+        })
+        .collect();
+    rows.sort_by_key(|row| (row.0, row.1.to_lowercase()));
+    let id_width = rows.iter().map(|row| row.2.chars().count()).max().unwrap_or(0);
+    let title_width = rows.iter().map(|row| row.1.chars().count()).max().unwrap_or(0).min(32);
+    for (_, title, id, detail) in rows {
+        println!("  {id:<id_width$}  {title:<title_width$}  {detail}");
+    }
 }
 
 fn read_api_key() -> anyhow::Result<String> {
@@ -355,7 +490,408 @@ fn print_providers(providers: &serde_json::Value) {
     }
 }
 
-async fn reload_feed(app: &std::sync::Arc<App>, method: &str, enable: fn(&App), what: &str) -> anyhow::Result<()> {
+/// An `mcp.*` request to the running `lorca serve` when there is one, so the app sees the change
+/// at once and the server runs there; else here. Says which it was.
+async fn mcp_call(app: &std::sync::Arc<App>, method: &str, params: serde_json::Value) -> anyhow::Result<(serde_json::Value, bool)> {
+    let (result, live) = match serve_call(app.config.port, method, &params).await? {
+        Some(result) => (result, true),
+        // Boxed, as `main`'s future lives on the main thread's stack, a megabyte on Windows.
+        None => (Box::pin(lorca::api::dispatch(app, method, params)).await, false),
+    };
+    Ok((result.map_err(|message| anyhow::anyhow!(message))?, live))
+}
+
+async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<()> {
+    use serde_json::json;
+    let reloading = matches!(command, McpCommand::Reload);
+    match command {
+        McpCommand::List | McpCommand::Reload => {
+            let method = if reloading { "mcp.reload" } else { "mcp.list" };
+            let (mut list, live) = mcp_call(app, method, json!({})).await?;
+            // Await enabled servers that are still connecting before reporting health.
+            let names: Vec<String> = list["servers"].as_array().into_iter().flatten()
+                .filter(|s| s["enabled"] != false && !s["problem"].is_string() && (!live || s["status"]["state"] != "ready"))
+                .filter_map(|s| s["name"].as_str().map(str::to_string)).collect();
+            if !names.is_empty() {
+                println!("Connecting {}…", if names.len() == 1 { names[0].clone() } else { format!("{} servers", names.len()) });
+                for result in futures::future::join_all(names.iter().map(|name| mcp_call(app, "mcp.reconnect", json!({ "name": name, "fresh": false })))).await {
+                    result?;
+                }
+                list = mcp_call(app, "mcp.list", json!({})).await?.0;
+            }
+            print_mcp_list(&list);
+            // A script can tell that something needs looking at.
+            if mcp_needs_attention(&list) {
+                anyhow::bail!("One or more enabled MCP servers are not ready.");
+            }
+            Ok(())
+        }
+        McpCommand::Get { name } => {
+            let server = mcp_connect(app, &name).await?;
+            print_mcp_server(&server);
+            Ok(())
+        }
+        McpCommand::Add { name, transport, env, header, description, timeout, target } => {
+            let config = mcp_config(transport.as_deref(), &env, &header, description, timeout, &target)?;
+            let (saved, _) = mcp_call(app, "mcp.save", json!({ "name": name, "config": config })).await?;
+            println!("Added {name} to {}.", saved["path"].as_str().unwrap_or("mcp.json"));
+            let server = mcp_connect(app, &name).await?;
+            println!("{}", mcp_outcome(&server));
+            Ok(())
+        }
+        McpCommand::AddJson { name, json } => {
+            let servers = lorca::plugins::mcp_json::parse_servers(&json).map_err(|e| anyhow::anyhow!(e))?;
+            let entry = match servers.as_slice() {
+                [(_, entry)] => entry.clone().map_err(|e| anyhow::anyhow!(e))?,
+                many => anyhow::bail!("That JSON has {} servers. Give one server's JSON, or add them all with `lorca mcp import <file>`.", many.len()),
+            };
+            let config = serde_json::Value::from(&entry);
+            let (saved, _) = mcp_call(app, "mcp.save", json!({ "name": name, "config": config })).await?;
+            println!("Added {name} to {}.", saved["path"].as_str().unwrap_or("mcp.json"));
+            let server = mcp_connect(app, &name).await?;
+            println!("{}", mcp_outcome(&server));
+            Ok(())
+        }
+        McpCommand::Remove { name } => {
+            mcp_call(app, "mcp.remove", json!({ "name": name })).await?;
+            println!("Removed {name}.");
+            Ok(())
+        }
+        McpCommand::Enable { name } => {
+            mcp_call(app, "mcp.set_enabled", json!({ "name": name, "enabled": true })).await?;
+            println!("Turned {name} on.");
+            let server = mcp_connect(app, &name).await?;
+            println!("{}", mcp_outcome(&server));
+            Ok(())
+        }
+        McpCommand::Disable { name } => {
+            mcp_call(app, "mcp.set_enabled", json!({ "name": name, "enabled": false })).await?;
+            println!("Turned {name} off. Bots no longer see it.");
+            Ok(())
+        }
+        McpCommand::SignIn { name } => {
+            eprintln!("Opening the {name} sign-in page in the browser. Finish signing in there…");
+            // The sign-in ends in the process that started it, which answers once it has.
+            mcp_call(app, "mcp.sign_in", json!({ "name": name, "wait": true })).await?;
+            println!("✔ Signed in to {name}.");
+            Ok(())
+        }
+        McpCommand::SignOut { name } => {
+            mcp_call(app, "mcp.sign_out", json!({ "name": name })).await?;
+            println!("Signed out of {name}. Its next use asks for a sign-in again.");
+            Ok(())
+        }
+        McpCommand::Hide { name, tool } => {
+            mcp_call(app, "mcp.hide_tool", json!({ "name": name, "tool": tool, "hidden": true })).await?;
+            println!("Hid {tool} of {name}. Bots no longer see it.");
+            Ok(())
+        }
+        McpCommand::Show { name, tool } => {
+            mcp_call(app, "mcp.hide_tool", json!({ "name": name, "tool": tool, "hidden": false })).await?;
+            println!("Bots see {name}'s {tool} again.");
+            Ok(())
+        }
+        McpCommand::Import { file } => mcp_import(app, file).await,
+    }
+}
+
+/// Connects a server, or takes the connection it has, and answers how it stands, with its tools.
+/// Without a running `lorca serve` the server ran in this process, which stops it before leaving.
+async fn mcp_connect(app: &std::sync::Arc<App>, name: &str) -> anyhow::Result<serde_json::Value> {
+    eprintln!("Connecting {name}…");
+    let (got, live) = mcp_call(app, "mcp.reconnect", serde_json::json!({ "name": name, "fresh": false })).await?;
+    if !live {
+        if let Some(id) = got["server"]["id"].as_str() {
+            app.mcp.forget(id);
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }
+    Ok(got["server"].clone())
+}
+
+/// What `lorca mcp add` says once the server has had its first try.
+fn mcp_outcome(server: &serde_json::Value) -> String {
+    let name = server["name"].as_str().unwrap_or("The server");
+    let status = &server["status"];
+    match status["state"].as_str() {
+        Some("ready") => match server["tool_count"].as_u64() {
+            Some(count) => format!("✔ {name} is ready with {count} tool{}.", if count == 1 { "" } else { "s" }),
+            None => format!("✔ {name} is ready."),
+        },
+        Some("needs_auth") => format!("! {name} needs a sign-in: run `lorca mcp sign-in {name}`, or sign in from Settings › Plugins in the app."),
+        Some(_) => format!("✘ {name} did not connect: {}", status["detail"].as_str().unwrap_or("unknown error")),
+        None => match server["problem"].as_str() {
+            Some(problem) => format!("✘ {problem}"),
+            None => format!("{name} is off."),
+        },
+    }
+}
+
+/// The entry `lorca mcp add` writes: a command with its environment, or a URL with its headers.
+/// What follows a command is its arguments, flags included (`npx -y …`, `docker run -e …`); what
+/// follows a URL is read as this command's own flags, which people write after it.
+fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], description: Option<String>, timeout: Option<u64>, target: &[String]) -> anyhow::Result<serde_json::Value> {
+    let Some(first) = target.first() else { anyhow::bail!("Give the command to run, or the server's URL, after the name.") };
+    let is_url = first.starts_with("http://") || first.starts_with("https://");
+    let (mut transport, mut env, mut headers, mut description, mut timeout) = (transport.map(str::to_string), env.to_vec(), headers.to_vec(), description, timeout);
+    let mut target = target.to_vec();
+    if is_url && transport.as_deref() != Some("stdio") {
+        let mut rest = target.split_off(1).into_iter();
+        while let Some(word) = rest.next() {
+            let (flag, attached) = match word.split_once('=') {
+                Some((flag, value)) if flag.starts_with("--") => (flag.to_string(), Some(value.to_string())),
+                _ => (word.clone(), None),
+            };
+            let mut value = || attached.clone().or_else(|| rest.next()).ok_or_else(|| anyhow::anyhow!("{flag} needs a value."));
+            match flag.as_str() {
+                "-H" | "--header" => headers.push(value()?),
+                "-e" | "--env" => env.push(value()?),
+                "--description" => description = Some(value()?),
+                "--timeout" => timeout = Some(value()?.parse().map_err(|_| anyhow::anyhow!("--timeout is a number of seconds."))?),
+                "-t" | "--transport" => transport = Some(value()?),
+                other => anyhow::bail!("A remote server is one URL, and {other:?} follows it. Flags go before or after the URL; a command's arguments follow the command."),
+            }
+        }
+    }
+    let transport = transport.as_deref();
+    if transport.is_some_and(|transport| !["stdio", "http"].contains(&transport)) {
+        anyhow::bail!("--transport is stdio or http.");
+    }
+    let remote = match transport {
+        Some(transport) => transport != "stdio",
+        None => target.len() == 1 && is_url,
+    };
+    let mut config = serde_json::Map::new();
+    if remote {
+        if target.len() > 1 {
+            anyhow::bail!("A remote server is one URL; {} more words follow it.", target.len() - 1);
+        }
+        if !env.is_empty() {
+            anyhow::bail!("-e sets a command's environment. A remote server takes headers: -H \"Name: value\".");
+        }
+        config.insert("type".into(), "http".into());
+        config.insert("url".into(), first.clone().into());
+        let mut map = serde_json::Map::new();
+        for header in headers {
+            let (name, value) = header.split_once(':').ok_or_else(|| anyhow::anyhow!("A header is \"Name: value\", not {header:?}."))?;
+            map.insert(name.trim().to_string(), value.trim().into());
+        }
+        if !map.is_empty() {
+            config.insert("headers".into(), map.into());
+        }
+    } else {
+        if !headers.is_empty() {
+            anyhow::bail!("-H sets a remote server's headers. A command takes its environment: -e KEY=value.");
+        }
+        config.insert("command".into(), first.clone().into());
+        if target.len() > 1 {
+            config.insert("args".into(), target[1..].to_vec().into());
+        }
+        let mut map = serde_json::Map::new();
+        for variable in env {
+            let (name, value) = variable.split_once('=').ok_or_else(|| anyhow::anyhow!("An environment variable is KEY=value, not {variable:?}."))?;
+            map.insert(name.trim().to_string(), value.into());
+        }
+        if !map.is_empty() {
+            config.insert("env".into(), map.into());
+        }
+    }
+    if let Some(description) = description.filter(|d| !d.trim().is_empty()) {
+        config.insert("description".into(), description.trim().into());
+    }
+    // The file reads a timeout of 1000 or more as milliseconds, as Gemini CLI writes it, so a long one
+    // is written that way.
+    if let Some(seconds) = timeout.filter(|seconds| *seconds > 0) {
+        config.insert("timeout".into(), (if seconds >= 1000 { seconds * 1000 } else { seconds }).into());
+    }
+    Ok(serde_json::Value::Object(config))
+}
+
+/// Adds every server another app's config has, skipping names mcp.json already has.
+async fn mcp_import(app: &std::sync::Arc<App>, file: Option<PathBuf>) -> anyhow::Result<()> {
+    use serde_json::json;
+    let named = file.is_some();
+    let sources: Vec<(String, PathBuf)> = match file {
+        Some(path) => vec![(path.display().to_string(), path)],
+        None => lorca::plugins::mcp_json::known_sources().into_iter().map(|(app, path)| (app.to_string(), path)).collect(),
+    };
+    if sources.is_empty() {
+        println!("No other app's MCP servers on this computer. Name a file: lorca mcp import <file>");
+        return Ok(());
+    }
+    let (list, _) = mcp_call(app, "mcp.list", json!({})).await?;
+    if let Some(error) = list["error"].as_str() { anyhow::bail!("{error}"); }
+    let mut names: std::collections::HashSet<String> = list["servers"].as_array().into_iter().flatten().filter_map(|s| s["name"].as_str().map(str::to_string)).collect();
+    for (label, path) in sources {
+        // A file named here may hold servers any way a README writes them; an app's settings file
+        // holds them under its servers' object, or has none.
+        let read = |text: String| if named { lorca::plugins::mcp_json::parse_servers(&text) } else { lorca::plugins::mcp_json::servers_in_app_config(&text) };
+        let servers = match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(read) {
+            Ok(servers) if servers.is_empty() => {
+                println!("{label}: no MCP servers.");
+                continue;
+            }
+            Ok(servers) => servers,
+            Err(error) if named => anyhow::bail!("{label}: {error}"),
+            Err(error) => {
+                println!("{label}: {error}");
+                continue;
+            }
+        };
+        let (mut added, mut skipped) = (Vec::new(), Vec::new());
+        for (name, entry) in servers {
+            let Some(name) = name else {
+                skipped.push("a server with no name (add it with `lorca mcp add-json <name> <json>`)".to_string());
+                continue;
+            };
+            match entry {
+                _ if names.contains(&name) => skipped.push(format!("{name}: mcp.json has it already")),
+                Err(problem) if named => anyhow::bail!("{label}: {name}: {problem}"),
+                Err(problem) => skipped.push(format!("{name}: {problem}")),
+                Ok(entry) => match mcp_call(app, "mcp.save", json!({ "name": name, "config": serde_json::Value::from(&entry) })).await {
+                    Ok(_) => {
+                        names.insert(name.clone());
+                        added.push(name);
+                    }
+                    Err(error) if named => return Err(error),
+                    Err(error) => skipped.push(format!("{name}: {error}")),
+                },
+            }
+        }
+        match added.as_slice() {
+            [] => println!("{label}: nothing to add."),
+            added => println!("{label}: added {}.", added.join(", ")),
+        }
+        for line in skipped {
+            println!("  skipped {line}");
+        }
+    }
+    Ok(())
+}
+
+/// `npx -y "My Folder"`: a command and its arguments as a shell would take them.
+fn command_line(server: &serde_json::Value) -> String {
+    let config = &server["config"];
+    if let Some(url) = config["url"].as_str() {
+        return url.to_string();
+    }
+    let words = std::iter::once(config["command"].as_str().unwrap_or_default()).chain(config["args"].as_array().into_iter().flatten().filter_map(|arg| arg.as_str()));
+    words
+        .map(|word| if word.is_empty() || word.contains(|c: char| c.is_whitespace() || c == '"' || c == '\'') { format!("\"{}\"", word.replace('"', "\\\"")) } else { word.to_string() })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A value whose name says it is a key, token, or password, cut to its last four characters.
+fn masked(name: &str, value: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    let secret = ["key", "token", "secret", "password", "auth", "credential"].iter().any(|word| lower.contains(word));
+    if !secret || (value.starts_with("${") && value.ends_with('}')) {
+        return value.to_string();
+    }
+    let count = value.chars().count();
+    if count <= 8 {
+        return "••••".to_string();
+    }
+    format!("••••{}", value.chars().skip(count - 4).collect::<String>())
+}
+
+/// How a server stands, in a few words.
+fn mcp_state(server: &serde_json::Value) -> String {
+    if let Some(problem) = server["problem"].as_str() {
+        return format!("✘ {problem}");
+    }
+    if server["enabled"] == false {
+        return "– off".into();
+    }
+    let status = &server["status"];
+    match status["state"].as_str() {
+        Some("ready") => match server["tool_count"].as_u64() {
+            Some(count) => format!("✔ {count} tool{}", if count == 1 { "" } else { "s" }),
+            None => "· not connected yet".into(),
+        },
+        Some("needs_auth") => "! needs a sign-in".into(),
+        Some("connecting") => format!("… {}", status["detail"].as_str().unwrap_or("connecting")),
+        Some(_) => format!("✘ {}", status["detail"].as_str().unwrap_or("error")),
+        None => String::new(),
+    }
+}
+
+/// Whether `mcp.json` does not read, or a server that is on cannot run, failed, or needs a
+/// sign-in or setup.
+fn mcp_needs_attention(list: &serde_json::Value) -> bool {
+    list["error"].is_string()
+        || list["servers"].as_array().into_iter().flatten().any(|server| {
+            server["enabled"] != false && (server["problem"].is_string() || server["status"]["state"] != "ready")
+        })
+}
+
+fn print_mcp_list(list: &serde_json::Value) {
+    let path = list["path"].as_str().unwrap_or("mcp.json");
+    if let Some(error) = list["error"].as_str() {
+        println!("✘ {error}\n");
+    }
+    let servers = list["servers"].as_array().cloned().unwrap_or_default();
+    if servers.is_empty() {
+        println!("No MCP servers in {path} yet. Add one with `lorca mcp add <name> <command or URL>`.");
+        return;
+    }
+    println!("{path}\n");
+    let width = servers.iter().filter_map(|s| s["name"].as_str()).map(|n| n.chars().count()).max().unwrap_or(0);
+    let states: Vec<String> = servers.iter().map(mcp_state).collect();
+    let state_width = states.iter().map(|s| s.chars().count()).max().unwrap_or(0).min(40);
+    for (server, state) in servers.iter().zip(&states) {
+        let name = server["name"].as_str().unwrap_or_default();
+        let target: String = command_line(server).chars().take(90).collect();
+        println!("  {name:<width$}  {state:<state_width$}  {target}");
+    }
+}
+
+fn print_mcp_server(server: &serde_json::Value) {
+    let config = &server["config"];
+    println!("{}", server["name"].as_str().unwrap_or_default());
+    let row = |label: &str, value: &str| println!("  {label:<9} {value}");
+    if config["url"].is_string() {
+        row("URL", config["url"].as_str().unwrap_or_default());
+        for (name, value) in config["headers"].as_object().into_iter().flatten() {
+            row("Header", &format!("{name}: {}", masked(name, value.as_str().unwrap_or_default())));
+        }
+    } else {
+        row("Command", &command_line(server));
+        for (name, value) in config["env"].as_object().into_iter().flatten() {
+            row("Env", &format!("{name}={}", masked(name, value.as_str().unwrap_or_default())));
+        }
+        if let Some(cwd) = config["cwd"].as_str() {
+            row("Folder", cwd);
+        }
+    }
+    if let Some(description) = config["description"].as_str() {
+        row("About", description);
+    }
+    if let Some(timeout) = config["timeout"].as_u64() {
+        // 1000 or more is milliseconds, as the file reads it.
+        let seconds = if timeout >= 1000 { timeout.div_ceil(1000) } else { timeout };
+        row("Timeout", &format!("{seconds} s without an answer or progress"));
+    }
+    row("State", &mcp_state(server));
+    if server["status"]["state"] == "needs_auth" {
+        row("", &format!("Run `lorca mcp sign-in {}`.", server["name"].as_str().unwrap_or_default()));
+    }
+    let tools = server["tools"].as_array().cloned().unwrap_or_default();
+    if !tools.is_empty() {
+        println!("  Tools");
+        let width = tools.iter().filter_map(|t| t["name"].as_str()).map(|n| n.chars().count()).max().unwrap_or(0).min(36);
+        for tool in tools {
+            let about: String = tool["description"].as_str().unwrap_or_default().chars().take(100).collect();
+            let hidden = if tool["hidden"] == true { " (hidden from bots)" } else { "" };
+            println!("    {:<width$}  {about}{hidden}", tool["name"].as_str().unwrap_or_default());
+        }
+    }
+}
+
+/// `lorca models reload` and `lorca marketplace reload`: checks the configured feed now,
+/// through the running `lorca serve`, or with none, here into its cache for the next start.
+async fn reload(app: &std::sync::Arc<App>, method: &str, enable: fn(&App), what: &str) -> anyhow::Result<()> {
     let (reply, live) = match serve_call(app.config.port, method, &serde_json::json!({})).await? {
         Some(reply) => (reply, true),
         None => {
@@ -373,142 +909,6 @@ async fn reload_feed(app: &std::sync::Arc<App>, method: &str, enable: fn(&App), 
     Ok(())
 }
 
-async fn mcp_call(app: &std::sync::Arc<App>, verb: &str, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
-    let result = match serve_call(app.config.port, verb, &body).await? {
-        Some(answer) => answer,
-        None => lorca::api::dispatch(app, verb, body).await,
-    };
-    result.map_err(anyhow::Error::msg)
-}
-
-async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<()> {
-    use serde_json::{json, Value};
-    let reload = matches!(command, McpCommand::Reload);
-    let enable = matches!(command, McpCommand::Enable { .. });
-    let hide = matches!(command, McpCommand::Hide { .. });
-    match command {
-        McpCommand::List | McpCommand::Reload => {
-            let verb = if reload { "mcp.reload" } else { "mcp.list" };
-            let mut result = mcp_call(app, verb, json!({})).await?;
-            if let Some(error) = result["error"].as_str() { anyhow::bail!("{error}"); }
-            let names: Vec<String> = result["servers"].as_array().into_iter().flatten()
-                .filter(|server| server["enabled"] == true && server["problem"].is_null())
-                .filter_map(|server| server["name"].as_str().map(str::to_owned)).collect();
-            for name in names {
-                mcp_call(app, "mcp.reconnect", json!({"name":name,"fresh":false})).await?;
-            }
-            result = mcp_call(app, "mcp.list", json!({})).await?;
-            if let Some(error) = result["error"].as_str() { anyhow::bail!("{error}"); }
-            let mut unhealthy = false;
-            for server in result["servers"].as_array().into_iter().flatten() {
-                let state = if server["enabled"] != true { "off" } else {
-                    server["problem"].as_str().or(server["status"]["state"].as_str()).unwrap_or("error")
-                };
-                println!("{}: {state}", server["name"].as_str().unwrap_or("?"));
-                unhealthy |= server["enabled"] == true && state != "ready";
-            }
-            if unhealthy { anyhow::bail!("One or more enabled MCP servers are not ready."); }
-        }
-        McpCommand::Get { name } => {
-            mcp_call(app, "mcp.reconnect", json!({"name":name, "fresh":false})).await?;
-            let result = mcp_call(app, "mcp.get", json!({"name":name})).await?;
-            let server = &result["server"];
-            println!("{}: {}", name, server["status"]["state"].as_str().or(server["problem"].as_str()).unwrap_or("off"));
-            for tool in server["tools"].as_array().into_iter().flatten() {
-                println!("  {}{}", tool["name"].as_str().unwrap_or("?"), if tool["hidden"] == true { " (hidden)" } else { "" });
-            }
-        }
-        McpCommand::Add { name, target, transport, env, header, description, timeout } => {
-            let first = target.first().ok_or_else(|| anyhow::anyhow!("Give command or URL"))?;
-            let remote = transport.as_deref() == Some("http") || (transport.is_none() && (first.starts_with("http://") || first.starts_with("https://")));
-            let mut config = if remote {
-                if target.len() != 1 { anyhow::bail!("Remote MCP server takes one URL"); }
-                json!({"type":"http", "url":first})
-            } else { json!({"command":first,"args": &target[1..]}) };
-            if remote && !env.is_empty() { anyhow::bail!("--env requires stdio transport"); }
-            if !remote && !header.is_empty() { anyhow::bail!("--header requires HTTP transport"); }
-            if !env.is_empty() { config["env"] = Value::Object(parse_mcp_pairs(env, "env")?); }
-            if !header.is_empty() { config["headers"] = Value::Object(parse_mcp_pairs(header, "header")?); }
-            if let Some(description) = description { config["description"] = json!(description); }
-            if let Some(timeout) = timeout {
-                if !(1..1000).contains(&timeout) { anyhow::bail!("--timeout must be 1–999 seconds"); }
-                config["timeout"] = json!(timeout);
-            }
-            mcp_call(app, "mcp.save", json!({"name":name,"config":config})).await?;
-            println!("Saved {name}.");
-        }
-        McpCommand::AddJson { name, json: text } => {
-            let parsed = lorca::plugins::mcp_json::parse_servers(&text).map_err(anyhow::Error::msg)?;
-            let [(_, Ok(entry))] = parsed.as_slice() else { anyhow::bail!("Expected one valid MCP server") };
-            mcp_call(app, "mcp.save", json!({"name":name,"config":Value::from(entry)})).await?;
-            println!("Saved {name}.");
-        }
-        McpCommand::Remove { name } => { mcp_call(app, "mcp.remove", json!({"name":name})).await?; println!("Removed {name}."); }
-        McpCommand::Enable { name } | McpCommand::Disable { name } => {
-            let enabled = enable;
-            mcp_call(app, "mcp.set_enabled", json!({"name":name,"enabled":enabled})).await?;
-            println!("{} {name}.", if enabled { "Enabled" } else { "Disabled" });
-        }
-        McpCommand::Hide { name, tool } | McpCommand::Show { name, tool } => {
-            let hidden = hide;
-            mcp_call(app, "mcp.hide_tool", json!({"name":name,"tool":tool,"hidden":hidden})).await?;
-            println!("{} {tool}.", if hidden { "Hid" } else { "Showed" });
-        }
-        McpCommand::SignIn { name } => { let result = mcp_call(app, "mcp.sign_in", json!({"name":name,"wait":true})).await?; println!("{}", result["message"].as_str().unwrap_or("Signed in.")); }
-        McpCommand::SignOut { name } => { mcp_call(app, "mcp.sign_out", json!({"name":name})).await?; println!("Signed out of {name}."); }
-        McpCommand::Import { file } => {
-            let explicit = file.is_some();
-            let sources = if let Some(file) = file { vec![(file.display().to_string(), file)] } else {
-                lorca::plugins::mcp_json::known_sources().into_iter()
-                    .map(|(label, path)| (label.to_owned(), path)).collect()
-            };
-            let existing = mcp_call(app, "mcp.list", json!({})).await?;
-            if let Some(error) = existing["error"].as_str() { anyhow::bail!("{error}"); }
-            let mut names: std::collections::HashSet<String> = existing["servers"].as_array().into_iter().flatten()
-                .filter_map(|server| server["name"].as_str().map(str::to_owned)).collect();
-            for (source, path) in sources {
-                let text = match std::fs::read_to_string(&path) {
-                    Ok(text) => text,
-                    Err(error) if !explicit => { eprintln!("Skipped {source}: {error}"); continue; }
-                    Err(error) => return Err(error.into()),
-                };
-                let parsed = if explicit {
-                    lorca::plugins::mcp_json::parse_servers(&text)
-                } else {
-                    lorca::plugins::mcp_json::servers_in_app_config(&text)
-                };
-                let parsed = match parsed {
-                    Ok(parsed) => parsed,
-                    Err(error) if !explicit => { eprintln!("Skipped {source}: {error}"); continue; }
-                    Err(error) => anyhow::bail!("{source}: {error}"),
-                };
-                for (name, config) in parsed {
-                    let Some(name) = name else { continue };
-                    if names.contains(&name) { println!("Skipped {name} (already exists)."); continue; }
-                    let config = match config {
-                        Ok(config) => Value::from(&config),
-                        Err(error) if !explicit => { eprintln!("Skipped {name} from {source}: {error}"); continue; }
-                        Err(error) => anyhow::bail!("{source}: {name}: {error}"),
-                    };
-                    mcp_call(app, "mcp.save", json!({"name":name,"config":config})).await?;
-                    println!("Imported {name} from {source}.");
-                    names.insert(name);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn parse_mcp_pairs(items: Vec<String>, flag: &str) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
-    let mut values = serde_json::Map::new();
-    for item in items {
-        let (key, value) = item.split_once('=').filter(|(key, _)| !key.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("--{flag} requires NAME=VALUE"))?;
-        values.insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
-    }
-    Ok(values)
-}
 
 /// One request to the `lorca serve` on `port`; `None` when nothing listens there.
 async fn serve_call(port: u16, method: &str, params: &serde_json::Value) -> anyhow::Result<Option<Result<serde_json::Value, String>>> {
@@ -607,4 +1007,15 @@ async fn doctor(app: &std::sync::Arc<App>) {
     }
     let credentials = app.credentials.lock().unwrap().connected_kinds();
     ok("providers", !credentials.is_empty(), if credentials.is_empty() { "none connected".into() } else { credentials.join(", ") });
+    let (servers, problems, error) = {
+        let store = app.plugins.lock().unwrap();
+        let problems: Vec<String> = store.mcp.servers.iter().filter_map(|server| server.problem().map(|problem| format!("{}: {problem}", server.name))).collect();
+        (store.mcp.servers.len(), problems, store.mcp.error.clone())
+    };
+    let path = app.config.mcp_path().display().to_string();
+    match error {
+        Some(error) => ok("mcp.json", false, error),
+        None if problems.is_empty() => ok("mcp.json", true, format!("{servers} server{} in {path}", if servers == 1 { "" } else { "s" })),
+        None => ok("mcp.json", false, problems.join("; ")),
+    }
 }

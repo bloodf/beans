@@ -544,7 +544,6 @@ pub fn script_bash(app: &App, workdir: std::path::PathBuf) -> lorca_agent::tools
     lorca_agent::tools::BashTool::for_script(workdir).with_extras(bot_shell_extras(app))
 }
 
-
 /// A turn's reach into the sessions: a bot reaches the ones it started, in the chat it runs in.
 pub struct TurnSessions {
     app: Arc<App>,

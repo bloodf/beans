@@ -4,11 +4,10 @@
 //! in-flight turns or grow process memory across refreshes.
 
 mod catalog;
-
 mod types;
 
-pub use types::{Cost, ThinkingLevel, Usage};
 pub use catalog::{install, parse, reset, updated, Catalog, BUNDLED};
+pub use types::{Cost, ThinkingLevel, Usage};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -231,5 +230,13 @@ mod tests {
         // Zen can turn DeepSeek V4 Pro's thinking off; on Go it thinks at least at high.
         assert_eq!(find("opencode", "deepseek-v4-pro").unwrap().clamp_level(Off), Some(Off));
         assert_eq!(find("opencode-go", "deepseek-v4-pro").unwrap().clamp_level(Off), Some(High));
+    }
+
+    #[test]
+    fn every_provider_has_a_review_model_it_lists() {
+        for provider in ["deepseek", "anthropic", "chatgpt", "grok", "opencode", "opencode-go"] {
+            let review = review_model(provider).unwrap_or_else(|| panic!("{provider} has no review model"));
+            assert!(find(provider, &review).is_some(), "{provider}/{review}");
+        }
     }
 }

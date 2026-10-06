@@ -2,6 +2,12 @@ import XCTest
 @testable import Lorca
 
 final class CustomProviderTests: XCTestCase {
+    func testDurinDoorPresetHasExplicitIdentityAndNoEndpoint() {
+        let preset = CustomProviderPreset.cloud.first { $0.name == "DurinDoor" }
+        XCTAssertEqual(preset?.integration, "durindoor")
+        XCTAssertEqual(preset?.baseURL, "")
+    }
+
     func testTheNoteNamesTheURLTheCLICalls() {
         XCTAssertEqual(CustomAPI.chatCompletions.endpoint(for: " https://openrouter.ai/api/v1/ "), "https://openrouter.ai/api/v1/chat/completions")
         XCTAssertEqual(CustomAPI.chatCompletions.endpoint(for: "http://localhost:11434/v1/chat/completions"), "http://localhost:11434/v1/chat/completions")

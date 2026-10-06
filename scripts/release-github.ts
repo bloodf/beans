@@ -65,6 +65,9 @@ function classify(name: string, version: string, core: string): Omit<ReleaseArti
   if (cli) return { component: cli[2] ? "checksum" : "cli", platform: cli[1].replace(/\.(?:tar\.gz|zip)$/, ""), version: core };
   if (name === `Beans-${version}.apk`) return { component: "android", platform: "android", version };
   if (name === `Beans-${version}.ipa`) return { component: "ios", platform: "ios", version };
+  if (name === `Beans-${version}-store.ipa`) return { component: "ios-store", platform: "ios", version };
+  if (name === `Beans-${version}.aab`) return { component: "android-store", platform: "android", version };
+  if (/^eas-(github|production|testflight)\.json$/.test(name)) return { component: "provenance", platform: "mobile", version };
   if ([`Beans-${version}.zip`, `Beans-${version}.dmg`, "appcast.xml"].includes(name)) return { component: "macos", platform: "macos-aarch64", version };
   const desktop = name.match(new RegExp(`^(?:update-(windows-amd64|linux-amd64|linux-arm64)\\.json|lorca-${version.replaceAll(".", "\\.")}-(windows-amd64|linux-amd64|linux-arm64)\\.tar\\.gz|install-(linux-amd64|linux-arm64)\\.sh)$`));
   if (desktop) return { component: "desktop", platform: desktop[1] ?? desktop[2] ?? desktop[3], version };
@@ -79,7 +82,8 @@ function required(version: string, scope: ReleaseScope): string[] {
   return [
     ...server,
     ...["macos-aarch64.tar.gz", "linux-aarch64.tar.gz", "linux-x86_64.tar.gz", "windows-x86_64.zip"].flatMap((suffix) => [`lorca-cli-${suffix}`, `lorca-cli-${suffix}.sha256`]),
-    `Beans-${version}.zip`, `Beans-${version}.dmg`, "appcast.xml", `Beans-${version}.apk`, `Beans-${version}.ipa`,
+    `Beans-${version}.zip`, `Beans-${version}.dmg`, "appcast.xml", `Beans-${version}.apk`, `Beans-${version}.aab`, `Beans-${version}-store.ipa`,
+    "eas-github.json", "eas-production.json", "eas-testflight.json",
     ...["windows-amd64", "linux-amd64", "linux-arm64"].flatMap((platform) => [`update-${platform}.json`, `lorca-${version}-${platform}.tar.gz`]),
     `Lorca Setup ${version}.exe`, `lorca_${version}_amd64.deb`, `lorca_${version}_arm64.deb`, "install-linux-amd64.sh", "install-linux-arm64.sh",
   ];
@@ -120,6 +124,22 @@ export async function buildReleaseManifest(tag: string, revision: string, direct
     const text = await Bun.file(join(directory, name)).text();
     if (text !== `${artifact.sha256}  ${artifact.name}\n` && text !== `${artifact.sha256} *${artifact.name}\n`) {
       throw new Error(`CLI checksum differs from archive: ${name}`);
+    }
+  }
+  if (scope === "all") {
+    const identities = new Set<string>();
+    for (const profile of ["github", "production", "testflight"]) {
+      const proof = await Bun.file(join(directory, `eas-${profile}.json`)).json();
+      const name = `Beans-${version}${profile === "testflight" ? "-store.ipa" : profile === "production" ? ".aab" : ".apk"}`;
+      const artifact = artifacts.find((entry) => entry.name === name)!;
+      if (proof.schema !== 1 || proof.revision !== revision || proof.version !== version || proof.profile !== profile ||
+          proof.artifact !== name || proof.sha256 !== artifact.sha256 || proof.size !== artifact.size ||
+          !/^[a-f0-9-]{36}$/i.test(proof.project ?? "") || !/^[a-f0-9-]{36}$/i.test(proof.buildId ?? "") ||
+          !/^[1-9]\d*$/.test(proof.buildNumber ?? "") || Number(proof.buildNumber) > 2_100_000_000 ||
+          proof.platform !== (profile === "testflight" ? "IOS" : "ANDROID") || identities.has(proof.buildId)) {
+        throw new Error(`Invalid EAS artifact provenance: ${profile}`);
+      }
+      identities.add(proof.buildId);
     }
   }
   return { schema: 1, version, revision, protocol: await releaseProtocol(), artifacts };

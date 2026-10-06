@@ -843,3 +843,5 @@
 "Have the bot read this now. A command it is running moves to the background." = "让智能体现在就读到这条消息。它正在运行的命令会转到后台。";
 "Waiting for the bot to finish its step." = "正在等智能体完成当前这一步。";
 "Beans" = "Beans";
+
+"Localhost belongs to this Device. Setup checks access here; each Runner must reach the same URL. Access admitted does not prove the key was recognized when keyless mode is enabled." = "localhost 指此设备。设置会检查本机访问权限；每个运行端都必须能访问同一 URL。允许无密钥访问时，访问获准不代表所填密钥已被识别。";

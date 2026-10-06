@@ -322,6 +322,11 @@ fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking:
     match provider.api {
         CustomApi::ChatCompletions => {
             let mut adapter = OpenAiCompatProvider::new(kind, &provider.base_url, &provider.api_key, model).with_thinking(thinking);
+            if provider.integration == Some(crate::credentials::CustomIntegration::Durindoor) {
+                adapter = adapter.without_redirects();
+                adapter.reasoning_effort_none = true;
+                adapter.supports_tools = provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.tools).unwrap_or(true);
+            }
             adapter.supports_images = info.images;
             adapter.info = Some(info);
             // OpenAI's own field; servers such as Gemini's refuse a request with one they lack.
@@ -351,7 +356,9 @@ fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking:
 fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> ModelInfo {
     let listed = provider.models.iter().find(|entry| entry.id == model);
     let known = models::find_any(model);
+    let durindoor = provider.integration == Some(crate::credentials::CustomIntegration::Durindoor);
     let thinking = match known.as_ref() {
+        _ if durindoor => ThinkingMode::Effort,
         Some(known) => known.thinking,
         None if provider.api == CustomApi::Messages => ThinkingMode::Budget,
         None => ThinkingMode::Effort,
@@ -362,12 +369,12 @@ fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> Mode
         provider: kind.to_string(),
         context_window: listed.and_then(|entry| entry.context_window).or_else(|| known.as_ref().map(|entry| entry.context_window)).unwrap_or(0),
         max_output: listed.and_then(|entry| entry.max_output).or_else(|| known.as_ref().map(|entry| entry.max_output)).unwrap_or(0),
-        reasoning: known.as_ref().is_some_and(|entry| entry.reasoning),
+        reasoning: listed.and_then(|entry| entry.reasoning).unwrap_or_else(|| !durindoor && known.as_ref().is_some_and(|entry| entry.reasoning)),
         images: listed.and_then(|entry| entry.images).or_else(|| known.as_ref().map(|entry| entry.images)).unwrap_or(false),
         rates: Rates { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 },
         tiers: Vec::new(),
         thinking,
-        levels: crate::credentials::custom_levels(model),
+        levels: listed.map(|entry| provider.levels(entry)).unwrap_or_else(|| if durindoor { Vec::new() } else { crate::credentials::custom_levels(model) }),
         wire: None,
     }
 }
@@ -480,11 +487,11 @@ mod tests {
     }
 
     fn model(id: &str) -> CustomModel {
-        CustomModel { id: id.into(), name: None, context_window: None, max_output: None, images: None }
+        CustomModel { id: id.into(), name: None, context_window: None, max_output: None, images: None, ..Default::default() }
     }
 
     fn add_custom(app: &App, kind: &str, api: CustomApi, models: Vec<CustomModel>) {
-        let provider = CustomProvider { name: "Lab".into(), api, base_url: "http://127.0.0.1:9/v1".into(), api_key: String::new(), models, created_at: 1 };
+        let provider = CustomProvider { name: "Lab".into(), api, base_url: "http://127.0.0.1:9/v1".into(), api_key: String::new(), models, created_at: 1, integration: None };
         app.credentials.lock().unwrap().custom.insert(kind.into(), provider);
     }
 
@@ -507,6 +514,20 @@ mod tests {
         add_custom(app, "custom:proxy", CustomApi::Messages, vec![model("anthropic/claude-haiku-4-5")]);
         assert_eq!(review_model(app, "custom:proxy"), ("anthropic/claude-haiku-4-5".into(), Some(ThinkingLevel::Off)));
         assert_eq!(review_model(app, "custom:gone"), (String::new(), None));
+    }
+
+    #[test]
+    fn durindoor_runtime_honors_declared_metadata_and_rejects_tool_incompatible_models() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let listed = CustomModel { context_window: Some(200_000), max_output: Some(32_000), images: Some(true), reasoning: Some(false), tools: Some(true), ..model("alias") };
+        add_custom(app, "custom:gateway", CustomApi::ChatCompletions, vec![listed, CustomModel { tools: Some(false), ..model("no-tools") }]);
+        app.credentials.lock().unwrap().custom.get_mut("custom:gateway").unwrap().integration = Some(crate::credentials::CustomIntegration::Durindoor);
+        let provider = provider_for(app, "custom:gateway", None, Some(ThinkingLevel::High)).unwrap();
+        let info = provider.model_info().unwrap();
+        assert_eq!((info.context_window, info.max_output, info.images, info.reasoning), (200_000, 32_000, true, false));
+        assert!(info.levels.is_empty());
+        assert!(provider_for(app, "custom:gateway", Some("no-tools"), None).is_ok(), "tool-free models.ask and reviews can construct this adapter");
     }
 
     #[test]
@@ -579,7 +600,7 @@ mod tests {
         for (api, path, body, line) in cases {
             let (root, server) = answer_once(body);
             let kind = format!("custom:keyless-{}", path.len());
-            let provider = CustomProvider { name: "Keyless".into(), api, base_url: format!("{root}{path}"), api_key: String::new(), models: vec![model("m")], created_at: 1 };
+            let provider = CustomProvider { name: "Keyless".into(), api, base_url: format!("{root}{path}"), api_key: String::new(), models: vec![model("m")], created_at: 1, integration: None };
             app.credentials.lock().unwrap().custom.insert(kind.clone(), provider);
             let mut stream = provider_for(app, &kind, None, None).unwrap().stream(request(), CancellationToken::new()).await;
             while stream.next().await.is_some() {}

@@ -1,6 +1,7 @@
 // Simplified Chinese. The key is the English text passed to L(); `bun run l10n` checks this table.
 
 export const zh: Record<string, string> = {
+  "Localhost belongs to this Device. Setup checks access here; each Runner must reach the same URL. Access admitted does not prove the key was recognized when keyless mode is enabled.": "localhost 指此设备。设置会检查本机访问权限；每个运行端都必须能访问同一 URL。允许无密钥访问时，访问获准不代表所填密钥已被识别。",
   " · @ to mention": " · 输入 @ 可提及智能体",
   " · jobs wait on the relay": " · 任务在中继上等待",
   ", ": "、",

@@ -22,6 +22,8 @@ final class CustomProviderViewController: SheetViewController {
     private let store = AppStore.shared
     /// The provider being edited; nil adds one.
     private let kind: ProviderCredential.Kind?
+    private let integration: String?
+    private var durindoor: Bool { integration == "durindoor" }
     /// Runs with the provider's kind once it is saved.
     private let onSave: (ProviderCredential.Kind) -> Void
 
@@ -87,6 +89,7 @@ final class CustomProviderViewController: SheetViewController {
 
     private init(existing: ProviderCredential?, preset: CustomProviderPreset?, apiKey: String, onSave: @escaping (ProviderCredential.Kind) -> Void) {
         kind = existing?.kind
+        integration = existing?.integration ?? preset?.integration
         self.onSave = onSave
         models = existing?.models ?? []
         selected = Set(models.map(\.id))
@@ -159,6 +162,10 @@ final class CustomProviderViewController: SheetViewController {
         form.translatesAutoresizingMaskIntoConstraints = false
         form.columnSpacing = 10
         form.rowSpacing = 8
+        if durindoor {
+            form.row(at: 0).isHidden = true
+            form.row(at: 1).isHidden = true
+        }
         form.row(at: 3).topPadding = -4
         for row in 0..<form.numberOfRows { form.row(at: row).yPlacement = .center }
         // The labels' column is as wide as the longest label; the controls take the rest.
@@ -168,6 +175,12 @@ final class CustomProviderViewController: SheetViewController {
         form.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
 
         let models = modelsSection()
+        if durindoor {
+            let customize = NSButton(title: L("Models"), target: self, action: #selector(customizeModels))
+            contentStack.addArrangedSubview(customize)
+            models.isHidden = true
+            models.identifier = NSUserInterfaceItemIdentifier("customizeModels")
+        }
         contentStack.addArrangedSubview(models)
         models.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
 
@@ -192,10 +205,19 @@ final class CustomProviderViewController: SheetViewController {
         super.viewDidAppear()
         // A preset needs its key next; an empty sheet starts at the name.
         guard kind == nil else { return }
-        if nameField.stringValue.isEmpty {
+        if durindoor {
+            view.window?.makeFirstResponder(baseURLField)
+        } else if nameField.stringValue.isEmpty {
             view.window?.makeFirstResponder(nameField)
         } else {
             keyField.focus()
+        }
+    }
+
+    @objc private func customizeModels() {
+        if let section = contentStack.arrangedSubviews.first(where: { $0.identifier?.rawValue == "customizeModels" }) {
+            section.isHidden.toggle()
+            fitSheetToContent()
         }
     }
 
@@ -288,7 +310,7 @@ final class CustomProviderViewController: SheetViewController {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             do {
-                let listed = try await AppStore.shared.listCustomModels(name: name, api: api, baseURL: root, apiKey: key)
+                let listed = try await AppStore.shared.listCustomModels(name: name, api: api, baseURL: root, apiKey: key, integration: self?.integration)
                 guard let self, generation == self.fetchGeneration else { return }
                 self.take(listed)
             } catch {
@@ -309,7 +331,7 @@ final class CustomProviderViewController: SheetViewController {
             reloadEntries()
             return
         }
-        if selected.isEmpty && listed.count <= 8 {
+        if selected.isEmpty && (durindoor || listed.count <= 8) {
             selected = Set(listed.map(\.id))
             defaultID = listed.first?.id
         }
@@ -424,7 +446,7 @@ final class CustomProviderViewController: SheetViewController {
     /// and offers the server's host as the name.
     private func updateEndpoint() {
         baseURLField.placeholderString = api.baseURLPlaceholder
-        endpointNote.stringValue = baseURL.isEmpty ? L("Beans adds %@ to it.", api.path) : L("Requests go to %@.", api.endpoint(for: baseURL))
+        endpointNote.stringValue = durindoor ? L("Localhost belongs to this Device. Setup checks access here; each Runner must reach the same URL. Access admitted does not prove the key was recognized when keyless mode is enabled.") : baseURL.isEmpty ? L("Beans adds %@ to it.", api.path) : L("Requests go to %@.", api.endpoint(for: baseURL))
         nameField.placeholderString = suggestedName ?? "OpenRouter"
         if kind == nil, keyField.stringValue.isEmpty {
             keyField.placeholderString = CustomProviderPreset.matching(baseURL)?.keyPlaceholder ?? L("Optional for a server on your network")
@@ -444,7 +466,7 @@ final class CustomProviderViewController: SheetViewController {
             guard let self else { return }
             do {
                 let saved = try await self.store.saveCustomProvider(
-                    kind: self.kind, name: name, api: api, baseURL: baseURL, apiKey: apiKey, models: ids)
+                    kind: self.kind, name: name, api: api, baseURL: baseURL, apiKey: apiKey, models: ids, integration: self.integration)
                 try Task.checkCancellation()
                 self.spinner.stopAnimation(nil)
                 self.status.textColor = .systemGreen

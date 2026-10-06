@@ -75,7 +75,7 @@ pub struct OfferedModel {
 
 
 /// A model a custom provider offers, with what its server's model list said about it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CustomModel {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,6 +87,31 @@ pub struct CustomModel {
     /// Whether it takes images.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_can_disable: Option<bool>,
+}
+
+/// Integration identity is independent of the editable name and endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CustomIntegration {
+    Durindoor,
+}
+
+impl CustomIntegration {
+    pub fn parse(value: Option<&str>) -> Result<Option<Self>, String> {
+        match value {
+            None | Some("") => Ok(None),
+            Some("durindoor") => Ok(Some(Self::Durindoor)),
+            Some(_) => Err("Unknown provider integration".into()),
+        }
+    }
 }
 
 /// A server the user added that speaks one of the wire protocols Lorca has: a gateway, another
@@ -102,9 +127,47 @@ pub struct CustomProvider {
     /// The models bots can pick, in the user's order; the first is the default.
     pub models: Vec<CustomModel>,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<CustomIntegration>,
 }
 
 impl CustomProvider {
+    /// DurinDoor translates OpenAI effort words to these documented native formats.
+    /// Unknown or absent formats never receive speculative reasoning parameters.
+    pub fn levels(&self, model: &CustomModel) -> Vec<lorca_models::ThinkingLevel> {
+        use lorca_models::ThinkingLevel::{Off, Minimal, Low, Medium, High, XHigh, Max};
+        if self.integration != Some(CustomIntegration::Durindoor) {
+            return custom_levels(&model.id);
+        }
+        if model.reasoning != Some(true) { return Vec::new(); }
+        let mut levels = match model.thinking_format.as_deref() {
+            Some("openai") => vec![Minimal, Low, Medium, High, XHigh],
+            Some("claude-adaptive") => vec![Low, Medium, High, Max],
+            Some("claude-budget") => vec![Low, Medium, High, XHigh, Max],
+            Some("gemini-level") => vec![Minimal, Low, Medium, High],
+            Some("gemini-budget" | "qwen" | "hunyuan" | "step") => vec![Low, Medium, High],
+            Some("kimi") => vec![Low, Medium, High, Max],
+            Some("deepseek") => if model.id.contains("deepseek-v4.") { vec![Low, Medium, High, XHigh, Max] } else if model.id.contains("deepseek-v4-") { vec![High, Max] } else { vec![High] },
+            Some("opencode" | "ollama") => vec![Low, Medium, High, Max],
+            Some("commandcode") => vec![Low, Medium, High, XHigh, Max],
+            Some("openai-low-high-max") => vec![Low, High, Max],
+            Some("zai" | "minimax") => vec![Low],
+            _ => return Vec::new(),
+        };
+        let id = model.id.to_ascii_lowercase();
+        if matches!(model.thinking_format.as_deref(), Some("openai")) && (id.contains("gpt-6-sol") || id.contains("gpt-6-luna") || id.contains("gpt-6-astra")) {
+            levels = vec![Low, Medium, High, XHigh, Max];
+        } else if model.thinking_format.as_deref() == Some("openai") && (id.contains("gpt-5.6-sol") || id.contains("gpt-5.6-terra") || id.contains("gpt-5.6-luna")) {
+            levels.push(Max);
+        } else if model.thinking_format.as_deref() == Some("claude-adaptive") && id.contains("opus-5-5") {
+            levels = vec![Low, Medium, High, XHigh, Max];
+        } else if model.thinking_format.as_deref() == Some("kimi") && id.contains("kimi-k3") {
+            levels = vec![Max];
+        }
+        if model.thinking_can_disable == Some(true) && !matches!(model.thinking_format.as_deref(), Some("gemini-level" | "commandcode" | "openai-low-high-max")) { levels.insert(0, Off); }
+        levels
+    }
+
     /// Preserve the user's model order and manually entered ids while extending the server's
     /// list. Refresh metadata for ids the server still advertises.
     pub fn merge_discovered_models(&mut self, discovered: Vec<CustomModel>) -> bool {
@@ -263,7 +326,7 @@ impl Credentials {
             return provider
                 .models
                 .iter()
-                .map(|model| OfferedModel { id: model.id.clone(), name: model.name.clone().unwrap_or_else(|| model.id.clone()), levels: custom_levels(&model.id) })
+                .map(|model| OfferedModel { id: model.id.clone(), name: model.name.clone().unwrap_or_else(|| model.id.clone()), levels: provider.levels(model) })
                 .collect();
         }
         lorca_models::for_provider(kind).into_iter().map(|model| OfferedModel { id: model.id.clone(), name: model.name.clone(), levels: model.levels.clone() }).collect()
@@ -318,7 +381,8 @@ impl Credentials {
                 base_url: Some(provider.base_url.clone()),
                 name: Some(provider.name.clone()),
                 api: Some(provider.api),
-                models: provider.models.iter().map(|model| StatusModel { model: model.clone(), levels: custom_levels(&model.id) }).collect(),
+                integration: provider.integration,
+                models: provider.models.iter().map(|model| StatusModel { model: model.clone(), levels: provider.levels(model) }).collect(),
             }
         });
         built_in.chain(custom).collect()
@@ -363,6 +427,31 @@ mod tests {
     }
 
     #[test]
+    fn durindoor_thinking_is_declared_and_unknown_formats_never_guess() {
+        use lorca_models::ThinkingLevel::{Off, Low, Medium, High, XHigh, Max};
+        let mut gateway = custom("Renamed", 1);
+        gateway.integration = Some(CustomIntegration::Durindoor);
+        let mut model = CustomModel { id: "combo".into(), reasoning: Some(true), thinking_format: Some("claude-adaptive".into()), thinking_can_disable: Some(false), ..Default::default() };
+        assert_eq!(gateway.levels(&model), [Low, Medium, High, Max]);
+        model.thinking_can_disable = Some(true);
+        assert_eq!(gateway.levels(&model), [Off, Low, Medium, High, Max]);
+        model.id = "cx/gpt-6-sol".into();
+        model.thinking_format = Some("openai".into());
+        model.thinking_can_disable = Some(false);
+        assert_eq!(gateway.levels(&model), [Low, Medium, High, XHigh, Max]);
+        model.thinking_format = Some("future-format".into());
+        assert!(gateway.levels(&model).is_empty());
+        model.thinking_format = None;
+        assert!(gateway.levels(&model).is_empty());
+        model.reasoning = Some(false);
+        model.thinking_format = Some("openai".into());
+        assert!(gateway.levels(&model).is_empty());
+        let legacy: CustomProvider = serde_json::from_value(serde_json::json!({"name":"Legacy","api":"chat-completions","base_url":"http://localhost/v1","models":[{"id":"unknown"}],"created_at":1})).unwrap();
+        assert_eq!(legacy.integration, None);
+        assert_eq!(legacy.levels(&legacy.models[0]), custom_levels("unknown"));
+    }
+
+    #[test]
     fn merge_takes_the_later_change_of_each_kind() {
         let mut ours = Credentials { deepseek: key("old"), anthropic: key("ours"), ..Default::default() };
         ours.changed_at.insert("deepseek".into(), 1.0);
@@ -393,15 +482,15 @@ mod tests {
     }
 
     fn custom(name: &str, created_at: i64) -> CustomProvider {
-        let models = vec![CustomModel { id: "m".into(), name: None, context_window: None, max_output: None, images: None }];
-        CustomProvider { name: name.into(), api: CustomApi::ChatCompletions, base_url: "http://lab/v1".into(), api_key: String::new(), models, created_at }
+        let models = vec![CustomModel { id: "m".into(), name: None, context_window: None, max_output: None, images: None, ..Default::default() }];
+        CustomProvider { name: name.into(), api: CustomApi::ChatCompletions, base_url: "http://lab/v1".into(), api_key: String::new(), models, created_at, integration: None }
     }
     #[test]
     fn discovered_models_extend_user_order_without_changing_connection() {
         let mut provider = custom("Lab", 1);
         provider.api_key = "secret".into();
         let selected = provider.models[0].clone();
-        let new = CustomModel { id: "new".into(), name: Some("New".into()), context_window: Some(128_000), max_output: None, images: Some(true) };
+        let new = CustomModel { id: "new".into(), name: Some("New".into()), context_window: Some(128_000), max_output: None, images: Some(true), ..Default::default() };
         assert!(provider.merge_discovered_models(vec![new.clone(), selected.clone(), new.clone()]));
         assert_eq!(provider.models, [selected.clone(), new.clone()]);
         assert_eq!((provider.base_url.as_str(), provider.api_key.as_str()), ("http://lab/v1", "secret"));
@@ -415,7 +504,7 @@ mod tests {
         local.custom.insert("custom:lab".into(), custom("Lab", 1));
         local.changed_at.insert("custom:lab".into(), 3.0);
         let mut refreshed = local.clone();
-        refreshed.custom.get_mut("custom:lab").unwrap().merge_discovered_models(vec![CustomModel { id: "new".into(), name: None, context_window: None, max_output: None, images: None }]);
+        refreshed.custom.get_mut("custom:lab").unwrap().merge_discovered_models(vec![CustomModel { id: "new".into(), name: None, context_window: None, max_output: None, images: None, ..Default::default() }]);
         refreshed.changed_at.insert("custom:lab".into(), 4.0);
         local.custom.get_mut("custom:lab").unwrap().name = "User edit".into();
         local.changed_at.insert("custom:lab".into(), 5.0);
@@ -428,7 +517,7 @@ mod tests {
     fn offered_models_follow_custom_order_and_catalog_levels() {
         let mut credentials = Credentials::default();
         let mut lab = custom("Lab", 1);
-        lab.models.push(CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus".into()), context_window: None, max_output: None, images: None });
+        lab.models.push(CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus".into()), context_window: None, max_output: None, images: None, ..Default::default() });
         credentials.custom.insert("custom:lab".into(), lab);
         let models = credentials.models("custom:lab");
         assert_eq!(models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["m", "anthropic/claude-opus-5"]);
@@ -477,7 +566,7 @@ mod tests {
     fn each_provider_offers_the_models_its_menu_lists() {
         let mut credentials = Credentials::default();
         let mut lab = custom("Lab", 1);
-        lab.models.push(CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus 5".into()), context_window: None, max_output: None, images: None });
+        lab.models.push(CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus 5".into()), context_window: None, max_output: None, images: None, ..Default::default() });
         credentials.custom.insert("custom:lab".into(), lab);
 
         // The catalog's, its default first.

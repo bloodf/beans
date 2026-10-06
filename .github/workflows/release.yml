@@ -1,7 +1,5 @@
 name: Release Beans
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -17,16 +15,15 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: beans-release-${{ github.event.release.tag_name || inputs.tag }}
+  group: beans-release-${{ inputs.tag }}
   cancel-in-progress: false
 jobs:
   prepare:
-    if: github.repository == 'bloodf/beans' && (github.event_name == 'workflow_dispatch' || (!github.event.release.prerelease && !github.event.release.draft && startsWith(github.event.release.tag_name, 'beans-v')))
+    if: github.repository == 'bloodf/beans'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.release.outputs.version }}
       revision: ${{ steps.release.outputs.revision }}
-      build_number: ${{ steps.release.outputs.build_number }}
       core_version: ${{ steps.release.outputs.core_version }}
       tag: ${{ steps.release.outputs.tag }}
       scope: ${{ steps.release.outputs.scope }}
@@ -35,14 +32,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          ref: ${{ inputs.tag }}
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - id: release
         name: Validate published tag, exact source and update signing key
         env:
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
-          SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || 'server' }}
+          TAG: ${{ inputs.tag }}
+          SCOPE: ${{ inputs.scope }}
           GH_TOKEN: ${{ github.token }}
           BEANS_UPDATE_PRIVATE_KEY: ${{ secrets.BEANS_UPDATE_PRIVATE_KEY }}
         run: |
@@ -57,7 +54,6 @@ jobs:
           echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#beans-v}" >> "$GITHUB_OUTPUT"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
-          echo "build_number=$(date +%s)" >> "$GITHUB_OUTPUT"
           echo "core_version=$(bun -e 'import { coreVersion } from "./scripts/release-github.ts"; console.log(await coreVersion())')" >> "$GITHUB_OUTPUT"
           if [[ $SCOPE == server ]]; then
             echo 'core_matrix={"include":[{"name":"linux-aarch64","target":"aarch64-unknown-linux-musl","os":"ubuntu-latest","zig":true},{"name":"linux-x86_64","target":"x86_64-unknown-linux-musl","os":"ubuntu-latest","zig":true}]}' >> "$GITHUB_OUTPUT"
@@ -69,24 +65,19 @@ jobs:
       - name: Validate full-platform signing prerequisites
         if: steps.release.outputs.scope == 'all'
         env:
-          BEANS_ANDROID_KEYSTORE_BASE64: ${{ secrets.BEANS_ANDROID_KEYSTORE_BASE64 }}
-          BEANS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.BEANS_ANDROID_KEYSTORE_PASSWORD }}
-          BEANS_ANDROID_KEY_ALIAS: ${{ secrets.BEANS_ANDROID_KEY_ALIAS }}
-          BEANS_ANDROID_KEY_PASSWORD: ${{ secrets.BEANS_ANDROID_KEY_PASSWORD }}
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          BEANS_EXPO_OWNER: ${{ vars.BEANS_EXPO_OWNER }}
+          BEANS_EXPO_PROJECT_ID: ${{ vars.BEANS_EXPO_PROJECT_ID }}
+          BEANS_APPLE_TEAM_ID: ${{ vars.BEANS_APPLE_TEAM_ID }}
           BEANS_MAC_CERTIFICATE_P12: ${{ secrets.BEANS_MAC_CERTIFICATE_P12 }}
           BEANS_MAC_CERTIFICATE_PASSWORD: ${{ secrets.BEANS_MAC_CERTIFICATE_PASSWORD }}
           BEANS_APPLE_NOTARY_KEY_P8: ${{ secrets.BEANS_APPLE_NOTARY_KEY_P8 }}
           BEANS_APPLE_NOTARY_KEY_ID: ${{ secrets.BEANS_APPLE_NOTARY_KEY_ID }}
           BEANS_APPLE_ISSUER_ID: ${{ secrets.BEANS_APPLE_ISSUER_ID }}
-          BEANS_IOS_CERTIFICATE_P12: ${{ secrets.BEANS_IOS_CERTIFICATE_P12 }}
-          BEANS_IOS_CERTIFICATE_PASSWORD: ${{ secrets.BEANS_IOS_CERTIFICATE_PASSWORD }}
-          BEANS_IOS_APP_PROFILE_BASE64: ${{ secrets.BEANS_IOS_APP_PROFILE_BASE64 }}
-          BEANS_IOS_NOTIFY_PROFILE_BASE64: ${{ secrets.BEANS_IOS_NOTIFY_PROFILE_BASE64 }}
-          BEANS_APPLE_TEAM_ID: ${{ secrets.BEANS_APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           missing=0
-          for name in BEANS_ANDROID_KEYSTORE_BASE64 BEANS_ANDROID_KEYSTORE_PASSWORD BEANS_ANDROID_KEY_ALIAS BEANS_ANDROID_KEY_PASSWORD BEANS_MAC_CERTIFICATE_P12 BEANS_MAC_CERTIFICATE_PASSWORD BEANS_APPLE_NOTARY_KEY_P8 BEANS_APPLE_NOTARY_KEY_ID BEANS_APPLE_ISSUER_ID BEANS_IOS_CERTIFICATE_P12 BEANS_IOS_CERTIFICATE_PASSWORD BEANS_IOS_APP_PROFILE_BASE64 BEANS_IOS_NOTIFY_PROFILE_BASE64 BEANS_APPLE_TEAM_ID; do
+          for name in EXPO_TOKEN BEANS_EXPO_OWNER BEANS_EXPO_PROJECT_ID BEANS_APPLE_TEAM_ID BEANS_MAC_CERTIFICATE_P12 BEANS_MAC_CERTIFICATE_PASSWORD BEANS_APPLE_NOTARY_KEY_P8 BEANS_APPLE_NOTARY_KEY_ID BEANS_APPLE_ISSUER_ID; do
             if [[ -z ${!name} ]]; then echo "::error::Required release secret is missing: $name"; missing=1; fi
           done
           [[ $missing == 0 ]]
@@ -290,122 +281,52 @@ jobs:
           if-no-files-found: error
       - if: always()
         run: security delete-keychain "$RUNNER_TEMP/beans-release.keychain-db" || true
-  android:
+  mobile:
     needs: prepare
     if: needs.prepare.outputs.scope == 'all'
     runs-on: ubuntu-latest
+    environment: release-build
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [github, production, testflight]
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      BEANS_EXPO_OWNER: ${{ vars.BEANS_EXPO_OWNER }}
+      BEANS_EXPO_PROJECT_ID: ${{ vars.BEANS_EXPO_PROJECT_ID }}
+      BEANS_APPLE_TEAM_ID: ${{ vars.BEANS_APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.revision }}
       - uses: oven-sh/setup-bun@v2
-      - uses: actions/setup-java@v5
+      - uses: expo/expo-github-action@v8
         with:
-          distribution: temurin
-          java-version: '17'
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android,x86_64-linux-android
-      - run: cargo install cargo-ndk --locked
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
       - run: bun install --frozen-lockfile && bun install --cwd mobile --frozen-lockfile
-      - name: Materialize private Android signing inputs
+      - name: Build and verify completed exact-source EAS artifact
         env:
-          KEYSTORE: ${{ secrets.BEANS_ANDROID_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.BEANS_ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.BEANS_ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.BEANS_ANDROID_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          umask 077
-          printf '%s' "$KEYSTORE" | base64 --decode > "$RUNNER_TEMP/beans.keystore"
-          printf 'BEANS_ANDROID_KEYSTORE=%s\nBEANS_ANDROID_KEYSTORE_PASSWORD=%s\nBEANS_ANDROID_KEY_ALIAS=%s\nBEANS_ANDROID_KEY_PASSWORD=%s\n' "$RUNNER_TEMP/beans.keystore" "$STORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > "$RUNNER_TEMP/android-signing.env"
-      - name: Build signed APK only
-        env:
-          BEANS_ANDROID_ENV: ${{ runner.temp }}/android-signing.env
-          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
-        run: bun run android:release
+          PROFILE: ${{ matrix.profile }}
+          REVISION: ${{ needs.prepare.outputs.revision }}
+        run: bun run scripts/release-eas.ts build "$PROFILE" "$REVISION" dist/mobile-assets
       - uses: actions/upload-artifact@v7
         with:
-          name: android
-          path: dist/android/Beans-*.apk
+          name: mobile-${{ matrix.profile }}
+          path: dist/mobile-assets/*
           if-no-files-found: error
-  ios:
-    needs: prepare
-    if: needs.prepare.outputs.scope == 'all'
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.prepare.outputs.revision }}
-      - uses: oven-sh/setup-bun@v2
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim
-      - run: bun install --frozen-lockfile && bun install --cwd mobile --frozen-lockfile
-      - name: Install ephemeral iOS distribution signing and explicit profiles
-        env:
-          CERTIFICATE: ${{ secrets.BEANS_IOS_CERTIFICATE_P12 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.BEANS_IOS_CERTIFICATE_PASSWORD }}
-          APP_PROFILE: ${{ secrets.BEANS_IOS_APP_PROFILE_BASE64 }}
-          NOTIFY_PROFILE: ${{ secrets.BEANS_IOS_NOTIFY_PROFILE_BASE64 }}
-          TEAM: ${{ secrets.BEANS_APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          umask 077
-          keychain="$RUNNER_TEMP/beans-ios.keychain-db"
-          password=$(openssl rand -hex 32)
-          echo "::add-mask::$password"
-          printf '%s' "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/ios.p12"
-          security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$password" "$keychain"
-          security import "$RUNNER_TEMP/ios.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
-          security list-keychains -d user -s "$keychain"
-          profiles="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
-          mkdir -p "$profiles"
-          printf '%s' "$APP_PROFILE" | base64 --decode > "$profiles/beans-app.mobileprovision"
-          printf '%s' "$NOTIFY_PROFILE" | base64 --decode > "$profiles/beans-notify.mobileprovision"
-          security cms -D -i "$profiles/beans-app.mobileprovision" > "$RUNNER_TEMP/app-profile.plist"
-          security cms -D -i "$profiles/beans-notify.mobileprovision" > "$RUNNER_TEMP/notify-profile.plist"
-          app_name=$(plutil -extract Name raw "$RUNNER_TEMP/app-profile.plist")
-          notify_name=$(plutil -extract Name raw "$RUNNER_TEMP/notify-profile.plist")
-          app_uuid=$(plutil -extract UUID raw "$RUNNER_TEMP/app-profile.plist")
-          notify_uuid=$(plutil -extract UUID raw "$RUNNER_TEMP/notify-profile.plist")
-          echo "BEANS_APPLE_TEAM_ID=$TEAM" >> "$GITHUB_ENV"
-          echo "BEANS_IOS_APP_PROFILE_NAME=$app_name" >> "$GITHUB_ENV"
-          echo "BEANS_IOS_NOTIFY_PROFILE_NAME=$notify_name" >> "$GITHUB_ENV"
-          echo "BEANS_IOS_EXPORT_OPTIONS=$RUNNER_TEMP/ExportOptions.plist" >> "$GITHUB_ENV"
-          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
-          <?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>
-          <key>method</key><string>release-testing</string><key>destination</key><string>export</string>
-          <key>teamID</key><string>$TEAM</string><key>signingStyle</key><string>manual</string>
-          <key>manageAppVersionAndBuildNumber</key><false/><key>provisioningProfiles</key><dict>
-          <key>ai.amoena.beans</key><string>$app_uuid</string><key>ai.amoena.beans.notify</key><string>$notify_uuid</string>
-          </dict></dict></plist>
-          PLIST
-      - name: Build signed ad-hoc IPA only (no store submission)
-        env:
-          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
-        run: bun run release-ios
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ios
-          path: dist/ios/Beans-*.ipa
-          if-no-files-found: error
-      - if: always()
-        run: security delete-keychain "$RUNNER_TEMP/beans-ios.keychain-db" || true
   finalize:
-    needs: [prepare, core, installers, desktop, mac, android, ios]
+    environment: release-publish
+    needs: [prepare, core, installers, desktop, mac, mobile]
     if: >-
       always() && !cancelled() && needs.prepare.result == 'success' &&
       needs.core.result == 'success' && needs.installers.result == 'success' &&
       ((needs.prepare.outputs.scope == 'server' &&
         needs.desktop.result == 'skipped' && needs.mac.result == 'skipped' &&
-        needs.android.result == 'skipped' && needs.ios.result == 'skipped') ||
+        needs.mobile.result == 'skipped') ||
        (needs.prepare.outputs.scope == 'all' &&
         needs.desktop.result == 'success' && needs.mac.result == 'success' &&
-        needs.android.result == 'success' && needs.ios.result == 'success'))
+        needs.mobile.result == 'success'))
     runs-on: ubuntu-latest
     permissions:
       contents: write

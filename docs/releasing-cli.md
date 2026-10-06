@@ -4,9 +4,9 @@ All platforms share stable GitHub releases in `bloodf/beans`, tagged `beans-v<ve
 
 ## Release workflow
 
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) defaults to **server** scope when a stable Beans release is published. It checks out the tag, checks that HEAD is the exact GitHub tag commit and the release is published and stable, validates matching client/relay protocol constants and the Beans update signing key, then builds Linux x86_64/aarch64 CLI and server archives. Linux CLI fresh-install/replacement checks gate finalization. Server scope does not run Mac, Windows/Linux desktop-app, Android or iOS builders and needs none of their signing credentials. A published release is incomplete until finalization succeeds.
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) is manual-only. Dispatch an exact published stable `tag` with immutable `scope: server|all` selected before building. Server scope needs only the update signing key. All scope builds desktop installers and completed exact-source EAS APK, AAB and store IPA artifacts, with provenance. No published-release event starts an automatic server finalizer. A finalized server release cannot acquire clients; use a new version/tag.
 
-Manual `workflow_dispatch` takes an exact published `tag` and `scope: server|all` (default `server`); it uses the tagged source, not the dispatch branch's source, and rechecks the tag commit before publication. `all` retains the full CLI installer acceptance matrix, Windows/Linux app installers and update archives, notarized Mac assets, a signed Android APK and an ad-hoc iOS IPA. Both phone builds share the workflow's numeric build number. To choose `all`, cancel the automatic server run before it finalizes and dispatch `all` against that published tag. A finalized server release cannot acquire clients: a later full-platform release needs a new root version and tag.
+See [release and account guide](architecture/releases.md) for EAS profiles, remote build-number authority, Expo linking, Apple/Google credentials, native push and separate manual Play internal/TestFlight submission. Store IPA is not an ad-hoc installer. Existing bytes and manifests remain immutable; retry uploads with original artifacts.
 
 The finalizer collects only recognized staged distribution assets, never unpacked apps or raw executables. Server scope requires `beans-server-linux-x86_64.tar.gz`, `beans-server-linux-aarch64.tar.gz` and `beans-server-updater.py`. CLI archives are optional to the server manifest API, but each included CLI archive requires its matching `.sha256` file and the checksum must match its bytes; orphan checksums are rejected. The workflow includes both Linux CLI archives and checksums.
 
@@ -18,13 +18,7 @@ Scope changes the required inventory, not the manifest schema or trust key. Read
 
 The public anchor is [`updates/public-key.txt`](../updates/public-key.txt). `BEANS_UPDATE_PRIVATE_KEY` supplies the corresponding Ed25519 PKCS8 PEM only to release jobs. MyGo receives base64 seed32+public32; Sparkle receives base64 seed32. There is no upstream key or login-keychain fallback. Keep the private key and Android keystore outside source and backed up; losing them prevents trusted future updates.
 
-Server CI requires only `BEANS_UPDATE_PRIVATE_KEY`, matching the committed public anchor, and the workflow's repository `contents: write` permission for finalization. `all` additionally requires:
-
-- Android: `BEANS_ANDROID_KEYSTORE_BASE64`, `BEANS_ANDROID_KEYSTORE_PASSWORD`, `BEANS_ANDROID_KEY_ALIAS`, `BEANS_ANDROID_KEY_PASSWORD`.
-- Mac: `BEANS_MAC_CERTIFICATE_P12`, `BEANS_MAC_CERTIFICATE_PASSWORD`, `BEANS_APPLE_NOTARY_KEY_P8`, `BEANS_APPLE_NOTARY_KEY_ID`, `BEANS_APPLE_ISSUER_ID`.
-- iOS: `BEANS_IOS_CERTIFICATE_P12`, `BEANS_IOS_CERTIFICATE_PASSWORD`, `BEANS_IOS_APP_PROFILE_BASE64`, `BEANS_IOS_NOTIFY_PROFILE_BASE64`, `BEANS_APPLE_TEAM_ID`.
-
-The Apple certificates/profiles must authorize the Beans app identities and the notification extension; Android must retain its existing signing identity. Installing secrets, creating Apple certificates/profiles, publishing a matching version/tag/release and deploying servers are separate operator actions. The tagged revision must contain these workflow, updater and runtime changes. Pipeline source and a public trust anchor are not proof that signed artifacts exist or that a host has updated.
+Server CI requires only `BEANS_UPDATE_PRIVATE_KEY`, matching the committed public anchor, and repository `contents: write` for finalization. All scope additionally needs Mac Developer ID/notarization credentials and linked Expo configuration with EAS-managed Android/iOS signing. Exact variables and legacy local signing inputs are in [Releases](architecture/releases.md#exact-credential-consumers). Installing secrets, creating accounts/credentials, cloud builds, publication and deployments are separate operator actions; pipeline source is not proof of shipped artifacts or live rollout.
 
 ### Source interfaces
 
@@ -80,4 +74,4 @@ Files are staged on the target filesystem and renamed into place. Before any sto
 
 For manual recovery, stop the updater timer, inspect `state.json`, the affected service and retained journals, repair the reported fault and recover originals if needed. Clear only the relevant `failed`/`failed_reason` or `operator_hold` after reviewing that recovery; retain progress, version floors and original files. An interrupted pass without a hold resumes the partial rollout and rechecks the relay first. The signed updater replaces itself only after all targets succeed.
 
-Platform-specific packaging and installation behavior are in [Mac releases](releasing-mac.md) and [Windows/Linux releases](releasing-desktop.md). Native Android installation requires OS approval. An ad-hoc IPA installs only on provisioned devices; GitHub cannot silently replace an installed native iOS app. No store submission is part of this workflow.
+Platform-specific packaging and installation behavior are in [Mac releases](releasing-mac.md) and [Windows/Linux releases](releasing-desktop.md). Native Android installation requires OS approval. An ad-hoc IPA installs only on provisioned devices; GitHub cannot silently replace an installed native iOS app. Store submission runs separately through the manual testing-only workflow described in [Releases](architecture/releases.md#exact-credential-consumers).

@@ -805,7 +805,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         #[cfg(feature = "provider-auth")]
         "providers.list_models" => {
             let str_param = |key: &str| params[key].as_str().unwrap_or_default().to_string();
-            let listed = provider_auth::list_custom_models(app, &str_param("name"), &str_param("api"), &str_param("base_url"), &str_param("api_key")).await?;
+            let listed = provider_auth::list_custom_models(app, &str_param("name"), &str_param("api"), &str_param("base_url"), &str_param("api_key"), opt_string(&params, "integration").as_deref()).await?;
             Ok(json!({ "listed": listed.is_some(), "models": listed.unwrap_or_default() }))
         }
         // Adds a custom provider, or saves one with `kind`, once its server answers.
@@ -813,6 +813,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "providers.connect_custom" => {
             let input = provider_auth::CustomInput {
                 kind: opt_string(&params, "kind"),
+                integration: opt_string(&params, "integration"),
                 name: params["name"].as_str().unwrap_or_default().to_string(),
                 api: opt_string(&params, "api").unwrap_or_else(|| "chat-completions".into()),
                 base_url: params["base_url"].as_str().unwrap_or_default().to_string(),

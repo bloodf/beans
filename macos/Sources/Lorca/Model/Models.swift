@@ -153,6 +153,7 @@ struct ProviderCredential: Hashable, Identifiable {
     /// A custom provider's name, the protocol its server speaks, and the models it offers.
     var name: String? = nil
     var api: CustomAPI? = nil
+    var integration: String? = nil
     var models: [CustomModel] = []
 }
 
@@ -209,6 +210,11 @@ struct CustomModel: Hashable {
     /// Whether it takes images.
     var images: Bool? = nil
     var levels: [String] = []
+    var maxOutput: Int? = nil
+    var reasoning: Bool? = nil
+    var tools: Bool? = nil
+    var thinkingFormat: String? = nil
+    var thinkingCanDisable: Bool? = nil
 
     var displayName: String { name ?? id }
 }
@@ -219,10 +225,13 @@ struct CustomProviderPreset: Hashable {
     let api: CustomAPI
     let baseURL: String
     let keyPlaceholder: String
+    var integration: String? = nil
 
     /// Services in the cloud, for the Add Provider menu.
     static var cloud: [CustomProviderPreset] {
         [
+            CustomProviderPreset(name: "DurinDoor", api: .chatCompletions, baseURL: "",
+                keyPlaceholder: L("Optional for a server on your network"), integration: "durindoor"),
             CustomProviderPreset(
                 name: "OpenAI", api: .responses, baseURL: "https://api.openai.com/v1",
                 keyPlaceholder: L("sk-… from platform.openai.com")),

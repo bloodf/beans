@@ -1,0 +1,90 @@
+# Releases and mobile accounts
+
+## Source and readiness
+
+[Release Beans](../../.github/workflows/release.yml) runs only by manual dispatch. Choose `server` or `all` **before** building against an already published stable `beans-v<root package.json version>` tag. Publishing a tag does not start a server finalizer. The checkout must match GitHub's exact tag commit; finalization rechecks it. Server scope needs only the Ed25519 update signing key and builds Linux x86_64/aarch64 CLI/server bundles. All scope adds CLI installation checks, Windows/Linux desktop installers, notarized arm64 Mac DMG/update ZIP and three completed EAS phone builds. Scope cannot change after readiness exists; use a new version/tag.
+
+Distribution assets upload first, detached signature next, `beans-update.json` last. Schema 1 binds root version, revision, relay protocol and each asset's component, platform, version, SHA-256 and size. Existing assets must have identical bytes; unexpected or changed bytes fail before upload. Readiness cannot be repaired or extended. Retry interrupted uploads using original staged artifacts, not rebuilt desktop binaries. The server updater verifies readiness, upgrades the relay first, then drains Runners; see [runtime](runtime.md#runner-update-drain) and [CLI release operations](../releasing-cli.md).
+
+`release-build`, `release-publish` and `mobile-submit` are workflow environment names. Configure their access/reviewer policies deliberately before use; referencing a name does not install protection. Build, publication and store submission are distinct operator actions. The all-scope workflow invokes cloud builds and publishes GitHub artifacts, so dispatch it only after approving any build charges and publication. No workflow promotes to public stores. E2E remains outside automatic workflows.
+
+Desktop inventory preserves upstream Windows/Linux names. Windows installers carry Ed25519 updater integrity, **not Windows Authenticode publisher identity**. A trusted Windows publisher additionally needs a code-signing certificate, signing service and separately implemented Authenticode packaging. Mac Developer ID signing/notarization and Ed25519 update signing serve different trust checks.
+
+## EAS source and native build
+
+`mobile/eas.json` explicitly uses EAS-managed remote signing credentials and remote application versions. EAS is the sole persistent mobile build-number authority. Initialize each platform above its existing store version using `eas build:version:set`; `autoIncrement` allocates once per build attempt. Failed attempts consume numbers; retries allocate new numbers. APK and AAB builds have distinct Android version codes. Do not also set timestamp numbers or use another store-number allocator. Local development config uses `1` without allocating store releases; legacy local/ad-hoc exports require explicit `BUILD_NUMBER` and are not store distribution.
+
+Profiles:
+
+- `production`: Android store AAB.
+- `github`: store-signed Android APK, distributable on GitHub with OS installation approval.
+- `testflight`: Apple store IPA, named `Beans-<version>-store.ipa`.
+- `preview`: separate internal distribution, using EAS-managed credentials and remote versions.
+- `development`: simulator development client.
+
+A store IPA is not an ad-hoc installer and cannot generally be sideloaded from GitHub. Preview/ad-hoc iOS installs require provisioned devices and are not required by all-scope readiness. Existing legacy `release-ios` is independent and exports only ad-hoc/development distributions.
+
+Run EAS from `mobile/`; the Git repository root is the upload context. Root `.easignore` excludes build output, native prebuild directories and credentials, retaining Cargo workspace/lock, scripts, root package metadata and `packages/beans-blobatar`. Do not upload only `mobile/`. Mobile `postinstall` runs `scripts/release-eas-native.ts` on EAS workers before Expo prebuild and CocoaPods; EAS's `eas-build-post-install` hook runs after pods and is too late. Rust is installed if missing, targets/cargo-ndk are prepared, then locked host and phone builds generate bindings/libraries. Host metadata uses `.so` on Linux and `.dylib` on macOS. Android accepts `ANDROID_NDK_HOME`/`ANDROID_NDK_ROOT`, or `ANDROID_HOME`/`ANDROID_SDK_ROOT` with `BEANS_ANDROID_NDK_VERSION`; EAS profile pins installed NDK `27.1.12297006`.
+
+`release-eas.ts` waits for finished builds and validates exact revision, project, production application identifier, store distribution, profile, platform, root version and positive allocated number. It downloads from trusted HTTPS artifact hosts, validates every redirect against trusted HTTPS hosts, hashes bytes and writes `eas-<profile>.json` without token-bearing URLs. Signed inventory includes APK, AAB, store IPA and three provenance files. Pending/failed/wrong-source builds cannot publish readiness. EAS build IDs and numbers are retained per attempt. The helper accepts a completed retry build ID as its last argument; immutable publish retries still require every original artifact. Real EAS platform builds, binary signing/identities, installation and phone push need external acceptance; source tests do not prove them.
+
+## Link Expo and signing accounts
+
+No Expo project is prelinked. Obtain identifiers from your own account; absent values fail clearly rather than using dummy IDs.
+
+1. Join/create your Expo organization/project deliberately in Expo dashboard. Creating a project/account is an operator action.
+2. Set `BEANS_EXPO_OWNER` to account/organization slug and `BEANS_EXPO_PROJECT_ID` to that project's UUID. These are public identifiers. Set them locally before `eas project:info`, then check it identifies the intended existing project; `eas init --id <existing-project-uuid>` may link that existing project when deliberately requested. Keep env-based config authoritative.
+3. Generate `EXPO_TOKEN` in Expo account settings and store it as a secret; grant only intended project access. Do not put it in `EXPO_PUBLIC_*` or commit it.
+4. Configure matching public values in EAS production/preview environments too: owner, project UUID and `BEANS_APPLE_TEAM_ID`. GitHub env values resolve local configuration; they do not automatically become remote worker environment values. Add Android Firebase file environment variable if push is required.
+5. Prepare signing interactively with `eas credentials --platform android` and `eas credentials --platform ios`. Retain existing Android upload/signing identity rather than silently generating a replacement. Register Apple app `ai.amoena.beans`, notification extension `ai.amoena.beans.notify`, and App Group `group.ai.amoena.beans`; authorize both targets. Check EAS app-extension credential discovery before cloud build. Set remote versions above existing store numbers.
+
+Apple Developer Program membership is typically US$99/year, local currency/tax may differ. Team ID is a public ten-character identifier, mapped by `BEANS_APPLE_TEAM_ID` to Expo `ios.appleTeamId`. EAS remote credentials hold Apple Distribution certificate and app/extension profiles; these are distinct from Mac Developer ID, notarization and APNs credentials. A paid account/project does not authorize this code session to build or upload.
+
+Google Play registration costs US$25 once; identity/device verification and account requirements apply. New personal accounts subject to testing requirements need a closed test with at least 12 continuously opted-in testers for 14 days before applying for production access. Internal testing does not satisfy that closed-test requirement. Complete Play App Signing and retain/upload the existing upload key. APK sideloads and Play installs must use compatible signing identities for upgrades; Play may sign delivered APKs with its app-signing key rather than your upload key. Explain this before mixing installation channels.
+
+## Exact credential consumers
+
+Use [safe environment example](../../mobile/.env.release.example); examples contain no real credentials. Workflow repository variables hold public identifiers; workflow secrets hold secret material. Do not add repository/EAS secrets or settings without operator approval.
+
+**GitHub/desktop**:
+
+- `BEANS_UPDATE_PRIVATE_KEY`: raw Ed25519 PKCS8 PEM, matching `updates/public-key.txt`; signs readiness/MyGo/Sparkle data.
+- `BEANS_MAC_CERTIFICATE_P12`: base64 Developer ID Application certificate plus private key; `BEANS_MAC_CERTIFICATE_PASSWORD`: import password.
+- `BEANS_APPLE_NOTARY_KEY_P8`: raw notarization `.p8`; `BEANS_APPLE_NOTARY_KEY_ID`, `BEANS_APPLE_ISSUER_ID`: notarization API identity. Local Mac alternatives: `SIGN_IDENTITY`, `NOTARY_PROFILE`, optional `SPARKLE_BIN`. Public builds leave `LORCA_DEFAULT_RELAY_URL` blank.
+- `GH_TOKEN`: workflow token; publication job needs repository `contents: write`, other jobs read. Local helper uses authenticated GitHub CLI.
+
+**Legacy local mobile signing, not EAS remote**:
+
+Android `BEANS_ANDROID_ENV` names private mode-0600 env file; it supplies `BEANS_ANDROID_KEYSTORE` path, `BEANS_ANDROID_KEYSTORE_PASSWORD`, `BEANS_ANDROID_KEY_ALIAS`, `BEANS_ANDROID_KEY_PASSWORD`. Keystore also has mode 0600. Legacy GitHub transport names are `BEANS_ANDROID_KEYSTORE_BASE64` plus those three signing values; current EAS workflow does not consume them. EAS remote credential setup must import retained key deliberately. Legacy iOS transport values `BEANS_IOS_CERTIFICATE_P12`, `BEANS_IOS_CERTIFICATE_PASSWORD`, `BEANS_IOS_APP_PROFILE_BASE64`, `BEANS_IOS_NOTIFY_PROFILE_BASE64` are not consumed by current EAS workflow. Local iOS script uses `BEANS_IOS_APP_PROFILE_NAME`, `BEANS_IOS_NOTIFY_PROFILE_NAME`, `BEANS_IOS_EXPORT_OPTIONS`, optional `BEANS_IOS_SIGN_IDENTITY`, explicit `BUILD_NUMBER` and Apple team.
+
+**Manual store submission**:
+
+[Submit Beans mobile testing](../../.github/workflows/submit-mobile.yml) dispatch takes finalized tag/platform. It verifies signature, exact tag revision, signed provenance and downloaded store binary SHA-256 before submission. No `--latest`, auto-submit or public promotion. Android uses Play `internal`, `releaseStatus: completed`; iOS uploads to TestFlight, not App Store review. External TestFlight testing may need beta review; App Store release/review is a later manual action.
+
+- `BEANS_ASC_APP_ID`: numeric App Store Connect application ID (public), not bundle ID.
+- `BEANS_ASC_KEY_P8`: raw App Store Connect API private key; `BEANS_ASC_KEY_ID` and `BEANS_ASC_ISSUER_ID`: key/issuer identity. Helper writes a new private temporary mode-0600 `.p8` file; maps `ascApiKeyPath`, `ascApiKeyId`, `ascApiKeyIssuerId`, `ascAppId` to EAS submit config. Use a key/team role authorized for upload. This is not the notarization/APNs key purpose.
+- `BEANS_PLAY_SERVICE_ACCOUNT_JSON`: authorized Google Play Developer API service-account JSON, written to a new private temporary mode-0600 file and consumed by `serviceAccountKeyPath`. Enable API, link/authorize intended Play app and grant least required releases permissions. First Play app upload may require manual Console upload before API submissions. This key is not Firebase server credentials.
+
+`EXPO_ASC_*` and `EXPO_APPLE_TEAM_*` repair/build-signing overrides are not implemented by these helpers. Configure EAS-managed signing interactively; do not assume these variables configure submit, notarization or APNs. Submission validates/downloads artifacts before creating secrets, removes its private temporary credentials in `finally`, and restores exact original `eas.json` bytes on success/failure. Existing credential files are not touched.
+
+## Native push and store readiness
+
+Beans registers native tokens directly with relay; Expo account/project linking does not provision direct FCM/APNs.
+
+- Android Firebase client JSON must identify `ai.amoena.beans`. `BEANS_GOOGLE_SERVICES_FILE` is the local/file-environment path consumed by app config; configure it as an EAS file environment variable for remote builders. Relay `LORCA_RELAY_FCM_SERVICE_ACCOUNT` supplies Firebase service-account credentials for native FCM delivery, distinct from Play submission.
+- Apple APNs `.p8` is consumed by relay `LORCA_RELAY_APNS_KEY`; set `LORCA_RELAY_APNS_KEY_ID`, `LORCA_RELAY_APNS_TEAM_ID`, and `LORCA_RELAY_APNS_TOPIC=ai.amoena.beans`. App/extension entitlements and provisioning must permit production notifications and shared App Group. Validate real paired phone notification/decryption.
+- Preserve persistent `LORCA_RELAY_SECRET`; changing it is not release setup. Server env/secret changes are separate operator actions.
+
+Create store records/listings, screenshots, age/content ratings, privacy policy, Apple privacy disclosures and Google Data safety accurately. Complete export-compliance declarations, permission explanations, reviewer access and account-deletion requirements where applicable. Test signing, paired-device reachability, native push, retention and installed upgrades on real devices before claiming release acceptance.
+
+## Official references
+
+- [EAS npm hooks and ordering](https://docs.expo.dev/build-reference/npm-hooks/)
+- [EAS monorepos](https://docs.expo.dev/build-reference/build-with-monorepos/)
+- [EAS versions](https://docs.expo.dev/build-reference/app-versions/)
+- [EAS configuration](https://docs.expo.dev/eas/json/)
+- [EAS iOS submission](https://docs.expo.dev/submit/ios/)
+- [EAS Android submission](https://docs.expo.dev/submit/android/)
+- [Apple enrollment](https://developer.apple.com/programs/enroll/)
+- [Google registration](https://support.google.com/googleplay/android-developer/answer/6112435)
+- [Google personal-account tests](https://support.google.com/googleplay/android-developer/answer/14151465)

@@ -182,28 +182,6 @@ final class AutoReviewRuleEditorViewController: SheetViewController, NSTextField
     }
 }
 
-/// Key on the left, any control on the right, inside a section card.
-final class AccessoryRow: NSView {
-    init(key keyText: String, accessory: NSView) {
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-        let key = Build.label(keyText, font: .systemFont(ofSize: 12.5))
-        accessory.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(key)
-        addSubview(accessory)
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 36),
-            key.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            key.centerYAnchor.constraint(equalTo: centerYAnchor),
-            accessory.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            accessory.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-}
-
 /// One rule in two levels: content across the full width, then metadata and actions below.
 final class AutoReviewRuleRow: NSView {
     var onEdit: (() -> Void)?

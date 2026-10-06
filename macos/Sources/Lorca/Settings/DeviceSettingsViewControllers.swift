@@ -188,7 +188,7 @@ final class ProvidersSettingsViewController: SettingsPaneViewController {
                 let item = NSMenuItem(title: preset.name, action: #selector(addPreset(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = preset
-                item.state = existing(named: preset.name) == nil ? .off : .on
+                item.state = existing(preset: preset) == nil ? .off : .on
                 menu.addItem(item)
             }
         }
@@ -199,13 +199,13 @@ final class ProvidersSettingsViewController: SettingsPaneViewController {
         return menu
     }
 
-    private func existing(named name: String) -> ProviderCredential? {
-        store.providers.first { $0.kind.isCustom && $0.name?.caseInsensitiveCompare(name) == .orderedSame }
+    private func existing(preset: CustomProviderPreset) -> ProviderCredential? {
+        store.providers.first { $0.kind.isCustom && (preset.integration != nil ? $0.integration == preset.integration : $0.name?.caseInsensitiveCompare(preset.name) == .orderedSame) }
     }
 
     @objc private func addPreset(_ sender: NSMenuItem) {
         guard let preset = sender.representedObject as? CustomProviderPreset else { return }
-        CustomProviderViewController.present(kind: existing(named: preset.name)?.kind, preset: preset, from: self)
+        CustomProviderViewController.present(kind: existing(preset: preset)?.kind, preset: preset, from: self)
     }
 
     @objc private func addOther() {

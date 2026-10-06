@@ -390,8 +390,8 @@ class Engine {
   /// with the key. With no model ids the core takes every chat model the server lists. The
   /// provider joins the account's encrypted credentials, shared with every paired Device.
   /// Answers its kind; rejects with what to fix.
-  async saveCustomProvider(input: { kind?: string; name: string; api: CustomAPI; baseURL: string; apiKey: string; models: string[] }): Promise<string> {
-    const params = { ...(input.kind ? { kind: input.kind } : {}), name: input.name, api: input.api, base_url: input.baseURL, api_key: input.apiKey, models: input.models };
+  async saveCustomProvider(input: { kind?: string; integration?: "durindoor"; name: string; api: CustomAPI; baseURL: string; apiKey: string; models: string[] }): Promise<string> {
+    const params = { ...(input.kind ? { kind: input.kind } : {}), name: input.name, integration: input.integration, api: input.api, base_url: input.baseURL, api_key: input.apiKey, models: input.models };
     const { kind, providers } = await core.request<{ kind: string; providers: ProviderStatus[] }>("providers.connect_custom", params);
     useStore.setState({ providers });
     return kind;
@@ -400,8 +400,8 @@ class Engine {
   /// The chat models a custom provider's server lists, in its order, with what it says of them;
   /// `listed` is false when the server publishes no list. Rejects with what is wrong: a key it
   /// refuses, a server out of reach, an answer that is not an API's. `name` goes in the messages.
-  async listCustomModels(input: { name?: string; api: CustomAPI; baseURL: string; apiKey: string }): Promise<{ listed: boolean; models: CustomModel[] }> {
-    const params = { ...(input.name ? { name: input.name } : {}), api: input.api, base_url: input.baseURL, api_key: input.apiKey };
+  async listCustomModels(input: { name?: string; integration?: "durindoor"; api: CustomAPI; baseURL: string; apiKey: string }): Promise<{ listed: boolean; models: CustomModel[] }> {
+    const params = { ...(input.name ? { name: input.name } : {}), integration: input.integration, api: input.api, base_url: input.baseURL, api_key: input.apiKey };
     const { listed, models } = await core.request<{ listed: boolean; models?: CustomModel[] }>("providers.list_models", params);
     return { listed: !!listed, models: models ?? [] };
   }

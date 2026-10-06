@@ -13,6 +13,7 @@ export interface ProviderStatus {
   /** A custom provider's name, the protocol its server speaks, and its models. Built-in providers have none. */
   name?: string;
   api?: CustomAPI;
+  integration?: "durindoor";
   models?: CustomModel[];
 }
 
@@ -27,6 +28,10 @@ export interface CustomModel {
   context_window?: number;
   max_output?: number;
   images?: boolean;
+  reasoning?: boolean;
+  tools?: boolean;
+  thinking_format?: string;
+  thinking_can_disable?: boolean;
   /// The thinking levels the core says it takes, lowest first: in a provider's status only.
   levels?: string[];
 }
@@ -433,6 +438,7 @@ export function isLoopbackHost(host: string): boolean {
 /// A server people often add, to start the form from: its product name, protocol, and base URL.
 /// `local` ones run on the user's own computer.
 export interface CustomPreset {
+  integration?: "durindoor";
   name: string;
   api: CustomAPI;
   baseURL: string;
@@ -441,6 +447,7 @@ export interface CustomPreset {
 }
 
 export const CUSTOM_PRESETS: readonly CustomPreset[] = [
+  { name: "DurinDoor", integration: "durindoor", api: "chat-completions", baseURL: "", keyPlaceholder: () => t("Optional for a server on your network") },
   { name: "OpenAI", api: "responses", baseURL: "https://api.openai.com/v1", keyPlaceholder: () => t("sk-… from platform.openai.com") },
   { name: "OpenRouter", api: "chat-completions", baseURL: "https://openrouter.ai/api/v1", keyPlaceholder: () => t("sk-or-… from openrouter.ai/keys") },
   { name: "Gemini", api: "chat-completions", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", keyPlaceholder: () => t("Key from aistudio.google.com") },
@@ -504,7 +511,7 @@ export function savedModelRows(models: readonly CustomModel[]): ModelRow[] {
 /// The rows once the server's list arrives: the user's rows first, with what the list says of
 /// them; then rows picked from an earlier list that this one lacks; then the list in its order,
 /// keeping what was picked. When nothing is picked and the list is short, all of it is.
-export function mergeListedModels(rows: readonly ModelRow[], listed: readonly CustomModel[]): ModelRow[] {
+export function mergeListedModels(rows: readonly ModelRow[], listed: readonly CustomModel[], selectAll = false): ModelRow[] {
   const byId = new Map<string, CustomModel>();
   for (const model of listed) if (!byId.has(model.id)) byId.set(model.id, model);
   const user = rows.filter((row) => row.source === "user").map((row) => (byId.has(row.id) ? { ...row, ...byId.get(row.id)!, selected: row.selected, source: row.source } : row));
@@ -513,7 +520,7 @@ export function mergeListedModels(rows: readonly ModelRow[], listed: readonly Cu
   const kept = rows.filter((row) => row.source === "server" && row.selected && !byId.has(row.id) && !userIds.has(row.id));
   const server: ModelRow[] = [...byId.values()].filter((model) => !userIds.has(model.id)).map((model) => ({ ...model, selected: picked.has(model.id), source: "server" }));
   const merged = [...user, ...kept, ...server];
-  if (byId.size > 0 && byId.size <= 8 && !merged.some((row) => row.selected)) return merged.map((row) => (byId.has(row.id) ? { ...row, selected: true } : row));
+  if (byId.size > 0 && (byId.size <= 8 || selectAll) && !merged.some((row) => row.selected)) return merged.map((row) => (byId.has(row.id) ? { ...row, selected: true } : row));
   return merged;
 }
 

@@ -1672,9 +1672,10 @@ final class AppStore {
 
     /// The chat models a custom provider's server lists, asked through the CLI on this
     /// computer; nil when the server publishes no list.
-    func listCustomModels(name: String, api: CustomAPI, baseURL: String, apiKey: String) async throws -> [CustomModel]? {
+    func listCustomModels(name: String, api: CustomAPI, baseURL: String, apiKey: String, integration: String? = nil) async throws -> [CustomModel]? {
         if isMock { return MockData.listedModels(baseURL: baseURL) }
-        let params: [String: Any] = ["name": name, "api": api.rawValue, "base_url": baseURL, "api_key": apiKey]
+        var params: [String: Any] = ["name": name, "api": api.rawValue, "base_url": baseURL, "api_key": apiKey]
+        if let integration { params["integration"] = integration }
         let listing = try await client.request("providers.list_models", params, as: Wire.ListedModels.self)
         return listing.listed ? listing.models.map { $0.toModel() } : nil
     }
@@ -1690,7 +1691,7 @@ final class AppStore {
     /// server. `models` lists the ids bots can pick, the default first. Answers the provider's kind.
     @discardableResult
     func saveCustomProvider(
-        kind: ProviderCredential.Kind?, name: String, api: CustomAPI, baseURL: String, apiKey: String, models: [String]
+        kind: ProviderCredential.Kind?, name: String, api: CustomAPI, baseURL: String, apiKey: String, models: [String], integration: String? = nil
     ) async throws -> ProviderCredential.Kind {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1706,6 +1707,7 @@ final class AppStore {
         }
         var params: [String: Any] = ["name": name, "api": api.rawValue, "base_url": baseURL, "api_key": apiKey, "models": models]
         if let kind { params["kind"] = kind.wireValue }
+        if let integration { params["integration"] = integration }
         let saved = try await client.request("providers.connect_custom", params, as: Wire.CustomProviderSaved.self)
         return ProviderCredential.Kind(wireValue: saved.kind) ?? .custom(saved.kind)
     }

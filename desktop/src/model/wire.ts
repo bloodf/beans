@@ -239,6 +239,7 @@ export interface WireProvider {
   /** A custom provider's name, wire protocol, and models. Built-in providers have none. */
   name?: string | null;
   api?: string | null;
+  integration?: "durindoor" | null;
   models?: WireCustomModel[] | null;
 }
 
@@ -250,6 +251,10 @@ export interface WireCustomModel {
   context_window?: number | null;
   max_output?: number | null;
   images?: boolean | null;
+  reasoning?: boolean | null;
+  tools?: boolean | null;
+  thinking_format?: string | null;
+  thinking_can_disable?: boolean | null;
   levels?: string[] | null;
 }
 
@@ -686,6 +691,7 @@ export function toProviders(wire: WireProvider[] | null | undefined): ProviderCr
     if (isCustomKind(provider.kind)) {
       credential.name = optional(provider.name);
       credential.api = provider.api && isCustomAPI(provider.api) ? provider.api : undefined;
+      credential.integration = optional(provider.integration);
       credential.models = (provider.models ?? []).map(toCustomModel);
     }
     return [credential];
@@ -699,6 +705,10 @@ export function toCustomModel(wire: WireCustomModel): CustomModel {
     contextWindow: optional(wire.context_window),
     maxOutput: optional(wire.max_output),
     images: optional(wire.images),
+    reasoning: optional(wire.reasoning),
+    tools: optional(wire.tools),
+    thinkingFormat: optional(wire.thinking_format),
+    thinkingCanDisable: optional(wire.thinking_can_disable),
     levels: optional(wire.levels),
   };
 }

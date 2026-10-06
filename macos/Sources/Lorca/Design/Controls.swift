@@ -448,6 +448,7 @@ final class SettingsPopUpButton: NSPopUpButton {
         isBordered = false
         font = Self.titleFont
         (cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+        lineBreakMode = .byTruncatingTail
         setContentHuggingPriority(.required, for: .horizontal)
     }
 
@@ -493,9 +494,15 @@ final class SettingsPopUpButton: NSPopUpButton {
         NSEdgeInsets(top: 0, left: 0, bottom: 0, right: Self.overhang)
     }
 
+    override func layout() {
+        super.layout()
+        toolTip = titleOfSelectedItem
+    }
+
     // The title follows the selection, and the button's width follows the title.
     override func synchronizeTitleAndSelectedItem() {
         super.synchronizeTitleAndSelectedItem()
+        toolTip = titleOfSelectedItem
         invalidateIntrinsicContentSize()
         needsDisplay = true
     }
@@ -521,10 +528,15 @@ final class SettingsPopUpButton: NSPopUpButton {
                 from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         }
 
-        let title = titleText
-        let size = title.size()
-        title.draw(
-            at: NSPoint(
-                x: max(0, platter.minX - Self.gap - size.width), y: ((bounds.height - size.height) / 2).rounded()))
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .right
+        paragraph.lineBreakMode = .byTruncatingTail
+        let title = NSMutableAttributedString(attributedString: titleText)
+        title.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: title.length))
+        let height = title.size().height
+        let titleRect = NSRect(
+            x: Self.leading, y: ((bounds.height - height) / 2).rounded(),
+            width: max(0, platter.minX - Self.gap - Self.leading), height: ceil(height))
+        title.draw(with: titleRect, options: [.truncatesLastVisibleLine])
     }
 }

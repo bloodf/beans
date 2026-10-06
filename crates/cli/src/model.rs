@@ -18,6 +18,8 @@ pub struct ProviderStatus {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api: Option<crate::credentials::CustomApi>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<crate::credentials::CustomIntegration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<StatusModel>,
 }

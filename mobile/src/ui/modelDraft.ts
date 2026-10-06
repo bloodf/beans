@@ -25,8 +25,8 @@ export function setModelListing(listing: ModelListing) {
 }
 
 /// The server's answer: its models merged into the rows, or that it lists none.
-export function takeModelListing(listed: boolean, models: CustomModel[]) {
-  useModelDraft.setState((s) => ({ rows: mergeListedModels(s.rows, listed ? models : []), listing: { state: listed && models.length ? "listed" : "unlisted" } }));
+export function takeModelListing(listed: boolean, models: CustomModel[], selectAll = false) {
+  useModelDraft.setState((s) => ({ rows: mergeListedModels(s.rows, listed ? models : [], selectAll), listing: { state: listed && models.length ? "listed" : "unlisted" } }));
 }
 
 /// New rows with the default where it was, as the desktop apps keep it: the model picked when

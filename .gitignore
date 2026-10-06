@@ -10,3 +10,7 @@ temp/
 target/
 .env
 .env.local
+mobile/credentials.json
+mobile/.credentials/
+mobile/google-services.json
+mobile/.env.local

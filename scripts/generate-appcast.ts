@@ -1,13 +1,10 @@
-// Sign a directory of update archives and (re)write Sparkle's appcast.xml there.
-//
-//   bun scripts/generate-appcast.ts <updates-dir>
-//
-// <updates-dir> holds Lorca-<version>.zip archives, the older ones included so Sparkle can build
-// binary deltas between them. The private EdDSA key comes from the login keychain
-// (docs/releasing-mac.md).
-import { existsSync, readdirSync } from "node:fs"
+// Sign Beans-<root version>.zip and write appcast.xml for beans-v<root version>.
+// The parent provides BEANS_UPDATE_PRIVATE_KEY (Ed25519 PKCS8 PEM).
+// No login-keychain fallback or upstream release history is used.
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { color, log, RELEASES_URL, SPARKLE_TOOLS } from "./app.ts"
+import { RELEASES_URL, SPARKLE_TOOLS, readVersion } from "./app.ts"
+import { rawReleaseSecret } from "./release-signing.ts"
 
 /** `SPARKLE_BIN`, then the copy SwiftPM unpacked beside the framework, then PATH. */
 export function sparkleTool(name: string): string | null {
@@ -15,44 +12,48 @@ export function sparkleTool(name: string): string | null {
   return candidates.find((path): path is string => Boolean(path) && existsSync(path as string)) ?? Bun.which(name)
 }
 
-/** The deltas in `dir`, finished or underway: Sparkle writes each one to `.<name>.delta.tmp` first. */
-function deltaNames(dir: string): string[] {
-  return readdirSync(dir).flatMap((file) => file.match(/^\.?(.+\.delta)(?:\.tmp)?$/)?.[1] ?? [])
-}
 
-export async function generateAppcast(updatesDir: string, downloadURLPrefix: string): Promise<boolean> {
+export async function generateAppcast(updatesDir: string, downloadURLPrefix: string, requiredProtocol: number): Promise<boolean> {
+  const version = readVersion()
+  if (!Number.isSafeInteger(requiredProtocol) || requiredProtocol < 3) throw new Error("the release protocol must be an integer >= 3")
+  const expectedPrefix = `https://github.com/bloodf/beans/releases/download/beans-v${version}/`
+  if (downloadURLPrefix !== expectedPrefix) throw new Error("Sparkle downloads must use the current Beans GitHub release")
+  const archives = readdirSync(updatesDir).filter((name) => /\.(zip|dmg|delta)$/.test(name))
+  if (archives.length !== 1 || archives[0] !== `Beans-${version}.zip`) {
+    throw new Error(`the appcast directory must hold only Beans-${version}.zip as its update archive`)
+  }
+  // MyGo uses seed32 + public32, but this Sparkle version takes the seed32 alone.
+  const secret = Buffer.from(await rawReleaseSecret(), "base64").subarray(0, 32).toString("base64")
   const tool = sparkleTool("generate_appcast")
-  if (!tool) {
-    console.error(`generate_appcast not found: run \`swift package resolve\` in macos/, or set SPARKLE_BIN.`)
+  const signer = sparkleTool("sign_update")
+  if (!tool || !signer) {
+    console.error("generate_appcast and sign_update are required: resolve Sparkle in macos/, or set SPARKLE_BIN")
     return false
   }
-  // A delta already in the directory is reused, not built.
-  const seen = new Set(deltaNames(updatesDir))
-  // The notes prefix makes generate_appcast link Lorca-<version>.md beside an archive as its
-  // <sparkle:releaseNotesLink>; Sparkle renders the Markdown in the update window.
+  // Sparkle accepts a base64 seed on stdin. Secrets never appear in argv or the keychain.
   const proc = Bun.spawn(
-    [tool, "--download-url-prefix", downloadURLPrefix, "--release-notes-url-prefix", downloadURLPrefix, updatesDir],
-    { stdout: "inherit", stderr: "inherit" },
+    [tool, "--ed-key-file", "-", "--maximum-deltas", "0", "--maximum-versions", "1",
+      "--download-url-prefix", expectedPrefix, "--release-notes-url-prefix", expectedPrefix, updatesDir],
+    { stdin: new Blob([secret + "\n"]), stdout: "inherit", stderr: "inherit" },
   )
-  // generate_appcast prints nothing while it builds a delta, a minute or so each for the CLI
-  // binary, so each one is announced as its file appears.
-  const poll = setInterval(() => {
-    for (const name of deltaNames(updatesDir)) {
-      if (seen.has(name)) continue
-      seen.add(name)
-      log(color.dim(`building ${name}`))
-    }
-  }, 1000)
-  const code = await proc.exited
-  clearInterval(poll)
-  return code === 0
+  if ((await proc.exited) !== 0) return false
+  const feedPath = join(updatesDir, "appcast.xml")
+  const feed = readFileSync(feedPath, "utf8").replaceAll(/<beansProtocol>[^<]*<\/beansProtocol>\s*/g, "")
+  if ((feed.match(/<item>/g) ?? []).length !== 1) throw new Error("expected one Beans appcast item")
+  writeFileSync(feedPath, feed.replace("<item>", `<item>\n      <beansProtocol>${requiredProtocol}</beansProtocol>`))
+  // Changing a custom element invalidates Sparkle's embedded feed signature. Re-sign last.
+  const signed = Bun.spawn([signer, "--ed-key-file", "-", feedPath], {
+    stdin: new Blob([secret + "\n"]), stdout: "inherit", stderr: "inherit",
+  })
+  return (await signed.exited) === 0
 }
 
 if (import.meta.main) {
   const updatesDir = process.argv[2]
-  if (!updatesDir) {
-    console.error("usage: bun scripts/generate-appcast.ts <updates-dir>")
+  const protocol = Number(process.argv[3])
+  if (!updatesDir || !Number.isSafeInteger(protocol) || protocol < 3) {
+    console.error("usage: bun scripts/generate-appcast.ts <updates-dir> <protocol>")
     process.exit(1)
   }
-  process.exit((await generateAppcast(updatesDir, RELEASES_URL)) ? 0 : 1)
+  process.exit((await generateAppcast(updatesDir, RELEASES_URL, protocol)) ? 0 : 1)
 }

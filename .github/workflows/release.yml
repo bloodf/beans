@@ -1,0 +1,434 @@
+name: Release Beans
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact published stable beans-v<root version> tag
+        required: true
+        type: string
+      scope:
+        description: Immutable release artifact scope
+        required: true
+        default: server
+        type: choice
+        options: [server, all]
+permissions:
+  contents: read
+concurrency:
+  group: beans-release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.repository == 'bloodf/beans' && (github.event_name == 'workflow_dispatch' || (!github.event.release.prerelease && !github.event.release.draft && startsWith(github.event.release.tag_name, 'beans-v')))
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      revision: ${{ steps.release.outputs.revision }}
+      build_number: ${{ steps.release.outputs.build_number }}
+      core_version: ${{ steps.release.outputs.core_version }}
+      tag: ${{ steps.release.outputs.tag }}
+      scope: ${{ steps.release.outputs.scope }}
+      core_matrix: ${{ steps.release.outputs.core_matrix }}
+      installer_matrix: ${{ steps.release.outputs.installer_matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - id: release
+        name: Validate published tag, exact source and update signing key
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.scope || 'server' }}
+          GH_TOKEN: ${{ github.token }}
+          BEANS_UPDATE_PRIVATE_KEY: ${{ secrets.BEANS_UPDATE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          bun run scripts/release-github.ts check "$TAG" "$SCOPE"
+          gh api "repos/bloodf/beans/releases/tags/$TAG" > "$RUNNER_TEMP/release.json"
+          bun -e 'const r = await Bun.file(process.argv[1]).json(); if (r.draft || r.prerelease || r.tag_name !== process.env.TAG) throw new Error("Only the exact published stable release can be finalized")' "$RUNNER_TEMP/release.json"
+          revision=$(git rev-parse HEAD)
+          tagged_revision=$(gh api "repos/bloodf/beans/commits/$TAG" --jq .sha)
+          [[ "$revision" == "$tagged_revision" ]]
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#beans-v}" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "build_number=$(date +%s)" >> "$GITHUB_OUTPUT"
+          echo "core_version=$(bun -e 'import { coreVersion } from "./scripts/release-github.ts"; console.log(await coreVersion())')" >> "$GITHUB_OUTPUT"
+          if [[ $SCOPE == server ]]; then
+            echo 'core_matrix={"include":[{"name":"linux-aarch64","target":"aarch64-unknown-linux-musl","os":"ubuntu-latest","zig":true},{"name":"linux-x86_64","target":"x86_64-unknown-linux-musl","os":"ubuntu-latest","zig":true}]}' >> "$GITHUB_OUTPUT"
+            echo 'installer_matrix={"os":["ubuntu-latest"]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'core_matrix={"include":[{"name":"macos-aarch64","target":"aarch64-apple-darwin","os":"macos-latest"},{"name":"linux-aarch64","target":"aarch64-unknown-linux-musl","os":"ubuntu-latest","zig":true},{"name":"linux-x86_64","target":"x86_64-unknown-linux-musl","os":"ubuntu-latest","zig":true},{"name":"windows-x86_64","target":"x86_64-pc-windows-gnu","os":"ubuntu-latest","zig":true}]}' >> "$GITHUB_OUTPUT"
+            echo 'installer_matrix={"os":["ubuntu-latest","macos-latest","windows-latest"]}' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Validate full-platform signing prerequisites
+        if: steps.release.outputs.scope == 'all'
+        env:
+          BEANS_ANDROID_KEYSTORE_BASE64: ${{ secrets.BEANS_ANDROID_KEYSTORE_BASE64 }}
+          BEANS_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.BEANS_ANDROID_KEYSTORE_PASSWORD }}
+          BEANS_ANDROID_KEY_ALIAS: ${{ secrets.BEANS_ANDROID_KEY_ALIAS }}
+          BEANS_ANDROID_KEY_PASSWORD: ${{ secrets.BEANS_ANDROID_KEY_PASSWORD }}
+          BEANS_MAC_CERTIFICATE_P12: ${{ secrets.BEANS_MAC_CERTIFICATE_P12 }}
+          BEANS_MAC_CERTIFICATE_PASSWORD: ${{ secrets.BEANS_MAC_CERTIFICATE_PASSWORD }}
+          BEANS_APPLE_NOTARY_KEY_P8: ${{ secrets.BEANS_APPLE_NOTARY_KEY_P8 }}
+          BEANS_APPLE_NOTARY_KEY_ID: ${{ secrets.BEANS_APPLE_NOTARY_KEY_ID }}
+          BEANS_APPLE_ISSUER_ID: ${{ secrets.BEANS_APPLE_ISSUER_ID }}
+          BEANS_IOS_CERTIFICATE_P12: ${{ secrets.BEANS_IOS_CERTIFICATE_P12 }}
+          BEANS_IOS_CERTIFICATE_PASSWORD: ${{ secrets.BEANS_IOS_CERTIFICATE_PASSWORD }}
+          BEANS_IOS_APP_PROFILE_BASE64: ${{ secrets.BEANS_IOS_APP_PROFILE_BASE64 }}
+          BEANS_IOS_NOTIFY_PROFILE_BASE64: ${{ secrets.BEANS_IOS_NOTIFY_PROFILE_BASE64 }}
+          BEANS_APPLE_TEAM_ID: ${{ secrets.BEANS_APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in BEANS_ANDROID_KEYSTORE_BASE64 BEANS_ANDROID_KEYSTORE_PASSWORD BEANS_ANDROID_KEY_ALIAS BEANS_ANDROID_KEY_PASSWORD BEANS_MAC_CERTIFICATE_P12 BEANS_MAC_CERTIFICATE_PASSWORD BEANS_APPLE_NOTARY_KEY_P8 BEANS_APPLE_NOTARY_KEY_ID BEANS_APPLE_ISSUER_ID BEANS_IOS_CERTIFICATE_P12 BEANS_IOS_CERTIFICATE_PASSWORD BEANS_IOS_APP_PROFILE_BASE64 BEANS_IOS_NOTIFY_PROFILE_BASE64 BEANS_APPLE_TEAM_ID; do
+            if [[ -z ${!name} ]]; then echo "::error::Required release secret is missing: $name"; missing=1; fi
+          done
+          [[ $missing == 0 ]]
+  core:
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.core_matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - if: matrix.zig
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build and pack exact release binaries
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.name }}
+          USE_ZIG: ${{ matrix.zig }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages=(-p lorca)
+          if [[ $PLATFORM == linux-* ]]; then packages+=(-p lorca-relay); fi
+          build=build
+          if [[ $USE_ZIG == true ]]; then build=zigbuild; fi
+          cargo "$build" --locked --release "${packages[@]}" --target "$TARGET"
+          mkdir -p dist/release-assets
+          bin="target/$TARGET/release"
+          if [[ $PLATFORM == windows-* ]]; then
+            archive="lorca-cli-$PLATFORM.zip"
+            zip -jX "dist/release-assets/$archive" "$bin/lorca.exe"
+          else
+            archive="lorca-cli-$PLATFORM.tar.gz"
+            flags=(--format ustar)
+            if [[ $RUNNER_OS == macOS ]]; then flags+=(--no-mac-metadata); fi
+            tar "${flags[@]}" -czf "dist/release-assets/$archive" -C "$bin" lorca
+          fi
+          (cd dist/release-assets && shasum -a 256 "$archive" > "$archive.sha256")
+          if [[ $PLATFORM == linux-* ]]; then
+            mkdir -p dist/server/models dist/server/marketplace
+            cp "$bin/lorca" "$bin/lorca-relay" dist/server/
+            cp crates/models/catalog.json dist/server/models/v1.json
+            cp crates/cli/marketplace/index.json dist/server/marketplace/v1.json
+            tar --format ustar -czf "dist/release-assets/beans-server-$PLATFORM.tar.gz" -C dist/server lorca lorca-relay models/v1.json marketplace/v1.json
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: core-${{ matrix.name }}
+          path: dist/release-assets/*
+          if-no-files-found: error
+  installers:
+    needs: [prepare, core]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix: ${{ fromJSON(needs.prepare.outputs.installer_matrix) }}
+    env:
+      LORCA_DOWNLOAD_URL: http://127.0.0.1:8000
+      WANT: lorca ${{ needs.prepare.outputs.core_version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: core-*
+          path: site/latest/download
+          merge-multiple: true
+      - name: Exercise fresh CLI installation and replacement
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m http.server --bind 127.0.0.1 --directory site 8000 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          for _ in $(seq 50); do curl -fs -o /dev/null "$LORCA_DOWNLOAD_URL/" && break; sleep 0.2; done
+          sh web/public/install-cli.sh
+          sh web/public/install-cli.sh
+          version=$(~/.local/bin/lorca --version)
+          [[ "$version" == "$WANT" ]]
+      - name: Exercise Windows PowerShell and PowerShell 7 installation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '--bind', '127.0.0.1', '--directory', 'site', '8000' -WindowStyle Hidden -PassThru
+          try {
+            foreach ($try in 1..50) {
+              try { Invoke-WebRequest "$env:LORCA_DOWNLOAD_URL/" -UseBasicParsing | Out-Null; break } catch { Start-Sleep -Milliseconds 200 }
+            }
+            powershell -NoProfile -Command 'Get-Content -Raw web/public/install-cli.ps1 | Invoke-Expression'
+            if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell installation failed' }
+            Get-Content -Raw web/public/install-cli.ps1 | Invoke-Expression
+            if ((lorca --version) -ne $env:WANT) { throw 'CLI version mismatch' }
+            $userPath = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment').GetValue('Path')
+            if ($userPath -notlike "*$HOME\.local\bin*") { throw 'CLI PATH entry missing' }
+          } finally { Stop-Process -Id $server.Id }
+  desktop:
+    needs: prepare
+    if: needs.prepare.outputs.scope == 'all'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows/amd64, target: x86_64-pc-windows-gnu, name: windows-amd64 }
+          - { platform: linux/amd64, target: x86_64-unknown-linux-musl, name: linux-amd64 }
+          - { platform: linux/arm64, target: aarch64-unknown-linux-musl, name: linux-arm64 }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - uses: oven-sh/setup-bun@v2
+      - if: startsWith(matrix.platform, 'windows/')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends nsis
+      - run: bun install --frozen-lockfile
+      - name: Build signed desktop assets without publishing readiness
+        env:
+          BEANS_UPDATE_PRIVATE_KEY: ${{ secrets.BEANS_UPDATE_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          bun run scripts/desktop.ts release "$PLATFORM" --stage-only
+          bun run scripts/release-github.ts desktop desktop/build/release-assets.json dist/desktop-assets
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.name }}
+          path: dist/desktop-assets/*
+          if-no-files-found: error
+  mac:
+    needs: prepare
+    if: needs.prepare.outputs.scope == 'all'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - run: bun install --frozen-lockfile
+      - run: brew install create-dmg
+      - name: Install ephemeral Developer ID and notarization credentials
+        env:
+          CERTIFICATE: ${{ secrets.BEANS_MAC_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.BEANS_MAC_CERTIFICATE_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.BEANS_APPLE_NOTARY_KEY_P8 }}
+          NOTARY_ID: ${{ secrets.BEANS_APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.BEANS_APPLE_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          keychain="$RUNNER_TEMP/beans-release.keychain-db"
+          password=$(openssl rand -hex 32)
+          echo "::add-mask::$password"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/mac.p12"
+          printf '%s' "$NOTARY_KEY" > "$RUNNER_TEMP/notary.p8"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/mac.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          xcrun notarytool store-credentials BEANS_NOTARY --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_ID" --issuer "$NOTARY_ISSUER" --keychain "$keychain"
+      - name: Build signed notarized Mac assets
+        env:
+          BEANS_UPDATE_PRIVATE_KEY: ${{ secrets.BEANS_UPDATE_PRIVATE_KEY }}
+          NOTARY_PROFILE: BEANS_NOTARY
+        run: bun run release-mac --local
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mac
+          path: |
+            dist/mac/Beans-*.dmg
+            dist/mac/updates/*
+          if-no-files-found: error
+      - if: always()
+        run: security delete-keychain "$RUNNER_TEMP/beans-release.keychain-db" || true
+  android:
+    needs: prepare
+    if: needs.prepare.outputs.scope == 'all'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - run: cargo install cargo-ndk --locked
+      - run: bun install --frozen-lockfile && bun install --cwd mobile --frozen-lockfile
+      - name: Materialize private Android signing inputs
+        env:
+          KEYSTORE: ${{ secrets.BEANS_ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.BEANS_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.BEANS_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.BEANS_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$KEYSTORE" | base64 --decode > "$RUNNER_TEMP/beans.keystore"
+          printf 'BEANS_ANDROID_KEYSTORE=%s\nBEANS_ANDROID_KEYSTORE_PASSWORD=%s\nBEANS_ANDROID_KEY_ALIAS=%s\nBEANS_ANDROID_KEY_PASSWORD=%s\n' "$RUNNER_TEMP/beans.keystore" "$STORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > "$RUNNER_TEMP/android-signing.env"
+      - name: Build signed APK only
+        env:
+          BEANS_ANDROID_ENV: ${{ runner.temp }}/android-signing.env
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+        run: bun run android:release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android
+          path: dist/android/Beans-*.apk
+          if-no-files-found: error
+  ios:
+    needs: prepare
+    if: needs.prepare.outputs.scope == 'all'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - run: bun install --frozen-lockfile && bun install --cwd mobile --frozen-lockfile
+      - name: Install ephemeral iOS distribution signing and explicit profiles
+        env:
+          CERTIFICATE: ${{ secrets.BEANS_IOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.BEANS_IOS_CERTIFICATE_PASSWORD }}
+          APP_PROFILE: ${{ secrets.BEANS_IOS_APP_PROFILE_BASE64 }}
+          NOTIFY_PROFILE: ${{ secrets.BEANS_IOS_NOTIFY_PROFILE_BASE64 }}
+          TEAM: ${{ secrets.BEANS_APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          keychain="$RUNNER_TEMP/beans-ios.keychain-db"
+          password=$(openssl rand -hex 32)
+          echo "::add-mask::$password"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/ios.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/ios.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          profiles="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+          mkdir -p "$profiles"
+          printf '%s' "$APP_PROFILE" | base64 --decode > "$profiles/beans-app.mobileprovision"
+          printf '%s' "$NOTIFY_PROFILE" | base64 --decode > "$profiles/beans-notify.mobileprovision"
+          security cms -D -i "$profiles/beans-app.mobileprovision" > "$RUNNER_TEMP/app-profile.plist"
+          security cms -D -i "$profiles/beans-notify.mobileprovision" > "$RUNNER_TEMP/notify-profile.plist"
+          app_name=$(plutil -extract Name raw "$RUNNER_TEMP/app-profile.plist")
+          notify_name=$(plutil -extract Name raw "$RUNNER_TEMP/notify-profile.plist")
+          app_uuid=$(plutil -extract UUID raw "$RUNNER_TEMP/app-profile.plist")
+          notify_uuid=$(plutil -extract UUID raw "$RUNNER_TEMP/notify-profile.plist")
+          echo "BEANS_APPLE_TEAM_ID=$TEAM" >> "$GITHUB_ENV"
+          echo "BEANS_IOS_APP_PROFILE_NAME=$app_name" >> "$GITHUB_ENV"
+          echo "BEANS_IOS_NOTIFY_PROFILE_NAME=$notify_name" >> "$GITHUB_ENV"
+          echo "BEANS_IOS_EXPORT_OPTIONS=$RUNNER_TEMP/ExportOptions.plist" >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>
+          <key>method</key><string>release-testing</string><key>destination</key><string>export</string>
+          <key>teamID</key><string>$TEAM</string><key>signingStyle</key><string>manual</string>
+          <key>manageAppVersionAndBuildNumber</key><false/><key>provisioningProfiles</key><dict>
+          <key>ai.amoena.beans</key><string>$app_uuid</string><key>ai.amoena.beans.notify</key><string>$notify_uuid</string>
+          </dict></dict></plist>
+          PLIST
+      - name: Build signed ad-hoc IPA only (no store submission)
+        env:
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+        run: bun run release-ios
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ios
+          path: dist/ios/Beans-*.ipa
+          if-no-files-found: error
+      - if: always()
+        run: security delete-keychain "$RUNNER_TEMP/beans-ios.keychain-db" || true
+  finalize:
+    needs: [prepare, core, installers, desktop, mac, android, ios]
+    if: >-
+      always() && !cancelled() && needs.prepare.result == 'success' &&
+      needs.core.result == 'success' && needs.installers.result == 'success' &&
+      ((needs.prepare.outputs.scope == 'server' &&
+        needs.desktop.result == 'skipped' && needs.mac.result == 'skipped' &&
+        needs.android.result == 'skipped' && needs.ios.result == 'skipped') ||
+       (needs.prepare.outputs.scope == 'all' &&
+        needs.desktop.result == 'success' && needs.mac.result == 'success' &&
+        needs.android.result == 'success' && needs.ios.result == 'success'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.revision }}
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist/collected
+      - name: Collect artifacts and include updater
+        env:
+          SCOPE: ${{ needs.prepare.outputs.scope }}
+        run: |
+          bun run scripts/release-github.ts collect dist/collected dist/release-assets "$SCOPE"
+          cp scripts/server-updater.py dist/release-assets/beans-server-updater.py
+      - name: Finalize scoped signed assets and publish readiness last
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          SCOPE: ${{ needs.prepare.outputs.scope }}
+          REVISION: ${{ needs.prepare.outputs.revision }}
+          BEANS_UPDATE_PRIVATE_KEY: ${{ secrets.BEANS_UPDATE_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: bun run scripts/release-github.ts publish "$TAG" "$REVISION" dist/release-assets "$SCOPE"

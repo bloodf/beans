@@ -1,12 +1,14 @@
 import { defineConfig } from "mygo-cli";
-import pkg from "./package.json" with { type: "json" };
+import pkg from "../package.json" with { type: "json" };
+import { RELEASES_REPO, TAG_PREFIX } from "../scripts/app.ts";
+import { releasePublicKey } from "../scripts/release-signing.ts";
 
 // Lorca for Windows and Linux. `mygo dev` builds Lorca Dev (app.lorca.dev), which keeps its
 // account in ~/.lorca-dev and its CLI on port 4863, apart from an installed Lorca.
-export default defineConfig(({ command }) => ({
+export default defineConfig(async ({ command }) => ({
   name: "Lorca",
   identifier: "app.lorca",
-  // The app's own version, apart from the Mac app's (the root package.json's).
+  // All desktop artifacts share the root Beans release version.
   version: pkg.version,
   icon: command === "dev" ? "assets/icon-dev.png" : "assets/icon.png",
   devUrl: "http://localhost:5178",
@@ -15,15 +17,14 @@ export default defineConfig(({ command }) => ({
   frontendDist: "dist",
   bindings: "src/mygo.ts",
   out: "build",
-  // Release builds update themselves from this repository's newest release tagged
-  // desktop-v<version>, which MyGo finds through the GitHub API since the latest release is the
-  // CLI's, and install only what the key of `mygo keygen` signed. `bun run release-desktop`
-  // uploads a release as a draft: docs/releasing-desktop.md. The version's section of CHANGELOG.md
-  // here is the update's release notes.
-  updates: {
-    publicKey: "WzJsOGNIuf6mcEqo5ff8jub+NoQQOEk4JXreLPYjgyQ=",
-    github: "egoist/lorca",
-    tagPrefix: "desktop-v",
+  resources: ["../updates/public-key.txt"],
+  // The existing Windows/Linux install identity stays unchanged; update trust is Beans-only.
+  updates: command === "dev" ? undefined : {
+    publicKey: await releasePublicKey(),
+    github: RELEASES_REPO,
+    tagPrefix: TAG_PREFIX,
+    changelog: "../CHANGELOG.md",
+    deltas: 0,
   },
   linux: {
     comment: "Chat with your bots, which run on computers you own",

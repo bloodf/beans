@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{App, RunningJob, SentJob};
+use crate::update_control::Admission;
 use crate::config::now_secs;
 use crate::model::*;
 
@@ -38,20 +39,37 @@ pub fn send_user_message(
     message_id: Option<String>,
     attachments: Vec<Attachment>,
     mentions: Vec<String>,
+    reply_to: Option<String>,
 ) -> anyhow::Result<Message> {
     let text = text.trim();
     if text.is_empty() && attachments.is_empty() {
         anyhow::bail!("Empty message");
     }
-    let mentions = resolve_mentions(&app, text, mentions);
     let chat = app.chat(chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
+    // Refused before anything is written while an update holds new work back, so no message
+    // waits for a turn that never comes. After the chat lookup, so a bad chat still says so.
+    let admission = app.update.try_admit().ok_or_else(|| anyhow::anyhow!(crate::update_control::UPDATING))?;
+    let mentions = resolve_mentions(&app, text, mentions);
+    let reply_to = match reply_to.filter(|id| !id.is_empty()) {
+        Some(id) => Some(
+            app.message(chat_id, &id)
+                .as_ref()
+                .and_then(ReplyTo::quoting)
+                .ok_or_else(|| anyhow::anyhow!("The message you replied to is no longer in this chat"))?,
+        ),
+        None => None,
+    };
     // The bytes go out ahead of the message that names them.
     for attachment in &attachments {
         if let Err(error) = crate::files::push_blob(&app, Some(chat_id), attachment) {
             tracing::warn!(%error, name = %attachment.name, "uploading an attachment");
         }
     }
-    let mut message = Message::new(chat_id, Author::You, Body::Text { text: text.to_string(), attachments, mentions: mentions.clone() });
+    let replied_bot = match &reply_to {
+        Some(ReplyTo { author: Author::Bot { bot_id }, .. }) => Some(bot_id.clone()),
+        _ => None,
+    };
+    let mut message = Message::new(chat_id, Author::You, Body::Text { text: text.to_string(), attachments, mentions: mentions.clone(), reply_to });
     if let Some(id) = message_id.filter(|id| !id.is_empty()) {
         message.id = id;
     }
@@ -60,22 +78,22 @@ pub fn send_user_message(
     crate::turns::hear_user_message(&app, &message);
 
     if chat.meta.is_group() {
-        let members = turn_order(&chat.meta, &app, &mentions);
-        start_room(app.clone(), chat_id.to_string(), message.id.clone(), members);
+        let members = turn_order(&chat.meta, &app, &mentions, replied_bot.as_deref());
+        start_room(app.clone(), chat_id.to_string(), message.id.clone(), members, admission);
     } else if let Some(bot) = chat.meta.bot_ids.first().and_then(|id| app.bot(id)) {
-        start_turn(&app, user_turn_job(&app, chat_id, &bot.id, &message.id));
+        start_turn(&app, user_turn_job(&app, chat_id, &bot.id, &message.id), admission);
     }
     Ok(message)
 }
 
 /// The user's first message to a bot just added from a marketplace template, and the turn that
 /// answers it: the bot sets itself up from `setup` first (`turns::setup_cue`), then says hello.
-pub fn greet_new_bot(app: &Arc<App>, chat_id: &str, bot_id: &str, text: &str, setup: TemplateSetup) {
-    let message = Message::new(chat_id, Author::You, Body::Text { text: text.trim().to_string(), attachments: Vec::new(), mentions: Vec::new() });
+pub fn greet_new_bot(app: &Arc<App>, chat_id: &str, bot_id: &str, text: &str, setup: TemplateSetup, admission: Admission) {
+    let message = Message::new(chat_id, Author::You, Body::text(text.trim()));
     let mut job = user_turn_job(app, chat_id, bot_id, &message.id);
     job.setup = Some(setup);
     app.upsert_message(message, true);
-    start_turn(app, job);
+    start_turn(app, job, admission);
 }
 
 /// Stops work in a chat on this Device and forwards job-specific cancellations to every other
@@ -165,11 +183,13 @@ pub fn command_job(app: &App, chat_id: &str, bot_id: &str, card_id: &str) -> Job
     }
 }
 
-/// Members in chat order, with the ones the message mentions first.
-pub fn turn_order(chat: &ChatMeta, app: &Arc<App>, mentions: &[String]) -> Vec<Bot> {
+/// Members in chat order, with the ones the message mentions first, then the one whose message
+/// it replies to.
+pub fn turn_order(chat: &ChatMeta, app: &Arc<App>, mentions: &[String], replied: Option<&str>) -> Vec<Bot> {
     let members: Vec<Bot> = chat.bot_ids.iter().filter_map(|id| app.bot(id)).collect();
     let (mentioned, rest): (Vec<Bot>, Vec<Bot>) = members.into_iter().partition(|bot| mentions.contains(&bot.id));
-    mentioned.into_iter().chain(rest).collect()
+    let (answered, rest): (Vec<Bot>, Vec<Bot>) = rest.into_iter().partition(|bot| Some(bot.id.as_str()) == replied);
+    mentioned.into_iter().chain(answered).chain(rest).collect()
 }
 
 /// The bots a message mentions, by id: the ones the user picked from the `@` menu, then each
@@ -285,15 +305,19 @@ fn finish_job(app: &App, job_id: &str) {
 }
 
 /// Registers a room before it waits for the chat lock. A later message is admitted behind it
-/// and takes over at the next member boundary.
-fn start_room(app: Arc<App>, chat_id: String, trigger: String, members: Vec<Bot>) {
+/// and takes over at the next member boundary. `admission` counts the room as running here
+/// until it ends.
+fn start_room(app: Arc<App>, chat_id: String, trigger: String, members: Vec<Bot>, admission: Admission) {
     if members.is_empty() {
         return;
     }
     let room_id = format!("room-{}", uuid::Uuid::new_v4());
     let cancel = CancellationToken::new();
     begin_job(&app, &room_id, &chat_id, "", None, None, cancel.clone());
-    tokio::spawn(run_room(app, chat_id, trigger, members, room_id, cancel));
+    tokio::spawn(async move {
+        let _admission = admission;
+        run_room(app, chat_id, trigger, members, room_id, cancel).await;
+    });
 }
 
 /// Whether another user instruction follows this room's trigger in the durable transcript.
@@ -511,12 +535,13 @@ pub fn deliver_job_result(app: &Arc<App>, result: JobResult) {
 // MARK: - Jobs
 
 /// Starts a turn wherever the bot runs: here in the background, or on its Runner with the
-/// wait for the result tracked here.
-pub fn start_turn(app: &Arc<App>, job: Job) {
+/// wait for the result tracked here. `admission` counts the turn as running here until it ends
+/// (`update_control`).
+pub fn start_turn(app: &Arc<App>, job: Job, admission: Admission) {
     if app.is_paused() { app.notice(&job.chat_id, "Account paused. Resume to run bots."); return; }
     let Some(bot) = app.bot(&job.bot_id) else { return };
     if app.this_device_id().as_deref() == Some(bot.runner_id.as_str()) {
-        spawn_local_job(app.clone(), job, None);
+        spawn_local_job(app.clone(), job, None, admission);
     } else {
         let cancel = CancellationToken::new();
         begin_job(
@@ -530,6 +555,7 @@ pub fn start_turn(app: &Arc<App>, job: Job) {
         );
         let app = app.clone();
         tokio::spawn(async move {
+            let _admission = admission;
             remote_turn_started(&app, job, cancel).await;
         });
     }
@@ -552,7 +578,8 @@ pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
     }
     let Some(bot) = app.bot(&job.bot_id) else { return Dispatch::Deferred };
     if app.this_device_id().as_deref() == Some(bot.runner_id.as_str()) {
-        spawn_local_job(app.clone(), job, None);
+        // The caller's admission still counts, so this run continues it.
+        spawn_local_job(app.clone(), job, None, app.update.hold());
         return Dispatch::Ran;
     }
     match app.device(&bot.runner_id) {
@@ -584,7 +611,8 @@ pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
 /// Runs a job on this Runner in the background. Turns in one chat run one at a time; the
 /// outcome goes back to the requesting Device when the job came from another one. It registers
 /// before taking the lock, so hard Stop also cancels jobs waiting behind another turn.
-pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>) {
+/// `admission` counts the job as running here until it ends.
+pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, admission: Admission) {
     if app.is_paused() {
         app.notice(&job.chat_id, "Account paused. Resume to run bots.");
         if let Some(id) = remote_blob_id {
@@ -609,6 +637,7 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>) 
         cancel.clone(),
     );
     tokio::spawn(async move {
+        let _admission = admission;
         let lock = app.chat_lock(&job.chat_id);
         let _guard = lock.lock().await;
         let outcome = run_job_started(&app, job.clone(), cancel).await;
@@ -647,6 +676,10 @@ async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken) ->
     {
         TurnOutcome::Skipped
     } else {
+        // A message a turn held and never read: this turn reads it now.
+        if job.kind == "turn" {
+            app.set_queued(&job.chat_id, &job.trigger_message_id, false);
+        }
         crate::turns::run_job(app, &job, cancel).await
     };
     #[cfg(not(feature = "runner"))]
@@ -710,6 +743,7 @@ mod tests {
                 title: None,
                 bot_ids: Vec::new(),
                 owner_bot_id: None,
+                description: None,
                 is_pinned: false,
                 created_at: 1.0,
             },
@@ -766,8 +800,53 @@ mod tests {
         assert_eq!(resolve_mentions(app, "@Chef and @Scout", vec!["b2".into(), "gone".into(), "b2".into()]), ["b2", "b3"]);
 
         let group = ChatMeta { kind: "group".into(), bot_ids: vec!["b1".into(), "b2".into(), "b3".into()], ..empty_chat("g").meta };
-        let order: Vec<String> = turn_order(&group, app, &["b2".into()]).into_iter().map(|bot| bot.id).collect();
+        let order: Vec<String> = turn_order(&group, app, &["b2".into()], None).into_iter().map(|bot| bot.id).collect();
         assert_eq!(order, ["b2", "b1", "b3"]);
+        // The bot whose message the user answers comes after the ones the user mentions.
+        let order: Vec<String> = turn_order(&group, app, &["b2".into()], Some("b3")).into_iter().map(|bot| bot.id).collect();
+        assert_eq!(order, ["b2", "b3", "b1"]);
+        let order: Vec<String> = turn_order(&group, app, &["b3".into()], Some("b3")).into_iter().map(|bot| bot.id).collect();
+        assert_eq!(order, ["b3", "b1", "b2"]);
+    }
+
+    /// A reply keeps a one-line quote of the message it answers, and only a text message can be
+    /// answered; a message that is not in the chat refuses the send.
+    #[test]
+    fn a_reply_quotes_the_message_it_answers() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        app.state.lock().unwrap().chats.push(empty_chat("chat"));
+        let mut original = Message::new("chat", Author::Bot { bot_id: "b1".into() }, Body::text("The build   passes.\n\nShip it?"));
+        original.id = "msg-original".into();
+        app.upsert_message(original, false);
+
+        let reply = send_user_message(app.clone(), "chat", "yes, ship it", None, Vec::new(), Vec::new(), Some("msg-original".into())).unwrap();
+        let Body::Text { reply_to: Some(quote), .. } = &reply.body else { panic!("no quote: {:?}", reply.body) };
+        assert_eq!(quote, &ReplyTo { message_id: "msg-original".into(), author: Author::Bot { bot_id: "b1".into() }, text: "The build passes. Ship it?".into() });
+        assert_eq!(app.message("chat", &reply.id).map(|stored| stored.body), Some(reply.body.clone()));
+
+        let error = send_user_message(app.clone(), "chat", "and this?", None, Vec::new(), Vec::new(), Some("msg-gone".into())).unwrap_err();
+        assert_eq!(error.to_string(), "The message you replied to is no longer in this chat");
+
+        let list = Message::new("chat", Author::You, Body::text("The checklist:\n\n- **Onboarding** done\n- `site` [checked](https://x.y)\n\n> ship it"));
+        assert_eq!(ReplyTo::quoting(&list).unwrap().text, "The checklist: Onboarding done site checked ship it");
+        let long = Message::new("chat", Author::You, Body::text("word ".repeat(100)));
+        let quote = ReplyTo::quoting(&long).unwrap();
+        assert_eq!(quote.text.chars().count(), REPLY_QUOTE_CHARS);
+        assert!(quote.text.ends_with('…'));
+        let notice = Message::new("chat", Author::System, Body::Notice { text: "Compacted".into(), routine_id: None });
+        assert_eq!(ReplyTo::quoting(&notice), None);
+        let file = Message::new(
+            "chat",
+            Author::You,
+            Body::Text {
+                text: String::new(),
+                attachments: vec![Attachment { id: "f".into(), name: "plan.pdf".into(), mime: "application/pdf".into(), size: 1, width: None, height: None }],
+                mentions: Vec::new(),
+                reply_to: None,
+            },
+        );
+        assert_eq!(ReplyTo::quoting(&file).unwrap().text, "plan.pdf");
     }
 
     #[test]
@@ -799,7 +878,7 @@ mod tests {
         );
 
         let message =
-            send_user_message(app.clone(), "chat", "change course", None, Vec::new(), Vec::new()).unwrap();
+            send_user_message(app.clone(), "chat", "change course", None, Vec::new(), Vec::new(), None).unwrap();
 
         assert!(!cancel.is_cancelled());
         assert_eq!(message.author, Author::You);

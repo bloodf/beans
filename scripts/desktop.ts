@@ -10,23 +10,18 @@
 //                                         this computer's, or Linux and Windows on x86-64 from a
 //                                         Mac. The Linux CLIs are static (musl) and, like other
 //                                         computers' CLIs, build with cargo-zigbuild.
-//   bun run release-desktop [platforms]   desktop:build signed with the update key and uploaded to
-//                                         the draft release desktop-v<version> of egoist/lorca
-//                                         (`mygo build -upload`), which the apps see once it is
-//                                         published: docs/releasing-desktop.md.
+//   bun scripts/desktop.ts release <platforms> --stage-only
+//                                         Signed local assets, listed in build/release-assets.json.
+//   bun run release-desktop [platforms]   Upload only release assets to the existing Beans draft.
 
-import { copyFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs"
-import { homedir } from "node:os"
-import { join } from "node:path"
-import { CLI_NAME, ROOT, buildCLI, color, log } from "./app.ts"
+import { copyFileSync, chmodSync, mkdirSync, readdirSync } from "node:fs"
+import { join, relative } from "node:path"
+import { CLI_NAME, ROOT, buildCLI, color, log, readVersion, RELEASES_REPO, TAG_PREFIX } from "./app.ts"
 import { extractReleaseNotes } from "./changelog.ts"
+import { rawReleaseSecret } from "./release-signing.ts"
 
 const DESKTOP = join(ROOT, "desktop")
 const MYGO = join(DESKTOP, "node_modules", ".bin", process.platform === "win32" ? "mygo.exe" : "mygo")
-/** `updates.github` and `updates.tagPrefix` of desktop/mygo.config.ts: the newest release with the
- * prefix is where installed apps look. */
-const RELEASES_REPO = "egoist/lorca"
-const TAG_PREFIX = "desktop-v"
 
 /** The Rust target of the CLI each MyGo platform ships, static builds for Linux. */
 const RUST_TARGETS: Record<string, string> = {
@@ -98,36 +93,6 @@ async function placeCLI(platform: string): Promise<boolean> {
   return true
 }
 
-/** Where `mygo keygen` writes the update keys: MyGo's folder in the user's configuration directory. */
-function keygenDirectory(): string {
-  const home = homedir()
-  const config =
-    process.platform === "win32"
-      ? (process.env.APPDATA ?? join(home, "AppData", "Roaming"))
-      : process.platform === "darwin"
-        ? join(home, "Library", "Application Support")
-        : process.env.XDG_CONFIG_HOME || join(home, ".config")
-  return join(config, "mygo", "update-keys")
-}
-
-/** What an upload needs besides the build: the update signing key, from MYGO_UPDATER_PRIVATE_KEY or
- * where `mygo keygen` put it, and the GitHub CLI with access to the releases repository (its
- * login, or GH_TOKEN). Null when something is missing. */
-function releaseEnv(): Record<string, string> | null {
-  const missing: string[] = []
-  let key = process.env.MYGO_UPDATER_PRIVATE_KEY ?? ""
-  if (key === "") {
-    const file = join(keygenDirectory(), "mygo-update.key")
-    if (existsSync(file)) key = readFileSync(file, "utf8").trim()
-    else missing.push(`the update signing key: MYGO_UPDATER_PRIVATE_KEY, or ${file}`)
-  }
-  if (!Bun.which("gh")) missing.push("the GitHub CLI, gh")
-  else if (Bun.spawnSync(["gh", "release", "list", "--repo", RELEASES_REPO, "--limit", "1"]).exitCode !== 0) {
-    missing.push(`access to ${RELEASES_REPO}: gh auth login, or GH_TOKEN`)
-  }
-  for (const thing of missing) log(color.red(`missing ${thing}`))
-  return missing.length === 0 ? { MYGO_UPDATER_PRIVATE_KEY: key } : null
-}
 
 /** Whether the release `tag` of the releases repository is a draft, published, or not there. */
 function releaseState(tag: string): "draft" | "published" | "none" {
@@ -137,20 +102,20 @@ function releaseState(tag: string): "draft" | "published" | "none" {
 }
 
 async function build(platforms: string[], options: { upload?: boolean } = {}): Promise<number> {
-  let env: Record<string, string> = {}
-  // The desktop app's own version, apart from the Mac app's.
-  const version = (await Bun.file(join(DESKTOP, "package.json")).json()).version as string
+  const version = readVersion()
+  const env = { MYGO_UPDATER_PRIVATE_KEY: await rawReleaseSecret() }
   if (options.upload) {
-    const release = releaseEnv()
-    if (!release) return 1
-    env = release
-    // mygo build reads the notes too, but only once the apps are built.
-    if (!extractReleaseNotes(await Bun.file(join(DESKTOP, "CHANGELOG.md")).text(), version)) {
-      log(color.red(`desktop/CHANGELOG.md has no "## [${version}]" section: add the notes of the update window`))
+    if (!Bun.which("gh")) {
+      log(color.red("missing the GitHub CLI, gh"))
       return 1
     }
-    if (releaseState(TAG_PREFIX + version) === "published" && process.env.FORCE !== "1") {
-      log(color.red(`${TAG_PREFIX}${version} is already published: bump "version" in desktop/package.json, or FORCE=1 to replace its files`))
+    // MyGo can create its own draft, but the unified release orchestrator owns that lifecycle.
+    if (releaseState(TAG_PREFIX + version) !== "draft") {
+      log(color.red(`the parent must create the ${TAG_PREFIX}${version} draft in ${RELEASES_REPO} before uploading desktop assets`))
+      return 1
+    }
+    if (!extractReleaseNotes(await Bun.file(join(ROOT, "CHANGELOG.md")).text(), version)) {
+      log(color.red(`CHANGELOG.md has no "## [${version}]" section`))
       return 1
     }
   }
@@ -163,15 +128,44 @@ async function build(platforms: string[], options: { upload?: boolean } = {}): P
   log(`${color.bold("building")} ${color.dim(`the app for ${platforms.join(", ")}`)}`)
   const command = [MYGO, "build", "-platform", platforms.join(","), ...(options.upload ? ["-upload"] : [])]
   const status = await run(command, { cwd: DESKTOP, env })
+  if (status === 0) {
+    const assets = new Map<string, string>()
+    for (const platform of platforms) {
+      const target = platform.replace("/", "-")
+      const directory = join(DESKTOP, "build", target)
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (!entry.isFile()) continue
+        const name = entry.name
+        if (name === `lorca-${version}-${target}.tar.gz` || name === `update-${target}.json`
+          || name === `Lorca Setup ${version}.exe` || name.endsWith(".deb") || name === "install.sh") {
+          assets.set(name, relative(ROOT, join(directory, name)))
+        }
+      }
+      if (!assets.has(`lorca-${version}-${target}.tar.gz`) || !assets.has(`update-${target}.json`)) {
+        throw new Error(`MyGo did not stage the signed archive and metadata for ${target}`)
+      }
+    }
+    const manifest = join(DESKTOP, "build", "release-assets.json")
+    await Bun.write(manifest, JSON.stringify({
+      version, tag: TAG_PREFIX + version, assets: [...assets.values()],
+    }, null, 2) + "\n")
+    log(`${color.green("staged")} ${color.dim(relative(ROOT, manifest))}`)
+  }
   if (status === 0 && options.upload) log(`${color.green("uploaded")} ${color.dim(`to the release ${TAG_PREFIX}${version} of ${RELEASES_REPO}`)}`)
   else if (status === 0) log(`${color.green("built")} ${color.dim(join(DESKTOP, "build"))}`)
   return status
 }
 
-const [mode, list] = process.argv.slice(2)
+const [mode, ...args] = process.argv.slice(2)
 if (mode === "build" || mode === "release") {
+  const stageOnly = args.includes("--stage-only")
+  const unknown = args.find((arg) => arg.startsWith("--") && arg !== "--stage-only")
+  const positional = args.filter((arg) => !arg.startsWith("--"))
+  if (unknown || positional.length > 1) {
+    throw new Error("usage: bun scripts/desktop.ts build|release [platforms] [--stage-only]")
+  }
   const host = hostPlatform()
-  const platforms = list?.split(",").filter((platform) => platform !== "") ?? (host.startsWith("darwin") ? ["linux/amd64", "windows/amd64"] : [host])
-  process.exit(await build(platforms, { upload: mode === "release" }))
+  const platforms = positional[0]?.split(",").filter((platform) => platform !== "") ?? (host.startsWith("darwin") ? ["linux/amd64", "windows/amd64"] : [host])
+  process.exit(await build(platforms, { upload: mode === "release" && !stageOnly }))
 }
 process.exit(await dev())

@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -47,6 +49,7 @@ type launcher struct {
 	port         int
 	status       LauncherStatus
 	process      *exec.Cmd
+	processDone  chan struct{}
 	ready        bool
 	probing      bool
 	restart      *time.Timer
@@ -158,6 +161,11 @@ func (l *launcher) environment() []string {
 	}
 	set("RUST_LOG", "lorca=info")
 	set("LORCA_HOME", defaultCLIHome())
+	if !isDevelopment() && mygo.Updater.Enabled() {
+		if token, err := ensureDesktopUpdateToken(); err == nil {
+			set("LORCA_UPDATE_TOKEN_FILE", token)
+		}
+	}
 	if !isDevelopment() {
 		set("LORCA_DEFAULT_RELAY_URL", productionRelayURL)
 	}
@@ -197,15 +205,20 @@ func (l *launcher) spawn(generation, port int) {
 	startupTrace("CLI spawned")
 
 	l.mu.Lock()
+	done := make(chan struct{})
 	stale := l.stopped || generation != l.generation
 	if !stale {
 		l.process = command
+		l.processDone = done
 		l.ready = false
 	}
 	l.mu.Unlock()
 
 	go l.readOutput(generation, port, command, stdout, logFile, logPath)
-	go l.wait(generation, command, logFile, logPath)
+	go func() {
+		l.wait(generation, command, logFile, logPath)
+		close(done)
+	}()
 	// Quitting or a new port raced the start: this child is not wanted.
 	if stale {
 		stopChild(command, true)
@@ -299,9 +312,40 @@ func (l *launcher) wait(generation int, command *exec.Cmd, logFile *os.File, log
 	l.setStatus(generation, LauncherStatus{Kind: "failed", Failure: &LaunchFailure{Kind: "exited", Code: code, Log: logPath}})
 }
 
-// stop fences further starts and stops the child. At quit a Windows CLI is left to see its
-// parent go (`--parent-pid`), which it does within a second, and stop its commands itself.
+// An ordinary Windows quit leaves the CLI to see --parent-pid go away.
+// An approved update has fenced admission and proved the child idle: stop it
+// now, so its resource handles close before the app swaps resources.
 func (l *launcher) stop() {
+	u := &desktopUpdater
+	u.mu.Lock()
+	update, lease, relay := u.installationQuitApproved, u.lease, u.relayURL
+	u.mu.Unlock()
+	if update && lease != nil {
+		// These final checks use only the pinned socket, not the closed pages.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := lease.verify(ctx)
+		if err == nil {
+			data, requestErr := lease.client.request(ctx, "bootstrap", nil)
+			err = requestErr
+			if err == nil {
+				var snapshot struct {
+					RelayURL string `json:"relay_url"`
+				}
+				err = json.Unmarshal(data, &snapshot)
+				if err == nil && snapshot.RelayURL != relay {
+					err = errors.New("the selected relay changed before shutdown")
+				}
+			}
+		}
+		cancel()
+		if err != nil {
+			log.Printf("Beans update deferred before shutdown: %v", err)
+			u.mu.Lock()
+			u.installationQuitApproved = false
+			u.mu.Unlock()
+			update = false
+		}
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.stopped = true
@@ -309,7 +353,9 @@ func (l *launcher) stop() {
 		l.restart.Stop()
 		l.restart = nil
 	}
-	l.stopChildLocked(false)
+	idleUpdate := update && lease != nil && l.process != nil && l.process.Process != nil &&
+		l.process.Process.Pid == lease.pid && l.generation == lease.generation
+	l.stopChildLocked(idleUpdate && runtime.GOOS == "windows")
 }
 
 func (l *launcher) stopChildLocked(restarting bool) {

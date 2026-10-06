@@ -1,9 +1,9 @@
 #!/bin/sh
-# Installs the Lorca CLI on macOS or Linux: https://lorca.app/docs/cli
+# Installs the Beans CLI (runtime name lorca) on macOS or Linux.
 #
-#   curl -fsSL https://lorca.app/install-cli.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/bloodf/beans/main/web/public/install-cli.sh | sh
 #
-# It downloads the build for this computer from the latest release of github.com/egoist/lorca,
+# It downloads this computer's build from the latest stable bloodf/beans GitHub release,
 # checks it against the checksum published beside it, puts `lorca` in ~/.local/bin, and adds
 # that folder to PATH in your shell's profile. Run it again to update. Settings, as environment
 # variables for `sh`:
@@ -16,7 +16,7 @@
 
 set -eu
 
-RELEASES=${LORCA_DOWNLOAD_URL:-https://github.com/egoist/lorca/releases}
+RELEASES=${LORCA_DOWNLOAD_URL:-https://github.com/bloodf/beans/releases}
 
 say() {
 	printf '%s\n' "$*"
@@ -130,7 +130,7 @@ main() {
 		case $version in
 			'' | *[!0-9.]*) die "not a Lorca version: $LORCA_VERSION" ;;
 		esac
-		url=$RELEASES/download/cli-v$version
+		url=$RELEASES/download/beans-v$version
 		release="release $version"
 	else
 		url=$RELEASES/latest/download

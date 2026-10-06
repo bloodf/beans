@@ -69,7 +69,11 @@ Release packaging in `scripts/app.ts` embeds an optional `LORCA_DEFAULT_RELAY_UR
 
 ## Production notes
 
-When APNs is used, run the relay with `LORCA_RELAY_APNS_TOPIC=ai.amoena.beans`. `scripts/release-mac.ts` and the publishing constants in `scripts/app.ts` (`RELEASES_URL`, `FEED_URL`, `SPARKLE_PUBLIC_KEY`) still name upstream release hosting and are not used by Beans builds. `mobile/google-services.json` is upstream's and is not used unless `BEANS_GOOGLE_SERVICES_FILE` points to a Beans file.
+When APNs is used, run the relay with `LORCA_RELAY_APNS_TOPIC=ai.amoena.beans`. Beans release jobs use the Beans release repository and signing anchor. `mobile/google-services.json` is upstream's and is not used unless `BEANS_GOOGLE_SERVICES_FILE` points to a Beans file.
+
+Stable `beans-v<root version>` publication defaults to server-only scope in [the unified release workflow](.github/workflows/release.yml): Linux x86_64/aarch64 server and CLI archives, matching CLI checksums and the updater script are covered by the signed schema-1 readiness manifest. Server scope requires the Beans Ed25519 update key, not Apple or Android signing inputs, and runs no native client builders. Manual dispatch accepts an exact published tag and `server|all`; `all` keeps every platform's build and installer gates. Tagged-source verification and immutable-byte preflight precede readiness publication, with the signature before the manifest. A finalized server release cannot gain client assets; a later full release needs a new version.
+
+Automatic rollout on a Linux updater host requires a trusted updater/public-key bootstrap, reviewed root-owned target configuration and backup policy, drain-capable Runners with configured update tokens, and explicit timer enablement after a successful manual pass. The relay upgrades and passes health/protocol checks before Runners move. Server readiness does not authorize a Mac or Windows/Linux app update without that consumer's signed assets. See [release prerequisites, scope commands and server bootstrap](docs/releasing-cli.md). Source changes are not evidence of generated phone artifacts, published signed releases or live server updates.
 
 ## Android release build
 

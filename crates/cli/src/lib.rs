@@ -39,5 +39,6 @@ pub mod sync;
 pub mod local_store;
 #[cfg(feature = "runner")]
 pub mod turns;
+pub mod update_control;
 #[cfg(feature = "server")]
 pub mod ws;

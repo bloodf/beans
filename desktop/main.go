@@ -9,6 +9,12 @@ import (
 )
 
 func main() {
+	// Keep MyGo's instance lock until the on-quit installation has finished.
+	// RequestSingleInstanceLock registers its release callback after this one.
+	mygo.App.OnQuit(func() {
+		app.willTerminate()
+		finishUpdaterOnQuit()
+	})
 	// Starting the app again brings the running one forward, as a click on the Dock icon does.
 	if !mygo.App.RequestSingleInstanceLock() {
 		return
@@ -33,8 +39,11 @@ func main() {
 			mygo.App.Quit()
 		}
 	})
-	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { app.quitting = true })
-	mygo.App.OnQuit(app.willTerminate)
+	mygo.App.OnBeforeQuit(func(event *mygo.QuitEvent) {
+		if updaterBeforeQuit(event) {
+			app.quitting = true
+		}
+	})
 	mygo.App.WhenReady(app.didFinishLaunching)
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)

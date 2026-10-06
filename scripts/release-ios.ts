@@ -1,19 +1,16 @@
-// Release the iPhone app to TestFlight:
-//   Rust core → production prebuild in a copy of mobile/ → pods → archive → upload to App Store Connect.
+// Build the signed iPhone IPA for a GitHub release; never submit to a store.
+//   Rust core → copied production project → pods → archive → local IPA export.
 //
-//   bun run release-ios                    archive and upload; the build number is the local time
-//   bun run release-ios --local            archive only; upload nothing
-//   BUILD_NUMBER=42 bun run release-ios    upload under a chosen build number
-//
-// Signing and the upload go through the Apple account signed in to Xcode (team GJE9R5VE87), with
-// automatic provisioning. App Store Connect holds the app record "Beans" for `ai.amoena.beans`. The
-// marketing version is `version` in mobile/app.config.ts. A build appears under TestFlight after
-// Apple finishes processing it, usually within half an hour.
+//   bun run release-ios                      export an ad-hoc IPA
+//   bun run release-ios --local              archive only
+//   bun run release-ios --export-method debugging  development-signed IPA
+// Provisioning profiles and certificates must already be installed. Creating/updating
+// Apple provisioning requires the explicit --allow-provisioning flag.
 import { $ } from "bun"
 import { existsSync } from "node:fs"
 import { mkdir, readdir, rename, rm, symlink } from "node:fs/promises"
 import { dirname, join, relative } from "node:path"
-import { color, log, ROOT } from "./app.ts"
+import { color, log, readVersion, ROOT } from "./app.ts"
 
 function die(message: string): never {
   log(color.red(message))
@@ -22,14 +19,22 @@ function die(message: string): never {
 
 const args = process.argv.slice(2)
 const local = args.includes("--local")
-const unknown = args.find((arg) => arg !== "--local")
-if (unknown) die(`unknown argument: ${unknown}`)
+const allowProvisioning = args.includes("--allow-provisioning")
+const methodIndex = args.indexOf("--export-method")
+const exportMethod = methodIndex < 0 ? "release-testing" : args[methodIndex + 1]
+if (exportMethod !== "release-testing" && exportMethod !== "debugging") {
+  die("--export-method must be release-testing or debugging")
+}
+for (let index = 0; index < args.length; index++) {
+  if (index === methodIndex) { index++; continue }
+  if (args[index] !== "--local" && args[index] !== "--allow-provisioning") die(`unknown argument: ${args[index]}`)
+}
 
 for (const tool of ["cargo", "xcodebuild", "pod", "bunx", "plutil", "rsync"]) {
   if (!Bun.which(tool)) die(`missing required tool: ${tool}`)
 }
 
-const TEAM_ID = "GJE9R5VE87"
+const TEAM_ID = process.env.BEANS_APPLE_TEAM_ID ?? "GJE9R5VE87"
 const BUNDLE_ID = "ai.amoena.beans"
 const MOBILE = join(ROOT, "mobile")
 const BUILD_DIR = join(ROOT, "dist", "ios")
@@ -46,14 +51,11 @@ const KEPT = join(BUILD_DIR, "kept")
 const ARCHIVE = join(BUILD_DIR, "Beans.xcarchive")
 const EXPORT = join(BUILD_DIR, "export")
 
-// App Store Connect wants every upload's build number above the last. Local time as YYYYMMDDHHmm
-// only grows, and it names when the build was made.
-const now = new Date()
-const pad = (n: number) => String(n).padStart(2, "0")
-const buildNumber =
-  process.env.BUILD_NUMBER ??
-  `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}`
-if (!/^\d+$/.test(buildNumber)) die(`BUILD_NUMBER must be digits, got "${buildNumber}"`)
+// Monotonic build numbers are shared with Android in GitHub release builds.
+const buildNumber = process.env.BUILD_NUMBER ?? String(Math.floor(Date.now() / 1000))
+if (!/^[1-9]\d*$/.test(buildNumber) || Number(buildNumber) > 2_100_000_000) {
+  die("BUILD_NUMBER must be a positive integer at most 2100000000")
+}
 
 // CocoaPods dies on a non-UTF-8 locale, and the CommandLineTools SDK breaks the pod install and
 // the build with "unknown architecture" from tapi. The variant variables would make a Beans Dev build.
@@ -92,6 +94,9 @@ if (existsSync(join(PROJECT, "package.json"))) {
   await mkdir(dirname(COPIED_BLOBATAR), { recursive: true })
   await $`cp -cR ${BLOBATAR} ${dirname(COPIED_BLOBATAR)}`
 }
+// app.config.ts reads its parent's release version. Keep the copied layout independent
+// of the repository's Bun workspaces while preserving the exact production version.
+await Bun.write(join(BUILD_DIR, "package.json"), JSON.stringify({ private: true, version: readVersion() }) + "\n")
 // Bun's file: install puts absolute per-file links in node_modules. Point the copied dependency at
 // the copied source instead, so Metro sees one Blobatar outside its project root and its React
 // imports resolve against this mobile project's node_modules.
@@ -129,7 +134,8 @@ if (!bundleIds.has(BUNDLE_ID)) die(`the project builds ${[...bundleIds].join(", 
 log(`${color.bold("archiving")} ${color.dim(ARCHIVE)}`)
 await rm(ARCHIVE, { recursive: true, force: true })
 await rm(EXPORT, { recursive: true, force: true })
-await $`xcodebuild -workspace ${join(IOS, "Beans.xcworkspace")} -scheme Beans -configuration Release -destination generic/platform=iOS -archivePath ${ARCHIVE} -allowProvisioningUpdates CURRENT_PROJECT_VERSION=${buildNumber} COMPILATION_CACHE_ENABLE_CACHING=YES archive -quiet`.env(env)
+const provisioningArgs = allowProvisioning ? ["-allowProvisioningUpdates"] : []
+await $`xcodebuild -workspace ${join(IOS, "Beans.xcworkspace")} -scheme Beans -configuration Release -destination generic/platform=iOS -archivePath ${ARCHIVE} ${provisioningArgs} CURRENT_PROJECT_VERSION=${buildNumber} COMPILATION_CACHE_ENABLE_CACHING=YES archive -quiet`.env(env)
 if (!existsSync(ARCHIVE)) die("xcodebuild produced no archive")
 
 const plist = join(ARCHIVE, "Products", "Applications", "Beans.app", "Info.plist")
@@ -143,26 +149,32 @@ if (local) {
   process.exit(0)
 }
 
-// ---- 4. upload
-const exportOptions = join(BUILD_DIR, "ExportOptions.plist")
-await Bun.write(
-  exportOptions,
-  `<?xml version="1.0" encoding="UTF-8"?>
+// ---- 4. local IPA export (no App Store or TestFlight submission)
+const configuredOptions = process.env.BEANS_IOS_EXPORT_OPTIONS
+const exportOptions = configuredOptions ?? join(BUILD_DIR, "ExportOptions.plist")
+if (configuredOptions) {
+  if (!existsSync(configuredOptions)) die("BEANS_IOS_EXPORT_OPTIONS does not exist")
+  const options = JSON.parse(await $`plutil -convert json -o - ${configuredOptions}`.text())
+  if (!["release-testing", "debugging", "ad-hoc", "development"].includes(options.method) || options.destination !== "export") {
+    die("Export options must export an ad-hoc/development IPA locally; store upload is not allowed")
+  }
+} else {
+  await Bun.write(exportOptions, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>method</key><string>app-store-connect</string>
-  <key>destination</key><string>upload</string>
+<plist version="1.0"><dict>
+  <key>method</key><string>${exportMethod}</string>
+  <key>destination</key><string>export</string>
   <key>teamID</key><string>${TEAM_ID}</string>
   <key>signingStyle</key><string>automatic</string>
-  <key>uploadSymbols</key><true/>
   <key>manageAppVersionAndBuildNumber</key><false/>
-</dict>
-</plist>
-`,
-)
-log(`${color.bold("uploading")} ${color.dim("to App Store Connect")}`)
-await $`xcodebuild -exportArchive -archivePath ${ARCHIVE} -exportOptionsPlist ${exportOptions} -exportPath ${EXPORT} -allowProvisioningUpdates`.env(env)
-
-log(`${color.green("uploaded")} Beans ${version} (${buildNumber})`)
-console.log("  TestFlight lists it once App Store Connect finishes processing")
+</dict></plist>`)
+}
+log(`${color.bold("exporting")} ${color.dim("signed IPA for GitHub")}`)
+await $`xcodebuild -exportArchive -archivePath ${ARCHIVE} -exportOptionsPlist ${exportOptions} -exportPath ${EXPORT} ${provisioningArgs}`.env(env)
+const ipas = (await readdir(EXPORT)).filter((file) => file.endsWith(".ipa"))
+if (ipas.length !== 1) die("xcodebuild must produce exactly one signed IPA")
+const output = join(BUILD_DIR, `Beans-${version}.ipa`)
+await rm(output, { force: true })
+await rename(join(EXPORT, ipas[0]), output)
+log(`${color.green("exported")} Beans ${version} (${buildNumber}); nothing was uploaded`)
+console.log(`  IPA ${output}`)

@@ -20,7 +20,7 @@
     $ProgressPreference = 'SilentlyContinue'
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-    $releases = 'https://github.com/egoist/lorca/releases'
+    $releases = 'https://github.com/bloodf/beans/releases'
     if ($env:LORCA_DOWNLOAD_URL) { $releases = $env:LORCA_DOWNLOAD_URL.TrimEnd('/') }
 
     $cpu = $null
@@ -32,7 +32,7 @@
     if ($env:LORCA_VERSION) {
         $version = $env:LORCA_VERSION.Trim().TrimStart('v')
         if ($version -notmatch '^[0-9.]+$') { throw "Not a Lorca version: $env:LORCA_VERSION" }
-        $url = "$releases/download/cli-v$version"
+        $url = "$releases/download/beans-v$version"
         $release = "release $version"
     } else {
         $url = "$releases/latest/download"

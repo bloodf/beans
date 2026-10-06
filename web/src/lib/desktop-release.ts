@@ -1,19 +1,24 @@
 /// <reference types="node" />
 
-/// The Windows and Linux app's newest release, which the build reads once and the download page
-/// links. Its releases are this repository's, tagged desktop-vX.Y.Z; the latest release is the
-/// CLI's, so the build reads the list, as the app's updater and install.sh do.
-const RELEASES = 'https://api.github.com/repos/egoist/lorca/releases?per_page=100'
-const TAG = 'desktop-v'
+/// Client downloads come from finalized stable Beans GitHub releases.
+/// Server-only readiness does not imply that any client artifact is available.
+const RELEASES = 'https://api.github.com/repos/bloodf/beans/releases?per_page=100'
+const TAG = 'beans-v'
+
+type ClientArtifact = { version: string; url: string }
 
 export type DesktopRelease = {
-  version: string
-  /// The installer, for x64.
-  windows: string
-  /// Installs the newest release for the user in ~/.local, where the app updates itself.
-  installScript: string
-  /// The Debian packages, which install in /opt and update only with the next package.
-  deb: { amd64: string; arm64: string }
+  mac: (ClientArtifact & { appcast: string }) | null
+  windows: ClientArtifact | null
+  linux: {
+    version: string
+    /// Installs the app in ~/.local, where it updates itself.
+    installScript: string
+    /// Debian packages install in /opt and update with the next package.
+    deb: { amd64: string; arm64: string }
+  } | null
+  android: ClientArtifact | null
+  ios: ClientArtifact | null
 }
 
 type GitHubRelease = {
@@ -25,46 +30,70 @@ type GitHubRelease = {
 
 const numeric = new Intl.Collator('en', { numeric: true })
 
-/// The newest published desktop release in a page of the GitHub releases API that holds every file
-/// the page links. A release is published once every platform has uploaded, so one missing a file
-/// is skipped for the one before it.
-export function parseDesktopReleases(releases: GitHubRelease[]): DesktopRelease | null {
-  return (
-    releases
-      .filter((release) => release.tag_name.startsWith(TAG) && !release.draft && !release.prerelease)
-      .sort((a, b) => numeric.compare(b.tag_name, a.tag_name))
-      .flatMap((release) => {
-        const file = (test: (name: string) => boolean) =>
-          release.assets.find(({ name }) => test(name))?.browser_download_url
-        const windows = file((name) => name.endsWith('.exe'))
-        const installScript = file((name) => name === 'install.sh')
-        const amd64 = file((name) => name.endsWith('_amd64.deb'))
-        const arm64 = file((name) => name.endsWith('_arm64.deb'))
-        if (!windows || !installScript || !amd64 || !arm64) return []
-        return [{ version: release.tag_name.slice(TAG.length), windows, installScript, deb: { amd64, arm64 } }]
-      })[0] ?? null
-  )
+function isGitHubRelease(value: unknown): value is GitHubRelease {
+  if (typeof value !== 'object' || value === null
+    || !('tag_name' in value) || typeof value.tag_name !== 'string' || !value.tag_name
+    || !('draft' in value) || typeof value.draft !== 'boolean'
+    || !('prerelease' in value) || typeof value.prerelease !== 'boolean'
+    || !('assets' in value) || !Array.isArray(value.assets)) return false
+  const prefix = `https://github.com/bloodf/beans/releases/download/${encodeURIComponent(value.tag_name)}/`
+  return value.assets.every((asset: unknown) =>
+      typeof asset === 'object' && asset !== null
+      && 'name' in asset && typeof asset.name === 'string' && asset.name.length > 0
+      && 'browser_download_url' in asset && typeof asset.browser_download_url === 'string'
+      && asset.browser_download_url.startsWith(prefix)
+      && asset.browser_download_url.length > prefix.length)
 }
 
-/// Reads the newest desktop release for the build, with `GITHUB_TOKEN` or `GH_TOKEN` when one is
-/// set (the API allows 60 requests an hour from an address without one). A release build stops
-/// when it can't, rather than ship a page with no Windows or Linux download; the dev server warns
-/// and shows the buttons disabled.
+/// Select each platform's newest ready assets independently. A newer server-only release does
+/// not hide an older client release. A valid API response with no eligible clients is unavailable.
+export function parseDesktopReleases(releases: unknown): DesktopRelease | null {
+  if (!Array.isArray(releases) || !releases.every(isGitHubRelease))
+    throw new Error('malformed GitHub releases response')
+  const ready = releases
+    .filter((release) => /^beans-v\d+\.\d+\.\d+$/.test(release.tag_name) && !release.draft && !release.prerelease
+      && release.assets.some(({ name }) => name === 'beans-update.json')
+      && release.assets.some(({ name }) => name === 'beans-update.json.sig'))
+    .sort((a, b) => numeric.compare(b.tag_name, a.tag_name))
+  const clients: DesktopRelease = { mac: null, windows: null, linux: null, android: null, ios: null }
+  for (const release of ready) {
+    const version = release.tag_name.slice(TAG.length)
+    const file = (name: string) => release.assets.find((asset) => asset.name === name)?.browser_download_url
+    const dmg = file(`Beans-${version}.dmg`)
+    const appcast = file('appcast.xml')
+    if (!clients.mac && dmg && appcast && file(`Beans-${version}.zip`))
+      clients.mac = { version, url: dmg, appcast }
+    const windows = file(`Lorca Setup ${version}.exe`)
+    if (!clients.windows && windows) clients.windows = { version, url: windows }
+    const installScript = file('install-linux-amd64.sh')
+    const amd64 = file(`lorca_${version}_amd64.deb`)
+    const arm64 = file(`lorca_${version}_arm64.deb`)
+    if (!clients.linux && installScript && amd64 && arm64)
+      clients.linux = { version, installScript, deb: { amd64, arm64 } }
+    const android = file(`Beans-${version}.apk`)
+    if (!clients.android && android) clients.android = { version, url: android }
+    const ios = file(`Beans-${version}.ipa`)
+    if (!clients.ios && ios) clients.ios = { version, url: ios }
+  }
+  return Object.values(clients).some(Boolean) ? clients : null
+}
+
+/// Reads client availability for the build, with `GITHUB_TOKEN` or `GH_TOKEN` when set.
+/// API, authentication, network and malformed-response failures stop production builds;
+/// the dev server warns and disables downloads. Confirmed client absence returns null in either mode.
 export async function fetchDesktopRelease({ required }: { required: boolean }): Promise<DesktopRelease | null> {
   const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
   try {
     const response = await fetch(RELEASES, {
       headers: {
         accept: 'application/vnd.github+json',
-        'user-agent': 'lorca.app',
+        'user-agent': 'beans',
         ...(token && { authorization: `Bearer ${token}` }),
       },
       signal: AbortSignal.timeout(10_000),
     })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const release = parseDesktopReleases(await response.json())
-    if (!release) throw new Error(`no published ${TAG} release with a Windows installer, install.sh, and both Debian packages`)
-    return release
+    return parseDesktopReleases(await response.json())
   } catch (error) {
     const message = `reading ${RELEASES}: ${error instanceof Error ? error.message : error}`
     if (required) throw new Error(message)

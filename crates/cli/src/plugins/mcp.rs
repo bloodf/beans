@@ -142,7 +142,11 @@ impl Default for Pool {
 
 impl Pool {
     pub fn new() -> Self {
-        let http = mcp_http::Client::builder().timeout(std::time::Duration::from_secs(600)).build().unwrap_or_default();
+        let http = mcp_http::Client::builder()
+            .tls_backend_preconfigured(lorca_tls::client_config(&["h2", "http/1.1"]))
+            .timeout(std::time::Duration::from_secs(600))
+            .build()
+            .expect("an MCP client over a built TLS config");
         Pool { servers: Mutex::new(HashMap::new()), generations: Mutex::new(HashMap::new()), connecting: Mutex::new(HashMap::new()), http, sign_ins: Mutex::new(HashMap::new()) }
     }
 
@@ -2630,7 +2634,7 @@ mod tests {
         })).unwrap();
         app.state.lock().unwrap().bots.push(bot.clone());
         app.state.lock().unwrap().chats.push(Chat {
-            meta: ChatMeta { id: "draft-chat".into(), kind: "dm".into(), title: None, bot_ids: vec!["draft-bot".into()], owner_bot_id: None, is_pinned: false, created_at: 0.0 },
+            meta: ChatMeta { id: "draft-chat".into(), kind: "dm".into(), title: None, description: None, bot_ids: vec!["draft-bot".into()], owner_bot_id: None, is_pinned: false, created_at: 0.0 },
             unread_count: 0, usage: None, compactions: Vec::new(),
         });
         let workspace = bot.working_directory(&app.config.home);
@@ -2714,7 +2718,7 @@ mod tests {
             let mut state = app.state.lock().unwrap();
             state.bots.push(bot);
             state.chats.push(Chat {
-                meta: ChatMeta { id: "draft-chat".into(), kind: "dm".into(), title: None, bot_ids: vec!["draft-bot".into()], owner_bot_id: None, is_pinned: false, created_at: 0.0 },
+                meta: ChatMeta { id: "draft-chat".into(), kind: "dm".into(), title: None, description: None, bot_ids: vec!["draft-bot".into()], owner_bot_id: None, is_pinned: false, created_at: 0.0 },
                 unread_count: 0, usage: None, compactions: Vec::new(),
             });
         }

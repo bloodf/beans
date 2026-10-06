@@ -77,9 +77,10 @@ export const en = {
   },
   download: {
     title: 'Download Lorca',
-    description: 'Download Lorca for Mac, Windows, and Linux, join the iPhone and iPad beta on TestFlight, or install the Lorca CLI on any computer.',
+    description: 'Check client download availability for Mac, Windows, Linux, Android and iOS, or install the CLI.',
     version: 'Version {{version}}',
-    unavailable: "Couldn't load the latest version. Reload the page to try again.",
+    unavailable: 'No published download is available for this platform yet.',
+    loadFailed: "Couldn't load the latest version. Reload the page to try again.",
     mac: {
       title: 'Mac',
       body: 'Chat with your bots and run them on your Mac.',
@@ -96,20 +97,21 @@ export const en = {
     linux: {
       title: 'Linux',
       body: 'Chat with your bots and run them on your Linux computer. The command installs Lorca in your home folder, without root, and Lorca keeps itself up to date.',
+      action: 'Download for Linux',
       deb: 'Or install the Debian package for <amd64>x64</amd64> or <arm64>Arm64</arm64>. It updates when you install the next one.',
       system: 'x64 and Arm64',
     },
     ios: {
       title: 'iPhone and iPad',
       body: 'Chat with your bots while they keep running on your computer. Scan the QR code in the desktop app to pair.',
-      action: 'Join the TestFlight beta',
-      note: 'Install TestFlight from the App Store first.',
+      action: 'Download IPA',
+      note: 'Ad-hoc IPAs install only on devices registered in the signing profile. iOS installation approval is required.',
     },
     android: {
       title: 'Android',
       body: 'Chat with your bots from your Android phone.',
+      action: 'Download APK',
     },
-    soon: 'Coming soon',
     cli: {
       title: 'Lorca CLI',
       body: 'Makes a computer a Runner: it runs your bots, with no chat window. The Mac, Windows, and Linux apps have it built in, so you need it only on a computer without the app. Pair it with your account, then create bots for it from the desktop app or your phone.',

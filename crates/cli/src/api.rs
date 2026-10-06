@@ -53,21 +53,51 @@ fn open_provider_auth(app: &Arc<App>, kind: &str, url: &str) -> Result<(), Strin
     }
 }
 
-/// A bot's profile image from the `avatar` param: `None` when the param is absent (leave it),
-/// `Some(None)` when it is null (remove it), and `Some(Some(_))` for a `{ path, … }` file,
-/// which is copied into the store and queued as a `file` blob like a message attachment.
-fn store_avatar(app: &Arc<App>, params: &Value) -> Result<Option<Option<Attachment>>, String> {
+/// Parses and validates the avatar before admission, without copying or queuing any bytes.
+fn avatar_file(params: &Value) -> Result<Option<Option<crate::files::OutgoingFile>>, String> {
     match params.get("avatar") {
         None => Ok(None),
         Some(Value::Null) => Ok(Some(None)),
         Some(value) => {
             let file: crate::files::OutgoingFile = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            let source = std::path::Path::new(&file.path);
+            let metadata = std::fs::metadata(source).map_err(|e| e.to_string())?;
+            if !metadata.is_file() {
+                return Err(format!("{} is not a file", file.path));
+            }
+            if metadata.len() > crate::files::MAX_ATTACHMENT_BYTES {
+                return Err(format!("{} is larger than {} MB", file.path, crate::files::MAX_ATTACHMENT_BYTES / 1024 / 1024));
+            }
+            let name = file.name.as_deref().filter(|name| !name.trim().is_empty())
+                .map(std::borrow::Cow::Borrowed)
+                .or_else(|| source.file_name().map(|name| name.to_string_lossy()))
+                .unwrap_or(std::borrow::Cow::Borrowed("file"));
+            let mime = file.mime.as_deref().filter(|mime| mime.contains('/'))
+                .unwrap_or_else(|| crate::files::mime_for(&name));
+            if !mime.starts_with("image/") {
+                return Err(format!("{name} is not an image"));
+            }
+            Ok(Some(Some(file)))
+        }
+    }
+}
+
+/// Stores a parsed profile image: absent leaves it, null removes it, and a file is copied
+/// and queued before the roster names it.
+fn store_avatar(app: &Arc<App>, avatar: Option<Option<crate::files::OutgoingFile>>) -> Result<Option<Option<Attachment>>, String> {
+    match avatar {
+        None => Ok(None),
+        Some(None) => Ok(Some(None)),
+        Some(Some(file)) => {
             let attachment = crate::files::store(app, &file).map_err(|e| e.to_string())?;
             if !attachment.is_image() {
                 let _ = std::fs::remove_file(crate::files::local_path(app, &attachment.id));
                 return Err(format!("{} is not an image", attachment.name));
             }
-            crate::files::push_blob(app, None, &attachment).map_err(|e| e.to_string())?;
+            if let Err(error) = crate::files::push_blob(app, None, &attachment) {
+                let _ = std::fs::remove_file(crate::files::local_path(app, &attachment.id));
+                return Err(error.to_string());
+            }
             Ok(Some(Some(attachment)))
         }
     }
@@ -195,6 +225,9 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             app.set_paused(paused);
             Ok(json!({ "paused": paused }))
         }
+        // Local update control (`update_control`): status for anyone on this Device, prepare
+        // and cancel only with the operator's token.
+        "update.status" | "update.prepare" | "update.cancel" => crate::update_control::dispatch(app, method, &params),
 
         "bots.create" => {
             // A bot from the marketplace starts from its template's profile, with the routines
@@ -203,16 +236,21 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 Some(id) => Some(crate::marketplace::template(app, &id).await?),
                 None => None,
             };
+            // The first turn of a template is new work, admitted below once the fields validate.
             let from_template = |pick: fn(&crate::marketplace::BotTemplate) -> &String| template.as_ref().map(|(t, _)| pick(t).clone());
             let capabilities = capabilities(&params)?.unwrap_or_default();
+            let name = opt_string(&params, "name").or_else(|| from_template(|t| &t.name)).ok_or("missing name")?;
+            let runner_id = string(&params, "runner_id")?;
+            let avatar = avatar_file(&params)?;
+            let mut admission = None;
             let bot = Bot {
                 id: opt_string(&params, "id").unwrap_or_default(),
-                name: opt_string(&params, "name").or_else(|| from_template(|t| &t.name)).ok_or("missing name")?,
+                name,
                 description: opt_string(&params, "description").or_else(|| from_template(|t| &t.description)).unwrap_or_default(),
                 symbol_name: opt_string(&params, "symbol_name").or_else(|| from_template(|t| &t.symbol_name)).unwrap_or_else(|| "sparkles".into()),
                 accent: opt_string(&params, "accent").or_else(|| from_template(|t| &t.accent)).unwrap_or_else(|| "indigo".into()),
-                avatar: store_avatar(app, &params)?.flatten(),
-                runner_id: string(&params, "runner_id")?,
+                avatar: None,
+                runner_id,
                 provider: opt_string(&params, "provider").unwrap_or_else(|| "deepseek".into()),
                 model: opt_string(&params, "model"),
                 thinking: opt_string(&params, "thinking"),
@@ -224,9 +262,16 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 capabilities,
             };
             // Every bot has one direct chat; both land in a single roster change.
-            let (bot, chat) = app.create_bot_with_dm(bot, opt_string(&params, "chat_id")).map_err(|e| e.to_string())?;
-            if let Some((template, plugins)) = template {
-                crate::marketplace::welcome(app, &bot, &chat.meta.id, &template, plugins, opt_string(&params, "greeting"));
+            let (bot, chat) = app.create_bot_with_dm_prepared(bot, opt_string(&params, "chat_id"), |bot| {
+                // The profile, Runner and ids validate before admission; a refusal stores no avatar.
+                if template.is_some() {
+                    admission = Some(app.update.try_admit().ok_or_else(|| anyhow::anyhow!(crate::update_control::UPDATING))?);
+                }
+                bot.avatar = store_avatar(app, avatar).map_err(anyhow::Error::msg)?.flatten();
+                Ok(())
+            }).map_err(|e| e.to_string())?;
+            if let (Some((template, plugins)), Some(admission)) = (template, admission) {
+                crate::marketplace::welcome(app, &bot, &chat.meta.id, &template, plugins, opt_string(&params, "greeting"), admission);
             }
             Ok(json!({ "bot": bot, "chat_id": chat.meta.id }))
         }
@@ -235,7 +280,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             // The image is copied and queued before the roster names it, so every Device can
             // fetch the blob by the time it reads the profile.
             let capabilities = capabilities(&params)?;
-            let avatar = store_avatar(app, &params)?;
+            let avatar = store_avatar(app, avatar_file(&params)?)?;
             let bot = app.update_bot(&id, |bot| {
                 if let Some(v) = opt_string(&params, "name") { bot.name = v; }
                 if let Some(v) = opt_string(&params, "symbol_name") { bot.symbol_name = v; }
@@ -275,6 +320,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                     kind,
                     title: opt_string(&params, "title"),
                     owner_bot_id: opt_string(&params, "owner_bot_id").or_else(|| bot_ids.first().cloned()),
+                    description: opt_string(&params, "description").map(|text| text.trim().to_string()),
                     bot_ids,
                     is_pinned: false,
                     created_at: 0.0,
@@ -296,7 +342,15 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let text = opt_string(&params, "text").unwrap_or_default();
             let mentions: Vec<String> = serde_json::from_value(params["mentions"].clone()).unwrap_or_default();
             let message =
-                runtime::send_user_message(app.clone(), &string(&params, "chat_id")?, &text, opt_string(&params, "message_id"), attachments, mentions)
+                runtime::send_user_message(
+                    app.clone(),
+                    &string(&params, "chat_id")?,
+                    &text,
+                    opt_string(&params, "message_id"),
+                    attachments,
+                    mentions,
+                    opt_string(&params, "reply_to"),
+                )
                     .map_err(|e| e.to_string())?;
             Ok(json!({ "message": message }))
         }
@@ -311,9 +365,28 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             runtime::cancel_chat(app, &string(&params, "chat_id")?);
             Ok(Value::Null)
         }
+        // A message the direct chat's turn holds for its next step: read now. Here when the bot
+        // runs here, else sealed to its Runner.
+        "chats.send_now" => {
+            let chat_id = string(&params, "chat_id")?;
+            let message_id = string(&params, "message_id")?;
+            let chat = app.chat(&chat_id).ok_or("Unknown chat")?;
+            if chat.meta.is_group() {
+                return Err("Send now is for a direct chat".into());
+            }
+            let bot = chat.meta.bot_ids.first().and_then(|id| app.bot(id)).ok_or("The chat has no bot")?;
+            if app.this_device_id().as_deref() == Some(bot.runner_id.as_str()) {
+                #[cfg(feature = "runner")]
+                return crate::turns::send_now(app, &chat_id, &message_id).map(|sent| json!({ "sent": sent }));
+            }
+            requests::ask(app, &bot.runner_id, "chats.send_now", json!({ "chat_id": chat_id, "message_id": message_id })).await
+        }
         #[cfg(feature = "runner")]
         "chats.compact" => {
             let chat_id = string(&params, "chat_id")?;
+            app.chat(&chat_id).ok_or("Unknown chat")?;
+            // A model call of its own: new work, held back while an update drains this Runner.
+            let _running = app.update.try_admit().ok_or(crate::update_control::UPDATING)?;
             let tokens_before = crate::turns::compact_now(app, &chat_id, opt_string(&params, "bot_id").as_deref()).await?;
             Ok(json!({ "tokens_before": tokens_before }))
         }
@@ -350,6 +423,11 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "chats.rename" => {
             let title = params["title"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
             app.rename_chat(&string(&params, "chat_id")?, title).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "chats.set_description" => {
+            let description = params["description"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            app.describe_chat(&string(&params, "chat_id")?, description).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "chats.pin" => {
@@ -666,7 +744,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
 
         // A command running in its terminal: the user's answer goes to it from its card, or it
         // stops. Here when the bot runs here, else sealed to its Runner. The text is never kept.
-        "bash.stdin" | "bash.stop" => {
+        "bash.stdin" | "bash.stop" | "bash.background" => {
             let chat_id = string(&params, "chat_id")?;
             let message_id = string(&params, "message_id")?;
             let message = app.message(&chat_id, &message_id).ok_or("Unknown message")?;

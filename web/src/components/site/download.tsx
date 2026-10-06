@@ -22,15 +22,12 @@ import { Logo } from './logo'
 import { Nav, SITE, docsPath, downloadPath } from './nav'
 import { Footer } from './sections'
 
-/// Sparkle's feed for the Mac app. Every release rewrites it.
-const APPCAST = 'https://mac-releases.lorca.app/appcast.xml'
-const TESTFLIGHT = 'https://testflight.apple.com/join/WRR2R3y1'
 /// Bots on Windows run their commands in its bash.
 const GIT_FOR_WINDOWS = 'https://git-scm.com/downloads/win'
 /// The CLI's install commands, one per shell.
 const INSTALL = [
-  { shell: 'download.cli.unix', prompt: '$', command: 'curl -fsSL https://lorca.app/install-cli.sh | sh' },
-  { shell: 'download.cli.windows', prompt: 'PS>', command: 'irm https://lorca.app/install-cli.ps1 | iex' },
+  { shell: 'download.cli.unix', prompt: '$', command: 'curl -fsSL https://raw.githubusercontent.com/bloodf/beans/main/web/public/install-cli.sh | sh' },
+  { shell: 'download.cli.windows', prompt: 'PS>', command: 'irm https://raw.githubusercontent.com/bloodf/beans/main/web/public/install-cli.ps1 | iex' },
 ] as const
 
 export type MacRelease = {
@@ -41,15 +38,14 @@ export type MacRelease = {
   appleSilicon: boolean
 }
 
-/// The newest Windows and Linux release, which the build reads (`define` in vite.config.ts).
+/// Per-platform ready client assets, which the build reads (`define` in vite.config.ts).
 declare const __DESKTOP_RELEASE__: DesktopRelease | null
 
 const numeric = new Intl.Collator('en', { numeric: true })
 
-/// The newest release in a Sparkle appcast. An item's enclosure is the zip Sparkle installs
-/// updates from; the release uploads the disk image people download beside it, under the same
-/// name.
-export function parseAppcast(xml: string): MacRelease | null {
+/// Version and system requirements from the newest item in a Sparkle appcast.
+/// The download URL comes from the selected release's actual disk-image asset.
+export function parseAppcast(xml: string): Omit<MacRelease, 'url'> | null {
   const items = [...xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/g)].flatMap(([, item]) => {
     // Delta updates carry enclosures of their own.
     const body = item.replace(/<sparkle:deltas>[\s\S]*?<\/sparkle:deltas>/g, '')
@@ -57,9 +53,8 @@ export function parseAppcast(xml: string): MacRelease | null {
     const archive = body.match(/<enclosure\b[^>]*\burl="([^"]+)"/)?.[1]
     const build = field('sparkle:version')
     if (!archive || !build) return []
-    const release: MacRelease = {
+    const release: Omit<MacRelease, 'url'> = {
       version: field('sparkle:shortVersionString') ?? build,
-      url: archive.replace(/\.zip$/, '.dmg'),
       minimumSystemVersion: field('sparkle:minimumSystemVersion') ?? null,
       appleSilicon: field('sparkle:hardwareRequirements')?.includes('arm64') ?? false,
     }
@@ -68,18 +63,21 @@ export function parseAppcast(xml: string): MacRelease | null {
   return items.sort((a, b) => numeric.compare(b.build, a.build))[0]?.release ?? null
 }
 
-/// The loader of the download page, in either language. The feed sends no CORS headers, so the
-/// server reads it. A feed it can't read leaves the Mac button disabled and the rest of the page
-/// working.
+/// The loader of the download page, in either language. Read only an appcast from a release
+/// that actually contains Mac assets; a newer server-only release has no effect on this selection.
+/// An unreadable feed leaves the Mac button disabled and the rest of the page working.
 export const latestMacRelease = createServerFn({ method: 'GET' }).handler(async () => {
+  const selected = __DESKTOP_RELEASE__?.mac
+  if (!selected) return null
   try {
-    const response = await fetch(APPCAST, { signal: AbortSignal.timeout(5000) })
+    const response = await fetch(selected.appcast, { signal: AbortSignal.timeout(5000) })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     const release = parseAppcast(await response.text())
     if (!release) throw new Error('no release in the feed')
-    return release
+    if (release.version !== selected.version) throw new Error('appcast version does not match the selected release')
+    return { ...release, url: selected.url }
   } catch (error) {
-    console.error(`reading ${APPCAST}:`, error)
+    console.error(`reading ${selected.appcast}:`, error)
     return null
   }
 })
@@ -107,6 +105,10 @@ const link = 'underline underline-offset-4 hover:text-foreground'
 export function Download({ release: mac }: { release: MacRelease | null }) {
   const { t, i18n } = useTranslation()
   const desktop = __DESKTOP_RELEASE__
+  const windows = desktop?.windows
+  const linux = desktop?.linux
+  const ios = desktop?.ios
+  const android = desktop?.android
   return (
     <div className="flex min-h-svh flex-col">
       <Nav />
@@ -131,7 +133,7 @@ export function Download({ release: mac }: { release: MacRelease | null }) {
                   ]}
                 />
               ) : (
-                t('download.unavailable')
+                t(desktop?.mac ? 'download.loadFailed' : 'download.unavailable')
               )
             }
           >
@@ -144,14 +146,14 @@ export function Download({ release: mac }: { release: MacRelease | null }) {
               <Trans i18nKey="download.windows.body" components={{ git: <a href={GIT_FOR_WINDOWS} className={link} /> }} />
             }
             note={
-              desktop ? (
-                <Notes items={[t('download.version', { version: desktop.version }), t('download.windows.system')]} />
+              windows ? (
+                <Notes items={[t('download.version', { version: windows.version }), t('download.windows.system')]} />
               ) : (
                 t('download.unavailable')
               )
             }
           >
-            <DownloadButton href={desktop?.windows}>{t('download.windows.action')}</DownloadButton>
+            <DownloadButton href={windows?.url}>{t('download.windows.action')}</DownloadButton>
           </Platform>
           {/* The whole row, for the install command's URL. */}
           <Platform
@@ -160,41 +162,50 @@ export function Download({ release: mac }: { release: MacRelease | null }) {
             title={t('download.linux.title')}
             body={t('download.linux.body')}
             note={
-              desktop ? (
+              linux ? (
                 <>
                   <Trans
                     i18nKey="download.linux.deb"
                     components={{
-                      amd64: <a href={desktop.deb.amd64} className={link} />,
-                      arm64: <a href={desktop.deb.arm64} className={link} />,
+                      amd64: <a href={linux.deb.amd64} className={link} />,
+                      arm64: <a href={linux.deb.arm64} className={link} />,
                     }}
                   />
                   <br />
-                  <Notes items={[t('download.version', { version: desktop.version }), t('download.linux.system')]} />
+                  <Notes items={[t('download.version', { version: linux.version }), t('download.linux.system')]} />
                 </>
               ) : (
                 t('download.unavailable')
               )
             }
           >
-            <InstallCommand
-              prompt="$"
-              command={desktop ? `curl -fsSL ${desktop.installScript} | sh` : 'curl -fsSL …/install.sh | sh'}
-              disabled={!desktop}
-            />
+            {linux ? (
+              <InstallCommand prompt="$" command={`curl -fsSL ${linux.installScript} | sh`} />
+            ) : (
+              <DownloadButton href={undefined}>{t('download.linux.action')}</DownloadButton>
+            )}
           </Platform>
-          <Platform icon={TabletSmartphone} title={t('download.ios.title')} body={t('download.ios.body')} note={t('download.ios.note')}>
-            <Button
-              asChild
-              size="lg"
-              variant="outline"
-              className={`${action} bg-transparent shadow-none hover:bg-foreground/5 dark:bg-transparent dark:hover:bg-foreground/5`}
-            >
-              <a href={TESTFLIGHT}>{t('download.ios.action')}</a>
-            </Button>
+          <Platform
+            icon={TabletSmartphone}
+            title={t('download.ios.title')}
+            body={t('download.ios.body')}
+            note={ios ? (
+              <>
+                <Notes items={[t('download.version', { version: ios.version })]} />
+                <br />
+                {t('download.ios.note')}
+              </>
+            ) : t('download.unavailable')}
+          >
+            <DownloadButton href={ios?.url}>{t('download.ios.action')}</DownloadButton>
           </Platform>
-          <Platform icon={Smartphone} title={t('download.android.title')} body={t('download.android.body')}>
-            <Soon />
+          <Platform
+            icon={Smartphone}
+            title={t('download.android.title')}
+            body={t('download.android.body')}
+            note={android ? t('download.version', { version: android.version }) : t('download.unavailable')}
+          >
+            <DownloadButton href={android?.url}>{t('download.android.action')}</DownloadButton>
           </Platform>
         </section>
         <section className="mx-auto max-w-4xl px-5 pt-5 pb-20">
@@ -227,7 +238,7 @@ export function Download({ release: mac }: { release: MacRelease | null }) {
   )
 }
 
-/// A platform's download, disabled while its release can't be read.
+/// A platform's download, disabled when no eligible artifact is available.
 function DownloadButton({ href, children }: { href: string | undefined; children: React.ReactNode }) {
   return href ? (
     <Button asChild size="lg" className={action}>
@@ -252,20 +263,10 @@ function Notes({ items }: { items: (string | false | null)[] }) {
     ))
 }
 
-/// An install command. A click anywhere on it copies it; the text stays selectable. A disabled one
-/// stands in for a command whose release can't be read.
-function InstallCommand({ prompt, command, disabled }: { prompt: string; command: string; disabled?: boolean }) {
+/// An install command. A click anywhere on it copies it; the text stays selectable.
+function InstallCommand({ prompt, command }: { prompt: string; command: string }) {
   const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
-  if (disabled)
-    return (
-      <div className="flex items-center gap-3 rounded-2xl border bg-foreground/[0.03] px-4 py-3.5 font-mono text-sm text-muted-foreground/60">
-        <span className="select-none" aria-hidden="true">
-          {prompt}
-        </span>
-        <span className="min-w-0 flex-1 truncate">{command}</span>
-      </div>
-    )
   const copy = () =>
     navigator.clipboard.writeText(command).then(() => {
       setCopied(true)
@@ -295,15 +296,6 @@ function InstallCommand({ prompt, command, disabled }: { prompt: string; command
   )
 }
 
-/// In place of the button, for a platform with no release yet.
-function Soon() {
-  const { t } = useTranslation()
-  return (
-    <p className="inline-flex rounded-full border bg-foreground/5 px-3 py-1 text-xs font-medium text-foreground/80">
-      {t('download.soon')}
-    </p>
-  )
-}
 
 function Platform({
   icon: Icon,

@@ -1,8 +1,9 @@
-// Custom providers as the CLI sends them: in the account's provider statuses, and as a bot's
-// provider.
+// What the CLI sends, as the app reads it: custom providers in the account's provider statuses and
+// as a bot's provider, and a command's card.
 
 import { expect, test } from "bun:test";
-import { toBot, toCustomModel, toMcpFile, toMcpServer, toParsedServers, toPlugin, toProviders, type WireBot } from "./wire";
+import { runsInForeground } from "./models";
+import { toBot, toCustomModel, toMessage, toProviders, type WireBot } from "./wire";
 
 test("statuses keep custom providers after the built-in ones and leave out unknown kinds", () => {
   const providers = toProviders([
@@ -60,28 +61,23 @@ test("a bot keeps its custom provider, and one this build does not know runs as 
   expect(toBot({ ...wire, provider: "mistral" }).provider).toBe("deepseek");
 });
 
-test("MCP wire keeps Runner source, opaque configuration and tool visibility", () => {
-  const status = { id: "local-files", name: "Files", state: "ready", source: "mcp.json" };
-  expect(toPlugin(status).source).toBe("mcp.json");
-  const server = toMcpServer({
-    name: "Files",
-    id: "local-files",
-    enabled: true,
-    config: { command: "npx", args: ["-y", "server"], env: { API_KEY: "secret" }, cwd: "/work", toolExposure: { private: false } },
-    status,
-    signs_in: true,
-    signed_in: false,
-    tool_count: 2,
-    tools: [{ name: "read", read_only: true, hidden: false }, { name: "write", read_only: false, hidden: true }],
-  });
-  expect(server.entry).toMatchObject({ command: "npx", env: { API_KEY: "secret" }, cwd: "/work", toolExposure: { private: false } });
-  expect(server.tools).toEqual([
-    { name: "read", title: undefined, description: "", readOnly: true, hidden: false },
-    { name: "write", title: undefined, description: "", readOnly: false, hidden: true },
-  ]);
-  expect(toMcpFile({ path: "/work/mcp.json", error: "Invalid JSON", servers: [{ name: "Files", id: "local-files", enabled: true, config: null }] })).toMatchObject({ error: "Invalid JSON", servers: [{ name: "Files", entry: {} }] });
-  expect(toParsedServers({ servers: [{ name: "test", config: { url: "https://mcp.test" } }, { name: "bad", config: null, problem: "Invalid" }] })).toEqual([
-    { name: "test", entry: { url: "https://mcp.test" }, problem: undefined },
-    { name: "bad", entry: undefined, problem: "Invalid" },
-  ]);
+test("Run in Background is offered while the bot's call waits on a command that is not in the background yet", () => {
+  const row = (isRunning: boolean, run: Record<string, unknown>) =>
+    toMessage({
+      id: "m1",
+      chat_id: "c1",
+      author: { kind: "bot", bot_id: "b1" },
+      body: { kind: "tool", name: "bash", summary: "Running", is_running: isRunning, run: { session_id: "bash-1a2b3c", command: "npm run dev", state: "running", ...run } },
+      state: { kind: "complete" },
+      created_at: 1,
+    });
+  const waitedOn = row(true, {});
+  expect(runsInForeground(waitedOn)).toBe(true);
+  const sent = row(false, { background: true });
+  expect(runsInForeground(sent)).toBe(false);
+  // Started in the background, during its first two seconds.
+  expect(runsInForeground(row(true, { background: true }))).toBe(false);
+  // Its call returned; the bot is no longer waiting on it.
+  expect(runsInForeground(row(false, {}))).toBe(false);
+  expect(runsInForeground(row(true, { state: "checking", session_id: null }))).toBe(false);
 });

@@ -38,8 +38,8 @@ function servedFiles(): Plugin {
 
 const config = defineConfig(async ({ command }) => ({
   resolve: { tsconfigPaths: true },
-  // The download page's Windows and Linux links, read once per build: a new desktop release
-  // reaches the page with the next deploy.
+  // Per-platform client availability, read once per build. A server-only release is valid;
+  // API failures still stop the build, and new client assets reach the page with the next deploy.
   define: {
     __DESKTOP_RELEASE__: JSON.stringify(await fetchDesktopRelease({ required: command === 'build' })),
   },

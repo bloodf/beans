@@ -8,7 +8,6 @@ import {
   connectedProviders,
   contextWindowLabel,
   CUSTOM_PRESETS,
-  customAPI,
   customPreset,
   customProviderNamed,
   customRequestURL,
@@ -33,6 +32,7 @@ import {
   providerModels,
   providerUsesAPIKey,
   PROVIDER_KINDS,
+  runsInForeground,
   runsInTerminal,
   savedModelRows,
   selectedModelIds,
@@ -114,6 +114,21 @@ describe("model", () => {
     expect(runsInTerminal(row("waiting", "bash-1"))).toBe(true);
     for (const state of ["exited", "failed", "stopped"] as const) expect(runsInTerminal(row(state, "bash-1"))).toBe(false);
     expect(runsInTerminal(undefined)).toBe(false);
+  });
+
+  test("Run in Background is offered while the bot's call waits on a command that is not in the background yet", () => {
+    const row = (is_running: boolean, run: Partial<CommandRun>) => ({
+      id: "call", chat_id: "chat", author: { kind: "bot" as const, bot_id: "bot" }, state: { kind: "streaming" as const }, created_at: 1,
+      body: { kind: "tool" as const, name: "bash", summary: "Running", detail: "", is_running, run: { command: "npm run dev", state: "running" as const, session_id: "bash-1", ...run } },
+    });
+    expect(runsInForeground(row(true, {}))).toBe(true);
+    // Sent there, or started there and still in its first two seconds.
+    expect(runsInForeground(row(false, { background: true }))).toBe(false);
+    expect(runsInForeground(row(true, { background: true }))).toBe(false);
+    // Its call returned, or no terminal runs it yet.
+    expect(runsInForeground(row(false, {}))).toBe(false);
+    expect(runsInForeground(row(true, { state: "checking", session_id: undefined }))).toBe(false);
+    expect(runsInForeground(undefined)).toBe(false);
   });
 
   test("describes provider credential setup", () => {
@@ -217,13 +232,6 @@ describe("custom providers", () => {
     // One endpoint is cut, and only the protocol's own.
     expect(customRequestURL("chat-completions", "https://x/v1/responses")).toBe("https://x/v1/responses/chat/completions");
     expect(customRequestURL("chat-completions", "  ")).toBe("");
-  });
-
-  test("protocols name their path and base URL example", () => {
-    expect(customAPI("messages")).toMatchObject({ title: "Anthropic Messages", path: "/v1/messages", placeholder: "https://api.example.com" });
-    expect(customAPI("responses")).toMatchObject({ title: "OpenAI Responses", path: "/responses", placeholder: "https://api.example.com/v1" });
-    // A protocol this build does not know reads as the first.
-    expect(customAPI(undefined).id).toBe("chat-completions");
   });
 
   test("presets start the form from a server people often add", () => {

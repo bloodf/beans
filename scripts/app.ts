@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { cp, rm, mkdir, chmod, readdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join, resolve } from "node:path"
+import { releasePublicKey } from "./release-signing.ts"
 
 export const ROOT = resolve(import.meta.dir, "..")
 export const PACKAGE_DIR = join(ROOT, "macos")
@@ -19,21 +20,22 @@ export const SWIFT_PRODUCT = "Lorca"
 export const APP_ICON_NAME = "Lorca.icns"
 export const DEBUG_APP_ICON_NAME = "Lorca-dev.icns"
 
-/** The root package.json's "version" is the Mac app's version: Info.plist carries it, and Sparkle
- * compares it. scripts/release-mac.ts bumps it. */
+/** The root package.json version identifies every Beans release and desktop update. */
 export const PACKAGE_JSON = join(ROOT, "package.json")
 export const VERSION_FIELD = /^(\s*"version"\s*:\s*)"([^"]*)"/m
 export function readVersion(): string {
   const version = readFileSync(PACKAGE_JSON, "utf8").match(VERSION_FIELD)?.[2]
-  if (!version) throw new Error('package.json has no "version"')
+  if (!version || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+    throw new Error('package.json must have a stable x.y.z "version"')
+  }
   return version
 }
 
-/** Publishing-only constants for scripts/release-mac.ts and generate-appcast.ts. Not written to
- * Info.plist: the app ships with updates disabled. */
-export const RELEASES_URL = process.env.DOWNLOAD_URL_PREFIX ?? "https://mac-releases.lorca.app/"
-export const FEED_URL = process.env.FEED_URL ?? `${RELEASES_URL}appcast.xml`
-export const SPARKLE_PUBLIC_KEY = "gv9GLMPjH5yMQkZMFXnoNfHOyL8/7KGzl/jzAqlzZZY="
+export const RELEASES_REPO = "bloodf/beans"
+export const TAG_PREFIX = "beans-v"
+export const RELEASES_URL = `https://github.com/${RELEASES_REPO}/releases/download/${TAG_PREFIX}${readVersion()}/`
+export const FEED_URL = `https://github.com/${RELEASES_REPO}/releases/latest/download/appcast.xml`
+export const SPARKLE_PUBLIC_KEY = await releasePublicKey()
 
 export type Config = "debug" | "release"
 
@@ -77,6 +79,19 @@ function infoPlist(version: string, config: Config) {
   const relayEntry = relay
     ? `\n\t<key>BeansRelayURL</key>\n\t<string>${relay.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</string>`
     : ""
+  const updates = config === "release"
+    ? `\t<key>SUFeedURL</key>
+\t<string>${FEED_URL}</string>
+\t<key>SUPublicEDKey</key>
+\t<string>${SPARKLE_PUBLIC_KEY}</string>
+\t<key>SUEnableAutomaticChecks</key>
+\t<true/>
+\t<key>SUAutomaticallyUpdate</key>
+\t<true/>
+\t<key>SUScheduledCheckInterval</key>
+\t<integer>3600</integer>`
+    : `\t<key>SUEnableAutomaticChecks</key>
+\t<false/>`
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -122,8 +137,7 @@ function infoPlist(version: string, config: Config) {
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
-	<key>SUEnableAutomaticChecks</key>
-	<false/>
+${updates}
 </dict>
 </plist>
 `

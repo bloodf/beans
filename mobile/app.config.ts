@@ -1,4 +1,5 @@
 import type { ExpoConfig } from "expo/config";
+import releasePackage from "../package.json";
 
 export default (): ExpoConfig => {
   const development =
@@ -11,13 +12,17 @@ export default (): ExpoConfig => {
   const splash = development ? "./assets/splash-icon-dev.png" : "./assets/splash-icon.png";
   const favicon = development ? "./assets/favicon-dev.png" : "./assets/favicon.png";
   const adaptiveIconBackgroundColor = development ? "#ffbe00" : "#3424f5";
+  const buildNumber = process.env.BUILD_NUMBER ?? String(Math.floor(Date.now() / 1000));
+  if (!/^[1-9]\d*$/.test(buildNumber) || Number(buildNumber) > 2_100_000_000) {
+    throw new Error("BUILD_NUMBER must be a positive integer at most 2100000000");
+  }
   const splashBackgroundColor = "#f7f7f8";
   const darkSplashBackgroundColor = "#1c1c1e";
 
   return {
     name: appName,
     slug: "beans",
-    version: "1.0.0",
+    version: releasePackage.version,
     scheme: development ? ["beans-dev", "lorca"] : ["beans", "lorca"],
     orientation: "portrait",
     icon,
@@ -32,13 +37,12 @@ export default (): ExpoConfig => {
         NSPhotoLibraryUsageDescription: "Beans attaches photos you pick to a message.",
         CFBundleAllowMixedLocalizations: true,
       },
-      // scripts/release-ios.ts sets a fresh one for every upload; the notify extension takes the
-      // same number through CURRENT_PROJECT_VERSION.
-      buildNumber: process.env.LORCA_IOS_BUILD_NUMBER ?? "1",
+      // GitHub builds share a monotonic BUILD_NUMBER with Android; local builds use epoch seconds.
+      buildNumber: process.env.LORCA_IOS_BUILD_NUMBER ?? buildNumber,
       entitlements: {
         "com.apple.security.application-groups": [appGroup],
       },
-      appleTeamId: "GJE9R5VE87",
+      appleTeamId: process.env.BEANS_APPLE_TEAM_ID ?? "GJE9R5VE87",
     },
     android: {
       package: appId,
@@ -49,7 +53,7 @@ export default (): ExpoConfig => {
         foregroundImage: icon,
       },
       predictiveBackGestureEnabled: true,
-      versionCode: 1,
+      versionCode: Number(buildNumber),
     },
     web: {
       favicon,
@@ -98,6 +102,7 @@ export default (): ExpoConfig => {
       "./plugins/with-scene-lifecycle",
       "./plugins/with-android-release-signing",
       "./plugins/with-android-locale-defaults",
+      "./plugins/with-ios-release-signing",
       "expo-web-browser",
     ],
     experiments: {

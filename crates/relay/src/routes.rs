@@ -238,7 +238,7 @@ async fn root() -> &'static str {
 }
 
 async fn health() -> Json<Value> {
-    Json(json!({ "ok": true, "service": "lorca-relay", "protocol": PROTOCOL }))
+    Json(json!({ "ok": true, "service": "lorca-relay", "protocol": PROTOCOL, "version": env!("CARGO_PKG_VERSION") }))
 }
 
 fn random_nonce(len: usize) -> String {

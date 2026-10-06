@@ -6,6 +6,9 @@ final class InspectorViewController: NSViewController {
     private let scrollView = NSScrollView()
     private let column = Build.stack([], spacing: 20)
     private let participants = SectionView(title: L("Bots in this chat"))
+    private let group = SectionView(title: L("Group"))
+    private let groupNameRow = EditableRow(key: L("Name"), placeholder: "")
+    private let groupDescriptionRow = SummaryActionRow(key: L("Description"), value: "", actionTitle: L("Edit…"))
     private let profile = SectionView(title: L("Profile"))
     private let nameRow = EditableRow(key: L("Name"), placeholder: L("Name"))
     private let descriptionRow = SummaryActionRow(key: L("Description"), value: "", actionTitle: L("Edit…"))
@@ -77,9 +80,13 @@ final class InspectorViewController: NSViewController {
         nameRow.field.alignment = .right
         descriptionRow.onAction = { [weak self] in self?.editDescription() }
         profile.setRows([nameRow, descriptionRow])
+        groupNameRow.field.alignment = .right
+        groupDescriptionRow.onAction = { [weak self] in self?.editGroupDescription() }
+        group.setRows([groupNameRow, groupDescriptionRow])
 
         column.addArrangedSubview(participants)
         column.addArrangedSubview(addButton)
+        column.addArrangedSubview(group)
         column.addArrangedSubview(profile)
         column.addArrangedSubview(runtime)
         column.addArrangedSubview(abilities)
@@ -117,6 +124,7 @@ final class InspectorViewController: NSViewController {
             column.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
             column.bottomAnchor.constraint(equalTo: documentView.bottomAnchor),
             participants.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
+            group.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             profile.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             runtime.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             abilities.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
@@ -217,6 +225,10 @@ final class InspectorViewController: NSViewController {
         if addButton.isHidden != chat.isDM { addButton.isHidden = chat.isDM }
         if addButton.isEnabled != canAdd { addButton.isEnabled = canAdd }
 
+        // A group's name and what it is for.
+        if group.isHidden == chat.isGroup { group.isHidden = !chat.isGroup }
+        if chat.isGroup { showGroup(chat, members: members) }
+
         // A direct chat is one bot, so its profile, provider, and model are edited right here.
         let single = chat.isDM && members.count == 1
         for section in [profile, runtime, abilities, memory, routines, plugins] where section.isHidden == single {
@@ -305,6 +317,16 @@ final class InspectorViewController: NSViewController {
     @objc private func removeMember(_ sender: NSMenuItem) {
         guard let botID = sender.representedObject as? Bot.ID else { return }
         onRemoveBot?(botID)
+    }
+
+    private func showGroup(_ chat: Chat, members: [Bot]) {
+        // The Name row keeps what the user is typing, and puts the name back after. Without a
+        // name of its own, a group goes by its members' names.
+        groupNameRow.field.placeholderString = members.map(\.name).joined(separator: ", ")
+        groupNameRow.setValue(chat.customTitle ?? "")
+        guard changed(group, to: [chat.id, chat.groupDescription]) else { return }
+        groupDescriptionRow.setValue(chat.groupDescription)
+        groupNameRow.onCommit = { [weak self] in self?.commitGroupName(of: chat.id) }
     }
 
     private func showProfile(of bot: Bot) {
@@ -423,7 +445,17 @@ final class InspectorViewController: NSViewController {
         guard case let .chat(chatID) = selection, let chat = store.chat(chatID), chat.isDM,
             let bot = store.bots(in: chat).first
         else { return }
-        presentAsSheet(BotDescriptionViewController(botID: bot.id))
+        presentAsSheet(DescriptionViewController.bot(bot.id))
+    }
+
+    private func commitGroupName(of chatID: Chat.ID) {
+        guard let chat = store.chat(chatID), chat.isGroup, groupNameRow.value != (chat.customTitle ?? "") else { return }
+        store.rename(chatID, to: groupNameRow.value)
+    }
+
+    private func editGroupDescription() {
+        guard case let .chat(chatID) = selection, store.chat(chatID)?.isGroup == true else { return }
+        presentAsSheet(DescriptionViewController.group(chatID))
     }
 
     private func runtimeRows(for bot: Bot, in chat: Chat) -> [NSView] {

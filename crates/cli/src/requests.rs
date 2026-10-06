@@ -66,9 +66,10 @@ pub fn deliver(app: Arc<App>, response: Response, blob_id: String) {
 }
 
 /// A `request` reached this Runner: answers it, seals the answer to the Device that asked, and
-/// drops the request from the relay.
-pub fn serve(app: Arc<App>, request: Request, blob_id: String) {
+/// drops the request from the relay. `running` counts it as work here until it is answered.
+pub fn serve(app: Arc<App>, request: Request, blob_id: String, running: crate::update_control::Admission) {
     tokio::spawn(async move {
+        let _running = running;
         let (body, error) = match answer(&app, &request).await {
             Ok(body) => (body, None),
             Err(error) => (Value::Null, Some(error)),
@@ -91,7 +92,7 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String) {
 /// that reached the wrong machine is refused, not forwarded. The plugin verbs act on this
 /// Runner's own installs, and the `mcp.*` verbs on its mcp.json; the permission verb answers a
 /// card a bot here is waiting on; the bash verbs type into, or stop, a command a bot here left
-/// waiting.
+/// waiting; Send now has a turn here read a message it holds.
 async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     let body = &request.body;
     match request.verb.as_str() {
@@ -107,7 +108,13 @@ async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
         #[cfg(feature = "runner")]
         verb if verb.starts_with("mcp.") => crate::plugins::mcp_json::serve_request(app, verb, body).await,
         #[cfg(feature = "runner")]
-        "bash.stdin" | "bash.stop" => crate::shell::serve(app, &request.verb, body).await,
+        "bash.stdin" | "bash.stop" | "bash.background" => crate::shell::serve(app, &request.verb, body).await,
+        #[cfg(feature = "runner")]
+        "chats.send_now" => {
+            let chat_id = body["chat_id"].as_str().ok_or("missing chat_id")?;
+            let message_id = body["message_id"].as_str().ok_or("missing message_id")?;
+            crate::turns::send_now(app, chat_id, message_id).map(|sent| json!({ "sent": sent }))
+        }
         other => Err(format!("Unknown request {other}")),
     }
 }

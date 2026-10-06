@@ -1,167 +1,39 @@
 # Releasing the Mac app
 
-Lorca.app updates itself with [Sparkle](https://sparkle-project.org). Releases live in a
-Cloudflare R2 bucket served at `https://mac-releases.lorca.app`: a notarized `.dmg` for a first
-download, a `.zip` Sparkle installs (with binary deltas from recent versions), and
-`appcast.xml`, the feed the app polls. Sparkle checks every archive against the EdDSA public key
-inside the app before it installs. One command produces all of it:
+Beans uses Sparkle with a project-owned Ed25519 anchor and GitHub assets from the [unified Beans release](releasing-cli.md). Root `package.json` supplies the version; the stable tag is `beans-v<version>` in `bloodf/beans`. Upstream R2 hosting and signing keys are not used.
+
+## Packaging prerequisites
+
+Install Bun, the Rust/Swift toolchains, Xcode and `create-dmg`. SwiftPM resolves Sparkle's tools into `macos/.build/artifacts/sparkle/Sparkle/bin`; `SPARKLE_BIN` can select another installed tool directory.
+
+Provide the matching `BEANS_UPDATE_PRIVATE_KEY` PEM, an installed **Developer ID Application** identity (`SIGN_IDENTITY` selects it), and a notarization keychain profile (`NOTARY_PROFILE`, default `BEANS_NOTARY`). Creating identities, storing Apple credentials and granting provisioning permissions are explicit operator actions, not release-script side effects. Public GitHub packaging refuses a private `LORCA_DEFAULT_RELAY_URL`.
 
 ```sh
-bun run release-mac 0.2.0
+bun run release-mac --local
 ```
 
-- Updater: [`macos/Sources/Lorca/App/Updater.swift`](../macos/Sources/Lorca/App/Updater.swift).
-  **Check for Updates…** in the app menu, and the Updates rows in Settings ▸ General.
-- Bundle: [`scripts/app.ts`](../scripts/app.ts) writes the version, `SUFeedURL`, and
-  `SUPublicEDKey` into Info.plist, embeds Sparkle.framework, and signs.
-- Release: [`scripts/release-mac.ts`](../scripts/release-mac.ts),
-  [`scripts/generate-appcast.ts`](../scripts/generate-appcast.ts),
-  [`scripts/changelog.ts`](../scripts/changelog.ts).
+This builds and signs Beans, checks its bundle version, creates/signs/notarizes the DMG, staples the DMG and application, verifies code signing and Gatekeeper acceptance, then archives the stapled application as `Beans-<version>.zip`. `dist/mac` contains the DMG and `updates/` contains the ZIP and signed `appcast.xml`. No upload or version bump occurs. A Finder-customization warning is not accepted as notarization proof: signing and assessment still must succeed.
 
-## One-time setup
+The appcast generator requires exactly the current Beans ZIP, uses seed32 on stdin, embeds the release protocol derived from the same constants as the readiness manifest, and signs the final modified XML. Deltas and upstream release history are disabled. The unified workflow hashes these final bytes and publishes readiness only after every platform succeeds.
 
-The scripts run on [Bun](https://bun.sh). The disk image comes from
-[`create-dmg`](https://github.com/create-dmg/create-dmg) and uploads go through
-[rclone](https://rclone.org):
+## Installed updater
 
-```sh
-brew install create-dmg rclone
-```
+`scripts/app.ts` writes the Beans feed/public key into release bundle metadata. Debug bundles omit them and disable checks. `Updater.swift` enables Sparkle only for the Beans production identity and feed; saved opt-outs are preserved. Automatic checks use Sparkle's minimum one-hour interval.
 
-Sparkle's command-line tools arrive with the package. `swift package resolve` in `macos/` (or any
-build) puts them in `macos/.build/artifacts/sparkle/Sparkle/bin`.
+The native updater verifies signed readiness and pins the appcast to that exact release, archive URL/size, version and required protocol. At installation it fetches readiness again and requires the same signed manifest bytes. Relay health requests use an ephemeral session without account credentials or cookies. The selected relay must actually answer `/v1/health` with `ok: true`, service `lorca-relay` and at least the signed required protocol, including when that requirement is 3; the protocol floor is not a health-check bypass.
 
-### 1. Sparkle signing key
+### Atomic Runner admission drain
 
-Every update is signed with an Ed25519 key. The private key is the login keychain's Sparkle item
-(Sparkle's default account, `ed25519`), and `generate_appcast` reads it from there; its public
-half is `SPARKLE_PUBLIC_KEY` in [`scripts/app.ts`](../scripts/app.ts), which ships inside the app.
+The native launcher keeps its build's default CLI home and port isolated: Beans uses `~/.beans` and `4864`, and Beans Dev uses `~/.beans-dev` and `4865`. Existing configurable CLI ports remain supported. When `LORCA_UPDATE_TOKEN_FILE` is absent from the app's environment, the launcher attempts to provision a `native-update-token` in its own home with exclusive creation and mode 0600, or validates the existing file without replacing its bytes or changing permissions. It opens the home and token without following symlinks, requires the opened home to belong to root or the current user and not be group/other writable, and checks the opened token's type, ownership, bounded size and absence of all group/other access. Successful provisioning supplies that path to the child; failure leaves update control unset and ordinary CLI startup continues.
 
-```sh
-macos/.build/artifacts/sparkle/Sparkle/bin/generate_keys -p   # prints the public key; it matches SPARKLE_PUBLIC_KEY
-```
+An inherited `LORCA_UPDATE_TOKEN_FILE` passes through to the child unchanged: an explicit empty value disables token authorization, and a configured operator value is neither replaced nor read or modified by the native app. The native updater refuses installation whenever this inherited key is present; it does not use an operator path as fallback trust. Native installation requires safely readable app-owned control and a drain-capable connected CLI configured with the matching native token. An external CLI or a child started without native control can serve ordinary app requests, but cannot authorize native installation unless that prerequisite is met.
 
-A Mac without the item imports it from a backup:
+Automatic installation waits for normal quit. Retained composer drafts (including behind Settings), active work, command input, onboarding, modal windows, sheets and edited documents block installation. The app does not clear drafts, cancel jobs, stop commands or change account Pause to make an update ready.
 
-```sh
-macos/.build/artifacts/sparkle/Sparkle/bin/generate_keys -x sparkle_private_key.txt   # export, for a password manager
-macos/.build/artifacts/sparkle/Sparkle/bin/generate_keys -f sparkle_private_key.txt   # import on another Mac
-```
+The guarded quit takes a token-authenticated `update.prepare` lease with a 1,800-second TTL **before** inspecting Runner work or fetching readiness and relay health. The CLI closes new admission under its work-producer lock; admitted turns, rooms, routines, command continuations and remote waits remain intact. If work is still admitted, the app releases the lease and cancels quit rather than forcing a stop. Relay envelopes held by the CLI drain remain queued for replay when admission resumes.
 
-Without the private key, no install in the field can be updated again.
+While admission is closed, the app rechecks the signed release, the bootstrap snapshot, actual selected-relay health and a subsequent `hello` relay selection. A final `update.status` must show the same Runner process, an enabled, prepared, ready control, no active work or jobs and positive remaining lifetime. Lease renewals retain the same lease id and process. Authorization also checks a conservative monotonic deadline measured from before the prepare request, the unchanged configured CLI port, the current native relay selection and the native quit guard immediately before use. An expired, canceled or replaced lease cannot authorize installation.
 
-### 2. Developer ID and notarization
+A user-requested Sparkle relaunch enters the same AppKit quit path. Its continuation is retained as a main-actor closure and invoked synchronously only after validation, after ending the first deferred AppKit quit request. The lease stays held through this deliberate handoff, and Sparkle's subsequent quit rechecks readiness, relay health and native safety again. Failed or canceled quits and finished/aborted update cycles release the native lease through `update.cancel`; cancellation waits for any in-flight prepare response before sending the release. A continuation that does not reach another guarded quit within 30 seconds also releases the lease. If release cannot reach the CLI, the error is surfaced and installation remains unauthorized; the CLI lease still expires independently. Subsequent explicit quits can try again without losing the postponed continuation.
 
-Gatekeeper opens only a Developer ID-signed, notarized app, and notarization requires the hardened
-runtime. `release-mac.ts` passes the identity to `buildApp`, which signs innermost first: Sparkle's
-XPC services, `Updater.app`, and `Autoupdate`, the framework, the bundled CLI (as `app.lorca.cli`),
-then the app with the `com.apple.security.device.audio-input` entitlement Dictate needs.
-
-- Install the **Developer ID Application** certificate in the login keychain. With more than one,
-  set `SIGN_IDENTITY` to the full name or the SHA-1.
-- Store notarization credentials once, as a keychain profile named `NOTARY`:
-
-  ```sh
-  xcrun notarytool store-credentials NOTARY --apple-id you@example.com --team-id XXXXXXXXXX
-  ```
-
-  It asks for an app-specific password; `--key` takes an App Store Connect API key instead.
-
-### 3. R2 bucket and domain
-
-1. Create an R2 bucket named `lorca-mac-releases` (or set `R2_BUCKET`).
-2. Attach the custom domain `mac-releases.lorca.app` to it (R2 ▸ the bucket ▸ Settings ▸ Custom
-   Domains). Objects are then public at `https://mac-releases.lorca.app/<file>`.
-3. Create an R2 API token with Object Read & Write on that bucket.
-
-### 4. rclone remote
-
-Add a remote named `r2` with `rclone config` (type S3, provider Cloudflare), or put this in
-`~/.config/rclone/rclone.conf`:
-
-```ini
-[r2]
-type = s3
-provider = Cloudflare
-access_key_id = <R2 access key id>
-secret_access_key = <R2 secret access key>
-endpoint = https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-region = auto
-no_check_bucket = true
-```
-
-Check it:
-
-```sh
-rclone lsf r2:lorca-mac-releases --s3-no-check-bucket
-```
-
-## Cutting a release
-
-1. Add a `## [0.2.0]` section at the top of [`CHANGELOG.md`](../CHANGELOG.md). The heading matches
-   the version; the section becomes the notes Sparkle shows in the update window.
-2. Run it:
-
-   ```sh
-   bun run release-mac 0.2.0
-   ```
-
-   The argument bumps `"version"` in the root [`package.json`](../package.json). Without an
-   argument the script releases the version already there.
-3. Commit `package.json` and `CHANGELOG.md`.
-
-The script:
-
-1. calls `buildApp("release")` from `scripts/app.ts`, the same build as `bun run build`: `cargo build
-   --release` for the `lorca` CLI and the Markdown library, `swift build -c release` for the app,
-   the CLI copied into `Contents/Resources/bin`, Sparkle embedded, and everything signed with the
-   Developer ID under the hardened runtime (`macos/.build/bundle/release/Lorca.app`);
-2. packs the app into `Lorca-<version>.dmg` and signs the image;
-3. notarizes the image and staples the ticket to the image and to the app (notarizing the image
-   covers the code inside it), then runs `codesign --verify` and `spctl --assess`;
-4. pulls the 15 most recent archives and the published `appcast.xml` from R2, so
-   `generate_appcast` can build deltas and keep the older entries;
-5. zips the stapled app as `Lorca-<version>.zip`, writes the changelog section beside it as
-   `Lorca-<version>.md`, and regenerates `appcast.xml`, signing with the keychain key;
-6. uploads the image, the archives, the deltas, and the notes as immutable, and `appcast.xml` with
-   a five-minute cache.
-
-Everything is staged under `dist/mac/`.
-
-To test an update, keep an older build in /Applications and choose **Check for Updates…**.
-`bun run release-mac --local` stops after step 3: a notarized app and `.dmg` to try on another Mac,
-with nothing published.
-
-### Options
-
-| Env | Default | Purpose |
-| --- | --- | --- |
-| `R2_BUCKET` | `lorca-mac-releases` | R2 bucket |
-| `R2_REMOTE` | `r2` | rclone remote |
-| `NOTARY_PROFILE` | `NOTARY` | `notarytool` keychain profile |
-| `SIGN_IDENTITY` | `Developer ID Application` | codesigning identity |
-| `SPARKLE_BIN` | the SwiftPM copy | directory holding `generate_appcast` |
-| `DOWNLOAD_URL_PREFIX` | `https://mac-releases.lorca.app/` | base URL of the appcast's links, and of `SUFeedURL` |
-| `HISTORY_COUNT` | `15` | recent archives pulled for deltas |
-| `FORCE=1` | | replace a version that is already published |
-| `NO_HISTORY=1` | | skip the old archives: a full download, no deltas |
-
-## Notes
-
-- **One version.** `"version"` in the root `package.json` is what `scripts/app.ts` writes into both
-  `CFBundleShortVersionString` and `CFBundleVersion`.
-  Sparkle compares `CFBundleVersion`, so it goes up with every release.
-- **The update replaces the whole bundle**, the CLI in `Contents/Resources/bin` included. The app
-  stops its CLI when it quits for the install and starts the new one on relaunch.
-- **Sparkle lives in the bundle.** SwiftPM links against the framework under
-  `macos/.build/artifacts`; `buildApp` copies it into `Contents/Frameworks`, which the
-  `@executable_path/../Frameworks` rpath in `Package.swift` resolves against. Debug bundles carry it
-  too, since the binary links it.
-- **Automatic checks are on** (`SUEnableAutomaticChecks`), so Sparkle never asks for permission on
-  the second launch. Settings ▸ General ▸ Updates turns them off, and has the switch for installing
-  updates without asking.
-- **A debug build never updates.** `Updater.isEnabled` is false under `DEBUG`: the menu item and
-  the settings rows leave themselves out of the dev loop's bundle.
-- **The build is for the Mac that runs it.** `cargo build` and `swift build` target the host
-  architecture, so a release cut on Apple silicon is an arm64 app.
-- Old archives stay in R2, so an install far behind still has a full archive to move to.
+Installed-app quit/relaunch behavior still requires real UI verification. Sparkle signing-tool proof and Swift compilation do not establish installed-update acceptance.

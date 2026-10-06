@@ -3,6 +3,7 @@
 // talks to a CLI's websocket itself or runs the demo.
 
 import { isMyGo, onFileDrop, type FileDrop } from "mygo-runtime";
+import { L } from "../l10n";
 import {
   CLI,
   events,
@@ -279,6 +280,38 @@ export function onOpenChat(listener: (chatID: string) => void): () => void {
 
 export function onUpdaterChanged(listener: (state: UpdaterState) => void): () => void {
   return inApp ? events.updaterChanged.on(listener) : () => {};
+}
+
+// The native updater asks only for its own dialog words through the live L()
+// table, rather than maintaining a separate native translation dictionary.
+if (typeof window !== "undefined") {
+  Object.defineProperty(window, "beansUpdateWord", {
+    configurable: true,
+    value: ({ key, args }: { key: string; args?: string[] }): string | null => {
+      switch (key) {
+        case "The Beans update is not ready":
+          return L("The Beans update is not ready");
+        case "You're up to date":
+          return L("You're up to date");
+        case "Beans %@ is available":
+          return L("Beans %@ is available", args?.[0] ?? "");
+        case "Install on normal quit after bot work finishes and drafts are saved. The app will not restart automatically.":
+          return L("Install on normal quit after bot work finishes and drafts are saved. The app will not restart automatically.");
+        case "Install on Quit":
+          return L("Install on Quit");
+        case "Later":
+          return L("Later");
+        case "Skip This Version":
+          return L("Skip This Version");
+        case "Download and install updates automatically":
+          return L("Download and install updates automatically");
+        case "The update will wait":
+          return L("The update will wait");
+        default:
+          return null;
+      }
+    },
+  });
 }
 
 /** Whether this page's window is where the user looks: in front, shown, not minimized. */

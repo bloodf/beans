@@ -1,0 +1,24 @@
+{
+  "relay": {
+    "name": "relay",
+    "driver": "systemd",
+    "service": "lorca-relay.service",
+    "binary": "/usr/local/bin/lorca-relay",
+    "health_url": "http://127.0.0.1:8787/v1/health",
+    "database": "/var/lib/lorca-relay/lorca-relay.db",
+    "backup_dir": "/var/backups/beans-relay",
+    "catalog_dir": "/usr/local/share/beans-relay"
+  },
+  "runners": [
+    {
+      "name": "runner-1",
+      "driver": "incus",
+      "instance": "runner-1",
+      "service": "lorca.service",
+      "binary": "/usr/local/bin/lorca",
+      "port": 4862,
+      "token_file": "/etc/beans/update-token",
+      "drain_timeout": 1800
+    }
+  ]
+}

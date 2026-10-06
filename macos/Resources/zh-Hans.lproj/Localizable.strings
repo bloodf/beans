@@ -302,6 +302,7 @@
 "Finance" = "财务";
 "Find the prior art and cite it" = "找出已有的先例并注明出处";
 "Find…" = "查找…";
+"Finish bot work and save or send drafts before quitting to install the update." = "请先完成智能体的工作，并保存或发送草稿，再退出以安装更新。";
 "Finished" = "已完成";
 "Folder" = "文件夹";
 "Form" = "表单";
@@ -312,6 +313,7 @@
 "Give the server a name." = "请为服务器命名。";
 "Give the server's URL." = "请填写服务器的 URL。";
 "Go to Chat %d" = "前往聊天 %d";
+"Group" = "群聊";
 "Group · %@ · %@" = "群聊 · %1$@ · %2$@";
 "Group name (optional)" = "群聊名称（可选）";
 "gsk_… from console.groq.com" = "gsk_…，来自 console.groq.com";
@@ -574,6 +576,8 @@
 "Routines are recurring tasks this bot runs on a schedule. Ask it in chat to set one up." = "例行任务是此智能体按计划重复运行的任务。在聊天中让它设置一个。";
 "Rule" = "规则";
 "rule allow automatically ask first always allow" = "规则 自动允许 先询问 始终允许 rule allow automatically ask first always allow";
+"Run Command in Background" = "在后台运行命令";
+"Run in Background" = "在后台运行";
 "Run Now" = "立即运行";
 "Runner" = "Runner";
 "Runner · runs bots with its own credentials" = "Runner · 用自己的凭证运行智能体";
@@ -701,6 +705,7 @@
 "The server's JSON" = "服务器的 JSON";
 "The transcript is removed from this Device and from paired Devices." = "聊天记录将从这台设备和已配对的设备上移除。";
 "The two Devices run a handshake; the relay only carries the ciphertext. This computer joins as a Runner." = "两台设备之间进行握手，中继只传递密文。这台电脑将作为 Runner 加入。";
+"The update will wait" = "更新将暂缓安装";
 "The URL starts with http:// or https://." = "URL 需以 http:// 或 https:// 开头。";
 "theme dark mode light mode system" = "主题 深色模式 浅色模式 跟随系统 theme dark mode light mode system";
 "They start paused. %@ asks whether to turn them on." = "它们先处于暂停状态。%@ 会问你是否开启。";
@@ -771,6 +776,7 @@
 "What do we not know yet?" = "我们还有哪些不知道的？";
 "What is the blast radius?" = "影响范围有多大？";
 "What it does and how it should work" = "它做什么以及应该如何工作";
+"What this group is for. Every bot in it reads this." = "这个群聊是做什么的。群里的每个智能体都会读到。";
 "What it is for, which bots read (optional)" = "用途说明，智能体会读到（可选）";
 "What it works with" = "它配合使用的插件";
 "What should I work on next?" = "我接下来该做什么？";
@@ -827,9 +833,12 @@
 "Waiting for Runner…" = "正在等待 Runner…";
 "Saving…" = "正在保存…";
 "Declining…" = "正在拒绝…";
-"Add MCP Server" = "添加 MCP 服务器";
-"Add Server…" = "添加服务器…";
-"MCP Servers" = "MCP 服务器";
-"MCP Servers on %@" = "%@ 上的 MCP 服务器";
-"Reconnect" = "重新连接";
-"Tools" = "工具";
+"Reply" = "回复";
+"Reply…" = "回复…";
+"Replying to %@" = "回复 %@";
+"Cancel reply" = "取消回复";
+"In reply to %@: %@" = "回复 %1$@：%2$@";
+"Send now" = "立即发送";
+"Have the bot read this now. A command it is running moves to the background." = "让智能体现在就读到这条消息。它正在运行的命令会转到后台。";
+"Waiting for the bot to finish its step." = "正在等智能体完成当前这一步。";
+"Beans" = "Beans";

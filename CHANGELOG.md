@@ -1,10 +1,12 @@
 # Changelog
 
-The Mac app's release notes. `bun run release-mac` attaches a version's section to its update, and
-Sparkle shows it in the update window. The Windows and Linux app's are in
-[desktop/CHANGELOG.md](desktop/CHANGELOG.md).
+Unified Beans release notes, versioned by the root `package.json` and tagged
+`beans-v<version>`. `bun run release-mac` attaches the matching section to its
+Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desktop notes.
 
 ## [Unreleased]
+
+- Beans uses unified signed GitHub release readiness for relay-first server updates and guarded desktop install-on-quit, with Android APK and ad-hoc iOS IPA release assets.
 
 - Group inspectors offer Make Owner, and `lorca chats list` / `chats set-owner` expose the same group ownership from the terminal.
 - Lossless PNG optimizations reduce bundled image sizes without changing their decoded pixels.
@@ -34,6 +36,25 @@ Sparkle shows it in the update window. The Windows and Linux app's are in
 - While onboarding pairs or restores, the Pair or Restore button and the field are disabled beside a spinner, and Back stops a pairing that is still waiting on the other computer.
 - The marketplace adds plugins for 飞书, 飞书项目, 滴答清单, 腾讯文档, 秘塔 AI 搜索, 知乎, 高德地图, and 可灵. 飞书, 飞书项目, 滴答清单, 腾讯文档, and 可灵 sign in with your account in the browser; 秘塔 AI 搜索 and 知乎 take an API key from their sites, and 高德地图 a Web Service key from the Amap console.
 - Settings › Devices can unpair this Mac too: Lorca forgets the account's keys, credentials, and chats here and goes back to onboarding. When this Mac holds your identity, the confirmation says that your backup phrase becomes the only way to restore it.
+
+## [1.0.11]
+
+The first server-only Beans release targets Linux relay, Runner and updater assets
+under `beans-v1.0.11`. The Cargo component version remains `0.1.10`; desktop package
+metadata remains independent. Signed readiness must be finalized before automatic
+updates can use this release; this server scope does not authorize native client updates.
+
+Includes upstream #61, #62, #65 and #66:
+
+- Commands on macOS and Linux run in their own terminals. Bots can start background commands, and users can send a waiting command to the background so the bot continues. Running tasks exposes their output and Stop; stopping a chat turn leaves background commands running.
+- Groups carry an editable description that reaches every member's system prompt, alongside the group's name and owner.
+- Provider, sign-in, relay and HTTP MCP requests use configured environment proxies or the macOS/Windows system proxy. PAC files and macOS proxy bypass lists are not read.
+- HTTPS uses system certificate trust on macOS and Windows, including administrator-installed roots, and system plus bundled roots on Linux. Certificate failures expose the underlying cause; the phone core retains bundled-root trust.
+- Server updates verify schema-1 readiness with the Beans Ed25519 public anchor and verify artifact hashes before installation. Finalized release bytes and inventories are immutable. The updater upgrades and checks the relay's component version and compatible protocol before moving Runners.
+- Renewable, token-authenticated Runner admission leases hold new work while existing turns, routines, commands and remote waits finish. Queued relay work remains pending; cancellation or lease expiry resumes admission without changing account Pause.
+- Binary and catalog replacement retains synced originals and a durable, service-bound recovery journal. Interrupted swaps reuse those originals for recovery and rollback; incompatible databases are never automatically restored.
+- Release failures hold the failed root version until a newer release or explicit operator clearance. Configuration, authentication, unsafe-path and recovery faults hold all further rollout until repaired and cleared; a busy Runner cancels its lease for a later pass.
+- Unattended Linux updates require trusted bootstrap, root-owned configuration, immutable executables, matching Runner drain tokens and explicit timer enablement after a successful manual pass. Release publication and live deployment remain separate operator actions.
 
 ## [0.1.8]
 

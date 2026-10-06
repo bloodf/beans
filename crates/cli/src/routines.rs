@@ -190,7 +190,8 @@ pub fn run_now(app: &Arc<App>, id: &str) -> Result<(), String> {
         return Err(format!("{} is running right now.", routine.name));
     }
     let job = job_for(app, &routine)?;
-    runtime::start_turn(app, job);
+    let admission = app.update.try_admit().ok_or(crate::update_control::UPDATING)?;
+    runtime::start_turn(app, job, admission);
     Ok(())
 }
 
@@ -261,13 +262,16 @@ pub fn tick(app: &Arc<App>) {
         return;
     }
     for routine in due {
+        // While an update holds new work back, a due routine stays due: the next tick after
+        // the lease ends starts it.
+        let Some(admission) = app.update.try_admit() else { return };
         if routine.check.is_some() {
-            check_then_run(app, routine);
+            check_then_run(app, routine, admission);
             continue;
         }
         started(app, &routine.id);
         match job_for(app, &routine) {
-            Ok(job) => runtime::spawn_local_job(app.clone(), job, None),
+            Ok(job) => runtime::spawn_local_job(app.clone(), job, None, admission),
             Err(error) => tracing::warn!(%error, routine = %routine.name, "starting a routine"),
         }
     }
@@ -389,11 +393,13 @@ pub fn next_run_shown(app: &App, routine: &Routine) -> Option<i64> {
 /// seen; so what this one found still starts its run, after that one, as the chat runs one turn
 /// at a time.
 #[cfg(feature = "runner")]
-fn check_then_run(app: &Arc<App>, routine: Routine) {
+fn check_then_run(app: &Arc<App>, routine: Routine, admission: crate::update_control::Admission) {
     let cancel = CancellationToken::new();
     if !app.routine_checks.start(&routine.id, &cancel) { return; }
     let app = app.clone();
     tokio::spawn(async move {
+        // The check and the run it calls for count as running here throughout.
+        let _admission = admission;
         let found = run_check(&app, &routine, &cancel).await;
         checked(&app, &routine.id);
         // A routine paused, deleted, or given another check meanwhile does not run on this one.
@@ -403,7 +409,7 @@ fn check_then_run(app: &Arc<App>, routine: Routine) {
         match job_for(&app, &current) {
             Ok(mut job) => {
                 job.check = Some(report);
-                runtime::spawn_local_job(app.clone(), job, None);
+                runtime::spawn_local_job(app.clone(), job, None, app.update.hold());
             }
             Err(error) => tracing::warn!(%error, routine = %current.name, "starting a routine its check called for"),
         }

@@ -79,9 +79,10 @@ export const zh: Messages = {
   },
   download: {
     title: '下载 Lorca',
-    description: '下载 Lorca 的 Mac、Windows 和 Linux 版，通过 TestFlight 加入 iPhone 和 iPad 版测试，或在任意电脑上安装 Lorca CLI。',
+    description: '查看 Mac、Windows、Linux、Android 和 iOS 客户端的下载可用情况，或安装 CLI。',
     version: '版本 {{version}}',
-    unavailable: '暂时无法获取最新版本，请刷新页面重试。',
+    unavailable: '此平台尚无已发布的下载文件。',
+    loadFailed: '暂时无法获取最新版本，请刷新页面重试。',
     mac: {
       title: 'Mac',
       body: '和智能体聊天，并在你的 Mac 上运行它们。',
@@ -98,20 +99,21 @@ export const zh: Messages = {
     linux: {
       title: 'Linux',
       body: '和智能体聊天，并在你的 Linux 电脑上运行它们。这条命令把 Lorca 安装到你的主目录，不需要 root，之后 Lorca 会自动更新。',
+      action: '下载 Linux 版',
       deb: '也可以安装 <amd64>x64</amd64> 或 <arm64>Arm64</arm64> 的 Debian 软件包，它在你安装下一个软件包时更新。',
       system: 'x64 和 Arm64',
     },
     ios: {
       title: 'iPhone 和 iPad',
       body: '和智能体聊天，它们继续在你的电脑上运行。扫描桌面应用里的二维码即可配对。',
-      action: '加入 TestFlight 测试',
-      note: '需要先从 App Store 安装 TestFlight。',
+      action: '下载 IPA',
+      note: 'Ad-hoc IPA 仅能安装到签名描述文件中注册的设备，并需要 iOS 安装批准。',
     },
     android: {
       title: 'Android',
       body: '在 Android 手机上和智能体聊天。',
+      action: '下载 APK',
     },
-    soon: '即将推出',
     cli: {
       title: 'Lorca CLI',
       body: '让一台电脑成为 Runner：它运行你的智能体，但没有聊天界面。Mac、Windows 和 Linux 应用都已内置 CLI，只有在没装应用的电脑上才需要单独安装。把它和你的账户配对，再用桌面应用或手机为它创建智能体。',

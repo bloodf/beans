@@ -77,6 +77,26 @@ enum Command {
     Status,
     /// Check the local setup.
     Doctor,
+    /// Local update control of the running `lorca serve`, for an operator's updater. Prepare and
+    /// cancel read the token from the file LORCA_UPDATE_TOKEN_FILE names.
+    Update {
+        #[usage(subcommand)]
+        command: UpdateCommand,
+    },
+}
+
+#[derive(Subcommands, Debug)]
+enum UpdateCommand {
+    /// Print whether new work is held back and whether anything still runs, as JSON.
+    Status,
+    /// Hold new work back while running work finishes; prints the status. Run again to extend.
+    Prepare {
+        /// Seconds the hold lasts unless renewed or cancelled (30 to 3600; 600 by default).
+        #[usage(long)]
+        ttl: Option<u64>,
+    },
+    /// Let new work in again.
+    Cancel,
 }
 
 #[derive(Subcommands, Debug)]
@@ -241,6 +261,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::load(cli.home, cli.port);
+    // Update control speaks only to the running service; it opens no data folder.
+    if let Command::Update { command } = command {
+        return update(config.port, command).await;
+    }
     let app = App::load(config)?;
 
     match command {
@@ -348,7 +372,28 @@ async fn main() -> anyhow::Result<()> {
             doctor(&app).await;
             Ok(())
         }
+        Command::Update { .. } => unreachable!("handled before the data folder opens"),
     }
+}
+
+/// `lorca update …` against the `lorca serve` on `port`. Prints the service's JSON answer, or
+/// `{"serving": false}` when nothing listens there.
+async fn update(port: u16, command: UpdateCommand) -> anyhow::Result<()> {
+    let token = || -> anyhow::Result<String> {
+        let path = std::env::var_os(lorca::update_control::TOKEN_FILE_ENV).ok_or_else(|| anyhow::anyhow!("Set LORCA_UPDATE_TOKEN_FILE to the update control token file."))?;
+        lorca::update_control::read_token(std::path::Path::new(&path)).map_err(anyhow::Error::msg)
+    };
+    let (method, params) = match command {
+        UpdateCommand::Status => ("update.status", serde_json::json!({})),
+        UpdateCommand::Prepare { ttl } => ("update.prepare", serde_json::json!({ "token": token()?, "ttl": ttl })),
+        UpdateCommand::Cancel => ("update.cancel", serde_json::json!({ "token": token()? })),
+    };
+    let reply = match serve_call(port, method, &params).await? {
+        Some(reply) => reply.map_err(anyhow::Error::msg)?,
+        None => serde_json::json!({ "serving": false }),
+    };
+    println!("{reply}");
+    Ok(())
 }
 
 /// Runs a provider command in the running `lorca serve` when there is one, so the app sees the

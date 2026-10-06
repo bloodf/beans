@@ -36,6 +36,9 @@ final class RootSplitViewController: NSSplitViewController {
     /// toolbar. This computer until another is picked.
     private(set) var settingsDeviceID: Device.ID?
     private var settingsControllers: [SettingsPane: NSViewController] = [:]
+    /// The chat controller is retained while Settings owns the content pane.
+    var hasUnsavedDraft: Bool { chatController?.hasUnsavedDraft == true }
+
     /// The chat Back returns to.
     private var lastChatID: Chat.ID?
     /// What held the keyboard when Settings opened, to hand it back on the way out.

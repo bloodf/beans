@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var onboardingOverIdentity = false
     private var settingsWindowController: SettingsWindowController?
     private var servicesStarted = false
+    private var terminationPending = false
 
     private let store = AppStore.shared
 
@@ -71,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func startServicesWhenReady() {
         guard !servicesStarted, !store.isStarting else { return }
         servicesStarted = true
+        Updater.shared.canTerminateSafely = { [weak self] in self?.canTerminateForUpdate == true }
         DispatchQueue.main.async {
             Notifier.shared.start()
             Updater.shared.start()
@@ -120,6 +122,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
+    private var canTerminateForUpdate: Bool {
+        store.isConnected && !store.isStarting
+            && !store.chats.contains { store.isResponding(in: $0.id) || $0.messages.contains { $0.commandRun?.takesInput == true } }
+            && mainWindowController?.root.hasUnsavedDraft != true
+            && onboardingWindowController == nil
+            && NSApp.modalWindow == nil
+            && !NSApp.windows.contains { $0.attachedSheet != nil || $0.isDocumentEdited }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard Updater.isEnabled, Updater.shared.hasPendingInstallation else { return .terminateNow }
+        guard !terminationPending else { return .terminateLater }
+        terminationPending = true
+        Task {
+            defer { terminationPending = false }
+            var replied = false
+            do {
+                guard canTerminateForUpdate else {
+                    throw NSError(domain: "Beans.Update", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: L("Finish bot work and save or send drafts before quitting to install the update.")
+                    ])
+                }
+                try await Updater.shared.validatePendingInstallation()
+                guard canTerminateForUpdate, Updater.shared.canInstallPendingUpdate else {
+                    throw NSError(domain: "Beans.Update", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: L("The update will wait")
+                    ])
+                }
+                if Updater.shared.needsPostponedInstallationResume {
+                    // End this deferred AppKit request before Sparkle starts its own quit.
+                    // Keep the lease through that handoff; the next quit revalidates it.
+                    sender.reply(toApplicationShouldTerminate: false)
+                    replied = true
+                    guard Updater.shared.resumePostponedInstallation() else {
+                        throw NSError(domain: "Beans.Update", code: 1, userInfo: [
+                            NSLocalizedDescriptionKey: L("The update will wait")
+                        ])
+                    }
+                } else {
+                    sender.reply(toApplicationShouldTerminate: true)
+                    replied = true
+                }
+            } catch {
+                var failure = error
+                do { try await Updater.shared.cancelUpdateDrain() }
+                catch { failure = error }
+                if !replied { sender.reply(toApplicationShouldTerminate: false) }
+                NSAlert(error: failure).runModal()
+            }
+        }
+        return .terminateLater
+    }
+
 
     func applicationWillTerminate(_ notification: Notification) {
         store.stop()

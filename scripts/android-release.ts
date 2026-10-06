@@ -1,9 +1,9 @@
 // Build the Rust phone core and a production, release-signed Android APK.
 // Signing material stays outside the repository (BEANS_ANDROID_ENV overrides its location).
-import { stat } from "node:fs/promises";
+import { copyFile, mkdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { ROOT } from "./app.ts";
+import { ROOT, readVersion } from "./app.ts";
 
 const mobile = join(ROOT, "mobile");
 const envPath = resolve((process.env.BEANS_ANDROID_ENV ?? "~/.config/beans/android/keystore.env").replace(/^~(?=\/)/, homedir()));
@@ -44,4 +44,7 @@ await run(["bunx", "expo", "prebuild", "--clean", "--platform", "android", "--no
 await run(["./gradlew", "app:assembleRelease"], join(mobile, "android"));
 const apk = join(mobile, "android/app/build/outputs/apk/release/app-release.apk");
 const size = (await stat(apk)).size;
-console.log(`Signed APK: ${apk} (${size} bytes, ${Math.round((Date.now() - started) / 1000)} s)`);
+const output = join(ROOT, "dist", "android", `Beans-${readVersion()}.apk`);
+await mkdir(join(ROOT, "dist", "android"), { recursive: true });
+await copyFile(apk, output);
+console.log(`Signed APK: ${output} (${size} bytes, ${Math.round((Date.now() - started) / 1000)} s)`);

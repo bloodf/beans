@@ -1,101 +1,31 @@
 # Releasing the Windows and Linux app
 
-The app in `desktop/` updates itself through MyGo's updater plugin. Its releases are releases of
-this repository tagged `desktop-v<version>`. The repository's latest release stays the CLI's, which
-`install-cli.sh` and `install-cli.ps1` download, and the app finds the newest `desktop-v` release
-that is neither a draft nor a prerelease through the GitHub API (`updates.tagPrefix`). Each release
-holds, for each platform, the installer (`Lorca Setup <version>.exe`, the Debian package), the app
-as an archive (`lorca-<version>-windows-amd64.tar.gz`), delta updates from the last three versions,
-the Linux `install.sh`, and `update-<platform>.json`, the manifest the app checks. Installed apps
-accept only archives and deltas signed with the update key, whose public half is
-`updates.publicKey` in [`desktop/mygo.config.ts`](../desktop/mygo.config.ts). A tag builds Windows
-x64, Linux x64, and Linux arm64 on GitHub Actions into a draft release:
+The desktop keeps the runtime identity Lorca (`app.lorca`) and uses the root `package.json` version. Distribution belongs to the [unified Beans release](releasing-cli.md) in `bloodf/beans`, tagged `beans-v<version>`, not a separate desktop release.
+
+## Build and staging
 
 ```sh
-git tag desktop-v0.1.0 && git push origin desktop-v0.1.0
+bun scripts/desktop.ts release linux/amd64 --stage-only
+bun scripts/desktop.ts release linux/arm64 --stage-only
+bun scripts/desktop.ts release windows/amd64 --stage-only
 ```
 
-- Updater: [`desktop/updater.go`](../desktop/updater.go). **Check for Updates…** in File and Help,
-  and the Updates rows in Settings › General.
-- Configuration: `updates` in [`desktop/mygo.config.ts`](../desktop/mygo.config.ts).
-- Release: [`scripts/desktop.ts`](../scripts/desktop.ts), which runs `mygo build -upload`, and
-  [`.github/workflows/release-desktop.yml`](../.github/workflows/release-desktop.yml). MyGo's
-  [auto-updates guide](https://github.com/egoist/mygo/blob/main/docs/updates.md) covers what it
-  signs and uploads.
+The script builds the bundled CLI and invokes MyGo with the project-owned Ed25519 signing key. It records exact distribution paths in `desktop/build/release-assets.json`; the unified workflow consumes that inventory rather than uploading unpacked application files. Archives are `lorca-<version>-<platform>.tar.gz`, metadata is `update-<platform>.json`, and the Windows installer is `Lorca Setup <version>.exe`. Linux also produces `lorca_<version>_<arch>.deb` and install scripts published as `install-linux-amd64.sh` / `install-linux-arm64.sh`. Deltas are disabled. Non-staging manual upload requires a parent-created Beans draft and a matching root changelog section.
 
-## One-time setup
+`BEANS_UPDATE_PRIVATE_KEY` is the release PEM. The signing helper checks it against `updates/public-key.txt` and converts it to MyGo's seed32+public32 format. Release signing never falls back to an upstream key or a MyGo configuration-folder key.
 
-### 1. Update key
+## Update eligibility
 
-`mygo keygen` (run in `desktop/`) writes the key pair to MyGo's folder in the user's configuration
-directory: `%APPDATA%\mygo\update-keys` on Windows, `~/Library/Application Support/mygo/update-keys`
-on macOS, `~/.config/mygo/update-keys` on Linux. `mygo-update.pub` is `updates.publicKey`;
-`mygo-update.key` is the secret. Keep a copy in a password manager, and put it in that folder on
-every computer that releases, or in `MYGO_UPDATER_PRIVATE_KEY`, which `release-desktop` prefers.
+[`desktop/updater.go`](../desktop/updater.go) discovers stable Beans releases, verifies signed readiness and binds the selected archive's SHA-256 to MyGo's archive verification. A context-bound HTTP transport supplies pinned metadata to MyGo v0.1.22 while unrelated requests retain their original transport. Archive requests accept the exact signed URL and GitHub asset-storage redirects whose originating request is that archive, not arbitrary storage-host downloads. Public requests strip cookies and authorization. A new SDK version requires checking that interface again.
 
-Without the secret key, no install in the field can be updated again.
+Automatic checks run every 15 minutes when enabled. Saved check/download preferences, skipped versions and last-check time remain in `updater.json`; development and non-writable installations do not update. Users can choose Install on Quit, Later or Skip. The app never forces an unattended relaunch. Native dialog words come from the existing frontend `L()` lookup, with its ordinary English fallback for untranslated keys.
 
-### 2. Secret
+Installation requires a drain-capable CLI child owned by this app. An external service, an old CLI without update control, or an unavailable/private-token failure defers installation without terminating work. In update-enabled release builds the launcher provisions `<LORCA_HOME>/update-token` (the normal CLI home when unset) using exclusive creation and random bytes; it never truncates an existing token. Unix creation uses mode 0600. Windows creation uses the system PowerShell to remove inherited access and grant only the current user's SID before writing the secret; unavailable ACL setup fails without writing a token. An inherited `LORCA_UPDATE_TOKEN_FILE`, including an explicit empty value, is preserved without provisioning a substitute. Operator files must already be private regular files, including their Windows ACL. Development and non-writable builds do not provision a token, and their imported environment remains intact.
 
-The workflow signs with the Actions secret `MYGO_UPDATER_PRIVATE_KEY` (Settings ▸ Secrets and
-variables ▸ Actions), the contents of `mygo-update.key`, and uploads with the workflow's own
-token. On a computer, `release-desktop` uses the GitHub CLI's login (or `GH_TOKEN`) and the key in
-MyGo's folder (or `MYGO_UPDATER_PRIVATE_KEY`). It stops before building when either is missing.
+Normal quit first rejects running work, retained composer drafts, editing sheets and extra settings/onboarding windows, then makes the page inert while validating the relay. A dedicated non-reconnecting local websocket pins update control to the child PID, launcher generation and selected port. The app refuses an already-prepared lease, requests a 30-minute admission lease, and requires ready/prepared status with at least ten minutes remaining. New Runner work waits atomically behind the lease while admitted work is left untouched. A second snapshot checks relay selection and drafts; the app checks lease readiness and CLI identity again before approving quit. This control is serialized by the app's single-instance lock; an operator must not run a competing updater against that Runner.
 
-## Cutting a release
+Failed preparation, port/reconnect/relay changes, preference cancellation and vetoed quit release the original Runner's lease through that pinned socket and restore page input. MyGo exposes no canceled-quit event, so a one-second watchdog resets approval when termination has not begun. If cancellation cannot reach the Runner, the lease expires and resumes admission; account Pause is never changed.
 
-The version is `"version"` in [`desktop/package.json`](../desktop/package.json), apart from the
-Mac app's in the root `package.json`.
+The combined quit callback stops the local app connection and waits for the approved idle child to exit before installation, while the single-instance lock is still held. Ordinary Windows quit retains parent-exit shutdown; approved update quit stops the idle CLI explicitly so resource locks do not wait for an app exit that installation would delay. MyGo renames the running Windows app executable aside and cleans it up on the next user launch. Readiness and selected-relay health are revalidated before installing; installation failures are logged and MyGo attempts its existing file-swap rollback. The app does not claim database rollback or restart itself. Real platform shutdown, ACL, resource-lock and rollback behavior requires parent verification; compilation alone is insufficient.
 
-1. Set the version, and give it a `## [<version>]` section in
-   [`desktop/CHANGELOG.md`](../desktop/CHANGELOG.md): the section becomes the notes of the release
-   and of the update window, and the release stops without it.
-2. Tag the commit `desktop-v<version>` and push the tag, or run **Release desktop** by hand from
-   the Actions tab on the branch to release (`gh workflow run release-desktop.yml --ref main`),
-   which drafts the release on its commit; publishing the draft makes the tag. A run on a commit
-   other than the one an existing `desktop-v<version>` tag names is refused.
-3. When the workflow is done, check the draft `desktop-v<version>` and publish it without making
-   it the latest release:
-
-   ```sh
-   gh release edit desktop-v0.1.0 --draft=false --latest=false
-   ```
-
-   On the release's page, untick **Set as the latest release** before **Publish release**. The
-   apps find it by its tag.
-
-The **Release desktop** workflow checks that the tag names the version in `desktop/package.json`,
-drafts the release with the changelog's section as its notes (not as the latest release), then
-builds `windows/amd64`, `linux/amd64`, and `linux/arm64` side by side on Ubuntu, one
-`bun run release-desktop <platform>` each: cargo-zigbuild builds the CLIs, and NSIS the Windows
-installer. A platform that fails leaves the others to finish; re-run its job, which uploads into
-the same draft. A version already published is refused.
-
-`bun run release-desktop [platforms]` releases from this computer too, into the same draft.
-Platforms are MyGo's, comma separated; the default is this computer's, or `linux/amd64` and
-`windows/amd64` from a Mac. The script:
-
-1. refuses a version whose release is already published, unless `FORCE=1`, which replaces its
-   files;
-2. builds the CLI for each platform into `desktop/resources/<goos>-<goarch>/bin`, as
-   `bun run desktop:build` does;
-3. runs `mygo build -platform … -upload`, which builds the apps and installers into
-   `desktop/build`, reads the newest published release's manifests and archives to make delta
-   updates, signs the archives and deltas, and uploads everything to the release
-   `desktop-v<version>`, which it drafts, not as the latest release, when there is none.
-
-To test an update, install an older release with its installer and choose **Check for Updates…**.
-
-## Notes
-
-- **Where apps update.** On Windows, the per-user install of the installer, in
-  `%LOCALAPPDATA%\Programs`. On Linux, the install of a release's `install.sh`
-  (`curl -fsSL https://github.com/egoist/lorca/releases/download/desktop-v0.1.0/install.sh | sh`),
-  which installs the newest release in `~/.local/lorca.app`. The Debian package installs in
-  `/opt`, where the app cannot write: it leaves the menu item and the Settings rows out, and the
-  next package updates it.
-- **A development build never updates.** `mygo dev`'s Lorca Dev leaves the menu item and the
-  Settings rows out.
-- **The GitHub API allows 60 requests an hour** from an address without a token; an app checks
-  once a day.
-- **Old releases stay**, so the next release can make deltas from their archives.
+On Windows, the per-user installer location can update itself. On Linux, the install script's `~/.local/lorca.app` can update itself; a package-managed `/opt` installation is updated through the package manager. The public download page links only to releases carrying readiness assets. No update request carries account credentials.

@@ -206,6 +206,9 @@ pub struct App {
     /// The direct-chat agent loop that currently owns each chat lock: `(job id, queue)`.
     #[cfg(feature = "runner")]
     pub steering_queues: Mutex<HashMap<String, (String, lorca_agent::AgentMessageQueue)>>,
+    /// The same loops' step interrupts, for Send now: `(job id, interrupt)`.
+    #[cfg(feature = "runner")]
+    step_interrupts: Mutex<HashMap<String, (String, lorca_agent::StepInterrupt)>>,
     pub chat_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The chat on screen in the local app while it is frontmost; a reply there needs no push.
     pub watched_chat: Mutex<Option<String>>,
@@ -232,6 +235,9 @@ pub struct App {
     /// The checks of this Runner's routines.
     #[cfg(feature = "runner")]
     pub routine_checks: crate::routines::Checks,
+    /// The local update lease, and the admission count every new turn, room, routine, check,
+    /// and relay envelope passes through (`update_control`).
+    pub update: crate::update_control::Control,
     pub http: reqwest::Client,
 }
 
@@ -263,7 +269,7 @@ impl App {
         // since the last upload has no copy, and every newly paired Device needs one.
         state.machine_blob_hash = None;
         let (events, _) = broadcast::channel(512);
-        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build()?;
+        let http = lorca_tls::client_builder().timeout(std::time::Duration::from_secs(60)).build()?;
 
         let app = Arc::new(App {
             config,
@@ -294,6 +300,8 @@ impl App {
             announced_turns: Mutex::new(std::collections::BTreeMap::new()),
             #[cfg(feature = "runner")]
             steering_queues: Mutex::new(HashMap::new()),
+            #[cfg(feature = "runner")]
+            step_interrupts: Mutex::new(HashMap::new()),
             chat_locks: Mutex::new(HashMap::new()),
             watched_chat: Mutex::new(None),
             pending_results: Mutex::new(HashMap::new()),
@@ -309,6 +317,7 @@ impl App {
             mcp: crate::plugins::mcp::Pool::new(),
             #[cfg(feature = "runner")]
             routine_checks: crate::routines::Checks::default(),
+            update: crate::update_control::Control::default(),
             http,
         });
         crate::marketplace::enable(&app);
@@ -566,6 +575,8 @@ impl App {
         self.cancel_plugin_sign_in(None);
         #[cfg(feature = "runner")]
         self.steering_queues.lock().unwrap().clear();
+        #[cfg(feature = "runner")]
+        self.step_interrupts.lock().unwrap().clear();
         *self.identity.lock().unwrap() = None;
         *self.machine.lock().unwrap() = None;
         *self.credentials.lock().unwrap() = Credentials::default();
@@ -1135,35 +1146,46 @@ impl App {
 
     /// Creates the bot and its direct chat in one roster change, so other Devices (and the
     /// app's optimistic rows) never see a bot without its DM.
-    pub fn create_bot_with_dm(&self, mut bot: Bot, chat_id: Option<String>) -> anyhow::Result<(Bot, Chat)> {
+    pub fn create_bot_with_dm(&self, bot: Bot, chat_id: Option<String>) -> anyhow::Result<(Bot, Chat)> {
+        self.create_bot_with_dm_prepared(bot, chat_id, |_| Ok(()))
+    }
+
+    /// Validates the Runner and reserved ids before preparation admits template work or
+    /// stores its avatar. The roster edit lock keeps those reservations valid through commit.
+    pub(crate) fn create_bot_with_dm_prepared(&self, mut bot: Bot, chat_id: Option<String>,
+        prepare: impl FnOnce(&mut Bot) -> anyhow::Result<()>) -> anyhow::Result<(Bot, Chat)> {
         let _edit = self.roster_edit.lock().unwrap();
         bot.normalize_description();
         let runner = self.device(&bot.runner_id).ok_or_else(|| anyhow::anyhow!("Unknown Runner"))?;
         if !runner.is_runner() {
             anyhow::bail!("{} runs {} and cannot run bots", runner.name, runner.os);
         }
-        let mut state = self.state.lock().unwrap();
-        let mut next = state.clone();
+        let state = self.state.lock().unwrap();
         if bot.id.is_empty() {
             loop {
                 bot.id = format!("bot-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                if !next.bots.iter().any(|b| b.id == bot.id) && !next.deleted_bot_versions.contains_key(&bot.id) { break; }
+                if !state.bots.iter().any(|b| b.id == bot.id) && !state.deleted_bot_versions.contains_key(&bot.id) { break; }
             }
-        } else if next.bots.iter().any(|b| b.id == bot.id) || next.deleted_bot_versions.contains_key(&bot.id) {
+        } else if state.bots.iter().any(|b| b.id == bot.id) || state.deleted_bot_versions.contains_key(&bot.id) {
             anyhow::bail!("Bot id already exists or was deleted");
         }
         let mut id = chat_id.filter(|id| !id.is_empty()).unwrap_or_default();
         if id.is_empty() {
             loop {
                 id = format!("chat-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                if !next.chats.iter().any(|c| c.meta.id == id) { break; }
+                if !state.chats.iter().any(|c| c.meta.id == id) { break; }
             }
-        } else if next.chats.iter().any(|c| c.meta.id == id) {
+        } else if state.chats.iter().any(|c| c.meta.id == id) {
             anyhow::bail!("Chat id already exists");
         }
+        drop(state);
+        let old_avatar = bot.avatar.as_ref().map(|avatar| avatar.id.clone());
+        prepare(&mut bot)?;
+        let mut state = self.state.lock().unwrap();
+        let mut next = state.clone();
         if bot.created_at == 0.0 { bot.created_at = config::now_secs(); }
         let chat = Chat {
-            meta: ChatMeta { id, kind: "dm".into(), title: None, bot_ids: vec![bot.id.clone()], owner_bot_id: Some(bot.id.clone()), is_pinned: false, created_at: config::now_secs() },
+            meta: ChatMeta { id, kind: "dm".into(), title: None, bot_ids: vec![bot.id.clone()], owner_bot_id: Some(bot.id.clone()), description: None, is_pinned: false, created_at: config::now_secs() },
             unread_count: 0, usage: None, compactions: Vec::new(),
         };
         let policy = if bot.capabilities != Capabilities::default() {
@@ -1174,7 +1196,15 @@ impl App {
         } else { None };
         next.bots.push(bot.clone());
         next.chats.insert(0, chat.clone());
-        self.store.save_state_creating_chat(&next, &chat.meta)?;
+        if let Err(error) = self.store.save_state_creating_chat(&next, &chat.meta) {
+            if let Some(avatar) = bot.avatar.as_ref().filter(|avatar| old_avatar.as_ref() != Some(&avatar.id)
+                && !state.bots.iter().any(|existing| existing.avatar.as_ref().is_some_and(|held| held.id == avatar.id))) {
+                self.drop_avatar(&mut state, &avatar.id);
+                self.store.remove_outbox_with_state(&avatar.id, &state)?;
+                self.outbox_notify.notify_waiters();
+            }
+            return Err(error);
+        }
         *state = next;
         drop(state);
         if let Some(policy) = policy { self.publish_policy(policy); }
@@ -1303,6 +1333,7 @@ impl App {
         }
         let ids: Vec<String> = if meta.kind == "dm" {
             meta.title = None;
+            meta.description = None;
             meta.bot_ids.iter().take(1).cloned().collect()
         } else {
             meta.kind = "group".into();
@@ -1360,6 +1391,7 @@ impl App {
             title: None,
             bot_ids: vec![bot_id.to_string()],
             owner_bot_id: Some(bot_id.to_string()),
+            description: None,
             is_pinned: false,
             created_at: 0.0,
         })
@@ -1407,6 +1439,22 @@ impl App {
                 anyhow::bail!("Only group chats can be renamed");
             }
             chat.meta.title = title;
+        }
+        self.roster_changed(true);
+        Ok(())
+    }
+
+    /// Sets what a group is for, which every member reads in its system prompt. A direct chat
+    /// is its bot's, and the bot's own description says what it is for.
+    pub fn describe_chat(&self, chat_id: &str, description: Option<String>) -> anyhow::Result<()> {
+        let _edit = self.roster_edit.lock().unwrap();
+        {
+            let mut state = self.state.lock().unwrap();
+            let chat = state.chats.iter_mut().find(|c| c.meta.id == chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
+            if !chat.meta.is_group() {
+                anyhow::bail!("Only a group has a description");
+            }
+            chat.meta.description = description;
         }
         self.roster_changed(true);
         Ok(())
@@ -1731,15 +1779,49 @@ impl App {
                 return None;
             }
             message.promoted_at = Some(config::now_secs());
+            message.queued = false;
             Some(message)
         });
         let Some(message) = promoted else { return false };
-        if let Err(error) = self.store.upsert(&message) {
-            tracing::error!(%error, %chat_id, %message_id, "promoting steering message");
-            return false;
-        }
-        self.push_chat_op(&ChatBlob::Upsert { message });
+        // The apps here hear it too: the message no longer waits, and its Send now goes.
+        self.upsert_message(message, true);
         true
+    }
+
+    /// Marks a user message as held for the next step of the turn at work, or as no longer
+    /// held, here and on every Device. Unchanged when it already is.
+    pub fn set_queued(&self, chat_id: &str, message_id: &str, queued: bool) {
+        let Some(mut message) = self.message(chat_id, message_id).filter(|m| m.queued != queued) else { return };
+        message.queued = queued;
+        self.upsert_message(message, true);
+    }
+
+    /// Stop: nothing in the chat waits for a step any more.
+    pub fn unqueue_chat(&self, chat_id: &str) {
+        // A held message is among the newest: the turn it waits on is the chat's latest.
+        let recent = self.store.page(chat_id, None, 40).map(|(messages, _)| messages).unwrap_or_default();
+        let held: Vec<String> = recent.into_iter().filter(|m| m.queued).map(|m| m.id).collect();
+        for id in held {
+            self.set_queued(chat_id, &id, false);
+        }
+    }
+
+    #[cfg(feature = "runner")]
+    pub fn register_step_interrupt(&self, chat_id: &str, job_id: &str, interrupt: lorca_agent::StepInterrupt) {
+        self.step_interrupts.lock().unwrap().insert(chat_id.to_string(), (job_id.to_string(), interrupt));
+    }
+
+    #[cfg(feature = "runner")]
+    pub fn unregister_step_interrupt(&self, chat_id: &str, job_id: &str) {
+        let mut interrupts = self.step_interrupts.lock().unwrap();
+        if interrupts.get(chat_id).is_some_and(|(active, _)| active == job_id) {
+            interrupts.remove(chat_id);
+        }
+    }
+
+    #[cfg(feature = "runner")]
+    pub fn step_interrupt(&self, chat_id: &str) -> Option<lorca_agent::StepInterrupt> {
+        self.step_interrupts.lock().unwrap().get(chat_id).map(|(_, interrupt)| interrupt.clone())
     }
 
     /// A replacement user job calls this after it reaches the chat lock. True means an older
@@ -2000,6 +2082,7 @@ mod tests {
                 title: None,
                 bot_ids: bot_ids.iter().map(|id| id.to_string()).collect(),
                 owner_bot_id: owner.map(str::to_string),
+                description: None,
                 is_pinned: false,
                 created_at: 1.0,
             },
@@ -2122,7 +2205,7 @@ mod tests {
         let runner_id = app.this_device_id().unwrap();
         let existing = app.state.lock().unwrap().bots[0].id.clone();
         for kind in ["group", "dm"] {
-            app.create_chat(ChatMeta { id: format!("taken-{kind}"), kind: kind.into(), title: None, bot_ids: vec![existing.clone()], owner_bot_id: Some(existing.clone()), is_pinned: false, created_at: 1.0 }).unwrap();
+            app.create_chat(ChatMeta { id: format!("taken-{kind}"), kind: kind.into(), title: None, bot_ids: vec![existing.clone()], owner_bot_id: Some(existing.clone()), description: None, is_pinned: false, created_at: 1.0 }).unwrap();
             let count = app.state.lock().unwrap().bots.len();
             let pending = app.store.pending_chat_creates().unwrap();
             let outbox = app.store.outbox().unwrap().len();

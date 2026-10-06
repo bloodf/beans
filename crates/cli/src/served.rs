@@ -14,7 +14,7 @@ pub async fn fetch(url: &str, etag: Option<&str>) -> Result<Option<(Option<Strin
     if !matches!(parsed.scheme(), "http" | "https") || parsed.username() != "" || parsed.password().is_some() {
         return Err("Invalid public feed URL".into());
     }
-    let client = reqwest::Client::builder()
+    let client = lorca_tls::client_builder()
         .timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .build().map_err(|error| error.to_string())?;

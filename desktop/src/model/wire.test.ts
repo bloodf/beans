@@ -72,8 +72,10 @@ test("Run in Background is offered while the bot's call waits on a command that 
       created_at: 1,
     });
   const waitedOn = row(true, {});
+  expect(waitedOn.body.kind === "tool" && waitedOn.body.tool.run?.background).toBe(false);
   expect(runsInForeground(waitedOn)).toBe(true);
   const sent = row(false, { background: true });
+  expect(sent.body.kind === "tool" && sent.body.tool.run?.background).toBe(true);
   expect(runsInForeground(sent)).toBe(false);
   // Started in the background, during its first two seconds.
   expect(runsInForeground(row(true, { background: true }))).toBe(false);

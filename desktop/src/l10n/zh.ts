@@ -317,6 +317,7 @@ export const zh: Record<string, string> = {
   "Give the command to run.": "请填写要运行的命令。",
   "Give the server a name.": "请为服务器命名。",
   "Give the server's URL.": "请填写服务器的 URL。",
+
   "Group": "群聊",
   "Group · %@ · %@": "群聊 · %1$@ · %2$@",
   "Group name (optional)": "群聊名称（可选）",

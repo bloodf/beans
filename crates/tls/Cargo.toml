@@ -10,6 +10,8 @@ reqwest.workspace = true
 rustls.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+tokio.workspace = true
 # The system checks certificates: the Keychain on macOS, the certificate store on Windows.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 rustls-platform-verifier = "0.7"

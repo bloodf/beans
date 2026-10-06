@@ -109,3 +109,17 @@ fn roots() -> rustls::RootCertStore {
     }
     roots
 }
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn describe_names_the_cause_after_the_request() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://127.0.0.1:{}/", listener.local_addr().unwrap().port());
+        drop(listener);
+        let error = super::client().get(&url).send().await.unwrap_err();
+        let text = super::describe(&error);
+        let cause = text.strip_prefix(&format!("error sending request for url ({url}): ")).unwrap_or_else(|| panic!("{text}"));
+        assert!(!cause.is_empty() && !cause.contains("error sending request"), "{text}");
+    }
+}

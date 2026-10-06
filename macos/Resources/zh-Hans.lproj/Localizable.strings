@@ -313,6 +313,7 @@
 "Give the server a name." = "请为服务器命名。";
 "Give the server's URL." = "请填写服务器的 URL。";
 "Go to Chat %d" = "前往聊天 %d";
+
 "Group" = "群聊";
 "Group · %@ · %@" = "群聊 · %1$@ · %2$@";
 "Group name (optional)" = "群聊名称（可选）";

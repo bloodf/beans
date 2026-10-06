@@ -2032,6 +2032,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-platform-verifier",
+ "tokio",
  "tracing",
  "webpki-roots 1.0.9",
 ]

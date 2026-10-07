@@ -121,7 +121,7 @@ pub(super) fn save_proposal(workdir: &Path, path: &str, content: &str) -> Result
 
     // A temp in this opened parent stays there even if its old pathname is renamed elsewhere.
     // Rename through the same handle, with ReplaceIfExists=false, is atomic and no-clobber.
-    let temp_name = format!(".lorca-propose-{}", uuid::Uuid::new_v4());
+    let temp_name = format!(".beans-propose-{}", uuid::Uuid::new_v4());
     let temporary = open_child(&dir, OsStr::new(&temp_name), true, false)?;
     let mut temporary = std::fs::File::from(temporary);
     let result = (|| -> Result<(), String> {
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn no_clobber_and_no_junction_traversal() {
-        let base = std::env::temp_dir().join(format!("lorca-proposal-{}", uuid::Uuid::new_v4()));
+        let base = std::env::temp_dir().join(format!("beans-proposal-{}", uuid::Uuid::new_v4()));
         let workspace = base.join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
         super::save_proposal(&workspace, "notes/draft.md", "one").unwrap();

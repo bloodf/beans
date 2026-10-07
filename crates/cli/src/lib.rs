@@ -1,7 +1,7 @@
-//! Lorca's Device core, and, with the `runner` feature, the Runner: keys, the relay sync,
-//! jobs and rooms, questions to other Runners, and the JSON API the apps speak. The `lorca`
+//! Beans's Device core, and, with the `runner` feature, the Runner: keys, the relay sync,
+//! jobs and rooms, questions to other Runners, and the JSON API the apps speak. The `beans`
 //! binary adds the local websocket server and the command line; the phone links the core
-//! alone through `lorca-mobile`.
+//! alone through `beans-mobile`.
 
 pub mod api;
 pub mod app;

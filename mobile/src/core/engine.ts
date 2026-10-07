@@ -5,7 +5,7 @@
 
 import * as WebBrowser from "expo-web-browser";
 import { AppState, Platform, type AppStateStatus } from "react-native";
-import * as core from "../../modules/lorca-core";
+import * as core from "../../modules/beans-core";
 import { t } from "../i18n";
 import { hostFacts } from "./host";
 import type { BotLook } from "./look";

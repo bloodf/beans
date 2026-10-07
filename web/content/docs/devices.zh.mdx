@@ -31,7 +31,7 @@ icon: MonitorSmartphone
 在桌面应用的引导流程里选择 **配对** 并粘贴字符串。在手机上扫描二维码。在只有命令行的电脑上：
 
 ```bash
-lorca pair 'lorca://pair?…'
+beans pair 'beans://pair?v=2&…'
 ```
 
 </Step>
@@ -60,4 +60,4 @@ lorca pair 'lorca://pair?…'
 
 ## 在另一台电脑上恢复
 
-在桌面应用的引导流程里选择 **恢复** 并输入备份短语，或在只有 CLI 的电脑上运行 `lorca identity restore <phrase>`。Beans 会重建你的密钥，并从中继拉回你的账户。原来运行在旧电脑上的智能体需要一个新的 Runner；它们的记忆和工作文件留在了旧磁盘上。
+在桌面应用的引导流程里选择 **恢复** 并输入备份短语，或在只有 CLI 的电脑上运行 `beans identity restore <phrase>`。Beans 会重建你的密钥，并从中继拉回你的账户。原来运行在旧电脑上的智能体需要一个新的 Runner；它们的记忆和工作文件留在了旧磁盘上。 必须提供以独立词 `beans-v2` 开头、后接十三组 base32 字符的新格式短语；旧版无前缀短语会在密钥派生之前被拒绝，旧账户目录不会迁移或重置。

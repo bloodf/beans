@@ -8,7 +8,7 @@ The Runner's `memory_service` modules add account-configured memory beside the e
 
 Records merge by logical counter, then exact Device id. A null value is a disconnect/reset tombstone. Unknown fields survive in their explicit flattened extension maps; known collection removals, including OpenViking identity keys, are not restored by unknown-field preservation. Equal-version conflicting known values fail closed. The private SQLite memory_config row stores account-encrypted bytes; config and relay ciphertext outbox change in one transaction with delivery invalidation and any deletion fence.
 
-Protocol remains 4. Relay health advertises `memory_config_version: 1`; clients require it alongside protocol and roster floors before account sync. Missing or malformed capability evidence stops sync, rather than silently making settings local-only. Relay kind/slot `memory_config` carries opaque ciphertext independently of credentials. Every pull merges remote memory config before upload, and republishes locally newer records. Unsupported config fails without advancing that blob's application record.
+Protocol is 5 with format `beans-v2`. Relay health retains `memory_config_version: 1`; clients require it alongside format, protocol and roster floors before account sync. Missing or malformed capability evidence stops sync rather than making settings local-only. Relay kind/slot `memory_config` still carries opaque ciphertext independently of credentials. Every pull merges remote memory config before upload and republishes locally newer records; unsupported config fails without advancing that blob’s application record.
 
 Snapshots, `roster.changed`, and `memory.connections.list` contain explicitly selected masked fields: connection id/name/backend/revision and secret-presence flags; profile model/revision/dimensions and presence flags; known bot preferences. They contain no secrets, backend identity bindings, endpoint credentials or unknown extension fields. Secret edits use keep/replace/clear; omitted endpoint/options/profile reference preserves it, explicit nullable endpoint/profile clears it.
 
@@ -17,6 +17,9 @@ OpenViking binding edits are per-bot patches: omitted identities remain, null re
 ## Own-bot dispatch
 
 Namespace is the full lowercase SHA-256 of `beans.memory.v1\0`, decoded canonical account Ed25519 public key, exact bot-id byte length and exact bot id. Renaming, provider/model changes and Runner assignment do not affect it. The model cannot choose account, bank, tenant, connection, URI, table, SQL or key. OpenViking stores typed namespace-bound USER-key or explicitly trusted-gateway identities; distinct bot namespaces cannot reuse authenticated account/user identity or USER keys across connections.
+
+The fresh account public key selects a distinct namespace without changing the `beans.memory.v1` domain. Existing account banks are not reused or automatically migrated.
+
 
 Namespaces are logical isolation, not server authorization. A Hindsight shared key can authorize more than one bank; hosted multi-user deployments need actual bank/tenant authorization at their server or gateway. Shell-enabled bots retain the Runner user's filesystem authority.
 
@@ -60,7 +63,7 @@ The full domain-separated SHA-256 vector-space fingerprint covers canonical sema
 
 ### Compatible API
 
-The Runner posts to the exact trusted URL ending in `/embeddings`, with the configured model, dimensions, float encoding and purpose-specific prefixed inputs. It uses optional sensitive Bearer authorization, shared `lorca-tls` certificate trust and system/environment proxies. HTTPS is the default; insecure HTTP needs explicit approval. Redirects are disabled. Request sizes, batch counts, decoded response bytes and elapsed time are bounded, including chunked bodies; cancellation drops the request.
+The Runner posts to the exact trusted URL ending in `/embeddings`, with the configured model, dimensions, float encoding and purpose-specific prefixed inputs. It uses optional sensitive Bearer authorization, shared `beans-tls` certificate trust and system/environment proxies. HTTPS is the default; insecure HTTP needs explicit approval. Redirects are disabled. Request sizes, batch counts, decoded response bytes and elapsed time are bounded, including chunked bodies; cancellation drops the request.
 
 Responses must name the pinned model and provide each batch index exactly once, in range, with the exact vector count and shape. Generic compatible responses do not attest a model revision: the endpoint operator must provide a stable immutable model/revision mapping. Errors expose only sanitized categories, not credentials, request text or service bodies. No discovery inference, retries, startup traffic or paid/backend fallback runs implicitly. API use sends plaintext embedding input to that configured endpoint, outside the relay's zero-knowledge boundary.
 

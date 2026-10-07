@@ -38,8 +38,8 @@ jobs:
       postgres:
         image: postgres:17
         env:
-          POSTGRES_PASSWORD: lorca
-          POSTGRES_DB: lorca
+          POSTGRES_PASSWORD: beans
+          POSTGRES_DB: beans
         ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready
@@ -47,16 +47,16 @@ jobs:
           --health-timeout 5s
           --health-retries 30
     env:
-      LORCA_RELAY_TEST_POSTGRES: postgres://postgres:lorca@127.0.0.1:5432/lorca?sslmode=disable
+      BEANS_RELAY_TEST_POSTGRES: postgres://postgres:beans@127.0.0.1:5432/beans?sslmode=disable
     steps:
       - uses: actions/checkout@v7
       - run: python3 -I -B scripts/server-updater.test.py -v
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Cargo unifies features across the packages of one run, and the phone core takes lorca
+      # Cargo unifies features across the packages of one run, and the phone core takes beans
       # without the runner, so it is tested on its own.
-      - run: cargo test --locked --workspace --exclude lorca-mobile
-      - run: cargo test --locked -p lorca-mobile
+      - run: cargo test --locked --workspace --exclude beans-mobile
+      - run: cargo test --locked -p beans-mobile
 
   rust-macos:
     name: Rust (macOS)
@@ -65,8 +65,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked --workspace --exclude lorca-mobile
-      - run: cargo test --locked -p lorca-mobile
+      - run: cargo test --locked --workspace --exclude beans-mobile
+      - run: cargo test --locked -p beans-mobile
 
   rust-windows:
     name: Rust (Windows)
@@ -81,7 +81,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Every suite runs, so one failing on Windows does not hide the others.
-      - run: cargo test --locked --no-fail-fast -p lorca -p lorca-agent -p lorca-models -p lorca-provider-auth -p lorca-tls
+      - run: cargo test --locked --no-fail-fast -p beans -p beans-agent -p beans-models -p beans-provider-auth -p beans-tls
 
   macos-app:
     name: macOS app
@@ -93,7 +93,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
       # The markdown crate's static library, xcframework, and Swift bindings, as `bun run dev`
-      # builds them into macos/Libraries and macos/Sources/LorcaMarkdown.
+      # builds them into macos/Libraries and macos/Sources/BeansMarkdown.
       - name: Build the markdown crate for Swift
         run: bun -e 'import { buildMarkdown } from "./scripts/app.ts"; if (!(await buildMarkdown("debug")).ok) process.exit(1)'
       - run: swift test

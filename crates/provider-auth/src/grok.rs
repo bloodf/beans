@@ -45,8 +45,6 @@ pub const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 pub const ISSUER: &str = "https://auth.x.ai";
 /// `grok-cli:access` and `api:access` are what let the token call `api.x.ai`.
 pub const SCOPES: &str = "openid profile email offline_access grok-cli:access api:access";
-/// Attribution xAI asks clients to send on the authorize URL.
-pub const REFERRER: &str = "lorca";
 
 struct AbortOnDrop(tokio::task::AbortHandle);
 
@@ -90,6 +88,14 @@ impl Endpoints {
     pub fn revoke(&self) -> String {
         format!("{}/oauth2/revoke", self.issuer)
     }
+
+    fn require_sign_in_configuration(&self) -> Result<(), String> {
+        let local_fixture = reqwest::Url::parse(&self.issuer).ok()
+            .and_then(|url| url.host_str().and_then(|host| host.parse::<std::net::IpAddr>().ok()))
+            .is_some_and(|address| address.is_loopback());
+        if local_fixture { return Ok(()); }
+        Err("Grok sign-in is unavailable: a verified Beans OAuth client configuration is required.".into())
+    }
 }
 
 /// One sign-in attempt.
@@ -110,7 +116,8 @@ impl PkceFlow {
         PkceFlow { verifier, challenge, state: b64url(&state_bytes) }
     }
 
-    pub fn authorize_url(&self, endpoints: &Endpoints, redirect_uri: &str) -> String {
+    pub fn authorize_url(&self, endpoints: &Endpoints, redirect_uri: &str) -> Result<String, String> {
+        endpoints.require_sign_in_configuration()?;
         let params = [
             ("response_type", "code"),
             ("client_id", CLIENT_ID),
@@ -119,14 +126,13 @@ impl PkceFlow {
             ("code_challenge", &self.challenge),
             ("code_challenge_method", "S256"),
             ("state", &self.state),
-            ("referrer", REFERRER),
         ];
         let query = params
             .iter()
             .map(|(key, value)| format!("{key}={}", urlencode(value)))
             .collect::<Vec<_>>()
             .join("&");
-        format!("{}?{query}", endpoints.authorize())
+        Ok(format!("{}?{query}", endpoints.authorize()))
     }
 }
 
@@ -242,8 +248,8 @@ fn preflight_response() -> String {
     )
 }
 
-const SUCCESS_PAGE: &str = "<html><body style=\"font-family:-apple-system\"><h2>Signed in to Grok</h2><p>You can close this window and return to Lorca.</p></body></html>";
-const FAILURE_PAGE: &str = "<html><body style=\"font-family:-apple-system\"><h2>Sign-in failed</h2><p>Go back to Lorca and try again.</p></body></html>";
+const SUCCESS_PAGE: &str = "<html><body style=\"font-family:-apple-system\"><h2>Signed in to Grok</h2><p>You can close this window and return to Beans.</p></body></html>";
+const FAILURE_PAGE: &str = "<html><body style=\"font-family:-apple-system\"><h2>Sign-in failed</h2><p>Go back to Beans and try again.</p></body></html>";
 const NOT_FOUND: &str = "<!doctype html><title>Not found</title>Not found.";
 
 /// Serves one connection: the preflight, the callback itself, or something unrelated (a
@@ -464,10 +470,11 @@ pub async fn login(
     open_url: impl FnOnce(&str) -> Result<(), String>,
     timeout: std::time::Duration,
 ) -> Result<GrokTokens, String> {
+    endpoints.require_sign_in_configuration()?;
     let flow = PkceFlow::new();
     let callback = Callback::bind().await?;
     let redirect_uri = callback.redirect_uri();
-    let url = flow.authorize_url(endpoints, &redirect_uri);
+    let url = flow.authorize_url(endpoints, &redirect_uri)?;
     let state = flow.state.clone();
     let waiter = tokio::spawn(async move { callback.wait(&state, timeout).await });
     let _abort_on_drop = AbortOnDrop(waiter.abort_handle());
@@ -483,14 +490,14 @@ mod tests {
     #[test]
     fn authorize_url_carries_pkce_and_the_loopback_redirect() {
         let flow = PkceFlow::new();
-        let url = flow.authorize_url(&Endpoints::xai(), "http://127.0.0.1:53211/callback");
-        assert!(url.starts_with("https://auth.x.ai/oauth2/authorize?"));
+        assert!(flow.authorize_url(&Endpoints::xai(), "http://127.0.0.1:53211/callback").is_err());
+        let url = flow.authorize_url(&Endpoints::at("http://127.0.0.1:8080"), "http://127.0.0.1:53211/callback").unwrap();
+        assert!(url.starts_with("http://127.0.0.1:8080/oauth2/authorize?"));
         assert!(url.contains(&format!("client_id={CLIENT_ID}")));
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A53211%2Fcallback"));
         assert!(url.contains("scope=openid%20profile%20email%20offline_access%20grok-cli%3Aaccess%20api%3Aaccess"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains(&format!("code_challenge={}", flow.challenge)));
-        assert!(url.contains("referrer=lorca"));
     }
 
     #[test]

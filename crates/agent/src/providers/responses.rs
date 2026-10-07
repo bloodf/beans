@@ -401,10 +401,10 @@ pub(crate) mod testing {
         })
     }
 
-    /// One provider's entry in the `credentials.json` that `LORCA_CREDENTIALS` names (a Lorca
+    /// One provider's entry in the `credentials.json` that `BEANS_CREDENTIALS` names (a Beans
     /// data directory's), or `None` to skip the probe.
     pub(crate) fn credential<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
-        let path = std::env::var("LORCA_CREDENTIALS").ok()?;
+        let path = std::env::var("BEANS_CREDENTIALS").ok()?;
         let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("reading {path}: {error}"));
         let credentials: Value = serde_json::from_str(&text).expect("credentials.json is JSON");
         match credentials.get(key).filter(|entry| !entry.is_null()) {
@@ -611,7 +611,7 @@ mod tests {
         assert_eq!(state.apply("response.output_item.added", &added, &tx).await, Ok(false));
         let done = json!({ "item": {
             "type": "web_search_call", "id": "ws_1", "status": "completed",
-            "action": { "type": "search", "query": "lorca relay" },
+            "action": { "type": "search", "query": "beans relay" },
         } });
         assert_eq!(state.apply("response.output_item.done", &done, &tx).await, Ok(false));
         let page = json!({ "item": { "type": "web_search_call", "id": "ws_2", "action": { "type": "open_page", "url": "https://example.com/a" } } });
@@ -628,7 +628,7 @@ mod tests {
         }
         assert!(matches!(&events[0], AssistantEvent::ServerToolStart { id, name, detail } if id == "ws_1" && name == WEB_SEARCH_TOOL && detail.is_empty()));
         assert!(matches!(&events[1], AssistantEvent::ServerToolEnd { id, name, detail, summary }
-            if id == "ws_1" && name == WEB_SEARCH_TOOL && detail == "lorca relay" && summary == "Searched the web for “lorca relay”"));
+            if id == "ws_1" && name == WEB_SEARCH_TOOL && detail == "beans relay" && summary == "Searched the web for “beans relay”"));
         assert!(matches!(&events[2], AssistantEvent::ServerToolStart { name, detail, .. } if name == WEB_FETCH_TOOL && detail == "https://example.com/a"));
         assert!(matches!(&events[3], AssistantEvent::ServerToolEnd { name, summary, .. } if name == WEB_FETCH_TOOL && summary == "Read https://example.com/a"));
         assert!(matches!(&events[4], AssistantEvent::TextStart { index: 0 }));
@@ -639,7 +639,7 @@ mod tests {
     async fn an_x_search_reads_as_a_search_of_x() {
         let (tx, mut rx) = mpsc::channel(16);
         let mut state = ResponsesState::new();
-        let item = json!({ "item": { "type": "x_search_call", "id": "xs_1", "action": { "type": "search", "query": "lorca" } } });
+        let item = json!({ "item": { "type": "x_search_call", "id": "xs_1", "action": { "type": "search", "query": "beans" } } });
         assert_eq!(state.apply("response.output_item.added", &item, &tx).await, Ok(false));
         assert_eq!(state.apply("response.output_item.done", &item, &tx).await, Ok(false));
         drop(tx);
@@ -648,7 +648,7 @@ mod tests {
             events.push(event);
         }
         assert!(matches!(&events[1], AssistantEvent::ServerToolEnd { name, detail, summary, .. }
-            if name == WEB_SEARCH_TOOL && detail == "lorca" && summary == "Searched X for “lorca”"));
+            if name == WEB_SEARCH_TOOL && detail == "beans" && summary == "Searched X for “beans”"));
     }
 
     #[test]

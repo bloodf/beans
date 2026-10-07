@@ -34,7 +34,7 @@ impl CloudBridge {
         Self::start_to(target, key).await
     }
     pub(super) async fn start_to(target: reqwest::Url, key: &str) -> Result<Self, MemoryError> {
-        let client = lorca_tls::client_builder()
+        let client = beans_tls::client_builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5))
             .build()

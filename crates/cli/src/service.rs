@@ -1,9 +1,9 @@
-//! `lorca service`: runs `lorca serve` in the background on a computer without the app, from
+//! `beans service`: runs `beans serve` in the background on a computer without the app, from
 //! login on and again whenever it stops, the way the apps keep their own CLI running. macOS gets a
 //! launchd agent, Linux a systemd user unit (with lingering, so it runs without a login), and
-//! Windows a supervisor, `lorca service run`, that the user's Run key starts at sign-in. Each
-//! starts `lorca serve` with `LORCA_SERVICE=1`, and with the `LORCA_HOME`, `LORCA_PORT`, and
-//! `LORCA_RELAY_URL` of the shell that installed it.
+//! Windows a supervisor, `beans service run`, that the user's Run key starts at sign-in. Each
+//! starts `beans serve` with `BEANS_SERVICE=1`, and with the `BEANS_HOME`, `BEANS_PORT`, and
+//! `BEANS_RELAY_URL` of the shell that installed it.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -12,23 +12,23 @@ use crate::config::Config;
 
 /// The launchd label.
 #[cfg(target_os = "macos")]
-const NAME: &str = "app.lorca.serve";
+const NAME: &str = "app.beans.serve";
 /// The systemd user unit.
 #[cfg(target_os = "linux")]
-const UNIT: &str = "lorca.service";
-/// A log larger than this starts over when `lorca serve` starts under the service.
+const UNIT: &str = "beans.service";
+/// A log larger than this starts over when `beans serve` starts under the service.
 const LOG_LIMIT: u64 = 20 << 20;
 
-/// Whether `lorca service` started this process.
+/// Whether `beans service` started this process.
 pub fn supervised() -> bool {
-    std::env::var("LORCA_SERVICE").is_ok_and(|value| value == "1")
+    std::env::var("BEANS_SERVICE").is_ok_and(|value| value == "1")
 }
 
-/// How the service stands, in words for `lorca service status`.
+/// How the service stands, in words for `beans service status`.
 pub struct Status {
     pub installed: bool,
     pub running: Option<u32>,
-    /// Where `lorca serve` writes its log, or how to read it.
+    /// Where `beans serve` writes its log, or how to read it.
     pub log: String,
 }
 
@@ -38,23 +38,23 @@ fn exe() -> anyhow::Result<PathBuf> {
     Ok(std::fs::canonicalize(&exe).unwrap_or(exe))
 }
 
-/// What `lorca serve` needs to serve the same account as the command that installed it: a
+/// What `beans serve` needs to serve the same account as the command that installed it: a
 /// folder or port other than the default, and a relay named in the environment.
 fn passed_on(config: &Config) -> Vec<(&'static str, String)> {
     let mut vars = Vec::new();
-    if Some(&config.home) != dirs::home_dir().map(|home| home.join(".lorca")).as_ref() {
-        vars.push(("LORCA_HOME", config.home.to_string_lossy().to_string()));
+    if Some(&config.home) != dirs::home_dir().map(|home| home.join(".beans-v2")).as_ref() {
+        vars.push(("BEANS_HOME", config.home.to_string_lossy().to_string()));
     }
     if config.port != crate::config::DEFAULT_PORT {
-        vars.push(("LORCA_PORT", config.port.to_string()));
+        vars.push(("BEANS_PORT", config.port.to_string()));
     }
-    if let Some(url) = std::env::var("LORCA_RELAY_URL").ok().filter(|url| !url.trim().is_empty()) {
-        vars.push(("LORCA_RELAY_URL", url));
+    if let Some(url) = std::env::var("BEANS_RELAY_URL").ok().filter(|url| !url.trim().is_empty()) {
+        vars.push(("BEANS_RELAY_URL", url));
     }
     vars
 }
 
-/// A `lorca serve` started under the service keeps its log in bounds: launchd appends to the
+/// A `beans serve` started under the service keeps its log in bounds: launchd appends to the
 /// same file forever, so one past [`LOG_LIMIT`] starts over.
 pub fn trim_log() {
     #[cfg(unix)]
@@ -75,7 +75,7 @@ fn plist_path() -> anyhow::Result<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn log_path() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join("Library/Logs/Lorca/serve.log")
+    dirs::home_dir().unwrap_or_default().join("Library/Logs/Beans/serve.log")
 }
 
 #[cfg(target_os = "macos")]
@@ -89,7 +89,7 @@ pub fn install(config: &Config) -> anyhow::Result<Status> {
     let exe = exe()?;
     let log = log_path();
     std::fs::create_dir_all(log.parent().unwrap())?;
-    let mut environment = String::from("\t\t<key>LORCA_SERVICE</key>\n\t\t<string>1</string>\n");
+    let mut environment = String::from("\t\t<key>BEANS_SERVICE</key>\n\t\t<string>1</string>\n");
     for (name, value) in passed_on(config) {
         environment.push_str(&format!("\t\t<key>{name}</key>\n\t\t<string>{}</string>\n", escape(&value)));
     }
@@ -170,17 +170,17 @@ fn systemctl(args: &[&str]) -> Command {
 pub fn install(config: &Config) -> anyhow::Result<Status> {
     if !systemctl(&["show-environment"]).output().is_ok_and(|o| o.status.success()) {
         anyhow::bail!(
-            "This computer has no systemd user session (a container, or WSL without systemd), so lorca service cannot keep lorca serve running. Start `lorca serve` from your own init system, or in tmux."
+            "This computer has no systemd user session (a container, or WSL without systemd), so beans service cannot keep beans serve running. Start `beans serve` from your own init system, or in tmux."
         );
     }
     // systemd splits ExecStart on spaces and reads quotes and backslashes.
     let quote = |text: &str| format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
-    let mut environment = String::from("Environment=LORCA_SERVICE=1\n");
+    let mut environment = String::from("Environment=BEANS_SERVICE=1\n");
     for (name, value) in passed_on(config) {
         environment.push_str(&format!("Environment={}\n", quote(&format!("{name}={value}"))));
     }
     let unit = format!(
-        "[Unit]\nDescription=Lorca: this computer's Runner (lorca serve)\n\n[Service]\nExecStart={} serve\n{environment}Restart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=Beans: this computer's Runner (beans serve)\n\n[Service]\nExecStart={} serve\n{environment}Restart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
         quote(&exe()?.to_string_lossy())
     );
     let path = unit_path()?;
@@ -193,7 +193,7 @@ pub fn install(config: &Config) -> anyhow::Result<Status> {
     let user = std::env::var("USER").unwrap_or_default();
     let lingers = || Command::new("loginctl").args(["show-user", &user, "-p", "Linger", "--value"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "yes");
     if !user.is_empty() && !lingers() && Command::new("loginctl").args(["enable-linger", &user]).output().map_or(true, |o| !o.status.success()) {
-        eprintln!("lorca serve runs while you are logged in. To keep it running after you log out, and to start it at boot, run: sudo loginctl enable-linger {user}");
+        eprintln!("beans serve runs while you are logged in. To keep it running after you log out, and to start it at boot, run: sudo loginctl enable-linger {user}");
     }
     Ok(status(config))
 }
@@ -223,7 +223,7 @@ pub fn status(_config: &Config) -> Status {
 #[cfg(windows)]
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 #[cfg(windows)]
-const RUN_VALUE: &str = "Lorca";
+const RUN_VALUE: &str = "Beans";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[cfg(windows)]
@@ -278,7 +278,7 @@ pub fn uninstall(config: &Config) -> anyhow::Result<bool> {
     Ok(installed)
 }
 
-/// Stops the supervisor and the `lorca serve` it started.
+/// Stops the supervisor and the `beans serve` it started.
 #[cfg(windows)]
 fn stop(config: &Config) {
     if let Some(pid) = supervisor_pid(config) {
@@ -314,10 +314,10 @@ fn process_alive(pid: u32) -> bool {
     }
 }
 
-/// `lorca service run`, the supervisor on Windows: leaves the console a sign-in opened for it,
-/// then runs `lorca serve` from the installed binary until it is stopped, at once again after an
+/// `beans service run`, the supervisor on Windows: leaves the console a sign-in opened for it,
+/// then runs `beans serve` from the installed binary until it is stopped, at once again after an
 /// update ([`crate::update::RESTART_EXIT`]), and after a pause that grows while it keeps stopping
-/// right after it starts. The log goes to `serve.log` in Lorca's folder, which starts over past
+/// right after it starts. The log goes to `serve.log` in Beans's folder, which starts over past
 /// [`LOG_LIMIT`].
 #[cfg(windows)]
 pub fn supervise(config: &Config, env: &[(String, String)]) -> anyhow::Result<()> {
@@ -338,7 +338,7 @@ pub fn supervise(config: &Config, env: &[(String, String)]) -> anyhow::Result<()
         let output = std::fs::OpenOptions::new().create(true).append(true).open(&log)?;
         let started = std::time::Instant::now();
         let mut command = Command::new(&exe);
-        command.arg("serve").env("LORCA_SERVICE", "1").stdin(std::process::Stdio::null()).stdout(output.try_clone()?).stderr(output).creation_flags(CREATE_NO_WINDOW);
+        command.arg("serve").env("BEANS_SERVICE", "1").stdin(std::process::Stdio::null()).stdout(output.try_clone()?).stderr(output).creation_flags(CREATE_NO_WINDOW);
         for (name, value) in env {
             command.env(name, value);
         }
@@ -358,7 +358,7 @@ pub fn supervise(config: &Config, env: &[(String, String)]) -> anyhow::Result<()
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub fn install(_config: &Config) -> anyhow::Result<Status> {
-    anyhow::bail!("lorca service runs on macOS, Linux, and Windows; start `lorca serve` from this system's own init.")
+    anyhow::bail!("beans service runs on macOS, Linux, and Windows; start `beans serve` from this system's own init.")
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]

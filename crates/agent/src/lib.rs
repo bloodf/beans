@@ -1,4 +1,4 @@
-//! Lorca agent runtime, after pi-agent-core.
+//! Beans agent runtime, after pi-agent-core.
 //!
 //! - [`agent_loop`]: the low-level loop. Streams one assistant turn, executes tool calls,
 //!   drains steering and follow-up queues, and emits [`AgentEvent`]s.

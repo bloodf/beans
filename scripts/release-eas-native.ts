@@ -20,5 +20,5 @@ if (process.env.EAS_BUILD === "true") {
   }
   await run(["rustup", "target", "add", ...(platform === "ios" ? ["aarch64-apple-ios", "aarch64-apple-ios-sim"] : ["aarch64-linux-android", "x86_64-linux-android"])]);
   if (platform === "android") await run(["cargo", "install", "cargo-ndk", "--locked"]);
-  await run(["bun", "run", "mobile/modules/lorca-core/build.ts", platform]);
+  await run(["bun", "run", "mobile/modules/beans-core/build.ts", platform]);
 }

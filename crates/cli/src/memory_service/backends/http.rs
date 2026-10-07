@@ -21,7 +21,7 @@ pub(super) struct MemoryHttp {
 impl MemoryHttp {
     pub(super) fn new(connection: &Connection, headers: HeaderMap) -> Result<Self, MemoryError> {
         let base = validated_endpoint(connection)?;
-        let client = lorca_tls::client_builder()
+        let client = beans_tls::client_builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(DEADLINE)
             .timeout(DEADLINE)

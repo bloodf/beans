@@ -1,4 +1,4 @@
-use lorca::{api, app::App, config::Config, crypto, identity, model::{Bot, RosterBlob}};
+use beans::{api, app::App, config::Config, crypto, identity, model::{Bot, RosterBlob}};
 use serde_json::{json, Value};
 
 struct Scratch(std::path::PathBuf);
@@ -11,7 +11,7 @@ impl Drop for Scratch {
     fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
 }
 fn setup() -> (Scratch, std::sync::Arc<App>, String) {
-    let scratch = Scratch(std::env::temp_dir().join(format!("lorca-appearance-{}", uuid::Uuid::new_v4())));
+    let scratch = Scratch(std::env::temp_dir().join(format!("beans-appearance-{}", uuid::Uuid::new_v4())));
     let app = scratch.app();
     identity::create(&app, Some("Appearance test".into())).unwrap();
     let runner = app.this_device_id().unwrap();
@@ -24,7 +24,7 @@ async fn create(app: &std::sync::Arc<App>, runner: &str, look: Value) -> Value {
     api::dispatch(app, "bots.create", json!({"id":"custom","name":"Custom","runner_id":runner,"look":look})).await.unwrap()["bot"].clone()
 }
 fn outbox(app: &App) -> Vec<(String, String, Vec<u8>)> {
-    let db = rusqlite::Connection::open(app.config.home.join("lorca.sqlite3")).unwrap();
+    let db = rusqlite::Connection::open(app.config.home.join("beans.sqlite3")).unwrap();
     let mut rows = db.prepare("SELECT id, kind, ciphertext FROM outbox ORDER BY id").unwrap();
     rows.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap().collect::<Result<_, _>>().unwrap()
 }

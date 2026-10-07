@@ -6,12 +6,12 @@ verifies beans-update.json against its detached Ed25519 signature with openssl a
 public key, then downloads the server archive for this host's platform from a URL derived from
 the fixed repository, the release tag, and the asset name. The archive's size and SHA-256 must
 match the signed manifest before it is extracted into a private staging directory, and it may
-hold only lorca, lorca-relay, models/v1.json, and marketplace/v1.json.
+hold only beans, beans-relay, models/v1.json, and marketplace/v1.json.
 
 The relay goes first: its SQLite database is backed up through the SQLite backup interface as the database's owner (or the config acknowledges an external backup), its
 binary and public catalogs are swapped atomically, and it must answer health with at least the
 signed manifest's protocol and the artifact's version from a restarted process running the new binary. Each Runner
-then holds new work back through `lorca update prepare` until it is idle, is stopped, swapped,
+then holds new work back through `beans update prepare` until it is idle, is stopped, swapped,
 started, and verified the same way. A failure rolls that target back to its previous binary and
 catalogs (never its database) and stops the rollout. The release's signed beans-server-updater.py
 is checked before any service changes and replaces the updater only after every target succeeds.
@@ -45,7 +45,7 @@ DOWNLOAD = "https://github.com/" + REPOSITORY + "/releases/download/{tag}/{name}
 MANIFEST = "beans-update.json"
 SIGNATURE = MANIFEST + ".sig"
 UPDATER_ASSET = "beans-server-updater.py"
-MIN_PROTOCOL = 3
+MIN_PROTOCOL = 5
 
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 TAG = re.compile(r"^beans-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
@@ -67,7 +67,7 @@ MAX_ARCHIVE_BYTES = 512 << 20
 MAX_UPDATER_BYTES = 1 << 20
 MAX_BINARY_BYTES = 384 << 20
 MAX_CATALOG_BYTES = 16 << 20
-ARCHIVE_FILES = {"lorca": "binary", "lorca-relay": "binary", "models/v1.json": "catalog", "marketplace/v1.json": "catalog"}
+ARCHIVE_FILES = {"beans": "binary", "beans-relay": "binary", "models/v1.json": "catalog", "marketplace/v1.json": "catalog"}
 ARCHIVE_DIRS = {"models", "marketplace"}
 CATALOGS = ("models/v1.json", "marketplace/v1.json")
 ELF_MACHINE = {"linux-x86_64": 62, "linux-aarch64": 183}
@@ -386,7 +386,7 @@ def check_elf(path, platform):
 
 
 def extract(archive, platform, destination):
-    """Unpacks the verified server archive by name: exactly lorca, lorca-relay, models/v1.json,
+    """Unpacks the verified server archive by name: exactly beans, beans-relay, models/v1.json,
     and marketplace/v1.json as regular files. Links, devices, absolute or parent paths, and any
     other entry fail. Returns each file's staged path and SHA-256."""
     found = {}
@@ -430,7 +430,7 @@ def extract(archive, platform, destination):
     missing = sorted(set(ARCHIVE_FILES) - set(found))
     if missing:
         raise Failure("the server archive lacks " + ", ".join(missing))
-    for name in ("lorca", "lorca-relay"):
+    for name in ("beans", "beans-relay"):
         check_elf(found[name]["path"], platform)
     for name in CATALOGS:
         with open(found[name]["path"], "rb") as handle:
@@ -498,7 +498,7 @@ def parse_target(value, role, what):
         raise ConfigError(what + ".service must name a systemd .service unit")
     target["service"] = value["service"]
     target["binary"] = absolute(value["binary"], what + ".binary")
-    expected = "lorca-relay" if role == "relay" else "lorca"
+    expected = "beans-relay" if role == "relay" else "beans"
     if os.path.basename(target["binary"]) != expected:
         raise ConfigError("%s.binary must be a file named %s" % (what, expected))
     target["health_timeout"] = whole(value.get("health_timeout", 120), what + ".health_timeout", 5, 1800)
@@ -525,7 +525,7 @@ def parse_target(value, role, what):
     else:
         if "health_url" in value:
             raise ConfigError(what + ".health_url applies only to the relay")
-        target["port"] = whole(value.get("port", 4862), what + ".port", 1, 65535)
+        target["port"] = whole(value.get("port", 4874), what + ".port", 1, 65535)
         target["token_file"] = absolute(value.get("token_file"), what + ".token_file")
         target["drain_timeout"] = whole(value.get("drain_timeout", 1800), what + ".drain_timeout", 60, 86400)
     return target
@@ -685,7 +685,9 @@ def copy_out(target, path, destination):
 def relay_health(target):
     """The relay's `/v1/health` answer, read from this host at the configured URL (for an Incus
     relay, an address this host reaches it at)."""
-    request = urllib.request.Request(target["health_url"], headers={"User-Agent": USER_AGENT})
+    request = urllib.request.Request(target["health_url"], headers={
+        "User-Agent": USER_AGENT, "Beans-Protocol": str(MIN_PROTOCOL), "Beans-Format": "beans-v2",
+    })
     try:
         with HEALTH_OPENER.open(request, timeout=10) as response:
             data = response.read(MAX_HEALTH_BYTES + 1)
@@ -700,18 +702,18 @@ def relay_health(target):
 
 
 def runner_control(target, command, check=True):
-    """`lorca update …` against the Runner's service, as root inside its host or instance. The
+    """`beans update …` against the Runner's service, as root inside its host or instance. The
     token file is the operator's, named by path in the environment; its contents never pass
     through here."""
     require_target_path(target, target["binary"], executable=True)
     argv = [target["binary"], "--port", str(target["port"]), "update"] + command
-    result = in_target(target, argv, timeout=60, check=False, env={"LORCA_UPDATE_TOKEN_FILE": target["token_file"]})
+    result = in_target(target, argv, timeout=60, check=False, env={"BEANS_UPDATE_TOKEN_FILE": target["token_file"]})
     if result.returncode != 0:
         if check:
-            raise Failure("lorca update %s on %s exited %d" % (command[0], target["name"], result.returncode))
+            raise Failure("beans update %s on %s exited %d" % (command[0], target["name"], result.returncode))
         return None
     try:
-        return strict_json(result.stdout.strip() or b"{}", "lorca update " + command[0])
+        return strict_json(result.stdout.strip() or b"{}", "beans update " + command[0])
     except Failure:
         if check:
             raise
@@ -773,12 +775,15 @@ def answers_as(target, version, required_protocol, old_pid=0):
         return False
     if target["role"] == "relay":
         health = relay_health(target)
-        return (isinstance(health, dict) and health.get("ok") is True and health.get("service") == "lorca-relay"
+        return (required_protocol >= MIN_PROTOCOL
+                and isinstance(health, dict) and health.get("ok") is True and health.get("service") == "beans-relay"
+                and health.get("format") == "beans-v2"
                 and type(health.get("protocol")) is int and health["protocol"] >= required_protocol
                 and health.get("version") == version
-                and (required_protocol < 4
-                     or (type(health.get("min_roster_protocol")) is int
-                         and 4 <= health["min_roster_protocol"] <= required_protocol)))
+                and type(health.get("min_protocol")) is int
+                and MIN_PROTOCOL <= health["min_protocol"] <= required_protocol
+                and type(health.get("min_roster_protocol")) is int
+                and MIN_PROTOCOL <= health["min_roster_protocol"] <= required_protocol)
     status = runner_control(target, ["status"], check=False)
     return (isinstance(status, dict) and status.get("version") == version
             and type(status.get("pid")) is int and status["pid"] == pid
@@ -809,7 +814,7 @@ def drain_runner(target):
     pid = main_pid(target)
     status = bound_runner_control(target, ["status"], pid)
     if status.get("control") is not True:
-        raise ConfigError("%s needs drain-capable bootstrap and service LORCA_UPDATE_TOKEN_FILE configuration" % target["name"])
+        raise ConfigError("%s needs drain-capable bootstrap and service BEANS_UPDATE_TOKEN_FILE configuration" % target["name"])
     try:
         return wait_drained(target, pid)
     except (Retry, ConfigError):
@@ -937,7 +942,7 @@ def backup_database(target, version):
 def files_for(target, staged):
     """(installed path, staged file) pairs a target receives: its binary, and the relay's
     public catalogs when it serves them."""
-    files = [(target["binary"], staged["lorca-relay" if target["role"] == "relay" else "lorca"])]
+    files = [(target["binary"], staged["beans-relay" if target["role"] == "relay" else "beans"])]
     if target["role"] == "relay" and target["catalog_dir"]:
         files += [(os.path.join(target["catalog_dir"], name), staged[name]) for name in CATALOGS]
     return files
@@ -1223,7 +1228,7 @@ def one_pass(settings):
             state["version_floor"] = version
             save_state(state_dir, state)
             install(target, staged, artifact, state_dir, required_protocol, version)
-            state["hashes"][target["name"]] = staged["lorca-relay" if target["role"] == "relay" else "lorca"]["sha256"]
+            state["hashes"][target["name"]] = staged["beans-relay" if target["role"] == "relay" else "beans"]["sha256"]
             if target["name"] not in state["targets"]:
                 state["targets"].append(target["name"])
             state.pop("pending", None)

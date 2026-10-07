@@ -63,7 +63,7 @@ const uuid = () => `m-${++nextId}`;
 describe("pairing", () => {
   test("parses a pairing string from another Device", () => {
     const target = parsePairingString(
-      " lorca://pair?relay=http%3A%2F%2F127.0.0.1%3A18790%2F&id=Clup-vXLfBF6T2JkKpLqNOpyE9hdQbqXjrIWfdDvLbs&ek=nAanQrXTSxfK1tf7m3V2Fg-65OL84r6MeqmQmWw5uhw&n=1qUeEODuTz_A2y5jSZdBqQ \n",
+      " beans://pair?v=2&relay=http%3A%2F%2F127.0.0.1%3A18790%2F&id=Clup-vXLfBF6T2JkKpLqNOpyE9hdQbqXjrIWfdDvLbs&ek=nAanQrXTSxfK1tf7m3V2Fg-65OL84r6MeqmQmWw5uhw&n=1qUeEODuTz_A2y5jSZdBqQ \n",
     );
     expect(target).toEqual({
       relay: "http://127.0.0.1:18790",
@@ -75,7 +75,43 @@ describe("pairing", () => {
 
   test("rejects other text", () => {
     expect(() => parsePairingString("hello")).toThrow("not a Beans pairing string");
-    expect(() => parsePairingString("lorca://pair?relay=x&id=y")).toThrow("missing a field");
+    expect(() => parsePairingString("beans://pair?v=2&relay=x&id=y")).toThrow("missing a field");
+  });
+
+  test("rejects incompatible versions, duplicate fields and noncanonical links", () => {
+    const code = "beans://pair?v=2&relay=https%3A%2F%2Frelay.example&id=Clup-vXLfBF6T2JkKpLqNOpyE9hdQbqXjrIWfdDvLbs&ek=nAanQrXTSxfK1tf7m3V2Fg-65OL84r6MeqmQmWw5uhw&n=1qUeEODuTz_A2y5jSZdBqQ";
+    for (const invalid of [
+      code.replace("v=2&", ""),
+      code.replace("v=2", "v=1"),
+      code.replace("v=2", "v=02"),
+      code.replace("v=2", "v=3"),
+      code.replace("beans://", "https://"),
+      code.replace("beans://", "beans-dev://"),
+      code.replace("beans://pair?", "arbitrary pair?"),
+      code.replace("beans://pair?", "beans://pair/?"),
+      `${code}&v=2`,
+      `${code}&relay=https%3A%2F%2Fother.example`,
+      `${code}&id=other`,
+      `${code}&ek=other`,
+      `${code}&n=other`,
+      `${code}&unknown=other`,
+      code.replace("v=2", "%76=2"),
+      code.replace("https%3A", "https%ZZ"),
+      `${code}#fragment`,
+    ]) expect(() => parsePairingString(invalid)).toThrow();
+  });
+
+  test("rejects malformed relay URLs, public keys and nonces", () => {
+    const code = "beans://pair?v=2&relay=https%3A%2F%2Frelay.example&id=Clup-vXLfBF6T2JkKpLqNOpyE9hdQbqXjrIWfdDvLbs&ek=nAanQrXTSxfK1tf7m3V2Fg-65OL84r6MeqmQmWw5uhw&n=1qUeEODuTz_A2y5jSZdBqQ";
+    for (const relay of ["file:///private", "https://user:pass@relay.example", "https://relay.example?x=1", "https://relay.example?", "https://relay.example#fragment", "https://relay.example#"]) {
+      expect(() => parsePairingString(code.replace("https%3A%2F%2Frelay.example", encodeURIComponent(relay)))).toThrow("invalid relay URL");
+    }
+    for (const field of ["id", "ek", "n"]) {
+      expect(() => parsePairingString(code.replace(new RegExp(`${field}=[^&]+`), `${field}=not%2Fvalid`))).toThrow("invalid key or nonce");
+    }
+    expect(() => parsePairingString(code.replace(/n=[^&]+$/, `n=${"a".repeat(257)}`))).toThrow("invalid key or nonce");
+    expect(() => parsePairingString(`${code}%0A`)).toThrow("invalid key or nonce");
+    expect(() => parsePairingString(code.replace("id=Clup-vXLfBF6T2JkKpLqNOpyE9hdQbqXjrIWfdDvLbs", "id=Clup-vXLfBF6T2JkKpLqNOpyE9hdQbqXjrIWfdDvLbt"))).toThrow("invalid key or nonce");
   });
 });
 

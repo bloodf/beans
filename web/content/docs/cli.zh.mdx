@@ -1,12 +1,15 @@
 ---
 title: 命令行
-description: lorca 命令行持有你的密钥、运行你的智能体。桌面应用是它的一扇窗口，而 Runner 只需要它。
+description: beans 命令行持有你的密钥、运行你的智能体。桌面应用是它的一扇窗口，而 Runner 只需要它。
 icon: Terminal
 ---
 
-`lorca` 才是真正干活的程序：它持有你的密钥，和中继、AI 服务商通信，并运行智能体。它支持 macOS、Linux 和 Windows。桌面应用内置了它，并替你启动；在没有桌面应用的电脑上，自己运行 CLI，那台电脑就是一个 Runner。
+`beans` 才是真正干活的程序：它持有你的密钥，和中继、AI 服务商通信，并运行智能体。它支持 macOS、Linux 和 Windows。桌面应用内置了它，并替你启动；在没有桌面应用的电脑上，自己运行 CLI，那台电脑就是一个 Runner。
 
-在 macOS 上，应用自带的可执行文件位于 `Beans.app/Contents/Resources/bin/lorca`。
+在 macOS 上，应用自带的可执行文件位于 `Beans.app/Contents/Resources/bin/beans`。
+
+新账户使用 `beans-v2` 格式、`~/.beans-v2` 目录和端口 4874（开发版为 `~/.beans-dev-v2`、4875）。备份的第一个独立词为 `beans-v2`，后面是十三组 base32 字符；恢复会在解码之前拒绝旧版无前缀或错误前缀的短语。旧账户目录和混合格式的设备配对/同步不兼容，不会自动迁移或重置。中继要求 `Beans-Protocol: 5` 和 `Beans-Format: beans-v2`；需自行配置中继，不提供猜测的生产主机。
+
 
 ## 安装
 
@@ -22,9 +25,9 @@ curl -fsSL https://usebeans.app/install-cli.sh | sh
 irm https://usebeans.app/install-cli.ps1 | iex
 ```
 
-脚本会下载适合这台电脑的最新 Beans 版本，核对相邻校验和，把 `lorca` 放进 `~/.local/bin` 并加入 PATH。CLI 自更新[不可用](#更新)。
+脚本会下载适合这台电脑的最新 Beans 版本，核对相邻校验和，把 `beans` 放进 `~/.local/bin` 并加入 PATH。CLI 自更新[不可用](#更新)。
 
-设置 `LORCA_VERSION=1.0.0` 安装指定版本，设置 `LORCA_INSTALL_DIR` 把 `lorca` 放到别的文件夹，设置 `LORCA_NO_MODIFY_PATH=1` 则不改动 PATH：`curl -fsSL https://usebeans.app/install-cli.sh | LORCA_VERSION=1.0.0 sh`；在 PowerShell 里，先运行 `$env:LORCA_VERSION = '1.0.0'` 再运行 `irm`。
+设置 `BEANS_VERSION=1.0.0` 安装指定版本，设置 `BEANS_INSTALL_DIR` 把 `beans` 放到别的文件夹，设置 `BEANS_NO_MODIFY_PATH=1` 则不改动 PATH：`curl -fsSL https://usebeans.app/install-cli.sh | BEANS_VERSION=1.0.0 sh`；在 PowerShell 里，先运行 `$env:BEANS_VERSION = '1.0.0'` 再运行 `irm`。
 
 在 Windows 上，智能体用 Git for Windows 自带的 bash 运行命令，不用 WSL 的 bash，所以也要安装 [Git for Windows](https://git-scm.com/downloads/win)。Beans 会在 Program Files、只为当前用户安装的位置，或 PATH 上的 `git` 旁边找到它；安装之前，智能体的命令会失败，并提示需要安装。
 
@@ -32,52 +35,52 @@ irm https://usebeans.app/install-cli.ps1 | iex
 
 | 命令 | 作用 |
 | --- | --- |
-| `lorca` | 列出所有命令。 |
-| `lorca serve` | 运行服务。 |
-| `lorca identity new` | 创建身份并打印备份短语。 |
-| `lorca identity restore <phrase>` | 用备份短语恢复身份。 |
-| `lorca identity show` | 显示这台设备的身份。 |
-| `lorca pair` | 显示配对字符串，并等待另一台设备。 |
-| `lorca pair <string>` | 用配对字符串加入一个账户。 |
-| `lorca provider set <kind> [api-key]` | 接入 `deepseek`、`anthropic`、`opencode`、`opencode-go`、`chatgpt` 或 `grok`。省略密钥时从标准输入读取；`--base-url` 设置自定义地址。 |
-| `lorca provider add <name> <base-url>` | 添加一个自定义服务商：任何兼容 OpenAI 或 Anthropic API 的服务器。`--api` 选择 `chat-completions`（默认）、`responses` 或 `messages`；`--model` 指定一个模型，每个模型写一次；`--api-key-stdin` 读取密钥。 |
-| `lorca provider remove <kind>` | 在每台设备上断开一个服务商，或删除一个自定义服务商（例如 `custom:openrouter`，以 `provider list` 显示的为准）。 |
-| `lorca provider list` | 列出已接入的服务商。 |
-| `lorca mcp …` | 管理这台电脑自己的 MCP 服务器；见 [MCP 服务器](#mcp-服务器)。 |
-| `lorca chats list` | 列出所有聊天：每个聊天的 ID 和智能体，以及群聊的负责人。 |
-| `lorca chats set-owner <group> <bot>` | 把某个智能体设为群聊的[负责人](/zh/docs/group-chats#负责人)。群聊用标题或 ID 指定，智能体用名字或 ID 指定。 |
-| `lorca marketplace reload` | 立即检查所选 Beans 中继的公共市场，离线时使用内置目录。 |
-| `lorca models reload` | 立即检查所选 Beans 中继的公共模型目录，离线时使用内置目录。 |
-| `lorca update status\|prepare\|cancel` | 控制正在运行的 Runner 的任务准入租约。Prepare/cancel 需要 `LORCA_UPDATE_TOKEN_FILE`，不会下载版本。 |
-| `lorca self-update` | 提示 Beans 不支持 CLI 自更新；请使用 Beans 的签名更新机制。 |
-| `lorca service install` | 让 `lorca serve` 在后台运行：现在启动，每次登录时启动，停止后会再次启动。`lorca service uninstall` 停止它；`lorca service status` 告诉你它是否在运行、日志在哪里。 |
-| `lorca status` | 以 JSON 打印这台设备的状态：设备、智能体、聊天、服务商。 |
-| `lorca doctor` | 检查主目录、身份、端口、中继和 `mcp.json`，并指出哪里有问题。 |
+| `beans` | 列出所有命令。 |
+| `beans serve` | 运行服务。 |
+| `beans identity new` | 创建身份并打印备份短语。 |
+| `beans identity restore <phrase>` | 用备份短语恢复身份。 |
+| `beans identity show` | 显示这台设备的身份。 |
+| `beans pair` | 显示配对字符串，并等待另一台设备。 |
+| `beans pair <string>` | 用配对字符串加入一个账户。 |
+| `beans provider set <kind> [api-key]` | 接入 `deepseek`、`anthropic`、`opencode`、`opencode-go` 或 `chatgpt`。生产 Grok OAuth 在 Beans 合同核验之前禁用。省略密钥时从标准输入读取；`--base-url` 设置 API 地址。 |
+| `beans provider add <name> <base-url>` | 添加一个自定义服务商：任何兼容 OpenAI 或 Anthropic API 的服务器。`--api` 选择 `chat-completions`（默认）、`responses` 或 `messages`；`--model` 指定一个模型，每个模型写一次；`--api-key-stdin` 读取密钥。 |
+| `beans provider remove <kind>` | 在每台设备上断开一个服务商，或删除一个自定义服务商（例如 `custom:openrouter`，以 `provider list` 显示的为准）。 |
+| `beans provider list` | 列出已接入的服务商。 |
+| `beans mcp …` | 管理这台电脑自己的 MCP 服务器；见 [MCP 服务器](#mcp-服务器)。 |
+| `beans chats list` | 列出所有聊天：每个聊天的 ID 和智能体，以及群聊的负责人。 |
+| `beans chats set-owner <group> <bot>` | 把某个智能体设为群聊的[负责人](/zh/docs/group-chats#负责人)。群聊用标题或 ID 指定，智能体用名字或 ID 指定。 |
+| `beans marketplace reload` | 立即检查所选 Beans 中继的公共市场，离线时使用内置目录。 |
+| `beans models reload` | 立即检查所选 Beans 中继的公共模型目录，离线时使用内置目录。 |
+| `beans update status\|prepare\|cancel` | 控制正在运行的 Runner 的任务准入租约。Prepare/cancel 需要 `BEANS_UPDATE_TOKEN_FILE`，不会下载版本。 |
+| `beans self-update` | 提示 Beans 不支持 CLI 自更新；请使用 Beans 的签名更新机制。 |
+| `beans service install` | 让 `beans serve` 在后台运行：现在启动，每次登录时启动，停止后会再次启动。`beans service uninstall` 停止它；`beans service status` 告诉你它是否在运行、日志在哪里。 |
+| `beans status` | 以 JSON 打印这台设备的状态：设备、智能体、聊天、服务商。 |
+| `beans doctor` | 检查主目录、身份、端口、中继和 `mcp.json`，并指出哪里有问题。 |
 
 ## MCP 服务器
 
-`lorca mcp` 编辑 Beans 文件夹里的 `mcp.json`，也就是这台电脑上所有智能体都能使用的[MCP 服务器](/zh/docs/plugins#你自己的-mcp-服务器)。`lorca serve` 正在运行时，改动会立即生效；没有运行时，下次 `lorca serve` 会读取这个文件。手动编辑文件后，运行 `lorca mcp reload`。
+`beans mcp` 编辑 Beans 文件夹里的 `mcp.json`，也就是这台电脑上所有智能体都能使用的[MCP 服务器](/zh/docs/plugins#你自己的-mcp-服务器)。`beans serve` 正在运行时，改动会立即生效；没有运行时，下次 `beans serve` 会读取这个文件。手动编辑文件后，运行 `beans mcp reload`。
 
 | 命令 | 作用 |
 | --- | --- |
-| `lorca mcp list` | 列出服务器及各自的状态：它的工具、需要的登录，或者没能启动的原因。`lorca serve` 没有运行时，会先逐个连接。有服务器需要处理时，以状态码 1 退出。 |
-| `lorca mcp get <name>` | 连接一个服务器，并显示它的设置和工具。 |
-| `lorca mcp add <name> <command> [args…]` | 添加一个由这台电脑运行的服务器。命令后面的所有内容（包括 flag）都是它的参数；在命令前用 `-e KEY=value` 设置变量，每个变量写一次。 |
-| `lorca mcp add <name> <url>` | 添加一个使用 streamable HTTP 的远程服务器。`-H "Name: value"` 添加请求头，写在 URL 前后都可以。 |
-| `lorca mcp add-json <name> <json>` | 用 JSON 添加服务器，就像 README 或其他应用的配置里写的那样。 |
-| `lorca mcp remove <name>` | 移除一个服务器，连同它的登录信息。 |
-| `lorca mcp enable <name>`、`disable <name>` | 开启或关闭一个服务器。关闭后，智能体看不到它，它也不会启动。 |
-| `lorca mcp sign-in <name>` | 在这台电脑的浏览器里登录一个要求登录的远程服务器。 |
-| `lorca mcp sign-out <name>` | 忘掉一个远程服务器的登录。下次使用时它会再次要求登录。 |
-| `lorca mcp reload` | 手动编辑 `mcp.json` 之后，让正在运行的 `lorca serve` 重新读取它。 |
-| `lorca mcp hide <name> <tool>`、`show <name> <tool>` | 让智能体用不到服务器的某个工具，或重新提供给它们。工具可以写成模式，比如 `delete_*`。 |
-| `lorca mcp import [file]` | 从其他应用的配置中添加服务器：Claude Desktop、Claude Code、Cursor、Windsurf、VS Code 或 Gemini CLI，或者你指定的文件。 |
+| `beans mcp list` | 列出服务器及各自的状态：它的工具、需要的登录，或者没能启动的原因。`beans serve` 没有运行时，会先逐个连接。有服务器需要处理时，以状态码 1 退出。 |
+| `beans mcp get <name>` | 连接一个服务器，并显示它的设置和工具。 |
+| `beans mcp add <name> <command> [args…]` | 添加一个由这台电脑运行的服务器。命令后面的所有内容（包括 flag）都是它的参数；在命令前用 `-e KEY=value` 设置变量，每个变量写一次。 |
+| `beans mcp add <name> <url>` | 添加一个使用 streamable HTTP 的远程服务器。`-H "Name: value"` 添加请求头，写在 URL 前后都可以。 |
+| `beans mcp add-json <name> <json>` | 用 JSON 添加服务器，就像 README 或其他应用的配置里写的那样。 |
+| `beans mcp remove <name>` | 移除一个服务器，连同它的登录信息。 |
+| `beans mcp enable <name>`、`disable <name>` | 开启或关闭一个服务器。关闭后，智能体看不到它，它也不会启动。 |
+| `beans mcp sign-in <name>` | 在这台电脑的浏览器里登录一个要求登录的远程服务器。 |
+| `beans mcp sign-out <name>` | 忘掉一个远程服务器的登录。下次使用时它会再次要求登录。 |
+| `beans mcp reload` | 手动编辑 `mcp.json` 之后，让正在运行的 `beans serve` 重新读取它。 |
+| `beans mcp hide <name> <tool>`、`show <name> <tool>` | 让智能体用不到服务器的某个工具，或重新提供给它们。工具可以写成模式，比如 `delete_*`。 |
+| `beans mcp import [file]` | 从其他应用的配置中添加服务器：Claude Desktop、Claude Code、Cursor、Windsurf、VS Code 或 Gemini CLI，或者你指定的文件。 |
 
 ```bash
-lorca mcp add notes npx -y @modelcontextprotocol/server-filesystem ~/Notes
-lorca mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=ghp_… docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server
-lorca mcp add linear https://mcp.linear.app/mcp
-lorca mcp add-json time '{"command": "uvx", "args": ["mcp-server-time"]}'
+beans mcp add notes npx -y @modelcontextprotocol/server-filesystem ~/Notes
+beans mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=ghp_… docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server
+beans mcp add linear https://mcp.linear.app/mcp
+beans mcp add-json time '{"command": "uvx", "args": ["mcp-server-time"]}'
 ```
 
 `--description` 告诉智能体服务器的用途，`--timeout` 设置一次调用最多可以多少秒没有回应。`add` 在保存后会连接一次服务器，并告诉你它是否启动成功。
@@ -85,33 +88,33 @@ lorca mcp add-json time '{"command": "uvx", "args": ["mcp-server-time"]}'
 ## 无屏幕的 Runner
 
 ```bash
-export LORCA_RELAY_URL=https://relay.example.com
-lorca pair 'lorca://pair?…'   # 来自已有设备上的“配对设备…”或 `lorca pair`
-lorca service install
+export BEANS_RELAY_URL=https://relay.example.com
+beans pair 'beans://pair?v=2&…'   # 来自已有设备上的“配对设备…”或 `beans pair`
+beans service install
 ```
 
-这台电脑会出现在你的设备列表里，你可以从桌面应用或手机为它创建智能体。`lorca service install` 让 `lorca serve` 一直运行：在 macOS 上是一个启动代理，在 Linux 上是一个 systemd 用户服务，在 Windows 上是一个登录项。在 Linux 上，它还会请 systemd 在你退出登录后继续运行你的服务；如果这需要管理员权限，它会打印需要运行的 `sudo loginctl enable-linger` 命令。在容器里或其他没有 systemd 的地方，请用你自己的 init 或在 tmux 里运行 `lorca serve`。
+这台电脑会出现在你的设备列表里，你可以从桌面应用或手机为它创建智能体。`beans service install` 让 `beans serve` 一直运行：在 macOS 上是一个启动代理，在 Linux 上是一个 systemd 用户服务，在 Windows 上是一个登录项。在 Linux 上，它还会请 systemd 在你退出登录后继续运行你的服务；如果这需要管理员权限，它会打印需要运行的 `sudo loginctl enable-linger` 命令。在容器里或其他没有 systemd 的地方，请用你自己的 init 或在 tmux 里运行 `beans serve`。
 
 ## 更新
 
-Beans 不支持 CLI 自更新，包括自动、手动和远程设备请求；`LORCA_SELF_UPDATE` 也无法启用它。**设置 › 设备** 显示核心版本，不提供此更新路径。
+Beans 不支持 CLI 自更新，包括自动、手动和远程设备请求；`BEANS_SELF_UPDATE` 也无法启用它。**设置 › 设备** 显示核心版本，不提供此更新路径。
 
-Beans 桌面应用通过 Beans 签名清单更新内置 CLI。已配置的服务器更新器先更新中继，再使用 `lorca update status|prepare|cancel` 等待 Runner 已接纳的任务完成后替换程序。这些命令不会查找或下载版本。
+Beans 桌面应用通过 Beans 签名清单更新内置 CLI。已配置的服务器更新器先更新中继，再使用 `beans update status|prepare|cancel` 等待 Runner 已接纳的任务完成后替换程序。这些命令不会查找或下载版本。
 
 ## 环境变量
 
 | 变量 | 设置什么 |
 | --- | --- |
-| `LORCA_HOME` | 密钥、凭据和聊天的存放位置。默认 `~/.lorca`。 |
-| `LORCA_PORT` | 应用连接的本地端口。默认 `4862`。 |
-| `LORCA_RELAY_URL` | 中继地址。 |
-| `LORCA_SHELL` | 智能体运行命令所用的 shell。默认 `/bin/bash`；在 Windows 上是 Git for Windows 的 bash。在 macOS 和 Linux 上，无论用哪个 shell，命令都会得到你的登录 shell 的 `PATH` 和环境变量。 |
-| `LORCA_DEEPSEEK_MODEL`、`LORCA_ANTHROPIC_MODEL`、`LORCA_CHATGPT_MODEL`、`LORCA_GROK_MODEL` | 没有指定模型的智能体使用的默认模型。 |
-| `LORCA_MODELS_URL` | Beans 检查更新模型目录的地址。默认 `https://lorca.app/models/v1.json`；设置 `LORCA_MODELS_FETCH=0` 则不再检查。 |
-| `LORCA_MARKETPLACE_URL` | Beans 检查更新市场的地址。默认 `https://lorca.app/marketplace/v1.json`；设置 `LORCA_MARKETPLACE_FETCH=0` 则不再检查。 |
+| `BEANS_HOME` | 密钥、凭据和聊天的存放位置。默认 `~/.beans-v2`。 |
+| `BEANS_PORT` | 应用连接的本地端口。默认 `4874`。 |
+| `BEANS_RELAY_URL` | 中继地址。 |
+| `BEANS_SHELL` | 智能体运行命令所用的 shell。默认 `/bin/bash`；在 Windows 上是 Git for Windows 的 bash。在 macOS 和 Linux 上，无论用哪个 shell，命令都会得到你的登录 shell 的 `PATH` 和环境变量。 |
+| `BEANS_DEEPSEEK_MODEL`、`BEANS_ANTHROPIC_MODEL`、`BEANS_CHATGPT_MODEL`、`BEANS_GROK_MODEL` | 没有指定模型的智能体使用的默认模型。 |
+| `BEANS_MODELS_URL` | 显式指定模型目录；否则使用所选中继的 `/models/v1.json`。`BEANS_MODELS_FETCH=0` 禁用检查，不会猜测生产主机。 |
+| `BEANS_MARKETPLACE_URL` | 显式指定市场；否则使用所选中继的 `/marketplace/v1.json`。`BEANS_MARKETPLACE_FETCH=0` 禁用检查，离线时仍可使用内置目录。 |
 
 ## 文件
 
-数据保存在只有当前用户可读的 `~/.lorca/`：身份和机器密钥、服务商凭据、设置、聊天、附件、插件、`mcp.json`、绑定来源的 `catalog.json` 和 `marketplace.json` 缓存，以及每个智能体的工作区和记忆。已禁用的 CLI 更新器不会创建 `update.json`。
+数据保存在只有当前用户可读的 `~/.beans-v2/`：身份和机器密钥、服务商凭据、设置、聊天、附件、插件、`mcp.json`、绑定来源的 `catalog.json` 和 `marketplace.json` 缓存，以及每个智能体的工作区和记忆。已禁用的 CLI 更新器不会创建 `update.json`。
 
-macOS Beans 应用把服务日志写到 `~/Library/Logs/Beans/cli.log`。使用 `lorca service` 时，macOS 日志是 `~/Library/Logs/Lorca/serve.log`，Linux 使用 `journalctl --user -u lorca`，Windows 日志是 CLI 数据目录中的 `serve.log`。
+macOS Beans 应用把服务日志写到 `~/Library/Logs/Beans/cli.log`。使用 `beans service` 时，macOS 日志是 `~/Library/Logs/Beans/serve.log`，Linux 使用 `journalctl --user -u beans`，Windows 日志是 CLI 数据目录中的 `serve.log`。

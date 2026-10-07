@@ -274,7 +274,7 @@ function SidebarFooter() {
     const name = device?.name ?? L("This computer");
     const relayError = connected ? store.relayError : null;
     const status = !connected
-      ? L("CLI not running · start it with: lorca serve").replace("lorca serve", hostInfo().cliCommand)
+      ? L("CLI not running · start it with: beans serve").replace("beans serve", hostInfo().cliCommand)
       : relayError
         ? L("Can’t connect to the relay: %@", relayError)
         : L("CLI on 127.0.0.1:%@", String(preferences().cliPort));

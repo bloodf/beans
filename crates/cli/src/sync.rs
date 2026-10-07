@@ -47,7 +47,7 @@ pub async fn run(app: Arc<App>) {
                     continue;
                 }
                 // The relay no longer serves this build. The app says so, and the next try
-                // waits: the answer stays the same until Lorca is updated or the relay changes.
+                // waits: the answer stays the same until Beans is updated or the relay changes.
                 let outdated = error.is_update_required();
                 if outdated && !app.relay_update_required.swap(true, Ordering::Relaxed) {
                     app.emit_relay_status();
@@ -1527,15 +1527,11 @@ fn apply_chat_op(app: &Arc<App>, op: ChatBlob) {
 pub async fn fetch_dek(app: &Arc<App>, url: &str, identity: &crate::keys::Identity, machine: &crate::keys::Machine) -> Result<[u8; 32], String> {
     let token = app.relay.authenticate(url, machine).await.map_err(|e| e.to_string())?;
     let (blobs, _) = app.relay.list_blobs(url, &token, 0, "key").await.map_err(|e| e.to_string())?;
-    for blob in blobs.iter().rev() {
-        let Ok(ciphertext) = unb64(&blob.ciphertext) else { continue };
-        if let Ok(bytes) = crate::crypto::unseal(&identity.content_secret, &ciphertext) {
-            if let Ok(dek) = <[u8; 32]>::try_from(bytes.as_slice()) {
-                return Ok(dek);
-            }
-        }
-    }
-    Err("The relay has no account key for this identity. Create the identity on a Device that is online first.".into())
+    let blob = blobs.last().ok_or("The relay has no account key for this identity. Create the identity on a Device that is online first.")?;
+    let ciphertext = unb64(&blob.ciphertext).map_err(|error| format!("Invalid account key ciphertext: {error}"))?;
+    let record = crate::crypto::unseal_json::<crate::keys::KeyRecord>(&identity.content_secret, &ciphertext)
+        .map_err(|error| format!("Invalid Beans v2 account key record; data unchanged: {error}"))?;
+    crate::keys::unb64_32(&record.account_dek).map_err(|error| format!("Invalid Beans v2 account key: {error}"))
 }
 
 #[cfg(test)]
@@ -1554,7 +1550,7 @@ mod tests {
     }
 
     fn scratch_app() -> ScratchApp {
-        let home = std::env::temp_dir().join(format!("lorca-sync-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-sync-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
     }

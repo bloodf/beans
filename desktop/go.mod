@@ -1,4 +1,4 @@
-module github.com/egoist/lorca/desktop
+module github.com/bloodf/beans/desktop
 
 go 1.27.1
 

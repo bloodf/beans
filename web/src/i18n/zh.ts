@@ -76,7 +76,7 @@ export const zh: Messages = {
       },
       {
         title: '连接 AI 服务商',
-        body: '登录 ChatGPT 或 Grok，或者粘贴一个 DeepSeek API 密钥。',
+        body: '登录 ChatGPT，或者粘贴一个 DeepSeek API 密钥。',
       },
       {
         title: '和幕僚长聊聊',
@@ -105,7 +105,7 @@ export const zh: Messages = {
       },
       {
         q: '它用的是哪家 AI？',
-        a: '你自己的账号或 API 密钥。登录 ChatGPT 或 Grok，或者添加一个 DeepSeek API 密钥。每个智能体可以用不同的服务商，随时可以换。',
+        a: '你自己的账号或 API 密钥。登录 ChatGPT，或者添加一个 DeepSeek API 密钥。每个智能体可以用不同的服务商，随时可以换。',
       },
       {
         q: '智能体能在我的电脑上做什么？',

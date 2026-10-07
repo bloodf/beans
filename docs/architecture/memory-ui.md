@@ -3,8 +3,8 @@
 The memory-service client boundary consists of isolated TypeScript and Foundation models:
 
 - `desktop/src/model/memoryService.ts` provides the framework-independent request adapter, editable per-bot draft and masked reply readers.
-- `macos/Sources/Lorca/Model/MemoryService.swift` provides Foundation-only request, draft, secret/options and masked reply types.
-- `desktop/src/model/memorySetup.ts` and `macos/Sources/Lorca/Model/MemorySetup.swift` provide exact typed local-asset, pgvector and Lance preview/apply boundaries and ephemeral confirmation drafts.
+- `macos/Sources/Beans/Model/MemoryService.swift` provides Foundation-only request, draft, secret/options and masked reply types.
+- `desktop/src/model/memorySetup.ts` and `macos/Sources/Beans/Model/MemorySetup.swift` provide exact typed local-asset, pgvector and Lance preview/apply boundaries and ephemeral confirmation drafts.
 
 Each adapter accepts the application's request transport rather than opening a second connection. Desktop `AppStore.memoryRequest` forwards only the exact common and concrete setup RPC allowlist to the existing private transport; it rejects arbitrary methods, superseded setup aliases and demo mode. General's account Memory action calls `presentMemoryConnections`; the desktop local memory sheet offers `presentBotMemoryService` without changing local editing or hash-conflict handling. Account and bot sheets use typed controls for connection patches, preferences, negotiated service actions and exact setup previews.
 
@@ -46,7 +46,7 @@ Bot setup uses the action-specific preview method, five-minute expiry and a one-
 
 ## Local editor and verification
 
-The service boundary is independent of local MEMORY.md. `macos/Sources/Lorca/Sheets/MemoryViewController.swift` continues to use its existing hash-based conflict protection; the desktop local editor is unchanged.
+The service boundary is independent of local MEMORY.md. `macos/Sources/Beans/Sheets/MemoryViewController.swift` continues to use its existing hash-based conflict protection; the desktop local editor is unchanged.
 
 `bun test desktop/src/model/memoryService.test.ts desktop/src/model/memorySetup.test.ts` exercises consent transitions, secret/options patches, bounded requests, masked status and exact setup approvals with fixture transports. `macos/Tests/MemoryServiceDraft.swift` and `macos/Tests/MemorySetupDraft.swift` are isolated Foundation executables compiled with their memory model sources, without a full application build. Fixture verification performs no remote retain, reflect, asset acquisition or DDL.
 

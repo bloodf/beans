@@ -1,6 +1,6 @@
 [package]
-name = "lorca-provider-auth"
-description = "Provider OAuth tokens and PKCE flows shared by Lorca Devices and Runners"
+name = "beans-provider-auth"
+description = "Provider OAuth tokens and PKCE flows shared by Beans Devices and Runners"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

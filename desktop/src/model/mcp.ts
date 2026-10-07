@@ -6,7 +6,7 @@ import { L } from "../l10n";
 import type { InstalledPlugin } from "./models";
 
 /** One server's entry, canonical: `command`, `args`, `env`, and `cwd` for a command; `type`, `url`,
- * and `headers` for a remote server; and any field Lorca does not know, as the file has it. */
+ * and `headers` for a remote server; and any field Beans does not know, as the file has it. */
 export interface McpEntry {
   type?: string;
   command?: string;
@@ -33,7 +33,7 @@ export interface McpTool {
 
 /** A server in a Runner's mcp.json, usable or not. */
 export interface McpServer {
-  /** Its key in the file: what the apps show and `lorca mcp` takes. */
+  /** Its key in the file: what the apps show and `beans mcp` takes. */
   name: string;
   /** The plugin id it runs as, which its tools go by (`id__tool`). */
   id: string;
@@ -282,7 +282,7 @@ export function sameEntry(a: McpEntry, b: McpEntry): boolean {
   return JSON.stringify(normal(a)) === JSON.stringify(normal(b));
 }
 
-/** An entry as the JSON field shows it: the keys in the order Lorca writes them, then the rest. */
+/** An entry as the JSON field shows it: the keys in the order Beans writes them, then the rest. */
 export function entryJSON(entry: McpEntry): string {
   const order = ["type", "command", "args", "env", "cwd", "url", "headers", "oauth", "description", "disabled"];
   const sorted: Record<string, unknown> = {};

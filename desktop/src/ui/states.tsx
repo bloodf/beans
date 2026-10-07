@@ -52,7 +52,7 @@ export function Offline() {
         <span class="state-icon">
           <Icon name="bolt.horizontal.circle" size={44} strokeWidth={1.4} />
         </span>
-        <div class="state-title large">{L("The Lorca CLI isn't answering")}</div>
+        <div class="state-title large">{L("The Beans CLI isn't answering")}</div>
         <div class="state-body">
           {L(
             "Your bots, keys and transcripts live in the CLI on this computer. The app starts it on its own; you can also run it from a terminal, and this window reconnects either way.",

@@ -1,6 +1,6 @@
 //! Images as a model takes them inline, after pi's. A provider refuses a whole request over an
 //! image it does not take, and since the image stays in the chat, every later turn fails too.
-//! So every image Lorca shows a model (a tool's, a script's, an attachment's) goes through
+//! So every image Beans shows a model (a tool's, a script's, an attachment's) goes through
 //! `prepare`: read whatever its format, turned upright, scaled down to fit 2000×2000 pixels,
 //! and written as a PNG or a JPEG small enough, with a note for the model when it changed.
 
@@ -224,7 +224,7 @@ fn read(bytes: &[u8]) -> Result<(DynamicImage, Option<ImageFormat>, Orientation)
             }
             Err(match heif_type(bytes) {
                 Some(mime) if cfg!(target_os = "macos") => format!("it is an {mime} image macOS could not convert"),
-                Some(mime) => format!("it is an {mime} image, which Lorca converts only on a Mac"),
+                Some(mime) => format!("it is an {mime} image, which Beans converts only on a Mac"),
                 None => error,
             })
         }
@@ -233,9 +233,9 @@ fn read(bytes: &[u8]) -> Result<(DynamicImage, Option<ImageFormat>, Orientation)
 
 fn decode(bytes: &[u8]) -> Result<(DynamicImage, Option<ImageFormat>, Orientation), String> {
     let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().map_err(|e| e.to_string())?;
-    let Some(format) = reader.format() else { return Err("it is not an image Lorca can read".into()) };
+    let Some(format) = reader.format() else { return Err("it is not an image Beans can read".into()) };
     let unreadable = |error: ImageError| match error {
-        ImageError::Unsupported(_) => format!("Lorca cannot read {} images", format.to_mime_type()),
+        ImageError::Unsupported(_) => format!("Beans cannot read {} images", format.to_mime_type()),
         error => format!("it could not be read: {}", error.to_string().trim()),
     };
     let mut decoder = reader.into_decoder().map_err(unreadable)?;
@@ -251,7 +251,7 @@ fn decode(bytes: &[u8]) -> Result<(DynamicImage, Option<ImageFormat>, Orientatio
 /// The image as a PNG by `sips`, which every Mac has, for a format only macOS reads.
 #[cfg(target_os = "macos")]
 fn sips_png(bytes: &[u8]) -> Option<Vec<u8>> {
-    let dir = std::env::temp_dir().join(format!("lorca-image-{}", uuid::Uuid::new_v4().simple()));
+    let dir = std::env::temp_dir().join(format!("beans-image-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).ok()?;
     let (input, output) = (dir.join("image"), dir.join("image.png"));
     let converted = std::fs::write(&input, bytes).ok().and_then(|()| {
@@ -361,10 +361,10 @@ mod tests {
         if cfg!(target_os = "macos") {
             return;
         }
-        assert_eq!(prepare(b"<svg xmlns='http://www.w3.org/2000/svg'/>"), Err("it is not an image Lorca can read".into()));
+        assert_eq!(prepare(b"<svg xmlns='http://www.w3.org/2000/svg'/>"), Err("it is not an image Beans can read".into()));
         let png = encoded(&picture(64, 48), ImageFormat::Png);
         assert!(prepare(&png[..60]).unwrap_err().starts_with("it could not be read: "), "a cut-off PNG");
-        assert_eq!(prepare(heic), Err("it is an image/heic image, which Lorca converts only on a Mac".into()));
+        assert_eq!(prepare(heic), Err("it is an image/heic image, which Beans converts only on a Mac".into()));
     }
 
     #[test]

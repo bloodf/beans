@@ -1,5 +1,5 @@
 import XCTest
-@testable import Lorca
+@testable import Beans
 
 final class McpServerTests: XCTestCase {
     func testACommandLineSplitsTheWayWindowsAndAShellBothReadIt() {
@@ -66,7 +66,7 @@ final class McpServerTests: XCTestCase {
         XCTAssertEqual(form.problem(name: "api"), "The URL starts with http:// or https://.")
     }
 
-    func testTheJSONViewWritesTheKeysInLorcasOrder() {
+    func testTheJSONViewWritesTheKeysInBeanssOrder() {
         let entry = McpEntry(["args": ["-y"], "command": "npx", "trust": true, "env": ["A": "1"]])
         XCTAssertEqual(entry.json, "{\n  \"command\": \"npx\",\n  \"args\": [\n    \"-y\"\n  ],\n  \"env\": {\n    \"A\": \"1\"\n  },\n  \"trust\": true\n}")
         XCTAssertTrue(looksSecret("GITHUB_PERSONAL_ACCESS_TOKEN") && looksSecret("Authorization") && !looksSecret("DEBUG"))

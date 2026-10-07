@@ -22,7 +22,7 @@ pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 /// `deepseek-chat` / `deepseek-reasoner` names were retired in 2026.
 pub const DEEPSEEK_DEFAULT_MODEL: &str = "deepseek-flash";
 
-const USER_AGENT: &str = concat!("lorca-agent/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("beans-agent/", env!("CARGO_PKG_VERSION"));
 
 pub struct OpenAiCompatProvider {
     pub provider_id: String,
@@ -64,7 +64,7 @@ impl OpenAiCompatProvider {
             info: models::find(provider_id, model),
             prompt_cache_key: true,
             reasoning_effort_none: false,
-            client: lorca_tls::client(),
+            client: beans_tls::client(),
         }
     }
 
@@ -75,7 +75,7 @@ impl OpenAiCompatProvider {
 
     /// A credential-bearing gateway connection never follows redirects to another endpoint.
     pub fn without_redirects(mut self) -> Self {
-        self.client = lorca_tls::client_builder().redirect(reqwest::redirect::Policy::none())
+        self.client = beans_tls::client_builder().redirect(reqwest::redirect::Policy::none())
             .build().expect("a client over a built TLS config");
         self
     }

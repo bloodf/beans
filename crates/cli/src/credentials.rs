@@ -11,7 +11,7 @@ use crate::config::{self, Config};
 use crate::model::{ProviderStatus, StatusModel};
 
 #[cfg(feature = "provider-auth")]
-pub use lorca_provider_auth::{chatgpt::ChatGptTokens, grok::GrokTokens};
+pub use beans_provider_auth::{chatgpt::ChatGptTokens, grok::GrokTokens};
 /// Builds without provider setup carry subscription tokens as opaque JSON.
 #[cfg(not(feature = "provider-auth"))]
 pub type ChatGptTokens = serde_json::Value;
@@ -62,7 +62,7 @@ impl CustomApi {
 pub struct OfferedModel {
     pub id: String,
     pub name: String,
-    pub levels: Vec<lorca_models::ThinkingLevel>,
+    pub levels: Vec<beans_models::ThinkingLevel>,
 }
 
 
@@ -121,7 +121,7 @@ impl CustomIntegration {
     }
 }
 
-/// A server the user added that speaks one of the wire protocols Lorca has: a gateway, another
+/// A server the user added that speaks one of the wire protocols Beans has: a gateway, another
 /// vendor's API, or a model server on their own network.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CustomProvider {
@@ -141,8 +141,8 @@ pub struct CustomProvider {
 impl CustomProvider {
     /// Thinking controls require an explicit format supported by the selected wire.
     /// Legacy gateway formats retain their declared effort translation.
-    pub fn levels(&self, model: &CustomModel) -> Vec<lorca_models::ThinkingLevel> {
-        use lorca_models::ThinkingLevel::{Off, Minimal, Low, Medium, High, XHigh, Max};
+    pub fn levels(&self, model: &CustomModel) -> Vec<beans_models::ThinkingLevel> {
+        use beans_models::ThinkingLevel::{Off, Minimal, Low, Medium, High, XHigh, Max};
         if model.reasoning != Some(true) { return Vec::new(); }
         if self.integration.is_none() {
             let supported = match self.api {
@@ -327,7 +327,7 @@ impl Credentials {
                 .map(|model| OfferedModel { id: model.id.clone(), name: model.name.clone().unwrap_or_else(|| model.id.clone()), levels: provider.levels(model) })
                 .collect();
         }
-        lorca_models::for_provider(kind).into_iter().map(|model| OfferedModel { id: model.id.clone(), name: model.name.clone(), levels: model.levels.clone() }).collect()
+        beans_models::for_provider(kind).into_iter().map(|model| OfferedModel { id: model.id.clone(), name: model.name.clone(), levels: model.levels.clone() }).collect()
     }
 
     /// The name people know a provider by: a custom provider's own, else the built-in's.
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn durindoor_thinking_is_declared_and_unknown_formats_never_guess() {
-        use lorca_models::ThinkingLevel::{Off, Low, Medium, High, XHigh, Max};
+        use beans_models::ThinkingLevel::{Off, Low, Medium, High, XHigh, Max};
         let mut gateway = custom("Renamed", 1);
         gateway.integration = Some(CustomIntegration::Durindoor);
         let mut model = CustomModel { id: "combo".into(), reasoning: Some(true), thinking_format: Some("claude-adaptive".into()), thinking_can_disable: Some(false), ..Default::default() };
@@ -436,7 +436,7 @@ mod tests {
         model.id = "cx/gpt-6-sol".into();
         model.thinking_format = Some("openai".into());
         model.thinking_can_disable = Some(false);
-        assert_eq!(gateway.levels(&model), [lorca_models::ThinkingLevel::Minimal, Low, Medium, High, XHigh]);
+        assert_eq!(gateway.levels(&model), [beans_models::ThinkingLevel::Minimal, Low, Medium, High, XHigh]);
         model.thinking_format = Some("future-format".into());
         assert!(gateway.levels(&model).is_empty());
         model.thinking_format = None;
@@ -521,7 +521,7 @@ mod tests {
         assert_eq!(models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["m", "anthropic/claude-opus-5"]);
         assert_eq!(models[1].name, "Opus");
         assert!(models[1].levels.is_empty());
-        assert_eq!(credentials.models("anthropic")[0].id, lorca_models::for_provider("anthropic")[0].id);
+        assert_eq!(credentials.models("anthropic")[0].id, beans_models::for_provider("anthropic")[0].id);
         assert!(credentials.models("custom:gone").is_empty());
     }
 
@@ -566,7 +566,7 @@ mod tests {
 
         // The catalog's, its default first.
         let anthropic = credentials.models("anthropic");
-        assert_eq!(anthropic.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), lorca_models::for_provider("anthropic").iter().map(|m| m.id.as_str()).collect::<Vec<_>>());
+        assert_eq!(anthropic.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), beans_models::for_provider("anthropic").iter().map(|m| m.id.as_str()).collect::<Vec<_>>());
         // A custom provider's, named as its server names them, with the levels each takes.
         let lab = credentials.models("custom:lab");
         assert_eq!(lab.iter().map(|m| (m.id.as_str(), m.name.as_str())).collect::<Vec<_>>(), [("m", "m"), ("anthropic/claude-opus-5", "Opus 5")]);

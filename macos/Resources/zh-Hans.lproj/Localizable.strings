@@ -34,7 +34,7 @@
 "%@ is ready to talk to. Pair another Device any time from the File menu." = "%@ 已准备好与你对话。你可以随时从“文件”菜单配对另一台设备。";
 "%@ is working" = "%@ 正在工作";
 "%@ is working…" = "%@ 正在工作…";
-"%@ Lorca keeps the servers it read before." = "%@ Lorca 会继续使用之前读到的服务器。";
+"%@ Beans keeps the servers it read before." = "%@ Beans 会继续使用之前读到的服务器。";
 "%@ of %@ · %d%%" = "%1$@ / %2$@ · %3$d%%";
 "%@ on %@" = "%1$@ · %2$@";
 "%@ proposes a draft: %@. Path: %@. %@. Content: %@" = "%1$@ 提议一份草稿：%2$@。路径：%3$@。%4$@。内容：%5$@";
@@ -203,7 +203,7 @@
 "Choose an image for this bot." = "为这个智能体选取一张图像。";
 "Choose Image…" = "选取图像…";
 "Circle" = "圆形";
-"CLI not running · start it with: lorca serve" = "CLI 未运行 · 用此命令启动：lorca serve";
+"CLI not running · start it with: beans serve" = "CLI 未运行 · 用此命令启动：beans serve";
 "CLI on 127.0.0.1:%@" = "CLI 位于 127.0.0.1:%@";
 "CLI port" = "CLI 端口";
 "CLI started by the app" = "CLI 已由 App 启动";
@@ -329,7 +329,7 @@
 "Environment" = "环境变量";
 "erase remove wipe relay data identity" = "抹除 移除 清除 中继 数据 身份 删除账户";
 "Error|avatar state" = "出错";
-"Every bot is assigned to a Runner: a Device running macOS, Linux, or Windows. That machine's CLI runs the turn with your account's provider credentials, so a bot on an offline Runner waits until it reconnects. Phones and tablets pair as Devices but never run bots.\n\nThe app talks only to the local CLI on 127.0.0.1:%@. Start it with `lorca serve`; the CLI holds your keys and provider credentials, which reach your other Devices encrypted." = "每个智能体都分配给一个 Runner，即一台运行 macOS、Linux 或 Windows 的设备。那台机器上的 CLI 使用你账户的服务商凭证来运行每一轮，因此离线 Runner 上的智能体会等到它重新连接。手机和平板电脑可以配对为设备，但从不运行智能体。\n\nApp 只与本机 127.0.0.1:%@ 上的 CLI 通信。用 `lorca serve` 启动它；CLI 保管你的密钥和服务商凭证，这些凭证会加密后传到你的其他设备。";
+"Every bot is assigned to a Runner: a Device running macOS, Linux, or Windows. That machine's CLI runs the turn with your account's provider credentials, so a bot on an offline Runner waits until it reconnects. Phones and tablets pair as Devices but never run bots.\n\nThe app talks only to the local CLI on 127.0.0.1:%@. Start it with `beans serve`; the CLI holds your keys and provider credentials, which reach your other Devices encrypted." = "每个智能体都分配给一个 Runner，即一台运行 macOS、Linux 或 Windows 的设备。那台机器上的 CLI 使用你账户的服务商凭证来运行每一轮，因此离线 Runner 上的智能体会等到它重新连接。手机和平板电脑可以配对为设备，但从不运行智能体。\n\nApp 只与本机 127.0.0.1:%@ 上的 CLI 通信。用 `beans serve` 启动它；CLI 保管你的密钥和服务商凭证，这些凭证会加密后传到你的其他设备。";
 "Every bot on %@ can use it." = "%@ 上的每个智能体都能使用它。";
 "Every bot on %@ can use these. Sign-ins and keys stay on %@." = "%1$@ 上的每个智能体都能使用这些插件。登录和密钥只留在 %2$@ 上。";
 "Every bot on %@ loses it, and its keys and sign-ins there are forgotten." = "%@ 上的所有智能体都将无法再使用它，它在那里的密钥和登录信息也会被清除。";
@@ -425,7 +425,7 @@
 "Login and Credential Management" = "登录与凭据管理";
 "Look" = "外观";
 "Looking for the CLI…" = "正在查找 CLI…";
-"Lorca CLI" = "Lorca CLI";
+"Beans CLI" = "Beans CLI";
 "Low" = "低";
 "Machine" = "机器";
 "Machine key" = "机器密钥";
@@ -518,8 +518,8 @@
 "On" = "开启";
 "on %@" = "位于 %@";
 "On %@" = "已安装在 %@";
-"On a computer that already has your identity, choose File › Pair a Device in the desktop app or run lorca pair in a terminal, then paste the code here." = "在已有你身份的电脑上，在桌面应用中选取“文件 › 配对设备”，或在终端运行 lorca pair，然后把显示的配对码粘贴到这里。";
-"On the other Device, choose Pair in onboarding (or run `lorca pair <code>`) and paste this code. The Devices run a handshake; the relay only carries ciphertext." = "在另一台设备上，于初始设置中选取“配对”（或运行 `lorca pair <code>`），然后粘贴此配对码。两台设备之间会进行握手；中继只传递密文。";
+"On a computer that already has your identity, choose File › Pair a Device in the desktop app or run beans pair in a terminal, then paste the code here." = "在已有你身份的电脑上，在桌面应用中选取“文件 › 配对设备”，或在终端运行 beans pair，然后把显示的配对码粘贴到这里。";
+"On the other Device, choose Pair in onboarding (or run `beans pair <code>`) and paste this code. The Devices run a handshake; the relay only carries ciphertext." = "在另一台设备上，于初始设置中选取“配对”（或运行 `beans pair <code>`），然后粘贴此配对码。两台设备之间会进行握手；中继只传递密文。";
 "Onboarding" = "引导";
 "One paragraph, no hype" = "写一段话，不要夸大";
 "One server's JSON, or the mcpServers block of Claude Desktop, Cursor, or a README." = "单个服务器的 JSON，或 Claude Desktop、Cursor、README 中的 mcpServers 配置块。";
@@ -561,7 +561,7 @@
 "Paste an %@ API key to continue." = "请粘贴 %@ API 密钥以继续。";
 "Paste and Match Style" = "粘贴并匹配样式";
 "Paste the JSON a server's README gives, or a whole mcpServers block from Claude Desktop or Cursor, into any field." = "可以把服务器 README 中的 JSON，或 Claude Desktop、Cursor 的整个 mcpServers 配置块，粘贴到任意一栏。";
-"Paste the twelve groups from your backup phrase. Everything else is re-derived and unwrapped from the relay." = "粘贴备份短语中的十二组字符。其余内容会重新派生，并从中继解开。";
+"Paste your complete backup phrase, including the beans-v2 first token and all thirteen groups. Backups without this version token require migration and cannot be restored here." = "请粘贴完整备份短语，包括首个 beans-v2 版本标记和全部十三组字符。没有此版本标记的备份需要迁移，无法在此恢复。";
 "Pastel" = "粉彩";
 "Pause" = "暂停";
 "Pause %@" = "暂停 %@";
@@ -695,7 +695,7 @@
 "Server" = "服务器";
 "server self-host sync pairing connection" = "中继 地址 服务器 自建 自托管 同步 配对 连接 server self-host sync pairing connection";
 "Servers" = "服务器";
-"Servers you add yourself live in mcp.json on %@, in the format Claude Desktop and Cursor use. Edit them here or with the lorca mcp command; after editing the file itself, click Reload." = "你自己添加的服务器保存在 %@ 上的 mcp.json 中，格式与 Claude Desktop 和 Cursor 相同。可以在这里或用 lorca mcp 命令编辑；直接编辑文件后，点按“重新载入”。";
+"Servers you add yourself live in mcp.json on %@, in the format Claude Desktop and Cursor use. Edit them here or with the beans mcp command; after editing the file itself, click Reload." = "你自己添加的服务器保存在 %@ 上的 mcp.json 中，格式与 Claude Desktop 和 Cursor 相同。可以在这里或用 beans mcp 命令编辑；直接编辑文件后，点按“重新载入”。";
 "Services" = "服务";
 "Set · type to replace" = "已设定 · 输入以替换";
 "Set Up" = "设置";
@@ -761,7 +761,7 @@
 "Stop responding (⌘.)" = "停止响应 (⌘.)";
 "Stop Speaking" = "停止朗读";
 "Stopped" = "已停止";
-"Streamable HTTP. When the server asks for a sign-in, Lorca signs in with OAuth; or send a token in a header." = "使用 Streamable HTTP。服务器要求登录时，Lorca 会通过 OAuth 登录；也可以在请求头中发送令牌。";
+"Streamable HTTP. When the server asks for a sign-in, Beans signs in with OAuth; or send a token in a header." = "使用 Streamable HTTP。服务器要求登录时，Beans 会通过 OAuth 登录；也可以在请求头中发送令牌。";
 "Subscription" = "订阅";
 "Sun" = "太阳";
 "Support" = "支持";
@@ -775,7 +775,7 @@
 "That JSON is not a server." = "这段 JSON 不是服务器。";
 "The app talks only to the local CLI over a localhost websocket. The CLI holds the keys, runs the agent loop, and syncs ciphertext with the relay. The relay stores public keys and opaque blobs.\n\nFull notes live in ARCHITECTURE.md." = "App 只通过本机 WebSocket 与本地 CLI 通信。CLI 保管密钥、运行智能体循环，并与中继同步密文。中继只存储公钥和不透明的数据块。\n\n完整说明见 ARCHITECTURE.md。";
 "The Beans CLI is not running" = "Beans CLI 未运行";
-"The Beans CLI is not running. Start it with `lorca serve` and try again." = "Beans CLI 未在运行。请用 `lorca serve` 启动它，然后重试。";
+"The Beans CLI is not running. Start it with `beans serve` and try again." = "Beans CLI 未在运行。请用 `beans serve` 启动它，然后重试。";
 "The Beans CLI isn't answering" = "Beans CLI 没有响应";
 "The body is hard to see on the background (contrast %@:1)." = "身体在背景上不易看清（对比度 %@:1）。";
 "The bot" = "智能体";
@@ -791,7 +791,7 @@
 "The key is checked against %@ and shared with your paired Devices, encrypted." = "密钥会向 %@ 验证，并加密共享给你已配对的设备。";
 "the link" = "链接页面";
 "The look was not saved: %@" = "外观未保存：%@";
-"The lorca CLI is not bundled with this build and is not on PATH." = "此版本未内置 lorca CLI，PATH 中也找不到它。";
+"The beans CLI is not bundled with this build and is not on PATH." = "此版本未内置 beans CLI，PATH 中也找不到它。";
 "The marketplace isn't available right now." = "市场暂时不可用。";
 "the other Device" = "另一台设备";
 "The relay deletes everything it holds for the account, and every paired Device, this one included, forgets its keys and chats. This can’t be undone." = "中继会删除它为此账户保存的全部内容，每台已配对设备（包括这一台）都会清除密钥和聊天。此操作无法撤销。";
@@ -816,7 +816,7 @@
 "This computer is your first Device" = "这台电脑是你的第一台设备";
 "This deletes the routine and stops its future runs. This can't be undone." = "这会删除该例行任务并停止它今后的运行。此操作无法撤销。";
 "This machine is paired to your account but has not sent its name or system. If you don't recognize it, unpair it." = "这台机器已配对到你的账户，但尚未发送它的名称和系统。如果你不认识它，请取消配对。";
-"This phrase is your master secret. It re-derives every key and unwraps everything on the relay. Write it down — nobody can reset it for you." = "这组短语是你的主密钥。它能重新派生所有密钥，并解开中继上的全部内容。请把它抄写下来——没有人能替你重置。";
+"Keep the beans-v2 first token and every group when copying or writing down this master-secret backup. It re-derives your keys and unwraps everything on the relay — nobody can reset it for you." = "复制或抄写此主密钥备份时，请保留首个 beans-v2 版本标记和每组字符。它能重新派生你的密钥，并解开中继上的全部内容——没有人能替你重置。";
 "This plugin is no longer in the marketplace." = "这个插件已不在市场中。";
 "This server doesn’t list its models. Add model IDs above." = "这个服务器不提供模型列表。请在上方添加模型 ID。";
 "Three processes" = "三个进程";
@@ -1003,3 +1003,4 @@
 "Leave unchanged" = "保持不变";
 "This can change service data or invoke paid downstream models. No background schedule is authorized. Deletes do not prove backup/history erasure." = "这可能更改服务数据或调用付费下游模型。未授权后台定时任务。删除不能证明备份和历史记录已擦除。";
 "Refresh preferences and connection" = "刷新偏好设置和连接";
+"This build connects only to its isolated Beans CLI port %d. Restore that port in Settings › Advanced." = "此构建仅连接其隔离的 Beans CLI 端口 %d。请在“设置 › 高级”中恢复该端口。";

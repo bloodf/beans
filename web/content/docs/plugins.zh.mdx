@@ -8,7 +8,7 @@ icon: Plug
 
 ## 市场
 
-点按侧边栏右下角的市场图标（四个圆点），或选择 **文件 › 市场…**（⇧⌘M，Windows 和 Linux 上是 Ctrl+Shift+M）。最前面是 **精选插件** 和 **精选智能体**，然后按类别列出其余内容。精选分组下的 **查看全部** 会列出所有插件或所有智能体。搜索会同时查找插件和智能体。市场内容来自 lorca.app，所以新的插件和智能体无需更新 Beans 就会出现。
+点按侧边栏右下角的市场图标（四个圆点），或选择 **文件 › 市场…**（⇧⌘M，Windows 和 Linux 上是 Ctrl+Shift+M）。最前面是 **精选插件** 和 **精选智能体**，然后按类别列出其余内容。精选分组下的 **查看全部** 会列出所有插件或所有智能体。搜索会同时查找插件和智能体。市场内容来自 beans.app，所以新的插件和智能体无需更新 Beans 就会出现。
 
 市场里有这些插件：
 
@@ -64,7 +64,7 @@ Browser、Context7、DeepWiki、Exa 和 Hugging Face 不需要账号。这里没
 
 需要账号的远程服务器会在 Beans 第一次连接时要求登录：服务器会显示 **需要登录**，在它的表单里或智能体发出的卡片上点 **登录**，就会像市场插件一样通过 OAuth 登录；在它的表单里点 **退出登录** 会忘掉这次登录。如果服务器接受令牌，可以把令牌放在请求头里，比如 `Authorization: Bearer …`。
 
-这些服务器保存在 Beans 文件夹里的 `mcp.json`（`~/.lorca/mcp.json`），格式与 Claude Desktop、Cursor 和 Claude Code 相同，你可以从它们的配置里复制，也可以直接手动编辑。编辑之后，在 **设置 › 插件** 里它那一行点按 **重新载入**，或运行 `lorca mcp reload`：
+这些服务器保存在 Beans 文件夹里的 `mcp.json`（`~/.beans-v2/mcp.json`），格式与 Claude Desktop、Cursor 和 Claude Code 相同，你可以从它们的配置里复制，也可以直接手动编辑。编辑之后，在 **设置 › 插件** 里它那一行点按 **重新载入**，或运行 `beans mcp reload`：
 
 ```json
 {
@@ -94,4 +94,4 @@ Browser、Context7、DeepWiki、Exa 和 Hugging Face 不需要账号。这里没
 
 不支持即时注册应用的服务器，可以在 `oauth` 里使用你在它那里注册的应用：`clientId`、`clientSecret`（可以写成 `${SECRET}`），以及注册时填写的 `callbackPort` 或 `callbackUrl`，这样的登录会在 Runner 自己的浏览器里打开。`clientName` 让 Beans 用另一个名字注册，用于只接受它认识的名字的服务器；`scope` 请求更多权限；服务器指错授权服务器时，`authServerMetadataUrl` 指向正确的那个。服务器回复某次调用需要比当前登录更多的权限时，会请你重新登录，一并授予这些权限。
 
-智能体按服务器的名称调用它的工具，比如 `notes__read_file`。读取类工具立即执行，其余的和其他插件一样要经过[自动审查](/zh/docs/auto-review)。提供资源（比如文件或记录）的服务器还会多出列出和读取资源的工具 `notes__list_mcp_resources` 和 `notes__read_mcp_resource`；二进制资源会存成文件，智能体可以打开。[命令行](/zh/docs/cli#mcp-服务器)管理的也是同一个文件：`lorca mcp add`、`list`、`get`、`remove`、`reload`、`sign-out`，以及从其他应用 `import`。
+智能体按服务器的名称调用它的工具，比如 `notes__read_file`。读取类工具立即执行，其余的和其他插件一样要经过[自动审查](/zh/docs/auto-review)。提供资源（比如文件或记录）的服务器还会多出列出和读取资源的工具 `notes__list_mcp_resources` 和 `notes__read_mcp_resource`；二进制资源会存成文件，智能体可以打开。[命令行](/zh/docs/cli#mcp-服务器)管理的也是同一个文件：`beans mcp add`、`list`、`get`、`remove`、`reload`、`sign-out`，以及从其他应用 `import`。

@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-@testable import Lorca
+@testable import Beans
 
 @MainActor
 final class MarkdownLayoutTests: XCTestCase {

@@ -64,7 +64,7 @@ test("downloads and stages exact finished APK/AAB/store IPA with hashes, never U
   }
 });
 describe("native build inputs", () => {
-  test("host suffix", () => { expect(hostLibrary("linux")).toBe("liblorca_mobile.so"); expect(hostLibrary("darwin")).toBe("liblorca_mobile.dylib"); expect(() => hostLibrary("win32")).toThrow(); });
+  test("host suffix", () => { expect(hostLibrary("linux")).toBe("libbeans_mobile.so"); expect(hostLibrary("darwin")).toBe("libbeans_mobile.dylib"); expect(() => hostLibrary("win32")).toThrow(); });
   test("explicit NDK inputs", () => {
     expect(androidNdk({ ANDROID_NDK_ROOT: "/ndk" }, "linux", () => true)).toBe("/ndk");
     expect(androidNdk({ ANDROID_SDK_ROOT: "/sdk", BEANS_ANDROID_NDK_VERSION: "27.1.12297006" }, "linux", () => true)).toBe("/sdk/ndk/27.1.12297006");

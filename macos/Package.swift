@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "Lorca",
+    name: "Beans",
     platforms: [.macOS(.v14)],
     dependencies: [
         // The updater. A binary xcframework: scripts/app.ts copies the framework into
@@ -13,28 +13,28 @@ let package = Package(
         // The Markdown parser from crates/markdown: the Rust static library and its C header,
         // built into Libraries/ by scripts/app.ts.
         .binaryTarget(
-            name: "LorcaMarkdownFFI",
-            path: "Libraries/LorcaMarkdownFFI.xcframework"
+            name: "BeansMarkdownFFI",
+            path: "Libraries/BeansMarkdownFFI.xcframework"
         ),
-        // The UniFFI Swift bindings over it, generated into Sources/LorcaMarkdown by the same step.
+        // The UniFFI Swift bindings over it, generated into Sources/BeansMarkdown by the same step.
         .target(
-            name: "LorcaMarkdown",
-            dependencies: ["LorcaMarkdownFFI"],
-            path: "Sources/LorcaMarkdown",
+            name: "BeansMarkdown",
+            dependencies: ["BeansMarkdownFFI"],
+            path: "Sources/BeansMarkdown",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
-            name: "Lorca",
-            dependencies: ["LorcaMarkdown", .product(name: "Sparkle", package: "Sparkle")],
-            path: "Sources/Lorca",
+            name: "Beans",
+            dependencies: ["BeansMarkdown", .product(name: "Sparkle", package: "Sparkle")],
+            path: "Sources/Beans",
             swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [
                 .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])
             ]
         ),
         .testTarget(
-            name: "LorcaTests",
-            dependencies: ["Lorca"],
+            name: "BeansTests",
+            dependencies: ["Beans"],
             path: "Tests/Notifications",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

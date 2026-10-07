@@ -1,7 +1,7 @@
 //! Model-visible schemas contain content only; the core supplies every service selector.
 use std::sync::Arc;
 use async_trait::async_trait;
-use lorca_agent::{Tool, ToolError, ToolResult, ToolUpdateFn};
+use beans_agent::{Tool, ToolError, ToolResult, ToolUpdateFn};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 use crate::app::App;

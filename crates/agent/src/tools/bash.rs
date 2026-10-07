@@ -47,7 +47,7 @@ const NO_INPUT_DESCRIPTION: &str = "Execute a bash command in the current workin
 
 const NO_SHELL: &str = "Commands run in Git for Windows' bash, and none was found: no bash.exe in Program Files, Program Files (x86), \
      %LOCALAPPDATA%\\Programs\\Git, or beside a git.exe on PATH. Install Git for Windows from https://git-scm.com/downloads/win, \
-     and commands run from the next message on; or set LORCA_SHELL to the full path of a bash.exe and restart Lorca.";
+     and commands run from the next message on; or set BEANS_SHELL to the full path of a bash.exe and restart Beans.";
 
 pub struct BashTool {
     cwd: PathBuf,
@@ -93,13 +93,13 @@ impl BashTool {
     }
 }
 
-/// The shell commands run in: `LORCA_SHELL` when set, else this platform's.
+/// The shell commands run in: `BEANS_SHELL` when set, else this platform's.
 fn shell() -> Option<String> {
     #[cfg(unix)]
     let default = || Some(default_shell());
     #[cfg(windows)]
     let default = default_shell;
-    std::env::var("LORCA_SHELL").ok().filter(|s| !s.is_empty()).or_else(default)
+    std::env::var("BEANS_SHELL").ok().filter(|s| !s.is_empty()).or_else(default)
 }
 
 #[cfg(unix)]
@@ -370,7 +370,7 @@ impl Tool for BashTool {
         let text = if self.script { super::sanitize::terminal_text(&output) } else { String::from_utf8_lossy(&output).into_owned() };
         let truncation = truncate_tail(&text, TruncationOptions::default());
         let full_output_path = if truncation.truncated {
-            let path = std::env::temp_dir().join(format!("lorca-bash-{}-{}.log", std::process::id(), crate::now_ms()));
+            let path = std::env::temp_dir().join(format!("beans-bash-{}-{}.log", std::process::id(), crate::now_ms()));
             let _ = std::fs::write(&path, &output);
             Some(path)
         } else {
@@ -442,37 +442,37 @@ mod tests {
     #[tokio::test]
     async fn host_extras_select_runner_command_and_address() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("lorca-bash-extras-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("beans-bash-extras-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("lorca");
-        std::fs::write(&script, "#!/bin/sh\necho \"runner $LORCA_HOME $LORCA_PORT\"\n").unwrap();
+        let script = dir.join("beans");
+        std::fs::write(&script, "#!/bin/sh\necho \"runner $BEANS_HOME $BEANS_PORT\"\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let extras = crate::login_shell::Extras {
-            variables: vec![("LORCA_HOME".into(), dir.clone().into_os_string()), ("LORCA_PORT".into(), "4899".into())],
+            variables: vec![("BEANS_HOME".into(), dir.clone().into_os_string()), ("BEANS_PORT".into(), "4899".into())],
             path_first: vec![dir.clone()],
         };
         let result = BashTool::new(dir.clone()).with_extras(extras)
-            .execute("1", json!({ "command": "lorca" }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+            .execute("1", json!({ "command": "beans" }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
         assert!(result.text_content().contains(&format!("runner {} 4899", dir.display())), "{}", result.text_content());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
     async fn a_host_puts_its_own_command_first_and_its_variables_in() {
-        let dir = std::env::temp_dir().join(format!("lorca-bash-extras-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("beans-bash-extras-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("lorca");
-        std::fs::write(&script, "#!/bin/sh\necho \"this Runner's lorca on $LORCA_PORT\"\n").unwrap();
+        let script = dir.join("beans");
+        std::fs::write(&script, "#!/bin/sh\necho \"this Runner's beans on $BEANS_PORT\"\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let extras = crate::login_shell::Extras { variables: vec![("LORCA_PORT".into(), "4899".into())], path_first: vec![dir.clone()] };
+        let extras = crate::login_shell::Extras { variables: vec![("BEANS_PORT".into(), "4899".into())], path_first: vec![dir.clone()] };
         let tool = BashTool::new(std::env::temp_dir()).with_extras(extras);
-        let result = tool.execute("1", json!({ "command": "lorca" }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        let result = tool.execute("1", json!({ "command": "beans" }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
         let text = result.text_content();
-        assert!(text.contains("this Runner's lorca on 4899"), "{text}");
+        assert!(text.contains("this Runner's beans on 4899"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

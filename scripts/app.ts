@@ -9,16 +9,16 @@ export const RESOURCES_DIR = join(PACKAGE_DIR, "Resources")
 export const SOURCES_DIR = join(PACKAGE_DIR, "Sources")
 
 export const CRATES_DIR = join(ROOT, "crates")
-export const CLI_NAME = "lorca"
+export const CLI_NAME = "beans"
 
 export const APP_NAME = "Beans"
 export const DEBUG_APP_NAME = "Beans Dev"
 export const BUNDLE_ID = "ai.amoena.beans"
 export const DEBUG_BUNDLE_ID = "ai.amoena.beans.dev"
-/** The Swift executable target keeps its upstream name; the bundle executable is APP_NAME. */
-export const SWIFT_PRODUCT = "Lorca"
-export const APP_ICON_NAME = "Lorca.icns"
-export const DEBUG_APP_ICON_NAME = "Lorca-dev.icns"
+/** The Swift executable target and bundle executable both use the Beans name. */
+export const SWIFT_PRODUCT = "Beans"
+export const APP_ICON_NAME = "Beans.icns"
+export const DEBUG_APP_ICON_NAME = "Beans-dev.icns"
 
 /** The root package.json version identifies every Beans release and desktop update. */
 export const PACKAGE_JSON = join(ROOT, "package.json")
@@ -70,12 +70,12 @@ export const color = {
 
 export function log(message: string) {
   const time = new Date().toLocaleTimeString("en-US", { hour12: false })
-  console.log(`${color.dim(time)} ${color.cyan("lorca")} ${message}`)
+  console.log(`${color.dim(time)} ${color.cyan("beans")} ${message}`)
 }
 
 function infoPlist(version: string, config: Config) {
   const name = appName(config)
-  const relay = config === "release" ? process.env.LORCA_DEFAULT_RELAY_URL?.trim() ?? "" : ""
+  const relay = config === "release" ? process.env.BEANS_DEFAULT_RELAY_URL?.trim() ?? "" : ""
   const relayEntry = relay
     ? `\n\t<key>BeansRelayURL</key>\n\t<string>${relay.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</string>`
     : ""
@@ -184,11 +184,11 @@ export async function buildCLI(config: Config): Promise<{ ok: boolean; path: str
   return { ok: build.exitCode === 0, path: join(ROOT, "target", config, CLI_NAME) }
 }
 
-export const MARKDOWN_CRATE = "lorca-markdown"
-/** The generated Swift bindings the app compiles as its `LorcaMarkdown` target. */
-export const MARKDOWN_SWIFT_DIR = join(SOURCES_DIR, "LorcaMarkdown")
+export const MARKDOWN_CRATE = "beans-markdown"
+/** The generated Swift bindings the app compiles as its `BeansMarkdown` target. */
+export const MARKDOWN_SWIFT_DIR = join(SOURCES_DIR, "BeansMarkdown")
 /** The Rust static library and its C header, as the xcframework `Package.swift` links. */
-export const MARKDOWN_XCFRAMEWORK = join(PACKAGE_DIR, "Libraries", "LorcaMarkdownFFI.xcframework")
+export const MARKDOWN_XCFRAMEWORK = join(PACKAGE_DIR, "Libraries", "BeansMarkdownFFI.xcframework")
 
 /**
  * Compile the Markdown parser the app links: the static library, the Swift bindings, and the
@@ -200,7 +200,7 @@ export async function buildMarkdown(config: Config): Promise<{ ok: boolean }> {
   if ((await run(["cargo", ...args], { cwd: ROOT })).exitCode !== 0) return { ok: false }
   // The bindings come from the host dylib's metadata; the debug one is always current after
   // the build above, whichever configuration produced the static library.
-  const dylib = join(ROOT, "target", config, "liblorca_markdown.dylib")
+  const dylib = join(ROOT, "target", config, "libbeans_markdown.dylib")
   const generated = join(ROOT, "target", "markdown-bindings")
   await rm(generated, { recursive: true, force: true })
   const bindgen = await run(
@@ -226,7 +226,7 @@ export async function buildMarkdown(config: Config): Promise<{ ok: boolean }> {
   }
   await rm(MARKDOWN_XCFRAMEWORK, { recursive: true, force: true })
   const framework = await run(
-    ["xcodebuild", "-create-xcframework", "-library", join(ROOT, "target", config, "liblorca_markdown.a"), "-headers", include, "-output", MARKDOWN_XCFRAMEWORK],
+    ["xcodebuild", "-create-xcframework", "-library", join(ROOT, "target", config, "libbeans_markdown.a"), "-headers", include, "-output", MARKDOWN_XCFRAMEWORK],
     { cwd: ROOT, capture: true },
   )
   return { ok: framework.exitCode === 0 }
@@ -377,8 +377,8 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   }
   await chmod(destination, 0o755)
 
-  // The app launches this binary as `lorca serve`. It lives under Resources/bin: on a
-  // case-insensitive volume, MacOS/lorca would be the same file as MacOS/Lorca.
+  // The app launches this binary as `beans serve`. It lives under Resources/bin: on a
+  // case-insensitive volume, MacOS/beans would be the same file as MacOS/Beans.
   const cliBinDir = join(bundle, "Contents", "Resources", "bin")
   await mkdir(cliBinDir, { recursive: true })
   const cliDestination = join(cliBinDir, CLI_NAME)

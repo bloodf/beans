@@ -51,7 +51,7 @@ func (Files) PrepareAvatar(path string) (FileInfo, error) {
 
 	var raw [4]byte
 	_, _ = rand.Read(raw[:])
-	target := filepath.Join(os.TempDir(), "lorca-avatar-"+hex.EncodeToString(raw[:])+".png")
+	target := filepath.Join(os.TempDir(), "beans-avatar-"+hex.EncodeToString(raw[:])+".png")
 	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return FileInfo{}, err

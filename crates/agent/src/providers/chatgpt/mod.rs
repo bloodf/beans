@@ -1,8 +1,8 @@
 //! ChatGPT subscription adapter. Isolated from the API-key providers: it authenticates with
 //! the OAuth tokens a ChatGPT login yields and calls the Codex responses backend.
 
-pub use lorca_provider_auth::chatgpt as oauth;
-pub use lorca_provider_auth::chatgpt::ChatGptTokens;
+pub use beans_provider_auth::chatgpt as oauth;
+pub use beans_provider_auth::chatgpt::ChatGptTokens;
 
 use std::sync::Arc;
 
@@ -54,7 +54,7 @@ impl ChatGptProvider {
             thinking_level: None,
             info: models::find("chatgpt", model),
             tool_images: ToolImages::InOutput,
-            client: lorca_tls::client(),
+            client: beans_tls::client(),
         }
     }
 
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(input.as_array().unwrap().len(), 3);
     }
 
-    /// The tokens of a Lorca data directory, used as they are: refreshing them here would spend
+    /// The tokens of a Beans data directory, used as they are: refreshing them here would spend
     /// the refresh token the account holds.
     struct LiveTokens(ChatGptTokens);
 
@@ -290,7 +290,7 @@ mod tests {
     impl TokenSource for LiveTokens {
         async fn tokens(&self) -> Result<ChatGptTokens, String> {
             if self.0.is_expired() {
-                return Err("the access token has expired; let Lorca refresh it, then run the probe again".into());
+                return Err("the access token has expired; let Beans refresh it, then run the probe again".into());
             }
             Ok(self.0.clone())
         }
@@ -299,7 +299,7 @@ mod tests {
         }
     }
 
-    /// `LORCA_CREDENTIALS=~/.lorca/credentials.json cargo test -p lorca-agent live_chatgpt --
+    /// `BEANS_CREDENTIALS=~/.beans-v2/credentials.json cargo test -p beans-agent live_chatgpt --
     /// --ignored --nocapture`: the model reads a random code off a tool's screenshot.
     #[tokio::test]
     #[ignore]

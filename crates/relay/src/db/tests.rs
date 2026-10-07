@@ -1,15 +1,15 @@
 //! One suite for both backends. SQLite always runs, on a file in the temp directory. Postgres
-//! runs when `LORCA_RELAY_TEST_POSTGRES` names a database, e.g.
-//! `postgres://postgres:lorca@127.0.0.1:55432/lorca`. Identities are random, so runs share it.
+//! runs when `BEANS_RELAY_TEST_POSTGRES` names a database, e.g.
+//! `postgres://postgres:beans@127.0.0.1:55432/beans`. Identities are random, so runs share it.
 
 use super::*;
 
 async fn backends() -> Vec<(Arc<dyn Store>, Arc<Local>)> {
     let mut backends = Vec::new();
-    let path = std::env::temp_dir().join(format!("lorca-relay-test-{}.db", uuid::Uuid::new_v4()));
+    let path = std::env::temp_dir().join(format!("beans-relay-test-{}.db", uuid::Uuid::new_v4()));
     let local = Arc::new(Local::default());
     backends.push((open(path.to_str().unwrap(), local.clone()).await.unwrap(), local));
-    if let Ok(url) = std::env::var("LORCA_RELAY_TEST_POSTGRES") {
+    if let Ok(url) = std::env::var("BEANS_RELAY_TEST_POSTGRES") {
         let local = Arc::new(Local::default());
         backends.push((open(&url, local.clone()).await.unwrap(), local));
     }
@@ -22,6 +22,20 @@ static MARKS: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 
 fn name(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4().simple())
+}
+
+#[tokio::test]
+async fn fresh_format_refuses_old_relay_sqlite_without_modifying_bytes() {
+    let path = std::env::temp_dir().join(format!("beans-old-relay-{}.db", uuid::Uuid::new_v4()));
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TABLE identities(pubkey TEXT); INSERT INTO identities VALUES ('existing');").unwrap();
+    drop(connection);
+    let before = std::fs::read(&path).unwrap();
+    assert!(open(path.to_str().unwrap(), Arc::new(Local::default())).await.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!std::path::PathBuf::from(format!("{}-wal", path.display())).exists());
+    assert!(!std::path::PathBuf::from(format!("{}-shm", path.display())).exists());
+    std::fs::remove_file(path).unwrap();
 }
 
 fn blob(identity: &str, id: &str, bytes: &[u8]) -> NewBlob {

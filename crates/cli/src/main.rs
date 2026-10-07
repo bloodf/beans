@@ -1,22 +1,22 @@
-//! `lorca`: keys, the local websocket for the app, the agent loop, and relay sync.
+//! `beans`: keys, the local websocket for the app, the agent loop, and relay sync.
 
 use std::path::PathBuf;
 
 use usage::Subcommands;
 
-use lorca::app::App;
-use lorca::config::Config;
-use lorca::{identity, keys, pairing, routines, runtime, sync, ws};
+use beans::app::App;
+use beans::config::Config;
+use beans::{identity, keys, pairing, routines, runtime, sync, ws};
 
 #[derive(usage::Cli, Debug)]
-#[usage(bin = "lorca", version, about = "Lorca CLI: identity, local API, agent loop, relay sync", unknown_flags = "error")]
+#[usage(bin = "beans", version, about = "Beans CLI: identity, local API, agent loop, relay sync", unknown_flags = "error")]
 struct Cli {
-    /// Data directory (default ~/.lorca).
-    #[usage(long, env = "LORCA_HOME", global)]
+    /// Data directory (default ~/.beans-v2; Dev ~/.beans-dev-v2).
+    #[usage(long, env = "BEANS_HOME", global)]
     home: Option<PathBuf>,
 
-    /// Local websocket port for the app.
-    #[usage(long, env = "LORCA_PORT", global)]
+    /// Local websocket port (4874 production; 4875 Dev).
+    #[usage(long, env = "BEANS_PORT", global)]
     port: Option<u16>,
 
     #[usage(subcommand)]
@@ -58,12 +58,12 @@ enum Command {
         #[usage(subcommand)]
         command: McpCommand,
     },
-    /// The marketplace: the plugins and bots Lorca offers to add.
+    /// The marketplace: the plugins and bots Beans offers to add.
     Marketplace {
         #[usage(subcommand)]
         command: MarketplaceCommand,
     },
-    /// The model catalog: the models Lorca offers, with their windows, thinking levels, and rates.
+    /// The model catalog: the models Beans offers, with their windows, thinking levels, and rates.
     Models {
         #[usage(subcommand)]
         command: ModelsCommand,
@@ -75,7 +75,7 @@ enum Command {
     },
     /// CLI self-update is unavailable in Beans; use the signed Beans update mechanism.
     SelfUpdate,
-    /// Keep lorca serve running in the background, from login on and whenever it stops.
+    /// Keep beans serve running in the background, from login on and whenever it stops.
     Service {
         #[usage(subcommand)]
         command: ServiceCommand,
@@ -84,8 +84,8 @@ enum Command {
     Status,
     /// Check the local setup.
     Doctor,
-    /// Local update control of the running `lorca serve`, for an operator's updater. Prepare and
-    /// cancel read the token from the file LORCA_UPDATE_TOKEN_FILE names.
+    /// Local update control of the running `beans serve`, for an operator's updater. Prepare and
+    /// cancel read the token from the file BEANS_UPDATE_TOKEN_FILE names.
     Update {
         #[usage(subcommand)]
         command: UpdateCommand,
@@ -167,9 +167,9 @@ enum McpCommand {
     Get { name: String },
     /// Add a server: a command this computer runs, or the URL of a remote server.
     ///
-    ///   lorca mcp add filesystem npx -y @modelcontextprotocol/server-filesystem ~/Documents
-    ///   lorca mcp add linear https://mcp.linear.app/mcp
-    ///   lorca mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=ghp_… -- docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server
+    ///   beans mcp add filesystem npx -y @modelcontextprotocol/server-filesystem ~/Documents
+    ///   beans mcp add linear https://mcp.linear.app/mcp
+    ///   beans mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=ghp_… -- docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server
     #[usage(verbatim_doc_comment)]
     Add {
         /// The server's name. Bots call its tools as name__tool.
@@ -213,7 +213,7 @@ enum McpCommand {
     Hide { name: String, tool: String },
     /// Offer a tool that was hidden to bots again.
     Show { name: String, tool: String },
-    /// Read mcp.json again after editing it by hand, so the running lorca serve takes the change.
+    /// Read mcp.json again after editing it by hand, so the running beans serve takes the change.
     Reload,
     /// Add the servers from another app's MCP config: Claude Desktop, Claude Code, Cursor,
     /// Windsurf, VS Code, or Gemini CLI. With no file, from every one of them this computer has.
@@ -226,10 +226,10 @@ enum ChatsCommand {
     List,
     /// Make a bot the owner of a group, the member holding the work.
     ///
-    ///   lorca chats set-owner "Launch room" Developer
+    ///   beans chats set-owner "Launch room" Developer
     #[usage(verbatim_doc_comment)]
     SetOwner {
-        /// The group's title or id, as `lorca chats list` shows it.
+        /// The group's title or id, as `beans chats list` shows it.
         group: String,
         /// The bot's name or id.
         bot: String,
@@ -238,17 +238,17 @@ enum ChatsCommand {
 
 #[derive(Subcommands, Debug)]
 enum ServiceCommand {
-    /// Start lorca serve now and at every login: a launchd agent on macOS, a systemd user unit on
+    /// Start beans serve now and at every login: a launchd agent on macOS, a systemd user unit on
     /// Linux, a sign-in item on Windows.
     Install,
-    /// Stop lorca serve and no longer start it at login.
+    /// Stop beans serve and no longer start it at login.
     Uninstall,
     /// Whether the service is installed and running, and where its log is.
     Status,
     /// The supervisor a sign-in starts on Windows.
     #[usage(hide)]
     Run {
-        /// A variable for lorca serve, as NAME=value.
+        /// A variable for beans serve, as NAME=value.
         #[usage(long)]
         env: Vec<String>,
     },
@@ -269,18 +269,18 @@ enum ModelsCommand {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    // Bare `lorca` lists the commands and touches nothing: the service is `lorca serve`, as the
-    // apps start it, so `lorca` typed to see what it does, a bot's included, never starts a second
+    // Bare `beans` lists the commands and touches nothing: the service is `beans serve`, as the
+    // apps start it, so `beans` typed to see what it does, a bot's included, never starts a second
     // one or makes a data folder.
     let Some(command) = cli.command else {
         print!("{}", Cli::render_help(Cli::command(), false).unwrap_or_default());
         return Ok(());
     };
-    // `lorca mcp` and `lorca chats` say how each step went in their own words; the log keeps to
+    // `beans mcp` and `beans chats` say how each step went in their own words; the log keeps to
     // warnings.
     let quiet = matches!(command, Command::Mcp { .. } | Command::Marketplace { .. } | Command::Models { .. } | Command::Chats { .. });
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| if quiet { "lorca=warn,lorca_agent=warn".into() } else { "lorca=info,lorca_agent=info".into() }))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| if quiet { "beans=warn,beans_agent=warn".into() } else { "beans=info,beans_agent=info".into() }))
         .with_target(false)
         // Colors for a terminal; a service's log file or journal gets plain text.
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
@@ -292,7 +292,7 @@ async fn main() -> anyhow::Result<()> {
     let command = match command {
         Command::Update { command } => return update(config.port, command).await,
         Command::Service { command } => return service(&config, command).await,
-        Command::SelfUpdate => anyhow::bail!("{}", lorca::update::UNAVAILABLE),
+        Command::SelfUpdate => anyhow::bail!("{}", beans::update::UNAVAILABLE),
         command => command,
     };
     let app = App::load(config)?;
@@ -300,30 +300,30 @@ async fn main() -> anyhow::Result<()> {
     match command {
         Command::Serve { parent_pid, ready_stdout } => {
             app.close_orphan_proposals()?;
-            lorca::service::trim_log();
-            lorca::update::start(&app);
+            beans::service::trim_log();
+            beans::update::start(&app);
             runtime::resume_sent_jobs(&app);
-            // A command a Lorca that quit left waiting went with it; its row says so now.
+            // A command a Beans that quit left waiting went with it; its row says so now.
             {
                 let app = app.clone();
-                tokio::task::spawn_blocking(move || lorca::shell::close_stale_rows(&app));
+                tokio::task::spawn_blocking(move || beans::shell::close_stale_rows(&app));
             }
             #[cfg(unix)]
             tokio::spawn(stop_on_signal(app.clone()));
             // Installed plugins follow the last verified marketplace index.
-            lorca::plugins::refresh_installed(&app, &lorca::marketplace::current(&app).plugins);
-            lorca::plugins::mcp_json::start(&app);
-            lorca::marketplace::check_in_background(&app);
-            lorca::catalog::check_in_background(&app);
+            beans::plugins::refresh_installed(&app, &beans::marketplace::current(&app).plugins);
+            beans::plugins::mcp_json::start(&app);
+            beans::marketplace::check_in_background(&app);
+            beans::catalog::check_in_background(&app);
             if let Some(pid) = parent_pid {
                 tokio::spawn(watch_parent(app.clone(), pid));
             }
             // Bots' commands and plugin servers start with it; read it while the rest starts.
-            tokio::spawn(lorca_agent::login_shell::environment());
+            tokio::spawn(beans_agent::login_shell::environment());
             tokio::spawn(sync::run(app.clone()));
             tokio::spawn(routines::run(app.clone()));
             #[cfg(feature = "provider-auth")]
-            tokio::spawn(lorca::app::refresh_models_periodically(app.clone()));
+            tokio::spawn(beans::app::refresh_models_periodically(app.clone()));
             ws::serve(app, ready_stdout).await
         }
         Command::Identity { command } => match command {
@@ -333,7 +333,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("Backup phrase (write it down; it is the identity):\n");
                 println!("  {}\n", phrase.join(" "));
                 if app.relay_url().is_none() {
-                    println!("No relay configured. Set LORCA_RELAY_URL to sync with other Devices.");
+                    println!("No relay configured. Set BEANS_RELAY_URL to sync with other Devices.");
                 } else {
                     flush_outbox_once(&app).await;
                 }
@@ -341,7 +341,7 @@ async fn main() -> anyhow::Result<()> {
             }
             IdentityCommand::Restore { phrase, name } => {
                 identity::restore(&app, &phrase.join(" "), name).await?;
-                println!("Identity restored. Run `lorca serve` to sync.");
+                println!("Identity restored. Run `beans serve` to sync.");
                 Ok(())
             }
             IdentityCommand::Show => {
@@ -354,7 +354,7 @@ async fn main() -> anyhow::Result<()> {
                         println!("holds master:  {}", app.is_identity_device());
                         println!("registered:    {}", machine.registered);
                     }
-                    None => println!("No identity on this Device. Run `lorca identity new`."),
+                    None => println!("No identity on this Device. Run `beans identity new`."),
                 }
                 Ok(())
             }
@@ -362,14 +362,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Pair { pairing_string, name } => match pairing_string {
             Some(text) => {
                 let device = pairing::accept(app.clone(), &text, name).await?;
-                println!("Paired as {}. Run `lorca serve` to sync.", device["name"].as_str().unwrap_or("this Device"));
+                println!("Paired as {}. Run `beans serve` to sync.", device["name"].as_str().unwrap_or("this Device"));
                 // The machine blob goes up now, so the other Devices learn what joined.
                 flush_outbox_once(&app).await;
                 Ok(())
             }
             None => {
                 let (nonce, pairing_string) = pairing::start(app.clone()).await?;
-                println!("On the other Device run:\n\n  lorca pair '{pairing_string}'\n\nWaiting…");
+                println!("On the other Device run:\n\n  beans pair '{pairing_string}'\n\nWaiting…");
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     let status = pairing::status(&app, &nonce);
@@ -392,8 +392,8 @@ async fn main() -> anyhow::Result<()> {
             let app = app.clone();
             tokio::spawn(async move { mcp(&app, command).await }).await?
         }
-        Command::Marketplace { command: MarketplaceCommand::Reload } => reload(&app, "marketplace.reload", lorca::marketplace::enable, "marketplace").await,
-        Command::Models { command: ModelsCommand::Reload } => reload(&app, "models.reload", lorca::catalog::enable, "model catalog").await,
+        Command::Marketplace { command: MarketplaceCommand::Reload } => reload(&app, "marketplace.reload", beans::marketplace::enable, "marketplace").await,
+        Command::Models { command: ModelsCommand::Reload } => reload(&app, "models.reload", beans::catalog::enable, "model catalog").await,
         Command::Chats { command } => chats(&app, command).await,
         Command::SelfUpdate => unreachable!("disabled before the data folder opens"),
         Command::Service { .. } => unreachable!(),
@@ -410,12 +410,12 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// `lorca update …` against the `lorca serve` on `port`. Prints the service's JSON answer, or
+/// `beans update …` against the `beans serve` on `port`. Prints the service's JSON answer, or
 /// `{"serving": false}` when nothing listens there.
 async fn update(port: u16, command: UpdateCommand) -> anyhow::Result<()> {
     let token = || -> anyhow::Result<String> {
-        let path = std::env::var_os(lorca::update_control::TOKEN_FILE_ENV).ok_or_else(|| anyhow::anyhow!("Set LORCA_UPDATE_TOKEN_FILE to the update control token file."))?;
-        lorca::update_control::read_token(std::path::Path::new(&path)).map_err(anyhow::Error::msg)
+        let path = std::env::var_os(beans::update_control::TOKEN_FILE_ENV).ok_or_else(|| anyhow::anyhow!("Set BEANS_UPDATE_TOKEN_FILE to the update control token file."))?;
+        beans::update_control::read_token(std::path::Path::new(&path)).map_err(anyhow::Error::msg)
     };
     let (method, params) = match command {
         UpdateCommand::Status => ("update.status", serde_json::json!({})),
@@ -430,13 +430,13 @@ async fn update(port: u16, command: UpdateCommand) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Runs a provider command in the running `lorca serve` when there is one, so the app sees the
+/// Runs a provider command in the running `beans serve` when there is one, so the app sees the
 /// change at once; otherwise here, followed by one sync pass.
 async fn provider(app: &std::sync::Arc<App>, command: ProviderCommand) -> anyhow::Result<()> {
     let (method, params) = match command {
         ProviderCommand::Set { kind, api_key, base_url } => {
-            if !lorca::credentials::PROVIDER_KINDS.contains(&kind.as_str()) {
-                anyhow::bail!("Unknown provider {kind}. Use one of: {}", lorca::credentials::PROVIDER_KINDS.join(", "));
+            if !beans::credentials::PROVIDER_KINDS.contains(&kind.as_str()) {
+                anyhow::bail!("Unknown provider {kind}. Use one of: {}", beans::credentials::PROVIDER_KINDS.join(", "));
             }
             let params = if matches!(kind.as_str(), "chatgpt" | "grok") {
                 if api_key.is_some() || base_url.is_some() {
@@ -469,7 +469,7 @@ async fn provider(app: &std::sync::Arc<App>, command: ProviderCommand) -> anyhow
     let result = match serve_call(app.config.port, &method, &params).await? {
         Some(result) => result,
         None => {
-            let result = Box::pin(lorca::api::dispatch(app, &method, params)).await;
+            let result = Box::pin(beans::api::dispatch(app, &method, params)).await;
             flush_outbox_once(app).await;
             result
         }
@@ -479,7 +479,7 @@ async fn provider(app: &std::sync::Arc<App>, command: ProviderCommand) -> anyhow
     Ok(())
 }
 
-/// Names groups and bots as the apps show them. A change goes through the running `lorca serve`
+/// Names groups and bots as the apps show them. A change goes through the running `beans serve`
 /// when there is one, so the apps see it at once; otherwise here, followed by one sync pass.
 async fn chats(app: &std::sync::Arc<App>, command: ChatsCommand) -> anyhow::Result<()> {
     match command {
@@ -488,7 +488,7 @@ async fn chats(app: &std::sync::Arc<App>, command: ChatsCommand) -> anyhow::Resu
             Ok(())
         }
         ChatsCommand::SetOwner { group, bot } => {
-            let chat = app.find_group(&group).map_err(|message| anyhow::anyhow!("{message} `lorca chats list` shows the groups."))?;
+            let chat = app.find_group(&group).map_err(|message| anyhow::anyhow!("{message} `beans chats list` shows the groups."))?;
             let bot = app.find_member(&chat, &bot).map_err(|message| anyhow::anyhow!(message))?;
             let title = app.chat_title(&chat.meta);
             if chat.meta.owner() == Some(bot.id.as_str()) {
@@ -499,7 +499,7 @@ async fn chats(app: &std::sync::Arc<App>, command: ChatsCommand) -> anyhow::Resu
             let result = match serve_call(app.config.port, "chats.set_owner", &params).await? {
                 Some(result) => result,
                 None => {
-                    let result = Box::pin(lorca::api::dispatch(app, "chats.set_owner", params)).await;
+                    let result = Box::pin(beans::api::dispatch(app, "chats.set_owner", params)).await;
                     flush_outbox_once(app).await;
                     result
                 }
@@ -513,7 +513,7 @@ async fn chats(app: &std::sync::Arc<App>, command: ChatsCommand) -> anyhow::Resu
 
 /// The groups, then the direct chats, each by title: id, title, and a group's bots with its owner.
 fn print_chats(app: &App) {
-    let chats: Vec<lorca::model::ChatMeta> = app.state.lock().unwrap().chats.iter().map(|chat| chat.meta.clone()).collect();
+    let chats: Vec<beans::model::ChatMeta> = app.state.lock().unwrap().chats.iter().map(|chat| chat.meta.clone()).collect();
     if chats.is_empty() {
         println!("No chats yet.");
         return;
@@ -569,13 +569,13 @@ fn print_providers(providers: &serde_json::Value) {
     }
 }
 
-/// An `mcp.*` request to the running `lorca serve` when there is one, so the app sees the change
+/// An `mcp.*` request to the running `beans serve` when there is one, so the app sees the change
 /// at once and the server runs there; else here. Says which it was.
 async fn mcp_call(app: &std::sync::Arc<App>, method: &str, params: serde_json::Value) -> anyhow::Result<(serde_json::Value, bool)> {
     let (result, live) = match serve_call(app.config.port, method, &params).await? {
         Some(result) => (result, true),
         // Boxed, as `main`'s future lives on the main thread's stack, a megabyte on Windows.
-        None => (Box::pin(lorca::api::dispatch(app, method, params)).await, false),
+        None => (Box::pin(beans::api::dispatch(app, method, params)).await, false),
     };
     Ok((result.map_err(|message| anyhow::anyhow!(message))?, live))
 }
@@ -619,10 +619,10 @@ async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<(
             Ok(())
         }
         McpCommand::AddJson { name, json } => {
-            let servers = lorca::plugins::mcp_json::parse_servers(&json).map_err(|e| anyhow::anyhow!(e))?;
+            let servers = beans::plugins::mcp_json::parse_servers(&json).map_err(|e| anyhow::anyhow!(e))?;
             let entry = match servers.as_slice() {
                 [(_, entry)] => entry.clone().map_err(|e| anyhow::anyhow!(e))?,
-                many => anyhow::bail!("That JSON has {} servers. Give one server's JSON, or add them all with `lorca mcp import <file>`.", many.len()),
+                many => anyhow::bail!("That JSON has {} servers. Give one server's JSON, or add them all with `beans mcp import <file>`.", many.len()),
             };
             let config = serde_json::Value::from(&entry);
             let (saved, _) = mcp_call(app, "mcp.save", json!({ "name": name, "config": config })).await?;
@@ -675,7 +675,7 @@ async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<(
 }
 
 /// Connects a server, or takes the connection it has, and answers how it stands, with its tools.
-/// Without a running `lorca serve` the server ran in this process, which stops it before leaving.
+/// Without a running `beans serve` the server ran in this process, which stops it before leaving.
 async fn mcp_connect(app: &std::sync::Arc<App>, name: &str) -> anyhow::Result<serde_json::Value> {
     eprintln!("Connecting {name}…");
     let (got, live) = mcp_call(app, "mcp.reconnect", serde_json::json!({ "name": name, "fresh": false })).await?;
@@ -688,7 +688,7 @@ async fn mcp_connect(app: &std::sync::Arc<App>, name: &str) -> anyhow::Result<se
     Ok(got["server"].clone())
 }
 
-/// What `lorca mcp add` says once the server has had its first try.
+/// What `beans mcp add` says once the server has had its first try.
 fn mcp_outcome(server: &serde_json::Value) -> String {
     let name = server["name"].as_str().unwrap_or("The server");
     let status = &server["status"];
@@ -697,7 +697,7 @@ fn mcp_outcome(server: &serde_json::Value) -> String {
             Some(count) => format!("✔ {name} is ready with {count} tool{}.", if count == 1 { "" } else { "s" }),
             None => format!("✔ {name} is ready."),
         },
-        Some("needs_auth") => format!("! {name} needs a sign-in: run `lorca mcp sign-in {name}`, or sign in from Settings › Plugins in the app."),
+        Some("needs_auth") => format!("! {name} needs a sign-in: run `beans mcp sign-in {name}`, or sign in from Settings › Plugins in the app."),
         Some(_) => format!("✘ {name} did not connect: {}", status["detail"].as_str().unwrap_or("unknown error")),
         None => match server["problem"].as_str() {
             Some(problem) => format!("✘ {problem}"),
@@ -706,7 +706,7 @@ fn mcp_outcome(server: &serde_json::Value) -> String {
     }
 }
 
-/// The entry `lorca mcp add` writes: a command with its environment, or a URL with its headers.
+/// The entry `beans mcp add` writes: a command with its environment, or a URL with its headers.
 /// What follows a command is its arguments, flags included (`npx -y …`, `docker run -e …`); what
 /// follows a URL is read as this command's own flags, which people write after it.
 fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], description: Option<String>, timeout: Option<u64>, target: &[String]) -> anyhow::Result<serde_json::Value> {
@@ -792,10 +792,10 @@ async fn mcp_import(app: &std::sync::Arc<App>, file: Option<PathBuf>) -> anyhow:
     let named = file.is_some();
     let sources: Vec<(String, PathBuf)> = match file {
         Some(path) => vec![(path.display().to_string(), path)],
-        None => lorca::plugins::mcp_json::known_sources().into_iter().map(|(app, path)| (app.to_string(), path)).collect(),
+        None => beans::plugins::mcp_json::known_sources().into_iter().map(|(app, path)| (app.to_string(), path)).collect(),
     };
     if sources.is_empty() {
-        println!("No other app's MCP servers on this computer. Name a file: lorca mcp import <file>");
+        println!("No other app's MCP servers on this computer. Name a file: beans mcp import <file>");
         return Ok(());
     }
     let (list, _) = mcp_call(app, "mcp.list", json!({})).await?;
@@ -804,7 +804,7 @@ async fn mcp_import(app: &std::sync::Arc<App>, file: Option<PathBuf>) -> anyhow:
     for (label, path) in sources {
         // A file named here may hold servers any way a README writes them; an app's settings file
         // holds them under its servers' object, or has none.
-        let read = |text: String| if named { lorca::plugins::mcp_json::parse_servers(&text) } else { lorca::plugins::mcp_json::servers_in_app_config(&text) };
+        let read = |text: String| if named { beans::plugins::mcp_json::parse_servers(&text) } else { beans::plugins::mcp_json::servers_in_app_config(&text) };
         let servers = match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(read) {
             Ok(servers) if servers.is_empty() => {
                 println!("{label}: no MCP servers.");
@@ -820,7 +820,7 @@ async fn mcp_import(app: &std::sync::Arc<App>, file: Option<PathBuf>) -> anyhow:
         let (mut added, mut skipped) = (Vec::new(), Vec::new());
         for (name, entry) in servers {
             let Some(name) = name else {
-                skipped.push("a server with no name (add it with `lorca mcp add-json <name> <json>`)".to_string());
+                skipped.push("a server with no name (add it with `beans mcp add-json <name> <json>`)".to_string());
                 continue;
             };
             match entry {
@@ -912,7 +912,7 @@ fn print_mcp_list(list: &serde_json::Value) {
     }
     let servers = list["servers"].as_array().cloned().unwrap_or_default();
     if servers.is_empty() {
-        println!("No MCP servers in {path} yet. Add one with `lorca mcp add <name> <command or URL>`.");
+        println!("No MCP servers in {path} yet. Add one with `beans mcp add <name> <command or URL>`.");
         return;
     }
     println!("{path}\n");
@@ -954,7 +954,7 @@ fn print_mcp_server(server: &serde_json::Value) {
     }
     row("State", &mcp_state(server));
     if server["status"]["state"] == "needs_auth" {
-        row("", &format!("Run `lorca mcp sign-in {}`.", server["name"].as_str().unwrap_or_default()));
+        row("", &format!("Run `beans mcp sign-in {}`.", server["name"].as_str().unwrap_or_default()));
     }
     let tools = server["tools"].as_array().cloned().unwrap_or_default();
     if !tools.is_empty() {
@@ -968,47 +968,47 @@ fn print_mcp_server(server: &serde_json::Value) {
     }
 }
 
-/// `lorca models reload` and `lorca marketplace reload`: checks the configured feed now,
-/// through the running `lorca serve`, or with none, here into its cache for the next start.
+/// `beans models reload` and `beans marketplace reload`: checks the configured feed now,
+/// through the running `beans serve`, or with none, here into its cache for the next start.
 async fn reload(app: &std::sync::Arc<App>, method: &str, enable: fn(&App), what: &str) -> anyhow::Result<()> {
     let (reply, live) = match serve_call(app.config.port, method, &serde_json::json!({})).await? {
         Some(reply) => (reply, true),
         None => {
             enable(app);
-            (Box::pin(lorca::api::dispatch(app, method, serde_json::json!({}))).await, false)
+            (Box::pin(beans::api::dispatch(app, method, serde_json::json!({}))).await, false)
         }
     };
     let reply = reply.map_err(anyhow::Error::msg)?;
     let updated = reply["updated"].as_str().unwrap_or_default();
     match (reply["changed"] == true, live) {
-        (true, true) => println!("lorca serve now uses the {what} of {updated}."),
-        (true, false) => println!("Saved the {what} of {updated}; lorca serve uses it when it starts."),
+        (true, true) => println!("beans serve now uses the {what} of {updated}."),
+        (true, false) => println!("Saved the {what} of {updated}; beans serve uses it when it starts."),
         (false, _) => println!("The {what} of {updated} is the latest."),
     }
     Ok(())
 }
 
-/// `lorca service`.
+/// `beans service`.
 async fn service(config: &Config, command: ServiceCommand) -> anyhow::Result<()> {
-    use lorca::service;
+    use beans::service;
     match command {
         ServiceCommand::Install => {
-            // Another lorca serve on the port would keep the service's from starting.
+            // Another beans serve on the port would keep the service's from starting.
             if !service::status(config).running.is_some() && serve_call(config.port, "hello", &serde_json::json!({})).await?.is_some() {
                 anyhow::bail!(
-                    "A lorca serve already answers on port {}. Stop it first; on a computer with the Lorca app, the app runs lorca serve itself.",
+                    "A beans serve already answers on port {}. Stop it first; on a computer with the Beans app, the app runs beans serve itself.",
                     config.port
                 );
             }
             let status = service::install(config)?;
             match status.running {
-                Some(pid) => println!("lorca serve runs in the background (pid {pid}) and starts again at every login. Log: {}", status.log),
-                None => println!("Installed the service, but lorca serve is not running yet. Log: {}", status.log),
+                Some(pid) => println!("beans serve runs in the background (pid {pid}) and starts again at every login. Log: {}", status.log),
+                None => println!("Installed the service, but beans serve is not running yet. Log: {}", status.log),
             }
         }
         ServiceCommand::Uninstall => {
             if service::uninstall(config)? {
-                println!("Stopped lorca serve; it no longer starts at login.");
+                println!("Stopped beans serve; it no longer starts at login.");
             } else {
                 println!("The service is not installed.");
             }
@@ -1018,7 +1018,7 @@ async fn service(config: &Config, command: ServiceCommand) -> anyhow::Result<()>
             match (status.installed, status.running) {
                 (true, Some(pid)) => println!("Installed, running (pid {pid}). Log: {}", status.log),
                 (true, None) => println!("Installed, not running. Log: {}", status.log),
-                (false, _) => println!("Not installed. Run lorca service install to keep lorca serve running."),
+                (false, _) => println!("Not installed. Run beans service install to keep beans serve running."),
             }
         }
         ServiceCommand::Run { env } => {
@@ -1034,14 +1034,14 @@ async fn service(config: &Config, command: ServiceCommand) -> anyhow::Result<()>
             #[cfg(not(windows))]
             {
                 let _ = env;
-                anyhow::bail!("lorca service run is the supervisor on Windows; elsewhere the system's own service manager runs lorca serve.");
+                anyhow::bail!("beans service run is the supervisor on Windows; elsewhere the system's own service manager runs beans serve.");
             }
         }
     }
     Ok(())
 }
 
-/// One request to the `lorca serve` on `port`; `None` when nothing listens there.
+/// One request to the `beans serve` on `port`; `None` when nothing listens there.
 async fn serve_call(port: u16, method: &str, params: &serde_json::Value) -> anyhow::Result<Option<Result<serde_json::Value, String>>> {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -1059,7 +1059,7 @@ async fn serve_call(port: u16, method: &str, params: &serde_json::Value) -> anyh
             None => Ok(value["result"].clone()),
         }));
     }
-    anyhow::bail!("lorca serve closed the connection")
+    anyhow::bail!("beans serve closed the connection")
 }
 
 /// Exits once the parent process is gone.
@@ -1075,7 +1075,7 @@ async fn watch_parent(app: std::sync::Arc<App>, pid: u32) {
 }
 
 /// Quitting (the app stopping its CLI, Ctrl-C, a closed terminal) first stops the commands bots
-/// left running in their terminals, so none outlives Lorca and their rows say so; then the
+/// left running in their terminals, so none outlives Beans and their rows say so; then the
 /// signal ends the process as it would have.
 #[cfg(unix)]
 async fn stop_on_signal(app: std::sync::Arc<App>) {
@@ -1126,15 +1126,15 @@ async fn flush_outbox_once(app: &std::sync::Arc<App>) {
 async fn doctor(app: &std::sync::Arc<App>) {
     let ok = |label: &str, good: bool, detail: String| println!("{} {label}: {detail}", if good { "✔" } else { "✘" });
     ok("home", app.config.home.is_dir(), app.config.home.display().to_string());
-    ok("identity", app.has_identity(), if app.has_identity() { "present".into() } else { "run `lorca identity new`".into() });
+    ok("identity", app.has_identity(), if app.has_identity() { "present".into() } else { "run `beans identity new`".into() });
     let port_free = std::net::TcpListener::bind(("127.0.0.1", app.config.port)).is_ok();
-    ok("port", port_free, if port_free { format!("{} free", app.config.port) } else { format!("{} busy (lorca serve running?)", app.config.port) });
+    ok("port", port_free, if port_free { format!("{} free", app.config.port) } else { format!("{} busy (beans serve running?)", app.config.port) });
     match app.relay_url() {
         Some(url) => {
             let reachable = app.relay.health(&url).await.is_ok();
             ok("relay", reachable, if reachable { url } else { format!("{url} unreachable") });
         }
-        None => ok("relay", false, "not configured (LORCA_RELAY_URL); single-Device mode".into()),
+        None => ok("relay", false, "not configured (BEANS_RELAY_URL); single-Device mode".into()),
     }
     let credentials = app.credentials.lock().unwrap().connected_kinds();
     ok("providers", !credentials.is_empty(), if credentials.is_empty() { "none connected".into() } else { credentials.join(", ") });

@@ -6,9 +6,12 @@ icon: Smartphone
 
 The phone app is a full Device on your account: the same keys, the same chats, the same end-to-end encryption. Bots keep running on your computers; the phone talks to them through the relay.
 
+Fresh phone cores use `beans-v2/core` or `beans-dev-v2/core`; JavaScript returns the path without creating account storage, and Android push decryption uses the same root. Existing accounts are not migrated. App/extension push keys use the versioned `beans-v2.push-key` account in the existing app group. Building Android requires an operator Firebase input matching the actual app id; iOS has no Firebase prerequisite.
+
+
 ## Pair your phone
 
-In the desktop app, choose **Pair a Device…**, then scan the QR code with the phone app. You can also paste a pairing string from the desktop app or from `lorca pair` on any computer that already has your identity, or open it as a `lorca://pair` link. Pairing needs a [relay](/docs/relay) your phone can reach.
+In the desktop app, choose **Pair a Device…**, then scan the QR code with the phone app. You can also paste a pairing string from the desktop app or from `beans pair` on any computer that already has your identity, or open it as a `beans://pair?v=2&…` link. Pairing needs a [relay](/docs/relay) your phone can reach. The original deep-link URL is validated before pairing, without rebuilding router parameters; duplicate or versionless codes cannot persist an account.
 
 ## What you can do
 

@@ -31,7 +31,7 @@ import (
 
 // fileScheme serves the files the pages show (attachments, bot images) by an opaque token, never
 // by path: only a file the app handed out a URL for can be read.
-const fileScheme = "lorca-file"
+const fileScheme = "beans-file"
 
 // FileInfo is a file on this computer as the composer and the bubbles need it.
 type FileInfo struct {
@@ -272,7 +272,7 @@ func (Files) URL(path string) string {
 // SavePasted writes what was pasted into the composer (a screenshot, a copied file) to a
 // temporary file the CLI can read. An image with no name becomes "Pasted image <date>.png".
 func (Files) SavePasted(name string, data []byte) (FileInfo, error) {
-	directory := filepath.Join(os.TempDir(), "lorca-paste")
+	directory := filepath.Join(os.TempDir(), "beans-paste")
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return FileInfo{}, err
 	}

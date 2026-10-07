@@ -33,11 +33,11 @@ const revision = "a".repeat(40);
 test("complete all inventory requires hash-bound EAS store provenance", async () => {
   const path = await server();
   const v = readVersion();
-  const names = [`Beans-${v}.zip`, `Beans-${v}.dmg`, "appcast.xml", `Beans-${v}.apk`, `Beans-${v}.aab`, `Beans-${v}-store.ipa`, `Lorca Setup ${v}.exe`, `lorca_${v}_amd64.deb`, `lorca_${v}_arm64.deb`, "install-linux-amd64.sh", "install-linux-arm64.sh", ...["windows-amd64", "linux-amd64", "linux-arm64"].flatMap((p) => [`update-${p}.json`, `lorca-${v}-${p}.tar.gz`])];
+  const names = [`Beans-${v}.zip`, `Beans-${v}.dmg`, "appcast.xml", `Beans-${v}.apk`, `Beans-${v}.aab`, `Beans-${v}-store.ipa`, `Beans Setup ${v}.exe`, `beans_${v}_amd64.deb`, `beans_${v}_arm64.deb`, "install-linux-amd64.sh", "install-linux-arm64.sh", ...["windows-amd64", "linux-amd64", "linux-arm64"].flatMap((p) => [`update-${p}.json`, `beans-${v}-${p}.tar.gz`])];
   for (const name of names) await writeFile(join(path, name), "fixture");
   const sha = createHash("sha256").update("fixture").digest("hex");
   for (const suffix of ["macos-aarch64.tar.gz", "linux-aarch64.tar.gz", "linux-x86_64.tar.gz", "windows-x86_64.zip"]) {
-    const name = `lorca-cli-${suffix}`;
+    const name = `beans-cli-${suffix}`;
     await writeFile(join(path, name), "fixture");
     await writeFile(join(path, `${name}.sha256`), `${sha}  ${name}\n`);
   }
@@ -67,9 +67,9 @@ test("tag, revision, scope and unknown assets fail closed", async () => {
 });
 test("missing inventory, zero files, orphan checksums and checksum mismatch fail", async () => {
   const path = await server();
-  await writeFile(join(path, "lorca-cli-linux-x86_64.tar.gz.sha256"), "wrong");
+  await writeFile(join(path, "beans-cli-linux-x86_64.tar.gz.sha256"), "wrong");
   await expect(buildReleaseManifest(tag, revision, path)).rejects.toThrow("no archive");
-  await writeFile(join(path, "lorca-cli-linux-x86_64.tar.gz"), "archive");
+  await writeFile(join(path, "beans-cli-linux-x86_64.tar.gz"), "archive");
   await expect(buildReleaseManifest(tag, revision, path)).rejects.toThrow("differs");
   await writeFile(join(path, "beans-server-updater.py"), "");
   await expect(buildReleaseManifest(tag, revision, path)).rejects.toThrow("size");

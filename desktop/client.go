@@ -14,7 +14,7 @@ import (
 
 // Errors the pages word themselves; each is the English key of its translation.
 var (
-	errNotRunning       = errors.New("The Lorca CLI is not running")
+	errNotRunning       = errors.New("The Beans CLI is not running")
 	errConnectionClosed = errors.New("The CLI connection closed")
 	errConnectionDrop   = errors.New("The CLI connection dropped")
 )

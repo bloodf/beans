@@ -1,5 +1,5 @@
 import XCTest
-@testable import Lorca
+@testable import Beans
 
 final class ChatNotificationTests: XCTestCase {
     private let start = Date(timeIntervalSince1970: 100)

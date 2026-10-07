@@ -1,6 +1,6 @@
 import AppKit
 #if !BEANS_CHROME_STANDALONE
-@testable import Lorca
+@testable import Beans
 #endif
 
 /// Shared by XCTest and the isolated settings runner; no app store or avatar dependency.

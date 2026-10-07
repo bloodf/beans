@@ -92,7 +92,7 @@
       },
       {
         "title": "KI-Anbieter verbinden",
-        "body": "Melde dich mit ChatGPT oder Grok an oder füge einen DeepSeek-API-Schlüssel ein."
+        "body": "Melde dich mit ChatGPT an oder füge einen DeepSeek-API-Schlüssel ein."
       },
       {
         "title": "Mit Chef sprechen",
@@ -121,7 +121,7 @@
       },
       {
         "q": "Welche KI wird verwendet?",
-        "a": "Dein eigenes Konto oder dein API-Schlüssel. Melde dich mit ChatGPT oder Grok an oder füge einen DeepSeek-Schlüssel hinzu. Jeder Bot kann einen anderen Anbieter nutzen, den du jederzeit ändern kannst."
+        "a": "Dein eigenes Konto oder dein API-Schlüssel. Melde dich mit ChatGPT an oder füge einen DeepSeek-Schlüssel hinzu. Jeder Bot kann einen anderen Anbieter nutzen, den du jederzeit ändern kannst."
       },
       {
         "q": "Was kann ein Bot auf meinem Computer tun?",
@@ -256,7 +256,7 @@
       "Dateien, Gedächtnis, Routinen und MCP-Werkzeuge"
     ],
     "subscriptionTitle": "Schon ein Abo?",
-    "subscriptionBody": "Verbinde ChatGPT oder Grok mit einem geeigneten Konto. Die Nutzungslimits deines Anbieters gelten weiterhin.",
+    "subscriptionBody": "Verbinde ChatGPT mit einem geeigneten Konto. Die Grok-Anmeldung ist bis zur Prüfung des Beans-OAuth-Vertrags deaktiviert. Die Nutzungslimits deines Anbieters gelten weiterhin.",
     "apiTitle": "Lieber ein API-Schlüssel?",
     "apiBody": "Verbinde Anthropic, DeepSeek, OpenCode oder einen kompatiblen Endpunkt. Der Anbieter berechnet die Nutzung nach seinen Tarifen.",
     "costNote": "KI-Nutzung wird separat abgerechnet. Mehr Bots können mehr von deinem Kontingent verbrauchen. Dein Computer muss ebenfalls online bleiben.",

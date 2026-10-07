@@ -552,7 +552,7 @@ async fn images_the_model_cannot_take_are_left_out() {
     let text = text_of(&result);
     assert_eq!(types, ["image/jpeg", "image/png", "image/png", "image/png", "image/png", "image/png", "image/png", "image/png"], "{text}");
     assert!(text.contains("[An image was left out: its data is not base64]"), "{text}");
-    assert!(text.contains("[An image was left out: it is not an image Lorca can read]"), "{text}");
+    assert!(text.contains("[An image was left out: it is not an image Beans can read]"), "{text}");
     assert!(text.contains("at most 10 images"), "{text}");
 }
 

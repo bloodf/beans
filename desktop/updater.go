@@ -70,10 +70,10 @@ type beansUpdater struct {
 var desktopUpdater beansUpdater
 
 func desktopUpdateTokenPath() string {
-	if path, set := os.LookupEnv("LORCA_UPDATE_TOKEN_FILE"); set {
+	if path, set := os.LookupEnv("BEANS_UPDATE_TOKEN_FILE"); set {
 		return path
 	}
-	home := os.Getenv("LORCA_HOME")
+	home := os.Getenv("BEANS_HOME")
 	if home == "" {
 		home = defaultCLIHome()
 	}
@@ -83,7 +83,7 @@ func desktopUpdateTokenPath() string {
 // Provision only the token for a CLI the launcher starts, never replace operator configuration.
 func ensureDesktopUpdateToken() (string, error) {
 	path := desktopUpdateTokenPath()
-	if _, set := os.LookupEnv("LORCA_UPDATE_TOKEN_FILE"); set {
+	if _, set := os.LookupEnv("BEANS_UPDATE_TOKEN_FILE"); set {
 		return path, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -823,6 +823,10 @@ func updateGET(ctx context.Context, address string, limit int64) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
+	return updateGETRequest(req, limit)
+}
+
+func updateGETRequest(req *http.Request, limit int64) ([]byte, error) {
 	req.Header.Set("User-Agent", "Beans-Updater")
 	// Public GET only: no account/provider credentials, cookies, or GitHub token.
 	response, err := updateHTTPClient.Do(req)
@@ -896,7 +900,7 @@ func readyDesktopRelease(ctx context.Context) (*verifiedDesktopRelease, error) {
 	if err = json.Unmarshal(body, &manifest); err != nil {
 		return nil, err
 	}
-	if manifest.Schema != 1 || manifest.Version != version || manifest.Protocol < 3 || !updateRevision.MatchString(manifest.Revision) {
+	if manifest.Schema != 1 || manifest.Version != version || manifest.Protocol < 5 || !updateRevision.MatchString(manifest.Revision) {
 		return nil, errors.New("invalid Beans release manifest")
 	}
 	seen := make(map[string]readyUpdateArtifact, len(manifest.Artifacts))
@@ -911,7 +915,7 @@ func readyDesktopRelease(ctx context.Context) (*verifiedDesktopRelease, error) {
 	}
 	target := runtime.GOOS + "-" + runtime.GOARCH
 	metadata, ok := seen["update-"+target+".json"]
-	archive, archiveOK := seen["lorca-"+version+"-"+target+".tar.gz"]
+	archive, archiveOK := seen["beans-"+version+"-"+target+".tar.gz"]
 	if !ok || !archiveOK || metadata.Version != version || archive.Version != version {
 		return nil, errors.New("the Beans desktop release is incomplete")
 	}
@@ -957,20 +961,32 @@ func readyDesktopRelease(ctx context.Context) (*verifiedDesktopRelease, error) {
 func verifyUpdateRelay(ctx context.Context, selected string, required int) error {
 	u, err := url.Parse(selected)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil ||
-		u.RawQuery != "" || u.Fragment != "" || strings.EqualFold(u.Hostname(), "relay.lorca.app") {
+		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || required < 5 {
 		return errors.New("select a Beans relay and upgrade it before installing this client")
 	}
-	data, err := updateGET(ctx, strings.TrimRight(selected, "/")+"/v1/health", 4096)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(selected, "/")+"/v1/health", nil)
+	if err != nil {
+		return errors.New("select a valid Beans relay before installing this client")
+	}
+	req.Header.Set("Beans-Protocol", "5")
+	req.Header.Set("Beans-Format", "beans-v2")
+	data, err := updateGETRequest(req, 4096)
 	if err != nil {
 		return errors.New("the selected relay must be reachable before this protocol update")
 	}
 	var health struct {
-		OK       bool   `json:"ok"`
-		Service  string `json:"service"`
-		Protocol int    `json:"protocol"`
+		OK                  bool   `json:"ok"`
+		Service             string `json:"service"`
+		Format              string `json:"format"`
+		Protocol            int    `json:"protocol"`
+		MinProtocol         int    `json:"min_protocol"`
+		MinRosterProtocol   int    `json:"min_roster_protocol"`
+		MemoryConfigVersion int    `json:"memory_config_version"`
 	}
-	if json.Unmarshal(data, &health) != nil || !health.OK || health.Service != "lorca-relay" || health.Protocol < required {
-		return fmt.Errorf("upgrade the selected relay to protocol %d before installing this client", required)
+	if json.Unmarshal(data, &health) != nil || !health.OK || health.Service != "beans-relay" ||
+		health.Format != "beans-v2" || health.Protocol < required || health.MinProtocol < 5 || health.MinProtocol > required ||
+		health.MinRosterProtocol < health.MinProtocol || health.MinRosterProtocol > required || health.MemoryConfigVersion != 1 {
+		return fmt.Errorf("upgrade the selected relay to Beans v2 protocol %d with enforced compatible floors before installing this client", required)
 	}
 	return nil
 }

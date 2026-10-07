@@ -1,10 +1,10 @@
-//! The Runner's `mcp.json`: MCP servers the user adds by hand, with `lorca mcp`, or from the apps,
+//! The Runner's `mcp.json`: MCP servers the user adds by hand, with `beans mcp`, or from the apps,
 //! in the file format Claude Desktop, Cursor, and Claude Code share
 //! (`{ "mcpServers": { "name": { … } } }`). Each server that is on becomes a plugin of the Runner
 //! (`source` `mcp.json`, one server named [`SERVER`]), so bots call its tools from codemode scripts,
 //! Auto-review checks the ones that change things, and a remote server signs in with OAuth once it
 //! asks for it. The file is the truth: the Runner reads it again when it changes on disk, and
-//! writes it back with the user's order and the fields Lorca does not know kept.
+//! writes it back with the user's order and the fields Beans does not know kept.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ pub const RECONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(1
 // MARK: - Ordered JSON
 
 /// A JSON value whose objects keep their keys in the order they came in, so a file the user
-/// arranged keeps its arrangement when Lorca writes it back.
+/// arranged keeps its arrangement when Beans writes it back.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum Json {
     #[default]
@@ -93,7 +93,7 @@ impl Json {
         Some(fields.remove(index).1)
     }
 
-    /// The text Lorca writes: two-space indentation and a final newline, as editors leave it.
+    /// The text Beans writes: two-space indentation and a final newline, as editors leave it.
     pub fn to_pretty(&self) -> Vec<u8> {
         let mut bytes = serde_json::to_vec_pretty(self).unwrap_or_default();
         bytes.push(b'\n');
@@ -212,7 +212,7 @@ impl<'de> Visitor<'de> for JsonVisitor {
 
 // MARK: - A server's entry
 
-/// One server as its entry says it, in Lorca's terms.
+/// One server as its entry says it, in Beans's terms.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerConfig {
     pub kind: Kind,
@@ -267,7 +267,7 @@ fn timeout_of(value: &Json) -> Result<u64, String> {
 
 /// An entry's `toolExposure` and `exposure`, as pi writes them: `hidden` keeps a tool, or with
 /// `exposure`, every tool not named otherwise, from bots; `codemode`, `deferred`, and `direct` all
-/// show it, since Lorca's bots reach every plugin tool from a script.
+/// show it, since Beans's bots reach every plugin tool from a script.
 fn tool_rules(entry: &Json) -> Result<Vec<super::ToolRule>, String> {
     let hidden = |value: &Json, field: &str| match value.as_str() {
         Some("hidden") => Ok(true),
@@ -292,10 +292,10 @@ fn tool_rules(entry: &Json) -> Result<Vec<super::ToolRule>, String> {
     Ok(rules)
 }
 
-/// The keys of an entry in the order Lorca writes them, after the ones the entry already has.
+/// The keys of an entry in the order Beans writes them, after the ones the entry already has.
 const CANONICAL_KEYS: [&str; 10] = ["type", "command", "args", "env", "cwd", "url", "headers", "oauth", "description", "disabled"];
 
-/// The canonical key another app spells `key` as, when it is one Lorca reads.
+/// The canonical key another app spells `key` as, when it is one Beans reads.
 fn canonical_key(key: &str) -> Option<&'static str> {
     Some(match key {
         "type" | "transport" => "type",
@@ -353,10 +353,10 @@ fn pairs(pairs: &[(String, String)]) -> Json {
     Json::Object(pairs.iter().map(|(k, v)| (k.clone(), Json::String(v.clone()))).collect())
 }
 
-/// One server's entry as Lorca writes it: the spellings other apps use for the same field
+/// One server's entry as Beans writes it: the spellings other apps use for the same field
 /// (Windsurf's `serverUrl`, OpenCode's `environment` and command list, Zed's command object,
 /// `enabled`) in the one Claude's and Cursor's files use, values as strings, a remote server's
-/// `type`, and the fields Lorca does not know, as they are. The entry's own order stays.
+/// `type`, and the fields Beans does not know, as they are. The entry's own order stays.
 pub fn canonical(entry: &Json) -> Result<Json, String> {
     let Json::Object(fields) = entry else { return Err("A server is a JSON object.".into()) };
     let mut kind: Option<&'static str> = None;
@@ -696,7 +696,7 @@ pub fn server_id(name: &str) -> String {
 /// `mcp.json` as the Runner last read it.
 #[derive(Debug, Clone, Default)]
 pub struct McpFile {
-    /// What was read, to tell a change on disk from Lorca's own write.
+    /// What was read, to tell a change on disk from Beans's own write.
     pub bytes: Option<Vec<u8>>,
     pub doc: Json,
     pub servers: Vec<FileServer>,
@@ -765,7 +765,7 @@ impl McpFile {
     }
 }
 
-/// An entry's known keys in the order Lorca writes them (`command` before `args`), then the rest
+/// An entry's known keys in the order Beans writes them (`command` before `args`), then the rest
 /// as they came: for an entry that arrived as a JSON object from the apps, whose keys are sorted.
 pub fn in_canonical_order(entry: &Json) -> Json {
     let Some(fields) = entry.as_object() else { return entry.clone() };
@@ -1022,7 +1022,7 @@ pub fn servers_in_app_config(text: &str) -> Result<Parsed, String> {
     })
 }
 
-/// Where other apps on this computer keep their MCP servers, for `lorca mcp import`: the ones
+/// Where other apps on this computer keep their MCP servers, for `beans mcp import`: the ones
 /// found, with their names.
 pub fn known_sources() -> Vec<(&'static str, PathBuf)> {
     let Some(home) = dirs::home_dir() else { return Vec::new() };
@@ -1041,7 +1041,7 @@ pub fn known_sources() -> Vec<(&'static str, PathBuf)> {
 
 // MARK: - The apps' view
 
-/// A server as the apps and `lorca mcp` show it: its entry, whether it is on, why it cannot run,
+/// A server as the apps and `beans mcp` show it: its entry, whether it is on, why it cannot run,
 /// and, for one that runs, its plugin's state and how many tools it offered last time.
 pub fn server_out(store: &Store, server: &FileServer, tool_count: Option<usize>) -> Value {
     let canonical_entry = canonical(&server.entry).unwrap_or_else(|_| server.entry.clone());
@@ -1074,7 +1074,7 @@ mod runner {
 
     use super::*;
 
-    /// Whether this process is `lorca serve`, which keeps servers connected. A one-off `lorca mcp`
+    /// Whether this process is `beans serve`, which keeps servers connected. A one-off `beans mcp`
     /// starts none in the background, only the one it was asked about.
     static SERVING: AtomicBool = AtomicBool::new(false);
 
@@ -1087,7 +1087,7 @@ mod runner {
         store.get(&server.id).filter(|plugin| plugin.source == SOURCE && server.problem().is_none())
     }
 
-    /// Every server in the file, for the apps' MCP Servers list and `lorca mcp list`.
+    /// Every server in the file, for the apps' MCP Servers list and `beans mcp list`.
     pub fn list(app: &Arc<App>) -> Value {
         let store = app.plugins.lock().unwrap();
         let servers: Vec<Value> = store
@@ -1241,7 +1241,7 @@ mod runner {
         Ok(())
     }
 
-    /// Connects a server and waits for it, so the apps and `lorca mcp get` show whether it starts
+    /// Connects a server and waits for it, so the apps and `beans mcp get` show whether it starts
     /// and what it offers. `fresh` drops its connection first, as the apps' Reconnect does;
     /// otherwise a connection it has, or one under way, is the answer. Its state says how it went.
     pub async fn reconnect(app: &Arc<App>, name: &str, fresh: bool) -> Result<(), String> {
@@ -1338,7 +1338,7 @@ mod runner {
         }
     }
 
-    /// The `mcp.*` verbs this Runner answers, from the local app, `lorca mcp`, or a sealed request.
+    /// The `mcp.*` verbs this Runner answers, from the local app, `beans mcp`, or a sealed request.
     pub async fn serve_request(app: &Arc<App>, verb: &str, body: &Value) -> Result<Value, String> {
         let name = || body["name"].as_str().map(str::trim).filter(|name| !name.is_empty()).map(str::to_string).ok_or_else(|| "missing name".to_string());
         match verb {
@@ -1368,7 +1368,7 @@ mod runner {
                 Box::pin(reconnect(app, &name, body["fresh"].as_bool().unwrap_or(true))).await?;
                 get(app, &name)
             }
-            // `lorca mcp sign-in`: the browser opens on this Runner. The apps sign in through
+            // `beans mcp sign-in`: the browser opens on this Runner. The apps sign in through
             // `plugins.connect`, which opens it on the Device that asked.
             "mcp.sign_in" => {
                 let name = name()?;
@@ -1378,7 +1378,7 @@ mod runner {
                     plugin_of(&store, server).map(|plugin| plugin.manifest.id.clone()).ok_or_else(|| server.problem().unwrap_or_else(|| format!("{name} is turned off.")))?
                 };
                 let started = super::super::mcp::connect_oauth(app, &id, SERVER, None).await?;
-                // `wait` answers once the sign-in has ended, as `lorca mcp sign-in` waits.
+                // `wait` answers once the sign-in has ended, as `beans mcp sign-in` waits.
                 if let (true, Some(done)) = (body["wait"] == true, started.done) {
                     let deadline = super::super::sign_in::TIMEOUT + std::time::Duration::from_secs(30);
                     match tokio::time::timeout(deadline, done).await {
@@ -1397,7 +1397,7 @@ mod runner {
                 super::super::sign_out(app, &id, Some(SERVER))?;
                 get(app, &name)
             }
-            // The file as it is now, after an edit made outside Lorca.
+            // The file as it is now, after an edit made outside Beans.
             "mcp.reload" => {
                 reload(app);
                 Ok(list(app))
@@ -1416,8 +1416,8 @@ mod runner {
         settle(app, changes);
     }
 
-    /// At `lorca serve`'s start: a server added while Lorca was not running connects once to list
-    /// its tools. An edit to the file made outside Lorca waits for `mcp.reload`.
+    /// At `beans serve`'s start: a server added while Beans was not running connects once to list
+    /// its tools. An edit to the file made outside Beans waits for `mcp.reload`.
     pub fn start(app: &Arc<App>) {
         SERVING.store(true, Ordering::Relaxed);
         let ids: Vec<String> = app.plugins.lock().unwrap().installed().iter().filter(|p| p.source == SOURCE).map(|p| p.manifest.id.clone()).collect();
@@ -1445,7 +1445,7 @@ pub async fn on_runner(app: &std::sync::Arc<crate::app::App>, runner_id: Option<
     }
 }
 
-/// `mcp.parse`: the servers pasted JSON describes, for the apps' JSON field and `lorca mcp`.
+/// `mcp.parse`: the servers pasted JSON describes, for the apps' JSON field and `beans mcp`.
 pub fn parse_reply(text: &str) -> Result<Value, String> {
     let servers = parse_servers(text)?;
     Ok(json!({
@@ -1643,7 +1643,7 @@ mod tests {
     #[cfg(feature = "runner")]
     #[test]
     fn a_tool_is_hidden_and_shown_in_the_entrys_tool_exposure() {
-        let home = std::env::temp_dir().join(format!("lorca-mcp-hide-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-mcp-hide-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("mcp.json"), r#"{"mcpServers": {"docs": {"command": "x", "toolExposure": {"delete_*": "hidden"}}}}"#).unwrap();
         let app = crate::app::App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();

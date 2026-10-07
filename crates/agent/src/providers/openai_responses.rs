@@ -19,7 +19,7 @@ use crate::retry::{send_with_retry, RequestFailure, DEFAULT_MAX_RETRY_DELAY_MS};
 use crate::transform::{transform_messages, TransformOptions};
 use crate::types::ThinkingLevel;
 
-const USER_AGENT: &str = concat!("lorca-agent/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("beans-agent/", env!("CARGO_PKG_VERSION"));
 
 pub struct OpenAiResponsesProvider {
     pub provider_id: String,
@@ -64,7 +64,7 @@ impl OpenAiResponsesProvider {
             max_retry_delay_ms: DEFAULT_MAX_RETRY_DELAY_MS,
             thinking_level: None,
             info,
-            client: lorca_tls::client(),
+            client: beans_tls::client(),
         }
     }
 
@@ -74,7 +74,7 @@ impl OpenAiResponsesProvider {
     }
 
     pub fn without_redirects(mut self) -> Self {
-        self.client = lorca_tls::client_builder().redirect(reqwest::redirect::Policy::none())
+        self.client = beans_tls::client_builder().redirect(reqwest::redirect::Policy::none())
             .build().expect("a client over a built TLS config");
         self
     }
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(openai.body(&request)["input"][2]["output"][1]["type"], "input_image");
     }
 
-    /// `LORCA_CREDENTIALS=~/.lorca/credentials.json cargo test -p lorca-agent live_opencode_zen --
+    /// `BEANS_CREDENTIALS=~/.beans-v2/credentials.json cargo test -p beans-agent live_opencode_zen --
     /// --ignored --nocapture`: Zen's GPT, Grok, and Muse Spark routes read a random code off a
     /// tool's screenshot sent in a user message, and the probe reports whether each also reads
     /// one inside the output. `live_opencode_go` does the same on Go's GPT and Grok.

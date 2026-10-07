@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-@testable import Lorca
+@testable import Beans
 
 @MainActor
 final class NativeChromeTests: XCTestCase {
@@ -57,7 +57,7 @@ final class NativeChromeTests: XCTestCase {
 
     func testSidebarSymbolsAndFirstRowGeometry() throws {
         guard AppStore.shared.isMock else {
-            throw XCTSkip("Sidebar chrome requires LORCA_MOCK=1; never load an account for rendering checks")
+            throw XCTSkip("Sidebar chrome requires BEANS_MOCK=1; never load an account for rendering checks")
         }
         try prepareAvatarGeometry()
         AppStore.shared.start()
@@ -102,7 +102,7 @@ final class NativeChromeTests: XCTestCase {
 
     func testWindowChromeKeepsControlsInsideAccessoriesAcrossSidebarSwaps() throws {
         guard AppStore.shared.isMock else {
-            throw XCTSkip("Window chrome requires LORCA_MOCK=1")
+            throw XCTSkip("Window chrome requires BEANS_MOCK=1")
         }
         try prepareAvatarGeometry()
         AppStore.shared.start()
@@ -147,7 +147,7 @@ final class NativeChromeTests: XCTestCase {
                             } else {
                                 print("UNAVAILABLE: native focus-ring compositor; key=\(window.isKeyWindow)")
                             }
-                        } else { XCTFail("first sidebar row missing; use LORCA_MOCK=1") }
+                        } else { XCTFail("first sidebar row missing; use BEANS_MOCK=1") }
                         XCTAssertNotEqual(search.field.focusRingType, .none)
                     } else { XCTFail("search missing") }
                     for footer in footers {

@@ -31,7 +31,7 @@
     },
     {
       "q": "Posso continuar usando minha assinatura de IA?",
-      "a": "O Beans oferece login por assinatura do ChatGPT e Grok. Outros provedores integrados usam chaves de API, e servidores compatíveis têm seus próprios requisitos. Confira as regras do plano e de uso do seu provedor."
+      "a": "O Beans oferece login por assinatura do ChatGPT. O login Grok está desativado até a verificação do contrato OAuth do Beans. Outros provedores usam chaves de API; confira seus requisitos e limites."
     },
     {
       "q": "Meu celular executa os bots?",
@@ -64,7 +64,7 @@
   "beans": [
     "Um Runner Mac, Windows ou Linux que pertence a você. Ele precisa permanecer online.",
     "ChatGPT, Grok, Anthropic, DeepSeek, OpenCode e endpoints compatíveis.",
-    "Login ChatGPT/Grok; chaves de API para outros provedores. Credenciais sincronizadas com criptografia entre dispositivos.",
+    "Login ChatGPT; OAuth Grok desativado. Chaves de API para outros provedores; credenciais sincronizadas com criptografia.",
     "Nomes, instruções, provedor, memória e Runner definidos para cada bot.",
     "Conversas diretas, grupos com até seis bots, menções e repasses entre Runners.",
     "Arquivos em pastas, comandos shell, pesquisa na web e plugins MCP com fluxos de permissão.",

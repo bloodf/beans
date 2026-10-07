@@ -8,7 +8,7 @@ Beans uses a local key pair for identity and end-to-end encryption to sync data 
 
 ## Your identity is a key
 
-Creating an identity makes a 32-byte secret on your first Device. Everything else is derived from it. The **backup phrase** is that secret written as thirteen groups of four characters.
+Creating an identity makes a 32-byte secret on your first Device. Fresh key derivation uses salt `beans-v2`. The **backup phrase** starts with the separate token `beans-v2`, followed by thirteen groups of four base32 characters. Restore rejects missing/wrong prefixes before decoding; old unversioned phrases and account stores are incompatible and are not automatically migrated or reset.
 
 - The secret stays on the device that created or restored it.
 - Whoever holds the phrase holds the account. Beans cannot recover it for you.
@@ -47,7 +47,7 @@ A relay also lets go of an account nothing has touched for a year: no device con
 
 ## On your computer
 
-- Keys, credentials, and chats are files under `~/.lorca/`, readable only by your user.
+- Keys, credentials, and chats are files under `~/.beans-v2/`, readable only by your user.
 - Bots run as your user and shell commands retain that user's full computer access after Auto-review allows them. See [Tools](/docs/tools).
 - Plugin secrets and sign-ins stay on the Runner where the plugin is installed.
 - Bot memory is scrubbed of anything that looks like a credential before it is written.

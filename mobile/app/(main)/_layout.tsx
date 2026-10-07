@@ -1,6 +1,6 @@
 import { Stack } from "expo-router";
 import { Platform, StyleSheet, useWindowDimensions, View } from "react-native";
-import { CompactWidthView } from "../../modules/lorca-core/CompactWidthView";
+import { CompactWidthView } from "../../modules/beans-core/CompactWidthView";
 import { t, useLanguage } from "../../src/i18n";
 import { PaneWidth, useSidebarWidth, useWide } from "../../src/ui/layout";
 import { useStackScreenOptions } from "../../src/ui/navigation";

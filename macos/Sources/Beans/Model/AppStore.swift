@@ -1,0 +1,1835 @@
+import AppKit
+import Foundation
+
+enum StoreEvent {
+    case snapshotReplaced
+    case rosterChanged
+    case chatsChanged
+    case chatChanged(Chat.ID)
+    case messageAdded(Chat.ID, Message.ID)
+    case messageChanged(Chat.ID, Message.ID)
+    case messageRemoved(Chat.ID, Message.ID)
+    case respondingChanged(Chat.ID)
+    /// A page of older messages was put ahead of the chat's first one.
+    case olderMessagesLoaded(Chat.ID)
+    /// A bot's turn ended; the date is when this app saw it start.
+    case turnFinished(Chat.ID, Bot.ID, Date)
+    /// A command in the chat has run long enough to count as a running task.
+    case runningTasksChanged(Chat.ID)
+    case selectionChanged
+    case connectionChanged
+    case identityChanged
+}
+
+enum SettingsPane: String, CaseIterable {
+    case general
+    case providers
+    case autoReview = "auto-review"
+    case plugins
+    case bots
+    case device
+    case advanced
+
+    /// Bots and plugins live on a Runner, so these panes show one Device, picked at the top of
+    /// the page. The others hold this computer's settings and the account's: the shared roster and
+    /// the provider credentials.
+    var isDeviceScoped: Bool {
+        switch self {
+        case .general, .providers, .autoReview, .advanced: false
+        case .bots, .plugins, .device: true
+        }
+    }
+}
+
+enum Selection: Hashable {
+    case chat(Chat.ID)
+    case settings(SettingsPane)
+
+    /// Settings panes are listed by the settings sidebar; chats by the main one.
+    var isSettings: Bool {
+        if case .chat = self { return false }
+        return true
+    }
+}
+
+/// The app's model. Everything comes from the CLI over 127.0.0.1; mutations are applied
+/// optimistically and confirmed by the events the CLI sends back. `BEANS_MOCK=1` runs the
+/// seeded demo data with the in-process reply engine instead.
+@MainActor
+final class AppStore {
+    static let shared = AppStore()
+
+    let isMock = ProcessInfo.processInfo.environment["BEANS_MOCK"] == "1"
+    let client = CLIClient()
+    let launcher = CLILauncher()
+
+    private(set) var devices: [Device] = []
+    private(set) var bots: [Bot] = []
+    private(set) var chats: [Chat] = []
+    /// Every bot's routines, from the roster.
+    private(set) var routines: [Routine] = []
+    /// Auto-review, shared through the roster.
+    private(set) var autoReview = AutoReview()
+    /// Account-wide pause, synchronized through the roster.
+    private(set) var paused = false
+    /// The account's provider credentials, the same on every Device.
+    private(set) var providers: [ProviderCredential] = []
+    /// The models the CLI's catalog offers, for the Model and Thinking pickers.
+    private(set) var catalog: [ProviderModel] = []
+
+    /// True when the CLI answers on localhost (mock: toggled from the Debug menu).
+    private(set) var isConnected = false
+    /// The first connection is still loading. The window is visible throughout this phase.
+    private(set) var isStarting = true
+    /// nil until the CLI has supplied the initial snapshot.
+    private(set) var hasIdentity: Bool?
+    private(set) var isIdentityDevice = false
+    private(set) var identityID: String?
+    private(set) var relayConnected = false
+    /// The relay refused this build's protocol: it syncs again once Beans is updated.
+    private(set) var relayUpdateRequired = false
+    /// Why the last try to connect to the relay failed, as the CLI words it, until one goes
+    /// through.
+    private(set) var relayError: String?
+    private(set) var relayURL: String?
+
+    /// Turns in flight, by job id: the chat and the bot (empty while a group exchange is between
+    /// member turns), and the routine when the turn is one of its runs. Drives the "is working"
+    /// row, the presence dot on avatars, and the spinner on a routine.
+    private var runningJobs: [(id: String, chatID: Chat.ID, botID: Bot.ID, routineID: Routine.ID?)] = []
+    /// When each turn in flight was first seen, so a finished turn's reply can be told from
+    /// what the bot said before it.
+    private var jobStarts: [String: Date] = [:]
+    /// Per-chat, per-bot retry and turn-end state for avatar looks; `activityExpiry` redraws
+    /// once an error look runs out and is cancelled when the turn's state goes away.
+    private var activity = BotActivityLedger()
+    private var activityExpiry: [BotActivityLedger.Key: DispatchWorkItem] = [:]
+    private var failedTurns: Set<BotActivityLedger.Key> = []
+    /// When this app saw each command start running in its terminal, by row.
+    private var commandStarts: [Message.ID: Date] = [:]
+    /// How long a command runs before it counts as a running task.
+    static let taskDelay: TimeInterval = 2
+    /// The chat last reported to the CLI as on screen; `.some(nil)` is "none".
+    private var reportedWatchedChat: Chat.ID??
+    private var loadingOlder: Set<Chat.ID> = []
+    private var replyEngine: ReplyEngine?
+    private var started = false
+    private var startupTask: Task<Void, Never>?
+    private var bootstrapGeneration = 0
+    private var isBootstrapping = true
+    private var bootstrapEvents: [(name: String, data: Data)] = []
+    private var isApplyingBootstrap = false
+
+    private struct Subscription {
+        weak var owner: AnyObject?
+        let handler: (StoreEvent) -> Void
+    }
+
+    private var subscriptions: [Subscription] = []
+
+    private init() {
+        if isMock {
+            replyEngine = ReplyEngine(store: self)
+        }
+    }
+
+    // MARK: - Lifecycle
+
+    func start() {
+        guard !started else { return }
+        StartupTrace.mark("store starting")
+        started = true
+        if isMock {
+            resetMockData()
+            isConnected = true
+            finishStartup()
+            hasIdentity = true
+            isIdentityDevice = true
+            emit(.connectionChanged)
+            emit(.identityChanged)
+            return
+        }
+
+        // A slow or silent CLI leaves the user with the offline recovery controls. This
+        // deadline bounds the loading state, never the time until a window is shown.
+        startupTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 2_500_000_000) } catch { return }
+            guard let self else { return }
+            self.finishStartup()
+            self.emit(.connectionChanged)
+        }
+
+        client.onStateChange = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .connected:
+                StartupTrace.mark("websocket connected")
+                self.bootstrapGeneration += 1
+                let generation = self.bootstrapGeneration
+                Task { await self.bootstrap(generation: generation) }
+            case .disconnected, .connecting:
+                self.bootstrapGeneration += 1
+                self.isBootstrapping = true
+                self.bootstrapEvents.removeAll()
+                self.reportedWatchedChat = nil
+                if self.isConnected {
+                    self.isConnected = false
+                    self.runningJobs.removeAll()
+                    self.thinkingBots.removeAll()
+                    self.resetActivity()
+                    self.emit(.connectionChanged)
+                }
+            }
+        }
+        client.onEvent = { [weak self] name, data in
+            guard let self else { return }
+            if self.isBootstrapping {
+                self.bootstrapEvents.append((name, data))
+            } else {
+                self.handle(event: name, data: data)
+            }
+        }
+        launcher.onStatusChange = { [weak self] status in
+            guard let self else { return }
+            // A child that is starting or restarting owns the next connection attempt.
+            // Cancel any socket retry left over from the previous process.
+            switch status {
+            case .starting, .failed: self.client.disconnect()
+            default: break
+            }
+            if case .failed = status { self.finishStartup() }
+            self.emit(.connectionChanged)
+        }
+        launcher.onReady = { [weak self] in self?.client.connect() }
+        client.onReconnectNeeded = { [weak self] in self?.launcher.ensureRunning() }
+        launcher.ensureRunning()
+    }
+
+    func stop() {
+        finishStartup()
+        client.disconnect()
+        launcher.stop()
+    }
+
+    private func finishStartup() {
+        startupTask?.cancel()
+        startupTask = nil
+        isStarting = false
+    }
+
+    /// What the offline state should say while the CLI is not answering.
+    var offlineStatus: String {
+        launcher.status.message
+    }
+
+    func reconnect() {
+        guard !isMock else {
+            setConnected(true)
+            return
+        }
+        client.reconnect()
+    }
+
+    private func bootstrap(generation: Int) async {
+        do {
+            // The snapshot includes identity and connection state as well as messages. Publish
+            // them together, so roster events cannot expose empty previews before it arrives.
+            let snapshot = try await client.request("bootstrap", as: Wire.Snapshot.self)
+            guard generation == bootstrapGeneration else { return }
+            StartupTrace.mark("snapshot received")
+            isApplyingBootstrap = true
+            apply(snapshot: snapshot)
+            for event in bootstrapEvents { handle(event: event.name, data: event.data) }
+            bootstrapEvents.removeAll()
+            isApplyingBootstrap = false
+            isBootstrapping = false
+            isConnected = true
+            finishStartup()
+            emit(.snapshotReplaced)
+            emit(.connectionChanged)
+            emit(.identityChanged)
+            StartupTrace.mark("snapshot presented")
+        } catch {
+            guard generation == bootstrapGeneration else { return }
+            finishStartup()
+            emit(.connectionChanged)
+            NSLog("bootstrap failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func apply(snapshot: Wire.Snapshot) {
+        hasIdentity = snapshot.hasIdentity
+        isIdentityDevice = snapshot.isIdentityDevice
+        identityID = snapshot.identityId
+        relayURL = snapshot.relayUrl
+        relayConnected = snapshot.relayConnected
+        relayUpdateRequired = snapshot.relayUpdateRequired ?? false
+        relayError = snapshot.relayError?.message
+        devices = snapshot.devices.map { $0.toModel() }
+        bots = snapshot.bots.map { $0.toModel() }
+        // A snapshot carries each chat's newest messages. Older pages this app already loaded
+        // stay ahead of them, so a resync does not throw the transcript back to the last page.
+        let loaded = chats
+        chats = snapshot.chats.map { incoming in
+            var chat = incoming.toModel()
+            if let existing = loaded.first(where: { $0.id == chat.id }), let first = chat.messages.first,
+                let index = existing.index(of: first.id), index > 0
+            {
+                chat.messages.insert(contentsOf: existing.messages[..<index], at: 0)
+                chat.hasMore = existing.hasMore
+            }
+            return chat
+        }
+        // Commands already running in a snapshot count at once, including after their next
+        // update. Keep the delay only for commands whose start this app observed live.
+        for chat in chats {
+            for message in chat.messages where message.commandRun?.takesInput == true {
+                if commandStarts[message.id] == nil { commandStarts[message.id] = .distantPast }
+            }
+        }
+        routines = (snapshot.routines ?? []).map { $0.toModel() }
+        autoReview = snapshot.autoReview?.toModel() ?? AutoReview()
+        paused = snapshot.paused ?? false
+        providers = (snapshot.providers ?? []).compactMap { $0.toModel() }
+        catalog = (snapshot.models ?? []).compactMap { $0.toModel() }
+        runningJobs = (snapshot.runningTurns ?? []).map { ($0.jobId, $0.chatId, $0.botId, $0.routineId) }
+        resetActivity()
+        for id in snapshot.runningChatIds where !runningJobs.contains(where: { $0.chatID == id }) {
+            runningJobs.append(("chat:\(id)", id, "", nil))
+        }
+        sortChats()
+        emit(.snapshotReplaced)
+    }
+
+    // MARK: - Events from the CLI
+
+    private func handle(event name: String, data: Data) {
+        func decode<T: Decodable>(_ type: T.Type) -> T? {
+            try? Wire.decoder.decode(Wire.Envelope<T>.self, from: data).data
+        }
+
+        switch name {
+        case "snapshot":
+            if let snapshot = decode(Wire.Snapshot.self) { apply(snapshot: snapshot) }
+
+        case "roster.changed":
+            guard let roster = decode(Wire.RosterChanged.self) else { return }
+            devices = roster.devices.map { $0.toModel() }
+            bots = roster.bots.map { $0.toModel() }
+            if let incoming = roster.routines { routines = incoming.map { $0.toModel() } }
+            if let incoming = roster.autoReview { autoReview = incoming.toModel() }
+            paused = roster.paused ?? false
+            if let incoming = roster.providers { providers = incoming.compactMap { $0.toModel() } }
+            if let incoming = roster.models { catalog = incoming.compactMap { $0.toModel() } }
+            var merged: [Chat] = []
+            var changed: [Chat.ID] = []
+            for summary in roster.chats {
+                let existing = chats.first { $0.id == summary.id }
+                let chat = summary.toModel(
+                    existingMessages: existing?.messages ?? [], existingUnread: existing?.unreadCount ?? 0, existingHasMore: existing?.hasMore ?? false)
+                if let existing, existing.botIDs != chat.botIDs || existing.customTitle != chat.customTitle {
+                    changed.append(chat.id)
+                }
+                merged.append(chat)
+            }
+            chats = merged
+            let activityKeys = Set(activity.turnEnds.keys).union(activity.retrying).union(activityExpiry.keys).union(failedTurns)
+            for key in activityKeys {
+                if !chats.contains(where: { $0.id == key.chatID }) { removeActivity(chatID: key.chatID) }
+                if !bots.contains(where: { $0.id == key.botID }) { removeActivity(botID: key.botID) }
+            }
+            sortChats()
+            emit(.rosterChanged)
+            emit(.chatsChanged)
+            for id in changed { emit(.chatChanged(id)) }
+
+        case "message.added", "message.updated":
+            guard let payload = decode(Wire.MessageEvent.self) else { return }
+            if let botID = payload.message.author.botId {
+                let key = BotActivityLedger.Key(chatID: payload.chatId, botID: botID)
+                if retryNotes.removeValue(forKey: key) != nil { emit(.respondingChanged(payload.chatId)) }
+                activity.settleRetry(botID, in: payload.chatId)
+            } else if payload.message.author.kind == "you" {
+                removeActivity(chatID: payload.chatId)
+            }
+            // The thinking bot's next message (a tool call, a reply) is where its thinking went.
+            if name == "message.added", let botID = payload.message.author.botId, thinkingBots[payload.chatId] == botID {
+                thinkingBots[payload.chatId] = nil
+            }
+            upsert(payload.message.toModel(), in: payload.chatId)
+            if let botID = payload.message.author.botId, payload.message.state.kind == "failed" {
+                failedTurns.insert(.init(chatID: payload.chatId, botID: botID))
+                if !runningJobs.contains(where: { $0.chatID == payload.chatId && $0.botID == botID }) {
+                    noteTurnEnded(botID, in: payload.chatId)
+                }
+            }
+
+        case "message.removed":
+            guard let payload = decode(Wire.MessageRemoved.self),
+                let index = chats.firstIndex(where: { $0.id == payload.chatId })
+            else { return }
+            chats[index].messages.removeAll { $0.id == payload.messageId }
+            commandStarts[payload.messageId] = nil
+            emit(.messageRemoved(payload.chatId, payload.messageId))
+
+        case "chat.removed":
+            guard let payload = decode(Wire.ChatRemoved.self) else { return }
+            chats.removeAll { $0.id == payload.chatId }
+            runningJobs.removeAll { $0.chatID == payload.chatId }
+            removeActivity(chatID: payload.chatId)
+            emit(.chatsChanged)
+
+        case "job.started":
+            guard let job = decode(Wire.JobEvent.self) else { return }
+            // A snapshot may already list it.
+            runningJobs.removeAll { $0.id == "pending:\(job.chatId)" || $0.id == job.jobId }
+            runningJobs.append((job.jobId, job.chatId, job.botId, job.routineId))
+            jobStarts[job.jobId] = jobStarts[job.jobId] ?? Date()
+            if !job.botId.isEmpty {
+                activity.turnStarted(job.botId, in: job.chatId)
+                failedTurns.remove(.init(chatID: job.chatId, botID: job.botId))
+                retryNotes.removeValue(forKey: .init(chatID: job.chatId, botID: job.botId))
+                activityExpiry.removeValue(forKey: .init(chatID: job.chatId, botID: job.botId))?.cancel()
+            }
+            emit(.respondingChanged(job.chatId))
+            emit(.chatsChanged)
+
+        case "job.finished":
+            guard let job = decode(Wire.JobEvent.self) else { return }
+            runningJobs.removeAll { $0.id == job.jobId }
+            if job.botId.isEmpty {
+                retryNotes = retryNotes.filter { $0.key.chatID != job.chatId }
+            } else {
+                retryNotes.removeValue(forKey: .init(chatID: job.chatId, botID: job.botId))
+            }
+            if job.botId.isEmpty || thinkingBots[job.chatId] == job.botId {
+                thinkingBots[job.chatId] = nil
+            }
+            emit(.respondingChanged(job.chatId))
+            emit(.chatsChanged)
+            if let startedAt = jobStarts.removeValue(forKey: job.jobId), !job.botId.isEmpty {
+                emit(.turnFinished(job.chatId, job.botId, startedAt))
+            }
+            if job.botId.isEmpty {
+                activity.settleRetry("", in: job.chatId)
+            } else {
+                noteTurnEnded(job.botId, in: job.chatId)
+            }
+
+        case "job.retry":
+            guard let retry = decode(Wire.JobRetry.self) else { return }
+            let seconds = max(1, Int((Double(retry.delayMs) / 1000).rounded()))
+            retryNotes[.init(chatID: retry.chatId, botID: retry.botId)] = L("Retrying (%d of %d) in %d s", retry.attempt, retry.maxAttempts, seconds)
+            activity.retry(retry.botId, in: retry.chatId)
+            emit(.respondingChanged(retry.chatId))
+            emit(.chatsChanged)
+
+        case "job.thinking":
+            guard let job = decode(Wire.JobThinking.self) else { return }
+            thinkingBots[job.chatId] = job.botId
+            emit(.respondingChanged(job.chatId))
+            emit(.chatsChanged)
+
+        case "chat.usage":
+            guard let payload = decode(Wire.ChatUsageEvent.self),
+                let index = chats.firstIndex(where: { $0.id == payload.chatId })
+            else { return }
+            chats[index].usage = payload.usage.toModel()
+            emit(.chatChanged(payload.chatId))
+
+        case "relay.status":
+            guard let status = decode(Wire.RelayStatus.self) else { return }
+            relayConnected = status.connected
+            relayUpdateRequired = status.updateRequired ?? false
+            relayError = status.error?.message
+            relayURL = status.url ?? relayURL
+            emit(.rosterChanged)
+
+        case "identity.changed":
+            guard let payload = decode(Wire.IdentityChanged.self) else { return }
+            hasIdentity = payload.hasIdentity
+            emit(.identityChanged)
+
+        default:
+            break
+        }
+    }
+
+    private func upsert(_ message: Message, in chatID: Chat.ID) {
+        guard let chatIndex = chats.firstIndex(where: { $0.id == chatID }) else { return }
+        noteCommand(message, in: chatID)
+        if let messageIndex = chats[chatIndex].index(of: message.id) {
+            chats[chatIndex].messages[messageIndex] = message
+            emit(.messageChanged(chatID, message.id))
+            if message.state == .complete { refreshChatList() }
+        } else {
+            chats[chatIndex].messages.append(message)
+            emit(.messageAdded(chatID, message.id))
+            sortChats()
+            emit(.chatsChanged)
+        }
+    }
+
+    // MARK: - Observation
+
+    func observe(_ owner: AnyObject, _ handler: @escaping (StoreEvent) -> Void) {
+        subscriptions.append(Subscription(owner: owner, handler: handler))
+    }
+
+    private func emit(_ event: StoreEvent) {
+        guard !isApplyingBootstrap else { return }
+        subscriptions.removeAll { $0.owner == nil }
+        for subscription in subscriptions {
+            subscription.handler(event)
+        }
+    }
+
+    // MARK: - Lookup
+
+    func bot(_ id: Bot.ID) -> Bot? {
+        bots.first { $0.id == id }
+    }
+
+    func device(_ id: Device.ID) -> Device? {
+        devices.first { $0.id == id }
+    }
+
+    /// Devices that can be assigned bots: those with a desktop `os`.
+    var runners: [Device] {
+        devices.filter(\.isRunner)
+    }
+
+    func chat(_ id: Chat.ID) -> Chat? {
+        chats.first { $0.id == id }
+    }
+
+    func bots(in chat: Chat) -> [Bot] {
+        chat.botIDs.compactMap(bot)
+    }
+
+    func bots(on runnerID: Device.ID) -> [Bot] {
+        bots.filter { $0.runnerID == runnerID }
+    }
+
+    func routine(_ id: Routine.ID) -> Routine? {
+        routines.first { $0.id == id }
+    }
+
+    /// A bot's routines, oldest first, with the running state from the turns in flight.
+    func routines(for botID: Bot.ID) -> [Routine] {
+        routines.filter { $0.botID == botID }.sorted { $0.createdAt < $1.createdAt }.map { routine in
+            var routine = routine
+            routine.isRunning = routine.isRunning || runningJobs.contains { $0.routineID == routine.id }
+            return routine
+        }
+    }
+
+    var thisDevice: Device? {
+        devices.first(where: \.isThisDevice)
+    }
+
+    func title(for chat: Chat) -> String {
+        if chat.isGroup, let custom = chat.customTitle, !custom.isEmpty { return custom }
+        let names = chat.botIDs.compactMap { bot($0)?.name }
+        return names.isEmpty ? L("New Chat") : names.joined(separator: ", ")
+    }
+
+    func subtitle(for chat: Chat) -> String {
+        let members = bots(in: chat)
+        if chat.isDM, let only = members.first {
+            let host = device(only.runnerID)?.name ?? L("unassigned")
+            return L("%@ on %@", only.provider.name, host)
+        }
+        let hosts = Set(members.compactMap { device($0.runnerID)?.name })
+        let runnerLabel = hosts.count == 1 ? (hosts.first ?? "") : L("%d Runners", hosts.count)
+        let botLabel = members.count == 1 ? L("1 bot") : L("%d bots", members.count)
+        return L("Group · %@ · %@", botLabel, runnerLabel)
+    }
+
+    func preview(for chat: Chat) -> String {
+        // The last thing worth previewing: tool calls never are, except a sent message.
+        let shown = chat.messages.last { message in
+            if case let .tool(tool) = message.body { return tool.isSentMessage }
+            return true
+        }
+        guard let last = shown else { return L("No messages yet") }
+        let body: String
+        switch last.body {
+        case let .text(value): body = value.isEmpty ? Attachment.summary(last.attachments) : value
+        case let .tool(tool): body = L("Messaged %@: %@", tool.targetBotID.flatMap(bot)?.name ?? L("a teammate"), tool.detail)
+        case let .handoff(from, to, reason):
+            body = !chat.isGroup && chat.botIDs.contains(to)
+                ? L("Message from %@: %@", bot(from)?.name ?? L("a teammate"), reason)
+                : L("Handed off to %@", bot(to)?.name ?? L("a teammate"))
+        case let .notice(value): body = value
+        case let .permission(request):
+            let who = bot(last.author.botID ?? "")?.name ?? L("A bot")
+            body = "\(who) \(request.verbPhrase)"
+        }
+
+        let flattened = body
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "`", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if chat.isGroup, case let .bot(id) = last.author, case .text = last.body {
+            return "\(bot(id)?.name ?? L("Bot")): \(flattened)"
+        }
+        return flattened
+    }
+
+    // MARK: - Connection
+
+    func setConnected(_ connected: Bool) {
+        guard isConnected != connected else { return }
+        isConnected = connected
+        emit(.connectionChanged)
+    }
+
+    // MARK: - Requests
+
+    /// Fire-and-forget request. A failure is logged and the store re-syncs from the CLI, so an
+    /// optimistic change that the CLI rejected gets rolled back.
+    private func perform(_ method: String, _ params: [String: Any] = [:]) {
+        guard !isMock else { return }
+        Task {
+            do {
+                _ = try await client.request(method, params)
+            } catch {
+                NSLog("\(method) failed: \(error.localizedDescription)")
+                if let snapshot = try? await client.request("bootstrap", as: Wire.Snapshot.self) {
+                    apply(snapshot: snapshot)
+                }
+            }
+        }
+    }
+
+    // MARK: - Chat mutation
+
+    private func sortChats() {
+        chats.sort { lhs, rhs in
+            if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
+            if lhs.lastActivity == rhs.lastActivity { return lhs.id < rhs.id }
+            return lhs.lastActivity > rhs.lastActivity
+        }
+    }
+
+    /// The one DM with this bot, created on first use. DMs are keyed by the bot, so opening one
+    /// twice lands in the same thread.
+    @discardableResult
+    func dm(with botID: Bot.ID) -> Chat.ID {
+        if let existing = chats.first(where: { $0.isDM && $0.botIDs == [botID] }) {
+            return existing.id
+        }
+        return createChat(kind: .dm, with: [botID], title: nil)
+    }
+
+    @discardableResult
+    func createChat(kind: Chat.Kind, with botIDs: [Bot.ID], title: String?) -> Chat.ID {
+        let botIDs: [Bot.ID] = kind == .dm ? Array(botIDs.prefix(1)) : Array(botIDs.prefix(Chat.maxGroupBots))
+        let chat = Chat(
+            id: "chat-\(UUID().uuidString.lowercased().prefix(8))",
+            kind: kind,
+            customTitle: kind == .group ? title : nil,
+            botIDs: botIDs,
+            messages: [],
+            unreadCount: 0,
+            isPinned: false,
+            createdAt: Date()
+        )
+        chats.insert(chat, at: 0)
+        sortChats()
+        emit(.chatsChanged)
+        perform(
+            "chats.create",
+            ["id": chat.id, "kind": kind.rawValue, "bot_ids": botIDs, "title": title ?? ""])
+        return chat.id
+    }
+
+    @discardableResult
+    func createBot(
+        name: String,
+        description: String = "",
+        symbolName: String,
+        accent: Accent,
+        runnerID: Device.ID,
+        provider: ProviderCredential.Kind,
+        model: String? = nil,
+        thinking: String? = nil,
+        templateID: BotTemplate.ID? = nil,
+        greeting: String? = nil
+    ) -> Bot.ID {
+        let bot = Bot(
+            id: "bot-\(UUID().uuidString.lowercased().prefix(8))",
+            name: name,
+            description: description,
+            symbolName: symbolName,
+            accent: accent,
+            runnerID: runnerID,
+            provider: provider,
+            model: model,
+            createdAt: Date()
+        )
+        bots.append(bot)
+        emit(.rosterChanged)
+        emit(.chatsChanged)
+
+        // The CLI gives every bot its direct chat; create it under the id the app will open.
+        if !isMock {
+            let chatID = "chat-\(UUID().uuidString.lowercased().prefix(8))"
+            let chat = Chat(
+                id: chatID, kind: .dm, customTitle: nil, botIDs: [bot.id], messages: [],
+                unreadCount: 0, isPinned: false, createdAt: Date())
+            chats.insert(chat, at: 0)
+            sortChats()
+            emit(.chatsChanged)
+            var params: [String: Any] = [
+                "id": bot.id, "name": name, "description": description, "symbol_name": symbolName,
+                "accent": accent.rawValue, "runner_id": runnerID, "provider": provider.wireValue,
+                "model": model ?? "", "thinking": thinking ?? "", "chat_id": chatID,
+            ]
+            if let templateID {
+                params["template_id"] = templateID
+                params["greeting"] = greeting ?? ""
+            }
+            perform("bots.create", params)
+        }
+        return bot.id
+    }
+
+    /// Adds a bot from a marketplace template on `runnerID` and answers with its direct chat.
+    /// The CLI gives it the template's routines, paused, and a first turn that answers the
+    /// user's greeting: the bot sets itself up there and asks about the rest.
+    func addBot(from template: BotTemplate, runnerID: Device.ID) -> Chat.ID {
+        let botID = createBot(
+            name: template.name, description: template.description, symbolName: template.symbolName,
+            accent: template.accent, runnerID: runnerID, provider: preferredProvider, templateID: template.id,
+            greeting: L("Hi %@, introduce yourself.", template.name))
+        return dm(with: botID)
+    }
+
+    /// The provider a bot made without asking runs with: the first one the account connected.
+    var preferredProvider: ProviderCredential.Kind {
+        providerKinds.first { credential(for: $0)?.isConnected == true } ?? .deepseek
+    }
+
+    /// Every provider a bot can run with: the built-in ones, then the ones the user added.
+    var providerKinds: [ProviderCredential.Kind] {
+        ProviderCredential.Kind.builtIn + providers.map(\.kind).filter(\.isCustom)
+    }
+
+    func updateBot(_ id: Bot.ID, name: String, description: String? = nil, provider: ProviderCredential.Kind? = nil) {
+        guard let index = bots.firstIndex(where: { $0.id == id }) else { return }
+        bots[index].name = name
+        if let description { bots[index].description = description }
+        if let provider { bots[index].provider = provider }
+        emit(.rosterChanged)
+        emit(.chatsChanged)
+        var params: [String: Any] = ["id": id, "name": name]
+        if let description { params["description"] = description }
+        if let provider { params["provider"] = provider.wireValue }
+        perform("bots.update", params)
+    }
+
+    /// Changes one bot's abilities without writing another bot's policy.
+    func setBotCapabilities(_ id: Bot.ID, _ capabilities: BotCapabilities) {
+        guard let index = bots.firstIndex(where: { $0.id == id }) else { return }
+        bots[index].capabilities = capabilities
+        emit(.rosterChanged)
+        perform("bots.update", ["id": id, "capabilities": [
+            "shell": capabilities.shell, "write": capabilities.write,
+            "plugins": capabilities.plugins.map { $0 as Any } ?? NSNull(),
+        ]])
+    }
+
+    func setPaused(_ value: Bool) async throws {
+        if isMock {
+            paused = value
+        } else {
+            let result = try await client.request("account.pause", ["paused": value], as: PauseResult.self)
+            paused = result.paused
+        }
+        emit(.rosterChanged)
+    }
+
+    private struct PauseResult: Decodable { let paused: Bool }
+
+    private struct BotUpdated: Decodable { let bot: Wire.Bot }
+
+    /// Saves the look and photo in one request and waits for the CLI, so the Look sheet keeps its
+    /// draft when the save fails. Nothing changes here until the CLI answers with the saved bot.
+    func saveBotLook(_ id: Bot.ID, look: BotLookChange, photo: BotPhotoChange) async throws {
+        guard bots.contains(where: { $0.id == id }), let params = BotLookChange.updateParams(id, look: look, photo: photo) else { return }
+        let saved: Bot
+        if isMock {
+            guard var bot = bot(id) else { return }
+            if case let .replace(value) = look { bot.look = value }
+            if case .reset = look { bot.look = nil }
+            switch photo {
+            case .keep: break
+            case .remove: bot.avatar = nil
+            case let .set(url):
+                let attachment = Attachment(id: "att-\(UUID().uuidString.lowercased().prefix(12))", name: url.lastPathComponent, mime: "image/png", size: 0)
+                attachmentURLs[attachment.id] = url
+                bot.avatar = attachment
+            }
+            saved = bot
+        } else {
+            saved = try await client.request("bots.update", params, as: BotUpdated.self).bot.toModel()
+            if case let .set(url) = photo, let attachment = saved.avatar {
+                attachmentURLs[attachment.id] = url
+            }
+        }
+        guard let index = bots.firstIndex(where: { $0.id == id }) else { return }
+        bots[index] = saved
+        emit(.rosterChanged)
+        emit(.chatsChanged)
+        for chat in chats where chat.botIDs.contains(id) { emit(.chatChanged(chat.id)) }
+    }
+
+    /// Provider, model, and thinking level a bot runs with. nil means the provider's default.
+    func setBotRuntime(_ id: Bot.ID, provider: ProviderCredential.Kind, model: String?, thinking: String?) {
+        guard let index = bots.firstIndex(where: { $0.id == id }) else { return }
+        bots[index].provider = provider
+        bots[index].model = model
+        bots[index].thinking = thinking
+        emit(.rosterChanged)
+        emit(.chatsChanged)
+        for chat in chats where chat.botIDs.contains(id) { emit(.chatChanged(chat.id)) }
+        perform("bots.update", ["id": id, "provider": provider.wireValue, "model": model ?? "", "thinking": thinking ?? ""])
+    }
+
+    /// Summarizes the chat's older part for its bot now, on the Runner.
+    func compactChat(_ id: Chat.ID) {
+        perform("chats.compact", ["chat_id": id])
+    }
+
+    // MARK: - Plugins
+
+    /// The marketplace: its plugins, each with the Runners that have it, and its bots.
+    func marketplace() async throws -> Marketplace {
+        if isMock { return MockData.marketplace() }
+        let wire = try await client.request("marketplace", [:], as: Wire.Marketplace.self)
+        return Marketplace(plugins: wire.plugins.map { $0.toModel() }, bots: wire.bots.map { $0.toModel() })
+    }
+
+    /// Installs a marketplace plugin on a Runner (here, or sealed to that Runner).
+    func installPlugin(_ pluginID: String, on runnerID: Device.ID) async throws -> InstalledPlugin {
+        guard !isMock else { return InstalledPlugin(id: pluginID, name: pluginID, description: "", version: "", icon: "", state: .ready, detail: "Ready") }
+        return try await client.request("plugins.install", ["runner_id": runnerID, "plugin_id": pluginID], as: Wire.PluginInstalled.self).status.toModel()
+    }
+
+    func uninstallPlugin(_ pluginID: String, on runnerID: Device.ID) async throws {
+        guard !isMock else { return }
+        _ = try await client.request("plugins.uninstall", ["runner_id": runnerID, "plugin_id": pluginID])
+    }
+
+    func pluginDetail(_ pluginID: String, on runnerID: Device.ID) async throws -> PluginDetail {
+        if isMock {
+            let status = device(runnerID)?.plugins.first { $0.id == pluginID } ?? InstalledPlugin(id: pluginID, name: pluginID, description: "", version: "", icon: "", state: .ready, detail: "Ready")
+            return PluginDetail(status: status, homepage: nil, variables: [.init(name: "GITHUB_TOKEN", description: "A personal access token, instead of signing in.", secret: true, required: false, isSet: false, value: nil)], servers: [.init(name: "github", kind: "http", url: "https://api.githubcopilot.com/mcp/", oauth: true, signedIn: status.state == .ready)], skills: [])
+        }
+        return try await client.request("plugins.detail", ["runner_id": runnerID, "plugin_id": pluginID], as: Wire.PluginDetail.self).toModel()
+    }
+
+    /// Sets variables on the Runner; a secret goes out in the request and is never read back.
+    func setPluginVariables(_ pluginID: String, on runnerID: Device.ID, variables: [String: String]) async throws -> InstalledPlugin {
+        guard !isMock else { return InstalledPlugin(id: pluginID, name: pluginID, description: "", version: "", icon: "", state: .ready, detail: "Ready") }
+        return try await client.request("plugins.set_variables", ["runner_id": runnerID, "plugin_id": pluginID, "variables": variables], as: Wire.PluginInstalled.self).status.toModel()
+    }
+
+    /// Starts a plugin's sign-in for the Runner; the browser opens on this Mac.
+    func connectPlugin(_ pluginID: String, on runnerID: Device.ID) async throws {
+        guard !isMock else { return }
+        _ = try await client.request("plugins.connect", ["runner_id": runnerID, "plugin_id": pluginID])
+    }
+
+    /// Forgets a plugin server's sign-in on its Runner. Nothing is revoked at the server; the
+    /// plugin's next use asks for a sign-in again.
+    func signOutPlugin(_ pluginID: String, server: String, on runnerID: Device.ID) async throws {
+        guard !isMock else { return }
+        _ = try await client.request("plugins.sign_out", ["runner_id": runnerID, "plugin_id": pluginID, "server": server])
+    }
+
+    // MARK: - MCP servers
+
+    /// The demo's mcp.json files, by Runner.
+    private var mockMcp: [Device.ID: [McpServer]] = [:]
+
+    private func mockMcpServers(_ runnerID: Device.ID) -> [McpServer] {
+        if let servers = mockMcp[runnerID] { return servers }
+        let servers = runnerID == "dev-workbench" ? MockData.mcpServers() : []
+        mockMcp[runnerID] = servers
+        return servers
+    }
+
+    /// The demo's Runner takes its servers as the CLI would: the ones that run are its plugins.
+    private func setMockMcpServers(_ servers: [McpServer], on runnerID: Device.ID) {
+        mockMcp[runnerID] = servers
+        guard let index = devices.firstIndex(where: { $0.id == runnerID }) else { return }
+        devices[index].plugins = devices[index].plugins.filter { !$0.isMcpServer } + servers.compactMap { $0.isEnabled ? $0.status : nil }
+        emit(.rosterChanged)
+    }
+
+    /// An `mcp.*` reply as JSON objects. Not through `Wire.decoder`, whose snake-case keys would
+    /// rename the variables and headers of an entry.
+    private func mcpReply(_ method: String, _ params: [String: Any]) async throws -> [String: Any] {
+        let data = try await client.request(method, params)
+        return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    private func mcpServer(in reply: [String: Any]) throws -> McpServer {
+        guard let server = (reply["server"] as? [String: Any]).flatMap(McpServer.init(json:)) else {
+            throw CLIClient.RequestError(message: L("Request failed"))
+        }
+        return server
+    }
+
+    /// A Runner's mcp.json: every server in it, usable or not, here or sealed to that Runner.
+    func mcpServers(on runnerID: Device.ID) async throws -> McpFile {
+        if isMock { return McpFile(path: "~/.\(AppInfo.isDevelopment ? "beans-dev-v2" : "beans-v2")/mcp.json", servers: mockMcpServers(runnerID)) }
+        return McpFile(json: try await mcpReply("mcp.list", ["runner_id": runnerID]))
+    }
+
+    /// One server with the tools it offered when it last connected.
+    func mcpServer(_ name: String, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            guard let server = mockMcpServers(runnerID).first(where: { $0.name == name }) else {
+                throw CLIClient.RequestError(message: L("No server named %@ in mcp.json.", name))
+            }
+            return server
+        }
+        return try mcpServer(in: try await mcpReply("mcp.get", ["runner_id": runnerID, "name": name]))
+    }
+
+    /// Adds a server, or saves the one `previousName` names under `name`. The CLI checks the
+    /// entry and writes it to the Runner's mcp.json, where the server starts once to list its tools.
+    func saveMcpServer(_ name: String, entry: McpEntry, previousName: String? = nil, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            var servers = mockMcpServers(runnerID)
+            if previousName != name, servers.contains(where: { $0.name == name }) {
+                throw CLIClient.RequestError(message: L("mcp.json already has a server named %@.", name))
+            }
+            let id = name.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }.joined(separator: "-")
+            let status = InstalledPlugin(
+                id: id, name: name, description: entry.about, version: "", icon: entry.symbolName, state: .ready, detail: "Ready", source: "mcp.json")
+            let tools = [McpTool(name: "echo", about: "Echo back what you send.", isReadOnly: true), McpTool(name: "write_note", about: "Write a note.", isReadOnly: false)]
+            let server = McpServer(name: name, id: id, isEnabled: !entry.isDisabled, entry: entry, status: entry.isDisabled ? nil : status, toolCount: tools.count, tools: tools)
+            if let index = servers.firstIndex(where: { $0.name == (previousName ?? name) }) {
+                servers[index] = server
+            } else {
+                servers.append(server)
+            }
+            setMockMcpServers(servers, on: runnerID)
+            return server
+        }
+        var params: [String: Any] = ["runner_id": runnerID, "name": name, "config": entry.fields]
+        if let previousName { params["previous_name"] = previousName }
+        return try mcpServer(in: try await mcpReply("mcp.save", params))
+    }
+
+    /// Removes a server from the Runner's mcp.json, with its sign-in.
+    func removeMcpServer(_ name: String, on runnerID: Device.ID) async throws {
+        if isMock {
+            setMockMcpServers(mockMcpServers(runnerID).filter { $0.name != name }, on: runnerID)
+            return
+        }
+        _ = try await client.request("mcp.remove", ["runner_id": runnerID, "name": name])
+    }
+
+    /// Turns a server on or off; off, no bot sees it and it never starts.
+    func setMcpServer(_ name: String, enabled: Bool, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            var servers = mockMcpServers(runnerID)
+            guard let index = servers.firstIndex(where: { $0.name == name }) else {
+                throw CLIClient.RequestError(message: L("No server named %@ in mcp.json.", name))
+            }
+            var server = servers[index]
+            server.isEnabled = enabled
+            if enabled {
+                server.entry.fields.removeValue(forKey: "disabled")
+            } else {
+                server.entry.fields["disabled"] = true
+            }
+            if enabled, server.status == nil {
+                server.status = InstalledPlugin(
+                    id: server.id, name: name, description: server.entry.about, version: "", icon: server.entry.symbolName, state: .ready,
+                    detail: "Ready", source: "mcp.json")
+            }
+            servers[index] = server
+            setMockMcpServers(servers, on: runnerID)
+            return server
+        }
+        return try mcpServer(in: try await mcpReply("mcp.set_enabled", ["runner_id": runnerID, "name": name, "enabled": enabled]))
+    }
+
+    /// Connects a server and waits for it: from scratch (`fresh`), or taking a connection it has
+    /// or one under way. Its state says how it went.
+    /// Has a Runner read its mcp.json again, after an edit made outside Beans, and answers the file
+    /// as it reads now.
+    func reloadMcpFile(on runnerID: Device.ID) async throws -> McpFile {
+        if isMock { return try await mcpServers(on: runnerID) }
+        return McpFile(json: try await mcpReply("mcp.reload", ["runner_id": runnerID]))
+    }
+
+    /// Offers one of a server's tools to bots, or keeps it from them, in the Runner's mcp.json. The
+    /// server keeps its connection.
+    func setMcpTool(_ tool: String, shown: Bool, server name: String, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            var servers = mockMcpServers(runnerID)
+            guard let index = servers.firstIndex(where: { $0.name == name }) else {
+                throw CLIClient.RequestError(message: L("No server named %@ in mcp.json.", name))
+            }
+            if let toolIndex = servers[index].tools?.firstIndex(where: { $0.name == tool }) {
+                servers[index].tools?[toolIndex].isHidden = !shown
+            }
+            setMockMcpServers(servers, on: runnerID)
+            return servers[index]
+        }
+        return try mcpServer(in: try await mcpReply("mcp.hide_tool", ["runner_id": runnerID, "name": name, "tool": tool, "hidden": !shown]))
+    }
+
+    /// Forgets a remote server's sign-in on its Runner. Nothing is revoked at the server; the
+    /// server's next use asks for a sign-in again.
+    func signOutMcpServer(_ name: String, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            var servers = mockMcpServers(runnerID)
+            guard let index = servers.firstIndex(where: { $0.name == name }) else {
+                throw CLIClient.RequestError(message: L("No server named %@ in mcp.json.", name))
+            }
+            var server = servers[index]
+            server.isSignedIn = false
+            if var status = server.status {
+                status.state = .needsAuth
+                status.detail = "Sign in"
+                server.status = status
+            }
+            servers[index] = server
+            setMockMcpServers(servers, on: runnerID)
+            return server
+        }
+        return try mcpServer(in: try await mcpReply("mcp.sign_out", ["runner_id": runnerID, "name": name]))
+    }
+
+    func reconnectMcpServer(_ name: String, fresh: Bool, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            try await Task.sleep(nanoseconds: 900_000_000)
+            return try await mcpServer(name, on: runnerID)
+        }
+        return try mcpServer(in: try await mcpReply("mcp.reconnect", ["runner_id": runnerID, "name": name, "fresh": fresh]))
+    }
+
+    /// The servers pasted JSON holds, in any app's spelling; the CLI on this Mac reads it.
+    func parseMcpJSON(_ text: String) async throws -> [ParsedServer] {
+        let reply: [String: Any]
+        if isMock {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else {
+                throw CLIClient.RequestError(message: L("Not a server's JSON: expected an object."))
+            }
+            let servers: [String: Any] = (object["mcpServers"] as? [String: Any]) ?? (object["servers"] as? [String: Any]) ?? [:]
+            var entries: [[String: Any]] = []
+            if object["command"] != nil || object["url"] != nil {
+                entries = [["config": object]]
+            } else {
+                for key in servers.keys.sorted() {
+                    entries.append(["name": key, "config": servers[key] ?? [String: Any]()])
+                }
+            }
+            reply = ["servers": entries]
+        } else {
+            reply = try await mcpReply("mcp.parse", ["text": text])
+        }
+        return (reply["servers"] as? [[String: Any]] ?? []).map { server in
+            ParsedServer(
+                name: server["name"] as? String, entry: (server["config"] as? [String: Any]).map { McpEntry($0) }, problem: server["problem"] as? String)
+        }
+    }
+
+    /// Replaces Auto-review (the switch and the rules); the change shows at once and the CLI's
+    /// roster event confirms it. A new rule gets its id from the CLI.
+    func setAutoReview(_ value: AutoReview) {
+        autoReview = value
+        emit(.rosterChanged)
+        let rules: [[String: Any]] = value.rules.map { rule in
+            var row: [String: Any] = ["id": rule.id, "text": rule.text, "behavior": rule.behavior.rawValue]
+            if let tool = rule.tool { row["tool"] = tool }
+            return row
+        }
+        perform("auto_review.set", ["is_enabled": value.isEnabled, "rules": rules])
+    }
+
+    /// Answers a question: a permission card's, or a command card's. `allow`, `always`, or
+    /// `deny`. The CLI confirms with the card's new state.
+    func answerPermission(chatID: Chat.ID, messageID: Message.ID, decision: String) {
+        update(messageID, in: chatID) { message in
+            switch message.body {
+            case var .permission(request):
+                // A proposal reports saved only after the Runner confirms the write.
+                if request.isProposal { return }
+                request.decision = decision == "always" ? .always : (decision == "deny" ? .denied : .allowed)
+                if request.isConnect, request.decision == .allowed { request.summary = L("Starting the sign-in…") }
+                message.body = .permission(request)
+            case var .tool(tool):
+                guard var run = tool.run, run.state == .asking else { return }
+                run.state = decision == "deny" ? .denied : .running
+                tool.run = run
+                message.body = .tool(tool)
+            default:
+                return
+            }
+        }
+        perform("chats.permission", ["chat_id": chatID, "message_id": messageID, "decision": decision])
+    }
+
+    // MARK: - Commands
+
+    /// Types the user's answer into a command running in its terminal, then Return.
+    /// The CLI writes it to the terminal, or seals it to the bot's Runner, and keeps nothing.
+    /// Throws why it could not, such as that Runner being offline.
+    func answerCommand(chatID: Chat.ID, messageID: Message.ID, text: String) async throws {
+        guard !isMock else {
+            finishMockCommand(chatID: chatID, messageID: messageID, state: .exited)
+            return
+        }
+        _ = try await client.request("bash.stdin", ["chat_id": chatID, "message_id": messageID, "text": text])
+    }
+
+    /// Stops a running command; its card leaves once the Runner has.
+    func stopCommand(chatID: Chat.ID, messageID: Message.ID) async throws {
+        guard !isMock else {
+            finishMockCommand(chatID: chatID, messageID: messageID, state: .stopped)
+            return
+        }
+        _ = try await client.request("bash.stop", ["chat_id": chatID, "message_id": messageID])
+    }
+
+    /// Sends a command the bot is waiting on to the background (`bash.background`): the bot's
+    /// call returns and the command runs on, out of the way of Stop in the chat.
+    func sendCommandToBackground(chatID: Chat.ID, messageID: Message.ID) async throws {
+        guard !isMock else {
+            update(messageID, in: chatID) { message in
+                guard case var .tool(tool) = message.body, var run = tool.run else { return }
+                run.background = true
+                tool.run = run
+                tool.isRunning = false
+                message.body = .tool(tool)
+            }
+            return
+        }
+        _ = try await client.request("bash.background", ["chat_id": chatID, "message_id": messageID])
+    }
+
+    /// The demo has no Runner: an answer or a Stop ends the command at once.
+    private func finishMockCommand(chatID: Chat.ID, messageID: Message.ID, state: CommandRun.State) {
+        update(messageID, in: chatID) { message in
+            guard case var .tool(tool) = message.body, var run = tool.run else { return }
+            run.state = state
+            run.prompt = nil
+            tool.run = run
+            message.body = .tool(tool)
+        }
+    }
+
+    // MARK: - Routines
+
+    /// Pauses or resumes a routine. A resumed schedule counts from now.
+    func setRoutineEnabled(_ id: Routine.ID, _ enabled: Bool) {
+        guard let index = routines.firstIndex(where: { $0.id == id }) else { return }
+        routines[index].isEnabled = enabled
+        routines[index].pausedReason = nil
+        if !enabled { routines[index].nextRunAt = nil }
+        emit(.rosterChanged)
+        perform("routines.update", ["id": id, "enabled": enabled])
+    }
+
+    /// Runs the routine now, on its bot's Runner.
+    func runRoutine(_ id: Routine.ID) {
+        guard let index = routines.firstIndex(where: { $0.id == id }) else { return }
+        routines[index].isRunning = true
+        emit(.rosterChanged)
+        perform("routines.run", ["id": id])
+    }
+
+    func deleteRoutine(_ id: Routine.ID) {
+        routines.removeAll { $0.id == id }
+        emit(.rosterChanged)
+        perform("routines.delete", ["id": id])
+    }
+
+    /// A bot's memory, read from its Runner. Answers with `here == false` when the bot runs on
+    /// another Device, whose disk this computer cannot read.
+    func botMemory(_ id: Bot.ID) async throws -> BotMemory {
+        if isMock {
+            return BotMemory(
+                botID: id, here: true, runner: "This computer", path: "~/\(AppInfo.isDevelopment ? ".beans-dev-v2" : ".beans-v2")/workspaces/\(id)",
+                text: "- 2026-09-10 · from your chat with the user · the user prefers short replies\n- 2026-09-12 · invoices are reconciled on Mondays\n",
+                hash: "mock", lines: 2, bytes: 128, truncated: false, maxLines: 200, maxBytes: 24_000,
+                topics: ["clients.md"], logs: ["2026-09-12", "2026-09-15"])
+        }
+        return try await client.request("bots.memory", ["bot_id": id], as: Wire.BotMemory.self).toModel()
+    }
+
+    /// Replaces the bot's MEMORY.md. With `expectedHash`, the write is refused when the file
+    /// changed since it was read, so an edit never silently overwrites what the bot wrote.
+    func writeBotMemory(_ id: Bot.ID, text: String, expectedHash: String?) async throws -> String {
+        guard !isMock else { return "mock" }
+        var params: [String: Any] = ["bot_id": id, "text": text]
+        if let expectedHash { params["expected_hash"] = expectedHash }
+        return try await client.request("bots.memory.write", params, as: Wire.MemoryWritten.self).hash
+    }
+
+    /// "Retrying (2 of 3) in 4 s", while a turn's model call waits to be asked again.
+    private var retryNotes: [BotActivityLedger.Key: String] = [:]
+
+    func retryNote(for chatID: Chat.ID) -> String? {
+        retryNotes.filter { $0.key.chatID == chatID }.sorted { $0.key.botID < $1.key.botID }.first?.value
+    }
+
+    /// The bot whose model is reasoning in a chat, until its next message or the end of its turn.
+    private var thinkingBots: [Chat.ID: Bot.ID] = [:]
+
+    func isThinking(_ botID: Bot.ID, in chatID: Chat.ID) -> Bool {
+        thinkingBots[chatID] == botID
+    }
+
+    func deleteChat(_ id: Chat.ID) {
+        guard let chat = chat(id) else { return }
+
+        // A bot owns its DM, so deleting that row deletes the bot as one roster operation.
+        // Groups keep their other members; a group with nobody left is removed too.
+        if chat.isDM, let botID = chat.botIDs.first, bot(botID) != nil {
+            let relatedChatIDs = chats.filter { $0.botIDs.contains(botID) }.map(\.id)
+            for chatID in relatedChatIDs { replyEngine?.cancel(chatID: chatID) }
+
+            var removedChatIDs = Set<Chat.ID>()
+            var changedChatIDs: [Chat.ID] = []
+            chats = chats.compactMap { existing in
+                guard existing.botIDs.contains(botID) else { return existing }
+                if existing.isDM {
+                    removedChatIDs.insert(existing.id)
+                    return nil
+                }
+                var updated = existing
+                updated.botIDs.removeAll { $0 == botID }
+                guard !updated.botIDs.isEmpty else {
+                    removedChatIDs.insert(existing.id)
+                    return nil
+                }
+                if updated.ownerBotID == botID { updated.ownerBotID = updated.botIDs.first }
+                changedChatIDs.append(existing.id)
+                return updated
+            }
+
+            bots.removeAll { $0.id == botID }
+            routines.removeAll { $0.botID == botID }
+            let cancelledJobs = runningJobs.filter {
+                $0.botID == botID || removedChatIDs.contains($0.chatID)
+            }
+            let cancelledJobIDs = Set(cancelledJobs.map(\.id))
+            runningJobs.removeAll { cancelledJobIDs.contains($0.id) }
+            for job in cancelledJobs { jobStarts.removeValue(forKey: job.id) }
+            thinkingBots = thinkingBots.filter { $0.value != botID && !removedChatIDs.contains($0.key) }
+            removeActivity(botID: botID)
+            for chatID in removedChatIDs { removeActivity(chatID: chatID) }
+
+            emit(.rosterChanged)
+            for chatID in changedChatIDs { emit(.chatChanged(chatID)) }
+            emit(.chatsChanged)
+            perform("bots.delete", ["id": botID])
+            return
+        }
+
+        replyEngine?.cancel(chatID: id)
+        chats.removeAll { $0.id == id }
+        let cancelledJobs = runningJobs.filter { $0.chatID == id }
+        runningJobs.removeAll { $0.chatID == id }
+        for job in cancelledJobs { jobStarts.removeValue(forKey: job.id) }
+        thinkingBots.removeValue(forKey: id)
+        removeActivity(chatID: id)
+        emit(.chatsChanged)
+        perform("chats.delete", ["chat_id": id])
+    }
+
+    func togglePin(_ id: Chat.ID) {
+        guard let index = chats.firstIndex(where: { $0.id == id }) else { return }
+        chats[index].isPinned.toggle()
+        sortChats()
+        emit(.chatsChanged)
+        perform("chats.pin", ["chat_id": id, "pinned": chats.first { $0.id == id }?.isPinned ?? false])
+    }
+
+    /// Asks the CLI for the page of messages before the chat's first one. The transcript calls
+    /// this as it nears the top; one request per chat at a time.
+    func loadOlderMessages(in id: Chat.ID) {
+        guard !isMock, !loadingOlder.contains(id), let chat = chat(id), chat.hasMore, let first = chat.messages.first else { return }
+        loadingOlder.insert(id)
+        Task {
+            defer { loadingOlder.remove(id) }
+            guard let page = try? await client.request("chats.messages", ["chat_id": id, "before": first.id], as: Wire.MessagePage.self),
+                let index = chats.firstIndex(where: { $0.id == id }), chats[index].messages.first?.id == first.id
+            else { return }
+            let known = Set(chats[index].messages.map(\.id))
+            chats[index].messages.insert(contentsOf: page.messages.map { $0.toModel() }.filter { !known.contains($0.id) }, at: 0)
+            chats[index].hasMore = page.hasMore
+            emit(.olderMessagesLoaded(id))
+        }
+    }
+
+    /// Full-text chat and message matches from the local SQLite index.
+    func searchChats(_ query: String) async throws -> Wire.SearchResults {
+        guard !isMock else { return .empty }
+        return try await client.request("chats.search", ["query": query, "limit": 24], as: Wire.SearchResults.self)
+    }
+
+    /// Tells the CLI which chat the user is looking at (nil when none, or the app is not
+    /// frontmost), so a reply they watch arrive is not pushed to their phone.
+    func setWatchedChat(_ id: Chat.ID?) {
+        guard !isMock, isConnected, reportedWatchedChat != .some(id) else { return }
+        reportedWatchedChat = .some(id)
+        Task { _ = try? await client.request("ui.watching", ["chat_id": id ?? NSNull()]) }
+    }
+
+    func markRead(_ id: Chat.ID) {
+        guard let index = chats.firstIndex(where: { $0.id == id }), chats[index].unreadCount > 0
+        else { return }
+        chats[index].unreadCount = 0
+        emit(.chatsChanged)
+        perform("chats.mark_read", ["chat_id": id])
+    }
+
+    func rename(_ id: Chat.ID, to title: String) {
+        guard let index = chats.firstIndex(where: { $0.id == id }), chats[index].isGroup else { return }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        chats[index].customTitle = trimmed
+        emit(.chatChanged(id))
+        emit(.chatsChanged)
+        perform("chats.rename", ["chat_id": id, "title": trimmed])
+    }
+
+    /// What a group is for; every member reads it in its system prompt.
+    func setDescription(_ text: String, of chatID: Chat.ID) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let index = chats.firstIndex(where: { $0.id == chatID }), chats[index].isGroup,
+            chats[index].groupDescription != trimmed
+        else { return }
+        chats[index].groupDescription = trimmed
+        emit(.chatChanged(chatID))
+        perform("chats.set_description", ["chat_id": chatID, "description": trimmed])
+    }
+
+    func addBot(_ botID: Bot.ID, to chatID: Chat.ID) {
+        guard let index = chats.firstIndex(where: { $0.id == chatID }),
+            chats[index].canAddBot,
+            !chats[index].botIDs.contains(botID)
+        else { return }
+        chats[index].botIDs.append(botID)
+        if isMock {
+            let name = bot(botID)?.name ?? "A bot"
+            append(Message(author: .system, body: .notice("\(name) joined the chat.")), to: chatID)
+        }
+        emit(.chatChanged(chatID))
+        emit(.chatsChanged)
+        perform("chats.add_bot", ["chat_id": chatID, "bot_id": botID])
+    }
+
+    func removeBot(_ botID: Bot.ID, from chatID: Chat.ID) {
+        guard let index = chats.firstIndex(where: { $0.id == chatID }),
+            chats[index].canRemoveBot
+        else { return }
+        chats[index].botIDs.removeAll { $0 == botID }
+        if chats[index].ownerBotID == botID { chats[index].ownerBotID = chats[index].botIDs.first }
+        emit(.chatChanged(chatID))
+        emit(.chatsChanged)
+        perform("chats.remove_bot", ["chat_id": chatID, "bot_id": botID])
+    }
+
+    /// Makes a group member the bot holding the work.
+    func setOwner(_ botID: Bot.ID, of chatID: Chat.ID) {
+        guard let index = chats.firstIndex(where: { $0.id == chatID }),
+            chats[index].isGroup,
+            chats[index].botIDs.contains(botID),
+            chats[index].owner != botID
+        else { return }
+        chats[index].ownerBotID = botID
+        emit(.chatChanged(chatID))
+        perform("chats.set_owner", ["chat_id": chatID, "bot_id": botID])
+    }
+
+    // MARK: - Messages
+
+    @discardableResult
+    func append(_ message: Message, to chatID: Chat.ID) -> Message.ID? {
+        guard let index = chats.firstIndex(where: { $0.id == chatID }) else { return nil }
+        chats[index].messages.append(message)
+        noteCommand(message, in: chatID)
+        emit(.messageAdded(chatID, message.id))
+        sortChats()
+        emit(.chatsChanged)
+        return message.id
+    }
+
+    /// Called for every streamed token, so this stays off the chat-list path.
+    /// The sidebar preview refreshes when a step finishes instead.
+    func update(_ messageID: Message.ID, in chatID: Chat.ID, _ transform: (inout Message) -> Void) {
+        guard let chatIndex = chats.firstIndex(where: { $0.id == chatID }),
+            let messageIndex = chats[chatIndex].index(of: messageID)
+        else { return }
+        transform(&chats[chatIndex].messages[messageIndex])
+        noteCommand(chats[chatIndex].messages[messageIndex], in: chatID)
+        emit(.messageChanged(chatID, messageID))
+    }
+
+    func refreshChatList() {
+        emit(.chatsChanged)
+    }
+
+    /// Sends the message and returns the chat it landed in. Mentions are references the chat's
+    /// bot acts on (it can message that bot); the message itself stays here. `mentions` are the
+    /// bots picked from the `@` menu, which the CLI hands the bot by id. `replyTo` is the message
+    /// the user answers, which the bot reads quoted.
+    @discardableResult
+    func send(_ text: String, attachments: [OutgoingAttachment] = [], mentions: [Bot.ID] = [], replyTo: Message.ID? = nil, in chatID: Chat.ID) -> Chat.ID {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || !attachments.isEmpty, let chat = chat(chatID) else { return chatID }
+
+        // The files are known here already; the CLI keeps the ids the bubble shows.
+        for outgoing in attachments { attachmentURLs[outgoing.attachment.id] = outgoing.url }
+        let quote = replyTo.flatMap { id in chat.messages.first { $0.id == id } }.flatMap(ReplyQuote.init(quoting:))
+        let message = Message(author: .you, body: .text(trimmed), attachments: attachments.map(\.attachment), replyTo: quote)
+        append(message, to: chatID)
+
+        if isMock {
+            replyEngine?.respond(to: trimmed, in: chat, messageID: message.id)
+            return chatID
+        }
+
+        // Expect a turn to start; the CLI's job events confirm or clear this. A DM names its
+        // bot right away so the working row appears with the send.
+        if !chat.botIDs.isEmpty {
+            let pendingID = "pending:\(chatID)"
+            runningJobs.append((pendingID, chatID, chat.isDM ? chat.botIDs[0] : "", nil))
+            emit(.respondingChanged(chatID))
+            emit(.chatsChanged)
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard let self, self.runningJobs.contains(where: { $0.id == pendingID }) else { return }
+                // Nothing started (no Runner answered); stop showing the bot at work.
+                self.runningJobs.removeAll { $0.id == pendingID }
+                self.emit(.respondingChanged(chatID))
+                self.emit(.chatsChanged)
+            }
+        }
+        var params: [String: Any] = [
+            "chat_id": chatID, "text": trimmed, "message_id": message.id, "mentions": mentions,
+            "attachments": attachments.map { outgoing in
+                [
+                    "id": outgoing.attachment.id, "path": outgoing.url.path, "name": outgoing.attachment.name,
+                    "mime": outgoing.attachment.mime, "width": outgoing.attachment.width as Any,
+                    "height": outgoing.attachment.height as Any,
+                ]
+            },
+        ]
+        if let quote { params["reply_to"] = quote.messageID }
+        perform("chats.send", params)
+        return chatID
+    }
+
+    // MARK: - Attachments
+
+    /// Decoded profile images by attachment id, so avatars draw without touching the disk.
+    private var avatarImages: [Attachment.ID: NSImage] = [:]
+
+    /// The bot's profile image once this computer has it. The first ask for one that is not here
+    /// fetches the blob and redraws the roster when it lands; until then callers draw the
+    /// symbol and accent.
+    func avatarImage(for bot: Bot) -> NSImage? {
+        guard let attachment = bot.avatar else { return nil }
+        if let image = avatarImages[attachment.id] { return image }
+        if let url = attachmentURLs[attachment.id], let image = NSImage(contentsOf: url) {
+            avatarImages[attachment.id] = image
+            return image
+        }
+        guard !isMock, !fetchingAttachments.contains(attachment.id) else { return nil }
+        fetchingAttachments.insert(attachment.id)
+        Task { [weak self] in
+            let params: [String: Any] = [
+                "attachment": ["id": attachment.id, "name": attachment.name, "mime": attachment.mime, "size": attachment.size]
+            ]
+            guard let self else { return }
+            do {
+                let reply = try await client.request("files.path", params, as: Wire.FilePath.self)
+                let url = URL(fileURLWithPath: reply.path)
+                attachmentURLs[attachment.id] = url
+                if let image = NSImage(contentsOf: url) { avatarImages[attachment.id] = image }
+                emit(.rosterChanged)
+                emit(.chatsChanged)
+                for chat in chats where chat.botIDs.contains(bot.id) { emit(.chatChanged(chat.id)) }
+            } catch {
+                NSLog("fetching \(bot.name)'s image failed: \(error.localizedDescription)")
+            }
+        }
+        return nil
+    }
+
+    /// Where an attachment's bytes are on this computer. A file sent from here is known at once; one
+    /// sent from another Device is fetched through the CLI, and the message reloads when it lands.
+    private var attachmentURLs: [Attachment.ID: URL] = [:]
+    private var fetchingAttachments: Set<Attachment.ID> = []
+
+    func localURL(for attachment: Attachment, in chatID: Chat.ID, messageID: Message.ID) -> URL? {
+        if let url = attachmentURLs[attachment.id] { return url }
+        guard !isMock, !fetchingAttachments.contains(attachment.id) else { return nil }
+        fetchingAttachments.insert(attachment.id)
+        Task { [weak self] in
+            let params: [String: Any] = [
+                "attachment": ["id": attachment.id, "name": attachment.name, "mime": attachment.mime, "size": attachment.size]
+            ]
+            guard let self else { return }
+            do {
+                let reply = try await client.request("files.path", params, as: Wire.FilePath.self)
+                attachmentURLs[attachment.id] = URL(fileURLWithPath: reply.path)
+                emit(.messageChanged(chatID, messageID))
+            } catch {
+                // Left in the fetching set: the relay does not have it, and every scroll would
+                // ask again. A relaunch retries.
+                NSLog("fetching \(attachment.name) failed: \(error.localizedDescription)")
+            }
+        }
+        return nil
+    }
+
+    func isResponding(in chatID: Chat.ID) -> Bool {
+        runningJobs.contains { $0.chatID == chatID }
+    }
+
+    /// The chat's running tasks: its commands running in their terminals, here or on their
+    /// Runners, in the order they started, once each has run for `taskDelay`. A command
+    /// Auto-review is still judging has no terminal yet, and a quick one ends before it would
+    /// show, so the Running tasks button does not flash for every `ls`.
+    func runningCommands(in chatID: Chat.ID) -> [Message] {
+        let now = Date()
+        return chat(chatID)?.messages.filter { message in
+            guard message.commandRun?.takesInput == true else { return false }
+            // One that was running before this app heard of it has run long enough.
+            return now.timeIntervalSince(commandStarts[message.id] ?? .distantPast) >= Self.taskDelay
+        } ?? []
+    }
+
+    /// The commands in `chatID` that a bot's call still waits on, which Run in Background sends
+    /// there.
+    func foregroundCommands(in chatID: Chat.ID) -> [Message] {
+        chat(chatID)?.messages.filter(\.runsInForeground) ?? []
+    }
+
+    /// Notes when a command starts running in its terminal, and tells the observers once it has
+    /// run for `taskDelay`.
+    private func noteCommand(_ message: Message, in chatID: Chat.ID) {
+        guard message.commandRun?.takesInput == true else {
+            commandStarts[message.id] = nil
+            return
+        }
+        guard commandStarts[message.id] == nil else { return }
+        commandStarts[message.id] = Date()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.taskDelay) { [weak self] in
+            self?.emit(.runningTasksChanged(chatID))
+        }
+    }
+
+    /// Bots with a turn running in this chat, in the order they started.
+    func workingBots(in chatID: Chat.ID) -> [Bot.ID] {
+        var seen: [Bot.ID] = []
+        for job in runningJobs where job.chatID == chatID && !job.botID.isEmpty && !seen.contains(job.botID) {
+            seen.append(job.botID)
+        }
+        return seen
+    }
+
+    /// Whether the bot has a turn running anywhere: the green dot on its avatar.
+    func isWorking(_ botID: Bot.ID) -> Bool {
+        runningJobs.contains { $0.botID == botID }
+    }
+
+    /// What the bot's portrait shows in one chat, from the job and message signals.
+    func avatarState(of botID: Bot.ID, in chatID: Chat.ID, now: Date = Date()) -> BotAvatarState {
+        guard let chat = chat(chatID) else { return .idle }
+        let isRunning = runningJobs.contains { $0.chatID == chatID && $0.botID == botID }
+        return BotActivity.state(BotActivity.signals(
+            of: botID, in: chat.messages, isRunning: isRunning, isThinking: isThinking(botID, in: chatID),
+            isRetrying: activity.isRetrying(botID, in: chatID), finishedAt: activity.finishedAt(botID, in: chatID), now: now))
+    }
+
+    /// What the bot's portrait shows where no chat is in view: the strongest state across its chats.
+    func avatarState(of botID: Bot.ID, now: Date = Date()) -> BotAvatarState {
+        BotActivity.aggregate(chats.lazy.filter { $0.botIDs.contains(botID) }.map { self.avatarState(of: botID, in: $0.id, now: now) })
+    }
+
+    /// Notes a turn's end and redraws once its error look expires; a newer end replaces the timer.
+    private func noteTurnEnded(_ botID: Bot.ID, in chatID: Chat.ID) {
+        activity.settleRetry(botID, in: chatID)
+        let key = BotActivityLedger.Key(chatID: chatID, botID: botID)
+        guard failedTurns.remove(key) != nil else { return }
+        activity.turnEnded(botID, in: chatID, at: Date())
+        activityExpiry.removeValue(forKey: key)?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            activityExpiry[key] = nil
+            emit(.respondingChanged(chatID))
+            emit(.chatsChanged)
+        }
+        activityExpiry[key] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + BotActivity.errorDuration, execute: work)
+        emit(.respondingChanged(chatID))
+        emit(.chatsChanged)
+    }
+
+    private func resetActivity() {
+        activity.reset()
+        failedTurns.removeAll()
+        retryNotes.removeAll()
+        thinkingBots.removeAll()
+        for work in activityExpiry.values { work.cancel() }
+        activityExpiry.removeAll()
+    }
+
+    private func removeActivity(chatID: Chat.ID) {
+        activity.remove(chatID: chatID)
+        failedTurns = failedTurns.filter { $0.chatID != chatID }
+        retryNotes = retryNotes.filter { $0.key.chatID != chatID }
+        for key in activityExpiry.keys where key.chatID == chatID { activityExpiry.removeValue(forKey: key)?.cancel() }
+    }
+
+    private func removeActivity(botID: Bot.ID) {
+        activity.remove(botID: botID)
+        failedTurns = failedTurns.filter { $0.botID != botID }
+        retryNotes = retryNotes.filter { $0.key.botID != botID }
+        for key in activityExpiry.keys where key.botID == botID { activityExpiry.removeValue(forKey: key)?.cancel() }
+    }
+
+    /// The mock reply engine's turns, so the demo shows the same working state as the CLI.
+    func setMockWorking(_ botID: Bot.ID, in chatID: Chat.ID, _ working: Bool) {
+        let id = "mock:\(chatID):\(botID)"
+        runningJobs.removeAll { $0.id == id }
+        if working { runningJobs.append((id, chatID, botID, nil)) }
+        emit(.respondingChanged(chatID))
+        emit(.chatsChanged)
+    }
+
+    /// Has the bot's turn read a message it holds for its next step now: a command it waits on
+    /// goes to the background, and a reply in progress stops where it got to.
+    func sendNow(_ messageID: Message.ID, in chatID: Chat.ID) {
+        if isMock {
+            replyEngine?.sendNow(chatID: chatID)
+            return
+        }
+        perform("chats.send_now", ["chat_id": chatID, "message_id": messageID])
+    }
+
+    /// Marks a message the mock turn holds, or no longer holds.
+    func setMockQueued(_ messageID: Message.ID, in chatID: Chat.ID, _ queued: Bool) {
+        update(messageID, in: chatID) { $0.queued = queued }
+    }
+
+    func stopResponding(in chatID: Chat.ID) {
+        if isMock {
+            replyEngine?.cancel(chatID: chatID)
+            return
+        }
+        perform("chats.stop", ["chat_id": chatID])
+    }
+
+    // MARK: - Identity, pairing, providers
+
+    func createIdentity() async throws -> [String] {
+        let created = try await client.request(
+            "identity.create", ["device_name": Host.current().localizedName ?? ""], as: Wire.IdentityCreated.self)
+        hasIdentity = true
+        isIdentityDevice = true
+        emit(.identityChanged)
+        return created.phrase
+    }
+
+    /// Unpairs another Device. The CLI has the relay drop its key; the Device wipes its copy of
+    /// the account the next time it connects. Throws when the relay could not be told.
+    func unpairDevice(_ id: Device.ID) async throws {
+        if !isMock {
+            _ = try await client.request("device.unpair", ["id": id])
+        }
+        devices.removeAll { $0.id == id }
+        emit(.rosterChanged)
+    }
+
+    /// Unpairs this Device. The CLI asks the relay to drop its key, best effort, then forgets the
+    /// identity here; the `identity.changed` it sends brings back onboarding. The demo has no CLI,
+    /// so its Unpair opens onboarding instead (`UnpairDevice`).
+    func forgetIdentity() async throws {
+        _ = try await client.request("identity.forget")
+    }
+
+    /// Deletes the account on the relay and on this Device; the other Devices forget it as the
+    /// relay drops them. Throws when the relay could not be told, and nothing is deleted then.
+    func deleteAccount() async throws {
+        _ = try await client.request("identity.delete")
+    }
+
+    func restoreIdentity(phrase: String) async throws {
+        _ = try await client.request("identity.restore", ["phrase": phrase])
+        hasIdentity = true
+        isIdentityDevice = true
+        emit(.identityChanged)
+    }
+
+    func startPairing() async throws -> Wire.PairStart {
+        try await client.request("pair.start", as: Wire.PairStart.self)
+    }
+
+    func pairingStatus(nonce: String) async throws -> Wire.PairStatus {
+        try await client.request("pair.status", ["nonce": nonce], as: Wire.PairStatus.self)
+    }
+
+    func cancelPairing(nonce: String) {
+        perform("pair.cancel", ["nonce": nonce])
+    }
+
+    func acceptPairing(_ pairingString: String) async throws {
+        _ = try await client.request(
+            "pair.accept", ["pairing_string": pairingString, "device_name": Host.current().localizedName ?? ""])
+        hasIdentity = true
+        emit(.identityChanged)
+    }
+
+    /// Stops waiting on the other Device: `acceptPairing` throws "Pairing cancelled".
+    func abortPairing() {
+        perform("pair.abort")
+    }
+
+    /// Whether the account this Mac just joined has a provider connected. The CLI answers once
+    /// its first pull from the relay has brought the account's credentials, or after half a
+    /// minute (`sync.account`).
+    func accountHasProvider() async -> Bool {
+        guard let synced = try? await client.request("sync.account", as: Wire.SyncAccount.self) else {
+            // A CLI that cannot answer (an older one, or one that restarted) leaves what the store has.
+            return providers.contains(where: \.isConnected)
+        }
+        return (synced.providers ?? []).compactMap { $0.toModel() }.contains(where: \.isConnected)
+    }
+
+    func providerAPIKey(_ kind: ProviderCredential.Kind) async throws -> Wire.ProviderAPIKey {
+        try await client.request("providers.api_key", ["kind": kind.wireValue], as: Wire.ProviderAPIKey.self)
+    }
+
+    /// Connects an API-key provider. An empty `baseURL` means the provider's own API.
+    func connectAPIKey(_ kind: ProviderCredential.Kind, apiKey: String, baseURL: String = "") async throws {
+        var params: [String: Any] = ["api_key": apiKey]
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            params["base_url"] = trimmed
+        }
+        _ = try await client.request("providers.connect_\(kind.connectMethodSuffix)", params)
+    }
+
+    /// Runs a subscription sign-in (`providers.connect_chatgpt`, `providers.connect_grok`): the
+    /// CLI opens the browser on this computer and the tokens go to the whole account.
+    func connectSignIn(_ kind: ProviderCredential.Kind) async throws {
+        _ = try await client.request("providers.connect_\(kind.wireValue)")
+    }
+
+    /// Stops a sign-in that is waiting on the browser: its `connectSignIn` fails, and finishing
+    /// in the browser afterwards connects nothing.
+    func cancelSignIn() {
+        perform("providers.auth.cancel")
+    }
+
+    func credential(for kind: ProviderCredential.Kind) -> ProviderCredential? {
+        providers.first { $0.kind == kind }
+    }
+
+    /// The models `kind` offers, in the catalog's order; the first is the default the CLI uses.
+    /// A custom provider's are the ones saved with it, with the levels the CLI says they take.
+    func models(for kind: ProviderCredential.Kind) -> [ProviderModel] {
+        guard kind.isCustom else { return catalog.filter { $0.provider == kind } }
+        return (credential(for: kind)?.models ?? []).map {
+            ProviderModel(provider: kind, id: $0.id, label: $0.displayName, levels: $0.levels)
+        }
+    }
+
+    /// The thinking levels `model` of `kind` takes, lowest first; see
+    /// `ProviderModel.thinkingLevels(for:among:)`.
+    func thinkingLevels(for kind: ProviderCredential.Kind, model: String?) -> [(id: String, label: String)] {
+        ProviderModel.thinkingLevels(for: model, among: models(for: kind))
+    }
+
+    /// Disconnects a provider for the whole account, or deletes a custom one.
+    func disconnectProvider(_ kind: ProviderCredential.Kind) async throws {
+        if isMock, kind.isCustom {
+            providers.removeAll { $0.kind == kind }
+            emit(.rosterChanged)
+            return
+        }
+        _ = try await client.request("providers.disconnect", ["kind": kind.wireValue])
+    }
+
+    /// The chat models a custom provider's server lists, asked through the CLI on this
+    /// computer; nil when the server publishes no list.
+    func listCustomModels(name: String, api: CustomAPI, baseURL: String, apiKey: String, integration: String? = nil) async throws -> [CustomModel]? {
+        if isMock { return MockData.listedModels(baseURL: baseURL) }
+        var params: [String: Any] = ["name": name, "api": api.rawValue, "base_url": baseURL, "api_key": apiKey]
+        if let integration { params["integration"] = integration }
+        let listing = try await client.request("providers.list_models", params, as: Wire.ListedModels.self)
+        return listing.listed ? listing.models.map { $0.toModel() } : nil
+    }
+
+    /// Refreshes every saved custom provider's model list; the count is providers changed, not models added.
+    func refreshCustomModels() async throws -> Int {
+        if isMock { return 0 }
+        struct Result: Decodable { let updated: Int }
+        return try await client.request("providers.refresh", as: Result.self).updated
+    }
+
+    /// Adds a custom provider, or saves the one `kind` names, once the CLI has heard from its
+    /// server. `models` lists the ids bots can pick, the default first. Answers the provider's kind.
+    @discardableResult
+    func saveCustomProvider(
+        kind: ProviderCredential.Kind?, name: String, api: CustomAPI, baseURL: String, apiKey: String, models: [String], integration: String? = nil
+    ) async throws -> ProviderCredential.Kind {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let models = models.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if isMock {
+            let kind = kind ?? .custom(ProviderCredential.Kind.customPrefix + name.lowercased().replacingOccurrences(of: " ", with: "-"))
+            let saved = ProviderCredential(
+                kind: kind, isConnected: true, detail: baseURL, baseURL: baseURL, name: name, api: api,
+                models: models.map { CustomModel(id: $0, levels: ["low", "medium", "high"]) })
+            if let index = providers.firstIndex(where: { $0.kind == kind }) { providers[index] = saved } else { providers.append(saved) }
+            emit(.rosterChanged)
+            return kind
+        }
+        var params: [String: Any] = ["name": name, "api": api.rawValue, "base_url": baseURL, "api_key": apiKey, "models": models]
+        if let kind { params["kind"] = kind.wireValue }
+        if let integration { params["integration"] = integration }
+        let saved = try await client.request("providers.connect_custom", params, as: Wire.CustomProviderSaved.self)
+        return ProviderCredential.Kind(wireValue: saved.kind) ?? .custom(saved.kind)
+    }
+
+    func setRelayURL(_ url: String) {
+        relayURL = url.isEmpty ? nil : url
+        perform("config.set", ["relay_url": url])
+    }
+
+    /// Replays the seeded conversations so the demo can be restarted from the Debug menu.
+    func resetMockData() {
+        guard isMock else { return }
+        for chat in chats { replyEngine?.cancel(chatID: chat.id) }
+        resetActivity()
+        devices = MockData.devices()
+        bots = MockData.bots()
+        chats = MockData.chats()
+        routines = MockData.routines()
+        autoReview = MockData.autoReview()
+        paused = false
+        providers = MockData.providers()
+        catalog = MockData.models()
+        sortChats()
+        emit(.snapshotReplaced)
+    }
+}

@@ -13,8 +13,8 @@
 /mobile/credentials.json
 /mobile/ios/
 /mobile/android/
-/mobile/modules/lorca-core/ios/generated/
-/mobile/modules/lorca-core/ios/LorcaCore.xcframework/
-/mobile/modules/lorca-core/android/src/main/jniLibs/
-/mobile/modules/lorca-core/android/src/main/java/uniffi/
+/mobile/modules/beans-core/ios/generated/
+/mobile/modules/beans-core/ios/BeansCore.xcframework/
+/mobile/modules/beans-core/android/src/main/jniLibs/
+/mobile/modules/beans-core/android/src/main/java/uniffi/
 # Cargo workspace, scripts, root package metadata and shared Blobatar source stay in archive.

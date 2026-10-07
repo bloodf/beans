@@ -12,9 +12,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::Value;
-use lorca_agent::provider::AssistantAccumulator;
-use lorca_agent::types::{LlmMessage, StopReason, UserMessage};
-use lorca_agent::{ModelRequest, RequestHooks, RequestOptions, ThinkingLevel};
+use beans_agent::provider::AssistantAccumulator;
+use beans_agent::types::{LlmMessage, StopReason, UserMessage};
+use beans_agent::{ModelRequest, RequestHooks, RequestOptions, ThinkingLevel};
 use tokio_util::sync::CancellationToken;
 
 use crate::app::App;
@@ -391,7 +391,7 @@ fn chat_lines(app: &App, message: &Message) -> Vec<String> {
                 };
                 (format!("{} {verb}: {}", name(bot_id), one_line(command)), answer(run.decision.as_deref()))
             }
-            None if tool == lorca_agent::codemode::CODEMODE_TOOL_NAME => (format!("{} ran a script: {}", name(bot_id), one_line(summary)), None),
+            None if tool == beans_agent::codemode::CODEMODE_TOOL_NAME => (format!("{} ran a script: {}", name(bot_id), one_line(summary)), None),
             None => (format!("{} used {tool}: {}", name(bot_id), one_line(summary)), None),
         },
         (Author::Bot { bot_id }, Body::Permission { plugin_name, tool, summary, decision, .. }) => {
@@ -420,10 +420,10 @@ mod tests {
 
     #[test]
     fn verdicts_parse_with_fences_prose_and_a_proposed_rule() {
-        let verdict = parse_verdict("```json\n{\"verdict\": \"ask\", \"reason\": \"It runs build scripts.\", \"rule\": \" run the Rust tests\\n in ~/dev/lorca. \"}\n```").unwrap();
+        let verdict = parse_verdict("```json\n{\"verdict\": \"ask\", \"reason\": \"It runs build scripts.\", \"rule\": \" run the Rust tests\\n in ~/dev/beans. \"}\n```").unwrap();
         assert!(!verdict.allow);
         assert_eq!(verdict.reason, "It runs build scripts.");
-        assert_eq!(verdict.rule.as_deref(), Some("run the Rust tests in ~/dev/lorca"));
+        assert_eq!(verdict.rule.as_deref(), Some("run the Rust tests in ~/dev/beans"));
         assert_eq!(parse_verdict("Sure: {\"verdict\":\"ALLOW\",\"reason\":\"A draft.\"}").map(|verdict| verdict.allow), Some(true));
         let bare = parse_verdict("{\"verdict\":\"ask\",\"rule\":\"\"}").unwrap();
         assert_eq!((bare.reason.as_str(), bare.rule), ("This action needs a look first.", None));
@@ -435,7 +435,7 @@ mod tests {
     fn the_review_reads_the_chat_that_asked_for_the_turn() {
         use crate::model::{CommandRun, Device};
 
-        let home = std::env::temp_dir().join(format!("lorca-review-request-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-review-request-{}", uuid::Uuid::new_v4()));
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         app.state.lock().unwrap().devices.push(Device {
             id: "runner".into(), name: "MacBook Air".into(), model: String::new(), os: "macos".into(), os_version: String::new(),

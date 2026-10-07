@@ -30,7 +30,7 @@ impl RelayError {
         self.status == Some(410)
     }
     /// The relay no longer serves the protocol this build speaks. Trying again changes
-    /// nothing; a newer Lorca does.
+    /// nothing; a newer Beans does.
     pub fn is_update_required(&self) -> bool {
         self.status == Some(426)
     }
@@ -161,14 +161,25 @@ fn socket_error(error: tokio_tungstenite::tungstenite::Error) -> RelayError {
 
 /// TLS for `wss://`: an upgrade is an HTTP/1.1 request, so it offers no ALPN.
 fn tls() -> Arc<rustls::ClientConfig> {
-    Arc::new(lorca_tls::client_config(&[]))
+    Arc::new(beans_tls::client_config(&[]))
 }
 
-/// The relay protocol this client speaks, sent as `Lorca-Protocol` with every request. A
+/// The relay protocol this client speaks, sent as `Beans-Protocol` with every request. A
 /// relay may refuse one it no longer serves with `426`. 1: group paging, `DELETE /v1/identity`.
 /// 2: `POST /v1/machines`. 3: durable encrypted policy events. 4: appearance-preserving rosters.
-pub const PROTOCOL: u32 = 4;
-const MIN_ROSTER_PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
+const MIN_ROSTER_PROTOCOL: u32 = 5;
+
+#[derive(Deserialize)]
+struct HealthEvidence<'a> {
+    ok: bool,
+    service: &'a str,
+    format: crate::config::Format,
+    protocol: u32,
+    min_protocol: u32,
+    min_roster_protocol: u32,
+    memory_config_version: u32,
+}
 
 const FILE_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
@@ -187,10 +198,11 @@ impl RelayClient {
     /// a provider.
     fn http_client() -> anyhow::Result<reqwest::Client> {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("lorca-protocol", reqwest::header::HeaderValue::from(PROTOCOL));
-        Ok(lorca_tls::client_builder()
+        headers.insert("beans-protocol", reqwest::header::HeaderValue::from(PROTOCOL));
+        headers.insert("beans-format", reqwest::header::HeaderValue::from_static(crate::config::FORMAT));
+        Ok(beans_tls::client_builder()
             .timeout(std::time::Duration::from_secs(60))
-            .user_agent(format!("lorca/{} ({})", crate::config::VERSION, std::env::consts::OS))
+            .user_agent(format!("beans/{} ({})", crate::config::VERSION, std::env::consts::OS))
             .default_headers(headers)
             .build()?)
     }
@@ -227,21 +239,30 @@ impl RelayClient {
         Ok(value)
     }
 
-    /// Requires advertised enforcement, not only a version: an older writer must not erase look.
+    /// Validates fresh format and enforced floors before account traffic.
     pub async fn health(&self, url: &str) -> RelayResult<u32> {
-        let value = Self::check(self.http().get(format!("{url}/v1/health")).send().await?).await?;
-        let number = |key: &str| value[key].as_u64().and_then(|value| u32::try_from(value).ok());
-        match (number("protocol"), number("min_protocol"), number("min_roster_protocol")) {
-            (Some(protocol), Some(min), Some(roster_min))
-                if protocol >= PROTOCOL && min <= PROTOCOL && (MIN_ROSTER_PROTOCOL..=PROTOCOL).contains(&roster_min)
-                    && roster_min >= min && number("memory_config_version") == Some(1) => Ok(protocol),
-            _ => Err(RelayError { status: Some(426), message:
-                "Relay update required: protocol 4, compatible roster floor and memory_config_version 1 are required".into() }),
+        let incompatible = || RelayError { status: Some(426), message:
+            "Relay update required: Beans v2 format, protocol 5 and compatible enforced floors are required".into() };
+        let response = self.http().get(format!("{url}/v1/health")).send().await?;
+        if !response.status().is_success() {
+            Self::check(response).await?;
+            return Err(incompatible());
+        }
+        let text = response.text().await?;
+        // Struct deserialization rejects duplicate compatibility fields.
+        let health: HealthEvidence<'_> = serde_json::from_str(&text).map_err(|_| incompatible())?;
+        if health.ok && health.service == "beans-relay" && health.format == crate::config::Format::BeansV2
+            && health.protocol >= PROTOCOL && health.min_protocol == PROTOCOL
+            && health.min_roster_protocol == MIN_ROSTER_PROTOCOL && health.memory_config_version == 1 {
+            Ok(health.protocol)
+        } else {
+            Err(incompatible())
         }
     }
 
     /// Signed by the identity: registers the identity (idempotent) and attests one machine.
     pub async fn register(&self, url: &str, identity: &Identity, machine_pubkey: &str, box_pubkey: &str) -> RelayResult<()> {
+        self.health(url).await?;
         let payload = json!({
             "identity_pubkey": identity.pubkey(),
             "content_pubkey": identity.content_pubkey(),
@@ -263,6 +284,7 @@ impl RelayClient {
     }
 
     pub async fn authenticate(&self, url: &str, machine: &Machine) -> RelayResult<String> {
+        self.health(url).await?;
         let challenge = Self::check(
             self.http()
                 .post(format!("{url}/v1/auth/challenge"))
@@ -345,7 +367,8 @@ impl RelayClient {
         let mut request = address.into_client_request().map_err(socket_error)?;
         let bearer = format!("Bearer {token}").parse().map_err(|_| RelayError { status: None, message: "token is not a header value".into() })?;
         request.headers_mut().insert("authorization", bearer);
-        request.headers_mut().insert("lorca-protocol", PROTOCOL.into());
+        request.headers_mut().insert("beans-protocol", PROTOCOL.into());
+        request.headers_mut().insert("beans-format", crate::config::FORMAT.parse().expect("Beans format header"));
         let connector = tokio_tungstenite::Connector::Rustls(tls());
         let connect = tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector));
         let (stream, _) = tokio::time::timeout(std::time::Duration::from_secs(20), connect)

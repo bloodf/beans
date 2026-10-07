@@ -41,8 +41,8 @@ function previewHost(): Plugin {
           "export const inApp = false;",
         );
         replace('isMock: query.get("mock") === "1"', "isMock: true");
-        replace('name: "Lorca Dev"', 'name: "Beans demo"');
-        replace('"lorca.prefs"', '"beans.website-preview.prefs"');
+        replace('name: "Beans Dev"', 'name: "Beans demo"');
+        replace('"beans-v2.prefs"', '"beans-v2.website-preview.prefs"');
         replace(
           'appLanguage: ""',
           'appLanguage: query.get("language") === "zh" ? "zh" : "en"',
@@ -67,7 +67,7 @@ function previewHost(): Plugin {
     },
     transformIndexHtml(html) {
       return html.replace(
-        "<title>Lorca</title>",
+        "<title>Beans</title>",
         "<title>Beans — app demo</title><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'\">",
       );
     },

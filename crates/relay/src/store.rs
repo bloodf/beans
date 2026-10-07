@@ -402,8 +402,8 @@ mod tests {
 
     #[test]
     fn paths() {
-        let s3 = S3::new("https://x.r2.cloudflarestorage.com/".into(), "lorca".into(), "auto".into(), "/files/".into(), "".into(), "".into());
-        assert_eq!(s3.object_path("abc-_/id.1"), "/lorca/files/abc-_/id.1");
+        let s3 = S3::new("https://x.r2.cloudflarestorage.com/".into(), "beans".into(), "auto".into(), "/files/".into(), "".into(), "".into());
+        assert_eq!(s3.object_path("abc-_/id.1"), "/beans/files/abc-_/id.1");
         assert_eq!(url::host_of("https://x.r2.cloudflarestorage.com"), "x.r2.cloudflarestorage.com");
         assert_eq!(uri_encode("a b+c"), "a%20b%2Bc");
     }

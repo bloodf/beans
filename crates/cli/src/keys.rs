@@ -25,7 +25,7 @@ pub fn unb64_32(text: &str) -> anyhow::Result<[u8; 32]> {
 }
 
 fn derive(secret: &[u8; 32], info: &str) -> [u8; 32] {
-    let hkdf = Hkdf::<Sha256>::new(Some(b"lorca-v1"), secret);
+    let hkdf = Hkdf::<Sha256>::new(Some(b"beans-v2"), secret);
     let mut out = [0u8; 32];
     hkdf.expand(info.as_bytes(), &mut out).expect("hkdf expand");
     out
@@ -43,17 +43,27 @@ pub fn random_32() -> [u8; 32] {
     bytes
 }
 
-/// Backup phrase: base32 (lowercase, no padding) of the master secret, in groups of four.
+/// Versioned backup phrase: Beans v2 prefix followed by base32 groups of four.
 pub fn phrase_from_secret(secret: &[u8; 32]) -> Vec<String> {
     let encoded = data_encoding::BASE32_NOPAD.encode(secret).to_lowercase();
-    encoded.as_bytes().chunks(4).map(|chunk| String::from_utf8_lossy(chunk).into_owned()).collect()
+    let mut phrase = vec![crate::config::FORMAT.to_string()];
+    phrase.extend(encoded.as_bytes().chunks(4).map(|chunk| String::from_utf8_lossy(chunk).into_owned()));
+    phrase
 }
 
 pub fn secret_from_phrase(phrase: &str) -> anyhow::Result<[u8; 32]> {
-    let cleaned: String = phrase.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_uppercase();
+    let (version, body) = phrase.split_once(' ')
+        .ok_or_else(|| anyhow::anyhow!("Beans v2 backup required; unversioned backups need migration"))?;
+    if version != crate::config::FORMAT {
+        anyhow::bail!("Beans v2 backup required; unsupported backup format");
+    }
+    if body.chars().any(|c| !c.is_ascii_alphanumeric() && !c.is_ascii_whitespace() && c != '-') {
+        anyhow::bail!("Invalid Beans v2 backup phrase");
+    }
+    let cleaned: String = body.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_uppercase();
     let bytes = data_encoding::BASE32_NOPAD
         .decode(cleaned.as_bytes())
-        .map_err(|_| anyhow::anyhow!("That does not look like a Lorca backup phrase"))?;
+        .map_err(|_| anyhow::anyhow!("That does not look like a Beans backup phrase"))?;
     bytes.try_into().map_err(|_| anyhow::anyhow!("Backup phrase has the wrong length"))
 }
 
@@ -145,13 +155,14 @@ pub fn verifying_key(pubkey: &str) -> anyhow::Result<VerifyingKey> {
 /// `identity.json`: the master secret. Present only on identity devices.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdentityFile {
+    pub format: crate::config::Format,
     pub master_secret: String,
     pub created_at: i64,
 }
 
 impl IdentityFile {
     pub fn new(identity: &Identity) -> Self {
-        IdentityFile { master_secret: b64(&identity.master), created_at: crate::config::now_unix() }
+        IdentityFile { format: crate::config::Format::BeansV2, master_secret: b64(&identity.master), created_at: crate::config::now_unix() }
     }
 
     pub fn identity(&self) -> anyhow::Result<Identity> {
@@ -162,6 +173,7 @@ impl IdentityFile {
 /// `machine.json`: this Device's secret and what pairing gave it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MachineFile {
+    pub format: crate::config::Format,
     pub machine_secret: String,
     pub identity_pubkey: String,
     pub content_pubkey: String,
@@ -175,7 +187,7 @@ pub struct MachineFile {
     /// paired it.
     #[serde(default)]
     pub registered: bool,
-    /// The identity's relay URL at pairing time. `LORCA_RELAY_URL` still overrides.
+    /// The identity's relay URL at pairing time. `BEANS_RELAY_URL` still overrides.
     #[serde(default)]
     pub relay_url: Option<String>,
     pub created_at: i64,
@@ -195,6 +207,13 @@ pub fn generate_dek() -> [u8; 32] {
     random_32()
 }
 
+/// The sealed account recovery key carries its own mandatory format.
+#[derive(Serialize, Deserialize)]
+pub struct KeyRecord {
+    pub format: crate::config::Format,
+    pub account_dek: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,7 +223,19 @@ mod tests {
         let identity = Identity::generate();
         let phrase = identity.phrase().join(" ");
         assert_eq!(secret_from_phrase(&phrase).unwrap(), identity.master);
-        let again = Identity::from_master(secret_from_phrase(&phrase.to_uppercase()).unwrap());
+        let again = Identity::from_master(secret_from_phrase(&format!("beans-v2 {}", phrase.split_once(' ').unwrap().1.to_uppercase())).unwrap());
         assert_eq!(again.pubkey(), identity.pubkey());
+    }
+
+    #[test]
+    fn fresh_backup_rejects_unversioned_input_before_normalization() {
+        let secret = [7; 32];
+        let encoded = data_encoding::BASE32_NOPAD.encode(&secret).to_lowercase();
+        assert!(secret_from_phrase(&encoded).is_err());
+        assert!(secret_from_phrase(&format!(" beans-v2 {encoded}")).is_err());
+        let phrase = phrase_from_secret(&secret).join(" ");
+        assert!(phrase.starts_with("beans-v2 "));
+        assert_eq!(secret_from_phrase(&phrase).unwrap(), secret);
+        assert!(serde_json::from_str::<IdentityFile>(r#"{"master_secret":"AA","created_at":0}"#).is_err());
     }
 }

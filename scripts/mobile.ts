@@ -2,7 +2,7 @@
 // iPhone paired with this Mac, `--device <name or udid>` for any other.
 //
 // The installed app holds two things Metro cannot reload: the Rust core (crates/mobile over
-// UniFFI, built into modules/lorca-core) and the native project (ios/, from the Expo config, the
+// UniFFI, built into modules/beans-core) and the native project (ios/, from the Expo config, the
 // plugins, and the native modules in package.json). This script fingerprints the inputs of
 // each, rebuilds what is stale, installs the app, starts Metro, and opens the app on it. A
 // Rust save while it runs rebuilds the core and installs the app again.
@@ -12,7 +12,7 @@ import { join, relative } from "node:path"
 import { CRATES_DIR, ROOT, color, log } from "./app.ts"
 
 const MOBILE = join(ROOT, "mobile")
-const MODULE = join(MOBILE, "modules", "lorca-core")
+const MODULE = join(MOBILE, "modules", "beans-core")
 const STAMPS = join(MOBILE, ".expo", "dev-stamps.json")
 const METRO_PORT = 8081
 const DEBOUNCE_MS = 500
@@ -23,7 +23,7 @@ const NATIVE_ENV = {
   LANG: "en_US.UTF-8",
   LC_ALL: "en_US.UTF-8",
   DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer",
-  LORCA_MOBILE_VARIANT: "development",
+  BEANS_MOBILE_VARIANT: "development",
 }
 
 /** `apps` is per device: an app installed on the simulator says nothing about the phone. */
@@ -163,7 +163,7 @@ async function build(reason: string): Promise<boolean> {
   const target = await device()
 
   const core = fingerprint(coreInputs())
-  if (stamps.core !== core || !existsSync(join(MODULE, "ios", "LorcaCore.xcframework"))) {
+  if (stamps.core !== core || !existsSync(join(MODULE, "ios", "BeansCore.xcframework"))) {
     log(`${color.bold("core")} ${color.dim(reason)}`)
     if (!(await run(["bun", "run", "core", "ios"], MOBILE))) return false
     stamps.core = core

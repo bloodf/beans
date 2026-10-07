@@ -21,7 +21,6 @@ import { docsPath, downloadPath, SectionLink } from './nav'
 
 export const providerNames = [
   { name: 'ChatGPT', icon: 'openai', type: 'subscription' },
-  { name: 'Grok', icon: 'grok', type: 'subscription' },
   { name: 'Claude', icon: 'claude', type: 'api' },
   { name: 'DeepSeek', icon: 'deepseek', type: 'api' },
   { name: 'OpenCode', icon: 'opencode', type: 'api' },

@@ -31,7 +31,7 @@
     },
     {
       "q": "可以继续使用已有 AI 订阅吗？",
-      "a": "Beans 支持 ChatGPT 和 Grok 订阅登录。其他内置提供商使用 API 密钥，兼容服务器有各自的访问要求。请查看提供商的套餐与用量规则。"
+      "a": "Beans 支持 ChatGPT 订阅登录；生产 Grok OAuth 在 Beans 合同核验之前禁用。其他服务商使用 API 密钥，需查看各自的访问要求与用量规则。"
     },
     {
       "q": "手机会运行智能体吗？",
@@ -64,7 +64,7 @@
   "beans": [
     "你拥有并指定的 Mac、Windows 或 Linux Runner，需要保持在线。",
     "ChatGPT、Grok、Anthropic、DeepSeek、OpenCode 和兼容模型接口。",
-    "ChatGPT/Grok 登录，其他提供商使用 API 密钥。凭据在配对设备间加密同步。",
+    "ChatGPT 登录；生产 Grok OAuth 禁用。其他服务商使用 API 密钥，凭据在设备间加密同步。",
     "保留智能体名称、指令、提供商、记忆和指定 Runner。",
     "私聊、最多六个智能体的群聊、提及和跨 Runner 交接。",
     "文件夹中的文件工作、shell 命令、网页搜索，以及带权限流程的 MCP 插件。",

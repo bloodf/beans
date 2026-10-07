@@ -1,4 +1,4 @@
-// The seeded demo (`LORCA_MOCK=1`), after the macOS app's MockData: the snapshot the CLI would send,
+// The seeded demo (`BEANS_MOCK=1`), after the macOS app's MockData: the snapshot the CLI would send,
 // for screenshots and for working on the views without a CLI. The marketplace is the CLI's own
 // bundled index.
 
@@ -116,7 +116,7 @@ export function providers(): ProviderCredential[] {
     { kind: "anthropic", isConnected: true, detail: "sk-ant…8d1a" },
     { kind: "opencode", isConnected: false, detail: "Not connected" },
     { kind: "opencode-go", isConnected: false, detail: "Not connected" },
-    { kind: "chatgpt", isConnected: true, detail: "you@lorca.app" },
+    { kind: "chatgpt", isConnected: true, detail: "you@beans.app" },
     { kind: "grok", isConnected: false, detail: "Not connected" },
     {
       kind: "custom:ollama",
@@ -428,7 +428,7 @@ function writerThread(): Message[] {
     message(bot("bot-nova"), { kind: "handoff", from: "bot-nova", to: "bot-quill", reason: "Draft a short launch announcement that leads with what people can do." }, minutesAgo(35)),
     message(
       bot("bot-quill"),
-      text("Create a team of bots for your everyday work. Give each one a role, bring them into a group chat, and pick up the conversation from your phone. Lorca runs the bots on your computers and encrypts your chats before they sync.\n\nDraft saved to `launch/announcement.md`."),
+      text("Create a team of bots for your everyday work. Give each one a role, bring them into a group chat, and pick up the conversation from your phone. Beans runs the bots on your computers and encrypts your chats before they sync.\n\nDraft saved to `launch/announcement.md`."),
       minutesAgo(24),
     ),
   ];
@@ -453,4 +453,4 @@ function devopsThread(): Message[] {
   ];
 }
 
-export const backupPhrase = ["k4mq", "7rth", "2bnz", "wq5f", "j3xd", "pv82", "ct6m", "9hsa", "e7lw", "4knr", "zb3u", "m5yq"];
+export const backupPhrase = ["beans-v2", "k4mq", "7rth", "2bnz", "wq5f", "j3xd", "pv52", "ct6m", "3hsa", "e7lw", "4knr", "zb3u", "m5yq", "aaaa"];

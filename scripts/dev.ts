@@ -24,7 +24,7 @@ let building = false
 let queued = false
 let stopping = false
 
-async function lorcaPids(): Promise<number[]> {
+async function beansPids(): Promise<number[]> {
   const proc = Bun.spawn(["pgrep", "-x", APP_NAME], { stdout: "pipe", stderr: "pipe" })
   const text = await new Response(proc.stdout).text()
   await proc.exited
@@ -33,7 +33,7 @@ async function lorcaPids(): Promise<number[]> {
     .map((line) => Number(line.trim()))
     .filter((pid) => Number.isInteger(pid) && pid > 0)
   // Only the development Mac bundle belongs to this loop. The production app and the phone
-  // app may both have an executable named Lorca and stay running beside it.
+  // app may both have an executable named Beans and stay running beside it.
   const mac: number[] = []
   const developmentExecutable = `${appName(CONFIG)}.app/Contents/MacOS/${APP_NAME}`
   for (const pid of pids) {
@@ -53,17 +53,17 @@ function killPid(pid: number, signal: NodeJS.Signals) {
   }
 }
 
-/** Quit every Lorca Dev process, not only the pid this script spawned last. */
+/** Quit every Beans Dev process, not only the pid this script spawned last. */
 async function stopApp() {
   const current = app
   app = null
   if (current?.pid) killPid(current.pid, "SIGTERM")
 
-  let pids = await lorcaPids()
+  let pids = await beansPids()
   for (const pid of pids) killPid(pid, "SIGTERM")
 
   for (let attempt = 0; attempt < 40; attempt++) {
-    pids = await lorcaPids()
+    pids = await beansPids()
     if (pids.length === 0) {
       if (current) await Promise.race([current.exited, Bun.sleep(250)])
       return
@@ -75,7 +75,7 @@ async function stopApp() {
     await Bun.sleep(50)
   }
 
-  pids = await lorcaPids()
+  pids = await beansPids()
   if (pids.length > 0) {
     log(color.red(`could not stop Beans pids ${pids.join(", ")}`))
   }
@@ -91,7 +91,7 @@ async function relayAnswers(): Promise<boolean> {
   }
 }
 
-/** The pid of a lorca-relay listening on the dev port that this loop did not start. */
+/** The pid of a beans-relay listening on the dev port that this loop did not start. */
 async function strayRelayPid(): Promise<number | null> {
   const proc = Bun.spawn(["lsof", "-ti", `tcp:${RELAY_PORT}`, "-sTCP:LISTEN"], { stdout: "pipe", stderr: "pipe" })
   const text = await new Response(proc.stdout).text()
@@ -102,13 +102,13 @@ async function strayRelayPid(): Promise<number | null> {
     const ps = Bun.spawn(["ps", "-o", "command=", "-p", String(pid)], { stdout: "pipe", stderr: "pipe" })
     const command = await new Response(ps.stdout).text()
     await ps.exited
-    if (command.includes("lorca-relay")) return pid
+    if (command.includes("beans-relay")) return pid
   }
   return null
 }
 
 /** A local relay on every interface, so a phone on this network can pair through it. The dev
- * app (LORCA_DEV=1) defaults its relay URL to this Mac's LAN IP on this port, and the phone
+ * app (BEANS_DEV=1) defaults its relay URL to this Mac's LAN IP on this port, and the phone
  * that pairs is the development build, so APNs pushes go to `ai.amoena.beans.dev`. A relay left
  * over from an earlier loop is replaced: it may predate the blob kinds the CLI now syncs, and
  * the CLI fails every cycle against one that rejects them. Its database lives in `temp/`, out
@@ -128,14 +128,14 @@ async function startRelay() {
   }
   // Build, then run the binary itself. Through `cargo run` the stop signal reaches cargo and
   // not the relay, which lives on orphaned and is what the next loop finds "already listening".
-  const build = Bun.spawn(["cargo", "build", "-q", "-p", "lorca-relay"], { cwd: ROOT, stdin: "ignore", stdout: "inherit", stderr: "inherit" })
+  const build = Bun.spawn(["cargo", "build", "-q", "-p", "beans-relay"], { cwd: ROOT, stdin: "ignore", stdout: "inherit", stderr: "inherit" })
   if ((await build.exited) !== 0) {
     log(color.red("relay build failed — not started"))
     return
   }
   mkdirSync(join(ROOT, "temp"), { recursive: true })
   relay = Bun.spawn(
-    [join(ROOT, "target", "debug", "lorca-relay"), "--bind", `0.0.0.0:${RELAY_PORT}`, "--db", join(ROOT, "temp", "lorca-relay.db"), "--apns-topic", "ai.amoena.beans.dev"],
+    [join(ROOT, "target", "debug", "beans-relay"), "--bind", `0.0.0.0:${RELAY_PORT}`, "--db", join(ROOT, "temp", "beans-relay.db"), "--apns-topic", "ai.amoena.beans.dev"],
     {
       cwd: ROOT,
       stdin: "ignore",
@@ -183,11 +183,11 @@ async function ttyPath(): Promise<string> {
  * Info.plist, and aborts the app when one is missing there (Kero has no speech string, so the
  * Dictate button crashed). Through `open` the app is its own responsible process and TCC reads
  * the bundle's own Info.plist. `open -W` exits when the app does; its environment is not
- * inherited, so LORCA_DEV goes through `--env`. */
+ * inherited, so BEANS_DEV goes through `--env`. */
 async function startApp() {
   const bundle = bundlePath(CONFIG)
   const output = (await ttyPath()) || join(PACKAGE_DIR, ".build", "app.log")
-  app = Bun.spawn(["open", "-n", "-W", "--stdout", output, "--stderr", output, "--env", "LORCA_DEV=1", bundle], {
+  app = Bun.spawn(["open", "-n", "-W", "--stdout", output, "--stderr", output, "--env", "BEANS_DEV=1", bundle], {
     stdin: "ignore",
     stdout: "inherit",
     stderr: "inherit",
@@ -199,7 +199,7 @@ async function startApp() {
     },
   })
   const where = output.startsWith("/dev/") ? "" : ` · output in ${output}`
-  log(`${color.green("running")} ${color.dim(`via open · CLI 127.0.0.1:4865${where}`)}`)
+  log(`${color.green("running")} ${color.dim(`via open · CLI 127.0.0.1:4875${where}`)}`)
 }
 
 async function cycle(reason: string) {

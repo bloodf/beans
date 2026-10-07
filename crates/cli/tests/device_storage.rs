@@ -1,6 +1,6 @@
 #![cfg(not(feature = "runner"))]
 
-use lorca::{app::App, config::Config, model::{Author, Body, Chat, ChatMeta, Message}};
+use beans::{app::App, config::Config, model::{Author, Body, Chat, ChatMeta, Message}};
 
 struct Scratch(std::path::PathBuf);
 impl Drop for Scratch {
@@ -9,7 +9,7 @@ impl Drop for Scratch {
 
 #[test]
 fn device_storage_keeps_only_the_app_view_of_tools() {
-    let scratch = Scratch(std::env::temp_dir().join(format!("lorca-device-storage-{}", uuid::Uuid::new_v4())));
+    let scratch = Scratch(std::env::temp_dir().join(format!("beans-device-storage-{}", uuid::Uuid::new_v4())));
     let app = App::load(Config { home: scratch.0.clone(), port: 0 }).unwrap();
     app.state.lock().unwrap().chats.push(Chat {
         meta: ChatMeta {

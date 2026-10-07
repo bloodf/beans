@@ -1,4 +1,4 @@
-// Lorca for Windows and Linux: a MyGo app whose Go side launches and talks to the local CLI, and
+// Beans for Windows and Linux: a MyGo app whose Go side launches and talks to the local CLI, and
 // whose pages (src/) are the chat UI. It follows the macOS app (macos/) screen for screen.
 package main
 

@@ -924,7 +924,7 @@ mod tests {
     }
 
     fn scratch_app() -> ScratchApp {
-        let home = std::env::temp_dir().join(format!("lorca-plugins-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-plugins-{}", uuid::Uuid::new_v4()));
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
     }

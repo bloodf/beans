@@ -18,10 +18,10 @@ enum Format {
 EOF
 swiftc -parse-as-library -swift-version 5 \
   "$root/macos/Tests/AvatarModel.swift" \
-  "$root/macos/Sources/Lorca/Model/Models.swift" \
-  "$root/macos/Sources/Lorca/Model/BotLook.swift" \
-  "$root/macos/Sources/Lorca/Model/BotActivity.swift" \
-  "$root/macos/Sources/Lorca/Sheets/BotLookDraft.swift" \
+  "$root/macos/Sources/Beans/Model/Models.swift" \
+  "$root/macos/Sources/Beans/Model/BotLook.swift" \
+  "$root/macos/Sources/Beans/Model/BotActivity.swift" \
+  "$root/macos/Sources/Beans/Sheets/BotLookDraft.swift" \
   "$output/stubs.swift" \
   -o "$output/avatar-model"
 "$output/avatar-model"

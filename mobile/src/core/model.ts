@@ -61,9 +61,9 @@ export interface Device {
   last_seen: number;
   /// Plugins installed on that Runner, with their setup state.
   plugins?: PluginStatus[];
-  /// The `lorca` that Device runs, as `lorca --version` says it.
+  /// The `beans` that Device runs, as `beans --version` says it.
   version?: string;
-  /// Only on a Runner whose CLI replaces itself (installed with lorca.app's script).
+  /// Only on a Runner whose CLI replaces itself (installed with beans.app's script).
   update?: UpdateStatus | null;
   /// The relay lists the machine, but it never sent its `machine` blob: no name, no `os`.
   unknown?: boolean;
@@ -76,7 +76,7 @@ export interface UpdateStatus {
   /// The newest release the last check found, when it is newer than `version`.
   latest?: string;
   /// `installing` while it downloads and swaps the binary; `restarting` once the new one is in
-  /// place and it waits for its bots to finish; `installed` when `lorca serve` has to be
+  /// place and it waits for its bots to finish; `installed` when `beans serve` has to be
   /// restarted by hand to run it.
   state?: "installing" | "restarting" | "installed";
   /// The CLI's words for the last check or install that failed.

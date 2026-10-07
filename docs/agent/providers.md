@@ -75,7 +75,7 @@ From the stream it reads `text_delta`, `thinking_delta`, `signature_delta` (as `
 
 An `error` event and HTTP errors become an error message with the server's `error.message`.
 
-`DEEPSEEK_API_KEY=… cargo test -p lorca-agent live_deepseek -- --ignored --nocapture` runs a search followed by a function call and continues the turn with the seals and server blocks replayed.
+`DEEPSEEK_API_KEY=… cargo test -p beans-agent live_deepseek -- --ignored --nocapture` runs a search followed by a function call and continues the turn with the seals and server blocks replayed.
 
 ### Thinking levels
 
@@ -94,7 +94,7 @@ A level the model does not have becomes the nearest higher one it has. With no l
 
 ### The model catalog and cost
 
-`agent::models` re-exports the `lorca-models` crate, a snapshot of [models.dev](https://models.dev) for the models the adapters offer, which a Device without the agent can use alone (`ThinkingLevel`, `Usage`, and `Cost` live there too and are re-exported from `agent::types`): `ModelInfo { id, name, provider, context_window, max_output, reasoning, images, rates, tiers, thinking, levels }`. `models::find(provider, id)` looks one up (dated Anthropic ids match their base entry); `models::for_provider(provider)` lists a provider's, default first. Every built-in adapter resolves its entry at construction and reports it through `Provider::model_info`, so a harness can read the window and the levels; an unlisted model runs with none.
+`agent::models` re-exports the `beans-models` crate, a snapshot of [models.dev](https://models.dev) for the models the adapters offer, which a Device without the agent can use alone (`ThinkingLevel`, `Usage`, and `Cost` live there too and are re-exported from `agent::types`): `ModelInfo { id, name, provider, context_window, max_output, reasoning, images, rates, tiers, thinking, levels }`. `models::find(provider, id)` looks one up (dated Anthropic ids match their base entry); `models::for_provider(provider)` lists a provider's, default first. Every built-in adapter resolves its entry at construction and reports it through `Provider::model_info`, so a harness can read the window and the levels; an unlisted model runs with none.
 
 When the entry is known, the `Usage` of every message carries `cost` in dollars: input, output, cache reads, and cache writes at the model's rates, at the long-context tier when the request's input is above it. `Usage::add` sums usages and costs. ChatGPT and Grok sign-ins are not billed per token; their cost is what the work would cost at API rates.
 
@@ -152,7 +152,7 @@ It posts the shared Responses input and function-tool shapes to `{base_url}/resp
 
 The transcript goes through the [shared transform](#before-conversion) first. `supports_images` (the catalog's, or true for a model it does not list), `tool_images` (`UserMessage`, since a gateway may take only a string `output`; OpenAI's own API takes `InOutput`), `max_retries` (2), and `max_retry_delay_ms` are public fields.
 
-`LORCA_CREDENTIALS=~/.lorca/credentials.json cargo test -p lorca-agent reads_a_tool_screenshot -- --ignored --nocapture` has each Responses adapter connected in that data directory read a random code off a tool's screenshot, and reports whether Grok and OpenCode's Responses routes read it inside the output too. It uses the access tokens as they are and never refreshes them, which would spend the refresh token the account holds.
+`BEANS_CREDENTIALS=~/.beans-v2/credentials.json cargo test -p beans-agent reads_a_tool_screenshot -- --ignored --nocapture` has each Responses adapter connected in that data directory read a random code off a tool's screenshot, and reports whether Grok and OpenCode's Responses routes read it inside the output too. It uses the access tokens as they are and never refreshes them, which would spend the refresh token the account holds.
 
 ### ChatGPT subscription
 
@@ -217,7 +217,7 @@ Reasoning summaries stream as thinking. The input is the [Responses shape](#open
 
 ### Grok subscription
 
-`GrokProvider` signs in with a Grok account (SuperGrok or X Premium+) instead of an API key and calls xAI's Responses API (`https://api.x.ai/v1/responses`) with the bearer. It shares the Responses wire shape with the ChatGPT adapter: the same `input` items, the same stream events, the same server-tool handling.
+`GrokProvider` retains the isolated Grok Responses adapter, but production subscription OAuth is disabled pending a verified Beans client/referrer contract. Production sign-in fails before callback/network effects; loopback wire fixtures remain available. The retained provider reads bearer tokens through its token source and shares Responses stream/server-tool handling with ChatGPT.
 
 Tokens come from a `GrokTokenSource` you implement, the same two calls as `TokenSource`. Access tokens last about six hours; the provider refreshes one within five minutes of its end and hands the new tokens to `store`. xAI rotates the refresh token, so store what comes back at once.
 
@@ -229,12 +229,12 @@ let provider = GrokProvider::new(Arc::new(FileTokens(path)), None); // grok-4.7
 
 `with_base_url` points it at another API root and `with_issuer` at another OAuth issuer, for a proxy or a test server.
 
-Get the first tokens with the sign-in in `agent::providers::grok::oauth`: the authorization-code flow with PKCE that xAI's Grok CLI runs at `auth.x.ai`, with the public desktop client id, the scopes `openid profile email offline_access grok-cli:access api:access`, and a loopback callback bound to a free port (`http://127.0.0.1:<port>/callback`):
+The `agent::providers::grok::oauth` code retains authorization-code/PKCE and provider-owned scopes for loopback fixtures. It does not offer a usable production sign-in; `Endpoints::xai()` operations reject pending the verified Beans contract, before opening callbacks or sending HTTP.
 
 ```rust
 use agent::providers::grok::oauth::{self, Endpoints};
 
-let tokens = oauth::login(&client, &Endpoints::xai(), |url| open_browser(url), Duration::from_secs(300)).await?;
+// Production Endpoints::xai() login is disabled; use explicit loopback endpoints only in isolated wire fixtures.
 ```
 
 The pieces are public for other flows: `PkceFlow`, `Callback`, `exchange_code`, `refresh`, `revoke`, and `jwt_claims`. The account id and email come from the id token, or from `/oauth2/userinfo` when it carries none.
@@ -269,7 +269,7 @@ let messages = transform_messages(&request.messages, &TransformOptions {
 
 ## Images
 
-`agent::images::prepare(bytes)` (and `prepare_base64`) makes any image into one a model takes inline, after pi's: a PNG, JPEG, or WebP that is upright, within 2000×2000 pixels, and under 4.5 MB of base64 goes as it is; anything else (a BMP, a GIF, a TIFF, an ICO, a photo its camera turned, a large screenshot, and on a Mac a HEIC or AVIF through `sips`) is decoded with the `image` crate, turned upright, scaled down to fit (Lanczos3), and written as a PNG or a JPEG at 80, whichever is smaller (a JPEG alone for a photo), then at lower qualities and smaller sizes while it is still too large. `Inline::note` tells the model what changed, in pi's words: `[Image converted from image/bmp to image/png.]`, or `[Image: original 2600x100, displayed at 2000x77. Multiply coordinates by 1.30 to map to original image.]`. The error says why an image cannot go. Decoding a large image takes a moment (a 12-megapixel photo about a quarter of a second in a release build), so callers run it off the async threads. Every image Lorca shows a model goes through it: `read`, codemode's `image()`, MCP results, and attachments. `images::file_type(bytes)` tells an image file from text by its first bytes.
+`agent::images::prepare(bytes)` (and `prepare_base64`) makes any image into one a model takes inline, after pi's: a PNG, JPEG, or WebP that is upright, within 2000×2000 pixels, and under 4.5 MB of base64 goes as it is; anything else (a BMP, a GIF, a TIFF, an ICO, a photo its camera turned, a large screenshot, and on a Mac a HEIC or AVIF through `sips`) is decoded with the `image` crate, turned upright, scaled down to fit (Lanczos3), and written as a PNG or a JPEG at 80, whichever is smaller (a JPEG alone for a photo), then at lower qualities and smaller sizes while it is still too large. `Inline::note` tells the model what changed, in pi's words: `[Image converted from image/bmp to image/png.]`, or `[Image: original 2600x100, displayed at 2000x77. Multiply coordinates by 1.30 to map to original image.]`. The error says why an image cannot go. Decoding a large image takes a moment (a 12-megapixel photo about a quarter of a second in a release build), so callers run it off the async threads. Every image Beans shows a model goes through it: `read`, codemode's `image()`, MCP results, and attachments. `images::file_type(bytes)` tells an image file from text by its first bytes.
 
 ## Retries and error classes
 

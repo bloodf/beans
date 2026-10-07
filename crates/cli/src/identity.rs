@@ -10,19 +10,17 @@ use crate::model::host_facts;
 
 fn machine_file_for(identity_pubkey: &str, content_pubkey: &str, machine: &Machine, dek: &[u8; 32], registered: bool, relay_url: Option<String>, name: Option<String>) -> MachineFile {
     let (host_name, os, os_version, model) = host_facts();
-    MachineFile {
-        machine_secret: keys::b64(&machine.secret),
-        identity_pubkey: identity_pubkey.to_string(),
-        content_pubkey: content_pubkey.to_string(),
-        account_dek: keys::b64(dek),
-        name: name.filter(|n| !n.trim().is_empty()).unwrap_or(host_name),
-        os,
-        os_version,
-        model,
-        registered,
-        relay_url,
-        created_at: now_unix(),
-    }
+    MachineFile { format: crate::config::Format::BeansV2, machine_secret: keys::b64(&machine.secret),
+    identity_pubkey: identity_pubkey.to_string(),
+    content_pubkey: content_pubkey.to_string(),
+    account_dek: keys::b64(dek),
+    name: name.filter(|n| !n.trim().is_empty()).unwrap_or(host_name),
+    os,
+    os_version,
+    model,
+    registered,
+    relay_url,
+    created_at: now_unix(), }
 }
 
 /// New identity, new machine, new account key. Returns the backup phrase.
@@ -53,7 +51,9 @@ pub fn create(app: &Arc<App>, device_name: Option<String>) -> anyhow::Result<Vec
 
     // The DEK wrapped to the content key, so a restore can unwrap it. Uploaded when a relay is
     // reachable; harmless to keep queued until then.
-    let sealed = crate::crypto::seal(&identity.content_pubkey(), &dek)?;
+    let sealed = crate::crypto::seal_json(&identity.content_pubkey(), &keys::KeyRecord {
+        format: crate::config::Format::BeansV2, account_dek: keys::b64(&dek),
+    })?;
     app.push_blob("key", None, sealed);
     app.push_machine_blob_if_changed();
     create_lead_bot(app);
@@ -99,8 +99,8 @@ pub async fn restore(app: &Arc<App>, phrase: &str, device_name: Option<String>) 
     if app.has_identity() {
         anyhow::bail!("This Device already has an identity.");
     }
-    let url = app.relay_url().ok_or_else(|| anyhow::anyhow!("Set a relay URL first. Restoring unwraps the account key from the relay."))?;
     let identity = Identity::from_master(keys::secret_from_phrase(phrase)?);
+    let url = app.relay_url().ok_or_else(|| anyhow::anyhow!("Set a relay URL first. Restoring unwraps the account key from the relay."))?;
     let machine = Machine::generate();
 
     app.relay.register(&url, &identity, &machine.pubkey(), &machine.box_pubkey()).await.map_err(|e| anyhow::anyhow!("{e}"))?;

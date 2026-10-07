@@ -113,29 +113,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          packages=(-p lorca)
-          if [[ $PLATFORM == linux-* ]]; then packages+=(-p lorca-relay); fi
+          packages=(-p beans)
+          if [[ $PLATFORM == linux-* ]]; then packages+=(-p beans-relay); fi
           build=build
           if [[ $USE_ZIG == true ]]; then build=zigbuild; fi
           cargo "$build" --locked --release "${packages[@]}" --target "$TARGET"
           mkdir -p dist/release-assets
           bin="target/$TARGET/release"
           if [[ $PLATFORM == windows-* ]]; then
-            archive="lorca-cli-$PLATFORM.zip"
-            zip -jX "dist/release-assets/$archive" "$bin/lorca.exe"
+            archive="beans-cli-$PLATFORM.zip"
+            zip -jX "dist/release-assets/$archive" "$bin/beans.exe"
           else
-            archive="lorca-cli-$PLATFORM.tar.gz"
+            archive="beans-cli-$PLATFORM.tar.gz"
             flags=(--format ustar)
             if [[ $RUNNER_OS == macOS ]]; then flags+=(--no-mac-metadata); fi
-            tar "${flags[@]}" -czf "dist/release-assets/$archive" -C "$bin" lorca
+            tar "${flags[@]}" -czf "dist/release-assets/$archive" -C "$bin" beans
           fi
           (cd dist/release-assets && shasum -a 256 "$archive" > "$archive.sha256")
           if [[ $PLATFORM == linux-* ]]; then
             mkdir -p dist/server/models dist/server/marketplace
-            cp "$bin/lorca" "$bin/lorca-relay" dist/server/
+            cp "$bin/beans" "$bin/beans-relay" dist/server/
             cp crates/models/catalog.json dist/server/models/v1.json
             cp crates/cli/marketplace/index.json dist/server/marketplace/v1.json
-            tar --format ustar -czf "dist/release-assets/beans-server-$PLATFORM.tar.gz" -C dist/server lorca lorca-relay models/v1.json marketplace/v1.json
+            tar --format ustar -czf "dist/release-assets/beans-server-$PLATFORM.tar.gz" -C dist/server beans beans-relay models/v1.json marketplace/v1.json
           fi
       - uses: actions/upload-artifact@v7
         with:
@@ -148,8 +148,8 @@ jobs:
     strategy:
       matrix: ${{ fromJSON(needs.prepare.outputs.installer_matrix) }}
     env:
-      LORCA_DOWNLOAD_URL: http://127.0.0.1:8000
-      WANT: lorca ${{ needs.prepare.outputs.core_version }}
+      BEANS_DOWNLOAD_URL: http://127.0.0.1:8000
+      WANT: beans ${{ needs.prepare.outputs.core_version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -167,10 +167,10 @@ jobs:
           python3 -m http.server --bind 127.0.0.1 --directory site 8000 &
           server=$!
           trap 'kill "$server"' EXIT
-          for _ in $(seq 50); do curl -fs -o /dev/null "$LORCA_DOWNLOAD_URL/" && break; sleep 0.2; done
+          for _ in $(seq 50); do curl -fs -o /dev/null "$BEANS_DOWNLOAD_URL/" && break; sleep 0.2; done
           sh web/public/install-cli.sh
           sh web/public/install-cli.sh
-          version=$(~/.local/bin/lorca --version)
+          version=$(~/.local/bin/beans --version)
           [[ "$version" == "$WANT" ]]
       - name: Exercise Windows PowerShell and PowerShell 7 installation
         if: runner.os == 'Windows'
@@ -179,12 +179,12 @@ jobs:
           $server = Start-Process python -ArgumentList '-m', 'http.server', '--bind', '127.0.0.1', '--directory', 'site', '8000' -WindowStyle Hidden -PassThru
           try {
             foreach ($try in 1..50) {
-              try { Invoke-WebRequest "$env:LORCA_DOWNLOAD_URL/" -UseBasicParsing | Out-Null; break } catch { Start-Sleep -Milliseconds 200 }
+              try { Invoke-WebRequest "$env:BEANS_DOWNLOAD_URL/" -UseBasicParsing | Out-Null; break } catch { Start-Sleep -Milliseconds 200 }
             }
             powershell -NoProfile -Command 'Get-Content -Raw web/public/install-cli.ps1 | Invoke-Expression'
             if ($LASTEXITCODE -ne 0) { throw 'Windows PowerShell installation failed' }
             Get-Content -Raw web/public/install-cli.ps1 | Invoke-Expression
-            if ((lorca --version) -ne $env:WANT) { throw 'CLI version mismatch' }
+            if ((beans --version) -ne $env:WANT) { throw 'CLI version mismatch' }
             $userPath = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment').GetValue('Path')
             if ($userPath -notlike "*$HOME\.local\bin*") { throw 'CLI PATH entry missing' }
           } finally { Stop-Process -Id $server.Id }

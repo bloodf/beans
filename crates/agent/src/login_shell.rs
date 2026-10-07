@@ -26,16 +26,16 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(unix)]
-const CAPTURE_VARIABLE: &str = "LORCA_SHELL_ENV_FILE";
+const CAPTURE_VARIABLE: &str = "BEANS_SHELL_ENV_FILE";
 #[cfg(unix)]
-const CAPTURE_COMMAND: &str = "/usr/bin/env -0 > \"$LORCA_SHELL_ENV_FILE\"";
+const CAPTURE_COMMAND: &str = "/usr/bin/env -0 > \"$BEANS_SHELL_ENV_FILE\"";
 /// What describes the shell that printed the environment rather than the user's setup, and what
 /// the capture itself set.
 #[cfg(unix)]
 const DROPPED: [&str; 8] = ["PWD", "OLDPWD", "SHLVL", "_", CAPTURE_VARIABLE, "DISABLE_AUTO_UPDATE", "ZSH_TMUX_AUTOSTARTED", "ZSH_TMUX_AUTOSTART"];
 
 /// `program` with the login shell's environment. The first call waits for the shell (five
-/// seconds at most); `lorca serve` starts reading it at launch. On Windows a bare name starts
+/// seconds at most); `beans serve` starts reading it at launch. On Windows a bare name starts
 /// the file a terminal would run ([`find_program`]).
 pub async fn command(program: impl AsRef<OsStr>) -> Command {
     command_with(program, environment().await)
@@ -301,7 +301,7 @@ struct CaptureFile(PathBuf);
 impl CaptureFile {
     fn create() -> Option<Self> {
         use std::os::unix::fs::OpenOptionsExt;
-        let path = std::env::temp_dir().join(format!(".lorca-shell-env-{}", uuid::Uuid::new_v4().simple()));
+        let path = std::env::temp_dir().join(format!(".beans-shell-env-{}", uuid::Uuid::new_v4().simple()));
         std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).ok()?;
         Some(CaptureFile(path))
     }
@@ -321,7 +321,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn fixture_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("lorca-login-shell-{name}-{}", uuid::Uuid::new_v4().simple()));
+        let dir = std::env::temp_dir().join(format!("beans-login-shell-{name}-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -348,7 +348,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parses_nul_separated_entries_and_drops_the_capture_shells_own() {
-        let environment = parse(b"PATH=/Users/me/.bun/bin:/usr/bin\0TOKEN=line one\nline two=rest\0EMPTY=\0PWD=/tmp\0SHLVL=2\0_=/usr/bin/env\0LORCA_SHELL_ENV_FILE=/tmp/x\0").unwrap();
+        let environment = parse(b"PATH=/Users/me/.bun/bin:/usr/bin\0TOKEN=line one\nline two=rest\0EMPTY=\0PWD=/tmp\0SHLVL=2\0_=/usr/bin/env\0BEANS_SHELL_ENV_FILE=/tmp/x\0").unwrap();
         assert_eq!(
             environment,
             vec![
@@ -384,11 +384,11 @@ mod tests {
         let shell = executable(
             &dir,
             "shell",
-            "#!/bin/sh\n[ \"$1 $2 $3\" = '-i -l -c' ] || exit 9\nprintf 'PATH=/fixture/bin\\000LORCA_FIXTURE=from-shell\\000PWD=/elsewhere\\000' > \"$LORCA_SHELL_ENV_FILE\"\n",
+            "#!/bin/sh\n[ \"$1 $2 $3\" = '-i -l -c' ] || exit 9\nprintf 'PATH=/fixture/bin\\000BEANS_FIXTURE=from-shell\\000PWD=/elsewhere\\000' > \"$BEANS_SHELL_ENV_FILE\"\n",
         );
         let (used, environment) = capture(&[dir.join("missing"), shell.clone()], TIMEOUT, INTERACTIVE_TIMEOUT).await.unwrap();
         assert_eq!(used, shell);
-        assert_eq!(environment, vec![("PATH".into(), "/fixture/bin".into()), ("LORCA_FIXTURE".into(), "from-shell".into())]);
+        assert_eq!(environment, vec![("PATH".into(), "/fixture/bin".into()), ("BEANS_FIXTURE".into(), "from-shell".into())]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -398,14 +398,14 @@ mod tests {
         let dir = fixture_dir("hang");
         let pid_file = dir.join("sleep.pid");
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = -i ]; then sleep 30 & echo $! > '{}'; wait; exit 0; fi\nprintf 'LORCA_FIXTURE=login\\000' > \"$LORCA_SHELL_ENV_FILE\"\n",
+            "#!/bin/sh\nif [ \"$1\" = -i ]; then sleep 30 & echo $! > '{}'; wait; exit 0; fi\nprintf 'BEANS_FIXTURE=login\\000' > \"$BEANS_SHELL_ENV_FILE\"\n",
             pid_file.display()
         );
         let shell = executable(&dir, "shell", &script);
         // macOS checks a new executable on its first launch, which can outlast the budget below.
         let _ = std::process::Command::new(&shell).stderr(std::process::Stdio::null()).status();
         let (_, environment) = capture(&[shell], TIMEOUT, Duration::from_secs(1)).await.unwrap();
-        assert_eq!(environment, vec![("LORCA_FIXTURE".into(), "login".into())]);
+        assert_eq!(environment, vec![("BEANS_FIXTURE".into(), "login".into())]);
 
         let sleep = std::fs::read_to_string(&pid_file).expect("the interactive attempt never started");
         let sleep: i32 = sleep.trim().parse().unwrap();
@@ -426,8 +426,8 @@ mod tests {
     #[tokio::test]
     async fn a_bare_program_resolves_through_the_environments_path() {
         let dir = fixture_dir("path");
-        executable(&dir, "lorca-fixture-tool", "#!/bin/sh\nprintf found\n");
-        let output = command_with("lorca-fixture-tool", &[("PATH".into(), dir.clone().into_os_string())]).output().await.unwrap();
+        executable(&dir, "beans-fixture-tool", "#!/bin/sh\nprintf found\n");
+        let output = command_with("beans-fixture-tool", &[("PATH".into(), dir.clone().into_os_string())]).output().await.unwrap();
         assert_eq!(output.stdout, b"found");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -439,11 +439,11 @@ mod tests {
     #[tokio::test]
     async fn a_bare_program_starts_a_batch_file_from_the_environments_path() {
         let dir = fixture_dir("Program Files");
-        std::fs::write(dir.join("lorca-fixture-tool"), "#!/bin/sh\necho the shell script\n").unwrap();
-        std::fs::write(dir.join("lorca-fixture-tool.cmd"), "@echo %*\r\n").unwrap();
+        std::fs::write(dir.join("beans-fixture-tool"), "#!/bin/sh\necho the shell script\n").unwrap();
+        std::fs::write(dir.join("beans-fixture-tool.cmd"), "@echo %*\r\n").unwrap();
         let environment = [("PATH".into(), dir.clone().into_os_string())];
-        let command = || command_with("lorca-fixture-tool", &environment);
-        assert_eq!(Path::new(command().as_std().get_program()), dir.join("lorca-fixture-tool.cmd"));
+        let command = || command_with("beans-fixture-tool", &environment);
+        assert_eq!(Path::new(command().as_std().get_program()), dir.join("beans-fixture-tool.cmd"));
 
         let output = command().args(["-y", "@playwright/mcp@latest", "--headless", "two words", "%PATH%", "a&echo injected"]).output().await.unwrap();
         assert!(output.status.success(), "{output:?}");

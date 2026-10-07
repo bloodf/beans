@@ -12,6 +12,6 @@
   ],
   "exclude": [
     "**/*.test.ts",
-    "modules/lorca-core/build.ts"
+    "modules/beans-core/build.ts"
   ]
 }

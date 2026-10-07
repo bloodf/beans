@@ -1,5 +1,5 @@
 import XCTest
-@testable import Lorca
+@testable import Beans
 
 final class ChatRowRunTests: XCTestCase {
     private let today = ChatRow.day(Date(timeIntervalSince1970: 86_400))

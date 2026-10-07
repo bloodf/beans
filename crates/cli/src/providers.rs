@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use lorca_agent::models::{ModelInfo, Rates, ThinkingMode, Wire};
-use lorca_agent::providers::anthropic::ANTHROPIC_BASE_URL;
-use lorca_agent::providers::{
+use beans_agent::models::{ModelInfo, Rates, ThinkingMode, Wire};
+use beans_agent::providers::anthropic::ANTHROPIC_BASE_URL;
+use beans_agent::providers::{
     AnthropicProvider, ChatGptProvider, ChatGptTokens, GrokProvider, GrokTokenSource, GrokTokens, OpenAiCompatProvider,
     OpenAiResponsesProvider, TokenSource,
 };
-use lorca_agent::{models, AssistantEventStream, ModelRequest, Provider, ThinkingLevel};
+use beans_agent::{models, AssistantEventStream, ModelRequest, Provider, ThinkingLevel};
 use tokio_util::sync::CancellationToken;
 
 use crate::app::App;
@@ -20,9 +20,9 @@ use crate::credentials::{is_custom, CustomApi, CustomProvider};
 pub const OPENCODE_BASE_URL: &str = "https://opencode.ai/zen";
 pub const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go";
 
-const USER_AGENT: &str = concat!("lorca/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("beans/", env!("CARGO_PKG_VERSION"));
 
-/// Identifies Lorca to OpenCode and sends the session header it uses for routing and prompt
+/// Identifies Beans to OpenCode and sends the session header it uses for routing and prompt
 /// caching. The regular request options also send `x-session-affinity`.
 struct OpenCodeHeaders {
     inner: Arc<dyn Provider>,
@@ -42,7 +42,7 @@ impl Provider for OpenCodeHeaders {
         self.inner.supports_images()
     }
 
-    fn model_info(&self) -> Option<&lorca_agent::models::ModelInfo> {
+    fn model_info(&self) -> Option<&beans_agent::models::ModelInfo> {
         self.inner.model_info()
     }
 
@@ -171,7 +171,7 @@ pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: O
                 .deepseek
                 .clone()
                 .ok_or_else(|| "DeepSeek is not connected".to_string())?;
-            let model = model.or_else(|| std::env::var("LORCA_DEEPSEEK_MODEL").ok()).unwrap_or_else(|| default_model(kind));
+            let model = model.or_else(|| std::env::var("BEANS_DEEPSEEK_MODEL").ok()).unwrap_or_else(|| default_model(kind));
             // The Anthropic-compatible endpoint: the one with DeepSeek's server-side web search.
             let base_url = deepseek_anthropic_url(&key.base_url.clone().unwrap_or_else(deepseek_base_url));
             Ok(Arc::new(AnthropicProvider::deepseek(&key.api_key, Some(&model)).with_base_url(&base_url).with_thinking(thinking)))
@@ -184,7 +184,7 @@ pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: O
                 .anthropic
                 .clone()
                 .ok_or_else(|| "Anthropic is not connected".to_string())?;
-            let model = model.or_else(|| std::env::var("LORCA_ANTHROPIC_MODEL").ok()).unwrap_or_else(|| default_model(kind));
+            let model = model.or_else(|| std::env::var("BEANS_ANTHROPIC_MODEL").ok()).unwrap_or_else(|| default_model(kind));
             let base_url = key.base_url.clone().unwrap_or_else(anthropic_base_url);
             Ok(Arc::new(AnthropicProvider::anthropic(&key.api_key, Some(&model)).with_base_url(&base_url).with_thinking(thinking)))
         }
@@ -196,8 +196,8 @@ pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: O
                 .opencode
                 .clone()
                 .ok_or_else(|| "OpenCode Zen is not connected".to_string())?;
-            let model = model.or_else(|| std::env::var("LORCA_OPENCODE_MODEL").ok()).unwrap_or_else(|| default_model(kind));
-            let root = key.base_url.clone().or_else(|| env_url("LORCA_OPENCODE_BASE_URL")).unwrap_or_else(|| OPENCODE_BASE_URL.into());
+            let model = model.or_else(|| std::env::var("BEANS_OPENCODE_MODEL").ok()).unwrap_or_else(|| default_model(kind));
+            let root = key.base_url.clone().or_else(|| env_url("BEANS_OPENCODE_BASE_URL")).unwrap_or_else(|| OPENCODE_BASE_URL.into());
             opencode_provider("opencode", &root, &key.api_key, &model, thinking)
         }
         "opencode-go" => {
@@ -208,11 +208,11 @@ pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: O
                 .opencode_go
                 .clone()
                 .ok_or_else(|| "OpenCode Go is not connected".to_string())?;
-            let model = model.or_else(|| std::env::var("LORCA_OPENCODE_GO_MODEL").ok()).unwrap_or_else(|| default_model(kind));
+            let model = model.or_else(|| std::env::var("BEANS_OPENCODE_GO_MODEL").ok()).unwrap_or_else(|| default_model(kind));
             let root = key
                 .base_url
                 .clone()
-                .or_else(|| env_url("LORCA_OPENCODE_GO_BASE_URL"))
+                .or_else(|| env_url("BEANS_OPENCODE_GO_BASE_URL"))
                 .unwrap_or_else(|| OPENCODE_GO_BASE_URL.into());
             opencode_provider("opencode-go", &root, &key.api_key, &model, thinking)
         }
@@ -220,19 +220,19 @@ pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: O
             if app.credentials.lock().unwrap().chatgpt.is_none() {
                 return Err("ChatGPT is not connected".into());
             }
-            let model = model.or_else(|| std::env::var("LORCA_CHATGPT_MODEL").ok()).unwrap_or_else(|| default_model(kind));
+            let model = model.or_else(|| std::env::var("BEANS_CHATGPT_MODEL").ok()).unwrap_or_else(|| default_model(kind));
             Ok(Arc::new(ChatGptProvider::new(Arc::new(AppTokenSource(app.clone())), Some(&model)).with_thinking(thinking)))
         }
         "grok" => {
             if app.credentials.lock().unwrap().grok.is_none() {
                 return Err("Grok is not connected".into());
             }
-            let model = model.or_else(|| std::env::var("LORCA_GROK_MODEL").ok()).unwrap_or_else(|| default_model(kind));
+            let model = model.or_else(|| std::env::var("BEANS_GROK_MODEL").ok()).unwrap_or_else(|| default_model(kind));
             let mut provider = GrokProvider::new(Arc::new(AppGrokTokenSource(app.clone())), Some(&model)).with_thinking(thinking);
-            if let Some(base_url) = env_url("LORCA_GROK_BASE_URL") {
+            if let Some(base_url) = env_url("BEANS_GROK_BASE_URL") {
                 provider = provider.with_base_url(&base_url);
             }
-            if let Some(issuer) = env_url("LORCA_GROK_ISSUER") {
+            if let Some(issuer) = env_url("BEANS_GROK_ISSUER") {
                 provider = provider.with_issuer(&issuer);
             }
             Ok(Arc::new(provider))
@@ -307,7 +307,7 @@ fn opencode_provider(
             Arc::new(provider)
         }
         OpenCodeWire::Unsupported => {
-            return Err(format!("{model} uses an OpenCode endpoint Lorca does not support"));
+            return Err(format!("{model} uses an OpenCode endpoint Beans does not support"));
         }
     };
     Ok(opencode_headers(provider))
@@ -375,10 +375,10 @@ fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> Mode
     }
 }
 
-/// DeepSeek's API root when the credential has none: `LORCA_DEEPSEEK_BASE_URL` (a proxy or a
+/// DeepSeek's API root when the credential has none: `BEANS_DEEPSEEK_BASE_URL` (a proxy or a
 /// test server) or DeepSeek itself.
 fn deepseek_base_url() -> String {
-    env_url("LORCA_DEEPSEEK_BASE_URL").unwrap_or_else(|| lorca_agent::providers::openai_compat::DEEPSEEK_BASE_URL.to_string())
+    env_url("BEANS_DEEPSEEK_BASE_URL").unwrap_or_else(|| beans_agent::providers::openai_compat::DEEPSEEK_BASE_URL.to_string())
 }
 
 /// The Anthropic-compatible endpoint under a DeepSeek API root. A root given with its
@@ -392,10 +392,10 @@ fn deepseek_anthropic_url(root: &str) -> String {
     }
 }
 
-/// Anthropic's API root when the credential has none: `LORCA_ANTHROPIC_BASE_URL` or
+/// Anthropic's API root when the credential has none: `BEANS_ANTHROPIC_BASE_URL` or
 /// Anthropic itself.
 fn anthropic_base_url() -> String {
-    env_url("LORCA_ANTHROPIC_BASE_URL").unwrap_or_else(|| ANTHROPIC_BASE_URL.to_string())
+    env_url("BEANS_ANTHROPIC_BASE_URL").unwrap_or_else(|| ANTHROPIC_BASE_URL.to_string())
 }
 
 fn env_url(name: &str) -> Option<String> {
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(opencode_wire("opencode-go", "minimax-m3"), OpenCodeWire::Messages);
         assert_eq!(opencode_wire("opencode-go", "qwen3.8-max"), OpenCodeWire::Messages);
         assert_eq!(opencode_wire("opencode-go", "grok-4.7"), OpenCodeWire::Responses);
-        // Every model the catalog offers on OpenCode has a wire Lorca speaks.
+        // Every model the catalog offers on OpenCode has a wire Beans speaks.
         for kind in ["opencode", "opencode-go"] {
             for model in models::for_provider(kind) {
                 assert_ne!(opencode_wire(kind, &model.id), OpenCodeWire::Unsupported, "{kind}/{}", model.id);
@@ -478,7 +478,7 @@ mod tests {
     }
 
     fn scratch_app() -> ScratchApp {
-        let home = std::env::temp_dir().join(format!("lorca-providers-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-providers-{}", uuid::Uuid::new_v4()));
         ScratchApp(App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap(), home)
     }
 
@@ -563,7 +563,7 @@ mod tests {
     #[tokio::test]
     async fn selected_aliases_keep_their_identity_and_metadata_on_each_wire() {
         use futures::StreamExt;
-        use lorca_agent::{AssistantEvent, LlmMessage, UserMessage};
+        use beans_agent::{AssistantEvent, LlmMessage, UserMessage};
         let cases = [
             (CustomApi::ChatCompletions, "/v1", "data: {\"choices\":[{\"delta\":{\"content\":\"fixture\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
             (CustomApi::Responses, "/v1", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{}}}\n\n"),
@@ -641,11 +641,11 @@ mod tests {
         let app = &scratch.0;
         let request = || ModelRequest {
             system_prompt: String::new(),
-            messages: vec![lorca_agent::LlmMessage::User(lorca_agent::UserMessage::text("hi"))],
+            messages: vec![beans_agent::LlmMessage::User(beans_agent::UserMessage::text("hi"))],
             tools: Vec::new(),
             cache_points: Vec::new(),
             max_tokens: None,
-            options: lorca_agent::RequestOptions::default().with_session_id("chat-1"),
+            options: beans_agent::RequestOptions::default().with_session_id("chat-1"),
         };
         let cases = [
             (CustomApi::ChatCompletions, "/v1", "data: [DONE]\n\n", "post /v1/chat/completions "),
@@ -668,7 +668,7 @@ mod tests {
 
 
     #[tokio::test]
-    async fn opencode_requests_identify_lorca_and_carry_the_conversation() {
+    async fn opencode_requests_identify_beans_and_carry_the_conversation() {
         let seen = Arc::new(Mutex::new(None));
         let provider = opencode_headers(Arc::new(CaptureProvider(seen.clone())));
         let request = ModelRequest {
@@ -677,7 +677,7 @@ mod tests {
             tools: Vec::new(),
             cache_points: Vec::new(),
             max_tokens: None,
-            options: lorca_agent::RequestOptions::default().with_session_id("chat-1"),
+            options: beans_agent::RequestOptions::default().with_session_id("chat-1"),
         };
         let _ = provider.stream(request, CancellationToken::new()).await;
         let request = seen.lock().take().unwrap();
@@ -692,7 +692,7 @@ mod tests {
     #[tokio::test]
     async fn compatible_metadata_drives_each_official_wire_without_id_guesses() {
         use futures::StreamExt;
-        use lorca_agent::{AssistantEvent, ContentPart, LlmMessage, UserMessage};
+        use beans_agent::{AssistantEvent, ContentPart, LlmMessage, UserMessage};
         let cases = [
             (CustomApi::ChatCompletions, "/v1", "/v1/chat/completions", "openai", "data: {\"choices\":[{\"delta\":{\"content\":\"fixture\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
             (CustomApi::Responses, "/v1", "/v1/responses", "openai", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{}}}\n\n"),
@@ -712,7 +712,7 @@ mod tests {
                     options: Default::default(),
                 };
                 let events: Vec<_> = adapter.stream(request, CancellationToken::new()).await.collect().await;
-                assert!(events.iter().any(|event| matches!(event, AssistantEvent::Done { stop_reason: lorca_agent::StopReason::Stop, .. })), "{events:?}");
+                assert!(events.iter().any(|event| matches!(event, AssistantEvent::Done { stop_reason: beans_agent::StopReason::Stop, .. })), "{events:?}");
                 assert!(!events.iter().any(|event| matches!(event, AssistantEvent::Error { .. })), "{events:?}");
                 let seen = server.join().unwrap();
                 let (headers, body) = seen.split_once("\r\n\r\n").unwrap();
@@ -755,7 +755,7 @@ mod tests {
                 assert!(body.get("prompt_cache_key").is_none());
             }
             let provider = CustomProvider { name: "Neutral".into(), api, base_url: "http://127.0.0.1:9".into(), api_key: String::new(), models: vec![CustomModel { tools: Some(false), ..model("no-tools") }], created_at: 1, integration: None };
-            let request = ModelRequest { system_prompt: String::new(), messages: Vec::new(), tools: vec![lorca_agent::ToolSpec { name: "read".into(), description: "fixture".into(), parameters: serde_json::json!({"type":"object"}) }], cache_points: Vec::new(), max_tokens: None, options: Default::default() };
+            let request = ModelRequest { system_prompt: String::new(), messages: Vec::new(), tools: vec![beans_agent::ToolSpec { name: "read".into(), description: "fixture".into(), parameters: serde_json::json!({"type":"object"}) }], cache_points: Vec::new(), max_tokens: None, options: Default::default() };
             let events: Vec<_> = custom_provider("custom:neutral", &provider, "no-tools", None).stream(request, CancellationToken::new()).await.collect().await;
             assert!(matches!(&events[0], AssistantEvent::Error { message, aborted: false } if message.contains("does not support tools")));
         }
@@ -781,7 +781,7 @@ mod tests {
             let request = ModelRequest { system_prompt:String::new(),messages:Vec::new(),tools:Vec::new(),cache_points:Vec::new(),max_tokens:Some(32),options:Default::default() };
             let events:Vec<_> = custom_provider("custom:neutral",&provider,"alias",None).stream(request,CancellationToken::new()).await.collect().await;
             server.join().unwrap();
-            assert!(events.iter().any(|event| matches!(event,lorca_agent::AssistantEvent::Error { message,aborted:false } if message.contains("307"))),"{events:?}");
+            assert!(events.iter().any(|event| matches!(event,beans_agent::AssistantEvent::Error { message,aborted:false } if message.contains("307"))),"{events:?}");
             assert_eq!(sink.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock);
         }
     }

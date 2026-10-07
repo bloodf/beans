@@ -267,7 +267,7 @@ pub async fn send_with_retry(
                 }
             }
             Err(error) => {
-                let failure = RequestFailure::Transport(lorca_tls::describe(&error));
+                let failure = RequestFailure::Transport(beans_tls::describe(&error));
                 if retries_left == 0 {
                     return Err(failure);
                 }

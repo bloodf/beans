@@ -68,7 +68,7 @@ export const enMarketing = {
   ],
   subscriptionTitle: 'Already have a plan?',
   subscriptionBody:
-    'Connect ChatGPT or Grok with an eligible account. Your provider’s usage limits still apply.',
+    'Connect ChatGPT with an eligible account. Production Grok sign-in is disabled pending a verified Beans contract. Your provider’s usage limits still apply.',
   apiTitle: 'Prefer an API key?',
   apiBody:
     'Connect Anthropic, DeepSeek, OpenCode, or a compatible endpoint. Usage is billed by that provider at its own rates.',
@@ -161,7 +161,7 @@ export const zhMarketing: typeof enMarketing = {
   ],
   subscriptionTitle: '已有订阅？',
   subscriptionBody:
-    '用符合条件的账号连接 ChatGPT 或 Grok，提供商用量限制依然适用。',
+    '用符合条件的账号连接 ChatGPT。生产 Grok 登录在 Beans 合同核验之前禁用；提供商用量限制依然适用。',
   apiTitle: '更喜欢 API？',
   apiBody:
     '连接 Anthropic、DeepSeek、OpenCode 或兼容接口，使用费用按提供商的费率计收。',

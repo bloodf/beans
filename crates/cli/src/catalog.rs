@@ -32,7 +32,7 @@ struct Cache {
 }
 
 fn source(app: &App) -> Option<String> {
-    std::env::var("LORCA_MODELS_URL").ok().map(|url| url.trim().to_string()).filter(|url| !url.is_empty())
+    std::env::var("BEANS_MODELS_URL").ok().map(|url| url.trim().to_string()).filter(|url| !url.is_empty())
         .or_else(|| app.relay_url().map(|relay| format!("{}/models/v1.json", relay.trim_end_matches('/'))))
 }
 
@@ -41,7 +41,7 @@ pub fn enable(app: &App) {
     let selected = source(app);
     let mut current = app.catalog.source.lock();
     if *current == selected { return; }
-    lorca_models::reset();
+    beans_models::reset();
     *app.catalog.unknown_checked.lock() = None;
     *current = selected;
     if let Some(url) = current.as_deref() { load_cached_from(&app.config, url); }
@@ -66,8 +66,8 @@ fn read_cache(config: &Config) -> Option<Cache> {
 fn load_cached_from(config: &Config, url: &str) {
     let Some(cache) = read_cache(config).filter(|cache| cache.source == url) else { return };
     let Ok(text) = serde_json::to_string(&cache.catalog) else { return };
-    match lorca_models::parse(&text) {
-        Ok(catalog) => { lorca_models::install(catalog); }
+    match beans_models::parse(&text) {
+        Ok(catalog) => { beans_models::install(catalog); }
         Err(error) => tracing::warn!(%error, "reading cached model catalog"),
     }
 }
@@ -89,8 +89,8 @@ pub async fn check_for_model(app: &Arc<App>, provider: &str, model: Option<&str>
     let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else { return };
     enable(app);
     if fetch_disabled() || app.catalog.source.lock().is_none()
-        || lorca_models::default_model(provider).is_none()
-        || lorca_models::find(provider, model).is_some() { return; }
+        || beans_models::default_model(provider).is_none()
+        || beans_models::find(provider, model).is_some() { return; }
     {
         let mut last = app.catalog.unknown_checked.lock();
         if last.is_some_and(|at| at.elapsed() < UNKNOWN_MODEL_EVERY) { return; }
@@ -102,7 +102,7 @@ pub async fn check_for_model(app: &Arc<App>, provider: &str, model: Option<&str>
 }
 
 fn fetch_disabled() -> bool {
-    std::env::var("LORCA_MODELS_FETCH").is_ok_and(|value| value.trim() == "0")
+    std::env::var("BEANS_MODELS_FETCH").is_ok_and(|value| value.trim() == "0")
 }
 
 /// Forced checks bypass freshness, not origin or version validation. True when installed.
@@ -117,7 +117,7 @@ pub async fn check(app: &Arc<App>, force: bool) -> Result<bool, String> {
     });
     // An invalid cache cannot support a 304 or suppress a fresh check.
     let valid = serde_json::to_string(&cache.catalog).ok()
-        .and_then(|text| lorca_models::parse(&text).ok()).is_some();
+        .and_then(|text| beans_models::parse(&text).ok()).is_some();
     if !valid { cache.etag = None; cache.checked_at = 0; cache.catalog = Value::Null; }
     let now = config::now_unix();
     if !force && (0..FRESH_SECS).contains(&(now - cache.checked_at)) { return Ok(false); }
@@ -130,9 +130,9 @@ pub async fn check(app: &Arc<App>, force: bool) -> Result<bool, String> {
     cache.checked_at = now;
     let installed = match fetched {
         Ok(Some((etag, text))) => {
-            let catalog = lorca_models::parse(&text)?;
+            let catalog = beans_models::parse(&text)?;
             let incoming = serde_json::from_str(&text).map_err(|error| error.to_string())?;
-            let installed = lorca_models::install(catalog);
+            let installed = beans_models::install(catalog);
             // A downgrade cannot replace persisted content or its validator. The next
             // request must not revalidate an older response as though it were current.
             if installed || (valid && incoming_newer_than_cache(&incoming, &cache.catalog)) {
@@ -162,14 +162,14 @@ mod tests {
 
     #[test]
     fn cache_rejects_foreign_origin_and_invalid_content() {
-        let home = std::env::temp_dir().join(format!("lorca-catalog-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-catalog-{}", uuid::Uuid::new_v4()));
         let config = Config { home: home.clone(), port: 0 };
-        let mut later: Value = serde_json::from_str(lorca_models::BUNDLED).unwrap();
+        let mut later: Value = serde_json::from_str(beans_models::BUNDLED).unwrap();
         later["updated"] = Value::from("2999-01-01T00:00:00Z");
         let cache = Cache { source: "https://other.example/models/v1.json".into(), catalog: later, ..Cache::default() };
         config::write_json_private(&config.catalog_path(), &cache).unwrap();
         load_cached_from(&config, "https://selected.example/models/v1.json");
-        assert_ne!(lorca_models::updated(), "2999-01-01T00:00:00Z");
+        assert_ne!(beans_models::updated(), "2999-01-01T00:00:00Z");
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -187,7 +187,7 @@ mod tests {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let mut later: Value = serde_json::from_str(lorca_models::BUNDLED).unwrap();
+        let mut later: Value = serde_json::from_str(beans_models::BUNDLED).unwrap();
         later["updated"] = Value::from("2999-01-01T00:00:00Z");
         let body = later.to_string();
         let server = std::thread::spawn(move || {
@@ -211,12 +211,12 @@ mod tests {
                 }
             }
         });
-        let home = std::env::temp_dir().join(format!("lorca-catalog-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-catalog-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         app.settings.lock().unwrap().relay_url = Some(base.clone());
         enable(&app);
         assert!(check(&app, false).await.unwrap());
-        assert_eq!(lorca_models::updated(), "2999-01-01T00:00:00Z");
+        assert_eq!(beans_models::updated(), "2999-01-01T00:00:00Z");
         assert!(!check(&app, false).await.unwrap());
         assert!(!check(&app, true).await.unwrap());
         server.join().unwrap();
@@ -225,8 +225,8 @@ mod tests {
         assert_eq!(cached.etag.as_deref(), Some("\"new\""));
         app.settings.lock().unwrap().relay_url = Some("http://127.0.0.1:1".into());
         enable(&app);
-        assert_ne!(lorca_models::updated(), "2999-01-01T00:00:00Z");
-        lorca_models::reset();
+        assert_ne!(beans_models::updated(), "2999-01-01T00:00:00Z");
+        beans_models::reset();
         drop(app);
         std::fs::remove_dir_all(home).unwrap();
     }

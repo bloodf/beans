@@ -31,7 +31,7 @@ On a device that is already set up, choose **File › Pair a Device…** (⇧⌘
 In the desktop app, choose **Pair** during onboarding and paste the string. On a phone, scan the QR code. On a computer with only the CLI:
 
 ```bash
-lorca pair 'lorca://pair?…'
+beans pair 'beans://pair?v=2&…'
 ```
 
 </Step>
@@ -60,4 +60,4 @@ To sign a device out yourself, unpair it from its own Devices pane.
 
 ## Restore on another computer
 
-Choose **Restore** during desktop-app onboarding, or run `lorca identity restore <phrase>` on a CLI-only computer. Beans rebuilds your keys and pulls your account from the relay. Bots that ran on the old computer need a new Runner; their memory and working files stayed on the old disk.
+Choose **Restore** during desktop-app onboarding, or run `beans identity restore <phrase>` on a CLI-only computer. Beans rebuilds your keys and pulls your account from the relay. Bots that ran on the old computer need a new Runner; their memory and working files stayed on the old disk. Supply a fresh-format phrase beginning with `beans-v2` plus thirteen base32 groups; old unversioned phrases are rejected before key derivation. Existing old-format account directories are not migrated or reset.

@@ -1,4 +1,4 @@
-use lorca::{api, app::App, config::Config, credentials::ApiKeyCredential};
+use beans::{api, app::App, config::Config, credentials::ApiKeyCredential};
 use serde_json::json;
 
 struct Home(std::path::PathBuf);
@@ -11,7 +11,7 @@ impl Drop for Home {
 
 #[tokio::test]
 async fn provider_settings_reads_only_the_requested_api_key() {
-    let home = Home(std::env::temp_dir().join(format!("lorca-provider-settings-{}", uuid::Uuid::new_v4())));
+    let home = Home(std::env::temp_dir().join(format!("beans-provider-settings-{}", uuid::Uuid::new_v4())));
     let app = App::load(Config { home: home.0.clone(), port: 0 }).unwrap();
     let kinds = ["deepseek", "anthropic", "opencode", "opencode-go"];
 

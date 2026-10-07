@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use lorca_agent::codemode::{self, Entry, Exposure, Namespace, NamespaceDetails};
-use lorca_agent::{BeforeToolCallContext, BeforeToolCallResult};
+use beans_agent::codemode::{self, Entry, Exposure, Namespace, NamespaceDetails};
+use beans_agent::{BeforeToolCallContext, BeforeToolCallResult};
 use rmcp::model::{CallToolRequestParams, ClientConfig, ContentBlock, Implementation};
 use rmcp::service::RunningService;
 use rmcp::transport::auth::{AuthClient, AuthorizationManager, AuthorizationRequest, OAuthState};
@@ -18,8 +18,8 @@ use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use lorca_agent::agent_loop::ToolExecutionMode;
-use lorca_agent::{ContentPart, Tool, ToolError, ToolResult, ToolUpdateFn};
+use beans_agent::agent_loop::ToolExecutionMode;
+use beans_agent::{ContentPart, Tool, ToolError, ToolResult, ToolUpdateFn};
 use tokio_util::sync::CancellationToken;
 
 use super::{fill, fill_if_set, pattern_matches, AuthSpec, Installed, ServerSpec};
@@ -143,7 +143,7 @@ impl Default for Pool {
 impl Pool {
     pub fn new() -> Self {
         let http = mcp_http::Client::builder()
-            .tls_backend_preconfigured(lorca_tls::client_config(&["h2", "http/1.1"]))
+            .tls_backend_preconfigured(beans_tls::client_config(&["h2", "http/1.1"]))
             .timeout(std::time::Duration::from_secs(600))
             .build()
             .expect("an MCP client over a built TLS config");
@@ -240,7 +240,7 @@ impl Pool {
 
 async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSpec, values: &BTreeMap<String, String>) -> Result<Server, String> {
     let mut implementation = Implementation::default();
-    implementation.name = "Lorca".into();
+    implementation.name = "Beans".into();
     implementation.version = crate::config::VERSION.into();
     let mut info = ClientConfig::default();
     info.client_info = implementation;
@@ -254,7 +254,7 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
             // The login shell's environment, so `npx` or `uvx` resolve from the user's PATH, on
             // Windows as files the way a terminal finds them (`npx` is npm's `npx.cmd`).
             let command = expand_home(&fill(command, values));
-            let mut cmd = lorca_agent::login_shell::command(&command).await;
+            let mut cmd = beans_agent::login_shell::command(&command).await;
             cmd.args(args.iter().map(|a| expand_home(&fill(a, values))));
             // A variable naming an optional key the user left unset is left out.
             for (key, value) in env {
@@ -503,7 +503,7 @@ fn describe_connect_error(error: &str, url: &str) -> String {
 async fn template_values(plugin: &Installed, own: BTreeMap<String, String>) -> BTreeMap<String, String> {
     if plugin.source != super::mcp_json::SOURCE { return own; }
     let mut values: BTreeMap<String, String> = std::env::vars_os().map(|(name, value)| (name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())).collect();
-    for (name, value) in lorca_agent::login_shell::environment().await {
+    for (name, value) in beans_agent::login_shell::environment().await {
         values.insert(name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned());
     }
     values.extend(own);
@@ -1096,7 +1096,7 @@ struct ClientHint {
     token_variable: Option<String>,
     client_id_variable: Option<String>,
     client_secret_variable: Option<String>,
-    /// The name to register under; Lorca when unset.
+    /// The name to register under; Beans when unset.
     name: Option<String>,
     /// The redirect a preregistered client was registered with.
     callback_port: Option<u16>,
@@ -1134,7 +1134,7 @@ impl ClientHint {
 /// The server's own `WWW-Authenticate` challenge, which names its resource metadata (GitHub
 /// keeps it under the server's path, where a blind probe never looks).
 async fn challenge_of(app: &Arc<App>, url: &str) -> Option<String> {
-    let probe = json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "Lorca", "version": crate::config::VERSION } } });
+    let probe = json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "Beans", "version": crate::config::VERSION } } });
     let response = app.mcp.http.post(url).header("accept", "application/json, text/event-stream").json(&probe).send().await.ok()?;
     if response.status().as_u16() != 401 {
         return None;
@@ -1149,7 +1149,7 @@ async fn challenge_of(app: &Arc<App>, url: &str) -> Option<String> {
 async fn begin_sign_in(app: &Arc<App>, url: &str, scopes: &[String], name: &str, client: &ClientHint, redirect: String) -> Result<(OAuthState, String), String> {
     let setup = async {
         let mut state = OAuthState::new(url, Some(app.mcp.http.clone())).await.map_err(|e| format!("{name}: {e}"))?;
-        let mut request = AuthorizationRequest::new(redirect).with_scopes(scopes.iter().cloned()).with_client_name(client.name.as_deref().unwrap_or("Lorca")).with_application_type("native");
+        let mut request = AuthorizationRequest::new(redirect).with_scopes(scopes.iter().cloned()).with_client_name(client.name.as_deref().unwrap_or("Beans")).with_application_type("native");
         if let Some(challenge) = challenge_of(app, url).await {
             request = request.with_challenge(challenge);
         }
@@ -1201,10 +1201,10 @@ async fn sign_in(app: &Arc<App>, url: &str, scopes: &[String], name: &str, clien
     complete_sign_in(state, &landed, name).await
 }
 
-/// Opens a sign-in page in this computer's browser. `LORCA_OAUTH_NO_BROWSER=1` fetches it
+/// Opens a sign-in page in this computer's browser. `BEANS_OAUTH_NO_BROWSER=1` fetches it
 /// instead, for tests against a fake server that redirects straight to the callback.
 pub fn open_browser(app: &Arc<App>, url: &str) -> Result<(), String> {
-    if std::env::var("LORCA_OAUTH_NO_BROWSER").ok().as_deref() == Some("1") {
+    if std::env::var("BEANS_OAUTH_NO_BROWSER").ok().as_deref() == Some("1") {
         let (http, url) = (app.mcp.http.clone(), url.to_string());
         tokio::spawn(async move {
             if let Err(error) = http.get(&url).send().await {
@@ -2131,7 +2131,7 @@ fn save_blob(uri: &str, blob: &str) -> Result<(std::path::PathBuf, usize), Strin
     use base64::Engine;
     if blob.len() > 64 * 1024 * 1024 { return Err("resource exceeds size limit".into()); }
     let bytes = base64::engine::general_purpose::STANDARD.decode(blob.trim()).map_err(|_| "invalid resource base64".to_string())?;
-    let dir = std::env::temp_dir().join("lorca-resources");
+    let dir = std::env::temp_dir().join("beans-resources");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let name: String = uri.rsplit(['/', '\\', ':']).next().unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).take(80).collect();
     let path = dir.join(format!("{}-{}", uuid::Uuid::new_v4().simple(), if name.trim_matches('.').is_empty() { "resource" } else { &name }));
@@ -2199,7 +2199,7 @@ fn model_content(result: &rmcp::model::CallToolResult) -> Vec<ContentPart> {
 
 fn model_image(data: &str) -> Result<Vec<ContentPart>, String> {
     if data.len() > 16 * 1024 * 1024 { return Err("image input exceeds limit".into()); }
-    lorca_agent::images::prepare_base64(data).map(lorca_agent::images::Inline::into_parts)
+    beans_agent::images::prepare_base64(data).map(beans_agent::images::Inline::into_parts)
 }
 
 /// Adds result text within the aggregate UTF-8 display budget.
@@ -2269,7 +2269,7 @@ async fn persist_refreshed(app: &Arc<App>, plugin_id: &str, server: &str, auth: 
     }
 }
 
-/// `create_issue · repo: lorca, title: Fix the relay`
+/// `create_issue · repo: beans, title: Fix the relay`
 fn call_summary(tool: &str, args: &Value) -> String {
     let mut parts = Vec::new();
     if let Some(object) = args.as_object() {
@@ -2500,7 +2500,7 @@ fn save_proposal(workdir: &std::path::Path, path: &str, content: &str) -> Result
     }
     let std::path::Component::Normal(target) = parts[parts.len() - 1] else { unreachable!() };
     let target = name(target)?;
-    let temp = name(OsStr::new(&format!(".lorca-propose-{}", uuid::Uuid::new_v4())))?;
+    let temp = name(OsStr::new(&format!(".beans-propose-{}", uuid::Uuid::new_v4())))?;
     let fd = unsafe { libc::openat(dir.as_raw_fd(), temp.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
     if fd < 0 { return Err(format!("Creating draft: {}", std::io::Error::last_os_error())); }
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
@@ -2596,7 +2596,7 @@ mod tests {
     }
 
     fn scratch_app() -> ScratchApp {
-        let home = std::env::temp_dir().join(format!("lorca-mcp-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-mcp-{}", uuid::Uuid::new_v4()));
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
     }
@@ -2872,8 +2872,8 @@ mod tests {
                 "embedded",
                 "[file:///a.pdf: application/pdf, left out]",
                 "[file:///b.md (b.md)]",
-                "[image/svg+xml image, left out: it is not an image Lorca can read]",
-                "[file:///c.png: image/png, left out: it is not an image Lorca can read]"
+                "[image/svg+xml image, left out: it is not an image Beans can read]",
+                "[file:///c.png: image/png, left out: it is not an image Beans can read]"
             ]
         );
         let types: Vec<&str> = content.iter().filter_map(|part| if let ContentPart::Image { mime_type, .. } = part { Some(mime_type.as_str()) } else { None }).collect();
@@ -3083,7 +3083,7 @@ mod tests {
         assert_eq!(tool_name("p", "a-b"), tool_name("p", "a_b"), "names are identifiers, so a collision gets a suffix in the catalog");
         assert_eq!(tool_name("p", &"x".repeat(100)).len(), 64);
         // serde_json keeps object keys sorted, so the summary lists them alphabetically.
-        assert_eq!(call_summary("create_issue", &json!({ "repo": "lorca", "title": "Fix   the relay", "body": "x".repeat(80) })), format!("create_issue · body: {}…, repo: lorca, title: Fix the relay", "x".repeat(60)));
+        assert_eq!(call_summary("create_issue", &json!({ "repo": "beans", "title": "Fix   the relay", "body": "x".repeat(80) })), format!("create_issue · body: {}…, repo: beans, title: Fix the relay", "x".repeat(60)));
         assert_eq!(call_summary("get_me", &json!({})), "get_me");
         assert_eq!(Decision::parse("always"), Some(Decision::Always));
         assert_eq!(Decision::parse("nope"), None);
@@ -3144,7 +3144,7 @@ mod tests {
     /// it, and names a plugin that never connected.
     #[test]
     fn a_turns_catalog_lists_saved_tools_without_connecting() {
-        use lorca_agent::codemode::{Catalog, CodemodeOptions, CodemodeTool};
+        use beans_agent::codemode::{Catalog, CodemodeOptions, CodemodeTool};
         let scratch = scratch_app();
         let app = &scratch.0;
         for (id, name) in [("linear", "Linear"), ("notion", "Notion")] {
@@ -3168,7 +3168,7 @@ mod tests {
         };
         crate::config::write_json_private(&catalog_path(app, "linear"), &saved).unwrap();
 
-        let mut local: Vec<Arc<dyn Tool>> = lorca_agent::tools::coding_tools(scratch.1.clone()).into_iter().filter(|tool| tool.name() == "read").collect();
+        let mut local: Vec<Arc<dyn Tool>> = beans_agent::tools::coding_tools(scratch.1.clone()).into_iter().filter(|tool| tool.name() == "read").collect();
         // The scripts' own bash: one command at a time, resolving to its output and exit code.
         let bash = Arc::new(crate::shell::script_bash(app, scratch.1.clone()));
         local.push(bash);
@@ -3196,7 +3196,7 @@ mod tests {
 
     #[tokio::test]
     async fn restricted_bot_cannot_discover_plugin_instructions_or_tools() {
-        use lorca_agent::codemode::Catalog;
+        use beans_agent::codemode::Catalog;
         let scratch = scratch_app();
         let app = &scratch.0;
         let manifest = super::super::Manifest::parse(&json!({

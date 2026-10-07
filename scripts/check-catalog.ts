@@ -1,4 +1,4 @@
-// Checks a change to what lorca.app serves Devices: the model catalog (crates/models/catalog.json)
+// Checks a change to what beans.app serves Devices: the model catalog (crates/models/catalog.json)
 // and the marketplace index (crates/cli/marketplace/index.json) each move their `updated` time
 // forward whenever anything else in them changes, since a Device keeps whichever copy has the later
 // time and would never take a changed one under the same time. Compares with `CATALOG_BASE`

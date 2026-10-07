@@ -37,7 +37,7 @@ try {
         render(icon, join(iconset, `icon_${size}x${size}${scale === 2 ? '@2x' : ''}.png`), size * scale);
       }
     }
-    execFileSync('iconutil', ['-c', 'icns', iconset, '-o', resolve(root, `macos/Resources/Lorca${suffix}.icns`)]);
+    execFileSync('iconutil', ['-c', 'icns', iconset, '-o', resolve(root, `macos/Resources/Beans${suffix}.icns`)]);
   }
   render('beans-adaptive-icon.svg', 'mobile/assets/adaptive-icon.png', 1024);
   render('beans-adaptive-icon-dev.svg', 'mobile/assets/adaptive-icon-dev.png', 1024);

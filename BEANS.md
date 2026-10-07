@@ -1,88 +1,36 @@
-# Beans fork
+# Beans project guide
 
-Beans is a Lorca fork with Beans branding on macOS and phones and project-owned changes to avatars, bot controls, relay compatibility, local websocket access, and custom-provider model discovery. The Swift target, Rust crates, `lorca` binary, `LORCA_*` environment variables, and pairing protocol (`lorca://pair`) retain their upstream runtime identifiers. The macOS bundles keep their CLI identities separate from upstream Lorca: Beans uses `~/.beans` on port `4864`; Beans Dev uses `~/.beans-dev` on port `4865`. The Windows and Linux app retains its upstream identity while sharing functional UI changes.
+Beans runs persistent bots on the user's Runners, with AppKit on macOS, MyGo on Windows/Linux and Expo over the Rust core on phones. Read [ARCHITECTURE.md](ARCHITECTURE.md) and its subject docs before changing a mechanism. Source provenance and project licensing are recorded in [README](README.md#license-and-credits); required third-party notices remain with their source.
 
-## Differences from upstream
+## Fresh account format
 
-The table below tracks branding and build configuration; it is not an exhaustive inventory of fork changes. The project-owned [`@beans/blobatar` package](packages/beans-blobatar/README.md) generates matching offline bot avatars across Mac, phone, and Windows/Linux. Its vendored Blobatar source retains Alain's MIT attribution and license in [`packages/beans-blobatar/LICENSE`](packages/beans-blobatar/LICENSE); bot images uploaded by users override the generated look.
+The runtime binary is `beans`; owned crates/modules/packages use Beans names and configuration uses `BEANS_*`. Format is exactly `beans-v2`, with the same byte string as the identity/machine/push HKDF salt. Backups start with the separate token `beans-v2`, followed by thirteen base32 groups. Restore rejects a missing/wrong prefix before normalization or derivation. Pairing uses exact `beans://pair?v=2&…` links and validates the version, unique fields and sealed request/reply format before persistence.
 
-Account-wide Pause, per-bot shell/file/plugin capabilities, and user-approved file drafts change bot behavior, not just copy. Pause and capability edits sync as encrypted `policy` actions alongside roster state so stale offline roster uploads do not undo explicit restrictions. Runner enforcement begins when a Device receives those actions; an offline Runner cannot enforce a change it has not received. Local CLI websocket upgrades check loopback `Host` and restrict browser `Origin` to the CLI's own origin or exact configured origins. These are source-tree mechanisms, not claims that a relay or client build has been deployed. See [Bots](docs/architecture/bots.md), [Tools](docs/architecture/tools.md), [Protocols](docs/architecture/protocols.md), and [CLI runtime](docs/architecture/runtime.md).
+Desktop homes are `~/.beans-v2` / `~/.beans-dev-v2`, with ports 4874 / 4875. Phone roots are `beans-v2/core` / `beans-dev-v2/core` within separate existing build sandboxes. AppKit preferences use `beans-v2.*` without old-key migration. Distribution/signing identifiers `ai.amoena.beans` / `.dev` and their app/keychain groups stay unchanged.
 
-Shell Auto-review has no implicit workspace exemption. Only statically read-only commands skip review while Auto-review is enabled; mutations and opaque programs use the existing review and permission flow even inside a bot's workspace. Explicit user rules still apply, and an unavailable review fails closed for unattended work. See [Tools](docs/architecture/tools.md).
+Device storage validates `format.json` before mkdir, permissions, deletion, recovery or SQLite setup; populated unmarked homes and malformed account records fail without modifying bytes. Direct LocalStore and push-decryption paths enforce the boundary. Device SQLite uses `BNS2` (`0x424E5332`). Relay SQLite separately requires `BNR2` (`0x424E5232`) before SQLite opens; Postgres requires exactly one `beans-v2` row in `beans_storage_format`, initialized only for a truly empty schema before account DDL/recovery. See [Identity](docs/architecture/identity.md#fresh-beans-format) and [Relay](docs/architecture/relay.md#fresh-relay-storage).
 
-Relay protocol 3 carries durable encrypted policy actions and conditional roster writes. Upgrade every relay replica first, then clients: the CLI refuses relays older than protocol 3, and a relay with minimum protocol 3 returns HTTP `426` to older clients on `/v1` routes (except health). If deployment overrides `LORCA_RELAY_MIN_PROTOCOL`, set it to 3. Mac, phone, and Windows/Linux UIs expose account and bot controls and refresh saved custom-provider model lists without replacing selected models; the CLI also refreshes catalogs periodically. Runner network restrictions are deployment configuration, not a guarantee provided by the application. See [Providers](docs/architecture/providers.md) and [Codemode and Plugins](docs/architecture/plugins.md).
+Protocol 5 plus `Beans-Protocol: 5` and `Beans-Format: beans-v2` gate every account route, including public registration/challenge/pair mailboxes and sync. Missing, malformed or duplicated capabilities fail closed. Effective account/roster floors cannot fall below 5. Old accounts, old unversioned backups and mixed-format paired Devices are incompatible. No automatic migration, reset or production rollout occurs; existing accounts, installed apps and services remain untouched.
 
-| File | Why |
-| --- | --- |
-| `scripts/app.ts` | Names the macOS bundles Beans / Beans Dev, assigns `ai.amoena.beans` / `.dev`, copies the unchanged Swift `Lorca` executable under the Beans bundle name, and omits the upstream Sparkle feed and key while disabling automatic checks. |
-| `package.json` | Uses the Beans Dev APNs topic for the standalone local relay script. |
-| `scripts/android-release.ts` | Rebuilds the Android core and generates a production release APK with external signing credentials. |
-| `scripts/dev.ts` | Uses the Beans Dev APNs topic for the local relay and reports its CLI port. |
-| `scripts/reset.ts` | Limits macOS resets to the selected Beans CLI home and port. |
-| `scripts/mobile.ts` | Opens the Beans Dev phone app and its Expo development URL. |
-| `scripts/release-ios.ts` | Uses the Beans iOS bundle ID and generated Xcode project, scheme, and archive paths. |
-| `macos/Sources/Lorca/App/AppInfo.swift` | Recognizes the Beans Dev bundle, displays Beans when bundle metadata is missing, sets separate CLI homes and ports, and sets the Beans release relay fallback. |
-| `macos/Sources/Lorca/App/Updater.swift` | Never starts Sparkle or exposes update controls without a Beans appcast. |
-| `macos/Sources/Lorca/App/AppDelegate.swift` | Names Beans in the relay update warning and product note. |
-| `macos/Sources/Lorca/App/MainMenu.swift` | Names Beans in the app and Help menus. |
-| `macos/Sources/Lorca/Chat/ChatViewController.swift` | Names Beans as the system message author. |
-| `macos/Sources/Lorca/Chat/Dictation.swift` | Names Beans in permission errors. |
-| `macos/Sources/Lorca/Content/StateViewControllers.swift` | Names Beans in the CLI unavailable state. |
-| `macos/Sources/Lorca/Model/CLIClient.swift` | Names Beans in the CLI connection error. |
-| `macos/Sources/Lorca/Onboarding/OnboardingWindowController.swift` | Names Beans in onboarding copy. |
-| `macos/Sources/Lorca/Settings/AutoReviewSettingsViewController.swift` | Names Beans in Auto-review copy. |
-| `macos/Sources/Lorca/Settings/DeviceSettingsViewControllers.swift` | Names Beans in relay status. |
-| `macos/Sources/Lorca/Settings/SettingsWindowController.swift` | Names Beans in app settings. |
-| `macos/Sources/Lorca/Sheets/CustomProviderViewController.swift` | Names Beans in provider setup. |
-| `macos/Resources/en.lproj/InfoPlist.strings` | Names Beans in English system permissions. |
-| `macos/Resources/zh-Hans.lproj/InfoPlist.strings` | Names Beans in Chinese system permissions. |
-| `macos/Resources/zh-Hans.lproj/Localizable.strings` | Translates Beans-facing UI strings. |
-| `mobile/app.config.ts` | Names both phone builds, separates IDs/groups/schemes, and reads Android Firebase configuration only from `BEANS_GOOGLE_SERVICES_FILE` when set. |
-| `mobile/plugins/with-android-release-signing.js` | Applies the external release keystore during Android prebuild without changing debug signing. |
-| `mobile/plugins/with-android-locale-defaults.js` | Gives Android permission translations a default English resource for release lint. |
-| `mobile/locales/en.json` | Names Beans in English system permissions. |
-| `mobile/locales/zh-Hans.json` | Names Beans in Chinese system permissions. |
-| `mobile/app/pair.tsx` | Recognizes Beans Dev and names Beans in pairing copy. |
-| `mobile/app/settings/index.tsx` | Names Beans in settings and version fallback. |
-| `mobile/app/settings/custom-provider.tsx` | Names Beans in provider setup. |
-| `mobile/app/settings/device/[id].tsx` | Names Beans in relay status. |
-| `mobile/src/i18n/zh.ts` | Translates Beans-facing phone strings. |
-| `mobile/src/core/pairing.ts` | Names Beans in invalid pairing-code errors; still parses `lorca://pair`. |
-| `mobile/src/core/core.test.ts` | Tracks the pairing error wording. |
-| `mobile/src/core/model.ts` | Names Beans in product-facing model descriptions. |
-| `mobile/src/core/prefs.ts` | Recognizes the Beans Dev ID while keeping the core's existing data-folder names. |
-| `mobile/src/ui/ChatsScreen.tsx` | Names Beans in relay-update status. |
-| `mobile/src/ui/Composer.tsx` | Names Beans in permission prompts. |
-| `mobile/src/ui/relay.ts` | Names Beans in connection errors. |
-| `mobile/modules/lorca-core/ios/LorcaCoreModule.swift` | Shares the push key through the Beans app group. |
-| `mobile/modules/lorca-core/android/src/main/java/app/lorca/core/PushService.kt` | Selects the Beans Dev sandbox for push decryption. |
-| `mobile/targets/notify/NotificationService.swift` | Reads the push key from the matching Beans app group. |
-| `ARCHITECTURE.md` | Records the platform install identities. |
-| `docs/architecture/macos-app.md` | Describes the bundle, CLI home and port, log location, and disabled updater. |
-| `docs/architecture/phone-app.md` | Describes phone identifiers, push group, and optional Firebase setup. |
+## Preserved mechanisms
 
-The Rust core emits `lorca://pair` codes. Beans registers `lorca` as a secondary URL scheme alongside its primary `beans` / `beans-dev` scheme so a link from another Device can open pairing. If upstream Lorca or both Beans variants are installed, OS selection of the `lorca` link handler is not deterministic; scanning or pasting the code inside the intended app still works. Android push requires a Beans Firebase client file; without `BEANS_GOOGLE_SERVICES_FILE`, Firebase push configuration is omitted.
+- Account Pause, per-bot shell/file/plugin capabilities, reviewed file drafts, policy reconciliation and roster CAS retain their existing behavior. Shell/allowed plugins still have the Runner user's authority; a workspace is not a sandbox and grants no automatic approval. See [Bots](docs/architecture/bots.md), [Tools](docs/architecture/tools.md) and [Protocols](docs/architecture/protocols.md).
+- Blobatar appearance and uploaded photos remain independent, seeded by stable bot ids, with existing renderer/activity and durable roster behavior. Vendored Blobatar retains Alain's [MIT notice](packages/beans-blobatar/LICENSE). See [Avatars](docs/architecture/avatars.md).
+- Provider credentials remain account-DEK-encrypted, shared through the `credentials` blob. Neutral custom-provider presets, discovery, defaults/references and capability handling remain unchanged. Production Grok OAuth fails before callback/network pending a verified Beans contract; loopback fixtures and API-key gateway models remain distinct. See [Providers](docs/architecture/providers.md).
+- Memory service namespaces retain domain `beans.memory.v1`; fresh account public keys select new namespaces without reusing old banks. Consent, masking, queues, deletion fences, embeddings and the Lance Cloud transport block stay unchanged. See [Memory services](docs/architecture/memory-services.md).
 
-## Relay selection
+## Relay and push configuration
 
-Release packaging in `scripts/app.ts` embeds an optional `LORCA_DEFAULT_RELAY_URL` as `BeansRelayURL` bundle metadata. `macos/Sources/Lorca/App/AppInfo.swift` reads that value; `CLILauncher.swift` passes it to the CLI only when the launch environment does not already set a fallback. Development bundles omit it. A release built without the variable has no preset relay. The phone inherits the relay URL in its pairing code. `crates/cli/src/config.rs` and `crates/cli/src/app.rs` resolve `LORCA_RELAY_URL` first, then saved settings, the paired Device URL, the development LAN relay, and finally `LORCA_DEFAULT_RELAY_URL`. Configure your relay explicitly before using the fork. Keep private build values outside source and contribution notes.
+Select an operator-supplied `BEANS_RELAY_URL`, saved relay, pairing relay or optional packaged `BEANS_DEFAULT_RELAY_URL`; development may select its LAN relay. There is no foreign production fallback or fabricated Beans hostname. Public model/marketplace feeds come from the selected relay or explicit overrides, with bundled offline catalogs.
 
-## Production notes
+APNs topics are `ai.amoena.beans` / `.dev`. Android prebuild requires a supplied `BEANS_GOOGLE_SERVICES_FILE` identifying the intended Beans app and matching relay Firebase service-account credentials. The Android-only plugin rejects missing/wrong-client inputs; iOS prebuild has no Firebase prerequisite. App/extension push keychain account is `beans-v2.push-key`, with no old-slot reads/deletes. No Firebase project or signing identity is invented. External signing inputs, Android keystore and Apple credentials remain outside source; see [Releases](docs/architecture/releases.md).
 
-When APNs is used, run the relay with `LORCA_RELAY_APNS_TOPIC=ai.amoena.beans`. Beans release jobs use the Beans release repository and signing anchor. `mobile/google-services.json` is upstream's and is not used unless `BEANS_GOOGLE_SERVICES_FILE` points to a Beans file.
+## Release and update contracts
 
-Stable `beans-v<root version>` publication defaults to server-only scope in [the unified release workflow](.github/workflows/release.yml): Linux x86_64/aarch64 server and CLI archives, matching CLI checksums and the updater script are covered by the signed schema-1 readiness manifest. Server scope requires the Beans Ed25519 update key, not Apple or Android signing inputs, and runs no native client builders. Manual dispatch accepts an exact published tag and `server|all`; `all` keeps every platform's build and installer gates. Tagged-source verification and immutable-byte preflight precede readiness publication, with the signature before the manifest. A finalized server release cannot gain client assets; a later full release needs a new version.
+New stable `beans-v<root version>` releases use Beans-only CLI/server archives, desktop installers and updater inventory. Existing published assets/manifests/signatures remain immutable. Manual `server|all` dispatch selects scope before building; server scope needs the existing Beans Ed25519 key, while all scope additionally coordinates signed desktop and exact-source EAS store builds. Finalization checks immutable bytes before uploads and publishes the detached signature before readiness. Publication, paid/cloud builds, store submission and live rollout are separate operator actions.
 
-Automatic rollout on a Linux updater host requires a trusted updater/public-key bootstrap, reviewed root-owned target configuration and backup policy, drain-capable Runners with configured update tokens, and explicit timer enablement after a successful manual pass. The relay upgrades and passes health/protocol checks before Runners move. Server readiness does not authorize a Mac or Windows/Linux app update without that consumer's signed assets. See [release prerequisites, scope commands and server bootstrap](docs/releasing-cli.md). Source changes are not evidence of generated phone artifacts, published signed releases or live server updates.
+Signed readiness requires protocol >=5 and compatible `beans-v2` relay health/floors. Standalone CLI self-update stays unavailable even with `BEANS_SELF_UPDATE`; local `update status|prepare|cancel` and service contracts remain independent. AppKit provisions its native token only after core readiness and marker validation; its existing admission lease, drafts and guarded quit remain mandatory. Server updater bootstrap, target/token/backup configuration and timer enablement require explicit operator action against fresh-format targets. See [CLI releases](docs/releasing-cli.md), [Mac releases](docs/releasing-mac.md) and [Windows/Linux releases](docs/releasing-desktop.md).
 
-## Android release build
+## Authorship and acceptance
 
-Run `bun run android:release` from the repository root. It rebuilds the Rust phone core, runs a clean production Android prebuild, and assembles `mobile/android/app/build/outputs/apk/release/app-release.apk`. Expo SDK 57 uses JDK 17; set `JAVA_HOME` for the command if your shell uses another JDK.
-
-The signing keystore lives outside the repository at `~/.config/beans/android/beans-release.keystore`. The script reads `~/.config/beans/android/keystore.env`, or the path in `BEANS_ANDROID_ENV`; both that file and the keystore must have mode 0600. The env file must supply the complete set of `BEANS_ANDROID_KEYSTORE`, `BEANS_ANDROID_KEYSTORE_PASSWORD`, `BEANS_ANDROID_KEY_ALIAS`, and `BEANS_ANDROID_KEY_PASSWORD`; inherited shell values cannot fill missing entries. Back up the keystore and passwords to keep future APK updates installable. Signing configuration is added only when these variables are set, by `mobile/plugins/with-android-release-signing.js` during prebuild. Without `BEANS_GOOGLE_SERVICES_FILE` pointing to a Beans Firebase client file, the Android build omits Firebase push configuration and push is unavailable.
-
-## Merge upstream
-
-On branch `beans`, run `git fetch upstream` then `git merge upstream/main`. Resolve branding and build conflicts in the table above while keeping Beans IDs, app groups, isolated macOS CLI homes and ports, disabled upstream Sparkle feed, optional Firebase config, and unchanged `lorca` runtime identifiers. Also resolve functional conflicts in `packages/beans-blobatar`, the CLI, relay, agent/tools, and Mac, phone, and Windows/Linux app surfaces: retain encrypted policy reconciliation, conditional roster writes and protocol 3 compatibility, local websocket Host/Origin checks, bot controls and approval flow, avatar rendering, and custom-model refresh. Check actual Runner NIC ACL attachment and allow/deny evidence rather than assuming script staging describes live state.
-
-Before shipping, run CI checks and platform builds/tests for affected Rust, Mac, phone, and desktop paths; exercise app flows for pairing, Pause/capabilities, draft approval, avatars, and provider refresh on actual clients. Roll out relay replicas before protocol-3 clients, verify health and old-client `426` behavior against the intended environment, then verify live client sync and enforcement before claiming deployment or security protection. Never publish a private relay address, signing material, provider keys, or client credentials in merge notes.
+Generators own generated bindings/libraries; never hand-author compatibility stubs. A rename invalidates prior build receipts. After source freeze, the integration owner runs renamed offline gates, isolated fresh-home/old-marker rejection, backup/pairing/protocol fixtures and available native surfaces. No source receipt proves installation, live sync, runtime embedding assets, signed publication or deployment. Existing accounts and production services are not acceptance fixtures.

@@ -35,7 +35,7 @@ mock.module("expo-notifications", () => ({
   getPresentedNotificationsAsync: async () => [notification("open", "Confirmation needed: Deploy the app"), notification("other", "Reply failed: Provider unavailable")],
   dismissNotificationAsync: async (id: string) => { cleared.push(id); },
 }));
-mock.module("../../modules/lorca-core", () => ({
+mock.module("../../modules/beans-core", () => ({
   start: () => {}, wake: () => {},
   onEvent: (listener: Listener) => { listeners.add(listener); return () => listeners.delete(listener); },
   request: async (method: string, params: Record<string, any> = {}) => {
@@ -208,7 +208,7 @@ test("events that arrive while a snapshot is on its way are applied after it", a
   // asked for, so the snapshot is older than both.
   let answer!: (snapshot: unknown) => void;
   heldSnapshot = new Promise((resolve) => { answer = resolve; });
-  const paired = engine.pair("lorca://pair");
+  const paired = engine.pair("beans://pair?v=2&relay=https%3A%2F%2Frelay.example&id=Clup-vXLfBF6T2JkKpLqNOpyE9hdQbqXjrIWfdDvLbs&ek=nAanQrXTSxfK1tf7m3V2Fg-65OL84r6MeqmQmWw5uhw&n=1qUeEODuTz_A2y5jSZdBqQ", "Phone");
   await flush();
   event({ event: "relay.status", data: { connected: true, update_required: false, url: "https://relay.example" } });
   reply("open");

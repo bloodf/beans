@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use lorca_provider_auth::chatgpt::{self as chatgpt_oauth, ChatGptTokens};
-use lorca_provider_auth::grok::{self as grok_oauth, GrokTokens};
+use beans_provider_auth::chatgpt::{self as chatgpt_oauth, ChatGptTokens};
+use beans_provider_auth::grok::{self as grok_oauth, GrokTokens};
 
 use crate::app::App;
 use crate::config;
@@ -22,7 +22,7 @@ const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go";
 const MODEL_RESPONSE_LIMIT: usize = 1024 * 1024;
 
 fn discovery_client() -> Result<reqwest::Client, String> {
-    lorca_tls::client_builder().redirect(reqwest::redirect::Policy::none())
+    beans_tls::client_builder().redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(20)).build()
         .map_err(|_| "Could not initialize provider connection".into())
 }
@@ -55,11 +55,11 @@ fn env_url(name: &str) -> Option<String> {
 }
 
 fn deepseek_base_url() -> String {
-    env_url("LORCA_DEEPSEEK_BASE_URL").unwrap_or_else(|| "https://api.deepseek.com".into())
+    env_url("BEANS_DEEPSEEK_BASE_URL").unwrap_or_else(|| "https://api.deepseek.com".into())
 }
 
 fn anthropic_base_url() -> String {
-    env_url("LORCA_ANTHROPIC_BASE_URL").unwrap_or_else(|| ANTHROPIC_BASE_URL.to_string())
+    env_url("BEANS_ANTHROPIC_BASE_URL").unwrap_or_else(|| ANTHROPIC_BASE_URL.to_string())
 }
 
 /// Removes an optional `/v1` from a custom OpenCode root; the credential check adds the
@@ -117,7 +117,7 @@ pub async fn connect_opencode(app: &Arc<App>, api_key: &str, base_url: Option<&s
         return Err("Paste an OpenCode Zen API key".into());
     }
     let base_url = custom_base_url(base_url)?;
-    let configured = base_url.clone().or_else(|| env_url("LORCA_OPENCODE_BASE_URL"));
+    let configured = base_url.clone().or_else(|| env_url("BEANS_OPENCODE_BASE_URL"));
     let root = configured.as_deref().map(opencode_root).unwrap_or(OPENCODE_BASE_URL);
     if root == OPENCODE_BASE_URL {
         let request = app.http.get(format!("{root}/go/v1/usage")).bearer_auth(key);
@@ -137,7 +137,7 @@ pub async fn connect_opencode_go(app: &Arc<App>, api_key: &str, base_url: Option
     let base_url = custom_base_url(base_url)?;
     let root = base_url
         .clone()
-        .or_else(|| env_url("LORCA_OPENCODE_GO_BASE_URL"))
+        .or_else(|| env_url("BEANS_OPENCODE_GO_BASE_URL"))
         .unwrap_or_else(|| OPENCODE_GO_BASE_URL.into());
     let root = opencode_root(&root);
     if root == OPENCODE_GO_BASE_URL {
@@ -149,7 +149,7 @@ pub async fn connect_opencode_go(app: &Arc<App>, api_key: &str, base_url: Option
 }
 
 async fn check_key(name: &str, request: reqwest::RequestBuilder) -> Result<(), String> {
-    let response = request.send().await.map_err(|e| format!("{name} unreachable: {}", lorca_tls::describe(&e)))?;
+    let response = request.send().await.map_err(|e| format!("{name} unreachable: {}", beans_tls::describe(&e)))?;
     match response.status() {
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(format!("{name} rejected that key")),
         status if status.is_success() => Ok(()),
@@ -158,7 +158,7 @@ async fn check_key(name: &str, request: reqwest::RequestBuilder) -> Result<(), S
 }
 
 async fn check_opencode_key(name: &str, request: reqwest::RequestBuilder, requires_go: bool) -> Result<(), String> {
-    let response = request.send().await.map_err(|e| format!("{name} unreachable: {}", lorca_tls::describe(&e)))?;
+    let response = request.send().await.map_err(|e| format!("{name} unreachable: {}", beans_tls::describe(&e)))?;
     match response.status() {
         reqwest::StatusCode::UNAUTHORIZED => Err(format!("{name} rejected that key")),
         reqwest::StatusCode::FORBIDDEN if requires_go => Err("OpenCode Go needs an active subscription".into()),
@@ -484,7 +484,7 @@ pub async fn connect_grok(
     app: &Arc<App>,
     open_url: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<GrokTokens, String> {
-    let endpoints = env_url("LORCA_GROK_ISSUER").map(|issuer| grok_oauth::Endpoints::at(&issuer)).unwrap_or_else(grok_oauth::Endpoints::xai);
+    let endpoints = env_url("BEANS_GROK_ISSUER").map(|issuer| grok_oauth::Endpoints::at(&issuer)).unwrap_or_else(grok_oauth::Endpoints::xai);
     let tokens = grok_oauth::login(&app.http, &endpoints, open_url, std::time::Duration::from_secs(5 * 60)).await?;
     app.update_credentials("grok", |c| c.grok = Some(tokens.clone())).map_err(|e| e.to_string())?;
     Ok(tokens)
@@ -516,7 +516,7 @@ pub fn disconnect(app: &Arc<App>, kind: &str) -> Result<(), String> {
             // Tell xAI the sign-in is over; the account-wide removal stands either way.
             if let Some(tokens) = credentials.grok.take() {
                 let http = app.http.clone();
-                let endpoints = env_url("LORCA_GROK_ISSUER").map(|issuer| grok_oauth::Endpoints::at(&issuer)).unwrap_or_else(grok_oauth::Endpoints::xai);
+                let endpoints = env_url("BEANS_GROK_ISSUER").map(|issuer| grok_oauth::Endpoints::at(&issuer)).unwrap_or_else(grok_oauth::Endpoints::xai);
                 tokio::spawn(async move {
                     if let Err(error) = grok_oauth::revoke(&http, &endpoints, &tokens.refresh_token).await {
                         tracing::debug!("grok revoke: {error}");

@@ -2,6 +2,9 @@
 
 All platforms share stable GitHub releases in `bloodf/beans`, tagged `beans-v<version>`. The version is the root `package.json` version; the CLI and relay retain the Cargo workspace version, recorded separately in the release manifest. Drafts and prereleases are not update candidates.
 
+This inventory applies only to new Beans releases. Published manifest/signature bytes are immutable and never rewritten into new names. Fresh-format binaries require `beans-v2` and reject old/unmarked Device and relay stores before writes; there is no automatic account/service migration or authorized live rollout. Existing production accounts, installed apps and services stay untouched. See [fresh relay storage](architecture/relay.md#fresh-relay-storage).
+
+
 ## Release workflow
 
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) is manual-only. Dispatch an exact published stable `tag` with immutable `scope: server|all` selected before building. Server scope needs only the update signing key. All scope builds desktop installers and completed exact-source EAS APK, AAB and store IPA artifacts, with provenance. No published-release event starts an automatic server finalizer. A finalized server release cannot acquire clients; use a new version/tag.
@@ -39,18 +42,18 @@ bun run scripts/release-github.ts publish <tag> <revision> <dir> [server|all]
 The website's [`install-cli.sh`](../web/public/install-cli.sh) and [`install-cli.ps1`](../web/public/install-cli.ps1) default to `https://github.com/bloodf/beans/releases` and use `beans-v` tags. Server workflow releases supply the Linux archives below; `all` supplies every listed platform:
 
 ```
-lorca-cli-macos-aarch64.tar.gz
-lorca-cli-linux-aarch64.tar.gz
-lorca-cli-linux-x86_64.tar.gz
-lorca-cli-windows-x86_64.zip
+beans-cli-macos-aarch64.tar.gz
+beans-cli-linux-aarch64.tar.gz
+beans-cli-linux-x86_64.tar.gz
+beans-cli-windows-x86_64.zip
 <archive>.sha256
 ```
 
-The scripts choose the computer's OS/CPU, verify the adjacent checksum and replace the executable by rename. `LORCA_VERSION` selects a root release version; `lorca --version` reports the Cargo component version. `LORCA_INSTALL_DIR`, `LORCA_NO_MODIFY_PATH` and `LORCA_DOWNLOAD_URL` retain their existing installer meanings. An Intel Mac and Windows on Arm are not supplied. The standalone CLI checksums protect archive integrity; they are not the signed automatic-update readiness verifier.
+The scripts choose the computer's OS/CPU, verify the adjacent checksum and replace the executable by rename. `BEANS_VERSION` selects a root release version; `beans --version` reports the Cargo component version. `BEANS_INSTALL_DIR`, `BEANS_NO_MODIFY_PATH` and `BEANS_DOWNLOAD_URL` retain their existing installer meanings. An Intel Mac and Windows on Arm are not supplied. The standalone CLI checksums protect archive integrity; they are not the signed automatic-update readiness verifier.
 
-Standalone CLI self-update is unavailable in Beans, even with `LORCA_SELF_UPDATE` set at compile time. Discovery and installation entry points reject before HTTP or file changes; no competing CLI publication workflow is enabled. Beans updates use the signed readiness and drain mechanisms below.
+Standalone CLI self-update is unavailable in Beans, even with `BEANS_SELF_UPDATE` set at compile time. Discovery and installation entry points reject before HTTP or file changes; no competing CLI publication workflow is enabled. Beans updates use the signed readiness and drain mechanisms below.
 
-When the latest release is server-only, Mac and Windows standalone CLI installers need `LORCA_VERSION` selecting a full release that actually contains their archive. The installers do not synthesize missing platform assets.
+When the latest release is server-only, Mac and Windows standalone CLI installers need `BEANS_VERSION` selecting a full release that actually contains their archive. The installers do not synthesize missing platform assets.
 
 ## Server and Runner updates
 
@@ -60,13 +63,13 @@ On a Linux updater host, install from a trusted checkout with `sudo sh updates/s
 
 After reviewing the configuration and backup/recovery procedure, run `sudo systemctl start beans-server-updater.service` and inspect its result before `sudo systemctl enable --now beans-server-updater.timer`. The timer starts after five minutes at boot and checks 15 minutes after the previous service finishes, with up to 60 seconds of randomized delay. Its installation alone, or release finalization alone, does not enable automatic server updates.
 
-The updater verifies signed readiness and streamed asset hashes, extracts only `lorca`, `lorca-relay`, `models/v1.json` and `marketplace/v1.json`, and rejects links, traversal, unexpected archive entries and wrong-architecture executables. Root-owned private state serializes passes and records progress. A target already recorded as current is checked against its live process and version before it can be skipped.
+The updater verifies signed readiness and streamed asset hashes, extracts only `beans`, `beans-relay`, `models/v1.json` and `marketplace/v1.json`, and rejects links, traversal, unexpected archive entries and wrong-architecture executables. Root-owned private state serializes passes and records progress. A target already recorded as current is checked against its live process and version before it can be skipped.
 
-The relay moves first. SQLite backup uses the database owner's privileges and SQLite's online backup API; an externally managed backup must be explicitly acknowledged in configuration. The relay must answer health with the expected component version and `protocol` at least the signed manifest's protocol before any Runner moves. For signed protocol 4 or newer, `min_roster_protocol` must also be an integer between 4 and the signed protocol inclusive: missing, malformed, too-low or unsupported floors fail closed. This also applies to already-installed target rechecks, even when the generic `min_protocol` is 3. Signed protocol-3 releases retain their existing health checks.
+The relay moves first. SQLite backup still uses the owner’s privileges and online backup API; external backups need explicit acknowledgement. New signed releases require protocol at least 5. Before any Runner moves, including a recorded-installation recheck, relay health must report the expected component version, `format: "beans-v2"`, `protocol` at least the signed protocol, and integer effective `min_protocol` and `min_roster_protocol` between 5 and that signed protocol inclusive. Missing, malformed, old-format, too-low or unsupported evidence fails closed; lowering an operator setting does not admit old account writers.
 
 Run the isolated health-compatibility regressions with `python3 -B scripts/server-updater.test.py -v`; they do not start services or install releases.
 
-A Runner service must already support `lorca update status|prepare|cancel` and set `LORCA_UPDATE_TOKEN_FILE`. Prepare closes new work admission under a lease while existing jobs finish. The updater renews the lease while waiting; expiry or cancel resumes work. Account Pause is unchanged, active jobs are not cancelled, and held relay envelopes keep their cursor position. A first installation therefore requires a controlled bootstrap upgrade, not an old Runner pretending to drain.
+A Runner service must already support `beans update status|prepare|cancel` and set `BEANS_UPDATE_TOKEN_FILE`. Prepare closes new work admission under a lease while existing jobs finish. The updater renews the lease while waiting; expiry or cancel resumes work. Account Pause is unchanged, active jobs are not cancelled, and held relay envelopes keep their cursor position. A first installation therefore requires a controlled bootstrap upgrade, not an old Runner pretending to drain.
 
 On both systemd and Incus targets, the installed executable is a regular root-owned file with executable bits, no write bits (including the owner's) and no set-id bits. Every ancestor directory is root-owned and not group/other-writable; symlink components are rejected explicitly before Incus metadata reads as well as by local `lstat`. The updater checks this before invoking the configured Runner binary, including status and cancellation. New and restored executables use root:root and mode `0555`, rather than inheriting ownership or writable/special permissions. Bootstrap the configured relay and Runner binaries with these permissions before the first pass. Catalog files and their complete directory ancestry are also root-owned and not group/other-writable. The example keeps catalogs under `/usr/local/share/beans-relay`, separate from the service-writable SQLite directory. Create the catalog subdirectories before rollout. The bootstrap installer checks its destination ancestry and existing files, installs the updater with mode `0555`, and leaves an existing config's ownership, permissions and bytes untouched; unsafe configuration requires explicit operator repair.
 

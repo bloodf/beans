@@ -20,7 +20,7 @@ The relay sees only plugin status in the Runner's encrypted machine blob, not `m
 
 ## Managing it
 
-`lorca mcp list|get|add|add-json|remove|enable|disable|hide|show|sign-in|sign-out|reload|import` talks to a running local `lorca serve` or acts on the local Runner. The app/API uses `mcp.list`, `mcp.get`, `mcp.save {name,previous_name?,config}`, `mcp.remove`, `mcp.set_enabled`, `mcp.hide_tool`, `mcp.reconnect`, `mcp.sign_in`, `mcp.sign_out`, `mcp.reload`, and local `mcp.parse {text}`. Except parse, these accept `runner_id` and travel as sealed requests to another Runner. List returns `{path,error,servers}`; get returns `{path,server}`, including cached tools. Broken individual entries carry `problem`, and their config can be any JSON value. Apps use `plugins.connect` for a sign-in browser on the requesting Device.
+`beans mcp list|get|add|add-json|remove|enable|disable|hide|show|sign-in|sign-out|reload|import` talks to a running local `beans serve` or acts on the local Runner. The app/API uses `mcp.list`, `mcp.get`, `mcp.save {name,previous_name?,config}`, `mcp.remove`, `mcp.set_enabled`, `mcp.hide_tool`, `mcp.reconnect`, `mcp.sign_in`, `mcp.sign_out`, `mcp.reload`, and local `mcp.parse {text}`. Except parse, these accept `runner_id` and travel as sealed requests to another Runner. List returns `{path,error,servers}`; get returns `{path,server}`, including cached tools. Broken individual entries carry `problem`, and their config can be any JSON value. Apps use `plugins.connect` for a sign-in browser on the requesting Device.
 
 ## In the apps
 

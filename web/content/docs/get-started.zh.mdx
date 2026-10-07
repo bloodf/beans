@@ -4,7 +4,10 @@ description: 设置 Beans，创建身份，接入 AI 服务商，发出第一条
 icon: Rocket
 ---
 
-你需要一个受支持的 AI 账号：API 密钥，或者 ChatGPT 或 Grok 的订阅。本指南使用桌面应用，支持 Mac、Windows 和 Linux。要在没有桌面应用的电脑上设置，请看[命令行](/zh/docs/cli)。
+你需要一个受支持的 AI 账号：API 密钥，或者 ChatGPT 的订阅。本指南使用桌面应用，支持 Mac、Windows 和 Linux。要在没有桌面应用的电脑上设置，请看[命令行](/zh/docs/cli)。
+
+生产 Grok 订阅 OAuth 在 Beans 合同核验之前禁用，登录会在回调/网络访问之前被拒绝；API 密钥网关模型另行配置。
+
 
 <Steps>
 <Step>
@@ -30,7 +33,7 @@ icon: Rocket
   备份短语就是你的身份。它是在另一台电脑上恢复账户的唯一办法，没有人能替你重置。把它离线保存在安全的地方。
 </Callout>
 
-如果你已经有账户，选择 **恢复** 并输入短语，或者选择 **配对**，粘贴来自另一台已设置好电脑的配对字符串。另一台电脑可以在桌面应用中选择 **配对设备**，或在终端中运行 `lorca pair` 来显示字符串。
+如果你已经有账户，选择 **恢复** 并输入短语，或者选择 **配对**，粘贴来自另一台已设置好电脑的配对字符串。另一台电脑可以在桌面应用中选择 **配对设备**，或在终端中运行 `beans pair` 来显示字符串。
 
 </Step>
 <Step>
@@ -44,7 +47,7 @@ icon: Rocket
 
 ### 接入服务商
 
-粘贴 DeepSeek、Anthropic、OpenCode Zen 或 OpenCode Go 的 API 密钥，或者登录 ChatGPT 或 Grok。登录会在浏览器里打开。要用其他服务，或你自己电脑上的模型服务器，就在同一个列表里选择它（OpenAI、OpenRouter、Gemini、Groq、Together AI、Ollama、LM Studio 或其他服务器）并完成设置；参见[自定义服务商](/zh/docs/providers#自定义服务商)。这一步可以跳过，之后在 **设置 › 服务商** 里接入，但在接入至少一个服务商之前，智能体无法回答。
+粘贴 DeepSeek、Anthropic、OpenCode Zen 或 OpenCode Go 的 API 密钥，或者登录 ChatGPT。登录会在浏览器里打开。要用其他服务，或你自己电脑上的模型服务器，就在同一个列表里选择它（OpenAI、OpenRouter、Gemini、Groq、Together AI、Ollama、LM Studio 或其他服务器）并完成设置；参见[自定义服务商](/zh/docs/providers#自定义服务商)。这一步可以跳过，之后在 **设置 › 服务商** 里接入，但在接入至少一个服务商之前，智能体无法回答。
 
 </Step>
 <Step>

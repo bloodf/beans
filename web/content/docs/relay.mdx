@@ -10,14 +10,17 @@ Because everything is [encrypted before upload](/docs/security), a relay needs n
 
 ## Point Beans at a relay
 
-Set **Settings › Advanced › Relay URL** on your first device, or the `LORCA_RELAY_URL` environment variable for the CLI. Devices you pair afterwards learn the URL from the pairing code.
+Set **Settings › Advanced › Relay URL** on your first device, or the `BEANS_RELAY_URL` environment variable for the CLI. Devices you pair afterwards learn the URL from the pairing code.
+
+Account routes, including registration, challenge, pairing mailboxes and sync, require unique valid `Beans-Protocol: 5` and `Beans-Format: beans-v2` headers. Effective floors cannot fall below 5. Old-format peers are incompatible, with no automatic migration or production rollout. SQLite requires `BNR2` application id `0x424E5232` before opening; Postgres requires exactly one `beans-v2` row in `beans_storage_format`, initialized only in a truly empty schema. Existing unmarked storage is rejected before DDL/recovery without changing it.
+
 
 ## Run your own
 
-The relay is a single binary, `lorca-relay`, with SQLite built in:
+The relay is a single binary, `beans-relay`, with SQLite built in:
 
 ```bash
-lorca-relay --bind 0.0.0.0:8787 --db lorca-relay.db
+beans-relay --bind 0.0.0.0:8787 --db beans-relay.db
 ```
 
 Put it behind HTTPS with a reverse proxy such as Caddy or nginx (WebSocket upgrades must pass through), and add `--trust-proxy` so rate limits see real client addresses.
@@ -26,7 +29,7 @@ Put it behind HTTPS with a reverse proxy such as Caddy or nginx (WebSocket upgra
 | --- | --- |
 | `--bind` | Address and port to listen on. |
 | `--db` | A SQLite file path, or a `postgres://` URL. |
-| `LORCA_RELAY_SECRET` | Signs session tokens. Set it so tokens survive a restart. |
+| `BEANS_RELAY_SECRET` | Signs session tokens. Set it so tokens survive a restart. |
 | `--quota-bytes` | Storage cap per identity; 5 GiB by default. `0` for none. |
 | `--concurrent-uploads` | Attachments over 1 MiB handled at once (3 by default), which bounds the memory they take. |
 | `--files-dir` | Where attachment ciphertext goes. Defaults to a folder beside the database. |
@@ -34,19 +37,19 @@ Put it behind HTTPS with a reverse proxy such as Caddy or nginx (WebSocket upgra
 | `--min-protocol` | Turns away Beans versions that speak an older relay protocol; their apps ask for an update. |
 | `--inactive-days` | Deletes an account nothing has touched for this long (365 by default; `0` for never). Devices keep their own copy. |
 | `--ip-per-minute`, `--identity-per-second` | Rate limits. |
-| `LORCA_RELAY_METRICS_TOKEN` | Serves `GET /metrics` for Prometheus to whoever sends this bearer token. |
+| `BEANS_RELAY_METRICS_TOKEN` | Serves `GET /metrics` for Prometheus to whoever sends this bearer token. |
 
 ### Postgres
 
-Use a `postgres://` URL to run several relay processes against one database, for deploys without a gap. They must share `LORCA_RELAY_SECRET` and keep attachments in an S3-compatible bucket.
+Use a `postgres://` URL to run several relay processes against one database, for deploys without a gap. They must share `BEANS_RELAY_SECRET` and keep attachments in an S3-compatible bucket.
 
 ### Push notifications
 
-To send pushes to the phone app, give the relay an APNs key (`--apns-key`, `--apns-key-id`, `--apns-team-id`) or a Firebase service account (`--fcm-service-account`). Each key is the path of its file or the text itself, so `LORCA_RELAY_APNS_KEY` and `LORCA_RELAY_FCM_SERVICE_ACCOUNT` can carry them where there is no disk to keep a file on. Without them everything else works and phones get no pushes.
+To send pushes to the phone app, give the relay an APNs key (`--apns-key`, `--apns-key-id`, `--apns-team-id`) or a Firebase service account (`--fcm-service-account`). Each key is the path of its file or the text itself, so `BEANS_RELAY_APNS_KEY` and `BEANS_RELAY_FCM_SERVICE_ACCOUNT` can carry them where there is no disk to keep a file on. Without them everything else works and phones get no pushes.
 
 ### Monitoring
 
-With `LORCA_RELAY_METRICS_TOKEN` set, `GET /metrics` answers a scraper that sends the token as a bearer with Prometheus text: identities and machines, blobs and bytes by kind, open sockets, requests by route and status, rate-limit refusals, pushes sent and failed, and what the housekeeping sweeps removed. The relay cannot read what it stores, so these numbers are what there is to watch.
+With `BEANS_RELAY_METRICS_TOKEN` set, `GET /metrics` answers a scraper that sends the token as a bearer with Prometheus text: identities and machines, blobs and bytes by kind, open sockets, requests by route and status, rate-limit refusals, pushes sent and failed, and what the housekeeping sweeps removed. The relay cannot read what it stores, so these numbers are what there is to watch.
 
 ## Limits
 

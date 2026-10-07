@@ -14,11 +14,11 @@ pub async fn fetch(url: &str, etag: Option<&str>) -> Result<Option<(Option<Strin
     if !matches!(parsed.scheme(), "http" | "https") || parsed.username() != "" || parsed.password().is_some() {
         return Err("Invalid public feed URL".into());
     }
-    let client = lorca_tls::client_builder()
+    let client = beans_tls::client_builder()
         .timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .build().map_err(|error| error.to_string())?;
-    let mut request = client.get(parsed).header(USER_AGENT, concat!("lorca/", env!("CARGO_PKG_VERSION")));
+    let mut request = client.get(parsed).header(USER_AGENT, concat!("beans/", env!("CARGO_PKG_VERSION")));
     if let Some(etag) = etag {
         request = request.header(IF_NONE_MATCH, etag);
     }

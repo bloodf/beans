@@ -8,49 +8,48 @@ import (
 	"github.com/egoist/mygo"
 )
 
-// productionRelayURL is the relay a release build's CLI falls back to. Lorca Dev has none; the
-// dev loop's relay on this computer stands in.
-const productionRelayURL = "https://relay.lorca.app"
+// productionRelayURL has no bundled default. Configure a Beans relay explicitly.
+const productionRelayURL = ""
 
-// isDevelopment is Lorca Dev: `mygo dev` and `go run` builds, which keep their account and CLI
-// apart from the installed Lorca's.
+// isDevelopment is Beans Dev: `mygo dev` and `go run` builds, which keep their account and CLI
+// apart from the installed Beans's.
 func isDevelopment() bool { return mygo.IsDev() }
 
-// isMock runs the seeded demo instead of the CLI (`LORCA_MOCK=1`), for screenshots.
-func isMock() bool { return os.Getenv("LORCA_MOCK") == "1" }
+// isMock runs the seeded demo instead of the CLI (`BEANS_MOCK=1`), for screenshots.
+func isMock() bool { return os.Getenv("BEANS_MOCK") == "1" }
 
-// appName is the name the user sees: "Lorca", or "Lorca Dev" for a development build.
+// appName is the name the user sees: "Beans", or "Beans Dev" for a development build.
 func appName() string {
 	if name := mygo.App.Name(); name != "" {
 		return name
 	}
 	if isDevelopment() {
-		return "Lorca Dev"
+		return "Beans Dev"
 	}
-	return "Lorca"
+	return "Beans"
 }
 
 func defaultCLIPort() int {
 	if isDevelopment() {
-		return 4863
+		return 4875
 	}
-	return 4862
+	return 4874
 }
 
 func defaultCLIHome() string {
 	home, _ := os.UserHomeDir()
 	if isDevelopment() {
-		return filepath.Join(home, ".lorca-dev")
+		return filepath.Join(home, ".beans-dev-v2")
 	}
-	return filepath.Join(home, ".lorca")
+	return filepath.Join(home, ".beans-v2")
 }
 
 // cliCommand is how to start the CLI by hand, for the offline state and the Help note.
 func cliCommand() string {
 	if isDevelopment() {
-		return "lorca serve --home ~/.lorca-dev --port 4863"
+		return "beans serve --home ~/.beans-dev-v2 --port 4875"
 	}
-	return "lorca serve"
+	return "beans serve --home ~/.beans-v2 --port 4874"
 }
 
 // logDir holds cli.log and startup.log.

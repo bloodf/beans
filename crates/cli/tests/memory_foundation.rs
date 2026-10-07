@@ -1,12 +1,12 @@
-use lorca::memory_service::{config::*, queue::*, types::*};
+use beans::memory_service::{config::*, queue::*, types::*};
 use serde_json::json;
 
 #[test]
 fn namespaces_are_full_account_and_exact_bot_scoped() {
-    let a = namespace(&lorca::keys::b64(&[1; 32]), "bot").unwrap();
+    let a = namespace(&beans::keys::b64(&[1; 32]), "bot").unwrap();
     assert_eq!(a.len(), 64);
-    assert_ne!(a, namespace(&lorca::keys::b64(&[2; 32]), "bot").unwrap());
-    assert_ne!(a, namespace(&lorca::keys::b64(&[1; 32]), "Bot").unwrap());
+    assert_ne!(a, namespace(&beans::keys::b64(&[2; 32]), "bot").unwrap());
+    assert_ne!(a, namespace(&beans::keys::b64(&[1; 32]), "Bot").unwrap());
     assert!(namespace("not-a-key", "bot").is_err());
 }
 
@@ -67,7 +67,7 @@ fn recall_is_deduplicated_bounded_and_explicitly_untrusted() {
 struct Scratch(std::path::PathBuf);
 impl Scratch {
     fn new() -> Self { Self(std::env::temp_dir().join(format!("beans-memory-core-{}",uuid::Uuid::new_v4()))) }
-    fn store(&self) -> lorca::local_store::LocalStore { lorca::local_store::LocalStore::open(&self.0.join("local.sqlite3")).unwrap() }
+    fn store(&self) -> beans::local_store::LocalStore { beans::local_store::LocalStore::open(&self.0.join("local.sqlite3")).unwrap() }
 }
 impl Drop for Scratch { fn drop(&mut self) { let _=std::fs::remove_dir_all(&self.0); } }
 fn delivery(id:&str) -> Delivery {
@@ -143,7 +143,7 @@ fn deletion_barrier_queries_all_scoped_rows_not_first_page() {
 
 #[test]
 fn config_and_outbox_transaction_rolls_back_together() {
-    use lorca::app::{OutboxItem,State,Slot};
+    use beans::app::{OutboxItem,State,Slot};
     let scratch=Scratch::new();let store=scratch.store();
     store.save_memory_config(b"before",None,|_|true,None).unwrap();
     let item=OutboxItem{id:"duplicate".into(),kind:"chat".into(),recipient:None,ciphertext:vec![1],
@@ -169,24 +169,24 @@ fn account_forget_clears_queue_config_and_runner_bindings() {
 fn scrub_expansion_cannot_exceed_frozen_payload_limit() {
     let input="password: abcdef\n".repeat(1600);
     assert!(input.len()<32768);
-    assert!(lorca::memory::scrub(&input).len()>32768);
+    assert!(beans::memory::scrub(&input).len()>32768);
     assert_eq!(freeze_document("namespace",&input,vec![]).unwrap_err().code,"invalid_document");
 }
 
 #[tokio::test]
 async fn config_rpc_preserves_omitted_fields_and_clears_explicit_null() {
     let scratch=Scratch::new();
-    let app=lorca::app::App::load(lorca::config::Config{home:scratch.0.clone(),port:0}).unwrap();
-    lorca::identity::create(&app,Some("fixture".into())).unwrap();
-    lorca::api::dispatch(&app,"memory.connections.set",json!({"id":"c","backend":"hindsight","name":"one",
+    let app=beans::app::App::load(beans::config::Config{home:scratch.0.clone(),port:0}).unwrap();
+    beans::identity::create(&app,Some("fixture".into())).unwrap();
+    beans::api::dispatch(&app,"memory.connections.set",json!({"id":"c","backend":"hindsight","name":"one",
         "endpoint":"https://memory.example.test","secret":{"action":"replace","value":"private-test-key"},
         "embedding_profile":"p"})).await.unwrap();
-    lorca::api::dispatch(&app,"memory.connections.set",json!({"id":"c","backend":"hindsight","name":"renamed","secret":{"action":"keep"}})).await.unwrap();
+    beans::api::dispatch(&app,"memory.connections.set",json!({"id":"c","backend":"hindsight","name":"renamed","secret":{"action":"keep"}})).await.unwrap();
     {let config=app.memory_config.lock();let c=config.connections["c"].value.as_ref().unwrap();
         assert_eq!(c.endpoint.as_deref(),Some("https://memory.example.test"));assert_eq!(c.embedding_profile.as_deref(),Some("p"));}
-    let summary=lorca::api::dispatch(&app,"memory.connections.list",json!({})).await.unwrap().to_string();
+    let summary=beans::api::dispatch(&app,"memory.connections.list",json!({})).await.unwrap().to_string();
     assert!(!summary.contains("private-test-key"));assert!(!summary.contains("memory.example.test"));
-    lorca::api::dispatch(&app,"memory.connections.set",json!({"id":"c","backend":"hindsight","name":"renamed",
+    beans::api::dispatch(&app,"memory.connections.set",json!({"id":"c","backend":"hindsight","name":"renamed",
         "secret":{"action":"clear"},"endpoint":null,"embedding_profile":null})).await.unwrap();
     let config=app.memory_config.lock();let c=config.connections["c"].value.as_ref().unwrap();
     assert!(c.endpoint.is_none()&&c.embedding_profile.is_none()&&c.secret.is_none());
@@ -194,34 +194,34 @@ async fn config_rpc_preserves_omitted_fields_and_clears_explicit_null() {
 
 #[tokio::test]
 async fn openviking_binding_patch_preserves_others_removes_null_and_requires_replace_all_confirmation() {
-    let scratch=Scratch::new();let app=lorca::app::App::load(lorca::config::Config{home:scratch.0.clone(),port:0}).unwrap();
-    lorca::identity::create(&app,Some("fixture".into())).unwrap();
+    let scratch=Scratch::new();let app=beans::app::App::load(beans::config::Config{home:scratch.0.clone(),port:0}).unwrap();
+    beans::identity::create(&app,Some("fixture".into())).unwrap();
     let first=app.state.lock().unwrap().bots[0].id.clone();
     let mut second=app.bot(&first).unwrap();second.id="second".into();app.state.lock().unwrap().bots.push(second);
     let binding=|user:&str,key:&str|json!({"mode":"user_key","account_id":"account","user_id":user,"secret":{"action":"replace","value":key}});
     let base=json!({"id":"ov","backend":"open_viking","name":"fixture","secret":{"action":"keep"},"options":{
         "backend":"open_viking","bindings":{first.clone():binding("first","fixture-first-key"),"second":binding("second","fixture-second-key")}}});
-    lorca::api::dispatch(&app,"memory.connections.set",base.clone()).await.unwrap();
+    beans::api::dispatch(&app,"memory.connections.set",base.clone()).await.unwrap();
     let mut patch=base.clone();patch["options"]["bindings"]=json!({first.clone():binding("first","replaced-key")});
-    lorca::api::dispatch(&app,"memory.connections.set",patch.clone()).await.unwrap();
+    beans::api::dispatch(&app,"memory.connections.set",patch.clone()).await.unwrap();
     let count=||match app.memory_config.lock().connections["ov"].value.as_ref().unwrap().options.as_ref().unwrap(){
         BackendOptions::OpenViking{bindings}=>bindings.len(),_=>panic!()};
     assert_eq!(count(),2);
     patch["options"]["bindings"]=json!({first.clone():null});
-    lorca::api::dispatch(&app,"memory.connections.set",patch.clone()).await.unwrap();assert_eq!(count(),1);
+    beans::api::dispatch(&app,"memory.connections.set",patch.clone()).await.unwrap();assert_eq!(count(),1);
     patch["options"]["bindings"]=json!({});patch["options"]["replace_all"]=json!(true);
-    assert_eq!(lorca::api::dispatch(&app,"memory.connections.set",patch.clone()).await.unwrap_err(),"confirmation_required");
+    assert_eq!(beans::api::dispatch(&app,"memory.connections.set",patch.clone()).await.unwrap_err(),"confirmation_required");
     assert_eq!(count(),1);patch["options"]["confirm_replace_all"]=json!(true);
-    lorca::api::dispatch(&app,"memory.connections.set",patch).await.unwrap();assert_eq!(count(),0);
+    beans::api::dispatch(&app,"memory.connections.set",patch).await.unwrap();assert_eq!(count(),0);
     let summary=app.memory_summary().to_string();assert!(!summary.contains("fixture-second-key"));
 }
 
 #[tokio::test]
 async fn lance_cloud_is_masked_blocked_and_cannot_be_activated_without_blocking_local() {
-    let scratch=Scratch::new();let app=lorca::app::App::load(lorca::config::Config{home:scratch.0.clone(),port:0}).unwrap();
-    lorca::identity::create(&app,Some("fixture".into())).unwrap();let bot=app.state.lock().unwrap().bots[0].id.clone();
+    let scratch=Scratch::new();let app=beans::app::App::load(beans::config::Config{home:scratch.0.clone(),port:0}).unwrap();
+    beans::identity::create(&app,Some("fixture".into())).unwrap();let bot=app.state.lock().unwrap().bots[0].id.clone();
     for (id,endpoint) in [("cloud",Some("db://fixture")),("local",None)]{
-        lorca::api::dispatch(&app,"memory.connections.set",json!({"id":id,"backend":"lance_db","name":id,
+        beans::api::dispatch(&app,"memory.connections.set",json!({"id":id,"backend":"lance_db","name":id,
             "endpoint":endpoint,"secret":{"action":"keep"},"options":{"backend":"lance_db","region":"us-east-1"}})).await.unwrap();
     }
     let summary=app.memory_summary();let rows=summary["connections"].as_array().unwrap();
@@ -229,6 +229,6 @@ async fn lance_cloud_is_masked_blocked_and_cannot_be_activated_without_blocking_
     assert_eq!(cloud["availability"],"blocked");assert_eq!(cloud["reason"],"lancedb_cloud_transport_unavailable");
     assert_eq!(local["availability"],"supported");assert!(local["reason"].is_null());assert!(!summary.to_string().contains("db://"));
     let request=|id:&str|json!({"bot_id":bot,"connection_id":id,"auto_recall":true,"capture_conversation":false,"capture_group_text":false});
-    assert_eq!(lorca::api::dispatch(&app,"memory.preferences.set",request("cloud")).await.unwrap_err(),"lancedb_cloud_transport_unavailable");
-    lorca::api::dispatch(&app,"memory.preferences.set",request("local")).await.unwrap();
+    assert_eq!(beans::api::dispatch(&app,"memory.preferences.set",request("cloud")).await.unwrap_err(),"lancedb_cloud_transport_unavailable");
+    beans::api::dispatch(&app,"memory.preferences.set",request("local")).await.unwrap();
 }

@@ -30,7 +30,7 @@ pub struct ProviderStatus {
 pub struct StatusModel {
     #[serde(flatten)]
     pub model: crate::credentials::CustomModel,
-    pub levels: Vec<lorca_models::ThinkingLevel>,
+    pub levels: Vec<beans_models::ThinkingLevel>,
 }
 
 /// A paired machine or phone. `os` decides whether it is a Runner.
@@ -46,7 +46,7 @@ pub struct Device {
     /// Plugins installed on that Runner, with their setup state. Secrets stay on the Runner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginStatus>,
-    /// The `lorca` this Device runs, as `lorca --version` says it.
+    /// The `beans` this Device runs, as `beans --version` says it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
     /// How a CLI that replaces itself keeps current: one installed with the site's script. Unset
@@ -164,7 +164,7 @@ pub struct Bot {
     #[serde(default, rename = "instructions")]
     pub legacy_instructions: String,
     /// Working directory for the coding tools on the Runner. Defaults to
-    /// `<LORCA_HOME>/workspaces/<bot id>`.
+    /// `<BEANS_HOME>/workspaces/<bot id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
     #[serde(default)]
@@ -233,12 +233,12 @@ impl Bot {
     }
 
     /// Where this bot's tools run, keyed by id so renames never move files. Created on first use.
-    pub fn working_directory(&self, lorca_home: &std::path::Path) -> std::path::PathBuf {
+    pub fn working_directory(&self, beans_home: &std::path::Path) -> std::path::PathBuf {
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
         match self.workdir.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
             Some(dir) if dir.starts_with('~') => home.join(dir.trim_start_matches('~').trim_start_matches('/')),
             Some(dir) => std::path::PathBuf::from(dir),
-            None => lorca_home.join("workspaces").join(&self.id),
+            None => beans_home.join("workspaces").join(&self.id),
         }
     }
 }
@@ -252,7 +252,7 @@ pub enum Author {
 }
 
 /// A file sent with a message. Its bytes travel as a `file` blob whose id is this id,
-/// encrypted with the account key; Devices keep a copy under `~/.lorca/files/<id>`.
+/// encrypted with the account key; Devices keep a copy under `~/.beans-v2/files/<id>`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Attachment {
     pub id: String,
@@ -335,7 +335,7 @@ pub enum Body {
         plugin_id: String,
         plugin_name: String,
         tool: String,
-        /// One line about the call: "create_issue · repo: lorca, title: …".
+        /// One line about the call: "create_issue · repo: beans, title: …".
         summary: String,
         #[serde(default)]
         arguments: serde_json::Value,
@@ -411,7 +411,7 @@ impl ReplyTo {
 }
 
 /// A `bash` call as its card shows it: Auto-review checking it, the question it asks, the
-/// command running in its terminal (`lorca_agent::tools::BashSession`), what the command asks,
+/// command running in its terminal (`beans_agent::tools::BashSession`), what the command asks,
 /// and how it ended.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CommandRun {
@@ -695,7 +695,7 @@ pub struct Routine {
     /// How the last run ended: `sent`, `pass`, or `error`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_outcome: Option<String>,
-    /// Why Lorca paused it, when it did: `away`.
+    /// Why Beans paused it, when it did: `away`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_reason: Option<String>,
     /// JavaScript the Runner runs at each due time before the bot does, without a model: a
@@ -997,6 +997,7 @@ pub struct Response {
 /// Pairing handshake payloads (sealed boxes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairRequest {
+    pub format: crate::config::Format,
     pub machine_pubkey: String,
     pub box_pubkey: String,
     pub device: Device,
@@ -1004,6 +1005,7 @@ pub struct PairRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairReply {
+    pub format: crate::config::Format,
     pub identity_pubkey: String,
     pub content_pubkey: String,
     pub account_dek: String,

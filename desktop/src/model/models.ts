@@ -9,7 +9,7 @@ import { markdownBlocks, plainText } from "./markdown";
 
 // MARK: - Providers
 
-/** The providers Lorca has built in. */
+/** The providers Beans has built in. */
 export type BuiltInProviderKind = "deepseek" | "anthropic" | "opencode" | "opencode-go" | "chatgpt" | "grok";
 
 /** A provider the user added: any server that speaks OpenAI's or Anthropic's API. Its kind is
@@ -239,7 +239,7 @@ export function customEndpoint(api: CustomAPI, baseURL: string): string {
 /** The note under the base URL field, naming the URL the CLI calls, so a base URL with a missing or
  * doubled path shows there. */
 export function customEndpointNote(api: CustomAPI, baseURL: string): string {
-  return baseURL.trim() === "" ? L("Lorca adds %@ to it.", customAPIPath(api)) : L("Requests go to %@.", customEndpoint(api, baseURL));
+  return baseURL.trim() === "" ? L("Beans adds %@ to it.", customAPIPath(api)) : L("Requests go to %@.", customEndpoint(api, baseURL));
 }
 
 /** The base URL's host: "api.example.com". Empty until the base URL has one. */
@@ -477,7 +477,7 @@ export interface Device {
   machineKey: string;
   /** Plugins installed on this Runner, as it advertises them. Secrets stay on the Runner. */
   plugins: InstalledPlugin[];
-  /** The `lorca` this Device runs; empty when its CLI has not said. */
+  /** The `beans` this Device runs; empty when its CLI has not said. */
   version: string;
   /** How a CLI that replaces itself keeps current: one installed with the install script. Unset
    * where an app updates the CLI it carries, and on phones. */
@@ -491,7 +491,7 @@ export interface DeviceUpdate {
   /** The newest release, when it is newer than `version`. */
   latest?: string;
   /** `installing` while it downloads and swaps the binary, `restarting` while it waits for its
-   * bots to finish, `installed` when `lorca serve` must be restarted by hand to run it. */
+   * bots to finish, `installed` when `beans serve` must be restarted by hand to run it. */
   state?: "installing" | "restarting" | "installed";
   /** Why the last check or install failed, in the CLI's words. */
   error?: string;
@@ -840,7 +840,7 @@ export interface Routine {
   /** The schedule in words: "Weekdays at 9:00 AM". */
   scheduleText: string;
   isEnabled: boolean;
-  /** Why Lorca paused it, when it did: "away". */
+  /** Why Beans paused it, when it did: "away". */
   pausedReason?: string;
   lastRunAt?: number;
   /** How the last run ended: "sent", "pass", or "error". */
@@ -985,7 +985,7 @@ export function isShown(tool: ToolInvocation): boolean {
   return run.state === "asking" || (isLive(run) && run.handedOver);
 }
 
-/** A file sent with a message. The bytes live under `~/.lorca/files/<id>` once this Device has
+/** A file sent with a message. The bytes live under `~/.beans-v2/files/<id>` once this Device has
  * them; `width` and `height` size an image's thumbnail before the file arrives. */
 export interface Attachment {
   id: string;

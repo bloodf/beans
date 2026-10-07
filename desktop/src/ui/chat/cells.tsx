@@ -110,7 +110,7 @@ export function quoteAuthorName(author: Author): string {
   track.roster();
   if (author.kind === "you") return L("You");
   if (author.kind === "bot") return store.bot(author.botID)?.name ?? L("Bot");
-  return "Lorca";
+  return "Beans";
 }
 
 /** `onReply` makes the draft a reply to this message (a right-click on the bubble offers it);

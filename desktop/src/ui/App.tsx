@@ -17,7 +17,7 @@ import { setupWindow, setWindowTitle } from "./window";
 
 // The menu bar keeps its items in step through a memo and an effect, so it is set up with the
 // window's page, not after it settles.
-// The window's title follows the page's: the app's name over onboarding, Settings - Lorca for the
+// The window's title follows the page's: the app's name over onboarding, Settings - Beans for the
 // small window of settings.
 function OnboardingRoute() {
   onCleanup(setupWindow("other"));

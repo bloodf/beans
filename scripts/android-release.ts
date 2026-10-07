@@ -26,7 +26,7 @@ for (const name of names) {
 }
 if (!(await Bun.file(env.BEANS_ANDROID_KEYSTORE).exists())) throw new Error(`Missing keystore: ${env.BEANS_ANDROID_KEYSTORE}`);
 if (((await stat(env.BEANS_ANDROID_KEYSTORE)).mode & 0o777) !== 0o600) throw new Error(`Keystore must have mode 0600: ${env.BEANS_ANDROID_KEYSTORE}`);
-delete env.LORCA_MOBILE_VARIANT;
+delete env.BEANS_MOBILE_VARIANT;
 delete env.EAS_BUILD_PROFILE;
 // Homebrew cargo can be first on PATH, but Android target libraries live in rustup's toolchain.
 const rustc = Bun.spawnSync(["rustup", "which", "rustc"], { stdout: "pipe", stderr: "pipe" });

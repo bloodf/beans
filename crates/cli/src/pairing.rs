@@ -16,34 +16,40 @@ use crate::model::{host_facts, Device, PairReply, PairRequest};
 
 const PAIR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const POLL: std::time::Duration = std::time::Duration::from_millis(1500);
-/// The relay protocol that lets a machine attest another (`POST /v1/machines`).
-const MACHINE_ATTEST_PROTOCOL: u32 = 2;
 
 pub fn parse_pairing_string(text: &str) -> anyhow::Result<(String, String, String, String)> {
-    let text = text.trim();
-    let query = text
-        .strip_prefix("lorca://pair?")
-        .or_else(|| text.split_once("pair?").map(|(_, q)| q))
-        .ok_or_else(|| anyhow::anyhow!("That is not a Lorca pairing string"))?;
-    let mut relay = None;
-    let mut id = None;
-    let mut ek = None;
-    let mut nonce = None;
+    let query = text.trim().strip_prefix("beans://pair?")
+        .ok_or_else(|| anyhow::anyhow!("That is not a Beans v2 pairing string"))?;
+    let mut fields = std::collections::BTreeMap::new();
     for pair in query.split('&') {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let value = percent_decode(value);
-        match key {
-            "relay" => relay = Some(value),
-            "id" => id = Some(value),
-            "ek" => ek = Some(value),
-            "n" => nonce = Some(value),
-            _ => {}
+        let (key, value) = pair.split_once('=').ok_or_else(|| anyhow::anyhow!("Invalid pairing field"))?;
+        if !matches!(key, "v" | "relay" | "id" | "ek" | "n") || fields.insert(key, percent_decode(value)?).is_some() {
+            anyhow::bail!("Unknown or duplicate pairing field");
         }
     }
-    match (relay, id, ek, nonce) {
-        (Some(relay), Some(id), Some(ek), Some(nonce)) => Ok((relay, id, ek, nonce)),
-        _ => Err(anyhow::anyhow!("Pairing string is missing a field")),
+    if fields.get("v").map(String::as_str) != Some("2") {
+        anyhow::bail!("Beans v2 pairing code required; incompatible pairing format");
     }
+    let mut required = |key| fields.remove(key).filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Pairing string is missing {key}"));
+    let relay = required("relay")?;
+    let id = required("id")?;
+    let ek = required("ek")?;
+    let nonce = required("n")?;
+    let url = reqwest::Url::parse(&relay)?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+        || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+        anyhow::bail!("Invalid pairing relay URL");
+    }
+    if id.len() != 43 || ek.len() != 43 {
+        anyhow::bail!("Pairing keys must be canonical base64url");
+    }
+    keys::unb64_32(&id)?;
+    keys::unb64_32(&ek)?;
+    if nonce.len() > 256 || !nonce.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
+        anyhow::bail!("Invalid pairing nonce");
+    }
+    Ok((relay, id, ek, nonce))
 }
 
 fn percent_encode(value: &str) -> String {
@@ -57,22 +63,22 @@ fn percent_encode(value: &str) -> String {
     out
 }
 
-fn percent_decode(value: &str) -> String {
+fn percent_decode(value: &str) -> anyhow::Result<String> {
     let bytes = value.as_bytes();
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() + 0 && i + 2 <= bytes.len() - 1 {
-            if let Ok(byte) = u8::from_str_radix(&value[i + 1..i + 3], 16) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%' {
+            let encoded = bytes.get(i + 1..i + 3).ok_or_else(|| anyhow::anyhow!("Invalid pairing escape"))?;
+            let encoded = std::str::from_utf8(encoded)?;
+            out.push(u8::from_str_radix(encoded, 16)?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
         }
-        out.push(bytes[i]);
-        i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    Ok(String::from_utf8(out)?)
 }
 
 /// A: create the mailbox and start waiting. Returns the nonce and the pairing string. Any
@@ -81,12 +87,9 @@ pub async fn start(app: Arc<App>) -> anyhow::Result<(String, String)> {
     let url = app.relay_url().ok_or_else(|| anyhow::anyhow!("Set a relay URL first. Pairing runs through the relay."))?;
     let machine_file = app.machine_file().ok_or_else(|| anyhow::anyhow!("No identity on this Device"))?;
     let machine = machine_file.machine()?;
+    app.relay.health(&url).await.map_err(|e| anyhow::anyhow!("{e}"))?;
     if !machine_file.registered {
         crate::sync::ensure_registered(&app, &url).await.map_err(|e| anyhow::anyhow!("{e}"))?;
-    }
-    // Said now, before the other Device posts its request into a pairing that cannot finish.
-    if !app.is_identity_device() && app.relay.health(&url).await.map_err(|e| anyhow::anyhow!("{e}"))? < MACHINE_ATTEST_PROTOCOL {
-        anyhow::bail!("Pairing from this Device needs a newer relay. Update the relay, or pair from the computer that created or restored the identity.");
     }
     let token = crate::sync::token_or_register(&app, &url, &machine).await.map_err(|e| anyhow::anyhow!("{e}"))?;
     let nonce = app.relay.pair_create(&url, &token).await.map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -94,7 +97,7 @@ pub async fn start(app: Arc<App>) -> anyhow::Result<(String, String)> {
     let ephemeral = crypto_box::SecretKey::generate(&mut rand::rngs::OsRng);
     let ek = keys::b64(ephemeral.public_key().as_bytes());
     let pairing_string = format!(
-        "lorca://pair?relay={}&id={}&ek={}&n={}",
+        "beans://pair?v=2&relay={}&id={}&ek={}&n={}",
         percent_encode(&url),
         percent_encode(&machine_file.identity_pubkey),
         percent_encode(&ek),
@@ -161,12 +164,10 @@ async fn wait_for_request(app: &Arc<App>, url: &str, nonce: &str) -> Result<Valu
             None => app.relay.attest(url, &token, &request.machine_pubkey, &request.box_pubkey).await,
         }
         .map_err(|e| e.to_string())?;
-        let reply = PairReply {
-            identity_pubkey: machine_file.identity_pubkey.clone(),
-            content_pubkey: machine_file.content_pubkey.clone(),
-            account_dek: machine_file.account_dek.clone(),
-            relay_url: url.to_string(),
-        };
+        let reply = PairReply { format: crate::config::Format::BeansV2, identity_pubkey: machine_file.identity_pubkey.clone(),
+        content_pubkey: machine_file.content_pubkey.clone(),
+        account_dek: machine_file.account_dek.clone(),
+        relay_url: url.to_string(), };
         let sealed_reply = crate::crypto::seal_json(&request.box_pubkey, &reply).map_err(|e| e.to_string())?;
         app.relay.pair_post_reply(url, &token, nonce, &sealed_reply).await.map_err(|e| e.to_string())?;
 
@@ -220,13 +221,14 @@ pub async fn accept(app: Arc<App>, pairing_string: &str, device_name: Option<Str
     if app.has_identity() {
         anyhow::bail!("This Device already belongs to an identity.");
     }
+    let pairing = parse_pairing_string(pairing_string)?;
     let cancel = CancellationToken::new();
     if let Some(previous) = app.accepting.lock().unwrap().replace(cancel.clone()) {
         previous.cancel();
     }
     let result = tokio::select! {
         _ = cancel.cancelled() => Err(anyhow::anyhow!("Pairing cancelled")),
-        result = join(&app, pairing_string, device_name) => result,
+        result = join(&app, pairing, device_name) => result,
     };
     // Cancelled means a newer accept owns the slot, or abort already emptied it.
     if !cancel.is_cancelled() {
@@ -242,8 +244,8 @@ pub fn abort(app: &Arc<App>) {
     }
 }
 
-async fn join(app: &Arc<App>, pairing_string: &str, device_name: Option<String>) -> anyhow::Result<Value> {
-    let (relay_url, identity_pubkey, ek, nonce) = parse_pairing_string(pairing_string)?;
+async fn join(app: &Arc<App>, pairing: (String, String, String, String), device_name: Option<String>) -> anyhow::Result<Value> {
+    let (relay_url, identity_pubkey, ek, nonce) = pairing;
     app.relay.health(&relay_url).await.map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let machine = Machine::generate();
@@ -260,7 +262,7 @@ async fn join(app: &Arc<App>, pairing_string: &str, device_name: Option<String>)
         update: None,
         updated_at: now_unix(),
     };
-    let request = PairRequest { machine_pubkey: machine.pubkey(), box_pubkey: machine.box_pubkey(), device: device.clone() };
+    let request = PairRequest { format: crate::config::Format::BeansV2, machine_pubkey: machine.pubkey(), box_pubkey: machine.box_pubkey(), device: device.clone() };
     let sealed = crate::crypto::seal_json(&ek, &request)?;
     // A mailbox that is gone means A cancelled, or the code expired. One that already holds
     // a request was used by a Device already: a code is good for one pairing.
@@ -289,19 +291,17 @@ async fn join(app: &Arc<App>, pairing_string: &str, device_name: Option<String>)
     }
     let dek = keys::unb64_32(&reply.account_dek)?;
 
-    let machine_file = MachineFile {
-        machine_secret: keys::b64(&machine.secret),
-        identity_pubkey: reply.identity_pubkey.clone(),
-        content_pubkey: reply.content_pubkey.clone(),
-        account_dek: keys::b64(&dek),
-        name: device.name.clone(),
-        os: device.os.clone(),
-        os_version: device.os_version.clone(),
-        model: device.model.clone(),
-        registered: true,
-        relay_url: Some(reply.relay_url.clone()),
-        created_at: now_unix(),
-    };
+    let machine_file = MachineFile { format: crate::config::Format::BeansV2, machine_secret: keys::b64(&machine.secret),
+    identity_pubkey: reply.identity_pubkey.clone(),
+    content_pubkey: reply.content_pubkey.clone(),
+    account_dek: keys::b64(&dek),
+    name: device.name.clone(),
+    os: device.os.clone(),
+    os_version: device.os_version.clone(),
+    model: device.model.clone(),
+    registered: true,
+    relay_url: Some(reply.relay_url.clone()),
+    created_at: now_unix(), };
     *app.machine.lock().unwrap() = Some(machine_file);
     app.save_machine()?;
     app.set_relay_url(Some(reply.relay_url.clone()))?;
@@ -316,4 +316,25 @@ async fn join(app: &Arc<App>, pairing_string: &str, device_name: Option<String>)
     app.emit(Event::IdentityChanged { has_identity: true });
     app.emit(Event::Snapshot(app.snapshot()));
     Ok(json!({ "id": device.id, "name": device.name, "os": device.os, "identity_id": keys::identity_id(&reply.identity_pubkey) }))
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn only_exact_versioned_pair_codes_with_unique_fields_are_accepted() {
+        let key = keys::b64(&[7; 32]);
+        let good = format!("beans://pair?v=2&relay=http%3A%2F%2F127.0.0.1%3A8787&id={key}&ek={key}&n=nonce");
+        let parsed = parse_pairing_string(&good).unwrap();
+        assert_eq!(parsed, ("http://127.0.0.1:8787".into(), key.clone(), key, "nonce".into()));
+        for bad in [
+            good.replace("beans://", "other://"), good.replace("v=2&", ""),
+            good.replace("v=2", "v=1"), format!("{good}&v=2"), format!("{good}&n=other"),
+            good.replace("n=nonce", "n=%GG"), good.replace("n=nonce", "n=%FF"),
+            good.replace("relay=http%3A%2F%2F127.0.0.1%3A8787", "relay=file%3A%2F%2Faccount"),
+        ] {
+            assert!(parse_pairing_string(&bad).is_err(), "{bad}");
+        }
+    }
 }

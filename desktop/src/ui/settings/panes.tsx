@@ -222,7 +222,7 @@ export function GeneralPane() {
           </AccessoryRow>
         </Section>
       </Show>
-      <Footnote text={L("Lorca talks only to the CLI on this computer. Nothing here is synced; each Device keeps its own settings.")} />
+      <Footnote text={L("Beans talks only to the CLI on this computer. Nothing here is synced; each Device keeps its own settings.")} />
     </PaneFrame>
   );
 }
@@ -279,7 +279,7 @@ export function AdvancedPane() {
       </Section>
       <Footnote
         text={L(
-          "Self-hosting the relay is a URL change: clients sign their requests and upload ciphertext, so the relay has nothing to trust. Leave it empty to use Lorca’s relay.",
+          "Self-hosting the relay is a URL change: clients sign their requests and upload ciphertext, so the relay has nothing to trust. Leave it empty to use Beans’s relay.",
         )}
       />
       <Section title={L("Setup")} style="heading">
@@ -411,7 +411,7 @@ function AutoReviewPane() {
             onChange={(on) => store.setAutoReview({ ...store.autoReview, isEnabled: on })}
           />
         </AccessoryRow>
-        <NoteRow text={L("Lorca checks each action before it runs and asks you first when needed. Add rules to customize what bots can do automatically.")} />
+        <NoteRow text={L("Beans checks each action before it runs and asks you first when needed. Add rules to customize what bots can do automatically.")} />
       </Section>
       <Section
         title={Entries.autoReviewRules().row}
@@ -549,14 +549,14 @@ function PluginsPane() {
       <Footnote text={L("Plugins are installed on a Runner, and the bots assigned to it use them. An action that changes something goes through Auto-review first.")} />
       <Show when={device() && isRunner(device()!)}>
         <McpServersSection device={device()!} />
-        <Footnote text={L("Servers you add yourself live in mcp.json on %@, in the format Claude Desktop and Cursor use. Edit them here or with the lorca mcp command; after editing the file itself, click Reload.", device()!.name)} />
+        <Footnote text={L("Servers you add yourself live in mcp.json on %@, in the format Claude Desktop and Cursor use. Edit them here or with the beans mcp command; after editing the file itself, click Reload.", device()!.name)} />
       </Show>
     </PaneFrame>
   );
 }
 
 /** A Runner's mcp.json: each server with how it stands and a switch, a row to add one, and the file
- * itself, with Reload for an edit made outside Lorca (and on this computer, Open). The list follows
+ * itself, with Reload for an edit made outside Beans (and on this computer, Open). The list follows
  * the servers' states in the Runner's roster. */
 function McpServersSection(props: { device: Device }) {
   const [file, setFile] = createSignal<McpFile | null>(null);
@@ -583,7 +583,7 @@ function McpServersSection(props: { device: Device }) {
     },
   );
   // This computer's file is asked again whenever the CLI says something changed, as a reload
-  // from a terminal (`lorca mcp reload`) does: a file that no longer reads moves no server's state.
+  // from a terminal (`beans mcp reload`) does: a file that no longer reads moves no server's state.
   onSettled(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const stop = onStoreEvent((event) => {
@@ -617,7 +617,7 @@ function McpServersSection(props: { device: Device }) {
       await files.showInFolder(path);
     }
   };
-  // The Runner reads the file only when asked, after an edit made outside Lorca.
+  // The Runner reads the file only when asked, after an edit made outside Beans.
   const reload = async () => {
     const runnerID = props.device.id;
     loads += 1;
@@ -633,7 +633,7 @@ function McpServersSection(props: { device: Device }) {
       <Show when={file()} fallback={<KeyValueRow label={failure() ?? L("Loading…")} value="" tint={failure() ? "var(--red)" : "var(--label-2)"} />}>
         {(current) => (
           <>
-            <Show when={current().error}>{(error) => <NoteRow text={L("%@ Lorca keeps the servers it read before.", error())} tint="var(--red)" />}</Show>
+            <Show when={current().error}>{(error) => <NoteRow text={L("%@ Beans keeps the servers it read before.", error())} tint="var(--red)" />}</Show>
             <For each={current().servers} keyed={(server) => server.name}>
               {(server) => (
                 <McpServerRow
@@ -779,7 +779,7 @@ function DevicePane() {
     track.connection();
     const url = store.relayURL;
     if (!url) return L("Not configured");
-    if (store.relayUpdateRequired) return L("%@ · update Lorca to sync", url);
+    if (store.relayUpdateRequired) return L("%@ · update Beans to sync", url);
     if (store.relayConnected) return url;
     // Why the last try to connect failed, in the CLI's words.
     return store.relayError ? `${url} · ${store.relayError}` : L("%@ · offline", url);
@@ -825,7 +825,7 @@ function DevicePane() {
               <Show when={current().os !== "unknown"}>
                 <KeyValueRow label={L("OS")} value={`${osDisplayName(current().os)} · ${current().osVersion}`} />
               </Show>
-              <Show when={current().version}><KeyValueRow label={L("Lorca CLI")} value={current().version} /></Show>
+              <Show when={current().version}><KeyValueRow label={L("Beans CLI")} value={current().version} /></Show>
               <KeyValueRow label={L("Role")} value={isRunner(current()) ? L("Runner · runs bots with its own credentials") : L("Device · never runs bots")} />
               <KeyValueRow label={L("Last seen")} value={current().status === "online" ? L("Active now") : Format.lastSeen(current().lastSeen)} />
               <KeyValueRow label={L("Relay")} value={relay()} monospaced />

@@ -3,13 +3,13 @@
 #   irm https://usebeans.app/install-cli.ps1 | iex
 #
 # It downloads the Windows build from the latest bloodf/beans release, checks it
-# against the checksum published beside it, puts lorca.exe in ~\.local\bin, and adds that folder
+# against the checksum published beside it, puts beans.exe in ~\.local\bin, and adds that folder
 # to your user PATH. Run it again to update. Settings, as environment variables set before it
 # runs:
 #
-#   $env:LORCA_VERSION = '1.0.0'        a release to install instead of the latest
-#   $env:LORCA_INSTALL_DIR = 'C:\...'   where lorca.exe goes
-#   $env:LORCA_NO_MODIFY_PATH = '1'     leave PATH alone
+#   $env:BEANS_VERSION = '1.0.0'        a release to install instead of the latest
+#   $env:BEANS_INSTALL_DIR = 'C:\...'   where beans.exe goes
+#   $env:BEANS_NO_MODIFY_PATH = '1'     leave PATH alone
 #
 # It runs in a script block of its own, so iex leaves no variables behind in the session, and it
 # never calls exit, which would close the window.
@@ -21,17 +21,17 @@
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     $releases = 'https://github.com/bloodf/beans/releases'
-    if ($env:LORCA_DOWNLOAD_URL) { $releases = $env:LORCA_DOWNLOAD_URL.TrimEnd('/') }
+    if ($env:BEANS_DOWNLOAD_URL) { $releases = $env:BEANS_DOWNLOAD_URL.TrimEnd('/') }
 
     $cpu = $null
     try { $cpu = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() } catch {}
     if (-not $cpu) { $cpu = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE } }
-    if ($cpu -notmatch '^(x64|amd64)$') { throw "There is no Lorca CLI for Windows on $cpu." }
+    if ($cpu -notmatch '^(x64|amd64)$') { throw "There is no Beans CLI for Windows on $cpu." }
     $target = 'windows-x86_64'
 
-    if ($env:LORCA_VERSION) {
-        $version = $env:LORCA_VERSION.Trim().TrimStart('v')
-        if ($version -notmatch '^[0-9.]+$') { throw "Not a Lorca version: $env:LORCA_VERSION" }
+    if ($env:BEANS_VERSION) {
+        $version = $env:BEANS_VERSION.Trim().TrimStart('v')
+        if ($version -notmatch '^[0-9.]+$') { throw "Not a Beans version: $env:BEANS_VERSION" }
         $url = "$releases/download/beans-v$version"
         $release = "release $version"
     } else {
@@ -39,14 +39,14 @@
         $release = 'the latest release'
     }
 
-    $dir = $env:LORCA_INSTALL_DIR
+    $dir = $env:BEANS_INSTALL_DIR
     if (-not $dir) { $dir = Join-Path $HOME '.local\bin' }
-    $exe = Join-Path $dir 'lorca.exe'
-    $archive = "lorca-cli-$target.zip"
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('lorca-' + [Guid]::NewGuid().ToString('N'))
+    $exe = Join-Path $dir 'beans.exe'
+    $archive = "beans-cli-$target.zip"
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('beans-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
-        Write-Host "Downloading lorca for $target from $release"
+        Write-Host "Downloading beans for $target from $release"
         $zip = Join-Path $tmp $archive
         try {
             Invoke-WebRequest -Uri "$url/$archive" -OutFile $zip -UseBasicParsing
@@ -60,15 +60,15 @@
         }
 
         Expand-Archive -Path $zip -DestinationPath $tmp -Force
-        $new = Join-Path $tmp 'lorca.exe'
-        if (-not (Test-Path $new)) { throw "$archive holds no lorca.exe." }
+        $new = Join-Path $tmp 'beans.exe'
+        if (-not (Test-Path $new)) { throw "$archive holds no beans.exe." }
 
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        # A running lorca.exe cannot be replaced, but it can be renamed: move it aside, then delete
+        # A running beans.exe cannot be replaced, but it can be renamed: move it aside, then delete
         # what is aside unless something still runs it, which a later install cleans up.
         if (Test-Path $exe) { Move-Item -Path $exe -Destination ($exe + '.old-' + [Guid]::NewGuid().ToString('N')) }
         Move-Item -Path $new -Destination $exe
-        Get-ChildItem -Path $dir -Filter 'lorca.exe.old-*' | Remove-Item -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $dir -Filter 'beans.exe.old-*' | Remove-Item -Force -ErrorAction SilentlyContinue
         Unblock-File -Path $exe
         $installed = & $exe --version
         if ($LASTEXITCODE -ne 0) { throw "$exe does not start on this computer." }
@@ -78,7 +78,7 @@
 
     Write-Host "Installed $installed at $exe"
     $inDir = { param($entry) $entry -and [Environment]::ExpandEnvironmentVariables($entry).TrimEnd('\') -eq $dir.TrimEnd('\') }
-    if ($env:LORCA_NO_MODIFY_PATH -eq '1') {
+    if ($env:BEANS_NO_MODIFY_PATH -eq '1') {
         if (-not ($env:Path -split ';' | Where-Object { & $inDir $_ })) { Write-Host "$dir is not on your PATH." }
     } else {
         # The registry value as written: [Environment]::GetEnvironmentVariable expands %VARIABLES%,
@@ -91,8 +91,8 @@
                 $key.SetValue('Path', (($entries + $dir) -join ';'), [Microsoft.Win32.RegistryValueKind]::ExpandString)
                 # A user variable set through .NET broadcasts the change, so terminals opened from
                 # now on read the new PATH.
-                [Environment]::SetEnvironmentVariable('LORCA_INSTALLER', '1', 'User')
-                [Environment]::SetEnvironmentVariable('LORCA_INSTALLER', $null, 'User')
+                [Environment]::SetEnvironmentVariable('BEANS_INSTALLER', '1', 'User')
+                [Environment]::SetEnvironmentVariable('BEANS_INSTALLER', $null, 'User')
                 Write-Host "Added $dir to your user PATH."
             }
         } finally {
@@ -103,14 +103,15 @@
     }
 
     Write-Host ''
-    $lorcaHome = $env:LORCA_HOME
-    if (-not $lorcaHome) { $lorcaHome = Join-Path $HOME '.lorca' }
-    if (Test-Path (Join-Path $lorcaHome 'machine.json')) {
-        Write-Host 'If lorca serve is running, restart it to run the new version. CLI self-update is unavailable in Beans.'
+    $beansHome = $env:BEANS_HOME
+    if (-not $beansHome) { $beansHome = Join-Path $HOME '.beans-v2' }
+    if (Test-Path (Join-Path $beansHome 'machine.json')) {
+        Write-Host 'If beans serve is running, restart it to run the new version. CLI self-update is unavailable in Beans.'
     } else {
         Write-Host 'To make this computer a Runner, pair it with your account and start the service:'
-        Write-Host "  lorca pair 'lorca://pair?...'   # from Pair a Device in the app"
-        Write-Host '  lorca service install           # runs lorca serve now and at every sign-in'
+        Write-Host "  beans pair 'beans://pair?v=2&...'   # from Pair a Device in the app"
+        Write-Host '  beans service install           # runs beans serve now and at every sign-in'
     }
+    Write-Host 'Fresh accounts use ~/.beans-v2 and port 4874; old accounts and unversioned backups are incompatible.'
     Write-Host 'Docs: https://usebeans.app/docs/cli'
 }

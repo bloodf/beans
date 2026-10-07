@@ -1,13 +1,13 @@
 //! Attachments: files a Device sends with a message. The bytes leave as a `file` blob under
 //! the attachment's id, encrypted with the account key like a chat op, and land in
-//! `~/.lorca/files/<id>` on every Device that needs them: the Runner copies them into the
+//! `~/.beans-v2/files/<id>` on every Device that needs them: the Runner copies them into the
 //! bot's working directory for its turn, and the app shows them in the transcript.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "runner")]
-use lorca_agent::ContentPart;
+use beans_agent::ContentPart;
 
 use crate::app::App;
 use crate::model::Attachment;
@@ -184,13 +184,13 @@ fn inline_image_path(app: &App, id: &str) -> PathBuf {
 /// once and kept beside the attachment, failures too, since every turn builds its messages again
 /// and a photo takes a moment to make.
 #[cfg(feature = "runner")]
-pub fn inline_image(app: &App, attachment: &Attachment) -> Result<lorca_agent::images::Inline, String> {
+pub fn inline_image(app: &App, attachment: &Attachment) -> Result<beans_agent::images::Inline, String> {
     let kept = inline_image_path(app, &attachment.id);
-    if let Some(made) = crate::config::read_json::<Result<lorca_agent::images::Inline, String>>(&kept) {
+    if let Some(made) = crate::config::read_json::<Result<beans_agent::images::Inline, String>>(&kept) {
         return made;
     }
     let bytes = std::fs::read(local_path(app, &attachment.id)).map_err(|e| format!("it could not be read: {e}"))?;
-    let made = lorca_agent::images::prepare(&bytes);
+    let made = beans_agent::images::prepare(&bytes);
     if let Err(error) = crate::config::write_json_private(&kept, &made) {
         tracing::warn!(%error, name = %attachment.name, "keeping an attachment's image for the model");
     }
@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn attachment_image_uses_decoded_type_and_size_bounds() {
         use base64::Engine;
-        let home = std::env::temp_dir().join(format!("lorca-files-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-files-{}", uuid::Uuid::new_v4()));
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         let image = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(2600, 100, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 60])));
         let mut png = Vec::new();

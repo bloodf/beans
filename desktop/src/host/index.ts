@@ -1,4 +1,4 @@
-// The app around the page: the Go side's services when the page runs in a Lorca window, and
+// The app around the page: the Go side's services when the page runs in a Beans window, and
 // stand-ins when it runs in a browser tab of the dev server (for working on the views), where it
 // talks to a CLI's websocket itself or runs the demo.
 
@@ -43,13 +43,13 @@ function browserPlatform(): string {
 
 let info: HostInfo = {
   platform: browserPlatform(),
-  name: "Lorca Dev",
+  name: "Beans Dev",
   version: "dev",
   isDevelopment: true,
   isMock: query.get("mock") === "1",
-  cliCommand: "lorca serve --home ~/.lorca-dev --port 4863",
-  defaultCLIPort: 4863,
-  productionRelayURL: "https://relay.lorca.app",
+  cliCommand: "beans serve --home ~/.beans-dev-v2 --port 4875",
+  defaultCLIPort: 4875,
+  productionRelayURL: "",
   locale: navigator.language,
   updatesEnabled: false,
   cliLogPath: "",
@@ -63,7 +63,7 @@ const defaultPrefs: Preferences = {
   sendOnReturn: true,
   showTimestamps: true,
   relayURL: "",
-  cliPort: Number(query.get("port")) || 4863,
+  cliPort: Number(query.get("port")) || 4875,
   appLanguage: "",
   appearance: "",
   sidebarWidth: 0,
@@ -84,11 +84,11 @@ export async function loadHost(): Promise<void> {
     });
   } else {
     try {
-      prefs = { ...defaultPrefs, ...JSON.parse(localStorage.getItem("lorca.prefs") ?? "{}") };
+      prefs = { ...defaultPrefs, ...JSON.parse(localStorage.getItem("beans-v2.prefs") ?? "{}") };
     } catch {
       prefs = defaultPrefs;
     }
-    // `?port=` wins, as `LORCA_PORT` does in the app.
+    // `?port=` wins, as `BEANS_PORT` does in the app.
     const port = Number(query.get("port"));
     if (port) prefs = { ...prefs, cliPort: port };
   }
@@ -124,7 +124,7 @@ export async function setPreferences(patch: PreferencesPatch): Promise<Preferenc
   } else {
     prefs = { ...prefs, ...patch };
     try {
-      localStorage.setItem("lorca.prefs", JSON.stringify(prefs));
+      localStorage.setItem("beans-v2.prefs", JSON.stringify(prefs));
     } catch {}
     for (const listener of prefsListeners) listener(prefs);
   }
@@ -169,8 +169,8 @@ class AppTransport implements Transport {
   }
 }
 
-/** A browser tab's own websocket to a CLI started by hand (`lorca serve`). The CLI must
- * explicitly allow this page's origin via LORCA_ALLOWED_ORIGINS (the desktop dev loop sets it). */
+/** A browser tab's own websocket to a CLI started by hand (`beans serve`). The CLI must
+ * explicitly allow this page's origin via BEANS_ALLOWED_ORIGINS (the desktop dev loop sets it). */
 class SocketTransport implements Transport {
   private socket: WebSocket | null = null;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
@@ -238,7 +238,7 @@ class SocketTransport implements Transport {
 
   request(method: string, params: Record<string, unknown> = {}) {
     const socket = this.socket;
-    if (!socket || this.connection !== "connected") return Promise.reject(new Error("The Lorca CLI is not running"));
+    if (!socket || this.connection !== "connected") return Promise.reject(new Error("The Beans CLI is not running"));
     const id = this.nextID++;
     return new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });

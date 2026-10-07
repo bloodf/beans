@@ -105,9 +105,9 @@ test("the endpoint is the base URL cut back to its root, then the API's path", (
   expect(customEndpoint("messages", "https://x/v1/v1")).toBe("https://x/v1/v1/messages");
 });
 
-test("the note under the base URL says what Lorca adds, then where requests go", () => {
-  expect(customEndpointNote("chat-completions", "")).toBe("Lorca adds /chat/completions to it.");
-  expect(customEndpointNote("messages", "   ")).toBe("Lorca adds /v1/messages to it.");
+test("the note under the base URL says what Beans adds, then where requests go", () => {
+  expect(customEndpointNote("chat-completions", "")).toBe("Beans adds /chat/completions to it.");
+  expect(customEndpointNote("messages", "   ")).toBe("Beans adds /v1/messages to it.");
   expect(customEndpointNote("responses", "https://openrouter.ai/api/v1/")).toBe("Requests go to https://openrouter.ai/api/v1/responses.");
   expect(customBaseURLPlaceholder("messages")).toBe("https://api.example.com");
   expect(customBaseURLPlaceholder("responses")).toBe("https://api.example.com/v1");

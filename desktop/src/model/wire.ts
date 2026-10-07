@@ -102,7 +102,7 @@ export interface WireDevice {
   plugins?: WirePluginStatus[];
   /** The relay lists the machine, but it never sent its `machine` blob: no name, no `os`. */
   unknown?: boolean;
-  /** The `lorca` that Device runs. */
+  /** The `beans` that Device runs. */
   version?: string | null;
   /** Only a CLI that updates itself, one installed with the install script, sends it. */
   update?: { auto?: boolean; latest?: string | null; state?: string | null; error?: string | null } | null;

@@ -31,7 +31,7 @@
       },
       "variables": [
         { "name": "GITHUB_TOKEN", "description": "A personal access token (github.com/settings/tokens), the quickest way in.", "secret": true, "required": false },
-        { "name": "GITHUB_CLIENT_ID", "description": "Normally not needed: the client id of your own OAuth app (github.com/settings/developers, Device Flow enabled), to sign in with it instead of Lorca's.", "secret": false, "required": false },
+        { "name": "GITHUB_CLIENT_ID", "description": "Normally not needed: the client id of your own OAuth app (github.com/settings/developers, Device Flow enabled), to sign in with it instead of Beans's.", "secret": false, "required": false },
         { "name": "GITHUB_CLIENT_SECRET", "description": "Only for a browser sign-in with your own app: its client secret.", "secret": true, "required": false }
       ],
       "tools": { "readonly": ["get_*", "list_*", "search_*"] }
@@ -758,7 +758,7 @@
       "accent": "orange",
       "category": "productivity",
       "featured": true,
-      "author": "Lorca",
+      "author": "Beans",
       "plugins": ["github", "linear", "sentry"],
       "routines": [
         {"name": "Morning briefing", "schedule": "30 8 * * 1-5", "prompt": "Prepare today's briefing: what needs the user today first, then the rest one line each, with links."}
@@ -774,7 +774,7 @@
       "accent": "teal",
       "category": "research",
       "featured": true,
-      "author": "Lorca",
+      "author": "Beans",
       "plugins": ["context7", "playwright"]
     },
     {
@@ -786,7 +786,7 @@
       "accent": "blue",
       "category": "code",
       "featured": true,
-      "author": "Lorca",
+      "author": "Beans",
       "plugins": ["github"],
       "routines": [
         {"name": "Review new pull requests", "schedule": "0 9 * * 1-5", "prompt": "Review the pull requests opened or updated since your last run in the repositories the user named."}
@@ -802,7 +802,7 @@
       "accent": "purple",
       "category": "research",
       "featured": true,
-      "author": "Lorca",
+      "author": "Beans",
       "plugins": ["playwright"],
       "routines": [
         {"name": "Check watched pages", "schedule": "every 2h", "prompt": "Check every watched page for changes since the last check and report only what changed."}
@@ -816,7 +816,7 @@
       "symbol_name": "tray.full.fill",
       "accent": "indigo",
       "category": "productivity",
-      "author": "Lorca",
+      "author": "Beans",
       "plugins": ["linear"],
       "routines": [
         {"name": "Triage new issues", "schedule": "0 10,16 * * 1-5", "prompt": "Triage the Linear issues created since your last run, anything urgent first."}
@@ -830,7 +830,7 @@
       "symbol_name": "exclamationmark.triangle.fill",
       "accent": "red",
       "category": "code",
-      "author": "Lorca",
+      "author": "Beans",
       "plugins": ["sentry", "github"],
       "routines": [
         {"name": "Check new errors", "schedule": "0 9,13,17 * * 1-5", "prompt": "Look at the errors that are new or regressed since your last run and report each one with its likely cause."}
@@ -844,7 +844,7 @@
       "symbol_name": "chart.line.uptrend.xyaxis",
       "accent": "green",
       "category": "research",
-      "author": "Lorca",
+      "author": "Beans",
       "plugins": ["playwright"],
       "routines": [
         {"name": "Weekly competitor briefing", "schedule": "0 9 * * 1", "prompt": "Check each competitor's pages and brief the user on what changed since last week."}
@@ -858,7 +858,7 @@
       "symbol_name": "hammer.fill",
       "accent": "pink",
       "category": "code",
-      "author": "Lorca"
+      "author": "Beans"
     },
     {
       "id": "docs-keeper",
@@ -868,7 +868,7 @@
       "symbol_name": "doc.text.fill",
       "accent": "blue",
       "category": "productivity",
-      "author": "Lorca",
+      "author": "Beans",
       "plugins": ["notion", "github"],
       "routines": [
         {"name": "Weekly docs check", "schedule": "0 15 * * 5", "prompt": "Compare what shipped this week with the Notion docs and draft the updates for the user to approve."}

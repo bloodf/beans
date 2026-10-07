@@ -1,29 +1,29 @@
 #!/bin/sh
-# Installs the Beans CLI (runtime name lorca) on macOS or Linux.
+# Installs the Beans CLI on macOS or Linux.
 #
 #   curl -fsSL https://raw.githubusercontent.com/bloodf/beans/main/web/public/install-cli.sh | sh
 #
 # It downloads this computer's build from the latest stable bloodf/beans GitHub release,
-# checks it against the checksum published beside it, puts `lorca` in ~/.local/bin, and adds
+# checks it against the checksum published beside it, puts `beans` in ~/.local/bin, and adds
 # that folder to PATH in your shell's profile. Run it again to update. Settings, as environment
 # variables for `sh`:
 #
-#   LORCA_VERSION=1.0.0      a release to install instead of the latest
-#   LORCA_INSTALL_DIR=DIR    where `lorca` goes
-#   LORCA_NO_MODIFY_PATH=1   leave shell profiles alone
+#   BEANS_VERSION=1.0.0      a release to install instead of the latest
+#   BEANS_INSTALL_DIR=DIR    where `beans` goes
+#   BEANS_NO_MODIFY_PATH=1   leave shell profiles alone
 #
 # Everything runs from main, at the end, so a download cut short runs nothing.
 
 set -eu
 
-RELEASES=${LORCA_DOWNLOAD_URL:-https://github.com/bloodf/beans/releases}
+RELEASES=${BEANS_DOWNLOAD_URL:-https://github.com/bloodf/beans/releases}
 
 say() {
 	printf '%s\n' "$*"
 }
 
 die() {
-	printf 'lorca: %s\n' "$*" >&2
+	printf 'beans: %s\n' "$*" >&2
 	exit 1
 }
 
@@ -38,7 +38,7 @@ download() {
 	elif command -v wget >/dev/null 2>&1; then
 		wget -q -O "$2" "$1"
 	else
-		die "curl or wget is needed to download Lorca"
+		die "curl or wget is needed to download Beans"
 	fi
 }
 
@@ -50,17 +50,17 @@ detect_target() {
 		Darwin) os=macos ;;
 		Linux) os=linux ;;
 		MINGW* | MSYS* | CYGWIN*) die "on Windows, install from PowerShell: irm https://usebeans.app/install-cli.ps1 | iex" ;;
-		*) die "there is no Lorca CLI for $os yet" ;;
+		*) die "there is no Beans CLI for $os yet" ;;
 	esac
 	case $cpu in
 		x86_64 | amd64) cpu=x86_64 ;;
 		arm64 | aarch64) cpu=aarch64 ;;
-		*) die "there is no Lorca CLI for $os on $cpu yet" ;;
+		*) die "there is no Beans CLI for $os on $cpu yet" ;;
 	esac
 	# There is no build for Intel Macs. A shell under Rosetta says x86_64 on Apple silicon, where
 	# the arm64 build runs.
 	if [ "$os" = macos ] && [ "$cpu" = x86_64 ]; then
-		[ "$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ] || die "the Lorca CLI needs a Mac with Apple silicon"
+		[ "$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ] || die "the Beans CLI needs a Mac with Apple silicon"
 		cpu=aarch64
 	fi
 	target=$os-$cpu
@@ -105,7 +105,7 @@ add_to_path() {
 			fi
 			;;
 		fish)
-			profile=${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/lorca.fish
+			profile=${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/beans.fish
 			line="fish_add_path \"$dir\""
 			;;
 		*) profile=$HOME/.profile ;;
@@ -114,21 +114,21 @@ add_to_path() {
 		return 0
 	fi
 	mkdir -p "$(dirname "$profile")"
-	printf '\n# The Lorca CLI\n%s\n' "$line" >>"$profile"
+	printf '\n# The Beans CLI\n%s\n' "$line" >>"$profile"
 	added=1
 }
 
 main() {
 	detect_target
 
-	tmp=$(mktemp -d 2>/dev/null || mktemp -d -t lorca)
+	tmp=$(mktemp -d 2>/dev/null || mktemp -d -t beans)
 	trap 'rm -rf "$tmp"' EXIT
 	trap 'exit 1' HUP INT TERM
 
-	if [ -n "${LORCA_VERSION:-}" ]; then
-		version=${LORCA_VERSION#v}
+	if [ -n "${BEANS_VERSION:-}" ]; then
+		version=${BEANS_VERSION#v}
 		case $version in
-			'' | *[!0-9.]*) die "not a Lorca version: $LORCA_VERSION" ;;
+			'' | *[!0-9.]*) die "not a Beans version: $BEANS_VERSION" ;;
 		esac
 		url=$RELEASES/download/beans-v$version
 		release="release $version"
@@ -137,29 +137,29 @@ main() {
 		release="the latest release"
 	fi
 
-	archive=lorca-cli-$target.tar.gz
-	say "Downloading lorca for $target from $release"
+	archive=beans-cli-$target.tar.gz
+	say "Downloading beans for $target from $release"
 	download "$url/$archive" "$tmp/$archive" progress || die "could not download $archive from $release"
 	download "$url/$archive.sha256" "$tmp/$archive.sha256" || die "could not download $archive.sha256 from $release"
 	verify "$tmp/$archive"
 	tar -xzf "$tmp/$archive" -C "$tmp"
-	[ -f "$tmp/lorca" ] || die "$archive holds no lorca binary"
+	[ -f "$tmp/beans" ] || die "$archive holds no beans binary"
 
-	install_dir=${LORCA_INSTALL_DIR:-$HOME/.local/bin}
+	install_dir=${BEANS_INSTALL_DIR:-$HOME/.local/bin}
 	mkdir -p "$install_dir" 2>/dev/null || true
-	[ -d "$install_dir" ] && [ -w "$install_dir" ] || die "cannot write to $install_dir: set LORCA_INSTALL_DIR to a folder you own"
-	# In by rename, not a copy over the old file: a running `lorca serve` keeps the file it
+	[ -d "$install_dir" ] && [ -w "$install_dir" ] || die "cannot write to $install_dir: set BEANS_INSTALL_DIR to a folder you own"
+	# In by rename, not a copy over the old file: a running `beans serve` keeps the file it
 	# started from, and macOS kills a signed binary that changes in place.
-	cp "$tmp/lorca" "$install_dir/.lorca-$$"
-	chmod 755 "$install_dir/.lorca-$$"
-	mv -f "$install_dir/.lorca-$$" "$install_dir/lorca"
-	installed=$("$install_dir/lorca" --version 2>/dev/null) || die "$install_dir/lorca does not start on this computer"
+	cp "$tmp/beans" "$install_dir/.beans-$$"
+	chmod 755 "$install_dir/.beans-$$"
+	mv -f "$install_dir/.beans-$$" "$install_dir/beans"
+	installed=$("$install_dir/beans" --version 2>/dev/null) || die "$install_dir/beans does not start on this computer"
 
-	say "Installed $installed at $install_dir/lorca"
+	say "Installed $installed at $install_dir/beans"
 	case ":$PATH:" in
 		*":$install_dir:"*) ;;
 		*)
-			if [ "${LORCA_NO_MODIFY_PATH:-}" = 1 ]; then
+			if [ "${BEANS_NO_MODIFY_PATH:-}" = 1 ]; then
 				say "$install_dir is not on your PATH."
 			else
 				add_to_path "$install_dir"
@@ -173,14 +173,15 @@ main() {
 	esac
 
 	say ""
-	if [ -f "${LORCA_HOME:-$HOME/.lorca}/machine.json" ]; then
-		say "If lorca serve is running, restart it to run the new version. CLI self-update is unavailable in Beans."
+	if [ -f "${BEANS_HOME:-$HOME/.beans-v2}/machine.json" ]; then
+		say "If beans serve is running, restart it to run the new version. CLI self-update is unavailable in Beans."
 	else
 		say "To make this computer a Runner, pair it with your account and start the service:"
-		say "  lorca pair 'lorca://pair?...'   # from Pair a Device in the app"
-		say "  lorca service install           # runs lorca serve now and at every login"
+		say "  beans pair 'beans://pair?v=2&...'   # from Pair a Device in the app"
+		say "  beans service install           # runs beans serve now and at every login"
 	fi
-	say "Docs: https://lorca.app/docs/cli"
+	say "Fresh accounts use ~/.beans-v2 and port 4874; old accounts and unversioned backups are incompatible."
+	say "Docs: https://usebeans.app/docs/cli"
 }
 
 main "$@"

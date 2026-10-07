@@ -159,15 +159,15 @@ func (l *launcher) environment() []string {
 			environment = append(environment, key+"="+value)
 		}
 	}
-	set("RUST_LOG", "lorca=info")
-	set("LORCA_HOME", defaultCLIHome())
+	set("RUST_LOG", "beans=info")
+	set("BEANS_HOME", defaultCLIHome())
 	if !isDevelopment() && mygo.Updater.Enabled() {
 		if token, err := ensureDesktopUpdateToken(); err == nil {
-			set("LORCA_UPDATE_TOKEN_FILE", token)
+			set("BEANS_UPDATE_TOKEN_FILE", token)
 		}
 	}
 	if !isDevelopment() {
-		set("LORCA_DEFAULT_RELAY_URL", productionRelayURL)
+		set("BEANS_DEFAULT_RELAY_URL", productionRelayURL)
 	}
 	return environment
 }
@@ -366,15 +366,15 @@ func (l *launcher) stopChildLocked(restarting bool) {
 	l.ready = false
 }
 
-// locateBinary finds the CLI: `LORCA_CLI`, the one in the app's resources, the install script's
+// locateBinary finds the CLI: `BEANS_CLI`, the one in the app's resources, the install script's
 // folder, cargo's, then PATH.
 func locateBinary() string {
-	if override := os.Getenv("LORCA_CLI"); override != "" {
+	if override := os.Getenv("BEANS_CLI"); override != "" {
 		return override
 	}
-	name := "lorca"
+	name := "beans"
 	if runtime.GOOS == "windows" {
-		name = "lorca.exe"
+		name = "beans.exe"
 	}
 	var candidates []string
 	if resources, err := mygo.App.Path(mygo.PathResources); err == nil {
@@ -390,7 +390,7 @@ func locateBinary() string {
 			return candidate
 		}
 	}
-	if found, err := exec.LookPath("lorca"); err == nil {
+	if found, err := exec.LookPath("beans"); err == nil {
 		return found
 	}
 	return ""
@@ -404,9 +404,9 @@ func isExecutable(path string) bool {
 	return runtime.GOOS == "windows" || info.Mode()&0o111 != 0
 }
 
-// startupTrace writes launch milestones to startup.log with `LORCA_TRACE_STARTUP=1`.
+// startupTrace writes launch milestones to startup.log with `BEANS_TRACE_STARTUP=1`.
 var startupTrace = func() func(string) {
-	if os.Getenv("LORCA_TRACE_STARTUP") != "1" {
+	if os.Getenv("BEANS_TRACE_STARTUP") != "1" {
 		return func(string) {}
 	}
 	started := time.Now()

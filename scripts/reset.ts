@@ -15,17 +15,17 @@ const development = args.includes("--dev")
 
 const appName = development ? DEBUG_APP_NAME : APP_NAME
 const bundleID = development ? DEBUG_BUNDLE_ID : BUNDLE_ID
-const port = development ? 4865 : 4864
-const home = join(homedir(), development ? ".beans-dev" : ".beans")
+const port = development ? 4875 : 4874
+const home = join(homedir(), development ? ".beans-dev-v2" : ".beans-v2")
 const logs = join(homedir(), "Library", "Logs", appName)
 
 const targets: { path: string; what: string; on: boolean }[] = [
   { path: home, what: "identity, keys, credentials, chats", on: true },
   { path: logs, what: "CLI logs", on: true },
-  { path: join(ROOT, "temp", "lorca-relay.db"), what: "local relay database", on: wipeRelay },
-  { path: join(ROOT, "temp", "lorca-relay.db-wal"), what: "local relay database", on: wipeRelay },
-  { path: join(ROOT, "temp", "lorca-relay.db-shm"), what: "local relay database", on: wipeRelay },
-  { path: join(ROOT, "temp", "lorca-relay.files"), what: "local relay attachments", on: wipeRelay },
+  { path: join(ROOT, "temp", "beans-relay.db"), what: "local relay database", on: wipeRelay },
+  { path: join(ROOT, "temp", "beans-relay.db-wal"), what: "local relay database", on: wipeRelay },
+  { path: join(ROOT, "temp", "beans-relay.db-shm"), what: "local relay database", on: wipeRelay },
+  { path: join(ROOT, "temp", "beans-relay.files"), what: "local relay attachments", on: wipeRelay },
   { path: join(ROOT, "target"), what: "Rust build output", on: wipeBuild },
   { path: join(PACKAGE_DIR, ".build"), what: "Swift build output", on: wipeBuild },
 ]
@@ -41,7 +41,7 @@ async function pids(pattern: string): Promise<number[]> {
 }
 
 async function stopProcesses() {
-  const patterns = [`${appName}.app/Contents/MacOS/${APP_NAME}`, `lorca serve --port ${port}`, "lorca-relay"]
+  const patterns = [`${appName}.app/Contents/MacOS/${APP_NAME}`, `beans serve --port ${port}`, "beans-relay"]
   let found: number[] = []
   for (const pattern of patterns) found = found.concat(await pids(pattern))
   found = [...new Set(found)]

@@ -1,6 +1,6 @@
 [package]
-name = "lorca-tls"
-description = "The certificate trust every Lorca Device connection uses"
+name = "beans-tls"
+description = "The certificate trust every Beans Device connection uses"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

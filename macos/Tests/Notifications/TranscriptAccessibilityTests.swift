@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-@testable import Lorca
+@testable import Beans
 
 /// The transcript answers accessibility clients from the chat: reading every row builds no
 /// cells beyond the ones on screen, and a row keeps its element while rows go in around it.

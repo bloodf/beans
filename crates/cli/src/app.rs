@@ -208,10 +208,10 @@ pub struct App {
     announced_turns: Mutex<std::collections::BTreeMap<String, LiveTurn>>,
     /// The direct-chat agent loop that currently owns each chat lock: `(job id, queue)`.
     #[cfg(feature = "runner")]
-    pub steering_queues: Mutex<HashMap<String, (String, lorca_agent::AgentMessageQueue)>>,
+    pub steering_queues: Mutex<HashMap<String, (String, beans_agent::AgentMessageQueue)>>,
     /// The same loops' step interrupts, for Send now: `(job id, interrupt)`.
     #[cfg(feature = "runner")]
-    step_interrupts: Mutex<HashMap<String, (String, lorca_agent::StepInterrupt)>>,
+    step_interrupts: Mutex<HashMap<String, (String, beans_agent::StepInterrupt)>>,
     pub chat_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The chat on screen in the local app while it is frontmost; a reply there needs no push.
     pub watched_chat: Mutex<Option<String>>,
@@ -250,17 +250,9 @@ pub struct App {
 impl App {
     pub fn load(config: Config) -> anyhow::Result<Arc<App>> {
         config.ensure_home()?;
-        // This storage layout intentionally has no migration path. Remove the two superseded
-        // local stores so plaintext account data is not left behind beside the database.
-        for name in ["state.json", "transcript.sqlite3", "transcript.sqlite3-wal", "transcript.sqlite3-shm"] {
-            let path = config.home.join(name);
-            if path.is_file() {
-                std::fs::remove_file(path)?;
-            }
-        }
         let settings = Settings::load(&config);
-        let identity: Option<IdentityFile> = config::read_json(&config.identity_path());
-        let machine: Option<MachineFile> = config::read_json(&config.machine_path());
+        let identity: Option<IdentityFile> = config::read_json_strict(&config.identity_path())?;
+        let machine: Option<MachineFile> = config::read_json_strict(&config.machine_path())?;
         let credentials = Credentials::load(&config);
         let plugins = crate::plugins::Store::load(&config);
         let marketplace = crate::marketplace::Updates::load(&config);
@@ -277,7 +269,7 @@ impl App {
         // since the last upload has no copy, and every newly paired Device needs one.
         state.machine_blob_hash = None;
         let (events, _) = broadcast::channel(512);
-        let http = lorca_tls::client_builder().timeout(std::time::Duration::from_secs(60)).build()?;
+        let http = beans_tls::client_builder().timeout(std::time::Duration::from_secs(60)).build()?;
 
         let app = Arc::new(App {
             config,
@@ -525,13 +517,13 @@ impl App {
         self.machine_file().and_then(|m| m.dek().ok())
     }
 
-    /// Settings, then `LORCA_RELAY_URL`, then the URL pairing handed this Device, then, in
-    /// dev, the relay the dev loop runs on this machine, then `LORCA_DEFAULT_RELAY_URL`, the
+    /// Settings, then `BEANS_RELAY_URL`, then the URL pairing handed this Device, then, in
+    /// dev, the relay the dev loop runs on this machine, then `BEANS_DEFAULT_RELAY_URL`, the
     /// relay the app that launched this CLI ships with.
     pub fn relay_url(&self) -> Option<String> {
         let from_settings = self.settings.lock().unwrap().effective_relay_url();
         from_settings
-            .or_else(|| std::env::var("LORCA_RELAY_URL").ok().filter(|s| !s.is_empty()))
+            .or_else(|| std::env::var("BEANS_RELAY_URL").ok().filter(|s| !s.is_empty()))
             .or_else(|| self.machine_file().and_then(|m| m.relay_url))
             .or_else(config::dev_relay_url)
             .or_else(config::default_relay_url)
@@ -1728,12 +1720,12 @@ impl App {
 
     /// Adds a finished turn's usage to the chat's and tells the app.
     #[cfg(feature = "runner")]
-    pub fn record_usage(&self, chat_id: &str, model: &str, usage: &lorca_agent::Usage, context_window: u64) {
+    pub fn record_usage(&self, chat_id: &str, model: &str, usage: &beans_agent::Usage, context_window: u64) {
         let updated = {
             let mut state = self.state.lock().unwrap();
             let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
             let entry = chat.usage.get_or_insert_with(ChatUsage::default);
-            entry.context_tokens = lorca_agent::estimate::context_tokens(usage);
+            entry.context_tokens = beans_agent::estimate::context_tokens(usage);
             entry.context_window = context_window;
             entry.input_tokens += usage.input + usage.cache_read + usage.cache_write;
             entry.output_tokens += usage.output;
@@ -1752,7 +1744,7 @@ impl App {
     /// count in what the chat spent, while its context size, turns, and model stay the last
     /// turn's.
     #[cfg(feature = "runner")]
-    pub fn add_side_usage(&self, chat_id: &str, usage: &lorca_agent::Usage) {
+    pub fn add_side_usage(&self, chat_id: &str, usage: &beans_agent::Usage) {
         let updated = {
             let mut state = self.state.lock().unwrap();
             let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
@@ -1851,7 +1843,7 @@ impl App {
     }
 
     #[cfg(feature = "runner")]
-    pub fn register_step_interrupt(&self, chat_id: &str, job_id: &str, interrupt: lorca_agent::StepInterrupt) {
+    pub fn register_step_interrupt(&self, chat_id: &str, job_id: &str, interrupt: beans_agent::StepInterrupt) {
         self.step_interrupts.lock().unwrap().insert(chat_id.to_string(), (job_id.to_string(), interrupt));
     }
 
@@ -1864,7 +1856,7 @@ impl App {
     }
 
     #[cfg(feature = "runner")]
-    pub fn step_interrupt(&self, chat_id: &str) -> Option<lorca_agent::StepInterrupt> {
+    pub fn step_interrupt(&self, chat_id: &str) -> Option<beans_agent::StepInterrupt> {
         self.step_interrupts.lock().unwrap().get(chat_id).map(|(_, interrupt)| interrupt.clone())
     }
 
@@ -1876,7 +1868,7 @@ impl App {
     }
 
     #[cfg(feature = "runner")]
-    pub fn register_steering_queue(&self, chat_id: &str, job_id: &str, queue: lorca_agent::AgentMessageQueue) {
+    pub fn register_steering_queue(&self, chat_id: &str, job_id: &str, queue: beans_agent::AgentMessageQueue) {
         self.steering_queues.lock().unwrap().insert(chat_id.to_string(), (job_id.to_string(), queue));
     }
 
@@ -1889,7 +1881,7 @@ impl App {
     }
 
     #[cfg(feature = "runner")]
-    pub fn steering_queue(&self, chat_id: &str) -> Option<lorca_agent::AgentMessageQueue> {
+    pub fn steering_queue(&self, chat_id: &str) -> Option<beans_agent::AgentMessageQueue> {
         self.steering_queues.lock().unwrap().get(chat_id).map(|(_, queue)| queue.clone())
     }
 
@@ -2015,7 +2007,7 @@ pub async fn refresh_models_periodically(app: Arc<App>) {
 /// The models the apps offer in their pickers, in the catalog's order, so each provider's first
 /// is its default: the provider, id, and name, and the thinking levels each one takes.
 fn models_out() -> Vec<Value> {
-    lorca_models::models()
+    beans_models::models()
         .iter()
         .map(|model| json!({ "provider": model.provider, "id": model.id, "name": model.name, "levels": model.levels }))
         .collect()
@@ -2097,7 +2089,7 @@ mod tests {
     }
 
     fn scratch_app() -> ScratchApp {
-        let home = std::env::temp_dir().join(format!("lorca-app-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-app-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
     }
@@ -2186,7 +2178,7 @@ mod tests {
 
     #[test]
     fn superseded_local_stores_are_discarded() {
-        let home = std::env::temp_dir().join(format!("lorca-old-store-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-old-store-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         for name in ["state.json", "transcript.sqlite3", "transcript.sqlite3-wal", "transcript.sqlite3-shm"] {
             std::fs::write(home.join(name), b"obsolete").unwrap();

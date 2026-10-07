@@ -1,6 +1,6 @@
 //! Bare links in message text, read as GitHub reads them (the GFM autolink extension, as
 //! cmark-gfm implements it): `http://` and `https://` URLs, `www.` hosts, and email addresses.
-//! Two rules are Lorca's, for Chinese and Japanese text, which runs into a link without a space:
+//! Two rules are Beans's, for Chinese and Japanese text, which runs into a link without a space:
 //! a `www.` link may follow any non-ASCII character, and a link ends at CJK or general
 //! punctuation (`，`, `。`, `）`, `“`, `…`) as it ends at a space.
 //!

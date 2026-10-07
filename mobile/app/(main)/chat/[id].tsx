@@ -37,7 +37,7 @@ import Animated, {
   ZoomOut,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { SoftScrollEdgeView } from "../../../modules/lorca-core/SoftScrollEdgeView";
+import { SoftScrollEdgeView } from "../../../modules/beans-core/SoftScrollEdgeView";
 import { chatTitle, engine } from "../../../src/core/engine";
 import { canBeQuoted, isLive, type Bot, type Message } from "../../../src/core/model";
 import {

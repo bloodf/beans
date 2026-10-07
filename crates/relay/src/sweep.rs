@@ -141,15 +141,15 @@ mod tests {
     use super::*;
     use crate::db::{Local, NewBlob, Payload};
 
-    /// A directory always; a bucket too when `LORCA_RELAY_TEST_S3` names an endpoint, e.g.
-    /// `http://127.0.0.1:59000` with `LORCA_RELAY_TEST_S3_KEYS=access:secret` (MinIO).
+    /// A directory always; a bucket too when `BEANS_RELAY_TEST_S3` names an endpoint, e.g.
+    /// `http://127.0.0.1:59000` with `BEANS_RELAY_TEST_S3_KEYS=access:secret` (MinIO).
     async fn stores() -> Vec<FileStore> {
-        let mut stores = vec![FileStore::Local { dir: std::env::temp_dir().join(format!("lorca-relay-sweep-{}", uuid::Uuid::new_v4())) }];
-        if let Ok(endpoint) = std::env::var("LORCA_RELAY_TEST_S3") {
-            let keys = std::env::var("LORCA_RELAY_TEST_S3_KEYS").unwrap_or_default();
+        let mut stores = vec![FileStore::Local { dir: std::env::temp_dir().join(format!("beans-relay-sweep-{}", uuid::Uuid::new_v4())) }];
+        if let Ok(endpoint) = std::env::var("BEANS_RELAY_TEST_S3") {
+            let keys = std::env::var("BEANS_RELAY_TEST_S3_KEYS").unwrap_or_default();
             let (access, secret) = keys.split_once(':').unwrap_or_default();
             let prefix = format!("sweep-{}", uuid::Uuid::new_v4().simple());
-            let s3 = store::S3::new(endpoint, "lorca-test".into(), "us-east-1".into(), prefix, access.into(), secret.into());
+            let s3 = store::S3::new(endpoint, "beans-test".into(), "us-east-1".into(), prefix, access.into(), secret.into());
             s3.create_bucket().await;
             stores.push(FileStore::S3(s3));
         }
@@ -159,7 +159,7 @@ mod tests {
     #[tokio::test]
     async fn an_old_object_with_no_row_goes() {
         for files in stores().await {
-            let path = std::env::temp_dir().join(format!("lorca-relay-sweep-{}.db", uuid::Uuid::new_v4()));
+            let path = std::env::temp_dir().join(format!("beans-relay-sweep-{}.db", uuid::Uuid::new_v4()));
             let db = crate::db::open(path.to_str().unwrap(), Arc::new(Local::default())).await.unwrap();
             let who = format!("identity-{}", uuid::Uuid::new_v4().simple());
             db.register_identity(&who, "content", "machine", "box", "attestation").await.map_err(|e| format!("{e:?}")).unwrap();

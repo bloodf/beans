@@ -15,7 +15,7 @@ export function sparkleTool(name: string): string | null {
 
 export async function generateAppcast(updatesDir: string, downloadURLPrefix: string, requiredProtocol: number): Promise<boolean> {
   const version = readVersion()
-  if (!Number.isSafeInteger(requiredProtocol) || requiredProtocol < 3) throw new Error("the release protocol must be an integer >= 3")
+  if (!Number.isSafeInteger(requiredProtocol) || requiredProtocol < 5) throw new Error("the release protocol must be an integer >= 5")
   const expectedPrefix = `https://github.com/bloodf/beans/releases/download/beans-v${version}/`
   if (downloadURLPrefix !== expectedPrefix) throw new Error("Sparkle downloads must use the current Beans GitHub release")
   const archives = readdirSync(updatesDir).filter((name) => /\.(zip|dmg|delta)$/.test(name))
@@ -51,7 +51,7 @@ export async function generateAppcast(updatesDir: string, downloadURLPrefix: str
 if (import.meta.main) {
   const updatesDir = process.argv[2]
   const protocol = Number(process.argv[3])
-  if (!updatesDir || !Number.isSafeInteger(protocol) || protocol < 3) {
+  if (!updatesDir || !Number.isSafeInteger(protocol) || protocol < 5) {
     console.error("usage: bun scripts/generate-appcast.ts <updates-dir> <protocol>")
     process.exit(1)
   }

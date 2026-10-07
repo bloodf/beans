@@ -13,9 +13,9 @@ Bots think with your own AI accounts. Connect a provider once, on any paired dev
 | **OpenCode Zen** | API key, pay as you go | `deepseek-v4.1-flash` |
 | **OpenCode Go** | API key and Go subscription | `glm-5.3-flash` |
 | **ChatGPT** | Sign in with your ChatGPT subscription | `gpt-6.1-sol` |
-| **Grok** | Sign in with SuperGrok or X Premium+ | `grok-4.7` |
+| **Grok** | Production subscription sign-in disabled pending a verified Beans OAuth contract | `grok-4.7` (API-key gateways remain separate) |
 
-DeepSeek, Anthropic, ChatGPT, and Grok search the web on the provider's side. Grok also searches X.
+DeepSeek, Anthropic and ChatGPT search the web on the provider’s side. Production Grok OAuth fails before callback/network access; no client/referrer contract is guessed.
 
 ## Connect
 
@@ -27,12 +27,12 @@ In the desktop or phone app, open **Settings › Providers**, select a provider,
 From a terminal:
 
 ```bash
-lorca provider set deepseek
-lorca provider set anthropic
-lorca provider set opencode
-lorca provider set opencode-go
-lorca provider set chatgpt
-lorca provider list
+beans provider set deepseek
+beans provider set anthropic
+beans provider set opencode
+beans provider set opencode-go
+beans provider set chatgpt
+beans provider list
 ```
 
 ### Custom API endpoint
@@ -54,9 +54,9 @@ Beans checks the server again when you save, which checks the key. A custom prov
 From a terminal:
 
 ```bash
-lorca provider add "OpenRouter" https://openrouter.ai/api/v1 --model anthropic/claude-sonnet-5 --api-key-stdin
-lorca provider add "Ollama" http://localhost:11434/v1
-lorca provider add "Claude proxy" https://proxy.example.com --api messages --model claude-opus-5 --api-key-stdin
+beans provider add "OpenRouter" https://openrouter.ai/api/v1 --model anthropic/claude-sonnet-5 --api-key-stdin
+beans provider add "Ollama" http://localhost:11434/v1
+beans provider add "Claude proxy" https://proxy.example.com --api messages --model claude-opus-5 --api-key-stdin
 ```
 
 ## Pick a model per bot
@@ -67,8 +67,8 @@ If a bot's provider is not connected, its turn ends with a note that says to con
 
 ## Disconnect
 
-**Disconnect** removes the credential from every device. For Grok it also revokes the sign-in. **Delete** removes a custom provider from every device; `lorca provider remove` does the same from a terminal, with the kind `lorca provider list` shows, such as `custom:openrouter`.
+**Disconnect** removes the credential from every device. **Delete** removes a custom provider from every device; `beans provider remove` does the same from a terminal, with the kind `beans provider list` shows, such as `custom:openrouter`.
 
 ## Cost
 
-DeepSeek, Anthropic, and OpenCode Zen bill by usage; OpenCode Go applies usage to its subscription limits. The inspector shows what each chat has spent. ChatGPT and Grok sign-ins use your subscription, and the figure shown is what the work would cost at API rates.
+DeepSeek, Anthropic, and OpenCode Zen bill by usage; OpenCode Go applies usage to its subscription limits. The inspector shows what each chat has spent. ChatGPT sign-in uses your subscription, and the figure shown is what the work would cost at API rates.

@@ -78,7 +78,7 @@ function fitPanes(available: number, sidebar: number, inspector: number) {
 }
 
 /** The relay turned this build away. Said once per launch, since every sync attempt gets the same
- * answer until Lorca is updated. */
+ * answer until Beans is updated. */
 let saidUpdateRequired = false;
 
 export function MainWindow(props: RouteSectionProps) {
@@ -181,7 +181,7 @@ export function MainWindow(props: RouteSectionProps) {
     paneLayout.open = undefined;
   });
 
-  // The title: the chat's, the pane's, or the app's; the window's adds " - Lorca".
+  // The title: the chat's, the pane's, or the app's; the window's adds " - Beans".
   const title = createMemo(() => {
     track.chats();
     const current = selection.read();
@@ -363,7 +363,7 @@ function startServices(notifier: Notifier): () => void {
     saidUpdateRequired = true;
     const updates = hostInfo().updatesEnabled;
     void alert({
-      message: L("Update Lorca to keep syncing"),
+      message: L("Update Beans to keep syncing"),
       informative: L("The relay no longer works with this version. Chats on this computer stay as they are, and nothing syncs with your other Devices until you update."),
       buttons: updates ? [{ title: L("Check for Updates…") }, { title: L("Later") }] : [{ title: L("OK") }],
     }).then((answer) => {

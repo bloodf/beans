@@ -29,7 +29,7 @@ async fn warm_binary(once: &OnceCell<Preflight>, mut command: Command) -> Prefli
 
 async fn prepare_cli() {
     let home = Home::new();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lorca"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_beans"));
     command.env_clear().env("RUST_LOG", "off").env("HOME", &home.0).env("USERPROFILE", &home.0);
     if let Some(root) = std::env::var_os("SystemRoot") { command.env("SystemRoot", root); }
     command.arg("--home").arg(&home.0).arg("--help").stdin(Stdio::null());
@@ -42,11 +42,11 @@ struct Home(std::path::PathBuf);
 
 impl Home {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("lorca-ready-{}", uuid::Uuid::new_v4())))
+        Self(std::env::temp_dir().join(format!("beans-ready-{}", uuid::Uuid::new_v4())))
     }
 
     fn serve(&self, port: u16) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lorca"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_beans"));
         command.env_clear();
         // Windows loads its network stack from under %SystemRoot%: without the variable, binding a
         // socket fails with WSAEPROVIDERFAILEDINIT.
@@ -91,7 +91,7 @@ async fn readiness_is_flushed_with_logs_disabled_and_the_websocket_is_ready() {
     if line.is_empty() {
         let mut stderr = String::new();
         let _ = timeout(Duration::from_secs(5), child.stderr.take().unwrap().read_to_string(&mut stderr)).await;
-        panic!("lorca serve exited before it was ready ({:?}): {stderr}", child.wait().await);
+        panic!("beans serve exited before it was ready ({:?}): {stderr}", child.wait().await);
     }
     let ready: Value = serde_json::from_str(&line).unwrap();
     assert_eq!(ready["event"], "ready");
@@ -148,10 +148,10 @@ async fn a_failed_bind_exits_without_announcing_readiness() {
 }
 
 fn mcp_cli(home: &Home, port: u16, args: &[&str]) -> std::process::Command {
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_lorca"));
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_beans"));
     command.env_clear().env("HOME", &home.0).env("USERPROFILE", &home.0);
     if let Some(root) = std::env::var_os("SystemRoot") { command.env("SystemRoot", root); }
-    command.env("LORCA_MODELS_FETCH", "0").env("LORCA_MARKETPLACE_FETCH", "0");
+    command.env("BEANS_MODELS_FETCH", "0").env("BEANS_MARKETPLACE_FETCH", "0");
     command.env("RUST_LOG", "off").arg("--home").arg(&home.0).arg("--port").arg(port.to_string()).arg("mcp").args(args);
     command
 }
@@ -182,7 +182,7 @@ async fn held_mcp(axum::extract::State(held): axum::extract::State<Held>, axum::
     axum::Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response()
 }
 
-/// Forwards one CLI websocket to `lorca serve`, releasing the held handshake once the CLI asks
+/// Forwards one CLI websocket to `beans serve`, releasing the held handshake once the CLI asks
 /// serve to connect a server.
 async fn relay(client: tokio::net::TcpStream, serve_port: u16, release: Arc<Notify>) {
     let Ok(client) = tokio_tungstenite::accept_async(client).await else { return };
@@ -210,8 +210,8 @@ async fn relay(client: tokio::net::TcpStream, serve_port: u16, release: Arc<Noti
     tokio::select! { _ = up => {}, _ = down => {} }
 }
 
-/// `lorca mcp list` against a running serve whose healthy server is still in its handshake (as
-/// right after `lorca mcp import`) waits for it instead of reporting it not ready.
+/// `beans mcp list` against a running serve whose healthy server is still in its handshake (as
+/// right after `beans mcp import`) waits for it instead of reporting it not ready.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_mcp_list_waits_for_a_healthy_server_still_connecting() {
     prepare_cli().await;
@@ -230,12 +230,12 @@ async fn live_mcp_list_waits_for_a_healthy_server_still_connecting() {
     std::fs::write(home.0.join("mcp.json"), json!({ "mcpServers": servers }).to_string()).unwrap();
 
     let mut serve = home.serve(0);
-    serve.env("HOME", &home.0).env("USERPROFILE", &home.0).env("LORCA_MODELS_FETCH", "0").env("LORCA_MARKETPLACE_FETCH", "0");
+    serve.env("HOME", &home.0).env("USERPROFILE", &home.0).env("BEANS_MODELS_FETCH", "0").env("BEANS_MARKETPLACE_FETCH", "0");
     let mut child = serve.spawn().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     timeout(Duration::from_secs(10), stdout.read_line(&mut line)).await.unwrap().unwrap();
-    let serve_port = serde_json::from_str::<Value>(&line).expect("lorca serve announces readiness")["port"].as_u64().unwrap() as u16;
+    let serve_port = serde_json::from_str::<Value>(&line).expect("beans serve announces readiness")["port"].as_u64().unwrap() as u16;
 
     let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let proxy_port = proxy.local_addr().unwrap().port();
@@ -248,7 +248,7 @@ async fn live_mcp_list_waits_for_a_healthy_server_still_connecting() {
     });
 
     // Serve's own first connection is under way, so the server is not ready yet.
-    timeout(Duration::from_secs(60), held.entered.notified()).await.expect("lorca serve starts the handshake");
+    timeout(Duration::from_secs(60), held.entered.notified()).await.expect("beans serve starts the handshake");
     let list = timeout(Duration::from_secs(60), Command::from(mcp_cli(&home, proxy_port, &["list"])).kill_on_drop(true).output()).await.expect("list returns").unwrap();
     assert!(list.status.success(), "{}", String::from_utf8_lossy(&list.stderr));
 
@@ -308,10 +308,10 @@ async fn mcp_list_fails_for_enabled_invalid_entries_but_not_disabled_ones() {
 }
 
 #[tokio::test]
-async fn bare_lorca_lists_the_commands_and_starts_nothing() {
+async fn bare_beans_lists_the_commands_and_starts_nothing() {
     prepare_cli().await;
     let home = Home::new();
-    let output = Command::new(env!("CARGO_BIN_EXE_lorca")).env("LORCA_HOME", &home.0).env("RUST_LOG", "off").stdin(Stdio::null()).output();
+    let output = Command::new(env!("CARGO_BIN_EXE_beans")).env("BEANS_HOME", &home.0).env("RUST_LOG", "off").stdin(Stdio::null()).output();
     let output = timeout(Duration::from_secs(10), output).await.expect("it returns rather than serving").unwrap();
     assert!(output.status.success());
     assert!(!home.0.exists(), "a help page makes no data folder");

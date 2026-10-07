@@ -64,9 +64,9 @@ const env: Record<string, string> = {
   LANG: "en_US.UTF-8",
   LC_ALL: "en_US.UTF-8",
   DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer",
-  LORCA_IOS_BUILD_NUMBER: buildNumber,
+  BEANS_IOS_BUILD_NUMBER: buildNumber,
 }
-delete env.LORCA_MOBILE_VARIANT
+delete env.BEANS_MOBILE_VARIANT
 delete env.EAS_BUILD_PROFILE
 
 // ---- 1. Rust core

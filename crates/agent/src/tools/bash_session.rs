@@ -2,8 +2,8 @@
 //! that reach a session after the call that started it returned: `bash_input` and
 //! `bash_output`.
 //!
-//! This is where Lorca parts from pi's bash, which runs commands on pipes with nothing on stdin
-//! and fails fast, because the person is at the terminal and answers there. A Lorca bot's
+//! This is where Beans parts from pi's bash, which runs commands on pipes with nothing on stdin
+//! and fails fast, because the person is at the terminal and answers there. A Beans bot's
 //! Runner is often a machine nobody is sitting at, so a command gets a pseudo-terminal of its
 //! own: `sudo`, `ssh`, and `getpass` prompt on it, a `[Y/n]` waits on it, and the answer comes
 //! from the model (`bash_input`) or from the user over the chat. A command that goes quiet
@@ -83,7 +83,7 @@ pub enum SessionEnd {
     Exited(i32),
     /// A signal ended the shell (Ctrl-C's SIGINT is 2). As on pipes, this is not a failure.
     Signaled(i32),
-    /// Lorca ended it, for this reason, as the model and the user read it: "Command aborted".
+    /// Beans ended it, for this reason, as the model and the user read it: "Command aborted".
     Stopped(String),
 }
 
@@ -177,7 +177,7 @@ impl Spill {
         let _ = file.write_all(part);
         self.written += part.len() as u64;
         if part.len() < bytes.len() {
-            let _ = file.write_all(format!("\n[Lorca stopped saving this output at {}.]\n", format_size(SPILL_MAX_BYTES as usize)).as_bytes());
+            let _ = file.write_all(format!("\n[Beans stopped saving this output at {}.]\n", format_size(SPILL_MAX_BYTES as usize)).as_bytes());
             self.written = SPILL_MAX_BYTES;
         }
     }
@@ -205,7 +205,7 @@ impl Output {
     /// Opens the spill file with everything so far, which the tail still holds: the spill
     /// starts at `DEFAULT_MAX_BYTES`, well inside `MEMORY_BYTES`.
     fn start_spill(&mut self, id: &str) {
-        let path = std::env::temp_dir().join(format!("lorca-{id}-{}.log", crate::now_ms()));
+        let path = std::env::temp_dir().join(format!("beans-{id}-{}.log", crate::now_ms()));
         let mut spill = Spill { file: std::fs::File::create(&path).ok(), path, shown: false, written: 0 };
         let (a, b) = self.tail.as_slices();
         spill.write(a);
@@ -627,7 +627,7 @@ impl BashSession {
             cmd.pre_exec(|| {
                 // A session of its own, whose controlling terminal is the pty: /dev/tty is this
                 // terminal, so sudo, ssh, and getpass ask here and never on the terminal
-                // `lorca serve` was started from. The shell leads the session and its process
+                // `beans serve` was started from. The shell leads the session and its process
                 // group (pgid = pid), which is what stopping it kills.
                 if libc::setsid() == -1 {
                     return Err(std::io::Error::last_os_error());
@@ -1436,12 +1436,12 @@ mod tests {
 
     #[test]
     fn the_spill_file_stops_growing_at_its_cap() {
-        let path = std::env::temp_dir().join(format!("lorca-spill-cap-{}.log", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("beans-spill-cap-{}.log", uuid::Uuid::new_v4()));
         let mut spill = Spill { file: Some(std::fs::File::create(&path).unwrap()), path: path.clone(), shown: false, written: SPILL_MAX_BYTES - 4 };
         spill.write(b"123456789");
         spill.write(b"more");
         drop(spill);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "1234\n[Lorca stopped saving this output at 64.0MB.]\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "1234\n[Beans stopped saving this output at 64.0MB.]\n");
         std::fs::remove_file(path).unwrap();
     }
 

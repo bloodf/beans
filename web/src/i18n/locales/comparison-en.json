@@ -31,7 +31,7 @@
     },
     {
       "q": "Can I keep my existing AI subscription?",
-      "a": "Beans offers ChatGPT and Grok subscription sign-in. Other built-in providers use API keys, and compatible servers have their own access requirements. Check your provider’s plan and usage rules."
+      "a": "Beans offers ChatGPT subscription sign-in. Production Grok OAuth is disabled pending a verified Beans contract. Other providers use API keys; check their access, plan and usage requirements."
     },
     {
       "q": "Does my phone run the bots?",
@@ -64,7 +64,7 @@
   "beans": [
     "An assigned Mac, Windows, or Linux Runner that you own. It needs to remain online.",
     "ChatGPT, Grok, Anthropic, DeepSeek, OpenCode, and compatible model endpoints.",
-    "ChatGPT/Grok sign-in; API keys for other providers. Credentials sync encrypted to paired devices.",
+    "ChatGPT sign-in; production Grok OAuth disabled. API keys for other providers. Credentials sync encrypted to paired devices.",
     "Persistent bot names, instructions, provider selection, memory, and an assigned Runner.",
     "Direct messages, groups of up to six bots, mentions, and handoffs across Runners.",
     "Folder-based file work, shell commands, web search, and MCP plugins with permission flows.",

@@ -10,14 +10,17 @@ icon: Server
 
 ## 让 Beans 使用某个中继
 
-在第一台设备上设置 **设置 › 高级 › 中继 URL**，或者为命令行设置 `LORCA_RELAY_URL` 环境变量。之后配对的设备会从配对码里得知这个地址。
+在第一台设备上设置 **设置 › 高级 › 中继 URL**，或者为命令行设置 `BEANS_RELAY_URL` 环境变量。之后配对的设备会从配对码里得知这个地址。
+
+账户路由（包括注册、验证、配对信箱和同步）要求唯一且有效的 `Beans-Protocol: 5`、`Beans-Format: beans-v2`。协议下限不能低于 5。旧格式设备不兼容；不存在自动迁移或生产部署。SQLite 在打开前要求 `BNR2` 应用标识 `0x424E5232`；Postgres 的 `beans_storage_format` 必须只有一行 `beans-v2`，且只能在真正空的 schema 内初始化。未标记的已有数据会在 DDL/恢复之前被拒绝，保持不变。
+
 
 ## 自己运行
 
-中继是单个可执行文件 `lorca-relay`，内置 SQLite：
+中继是单个可执行文件 `beans-relay`，内置 SQLite：
 
 ```bash
-lorca-relay --bind 0.0.0.0:8787 --db lorca-relay.db
+beans-relay --bind 0.0.0.0:8787 --db beans-relay.db
 ```
 
 用 Caddy 或 nginx 这类反向代理为它加上 HTTPS（WebSocket 升级必须能通过），并加上 `--trust-proxy`，让限流看到真实的客户端地址。
@@ -26,27 +29,27 @@ lorca-relay --bind 0.0.0.0:8787 --db lorca-relay.db
 | --- | --- |
 | `--bind` | 监听的地址和端口。 |
 | `--db` | SQLite 文件路径，或 `postgres://` URL。 |
-| `LORCA_RELAY_SECRET` | 用来签发会话令牌。设置它，令牌才能在重启后继续有效。 |
+| `BEANS_RELAY_SECRET` | 用来签发会话令牌。设置它，令牌才能在重启后继续有效。 |
 | `--quota-bytes` | 每个身份的存储上限，默认 5 GiB。`0` 表示不限。 |
 | `--concurrent-uploads` | 同时处理的超过 1 MiB 的附件数量（默认 3），用来限制附件占用的内存。 |
 | `--files-dir` | 附件密文存放的位置。默认是数据库旁边的一个文件夹。 |
 | `--s3-bucket`、`--s3-endpoint` | 改为把附件存到 S3、R2 或 MinIO。 |
 | `--min-protocol` | 拒绝使用更旧中继协议的 Beans 版本，这些版本的应用会提示更新。 |
 | `--inactive-days` | 账户在这么多天内没有任何活动就会被删除（默认 365，`0` 表示永不删除）。各设备上的本地数据不受影响。 |
-| `LORCA_RELAY_METRICS_TOKEN` | 设置后，携带此 Bearer 令牌即可从 `GET /metrics` 读取 Prometheus 格式的指标。 |
+| `BEANS_RELAY_METRICS_TOKEN` | 设置后，携带此 Bearer 令牌即可从 `GET /metrics` 读取 Prometheus 格式的指标。 |
 | `--ip-per-minute`、`--identity-per-second` | 限流。 |
 
 ### Postgres
 
-使用 `postgres://` URL，可以让多个中继进程共用一个数据库，实现无间断部署。它们必须共用 `LORCA_RELAY_SECRET`，并把附件存在 S3 兼容的存储桶里。
+使用 `postgres://` URL，可以让多个中继进程共用一个数据库，实现无间断部署。它们必须共用 `BEANS_RELAY_SECRET`，并把附件存在 S3 兼容的存储桶里。
 
 ### 推送通知
 
-要给手机应用发推送，需要给中继配置 APNs 密钥（`--apns-key`、`--apns-key-id`、`--apns-team-id`）或 Firebase 服务账号（`--fcm-service-account`）。每个密钥既可以是文件路径，也可以直接是密钥内容，所以在没有磁盘存放文件的环境里，可以用 `LORCA_RELAY_APNS_KEY` 和 `LORCA_RELAY_FCM_SERVICE_ACCOUNT` 变量直接传入。不配置的话其他功能照常，只是手机收不到推送。
+要给手机应用发推送，需要给中继配置 APNs 密钥（`--apns-key`、`--apns-key-id`、`--apns-team-id`）或 Firebase 服务账号（`--fcm-service-account`）。每个密钥既可以是文件路径，也可以直接是密钥内容，所以在没有磁盘存放文件的环境里，可以用 `BEANS_RELAY_APNS_KEY` 和 `BEANS_RELAY_FCM_SERVICE_ACCOUNT` 变量直接传入。不配置的话其他功能照常，只是手机收不到推送。
 
 ### 监控
 
-设置 `LORCA_RELAY_METRICS_TOKEN` 后，抓取方携带该 Bearer 令牌访问 `GET /metrics`，即可得到 Prometheus 文本格式的指标：身份和设备数量、各类数据块的数量与字节数、打开的同步连接、按路由和状态码统计的请求、被限流的请求、推送的成功与失败，以及清理任务删除的内容。中继无法读取自己存储的内容，所以这些数字就是全部可观察的信息。
+设置 `BEANS_RELAY_METRICS_TOKEN` 后，抓取方携带该 Bearer 令牌访问 `GET /metrics`，即可得到 Prometheus 文本格式的指标：身份和设备数量、各类数据块的数量与字节数、打开的同步连接、按路由和状态码统计的请求、被限流的请求、推送的成功与失败，以及清理任务删除的内容。中继无法读取自己存储的内容，所以这些数字就是全部可观察的信息。
 
 ## 限制
 

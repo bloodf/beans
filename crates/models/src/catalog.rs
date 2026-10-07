@@ -1,5 +1,5 @@
 //! The catalog as data. `catalog.json` is read by rules every later version keeps, so a catalog
-//! written for a newer Lorca never breaks an older one, and the catalog in use is replaced whole
+//! written for a newer Beans never breaks an older one, and the catalog in use is replaced whole
 //! by a newer one.
 //!
 //! The rules: fields this version does not know are ignored; a model it cannot run as listed (a
@@ -96,7 +96,7 @@ fn read(json: &str, required: &BTreeSet<&str>) -> Result<Catalog, String> {
     if json.len() > 1_048_576 { return Err("The model catalog exceeds 1 MiB".into()); }
     let raw: RawCatalog = serde_json::from_str(json).map_err(|e| format!("The model catalog does not read: {e}"))?;
     if raw.version != VERSION {
-        return Err(format!("The model catalog is version {}; this Lorca reads version {VERSION}", raw.version));
+        return Err(format!("The model catalog is version {}; this Beans reads version {VERSION}", raw.version));
     }
     if !is_utc_time(&raw.updated) {
         return Err(format!("The model catalog's updated time {:?} is not YYYY-MM-DDTHH:MM:SSZ", raw.updated));

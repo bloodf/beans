@@ -1,8 +1,8 @@
 // The Windows and Linux app in desktop/, built with MyGo.
 //
-//   bun run desktop                       Lorca Dev with live reload: builds the CLI for this
+//   bun run desktop                       Beans Dev with live reload: builds the CLI for this
 //                                         computer and runs `mygo dev`, whose app launches it
-//                                         (LORCA_CLI) with LORCA_DEV=1, as the Mac dev loop does.
+//                                         (BEANS_CLI) with BEANS_DEV=1, as the Mac dev loop does.
 //   bun run desktop:build [platforms]     The release apps: the CLI for each platform into
 //                                         desktop/resources/<goos>-<goarch>/bin, then
 //                                         `mygo build -platform`. Platforms are MyGo's, comma
@@ -57,9 +57,9 @@ async function dev(): Promise<number> {
   const binary = process.platform === "win32" ? `${cli.path}.exe` : cli.path
   log(`${color.bold("running")} ${color.dim("mygo dev")}`)
   return await run([MYGO, "dev"], { cwd: DESKTOP, env: {
-    LORCA_CLI: binary,
-    LORCA_DEV: "1",
-    LORCA_ALLOWED_ORIGINS: "http://localhost:5178,http://127.0.0.1:5178",
+    BEANS_CLI: binary,
+    BEANS_DEV: "1",
+    BEANS_ALLOWED_ORIGINS: "http://localhost:5178,http://127.0.0.1:5178",
   } })
 }
 
@@ -136,12 +136,12 @@ async function build(platforms: string[], options: { upload?: boolean } = {}): P
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
         if (!entry.isFile()) continue
         const name = entry.name
-        if (name === `lorca-${version}-${target}.tar.gz` || name === `update-${target}.json`
-          || name === `Lorca Setup ${version}.exe` || name.endsWith(".deb") || name === "install.sh") {
+        if (name === `beans-${version}-${target}.tar.gz` || name === `update-${target}.json`
+          || name === `Beans Setup ${version}.exe` || name.endsWith(".deb") || name === "install.sh") {
           assets.set(name, relative(ROOT, join(directory, name)))
         }
       }
-      if (!assets.has(`lorca-${version}-${target}.tar.gz`) || !assets.has(`update-${target}.json`)) {
+      if (!assets.has(`beans-${version}-${target}.tar.gz`) || !assets.has(`update-${target}.json`)) {
         throw new Error(`MyGo did not stage the signed archive and metadata for ${target}`)
       }
     }

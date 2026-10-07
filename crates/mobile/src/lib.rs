@@ -1,4 +1,4 @@
-//! Lorca's Device core for the phone. The app starts one `Core` with a folder to keep things
+//! Beans's Device core for the phone. The app starts one `Core` with a folder to keep things
 //! in and the facts about the phone, then speaks the same JSON API the desktop app speaks over
 //! the local websocket: `request(method, params)` answers with `{ "result": … }` or
 //! `{ "error": { "message": … } }`, and every event on the core's bus reaches the listener as
@@ -8,14 +8,14 @@
 uniffi::setup_scaffolding!();
 
 /// Linked so the phone's bindings carry the Markdown parser's FFI beside the core's.
-pub use lorca_markdown::parse_markdown;
+pub use beans_markdown::parse_markdown;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lorca::app::App;
-use lorca::config::Config;
-use lorca::events::Event;
+use beans::app::App;
+use beans::config::Config;
+use beans::events::Event;
 
 /// Where events go. Implemented by the app; called from the core's threads.
 #[uniffi::export(with_foreign)]
@@ -44,8 +44,10 @@ pub struct PushNotice {
 /// the process. `None` when this phone is not paired or the push is not for this account.
 #[uniffi::export]
 pub fn push_open(home: String, sealed: String) -> Option<PushNotice> {
-    let machine: lorca::keys::MachineFile = lorca::config::read_json(&Config { home: PathBuf::from(home), port: 0 }.machine_path())?;
-    let notice = lorca::push::open(&machine.dek().ok()?, &lorca::keys::unb64(&sealed).ok()?).ok()?;
+    let config = Config { home: PathBuf::from(home), port: 0 };
+    if !config.validate_home().ok()? { return None; }
+    let machine: beans::keys::MachineFile = beans::config::read_json_strict(&config.machine_path()).ok()??;
+    let notice = beans::push::open(&machine.dek().ok()?, &beans::keys::unb64(&sealed).ok()?).ok()?;
     Some(PushNotice { title: notice.title, subtitle: notice.subtitle, body: notice.body, chat_id: notice.chat_id })
 }
 
@@ -64,27 +66,27 @@ impl Core {
     #[uniffi::constructor]
     pub fn start(home: String, name: String, os: String, os_version: String, model: String, listener: Arc<dyn EventListener>) -> Result<Arc<Self>, CoreError> {
         let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "lorca=info".into()))
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "beans=info".into()))
             .with_target(false)
             .with_ansi(false)
             .with_writer(std::io::stderr)
             .try_init();
-        lorca::model::set_host_facts(name, os, os_version, model);
+        beans::model::set_host_facts(name, os, os_version, model);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .map_err(|e| CoreError::Failed(e.to_string()))?;
         let app = App::load(Config { home: PathBuf::from(home), port: 0 }).map_err(|e| CoreError::Failed(e.to_string()))?;
-        // The app's first `bootstrap` checks lorca.app for a newer model catalog. Tests never do.
+        // The app's first `bootstrap` checks beans.app for a newer model catalog. Tests never do.
         if !cfg!(test) {
-            lorca::catalog::enable(&app);
+            beans::catalog::enable(&app);
         }
         let _guard = runtime.enter();
         // Before the first snapshot and the first pull: a turn sent before the app was closed
         // still shows, and a result that landed meanwhile ends it.
-        lorca::runtime::resume_sent_jobs(&app);
-        runtime.spawn(lorca::sync::run(app.clone()));
+        beans::runtime::resume_sent_jobs(&app);
+        runtime.spawn(beans::sync::run(app.clone()));
         runtime.spawn(forward_events(app.clone(), listener));
         Ok(Arc::new(Core { app, runtime }))
     }
@@ -95,7 +97,7 @@ impl Core {
         let params: serde_json::Value = if params.trim().is_empty() { serde_json::Value::Null } else { serde_json::from_str(&params).unwrap_or(serde_json::Value::Null) };
         let app = self.app.clone();
         let response = self.runtime.block_on(async move {
-            match lorca::api::dispatch(&app, &method, params).await {
+            match beans::api::dispatch(&app, &method, params).await {
                 Ok(result) => serde_json::json!({ "result": result }),
                 Err(message) => serde_json::json!({ "error": { "message": message } }),
             }
@@ -106,7 +108,7 @@ impl Core {
     /// The key pushes are sealed under, for the iOS notification service extension, which
     /// runs outside the app and reads it from the shared keychain. `None` until paired.
     pub fn push_key(&self) -> Option<Vec<u8>> {
-        self.app.dek().map(|dek| lorca::keys::push_key(&dek).to_vec())
+        self.app.dek().map(|dek| beans::keys::push_key(&dek).to_vec())
     }
 
     /// The app came to the foreground: sync now rather than after the backoff.
@@ -148,9 +150,22 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn fresh_format_push_open_rejects_unmarked_home_without_effects() {
+        let home = std::env::temp_dir().join(format!("beans-unmarked-push-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let path = home.join("machine.json");
+        std::fs::write(&path, b"old-machine-account").unwrap();
+        assert!(push_open(home.display().to_string(), "ciphertext".into()).is_none());
+        assert_eq!(std::fs::read(path).unwrap(), b"old-machine-account");
+        assert!(!home.join("format.json").exists());
+        assert!(!home.join("beans.sqlite3").exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
     #[test]
     fn the_core_answers_the_api_and_forwards_events() {
-        let home = std::env::temp_dir().join(format!("lorca-mobile-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("beans-mobile-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let listener = Arc::new(Collect(Mutex::new(Vec::new())));
         let core = Core::start(home.display().to_string(), "Phone".into(), "ios".into(), "iOS 26".into(), "iPhone17,1".into(), listener.clone()).unwrap();
@@ -232,8 +247,8 @@ mod tests {
         // The Device build stores only the app view of tool activity. Workspace tests unify
         // the desktop runner feature, which retains the transcript; check the app view in both.
         let chat_id = "mobile-chat";
-        core.app.state.lock().unwrap().chats.push(lorca::model::Chat {
-            meta: lorca::model::ChatMeta {
+        core.app.state.lock().unwrap().chats.push(beans::model::Chat {
+            meta: beans::model::ChatMeta {
                 id: chat_id.into(),
                 kind: "group".into(),
                 title: None,
@@ -247,10 +262,10 @@ mod tests {
             usage: None,
             compactions: Vec::new(),
         });
-        let tool = lorca::model::Message::new(
+        let tool = beans::model::Message::new(
             chat_id,
-            lorca::model::Author::Bot { bot_id: "bot".into() },
-            lorca::model::Body::Tool {
+            beans::model::Author::Bot { bot_id: "bot".into() },
+            beans::model::Body::Tool {
                 name: "bash".into(),
                 summary: "Ran a command".into(),
                 detail: "d".repeat(1_000),
@@ -268,12 +283,12 @@ mod tests {
         let tool_id = tool.id.clone();
         core.app.upsert_message(tool, false);
         let stored = core.app.message(chat_id, &tool_id).unwrap().for_app();
-        let lorca::model::Body::Tool { detail, arguments, result, .. } = stored.body else { panic!("a tool row") };
+        let beans::model::Body::Tool { detail, arguments, result, .. } = stored.body else { panic!("a tool row") };
         assert_eq!(detail.chars().count(), 400);
         assert!(arguments.is_null());
         assert_eq!(result, None);
-        assert!(home.join("lorca.sqlite3").is_file());
-        let searchable = lorca::model::Message::new(chat_id, lorca::model::Author::You, lorca::model::Body::text("a searchable mobile needle"));
+        assert!(home.join("beans.sqlite3").is_file());
+        let searchable = beans::model::Message::new(chat_id, beans::model::Author::You, beans::model::Body::text("a searchable mobile needle"));
         let searchable_id = searchable.id.clone();
         core.app.upsert_message(searchable, false);
         let search: serde_json::Value = serde_json::from_str(

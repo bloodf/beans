@@ -63,11 +63,11 @@ export function parseDesktopReleases(releases: unknown): DesktopRelease | null {
     const appcast = file('appcast.xml')
     if (!clients.mac && dmg && appcast && file(`Beans-${version}.zip`))
       clients.mac = { version, url: dmg, appcast }
-    const windows = file(`Lorca Setup ${version}.exe`) ?? file(`Lorca.Setup.${version}.exe`)
+    const windows = file(`Beans Setup ${version}.exe`) ?? file(`Beans.Setup.${version}.exe`)
     if (!clients.windows && windows) clients.windows = { version, url: windows }
     const installScript = file('install-linux-amd64.sh')
-    const amd64 = file(`lorca_${version}_amd64.deb`)
-    const arm64 = file(`lorca_${version}_arm64.deb`)
+    const amd64 = file(`beans_${version}_amd64.deb`)
+    const arm64 = file(`beans_${version}_arm64.deb`)
     if (!clients.linux && installScript && amd64 && arm64)
       clients.linux = { version, installScript, deb: { amd64, arm64 } }
     const android = file(`Beans-${version}.apk`)

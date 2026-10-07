@@ -63,8 +63,8 @@ pub enum StopReason {
 }
 
 /// The thinking level and what a response used and cost live beside the model catalog, in
-/// `lorca-models`.
-pub use lorca_models::{Cost, ThinkingLevel, Usage};
+/// `beans-models`.
+pub use beans_models::{Cost, ThinkingLevel, Usage};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserMessage {

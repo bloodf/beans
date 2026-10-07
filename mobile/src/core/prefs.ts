@@ -12,7 +12,7 @@ export interface Prefs {
 }
 
 function root(): Directory {
-  const dir = new Directory(Paths.document, Application.applicationId === "ai.amoena.beans.dev" ? "lorca-dev" : "lorca");
+  const dir = new Directory(Paths.document, Application.applicationId === "ai.amoena.beans.dev" ? "beans-dev-v2" : "beans-v2");
   if (!dir.exists) dir.create({ intermediates: true, idempotent: true });
   return dir;
 }
@@ -24,7 +24,6 @@ function prefsFile(): File {
 /// Where the Rust core keeps its files, as a plain path.
 export function coreHome(): string {
   const dir = new Directory(root(), "core");
-  if (!dir.exists) dir.create({ intermediates: true, idempotent: true });
   return pathOf(dir.uri);
 }
 

@@ -19,7 +19,7 @@ use tokio_postgres::{AsyncMessage, Row, Transaction};
 use super::{now, page_of_slots, sealed_kinds_sql, slots_with_rows, GroupSlot, BlobRow, DeletedIdentity, Event, Inserted, Local, Machine, NewBlob, Payload, PushToken, Stats, Store};
 use crate::routes::{ApiError, ApiResult};
 
-const CHANNEL: &str = "lorca_relay";
+const CHANNEL: &str = "beans_relay";
 /// A process beats once a minute (`tick`); one silent for this long is gone.
 const INSTANCE_TTL: i64 = 150;
 /// Held while the schema is made, so two processes starting together do not collide.
@@ -149,6 +149,28 @@ async fn migrate(client: &mut Object) -> Result<(), tokio_postgres::Error> {
     Ok(())
 }
 
+/// Admit only an explicitly marked Beans v2 schema or a genuinely empty schema.
+/// This runs under the schema lock before any DDL or account recovery.
+async fn ensure_format(client: &Object) -> anyhow::Result<()> {
+    let marker: Option<String> = client.query_one("SELECT to_regclass('beans_storage_format')::text", &[]).await?.try_get(0)?;
+    if marker.is_some() {
+        let rows = client.query("SELECT format FROM beans_storage_format", &[]).await?;
+        if rows.len() == 1 && rows[0].try_get::<_, String>(0)? == "beans-v2" { return Ok(()); }
+        anyhow::bail!("Beans v2 relay storage marker invalid; existing data is untouched");
+    }
+    let populated: bool = client.query_one(
+        "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = current_schema())", &[],
+    ).await?.try_get(0)?;
+    if populated {
+        anyhow::bail!("Beans v2 relay requires a fresh schema; existing data is untouched");
+    }
+    client.batch_execute(
+        "CREATE TABLE beans_storage_format (format TEXT PRIMARY KEY CHECK (format = 'beans-v2'));
+         INSERT INTO beans_storage_format VALUES ('beans-v2');",
+    ).await?;
+    Ok(())
+}
+
 impl From<tokio_postgres::Error> for ApiError {
     fn from(error: tokio_postgres::Error) -> Self {
         tracing::error!(%error, "database");
@@ -197,7 +219,11 @@ impl Postgres {
 
         let mut client = pool.get().await?;
         client.execute("SELECT pg_advisory_lock($1)", &[&SCHEMA_LOCK]).await?;
-        let made = migrate(&mut client).await;
+        let made = async {
+            ensure_format(&client).await?;
+            migrate(&mut client).await?;
+            Ok::<(), anyhow::Error>(())
+        }.await;
         client.execute("SELECT pg_advisory_unlock($1)", &[&SCHEMA_LOCK]).await?;
         made?;
 

@@ -3,7 +3,7 @@ import Foundation
 import Darwin
 
 func L(_ text: String, _ args: CVarArg...) -> String { String(format: text, arguments: args) }
-enum AppInfo { static let name = "Lorca Launch Tests" }
+enum AppInfo { static let name = "Beans Launch Tests" }
 
 private final class Events: @unchecked Sendable {
     let ready = DispatchSemaphore(value: 0)
@@ -47,7 +47,7 @@ struct LaunchConcurrency {
             let events = Events()
             let worker = CLILaunchWorker { _, event in events.receive(event) }
             var environment = ProcessInfo.processInfo.environment
-            environment["LORCA_CLI"] = binary.path
+            environment["BEANS_CLI"] = binary.path
             environment["TEST_PORT"] = String(port)
             environment["TEST_PID_FILE"] = pidFile.path
             let configuration = CLILaunchWorker.Configuration(

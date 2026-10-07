@@ -30,11 +30,16 @@ pub struct MessageSearchHit {
 
 impl LocalStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let config = crate::config::Config { home: parent.into(), port: 0 };
+        config.validate_home()?;
+        if path.exists() {
+            crate::config::validate_database(path)?;
         }
+        config.ensure_home()?;
         let connection =
             Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+        connection.pragma_update(None, "application_id", crate::config::SQLITE_APPLICATION_ID)?;
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -613,7 +618,7 @@ impl LocalStore {
         collect_messages(rows)
     }
 
-    /// Every `bash` card (`Body::Tool.run`), in any chat: for the ones a Lorca that quit left
+    /// Every `bash` card (`Body::Tool.run`), in any chat: for the ones a Beans that quit left
     /// open.
     pub fn command_rows(&self) -> anyhow::Result<Vec<Message>> {
         let connection = self.connection.lock().unwrap();
@@ -1644,9 +1649,9 @@ mod tests {
     }
 
     fn scratch() -> Scratch {
-        let home = std::env::temp_dir().join(format!("lorca-transcript-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-transcript-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
-        Scratch(LocalStore::open(&home.join("lorca.sqlite3")).unwrap(), home)
+        Scratch(LocalStore::open(&home.join("beans.sqlite3")).unwrap(), home)
     }
 
     fn message(id: &str, at: f64) -> Message {
@@ -1913,7 +1918,7 @@ mod tests {
         assert_eq!(kind, "blob");
         assert_eq!(length, ciphertext.len());
         drop(connection);
-        let reopened = LocalStore::open(&scratch.1.join("lorca.sqlite3")).unwrap();
+        let reopened = LocalStore::open(&scratch.1.join("beans.sqlite3")).unwrap();
         let queued = reopened.first_outbox().unwrap().unwrap();
         assert_eq!(queued.ciphertext, ciphertext);
         assert_eq!(queued.group.as_deref(), Some("chat"));

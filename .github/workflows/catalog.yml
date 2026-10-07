@@ -1,7 +1,7 @@
-# Checks a change to what lorca.app serves Devices: the model catalog (crates/models/catalog.json)
+# Checks a change to what beans.app serves Devices: the model catalog (crates/models/catalog.json)
 # and the marketplace index (crates/cli/marketplace/index.json) each move their "updated" time
 # forward whenever anything else in them changes, as Devices keep whichever copy is later. The
-# rules each must read by are checked by the lorca-models and lorca tests in the Tests workflow.
+# rules each must read by are checked by the beans-models and beans tests in the Tests workflow.
 # scripts/check-catalog.ts is the check; `bun run check:catalog` runs it locally.
 name: Catalog
 

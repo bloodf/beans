@@ -876,7 +876,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         // Checks the configured model catalog now, even within the last check's hour.
         "models.reload" => {
             let changed = crate::catalog::check(app, true).await?;
-            Ok(json!({ "updated": lorca_models::updated(), "changed": changed }))
+            Ok(json!({ "updated": beans_models::updated(), "changed": changed }))
         }
 
         other => Err(format!("unknown method {other}")),

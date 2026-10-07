@@ -3,14 +3,14 @@ use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
 use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
-use lorca::{app::App,config::Config,memory_service::{types::*,dispatch as d,queue::*}};
+use beans::{app::App,config::Config,memory_service::{types::*,dispatch as d,queue::*}};
 
 struct Scratch { app:Arc<App>, home:std::path::PathBuf, bot:String }
 impl Scratch {
     fn new()->Self{
         let home=std::env::temp_dir().join(format!("beans-memory-dispatch-{}",uuid::Uuid::new_v4()));
         let app=App::load(Config{home:home.clone(),port:0}).unwrap();
-        lorca::identity::create(&app,Some("fixture".into())).unwrap();
+        beans::identity::create(&app,Some("fixture".into())).unwrap();
         let bot=app.state.lock().unwrap().bots[0].id.clone();
         let device=app.this_device_id().unwrap();
         let mut config=app.memory_config.lock();
@@ -102,7 +102,7 @@ async fn model_selectors_and_arbitrary_advanced_actions_never_dispatch(){
     let s=Scratch::new();let fixture=Fixture::new(false);s.register(fixture.clone());let access=s.access();
     let request=BackendRequest::Advanced{feature:AdvancedFeature::BankConfig,action:"execute_sql".into(),body:json!({"nested":{"bank_id":"other"}})};
     assert_eq!(d::execute(&s.app,&access,request,CancellationToken::new(),false).await.unwrap_err().code,"untrusted_selector");
-    let tools=lorca::memory_service::tools::tools(&s.app,&access);
+    let tools=beans::memory_service::tools::tools(&s.app,&access);
     let recall=tools.iter().find(|t|t.name()=="memory_service_recall").unwrap();
     let result=recall.execute("call",json!({"query":"fact","bank":"other"}),CancellationToken::new(),Arc::new(|_|{})).await;
     assert!(result.is_err());assert_eq!(fixture.calls.load(Ordering::SeqCst),0);
@@ -121,15 +121,15 @@ async fn cancellation_is_unknown_not_reported_stored(){
 #[tokio::test]
 async fn local_memory_and_untrusted_automatic_recall_coexist(){
     let s=Scratch::new();let fixture=Fixture::new(false);s.register(fixture.clone());
-    let bot=s.app.bot(&s.bot).unwrap();let local=lorca::memory::MemoryStore::for_bot(&s.home,&bot);
+    let bot=s.app.bot(&s.bot).unwrap();let local=beans::memory::MemoryStore::for_bot(&s.home,&bot);
     local.append_entry("curated local fact",None,0).unwrap();
     {let mut c=s.app.memory_config.lock();c.bots.get_mut(&s.bot).unwrap().value.as_mut().unwrap().auto_recall=true;}
     let notes=d::automatic_recall(&s.app,&s.access(),"task",CancellationToken::new()).await.unwrap();
     assert!(notes.contains("UNTRUSTED HISTORICAL DATA"));assert!(local.read_index().contains("curated local fact"));
 }
 
-fn turn_job(s:&Scratch,id:&str,text:&str)->lorca::model::Job {
-    use lorca::model::*;
+fn turn_job(s:&Scratch,id:&str,text:&str)->beans::model::Job {
+    use beans::model::*;
     let chat_id=s.app.state.lock().unwrap().chats[0].meta.id.clone();
     let message=Message::new(&chat_id,Author::You,Body::text(text));
     let trigger_message_id=message.id.clone();s.app.upsert_message(message,true);
@@ -141,36 +141,36 @@ fn turn_job(s:&Scratch,id:&str,text:&str)->lorca::model::Job {
 async fn negative_admission_survives_restart_and_cannot_be_backfilled_after_opt_in(){
     let s=Scratch::new();
     let prefs=|capture:bool|json!({"bot_id":s.bot,"connection_id":"c","auto_recall":false,"capture_conversation":capture,"capture_group_text":false});
-    lorca::api::dispatch(&s.app,"memory.preferences.set",prefs(false)).await.unwrap();
+    beans::api::dispatch(&s.app,"memory.preferences.set",prefs(false)).await.unwrap();
     let job=turn_job(&s,"old-turn","past unconsented text");
-    let access=lorca::memory_service::admission::admit_turn(&s.app,&job,&CancellationToken::new()).unwrap().unwrap();
+    let access=beans::memory_service::admission::admit_turn(&s.app,&job,&CancellationToken::new()).unwrap().unwrap();
     assert!(access.consent_revision.is_none());
-    lorca::api::dispatch(&s.app,"memory.preferences.set",prefs(true)).await.unwrap();
+    beans::api::dispatch(&s.app,"memory.preferences.set",prefs(true)).await.unwrap();
     let restarted=App::load(Config{home:s.home.clone(),port:0}).unwrap();
-    let restored=lorca::memory_service::admission::admit_turn(&restarted,&job,&CancellationToken::new()).unwrap().unwrap();
+    let restored=beans::memory_service::admission::admit_turn(&restarted,&job,&CancellationToken::new()).unwrap().unwrap();
     assert!(restored.consent_revision.is_none());
-    lorca::memory_service::tools::capture_completed(&restarted,&restored,&job.chat_id,&job.trigger_message_id,&[],CancellationToken::new()).await;
+    beans::memory_service::tools::capture_completed(&restarted,&restored,&job.chat_id,&job.trigger_message_id,&[],CancellationToken::new()).await;
     assert!(restarted.store.memory_deliveries(&s.bot).unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn admitted_text_is_frozen_and_capture_consumption_is_atomic_across_restart(){
-    use lorca::model::*;
+    use beans::model::*;
     let s=Scratch::new();
-    lorca::api::dispatch(&s.app,"memory.preferences.set",json!({"bot_id":s.bot,"connection_id":"c",
+    beans::api::dispatch(&s.app,"memory.preferences.set",json!({"bot_id":s.bot,"connection_id":"c",
         "auto_recall":false,"capture_conversation":true,"capture_group_text":false})).await.unwrap();
     let job=turn_job(&s,"eligible-turn","original admitted text");
-    let access=lorca::memory_service::admission::admit_turn(&s.app,&job,&CancellationToken::new()).unwrap().unwrap();
+    let access=beans::memory_service::admission::admit_turn(&s.app,&job,&CancellationToken::new()).unwrap().unwrap();
     let mut trigger=s.app.message(&job.chat_id,&job.trigger_message_id).unwrap();trigger.body=Body::text("later edited text");s.app.upsert_message(trigger,true);
     let reply=Message::new(&job.chat_id,Author::Bot{bot_id:s.bot.clone()},Body::text("eligible assistant reply"));
     let reply_id=reply.id.clone();s.app.upsert_message(reply,true);
     s.app.memory_runtime.register(access.scope.clone(),Fixture::new(false));
-    lorca::memory_service::tools::capture_completed(&s.app,&access,&job.chat_id,&job.trigger_message_id,&[reply_id.clone()],CancellationToken::new()).await;
+    beans::memory_service::tools::capture_completed(&s.app,&access,&job.chat_id,&job.trigger_message_id,&[reply_id.clone()],CancellationToken::new()).await;
     let rows=s.app.store.memory_deliveries(&s.bot).unwrap();assert_eq!(rows.len(),1);
     assert!(rows[0].document.text.contains("original admitted text"));assert!(!rows[0].document.text.contains("later edited text"));
     let restarted=App::load(Config{home:s.home.clone(),port:0}).unwrap();
-    let restored=lorca::memory_service::admission::admit_turn(&restarted,&job,&CancellationToken::new()).unwrap().unwrap();
+    let restored=beans::memory_service::admission::admit_turn(&restarted,&job,&CancellationToken::new()).unwrap().unwrap();
     assert!(restored.consent_revision.is_none());
-    lorca::memory_service::tools::capture_completed(&restarted,&restored,&job.chat_id,&job.trigger_message_id,&[reply_id],CancellationToken::new()).await;
+    beans::memory_service::tools::capture_completed(&restarted,&restored,&job.chat_id,&job.trigger_message_id,&[reply_id],CancellationToken::new()).await;
     assert_eq!(restarted.store.memory_deliveries(&s.bot).unwrap().len(),1);
 }

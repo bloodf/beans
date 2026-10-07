@@ -169,12 +169,12 @@ struct Cache {
 }
 
 fn override_url(app: &App) -> Option<String> {
-    std::env::var("LORCA_MARKETPLACE_URL").ok().filter(|url| !url.trim().is_empty())
+    std::env::var("BEANS_MARKETPLACE_URL").ok().filter(|url| !url.trim().is_empty())
         .or_else(|| app.settings.lock().unwrap().marketplace_url.clone().filter(|url| !url.trim().is_empty()))
 }
 
 fn source(app: &App) -> Option<String> {
-    if std::env::var("LORCA_MARKETPLACE_FETCH").is_ok_and(|value| value.trim() == "0") {
+    if std::env::var("BEANS_MARKETPLACE_FETCH").is_ok_and(|value| value.trim() == "0") {
         return None;
     }
     override_url(app).or_else(|| app.relay_url().map(|relay| format!("{}/marketplace/v1.json", relay.trim_end_matches('/'))))
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn cache_is_bound_to_feed_and_only_newer_indexes_win() {
-        let home = std::env::temp_dir().join(format!("lorca-marketplace-cache-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-marketplace-cache-{}", uuid::Uuid::new_v4()));
         let config = Config { home: home.clone(), port: 0 };
         let mut cached: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
         cached["updated"] = Value::from("2999-01-01T00:00:00Z");
@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     fn newer_index_replaces_old_entries_and_older_one_cannot_downgrade() {
-        let home = std::env::temp_dir().join(format!("lorca-marketplace-version-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-marketplace-version-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         let mut newer: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
         newer["updated"] = Value::from("2999-01-01T00:00:00Z");
@@ -538,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_bot_added_from_a_template_starts_with_paused_routines_and_a_greeting() {
-        let home = std::env::temp_dir().join(format!("lorca-marketplace-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-marketplace-{}", uuid::Uuid::new_v4()));
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Workbench".into())).unwrap();
         let runner_id = app.this_device_id().unwrap();

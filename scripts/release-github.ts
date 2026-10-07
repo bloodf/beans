@@ -32,7 +32,7 @@ const stable = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const assetName = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,179}$/;
 // GitHub normalizes spaces in the Windows installer filename when uploading.
 function githubAssetName(name: string): string {
-  return /^Lorca Setup \d+\.\d+\.\d+\.exe$/.test(name) ? name.replaceAll(" ", ".") : name;
+  return /^Beans Setup \d+\.\d+\.\d+\.exe$/.test(name) ? name.replaceAll(" ", ".") : name;
 }
 
 function releaseVersion(tag: string): string {
@@ -48,7 +48,7 @@ export async function releaseProtocol(): Promise<number> {
     if (!match) throw new Error(`No protocol constant in ${path}`);
     return Number(match[1]);
   }));
-  if (values[0] !== values[1] || values[0] < 3) throw new Error("Client and relay release protocols must match and be at least3");
+  if (values[0] !== values[1] || values[0] < 5) throw new Error("Client and relay release protocols must match and be at least 5");
   return values[0];
 }
 async function digest(path: string): Promise<string> {
@@ -66,7 +66,7 @@ function classify(name: string, version: string, core: string): Omit<ReleaseArti
   if (name === "beans-server-updater.py") return { component: "updater", platform: "linux", version };
   const server = name.match(/^beans-server-(linux-(?:x86_64|aarch64))\.tar\.gz$/);
   if (server) return { component: "server", platform: server[1], version: core };
-  const cli = name.match(/^lorca-cli-((?:macos-aarch64|linux-aarch64|linux-x86_64)\.tar\.gz|windows-x86_64\.zip)(\.sha256)?$/);
+  const cli = name.match(/^beans-cli-((?:macos-aarch64|linux-aarch64|linux-x86_64)\.tar\.gz|windows-x86_64\.zip)(\.sha256)?$/);
   if (cli) return { component: cli[2] ? "checksum" : "cli", platform: cli[1].replace(/\.(?:tar\.gz|zip)$/, ""), version: core };
   if (name === `Beans-${version}.apk`) return { component: "android", platform: "android", version };
   if (name === `Beans-${version}.ipa`) return { component: "ios", platform: "ios", version };
@@ -74,10 +74,10 @@ function classify(name: string, version: string, core: string): Omit<ReleaseArti
   if (name === `Beans-${version}.aab`) return { component: "android-store", platform: "android", version };
   if (/^eas-(github|production|testflight)\.json$/.test(name)) return { component: "provenance", platform: "mobile", version };
   if ([`Beans-${version}.zip`, `Beans-${version}.dmg`, "appcast.xml"].includes(name)) return { component: "macos", platform: "macos-aarch64", version };
-  const desktop = name.match(new RegExp(`^(?:update-(windows-amd64|linux-amd64|linux-arm64)\\.json|lorca-${version.replaceAll(".", "\\.")}-(windows-amd64|linux-amd64|linux-arm64)\\.tar\\.gz|install-(linux-amd64|linux-arm64)\\.sh)$`));
+  const desktop = name.match(new RegExp(`^(?:update-(windows-amd64|linux-amd64|linux-arm64)\\.json|beans-${version.replaceAll(".", "\\.")}-(windows-amd64|linux-amd64|linux-arm64)\\.tar\\.gz|install-(linux-amd64|linux-arm64)\\.sh)$`));
   if (desktop) return { component: "desktop", platform: desktop[1] ?? desktop[2] ?? desktop[3], version };
-  if (name === `Lorca Setup ${version}.exe`) return { component: "desktop", platform: "windows-amd64", version };
-  const deb = name.match(new RegExp(`^lorca_${version.replaceAll(".", "\\.")}_(amd64|arm64)\\.deb$`));
+  if (name === `Beans Setup ${version}.exe`) return { component: "desktop", platform: "windows-amd64", version };
+  const deb = name.match(new RegExp(`^beans_${version.replaceAll(".", "\\.")}_(amd64|arm64)\\.deb$`));
   if (deb) return { component: "desktop", platform: `linux-${deb[1]}`, version };
   throw new Error(`Unexpected release asset: ${name}`);
 }
@@ -86,11 +86,11 @@ function required(version: string, scope: ReleaseScope): string[] {
   if (scope === "server") return server;
   return [
     ...server,
-    ...["macos-aarch64.tar.gz", "linux-aarch64.tar.gz", "linux-x86_64.tar.gz", "windows-x86_64.zip"].flatMap((suffix) => [`lorca-cli-${suffix}`, `lorca-cli-${suffix}.sha256`]),
+    ...["macos-aarch64.tar.gz", "linux-aarch64.tar.gz", "linux-x86_64.tar.gz", "windows-x86_64.zip"].flatMap((suffix) => [`beans-cli-${suffix}`, `beans-cli-${suffix}.sha256`]),
     `Beans-${version}.zip`, `Beans-${version}.dmg`, "appcast.xml", `Beans-${version}.apk`, `Beans-${version}.aab`, `Beans-${version}-store.ipa`,
     "eas-github.json", "eas-production.json", "eas-testflight.json",
-    ...["windows-amd64", "linux-amd64", "linux-arm64"].flatMap((platform) => [`update-${platform}.json`, `lorca-${version}-${platform}.tar.gz`]),
-    `Lorca Setup ${version}.exe`, `lorca_${version}_amd64.deb`, `lorca_${version}_arm64.deb`, "install-linux-amd64.sh", "install-linux-arm64.sh",
+    ...["windows-amd64", "linux-amd64", "linux-arm64"].flatMap((platform) => [`update-${platform}.json`, `beans-${version}-${platform}.tar.gz`]),
+    `Beans Setup ${version}.exe`, `beans_${version}_amd64.deb`, `beans_${version}_arm64.deb`, "install-linux-amd64.sh", "install-linux-arm64.sh",
   ];
 }
 

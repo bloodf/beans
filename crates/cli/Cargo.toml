@@ -1,27 +1,27 @@
 [package]
-name = "lorca"
-description = "Lorca CLI: keys, local websocket, agent loop, relay sync"
+name = "beans"
+description = "Beans CLI: keys, local websocket, agent loop, relay sync"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lib]
-name = "lorca"
+name = "beans"
 path = "src/lib.rs"
 
 [[bin]]
-name = "lorca"
+name = "beans"
 path = "src/main.rs"
 required-features = ["cli"]
 
 [features]
 default = ["cli"]
 # The command-line binary: everything.
-cli = ["runner", "server", "dep:usage", "dep:tracing-subscriber", "dep:flate2", "dep:tar", "dep:zip"]
+cli = ["runner", "server", "dep:usage", "dep:tracing-subscriber"]
 # Connecting and disconnecting account providers. Devices use this without the agent loop.
-provider-auth = ["dep:lorca-provider-auth"]
+provider-auth = ["dep:beans-provider-auth"]
 # Running bots: the agent loop, providers, tools. Off for a Device that only takes part.
-runner = ["provider-auth", "dep:lorca-agent", "dep:open", "dep:rmcp", "dep:mcp_http", "dep:process-wrap", "memory-pgvector", "memory-lance"]
+runner = ["provider-auth", "dep:beans-agent", "dep:open", "dep:rmcp", "dep:mcp_http", "dep:process-wrap", "memory-pgvector", "memory-lance"]
 # The local websocket the desktop app connects to.
 server = ["dep:axum"]
 # Vector/native SDKs are linked only by Runners, never the phone core.
@@ -30,10 +30,10 @@ memory-lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:arrow
 embedding-local = ["runner", "dep:ort", "dep:tokenizers"]
 
 [dependencies]
-lorca-agent = { path = "../agent", optional = true }
-lorca-models = { path = "../models" }
-lorca-provider-auth = { path = "../provider-auth", optional = true }
-lorca-tls = { path = "../tls" }
+beans-agent = { path = "../agent", optional = true }
+beans-models = { path = "../models" }
+beans-provider-auth = { path = "../provider-auth", optional = true }
+beans-tls = { path = "../tls" }
 anyhow.workspace = true
 async-trait.workspace = true
 axum = { workspace = true, optional = true }
@@ -68,9 +68,6 @@ tracing-subscriber = { workspace = true, optional = true }
 uuid.workspace = true
 x25519-dalek.workspace = true
 if-addrs = "0.15.0"
-# The release archives `lorca update` unpacks: .tar.gz for macOS and Linux.
-flate2 = { version = "1", optional = true }
-tar = { version = "0.4", default-features = false, optional = true }
 # rmcp speaks reqwest 0.13; the rest of the crate is on the workspace's 0.12, so the MCP side has its own client.
 mcp_http = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "stream", "rustls", "http2", "system-proxy"], optional = true }
 rmcp = { version = "3.4.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth", "reqwest"], optional = true }
@@ -91,8 +88,6 @@ tokenizers = { version = "=0.22.2", default-features = false, features = ["onig"
 [target.'cfg(windows)'.dependencies]
 # Native draft paths, parent watches, and the Windows service console need these APIs.
 windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading", "Win32_System_Console"] }
-# The Windows release archive the retained self-update implementation unpacks.
-zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

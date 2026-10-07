@@ -64,7 +64,7 @@ impl AssetInstaller {
                 return Err(EmbeddingError::InvalidProfile);
             }
         }
-        let client=lorca_tls::client_builder().redirect(reqwest::redirect::Policy::none())
+        let client=beans_tls::client_builder().redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(300))
             .no_gzip().build().map_err(|_|EmbeddingError::Transport)?;
         Ok(Self{root,allowed_origins,allow_insecure_http,client,pending:Mutex::new(HashMap::new())})

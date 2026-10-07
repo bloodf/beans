@@ -1,5 +1,5 @@
 //! The certificate trust every Device connection uses: providers and their sign-ins, the
-//! relay, lorca.app, and MCP servers over HTTPS.
+//! relay, beans.app, and MCP servers over HTTPS.
 //!
 //! macOS and Windows check a server's certificate with the system, so a root an
 //! administrator installed for a TLS-inspecting proxy counts, as it does in the browser.

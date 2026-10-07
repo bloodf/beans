@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use lorca_agent::codemode::{CodemodeStore, HostFunction, StoreWrites};
-use lorca_agent::provider::AssistantAccumulator;
-use lorca_agent::types::{LlmMessage, StopReason, UserMessage};
-use lorca_agent::{ModelRequest, RequestOptions};
+use beans_agent::codemode::{CodemodeStore, HostFunction, StoreWrites};
+use beans_agent::provider::AssistantAccumulator;
+use beans_agent::types::{LlmMessage, StopReason, UserMessage};
+use beans_agent::{ModelRequest, RequestOptions};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -139,7 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn models_ask_checks_its_arguments_and_its_provider() {
-        let home = std::env::temp_dir().join(format!("lorca-scripts-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-scripts-{}", uuid::Uuid::new_v4()));
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         assert!(ModelsAsk::new(&app, "chat", "unknown").is_none(), "a provider with no small model has no models.ask()");
         let ask = ModelsAsk::new(&app, "chat", "deepseek").unwrap();

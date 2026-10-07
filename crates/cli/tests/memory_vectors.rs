@@ -1,5 +1,5 @@
 #![cfg(feature = "runner")]
-use lorca::memory_service::{
+use beans::memory_service::{
     backends::{
         lance::{LanceBackend, LanceBinding},
         pgvector::{PgvectorConfig, VectorDistance, VectorSpace},
@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 fn scope(bot: &str) -> MemoryScope {
     MemoryScope {
-        namespace: namespace(&lorca::keys::b64(&[42; 32]), bot).unwrap(),
+        namespace: namespace(&beans::keys::b64(&[42; 32]), bot).unwrap(),
         connection_id: "vectors".into(),
         connection_revision: Revision {
             counter: 1,

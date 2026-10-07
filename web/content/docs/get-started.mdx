@@ -4,7 +4,10 @@ description: Set up Beans, create your identity, connect an AI provider, and sen
 icon: Rocket
 ---
 
-You need one supported AI account: an API key, or a ChatGPT or Grok subscription. This guide uses the desktop app, for Mac, Windows, and Linux. To set up a computer without it, see [Command line](/docs/cli).
+You need one supported AI account: an API key, or a ChatGPT subscription. This guide uses the desktop app, for Mac, Windows, and Linux. To set up a computer without it, see [Command line](/docs/cli).
+
+Production Grok subscription OAuth is disabled pending a verified Beans contract; the sign-in is rejected before callback/network access. API-key gateway models are separate.
+
 
 <Steps>
 <Step>
@@ -30,7 +33,7 @@ On first launch, choose **Create**. Beans makes a key pair on this computer and 
   The backup phrase is your identity. It is the only way to restore your account on another computer, and nobody can reset it for you. Keep it somewhere safe and offline.
 </Callout>
 
-If you already have an account, choose **Restore** and type your phrase, or **Pair** and paste a pairing string from another computer that is already set up. The other computer can show one with **Pair a Device** in the desktop app or `lorca pair` in a terminal.
+If you already have an account, choose **Restore** and type your phrase, or **Pair** and paste a pairing string from another computer that is already set up. The other computer can show one with **Pair a Device** in the desktop app or `beans pair` in a terminal.
 
 </Step>
 <Step>
@@ -44,7 +47,7 @@ Every account starts with one bot, Chef. Keep the name or pick your own.
 
 ### Connect a provider
 
-Paste a DeepSeek, Anthropic, OpenCode Zen, or OpenCode Go API key, or sign in to ChatGPT or Grok. The sign-in opens in your browser. To use another service or a model server on your own computer, pick it from the same list (OpenAI, OpenRouter, Gemini, Groq, Together AI, Ollama, LM Studio, or Other Server) and set it up; see [Custom providers](/docs/providers#custom-providers). You can skip this step and connect later in **Settings › Providers**, but bots cannot answer until one provider is connected.
+Paste a DeepSeek, Anthropic, OpenCode Zen, or OpenCode Go API key, or sign in to ChatGPT. The sign-in opens in your browser. To use another service or a model server on your own computer, pick it from the same list (OpenAI, OpenRouter, Gemini, Groq, Together AI, Ollama, LM Studio, or Other Server) and set it up; see [Custom providers](/docs/providers#custom-providers). You can skip this step and connect later in **Settings › Providers**, but bots cannot answer until one provider is connected.
 
 </Step>
 <Step>

@@ -1,7 +1,0 @@
-{
-  "name": "lorca-core",
-  "version": "0.1.0",
-  "description": "Lorca's Device core (Rust) for the phone: the JSON API and events",
-  "main": "index.ts",
-  "private": true
-}

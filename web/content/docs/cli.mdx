@@ -1,12 +1,15 @@
 ---
 title: Command line
-description: The lorca CLI holds your keys and runs your bots. The desktop app is a window onto it, and a Runner needs nothing else.
+description: The beans CLI holds your keys and runs your bots. The desktop app is a window onto it, and a Runner needs nothing else.
 icon: Terminal
 ---
 
-`lorca` is the program that does the work: it holds your keys, talks to the relay and the AI providers, and runs the bots. It runs on macOS, Linux, and Windows. The desktop app bundles it and runs it for you; on a computer without the app, run the CLI yourself and that computer is a Runner.
+`beans` is the program that does the work: it holds your keys, talks to the relay and the AI providers, and runs the bots. It runs on macOS, Linux, and Windows. The desktop app bundles it and runs it for you; on a computer without the app, run the CLI yourself and that computer is a Runner.
 
-On macOS, the bundled binary lives inside the app at `Beans.app/Contents/Resources/bin/lorca`.
+On macOS, the bundled binary lives inside the app at `Beans.app/Contents/Resources/bin/beans`.
+
+Fresh accounts use format `beans-v2`, home `~/.beans-v2` and port 4874 (Dev: `~/.beans-dev-v2`, 4875). Backups start with the separate first token `beans-v2`, followed by thirteen base32 groups. Restore rejects unversioned/wrong-prefix phrases before decoding. Old account directories and mixed-format pairing/sync are incompatible and are not automatically migrated or reset. The relay requires `Beans-Protocol: 5` and `Beans-Format: beans-v2`; use your own configured relay, not a built-in production host.
+
 
 ## Install
 
@@ -22,9 +25,9 @@ On Windows, in PowerShell:
 irm https://usebeans.app/install-cli.ps1 | iex
 ```
 
-The script downloads the latest Beans release for your computer, checks its adjacent checksum, puts `lorca` in `~/.local/bin`, and adds that folder to PATH. CLI self-update is [unavailable](#updates).
+The script downloads the latest Beans release for your computer, checks its adjacent checksum, puts `beans` in `~/.local/bin`, and adds that folder to PATH. CLI self-update is [unavailable](#updates).
 
-Set `LORCA_VERSION=1.0.0` to install that release, `LORCA_INSTALL_DIR` to put `lorca` in another folder, or `LORCA_NO_MODIFY_PATH=1` to leave your PATH alone: `curl -fsSL https://usebeans.app/install-cli.sh | LORCA_VERSION=1.0.0 sh`, or `$env:LORCA_VERSION = '1.0.0'` before `irm` in PowerShell.
+Set `BEANS_VERSION=1.0.0` to install that release, `BEANS_INSTALL_DIR` to put `beans` in another folder, or `BEANS_NO_MODIFY_PATH=1` to leave your PATH alone: `curl -fsSL https://usebeans.app/install-cli.sh | BEANS_VERSION=1.0.0 sh`, or `$env:BEANS_VERSION = '1.0.0'` before `irm` in PowerShell.
 
 On Windows, bots run their commands in Git for Windows' bash, not WSL's, so install [Git for Windows](https://git-scm.com/downloads/win) too. Beans finds it in Program Files, in an install for your user only, or through `git` on your PATH; until it is installed, a bot's commands fail with a note that says so.
 
@@ -32,52 +35,52 @@ On Windows, bots run their commands in Git for Windows' bash, not WSL's, so inst
 
 | Command | What it does |
 | --- | --- |
-| `lorca` | Lists the commands. |
-| `lorca serve` | Runs the service. |
-| `lorca identity new` | Creates an identity and prints the backup phrase. |
-| `lorca identity restore <phrase>` | Restores an identity from its phrase. |
-| `lorca identity show` | Shows this device's identity. |
-| `lorca pair` | Shows a pairing string and waits for the other device. |
-| `lorca pair <string>` | Joins an account with a pairing string. |
-| `lorca provider set <kind> [api-key]` | Connects `deepseek`, `anthropic`, `opencode`, `opencode-go`, `chatgpt`, or `grok`. The key is read from stdin when omitted; `--base-url` sets a custom endpoint. |
-| `lorca provider add <name> <base-url>` | Adds a custom provider: any server that speaks OpenAI's or Anthropic's API. `--api` picks `chat-completions` (the default), `responses`, or `messages`; `--model` names a model, once per model; `--api-key-stdin` reads a key. |
-| `lorca provider remove <kind>` | Disconnects a provider on every device, or deletes a custom one (`custom:openrouter`, as `provider list` shows it). |
-| `lorca provider list` | Lists the connected providers. |
-| `lorca mcp …` | Manages this computer's own MCP servers; see [MCP servers](#mcp-servers). |
-| `lorca chats list` | Lists the chats: each one's id and bots, with a group's owner. |
-| `lorca chats set-owner <group> <bot>` | Makes a bot the [owner](/docs/group-chats#the-owner) of a group. Name the group by its title or id, and the bot by its name or id. |
-| `lorca marketplace reload` | Checks the selected Beans relay's public marketplace feed now, with a bundled offline fallback. |
-| `lorca models reload` | Checks the selected Beans relay's public model catalog now, with a bundled offline fallback. |
-| `lorca update status\|prepare\|cancel` | Controls the running Runner's admission drain. Prepare/cancel require `LORCA_UPDATE_TOKEN_FILE`; no release is downloaded. |
-| `lorca self-update` | Reports unavailable in Beans; use the signed Beans update mechanism. |
-| `lorca service install` | Runs `lorca serve` in the background, now and at every login, and starts it again if it stops. `lorca service uninstall` stops it; `lorca service status` says whether it runs and where its log is. |
-| `lorca status` | Prints this device's state as JSON: devices, bots, chats, providers. |
-| `lorca doctor` | Checks the home folder, identity, port, relay, and `mcp.json`, and says what is wrong. |
+| `beans` | Lists the commands. |
+| `beans serve` | Runs the service. |
+| `beans identity new` | Creates an identity and prints the backup phrase. |
+| `beans identity restore <phrase>` | Restores an identity from its phrase. |
+| `beans identity show` | Shows this device's identity. |
+| `beans pair` | Shows a pairing string and waits for the other device. |
+| `beans pair <string>` | Joins an account with a pairing string. |
+| `beans provider set <kind> [api-key]` | Connects `deepseek`, `anthropic`, `opencode`, `opencode-go` or `chatgpt`. Production `grok` OAuth is disabled pending a verified Beans contract. The key is read from stdin when omitted; `--base-url` selects an API endpoint. |
+| `beans provider add <name> <base-url>` | Adds a custom provider: any server that speaks OpenAI's or Anthropic's API. `--api` picks `chat-completions` (the default), `responses`, or `messages`; `--model` names a model, once per model; `--api-key-stdin` reads a key. |
+| `beans provider remove <kind>` | Disconnects a provider on every device, or deletes a custom one (`custom:openrouter`, as `provider list` shows it). |
+| `beans provider list` | Lists the connected providers. |
+| `beans mcp …` | Manages this computer's own MCP servers; see [MCP servers](#mcp-servers). |
+| `beans chats list` | Lists the chats: each one's id and bots, with a group's owner. |
+| `beans chats set-owner <group> <bot>` | Makes a bot the [owner](/docs/group-chats#the-owner) of a group. Name the group by its title or id, and the bot by its name or id. |
+| `beans marketplace reload` | Checks the selected Beans relay's public marketplace feed now, with a bundled offline fallback. |
+| `beans models reload` | Checks the selected Beans relay's public model catalog now, with a bundled offline fallback. |
+| `beans update status\|prepare\|cancel` | Controls the running Runner's admission drain. Prepare/cancel require `BEANS_UPDATE_TOKEN_FILE`; no release is downloaded. |
+| `beans self-update` | Reports unavailable in Beans; use the signed Beans update mechanism. |
+| `beans service install` | Runs `beans serve` in the background, now and at every login, and starts it again if it stops. `beans service uninstall` stops it; `beans service status` says whether it runs and where its log is. |
+| `beans status` | Prints this device's state as JSON: devices, bots, chats, providers. |
+| `beans doctor` | Checks the home folder, identity, port, relay, and `mcp.json`, and says what is wrong. |
 
 ## MCP servers
 
-`lorca mcp` edits `mcp.json` in Beans's folder, the [MCP servers](/docs/plugins#your-own-mcp-servers) every bot on this computer can use. With `lorca serve` running, the change reaches it at once; without it, the next `lorca serve` reads the file. After editing the file by hand, run `lorca mcp reload`.
+`beans mcp` edits `mcp.json` in Beans's folder, the [MCP servers](/docs/plugins#your-own-mcp-servers) every bot on this computer can use. With `beans serve` running, the change reaches it at once; without it, the next `beans serve` reads the file. After editing the file by hand, run `beans mcp reload`.
 
 | Command | What it does |
 | --- | --- |
-| `lorca mcp list` | Lists the servers and how each stands: its tools, a sign-in it needs, or why it did not start. Without `lorca serve` running, it connects each one first. It exits with 1 when a server needs attention. |
-| `lorca mcp get <name>` | Connects a server and shows its settings and tools. |
-| `lorca mcp add <name> <command> [args…]` | Adds a server this computer runs. Everything after the command is its arguments, flags included; `-e KEY=value` sets a variable, once per variable, before the command. |
-| `lorca mcp add <name> <url>` | Adds a remote server that speaks streamable HTTP. `-H "Name: value"` adds a header, before or after the URL. |
-| `lorca mcp add-json <name> <json>` | Adds a server from its JSON, as a README or another app's config writes it. |
-| `lorca mcp remove <name>` | Removes a server, with its sign-in. |
-| `lorca mcp enable <name>`, `disable <name>` | Turns a server on or off. Off, bots don't see it and it never starts. |
-| `lorca mcp sign-in <name>` | Signs in to a remote server that asks for it, in this computer's browser. |
-| `lorca mcp sign-out <name>` | Forgets a remote server's sign-in. Its next use asks for one again. |
-| `lorca mcp reload` | Has the running `lorca serve` read `mcp.json` again, after you edit the file by hand. |
-| `lorca mcp hide <name> <tool>`, `show <name> <tool>` | Keeps one of a server's tools from bots, or offers it again. The tool can be a pattern such as `delete_*`. |
-| `lorca mcp import [file]` | Adds the servers from another app's config: Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, or Gemini CLI, or the file you name. |
+| `beans mcp list` | Lists the servers and how each stands: its tools, a sign-in it needs, or why it did not start. Without `beans serve` running, it connects each one first. It exits with 1 when a server needs attention. |
+| `beans mcp get <name>` | Connects a server and shows its settings and tools. |
+| `beans mcp add <name> <command> [args…]` | Adds a server this computer runs. Everything after the command is its arguments, flags included; `-e KEY=value` sets a variable, once per variable, before the command. |
+| `beans mcp add <name> <url>` | Adds a remote server that speaks streamable HTTP. `-H "Name: value"` adds a header, before or after the URL. |
+| `beans mcp add-json <name> <json>` | Adds a server from its JSON, as a README or another app's config writes it. |
+| `beans mcp remove <name>` | Removes a server, with its sign-in. |
+| `beans mcp enable <name>`, `disable <name>` | Turns a server on or off. Off, bots don't see it and it never starts. |
+| `beans mcp sign-in <name>` | Signs in to a remote server that asks for it, in this computer's browser. |
+| `beans mcp sign-out <name>` | Forgets a remote server's sign-in. Its next use asks for one again. |
+| `beans mcp reload` | Has the running `beans serve` read `mcp.json` again, after you edit the file by hand. |
+| `beans mcp hide <name> <tool>`, `show <name> <tool>` | Keeps one of a server's tools from bots, or offers it again. The tool can be a pattern such as `delete_*`. |
+| `beans mcp import [file]` | Adds the servers from another app's config: Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, or Gemini CLI, or the file you name. |
 
 ```bash
-lorca mcp add notes npx -y @modelcontextprotocol/server-filesystem ~/Notes
-lorca mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=ghp_… docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server
-lorca mcp add linear https://mcp.linear.app/mcp
-lorca mcp add-json time '{"command": "uvx", "args": ["mcp-server-time"]}'
+beans mcp add notes npx -y @modelcontextprotocol/server-filesystem ~/Notes
+beans mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=ghp_… docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server
+beans mcp add linear https://mcp.linear.app/mcp
+beans mcp add-json time '{"command": "uvx", "args": ["mcp-server-time"]}'
 ```
 
 `--description` tells bots what a server is for, and `--timeout` how many seconds a call may go without an answer. `add` connects the server once it is saved and says whether it started.
@@ -85,33 +88,33 @@ lorca mcp add-json time '{"command": "uvx", "args": ["mcp-server-time"]}'
 ## A headless Runner
 
 ```bash
-export LORCA_RELAY_URL=https://relay.example.com
-lorca pair 'lorca://pair?…'   # from Pair a Device… or `lorca pair` on an existing Device
-lorca service install
+export BEANS_RELAY_URL=https://relay.example.com
+beans pair 'beans://pair?v=2&…'   # from Pair a Device… or `beans pair` on an existing Device
+beans service install
 ```
 
-The computer shows up in your Device list, and you can create bots for it from the desktop app or your phone. `lorca service install` keeps `lorca serve` running: a launch agent on macOS, a systemd user service on Linux, and a sign-in item on Windows. On Linux it also asks systemd to keep your services running after you log out; if that needs an administrator, it prints the `sudo loginctl enable-linger` command to run. In a container or anywhere else without systemd, run `lorca serve` under your own init or in tmux.
+The computer shows up in your Device list, and you can create bots for it from the desktop app or your phone. `beans service install` keeps `beans serve` running: a launch agent on macOS, a systemd user service on Linux, and a sign-in item on Windows. On Linux it also asks systemd to keep your services running after you log out; if that needs an administrator, it prints the `sudo loginctl enable-linger` command to run. In a container or anywhere else without systemd, run `beans serve` under your own init or in tmux.
 
 ## Updates
 
-CLI self-update is unavailable in Beans, including automatic, manual and remote Device requests. `LORCA_SELF_UPDATE` cannot enable it. **Settings › Devices** reports the core version without advertising this update path.
+CLI self-update is unavailable in Beans, including automatic, manual and remote Device requests. `BEANS_SELF_UPDATE` cannot enable it. **Settings › Devices** reports the core version without advertising this update path.
 
-Beans desktop apps update their bundled CLI through signed Beans readiness. The configured server updater upgrades the relay first and uses `lorca update status|prepare|cancel` to drain standalone Runners before replacement; these commands do not discover or download releases.
+Beans desktop apps update their bundled CLI through signed Beans readiness. The configured server updater upgrades the relay first and uses `beans update status|prepare|cancel` to drain standalone Runners before replacement; these commands do not discover or download releases.
 
 ## Environment
 
 | Variable | What it sets |
 | --- | --- |
-| `LORCA_HOME` | Where keys, credentials, and chats live. Default `~/.lorca`. |
-| `LORCA_PORT` | The local port the app connects to. Default `4862`. |
-| `LORCA_RELAY_URL` | The relay. |
-| `LORCA_SHELL` | The shell bots run commands in. Default `/bin/bash`; on Windows, Git for Windows' bash. On macOS and Linux, commands get your login shell's `PATH` and variables either way. |
-| `LORCA_DEEPSEEK_MODEL`, `LORCA_ANTHROPIC_MODEL`, `LORCA_CHATGPT_MODEL`, `LORCA_GROK_MODEL` | The default model for bots that do not pick one. |
-| `LORCA_MODELS_URL` | Where Beans checks for a newer model catalog. Default `https://lorca.app/models/v1.json`; `LORCA_MODELS_FETCH=0` turns the checks off. |
-| `LORCA_MARKETPLACE_URL` | Where Beans checks for a newer marketplace. Default `https://lorca.app/marketplace/v1.json`; `LORCA_MARKETPLACE_FETCH=0` turns the checks off. |
+| `BEANS_HOME` | Where keys, credentials, and chats live. Default `~/.beans-v2`. |
+| `BEANS_PORT` | The local port the app connects to. Default `4874`. |
+| `BEANS_RELAY_URL` | The relay. |
+| `BEANS_SHELL` | The shell bots run commands in. Default `/bin/bash`; on Windows, Git for Windows' bash. On macOS and Linux, commands get your login shell's `PATH` and variables either way. |
+| `BEANS_DEEPSEEK_MODEL`, `BEANS_ANTHROPIC_MODEL`, `BEANS_CHATGPT_MODEL`, `BEANS_GROK_MODEL` | The default model for bots that do not pick one. |
+| `BEANS_MODELS_URL` | Explicit model catalog override. Otherwise uses the selected relay’s `/models/v1.json`; `BEANS_MODELS_FETCH=0` disables checks. No production host is guessed. |
+| `BEANS_MARKETPLACE_URL` | Explicit marketplace override. Otherwise uses the selected relay’s `/marketplace/v1.json`; `BEANS_MARKETPLACE_FETCH=0` disables checks. Bundled catalogs remain available offline. |
 
 ## Files
 
-Everything is under `~/.lorca/`, readable only by your user: identity and machine keys, provider credentials, settings, chats, attachments, plugins, `mcp.json`, source-bound `catalog.json` and `marketplace.json` caches, and one workspace folder per bot with its memory. The disabled CLI updater does not create `update.json`.
+Everything is under `~/.beans-v2/`, readable only by your user: identity and machine keys, provider credentials, settings, chats, attachments, plugins, `mcp.json`, source-bound `catalog.json` and `marketplace.json` caches, and one workspace folder per bot with its memory. The disabled CLI updater does not create `update.json`.
 
-The macOS Beans app logs the service to `~/Library/Logs/Beans/cli.log`. Under `lorca service` the log is `~/Library/Logs/Lorca/serve.log` on macOS, `journalctl --user -u lorca` on Linux, and `serve.log` in the CLI home on Windows.
+The macOS Beans app logs the service to `~/Library/Logs/Beans/cli.log`. Under `beans service` the log is `~/Library/Logs/Beans/serve.log` on macOS, `journalctl --user -u beans` on Linux, and `serve.log` in the CLI home on Windows.

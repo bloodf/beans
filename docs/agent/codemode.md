@@ -90,7 +90,7 @@ A `Catalog` says what scripts can reach:
 | `search(query, namespace, limit, cancel)` | `searchTools()`. Defaults to BM25 over `entries()`. |
 | `describe_namespace(name, cancel)` | `describeNamespace()`: a `NamespaceDetails { name, description, instructions, tools }`. Defaults to `namespaces()` and `entries()`, with no instructions; a catalog whose `find` reaches tools `entries()` lacks gives them here too. |
 
-`StaticCatalog` is a fixed list. Lorca's CLI implements its own over the plugins installed on a Runner, whose tool lists it keeps on disk so a turn lists them without starting a server.
+`StaticCatalog` is a fixed list. Beans's CLI implements its own over the plugins installed on a Runner, whose tool lists it keeps on disk so a turn lists them without starting a server.
 
 ## Host functions
 

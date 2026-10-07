@@ -92,7 +92,7 @@ function PairingSheet(props: { dismiss: () => void }) {
     <Sheet
       title={L("Pair a Device")}
       subtitle={L(
-        "On the other Device, choose Pair in onboarding (or run `lorca pair <code>`) and paste this code. The Devices run a handshake; the relay only carries ciphertext.",
+        "On the other Device, choose Pair in onboarding (or run `beans pair <code>`) and paste this code. The Devices run a handshake; the relay only carries ciphertext.",
       )}
       width={400}
       confirm={L("Done")}

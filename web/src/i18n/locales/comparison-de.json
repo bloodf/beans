@@ -31,7 +31,7 @@
     },
     {
       "q": "Kann ich mein vorhandenes KI-Abo behalten?",
-      "a": "Beans bietet ChatGPT- und Grok-Abo-Anmeldung. Andere integrierte Anbieter nutzen API-Schlüssel; kompatible Server haben eigene Zugangsvoraussetzungen. Prüfe die Tarif- und Nutzungsregeln deines Anbieters."
+      "a": "Beans bietet ChatGPT-Abo-Anmeldung. Die Grok-Anmeldung ist bis zur Prüfung des Beans-OAuth-Vertrags deaktiviert. Andere Anbieter nutzen API-Schlüssel; prüfe ihre Tarif- und Nutzungsregeln."
     },
     {
       "q": "Führt mein Handy die Bots aus?",
@@ -64,7 +64,7 @@
   "beans": [
     "Dein eigener zugewiesener Mac-, Windows- oder Linux-Runner. Er muss online bleiben.",
     "ChatGPT, Grok, Anthropic, DeepSeek, OpenCode und kompatible Modellendpunkte.",
-    "ChatGPT/Grok-Anmeldung; API-Schlüssel für andere Anbieter. Zugangsdaten werden verschlüsselt zwischen Geräten synchronisiert.",
+    "ChatGPT-Anmeldung; Grok-OAuth deaktiviert. API-Schlüssel für andere Anbieter. Zugangsdaten werden verschlüsselt synchronisiert.",
     "Dauerhafte Botnamen, Anweisungen, Anbieterwahl, Gedächtnis und zugewiesener Runner.",
     "Direktnachrichten, Gruppen mit bis zu sechs Bots, Erwähnungen und Übergaben zwischen Runnern.",
     "Dateiarbeit im Ordner, Shell-Befehle, Websuche und MCP-Plugins mit Berechtigungsabläufen.",

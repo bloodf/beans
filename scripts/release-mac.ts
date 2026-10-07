@@ -16,8 +16,8 @@ await releasePrivateKey();
 for (const tool of ["cargo", "swift", "ditto", "plutil", "xcrun", "create-dmg"]) {
   if (!Bun.which(tool)) throw new Error(`Missing required release tool: ${tool}`);
 }
-if (process.env.LORCA_DEFAULT_RELAY_URL?.trim()) {
-  throw new Error("Public GitHub releases must not embed private relay metadata; unset LORCA_DEFAULT_RELAY_URL");
+if (process.env.BEANS_DEFAULT_RELAY_URL?.trim()) {
+  throw new Error("Public GitHub releases must not embed private relay metadata; unset BEANS_DEFAULT_RELAY_URL");
 }
 const identity = process.env.SIGN_IDENTITY ?? "Developer ID Application";
 const notaryProfile = process.env.NOTARY_PROFILE ?? "BEANS_NOTARY";

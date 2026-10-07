@@ -180,8 +180,8 @@ mod tests {
     #[test]
     fn the_extension_vector_opens() {
         let dek = crate::keys::unb64_32("yMfGxcTDwsHAv769vLu6ubi3trW0s7KxsK-urayrqqk").unwrap();
-        assert_eq!(crate::keys::b64(&crate::keys::push_key(&dek)), "unjACZuGtiiK-SdODWMW3_WnbcuTvn9uzRsw0n7qHus");
-        let sealed = crate::keys::unb64("cPVJx5Kj3f-rxYhZNRuI61AeE75VVo89I2TVTkq372GepHEWAdS9QxGYMPLesVR2AjaBWI7r0-WzY4a4lXRbzHEIG1-8JjyetlxTUxPYBYTTzoOPGTq4Dfu-AIoi1lSRugJWU9eHX2KS_ybQSp8Tu2yiEZQLaMe22zjax9uk").unwrap();
+        assert_eq!(crate::keys::b64(&crate::keys::push_key(&dek)), "yNTeeGZJZYNYvGYS5Yo0GdwCyZ6IhuiHsEzCSP60ves");
+        let sealed = crate::keys::unb64("cPVJx5Kj3f-rxYhZa5XhXAmalJQjReCwQdhctWmFpV2hgZ-mdkFkkSzoQy1JGjNUFvuPToZlZdnj9eIYaA3T7m1rCADhNwin9WsiqH-pfUySo_O2FBKNKP-S3_2CbEff4vo93pMqJz9WyfHUTDMe_xzLhkFVK5dXodBccNcu").unwrap();
         let notice = open(&dek, &sealed).unwrap();
         assert_eq!((notice.title.as_str(), notice.subtitle.as_deref(), notice.chat_id.as_str()), ("Chef", Some("Standup"), "chat-1"));
         assert_eq!(notice.body, "Sent the three flagged invoices.");
@@ -192,14 +192,12 @@ mod tests {
     fn runner(url: &str, dek: &[u8; 32]) -> (Arc<App>, Bot, std::path::PathBuf) {
         use crate::{config::Config, keys::MachineFile};
 
-        let home = std::env::temp_dir().join(format!("lorca-push-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-push-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
-        *app.machine.lock().unwrap() = Some(MachineFile {
-            machine_secret: crate::keys::b64(&crate::keys::random_32()), identity_pubkey: "identity".into(),
-            content_pubkey: "content".into(), account_dek: crate::keys::b64(dek), name: "Runner".into(),
-            os: "macos".into(), os_version: String::new(), model: String::new(), registered: true,
-            relay_url: Some(url.into()), created_at: 1,
-        });
+        *app.machine.lock().unwrap() = Some(MachineFile { format: crate::config::Format::BeansV2, machine_secret: crate::keys::b64(&crate::keys::random_32()), identity_pubkey: "identity".into(),
+        content_pubkey: "content".into(), account_dek: crate::keys::b64(dek), name: "Runner".into(),
+        os: "macos".into(), os_version: String::new(), model: String::new(), registered: true,
+        relay_url: Some(url.into()), created_at: 1, });
         app.settings.lock().unwrap().relay_url = Some(url.into());
         let bot = Bot {
             id: "bot".into(), name: "Chef".into(), description: String::new(), symbol_name: "sparkles".into(),
@@ -234,6 +232,10 @@ mod tests {
 
         let (sent, mut pushes) = tokio::sync::mpsc::unbounded_channel();
         let server = Router::new()
+            .route("/v1/health", axum::routing::get(|| async { Json(serde_json::json!({
+                "ok":true,"service":"beans-relay","format":"beans-v2","protocol":5,
+                "min_protocol":5,"min_roster_protocol":5,"memory_config_version":1
+            })) }))
             .route("/v1/auth/challenge", post(|| async { Json(serde_json::json!({ "nonce": "test" })) }))
             .route("/v1/auth/verify", post(|| async { Json(serde_json::json!({ "token": "test" })) }))
             .route("/v1/push", post(move |Json(body): Json<serde_json::Value>| {
@@ -350,6 +352,10 @@ mod tests {
         let issued = Arc::new(AtomicUsize::new(0));
         let (sent, mut pushes) = tokio::sync::mpsc::unbounded_channel::<Push>();
         let server = Router::new()
+            .route("/v1/health", axum::routing::get(|| async { Json(serde_json::json!({
+                "ok":true,"service":"beans-relay","format":"beans-v2","protocol":5,
+                "min_protocol":5,"min_roster_protocol":5,"memory_config_version":1
+            })) }))
             .route("/v1/auth/challenge", post(|| async { Json(serde_json::json!({ "nonce": "test" })) }))
             .route("/v1/auth/verify", post(move || {
                 let token = format!("token-{}", issued.fetch_add(1, Ordering::Relaxed));

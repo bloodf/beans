@@ -1,4 +1,4 @@
-// Menus that pop up: the system's own in a Lorca window, and a stand-in drawn in the page in a
+// Menus that pop up: the system's own in a Beans window, and a stand-in drawn in the page in a
 // browser tab.
 
 import { Portal } from "@solidjs/web";

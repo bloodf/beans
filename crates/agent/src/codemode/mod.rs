@@ -1060,7 +1060,7 @@ async fn truncate_output(items: Vec<ContentPart>, max_tokens: usize) -> (Vec<Con
         combined.lines().count(),
         removed.div_ceil(CHARS_PER_TOKEN)
     );
-    let path = std::env::temp_dir().join(format!("lorca-codemode-{}.txt", uuid::Uuid::new_v4()));
+    let path = std::env::temp_dir().join(format!("beans-codemode-{}.txt", uuid::Uuid::new_v4()));
     let saved = write_private(&path, combined.as_bytes()).await;
     let full_output_path = match saved {
         Ok(()) => {

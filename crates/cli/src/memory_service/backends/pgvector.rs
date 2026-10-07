@@ -234,7 +234,7 @@ impl PgvectorBackend {
         {
             return Err(MemoryError::new("embedding_model_mismatch"));
         }
-        let tls = memory_postgres_rustls::MakeRustlsConnect::new(lorca_tls::client_config(&[]));
+        let tls = memory_postgres_rustls::MakeRustlsConnect::new(beans_tls::client_config(&[]));
         let (client, connection) = bounded(cancel, 5000, false, async {
             config
                 .connection

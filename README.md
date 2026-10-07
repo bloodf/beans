@@ -67,7 +67,7 @@ Keep the assigned computer online for new turns and scheduled work. Your phone s
 
 Supported connections include:
 
-- ChatGPT and Grok through subscription sign-in.
+- ChatGPT through subscription sign-in. Production Grok subscription OAuth is disabled pending a verified Beans OAuth/referrer contract; Grok models via API-key gateways remain separate.
 - Anthropic, DeepSeek, OpenCode Zen, and OpenCode Go through API keys.
 - Custom providers with OpenAI-compatible or Anthropic-compatible APIs, including reachable local model servers that implement a supported API.
 
@@ -100,12 +100,12 @@ The website is available in [English](https://usebeans.app/), [Português do Bra
 
 ## Build from source
 
-Read [ARCHITECTURE.md](./ARCHITECTURE.md) before changing code, then the subject docs it lists for the parts you touch. Beans builds on [Lorca](https://github.com/egoist/lorca); the CLI binary remains `lorca`, with `LORCA_*` environment variables and `lorca://pair` pairing links.
+Read [ARCHITECTURE.md](./ARCHITECTURE.md) before changing code, then the subject docs it lists for the parts you touch. The binary is `beans`, configuration uses `BEANS_*`, and pairing uses exact `beans://pair?v=2&…` links.
 
 Install [Bun](https://bun.sh) and Rust stable. macOS builds need Xcode with Swift 6 and the macOS 26 SDK. Windows/Linux desktop builds need Go 1.27.1 or newer and the host webview dependencies. Phone builds need Xcode for iOS, or JDK 17 and the Android SDK/NDK for Android. See the [macOS](./docs/architecture/macos-app.md), [desktop](./docs/architecture/desktop-app.md), and [phone](./docs/architecture/phone-app.md) build docs.
 
 ```bash
-git clone --branch feat/durindoor-fresh-start-releases https://github.com/bloodf/beans.git
+git clone https://github.com/bloodf/beans.git
 cd beans
 # To reproduce a release, check out its beans-v<version> tag before installing.
 bun install
@@ -126,23 +126,26 @@ bun run web           # Website development on localhost:3000
 
 For phone development, first run `bun install --cwd mobile`. The phone app is not a root Bun workspace. Desktop cross-compilation uses `cargo-zigbuild`; platform prerequisites and packaging details are in the build docs above.
 
-Beans on macOS uses `~/.beans` and CLI port `4864`. Beans Dev uses `~/.beans-dev` and port `4865`. To run the development CLI directly:
+Beans uses `~/.beans-v2` and CLI port `4874`; Beans Dev uses `~/.beans-dev-v2` and `4875`. Phone cores use `beans-v2/core` or `beans-dev-v2/core` inside the existing OS sandbox. Format `beans-v2`, protocol 5 and versioned backups are intentionally incompatible with old accounts, unversioned phrases and mixed paired Devices. No migration/reset occurs; existing accounts, installed apps and services remain untouched. To run the development CLI directly:
 
 ```bash
-cargo run -q -p lorca -- --home "$HOME/.beans-dev" --port 4865 serve
+cargo run -q -p beans -- --home "$HOME/.beans-dev-v2" --port 4875 serve
 ```
 
 `bun run dev` starts its local relay on every network interface so phones can pair. Use a trusted network. `bun run reset` deletes local installation data; it is not a setup prerequisite.
+
+New backup phrases start with the separate token `beans-v2`, followed by thirteen base32 groups. Restore rejects missing/wrong prefixes before decoding. Do not reuse or reset an existing account directory to make a fresh build start. Relay account requests carry `Beans-Protocol: 5` and `Beans-Format: beans-v2`; incompatible storage and peers fail closed.
+
 
 ### Run your own relay
 
 A relay enables pairing and sync across devices. Run a local instance with:
 
 ```bash
-cargo run -q -p lorca-relay -- --bind 127.0.0.1:8787 --db lorca-relay.db
+cargo run -q -p beans-relay -- --bind 127.0.0.1:8787 --db beans-relay.db
 ```
 
-Set `LORCA_RELAY_SECRET` to a stable random value so devices remain authenticated across restarts. Configure clients through `LORCA_RELAY_URL` or Settings > Advanced. [`.env.example`](./.env.example) documents push settings. Keep credentials and signing keys outside the repository.
+Set `BEANS_RELAY_SECRET` to a stable random value so devices remain authenticated across restarts. Configure clients through `BEANS_RELAY_URL` or Settings > Advanced; no production relay is guessed. [`.env.example`](./.env.example) documents push settings. Keep credentials and signing keys outside the repository.
 
 The relay supports SQLite or Postgres and has a [container recipe](./crates/relay/Dockerfile). Follow the [relay](./docs/architecture/relay.md) and [protocol](./docs/architecture/protocols.md) docs for deployment, proxy configuration, and compatible client upgrades.
 
@@ -168,8 +171,8 @@ Keep changes focused on an observable behavior. Exercise the path with an isolat
 Run the checks relevant to your change:
 
 ```bash
-cargo test --locked --workspace --exclude lorca-mobile
-cargo test --locked -p lorca-mobile # Separate to avoid Runner feature unification
+cargo test --locked --workspace --exclude beans-mobile
+cargo test --locked -p beans-mobile # Separate to avoid Runner feature unification
 bun run check:docs
 bun run l10n
 bun run test:mac-startup
@@ -185,6 +188,9 @@ go -C desktop test ./...
 
 ## License and credits
 
-Beans is licensed under [GPL-3.0](./LICENSE) and builds on [Lorca](https://github.com/egoist/lorca) by egoist. The vendored Blobatar avatar source by Alain is [MIT-licensed](./packages/beans-blobatar/LICENSE).
+Beans is licensed under [GPL-3.0-only](./LICENSE) and builds on [Lorca](https://github.com/egoist/lorca) by egoist, preserving its source history and required attribution. The vendored Blobatar avatar source by Alain is [MIT-licensed](./packages/beans-blobatar/LICENSE).
+
+The read-only tracked-name check takes the provenance name explicitly: `bun run scripts/check-tracked-names.ts Lorca`. It inspects tracked paths/content, allows provenance only here and preserves its enumerated required legal notices; run it after tracked path moves are reconciled.
+
 
 [Website](https://usebeans.app/) · [Downloads](https://usebeans.app/download) · [Documentation](https://usebeans.app/docs) · [Releases](https://github.com/bloodf/beans/releases) · [Privacy](https://usebeans.app/privacy.html) · [Support](https://usebeans.app/support.html)

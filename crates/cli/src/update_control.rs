@@ -1,4 +1,4 @@
-//! Local update control for a Runner. An operator's updater asks the running `lorca serve` to
+//! Local update control for a Runner. An operator's updater asks the running `beans serve` to
 //! prepare (`update.prepare`): the lease closes admission at once, under the lock every admission
 //! takes, and running work finishes undisturbed; `ready` turns true once nothing runs here. Turns,
 //! rooms, routines, routine checks, commands left running, and relay `job` / `request` envelopes
@@ -11,7 +11,7 @@
 //! on the relay for the main pull. Policy replays by version; consumed envelopes replay as no-ops,
 //! preserving deduplication. Cancelling the lease, its
 //! expiry, or a restart lets work in again. Mutating calls need the token in the file
-//! `LORCA_UPDATE_TOKEN_FILE` names; without that variable they are off. Account Pause and running
+//! `BEANS_UPDATE_TOKEN_FILE` names; without that variable they are off. Account Pause and running
 //! work are never touched.
 
 use std::path::Path;
@@ -27,7 +27,7 @@ use crate::app::App;
 /// What a refused admission says.
 pub const UPDATING: &str = "This Runner is installing an update. Try again in a few minutes.";
 /// Names the file holding the operator's update control token.
-pub const TOKEN_FILE_ENV: &str = "LORCA_UPDATE_TOKEN_FILE";
+pub const TOKEN_FILE_ENV: &str = "BEANS_UPDATE_TOKEN_FILE";
 const DEFAULT_LEASE: Duration = Duration::from_secs(600);
 const MIN_LEASE: Duration = Duration::from_secs(30);
 const MAX_LEASE: Duration = Duration::from_secs(3600);
@@ -193,7 +193,7 @@ fn authorize(params: &Value) -> Result<(), String> {
 
 /// `path` is the file `TOKEN_FILE_ENV` names, if any; without one the control is off.
 fn authorize_with(path: Option<std::ffi::OsString>, params: &Value) -> Result<(), String> {
-    let path = path.ok_or("Update control is off: LORCA_UPDATE_TOKEN_FILE is not set.")?;
+    let path = path.ok_or("Update control is off: BEANS_UPDATE_TOKEN_FILE is not set.")?;
     let expected = read_token(Path::new(&path))?;
     let given = params["token"].as_str().ok_or("Update control needs its token.")?;
     // Equal-length digests compared without an early exit.
@@ -252,7 +252,7 @@ mod tests {
     use super::*;
 
     fn scratch_app() -> (Arc<App>, std::path::PathBuf) {
-        let home = std::env::temp_dir().join(format!("lorca-update-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-update-{}", uuid::Uuid::new_v4()));
         (App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap(), home)
     }
 
@@ -378,7 +378,7 @@ mod tests {
     #[cfg(unix)]
     fn token_file(contents: &str, mode: u32) -> TokenFile {
         use std::os::unix::fs::PermissionsExt;
-        let path = std::env::temp_dir().join(format!("lorca-token-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("beans-token-{}", uuid::Uuid::new_v4()));
         std::fs::write(&path, contents).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
         TokenFile { path }
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn token_file_that_is_a_symlink_or_a_directory_is_refused() {
         let real = token_file(&"t".repeat(MIN_TOKEN_CHARS), 0o600);
-        let link = std::env::temp_dir().join(format!("lorca-token-link-{}", uuid::Uuid::new_v4()));
+        let link = std::env::temp_dir().join(format!("beans-token-link-{}", uuid::Uuid::new_v4()));
         std::os::unix::fs::symlink(&real.path, &link).unwrap();
         let refused = read_token(&link);
         let _ = std::fs::remove_file(&link);

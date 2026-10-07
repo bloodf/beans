@@ -1,12 +1,15 @@
 # Releasing the Mac app
 
-Beans uses Sparkle with a project-owned Ed25519 anchor and GitHub assets from the [unified Beans release](releasing-cli.md). Root `package.json` supplies the version; the stable tag is `beans-v<version>` in `bloodf/beans`. Upstream R2 hosting and signing keys are not used.
+Beans uses Sparkle with a project-owned Ed25519 anchor and GitHub assets from the [unified Beans release](releasing-cli.md). Root `package.json` supplies the version; the stable tag is `beans-v<version>` in `bloodf/beans`.
+
+These files describe new Beans-only release assets. Published historical manifests and signatures remain immutable. Fresh-format builds do not migrate existing homes, preferences, accounts or unversioned backups; no installed app, production service or live relay rollout is changed by source packaging.
+
 
 ## Packaging prerequisites
 
 Install Bun, the Rust/Swift toolchains, Xcode and `create-dmg`. SwiftPM resolves Sparkle's tools into `macos/.build/artifacts/sparkle/Sparkle/bin`; `SPARKLE_BIN` can select another installed tool directory.
 
-Provide the matching `BEANS_UPDATE_PRIVATE_KEY` PEM, an installed **Developer ID Application** identity (`SIGN_IDENTITY` selects it), and a notarization keychain profile (`NOTARY_PROFILE`, default `BEANS_NOTARY`). Creating identities, storing Apple credentials and granting provisioning permissions are explicit operator actions, not release-script side effects. Public GitHub packaging refuses a private `LORCA_DEFAULT_RELAY_URL`.
+Provide the matching `BEANS_UPDATE_PRIVATE_KEY` PEM, an installed **Developer ID Application** identity (`SIGN_IDENTITY` selects it), and a notarization keychain profile (`NOTARY_PROFILE`, default `BEANS_NOTARY`). Creating identities, storing Apple credentials and granting provisioning permissions are explicit operator actions, not release-script side effects. Public GitHub packaging refuses a private `BEANS_DEFAULT_RELAY_URL`.
 
 ```sh
 bun run release-mac --local
@@ -20,13 +23,14 @@ The appcast generator requires exactly the current Beans ZIP, uses seed32 on std
 
 `scripts/app.ts` writes the Beans feed/public key into release bundle metadata. Debug bundles omit them and disable checks. `Updater.swift` enables Sparkle only for the Beans production identity and feed; saved opt-outs are preserved. Automatic checks use Sparkle's minimum one-hour interval.
 
-The native updater verifies signed readiness and pins the appcast to that exact release, archive URL/size, version and required protocol. At installation it fetches readiness again and requires the same signed manifest bytes. Relay health requests use an ephemeral session without account credentials or cookies. The selected relay must actually answer `/v1/health` with `ok: true`, service `lorca-relay` and at least the signed required protocol, including when that requirement is 3; the protocol floor is not a health-check bypass.
+The native updater verifies signed readiness, requires protocol at least 5 and pins the appcast to that exact release, archive URL/size, version and required protocol. At installation it fetches readiness again and requires identical signed manifest bytes. Ephemeral relay health requests carry no account credentials or cookies. The selected relay must answer `/v1/health` with `ok: true`, service `beans-relay`, `format: "beans-v2"`, protocol at least the signed requirement, and integer effective `min_protocol`/`min_roster_protocol` from 5 through that requirement. Missing, malformed, wrong-format or unsupported evidence fails closed.
 
 ### Atomic Runner admission drain
 
-The native launcher keeps its build's default CLI home and port isolated: Beans uses `~/.beans` and `4864`, and Beans Dev uses `~/.beans-dev` and `4865`. Existing configurable CLI ports remain supported. When `LORCA_UPDATE_TOKEN_FILE` is absent from the app's environment, the launcher attempts to provision a `native-update-token` in its own home with exclusive creation and mode 0600, or validates the existing file without replacing its bytes or changing permissions. It opens the home and token without following symlinks, requires the opened home to belong to root or the current user and not be group/other writable, and checks the opened token's type, ownership, bounded size and absence of all group/other access. Successful provisioning supplies that path to the child; failure leaves update control unset and ordinary CLI startup continues.
+The native launcher fixes Beans to `~/.beans-v2` / `4874` and Beans Dev to `~/.beans-dev-v2` / `4875`. Preferences use `beans-v2.*` without old-key migration; a saved different port fails closed. It passes the fixed `native-update-token` path into the child environment without creating storage. Only after core readiness does it validate the existing `beans-v2` marker and provision/read the private token through no-follow descriptors. Exclusive 0600 creation preserves existing token bytes and permissions; bounded regular-file and ownership/access checks remain mandatory.
+The opened home and token must belong to root or the current user. The home is not group/other writable; the token is a bounded regular file with no group/other access. Validation never replaces its bytes or changes existing permissions.
 
-An inherited `LORCA_UPDATE_TOKEN_FILE` passes through to the child unchanged: an explicit empty value disables token authorization, and a configured operator value is neither replaced nor read or modified by the native app. The native updater refuses installation whenever this inherited key is present; it does not use an operator path as fallback trust. Native installation requires safely readable app-owned control and a drain-capable connected CLI configured with the matching native token. An external CLI or a child started without native control can serve ordinary app requests, but cannot authorize native installation unless that prerequisite is met.
+An inherited `BEANS_UPDATE_TOKEN_FILE` disable/operator setting cannot authorize native installation. The app does not read, replace or modify an operator token or substitute it for app-owned trust. Installation needs validated app-owned control and a drain-capable connected CLI with the matching token; ordinary app requests do not imply permission to install.
 
 Automatic installation waits for normal quit. Retained composer drafts (including behind Settings), active work, command input, onboarding, modal windows, sheets and edited documents block installation. The app does not clear drafts, cancel jobs, stop commands or change account Pause to make an update ready.
 

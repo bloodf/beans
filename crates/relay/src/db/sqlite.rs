@@ -14,6 +14,8 @@ use tokio::sync::Semaphore;
 use super::{blocking, now, page_of_slots, sealed_kinds_sql, slots_with_rows, GroupSlot, BlobRow, DeletedIdentity, Event, Inserted, Local, Machine, NewBlob, Payload, PushToken, Slot, Stats, Store};
 use crate::routes::{ApiError, ApiResult};
 
+const APPLICATION_ID: u32 = 0x424E5232;
+
 const SCHEMA: &str = "
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
@@ -112,7 +114,18 @@ pub struct Sqlite {
 
 impl Sqlite {
     pub fn open(path: &str, local: Arc<Local>) -> anyhow::Result<Sqlite> {
+        let location = std::path::Path::new(path);
+        if location.exists() {
+            use std::io::Read;
+            let mut header = [0; 72];
+            let mut file = std::fs::File::open(location)?;
+            if file.read_exact(&mut header).is_err() || &header[..16] != b"SQLite format 3\0"
+                || u32::from_be_bytes(header[68..72].try_into().expect("SQLite application id")) != APPLICATION_ID {
+                anyhow::bail!("Beans v2 relay storage required at {path}; existing data is untouched");
+            }
+        }
         let writer = Connection::open(path)?;
+        writer.pragma_update(None, "application_id", APPLICATION_ID)?;
         writer.execute_batch(SCHEMA)?;
         migrate(&writer)?;
 

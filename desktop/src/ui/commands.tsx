@@ -111,7 +111,7 @@ export const commandTable: Command[] = [
     },
     enabled: chatSelected,
   },
-  { id: "help", title: () => L("Lorca Help"), accelerator: "F1" },
+  { id: "help", title: () => L("Beans Help"), accelerator: "F1" },
   { id: "architecture", title: () => L("Architecture Notes") },
   {
     id: "checkForUpdates",

@@ -144,7 +144,7 @@ mod tests {
 
     #[tokio::test]
     async fn images_go_as_a_model_takes_them() {
-        let dir = std::env::temp_dir().join(format!("lorca-read-images-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("beans-read-images-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let small = read(&dir, "small.png", &picture(64, 48, ImageFormat::Png)).await;
         assert_eq!(text(&small), "Read image file [image/png]");

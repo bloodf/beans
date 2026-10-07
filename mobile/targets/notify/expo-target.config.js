@@ -1,7 +1,7 @@
 /** @type {import('@bacons/apple-targets/app.plugin').ConfigFunction} */
 module.exports = (config) => ({
   type: "notification-service",
-  name: "LorcaNotify",
+  name: "BeansNotify",
   displayName: config.name,
   bundleIdentifier: ".notify",
   deploymentTarget: "16.4",

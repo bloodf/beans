@@ -2,8 +2,8 @@
 //! OAuth tokens a Grok sign-in yields (a SuperGrok or X Premium+ account) and calls xAI's
 //! Responses API with them.
 
-pub use lorca_provider_auth::grok as oauth;
-pub use lorca_provider_auth::grok::GrokTokens;
+pub use beans_provider_auth::grok as oauth;
+pub use beans_provider_auth::grok::GrokTokens;
 
 use std::sync::Arc;
 
@@ -58,7 +58,7 @@ impl GrokProvider {
             thinking_level: None,
             info: models::find("grok", model),
             tool_images: ToolImages::UserMessage,
-            client: lorca_tls::client(),
+            client: beans_tls::client(),
         }
     }
 
@@ -289,7 +289,7 @@ mod tests {
         assert!(!later.is_expired());
     }
 
-    /// The tokens of a Lorca data directory, used as they are: xAI rotates the refresh token,
+    /// The tokens of a Beans data directory, used as they are: xAI rotates the refresh token,
     /// so refreshing here would spend the one the account holds.
     struct LiveTokens(GrokTokens);
 
@@ -297,7 +297,7 @@ mod tests {
     impl GrokTokenSource for LiveTokens {
         async fn tokens(&self) -> Result<GrokTokens, String> {
             if self.0.is_expired() {
-                return Err("the access token has expired; let Lorca refresh it, then run the probe again".into());
+                return Err("the access token has expired; let Beans refresh it, then run the probe again".into());
             }
             Ok(self.0.clone())
         }
@@ -306,7 +306,7 @@ mod tests {
         }
     }
 
-    /// `LORCA_CREDENTIALS=~/.lorca/credentials.json cargo test -p lorca-agent live_grok --
+    /// `BEANS_CREDENTIALS=~/.beans-v2/credentials.json cargo test -p beans-agent live_grok --
     /// --ignored --nocapture`: the model reads a random code off a tool's screenshot sent in a
     /// user message, and the probe reports whether it also reads one inside the output.
     #[tokio::test]

@@ -591,7 +591,7 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
               <TextField value={form().url} placeholder="https://mcp.example.com/mcp" monospaced disabled={busy()} label={L("URL")} onInput={(url) => update({ url })} />
             </div>
             <span />
-            <div class="field-note">{L("Streamable HTTP. When the server asks for a sign-in, Lorca signs in with OAuth; or send a token in a header.")}</div>
+            <div class="field-note">{L("Streamable HTTP. When the server asks for a sign-in, Beans signs in with OAuth; or send a token in a header.")}</div>
             <FormLabel text={L("Headers")} top />
             <div class="form-control">
               <PairsEditor

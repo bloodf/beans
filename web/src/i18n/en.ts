@@ -81,7 +81,7 @@ export const en = {
       },
       {
         title: 'Connect an AI provider',
-        body: 'Sign in with ChatGPT or Grok, or paste a DeepSeek API key.',
+        body: 'Sign in with ChatGPT, or paste a DeepSeek API key.',
       },
       {
         title: 'Talk to Chef',
@@ -110,7 +110,7 @@ export const en = {
       },
       {
         q: 'Which AI does it use?',
-        a: 'Your own account or API key. Sign in with ChatGPT or Grok, or add a DeepSeek API key. Each bot can use a different provider, and you can change it any time.',
+        a: 'Your own account or API key. Sign in with ChatGPT, or add a DeepSeek API key. Each bot can use a different provider, and you can change it any time.',
       },
       {
         q: 'What can a bot do on my computer?',

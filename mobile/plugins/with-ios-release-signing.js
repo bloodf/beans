@@ -21,7 +21,7 @@ module.exports = function withIOSReleaseSigning(config) {
       const productType = String(target.productType || "").replaceAll('"', "");
       const targetName = String(target.name || "").replaceAll('"', "");
       const isApp = productType === "com.apple.product-type.application" && targetName === config.name;
-      const isNotification = productType === "com.apple.product-type.app-extension" && targetName === "LorcaNotify";
+      const isNotification = productType === "com.apple.product-type.app-extension" && targetName === "BeansNotify";
       if (!isApp && !isNotification) continue;
       const profile = isApp ? process.env.BEANS_IOS_APP_PROFILE_NAME : process.env.BEANS_IOS_NOTIFY_PROFILE_NAME;
       const list = lists[target.buildConfigurationList];

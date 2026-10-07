@@ -125,9 +125,9 @@ async fn serve(mut socket: tokio::net::TcpStream, port: u16, expected: String, n
         return;
     }
     let (status, page) = if denied(&path) {
-        ("400 Bad Request", "<h2>Sign-in failed</h2><p>Go back to Lorca and try again.</p>".to_string())
+        ("400 Bad Request", "<h2>Sign-in failed</h2><p>Go back to Beans and try again.</p>".to_string())
     } else {
-        ("200 OK", format!("<h2>Signed in to {name}</h2><p>You can close this window and return to Lorca.</p>"))
+        ("200 OK", format!("<h2>Signed in to {name}</h2><p>You can close this window and return to Beans.</p>"))
     };
     let body = format!("<html><body style=\"font-family:-apple-system\">{page}</body></html>");
     let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());

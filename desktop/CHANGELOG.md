@@ -6,6 +6,7 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- Fresh Beans v2 accounts use isolated `.beans-v2` / `.beans-dev-v2` homes, ports 4874 / 4875, versioned backup phrases and pairing links, and independent client preferences. Configure the relay explicitly.
 - Group member rows offer Make Owner from their context menu, with the current owner identified in the inspector.
 - Lossless PNG optimizations reduce bundled image sizes without changing their decoded pixels.
 - Bots show stable offline Blobatar portraits on Windows and Linux, matching the Mac and phone; encrypted uploaded photos still override them.
@@ -16,14 +17,14 @@ and the update window shows it.
 - Manage MCP servers in Settings › Plugins: add a command or URL, edit its configuration, sign in, toggle tools, and reload `mcp.json`. Taskbar titles name the current chat or pane followed by the app name.
 - Built-in model and marketplace catalogs update from the selected Beans relay, with a bundled offline fallback; bots can change their own or a teammate's model and supported thinking level.
 - A running codemode script shows its latest command in the working row; reviewed script commands and MCP resources use the same per-bot controls as direct tools.
-- Devices report their CLI version. Standalone Runners support `lorca service install`; CLI self-update remains unavailable in Beans.
+- Devices report their CLI version. Standalone Runners support `beans service install`; CLI self-update remains unavailable in Beans.
 
 ## [0.1.3]
 
-- The marketplace comes from lorca.app, so new plugins and bots show up without an update, and
-  plugins you installed from it get their fixes the same way. Lorca checks when it starts, when the
+- The marketplace comes from beans.app, so new plugins and bots show up without an update, and
+  plugins you installed from it get their fixes the same way. Beans checks when it starts, when the
   app connects, and when you or a bot look through the marketplace, at most once an hour, and a bot
-  that can't find a plugin you asked for checks again first. `lorca marketplace reload` checks
+  that can't find a plugin you asked for checks again first. `beans marketplace reload` checks
   right away.
 - A bot's scripts can run commands, edit files, and use its memory, as pi's do, not just read and
   write files and call plugins. A script can run a command for each project or file it finds, keep
@@ -32,7 +33,7 @@ and the update window shows it.
 - While a bot's script runs a command, the working row says which, as it does for a command the
   bot runs itself, and bots can read a plugin's whole instructions from its server, not just their
   start.
-- Window titles end with ` - Lorca`, so the taskbar and Alt+Tab say which app a chat belongs
+- Window titles end with ` - Beans`, so the taskbar and Alt+Tab say which app a chat belongs
   to.
 
 ## [0.1.2]
@@ -40,7 +41,7 @@ and the update window shows it.
 - Your own MCP servers: Settings › Plugins has an MCP Servers section, where you add a server by
   the command that runs it or its URL, or paste its JSON from a README or another app's settings,
   and edit, turn off, or remove it. Each server shows how it stands and the tools it offers, with
-  Sign in when it asks for one, and every bot on that computer can use it. Lorca keeps them in
+  Sign in when it asks for one, and every bot on that computer can use it. Beans keeps them in
   `mcp.json` in its folder, in the format Claude Desktop, Cursor, and Claude Code use; after
   editing the file by hand, click Reload. Servers that offer resources, such as files or records,
   give bots tools to list and read them. Pick another Runner in Settings to manage its servers.
@@ -49,14 +50,14 @@ and the update window shows it.
   server wants an app registered with it, with the redirect port or URL it was registered with, a
   name to register under, and the authorization server's address when the server names the wrong
   one. A server that needs more access asks you to sign in again for it.
-- `lorca mcp` lists, adds, removes, turns on or off, hides tools of, reloads, and signs in to or out
-  of MCP servers from a terminal, and `lorca mcp import` adds the servers Claude Desktop, Claude
+- `beans mcp` lists, adds, removes, turns on or off, hides tools of, reloads, and signs in to or out
+  of MCP servers from a terminal, and `beans mcp import` adds the servers Claude Desktop, Claude
   Code, Cursor, Windsurf, VS Code, or Gemini CLI have on the computer.
-- Bots can add an MCP server the marketplace lacks, as its README gives it: the `lorca` command is
+- Bots can add an MCP server the marketplace lacks, as its README gives it: the `beans` command is
   in their shell, pointed at their Runner, and Auto-review checks each change it makes, asking you
   when you didn't ask for it.
 - Plugin servers are sturdier. One that fails to start says why, in the words it printed, and one
-  that stopped starts again on the next call instead of failing until Lorca restarts. Stopping a
+  that stopped starts again on the next call instead of failing until Beans restarts. Stopping a
   server also stops what it started, such as npx's node; a call you stop is called off at the
   server; servers start side by side, so a slow one holds up no other; a server's new tools reach
   bots without a reconnect; and a remote server that is busy for a moment is tried again. A server
@@ -97,7 +98,7 @@ and the update window shows it.
   搜索 and 知乎 take an API key from their sites, and 高德地图 a Web Service key from the Amap console.
 - On Windows 10 the main window and onboarding no longer show Windows' own title bar, with a second
   set of window buttons, above the app's.
-- Settings › Devices can unpair this computer too: Lorca forgets the account's keys, credentials,
+- Settings › Devices can unpair this computer too: Beans forgets the account's keys, credentials,
   and chats here and goes back to onboarding. When this computer holds your identity, the
   confirmation says that your backup phrase becomes the only way to restore it.
 - Red spelling underlines no longer appear under API keys, URLs, plugin variables, names, and
@@ -105,7 +106,7 @@ and the update window shows it.
   checks spelling.
 - Bot avatars, image attachments, and the app icon can no longer be dragged out of the window.
 - On Windows, plugins that start with `npx`, such as Browser and 高德地图, no longer fail with
-  "Cannot start npx: program not found". Lorca finds a plugin's program as a terminal does, so it
+  "Cannot start npx: program not found". Beans finds a plugin's program as a terminal does, so it
   finds the `npx.cmd` that Node.js installs.
 
 ## [0.1.1]
@@ -119,12 +120,12 @@ and the update window shows it.
 - When a long chat fills a bot's context, the summary that replaces the older part, and the memory
   save before it, reuse the prompt cache of the bot's own turn instead of sending the whole chat
   again, so compacting while a bot works costs a fraction of what it did.
-- Lorca opens on your last chat, even when you quit it with Settings open.
+- Beans opens on your last chat, even when you quit it with Settings open.
 - Toggle Inspector shows the inspector in a window too narrow for it. Opening the inspector or the
   sidebar where there is no room widens the window by the pane; a maximized window keeps its size,
   and the chat narrows instead.
 - On Linux without a tray icon, finishing onboarding opens the main window, and Delete Account
-  opens onboarding. Before, Lorca quit.
+  opens onboarding. Before, Beans quit.
 - Your phone still gets the notification for a reply that finishes while the relay restarts or is
   briefly out of reach.
 

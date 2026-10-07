@@ -11,7 +11,7 @@ import * as Haptics from "expo-haptics";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, { useAnimatedStyle, useSharedValue, withSequence, withSpring, withTiming } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
-import { ShimmerView } from "../../modules/lorca-core/ShimmerView";
+import { ShimmerView } from "../../modules/beans-core/ShimmerView";
 import { isLive, isSentMessage, showsCard, type Author, type Body, type Bot, type Chat, type CommandRun, type Message } from "../core/model";
 import { engine } from "../core/engine";
 import { useStore } from "../core/store";
@@ -131,7 +131,7 @@ const REPLY_SWIPE = 56;
 export function quoteAuthorName(author: Author, bots: Map<string, Bot>): string {
   if (author.kind === "you") return t("You");
   if (author.kind === "bot") return bots.get(author.bot_id)?.name ?? t("Bot");
-  return "Lorca";
+  return "Beans";
 }
 
 /// A message that follows a leftward swipe, with a reply arrow fading in behind it; let go past

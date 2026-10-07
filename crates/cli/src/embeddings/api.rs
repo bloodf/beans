@@ -24,7 +24,7 @@ impl ApiEmbedding {
             let mut header=HeaderValue::from_str(&format!("Bearer {key}")).map_err(|_|EmbeddingError::InvalidProfile)?;
             header.set_sensitive(true); Ok(header)
         }).transpose()?;
-        let client=lorca_tls::client_builder().redirect(Policy::none()).timeout(limits.timeout)
+        let client=beans_tls::client_builder().redirect(Policy::none()).timeout(limits.timeout)
             .connect_timeout(limits.timeout).build().map_err(|_|EmbeddingError::Transport)?;
         Ok(Self {spec,client,authorization,limits})
     }

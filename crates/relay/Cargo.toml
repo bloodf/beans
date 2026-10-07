@@ -1,12 +1,12 @@
 [package]
-name = "lorca-relay"
-description = "Zero-knowledge store-and-forward relay for Lorca"
+name = "beans-relay"
+description = "Zero-knowledge store-and-forward relay for Beans"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "lorca-relay"
+name = "beans-relay"
 path = "src/main.rs"
 
 [dependencies]
@@ -38,4 +38,4 @@ uuid.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
-lorca = { path = "../cli", default-features = false }
+beans = { path = "../cli", default-features = false }

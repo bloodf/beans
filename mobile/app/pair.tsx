@@ -4,7 +4,7 @@ import * as Haptics from "expo-haptics";
 import * as Application from "expo-application";
 import { LinearGradient } from "expo-linear-gradient";
 import { useEffect, useRef, useState } from "react";
-import { useLocalSearchParams } from "expo-router";
+import { useLinkingURL } from "expo-linking";
 import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { engine } from "../src/core/engine";
@@ -36,16 +36,15 @@ export default function PairScreen() {
   const scanned = useRef(false);
   const lastFailed = useRef<string | null>(null);
   const busy = phase !== "idle";
-  // A pairing code opened as a link (`lorca://pair?…`, from the Camera app or a tap on the
-  // another Device's code) lands here with its fields as params: pair with it right away.
-  const params = useLocalSearchParams<{ relay?: string; id?: string; ek?: string; n?: string }>();
+  // Validate the original URL, not router params: reconstruction loses duplicate fields
+  // and can turn a different scheme or missing version into an acceptable pairing code.
+  const url = useLinkingURL();
   useEffect(() => {
-    if (!params.relay || !params.id || !params.ek || !params.n || inFlight.current) return;
-    const text = `lorca://pair?relay=${encodeURIComponent(params.relay)}&id=${params.id}&ek=${params.ek}&n=${params.n}`;
-    setCode(text);
-    void pair(text);
+    if (!url?.startsWith("beans://pair?") || inFlight.current) return;
+    setCode(url);
+    void pair(url);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.relay, params.id, params.ek, params.n]);
+  }, [url]);
 
   async function pair(text: string) {
     if (inFlight.current) return;
@@ -91,7 +90,7 @@ export default function PairScreen() {
 
   async function paste() {
     const text = (await Clipboard.getStringAsync()).trim();
-    if (text.includes("pair?")) {
+    if (text) {
       setCode(text);
       void pair(text);
     } else {
@@ -108,7 +107,7 @@ export default function PairScreen() {
           </View>
           <Text style={[styles.title, { color: p.label }]}>{t("Pair this phone")}</Text>
           <Text style={[styles.subtitle, { color: p.secondaryLabel }]}>
-            {t("Your bots run on your own computers. Get a pairing code from a computer that already has your identity: choose Pair a Device in the desktop app, or run lorca pair in a terminal. Then scan or paste the code.")}
+            {t("Your bots run on your own computers. Get a pairing code from a computer that already has your identity: choose Pair a Device in the desktop app, or run beans pair in a terminal. Then scan or paste the code.")}
           </Text>
 
           <View style={[styles.card, { backgroundColor: p.cell }]}>
@@ -139,7 +138,7 @@ export default function PairScreen() {
                 <TextInput
                   value={code}
                   onChangeText={setCode}
-                  placeholder="lorca://pair?relay=…"
+                  placeholder="beans://pair?v=2&relay=…"
                   placeholderTextColor={p.tertiaryLabel}
                   style={[styles.input, styles.codeInput, { color: p.label }]}
                   autoCapitalize="none"
@@ -163,7 +162,7 @@ export default function PairScreen() {
             facing="back"
             barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
             onBarcodeScanned={({ data }) => {
-              if (!data.includes("pair?") || inFlight.current || scanned.current) return;
+              if (!data.trim().startsWith("beans://pair?") || inFlight.current || scanned.current) return;
               scanned.current = true;
               setScanning(false);
               void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);

@@ -27,7 +27,7 @@ pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 pub const DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
 pub const DEEPSEEK_DEFAULT_MODEL: &str = super::openai_compat::DEEPSEEK_DEFAULT_MODEL;
 
-const USER_AGENT: &str = concat!("lorca-agent/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("beans-agent/", env!("CARGO_PKG_VERSION"));
 /// The most `cache_control` marks a request may carry.
 const MAX_CACHE_MARKS: usize = 4;
 /// Answer allowance kept inside the output cap when thinking uses a token budget.
@@ -86,7 +86,7 @@ impl AnthropicProvider {
             eager_tool_streaming: true,
             max_retries: 2,
             max_retry_delay_ms: DEFAULT_MAX_RETRY_DELAY_MS,
-            client: lorca_tls::client(),
+            client: beans_tls::client(),
         }
     }
 
@@ -128,7 +128,7 @@ impl AnthropicProvider {
     }
 
     pub fn without_redirects(mut self) -> Self {
-        self.client = lorca_tls::client_builder().redirect(reqwest::redirect::Policy::none())
+        self.client = beans_tls::client_builder().redirect(reqwest::redirect::Policy::none())
             .build().expect("a client over a built TLS config");
         self
     }
@@ -1121,7 +1121,7 @@ mod tests {
             ("content_block_delta", json!({ "index": 1, "delta": { "type": "input_json_delta", "partial_json": "ca relay\"}" } })),
             ("content_block_stop", json!({ "index": 1 })),
             ("content_block_start", json!({ "index": 2, "content_block": { "type": "web_search_tool_result", "tool_use_id": "call_00", "content": [
-                { "type": "web_search_result", "title": "Lorca", "url": "https://example.com", "encrypted_content": "xx", "page_age": null }
+                { "type": "web_search_result", "title": "Beans", "url": "https://example.com", "encrypted_content": "xx", "page_age": null }
             ] } })),
             ("content_block_stop", json!({ "index": 2 })),
             ("content_block_start", json!({ "index": 3, "content_block": { "type": "text", "text": "" } })),
@@ -1137,9 +1137,9 @@ mod tests {
         let (events, state) = drive(&search_stream()).await;
         let starts: Vec<_> = events.iter().filter(|e| matches!(e, AssistantEvent::ServerToolStart { .. })).collect();
         assert_eq!(starts.len(), 1);
-        assert!(matches!(starts[0], AssistantEvent::ServerToolStart { id, name, detail } if id == "call_00" && name == WEB_SEARCH_TOOL && detail == "lorca relay"));
+        assert!(matches!(starts[0], AssistantEvent::ServerToolStart { id, name, detail } if id == "call_00" && name == WEB_SEARCH_TOOL && detail == "beans relay"));
         assert!(events.iter().any(|e| matches!(e, AssistantEvent::ServerToolEnd { id, name, detail, summary }
-            if id == "call_00" && name == WEB_SEARCH_TOOL && detail == "lorca relay" && summary == "Searched the web for “lorca relay”")));
+            if id == "call_00" && name == WEB_SEARCH_TOOL && detail == "beans relay" && summary == "Searched the web for “beans relay”")));
         assert_eq!(state.stop, Some(Ok(StopReason::Stop)));
         assert_eq!((state.usage.input, state.usage.output, state.usage.reasoning), (3200, 40, Some(12)));
 
@@ -1150,7 +1150,7 @@ mod tests {
         let message = acc.finish(false);
         assert_eq!(message.content.len(), 4);
         assert!(matches!(&message.content[0], AssistantPart::Thinking { thinking, signature: Some(s) } if thinking == "I should search." && s == "msg-1"));
-        assert!(matches!(&message.content[1], AssistantPart::ServerBlock { block } if block["input"]["query"] == "lorca relay"));
+        assert!(matches!(&message.content[1], AssistantPart::ServerBlock { block } if block["input"]["query"] == "beans relay"));
         assert!(matches!(&message.content[2], AssistantPart::ServerBlock { block } if block["type"] == "web_search_tool_result"));
         assert!(matches!(&message.content[3], AssistantPart::Text { text } if text == "Found it."));
         assert_eq!(message.text(), "Found it.");
@@ -1219,10 +1219,10 @@ mod tests {
         assert_eq!(state.stop, Some(Ok(StopReason::Stop)));
     }
 
-    /// Runs against DeepSeek's endpoint: `DEEPSEEK_API_KEY=… cargo test -p lorca-agent
+    /// Runs against DeepSeek's endpoint: `DEEPSEEK_API_KEY=… cargo test -p beans-agent
     /// live_deepseek -- --ignored --nocapture`. A search, then a function call the turn
     /// continues from with the seals and server blocks replayed.
-    /// `DEEPSEEK_API_KEY=… cargo test -p lorca-agent live_deepseek_takes -- --ignored
+    /// `DEEPSEEK_API_KEY=… cargo test -p beans-agent live_deepseek_takes -- --ignored
     /// --nocapture`. A turn with its cache points and a note after them carries four marks.
     #[tokio::test]
     #[ignore]

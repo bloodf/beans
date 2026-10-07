@@ -24,7 +24,7 @@ const SERVED = [
 
 function servedFiles(): Plugin {
   return {
-    name: 'lorca-served-files',
+    name: 'beans-served-files',
     buildStart() {
       for (const [from, to] of SERVED) {
         const file = JSON.parse(readFileSync(fileURLToPath(new URL(from, import.meta.url)), 'utf8'))

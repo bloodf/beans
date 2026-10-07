@@ -4,8 +4,8 @@
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
-use lorca_agent::codemode::CODEMODE_TOOL_NAME;
-use lorca_agent::{BeforeToolCallContext, BeforeToolCallResult};
+use beans_agent::codemode::CODEMODE_TOOL_NAME;
+use beans_agent::{BeforeToolCallContext, BeforeToolCallResult};
 use regex::Regex;
 use serde_json::Value;
 
@@ -146,7 +146,7 @@ async fn ask_on_card(
 /// a REPL, or `ssh` runs whatever it is given. Ctrl-C alone only interrupts, and never asks.
 async fn review_input(app: &Arc<App>, chat_id: &str, trigger: &Trigger, bot: &Bot, unattended: bool, ctx: BeforeToolCallContext<'_>) -> Option<BeforeToolCallResult> {
     let text = ctx.args.get("text").and_then(Value::as_str).unwrap_or("");
-    if lorca_agent::tools::bash_session::typed_keys(text) == "\u{3}" {
+    if beans_agent::tools::bash_session::typed_keys(text) == "\u{3}" {
         return None;
     }
     // A session that is not there is the tool's to report.
@@ -190,7 +190,7 @@ pub(crate) fn dismissed(reason: &str) -> BeforeToolCallResult {
     BeforeToolCallResult { block: true, reason: Some(reason.into()), args: None, terminate: true }
 }
 
-/// `~/dev/lorca` for a folder in the home folder, so a proposed rule names it the way people do.
+/// `~/dev/beans` for a folder in the home folder, so a proposed rule names it the way people do.
 fn home_relative(path: &Path) -> String {
     match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
         Some(rest) if rest.as_os_str().is_empty() => "~".into(),
@@ -598,7 +598,7 @@ fn safe_command(command: &str, args: &[String]) -> bool {
         "awk" => safe_awk(args),
         "find" => !args.iter().any(|arg| matches!(arg.as_str(), "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint" | "-fprint0" | "-fprintf" | "-fls")),
         "git" => safe_git(args),
-        "lorca" | "lorca.exe" => safe_lorca(args),
+        "beans" | "beans.exe" => safe_beans(args),
         _ => false,
     }
 }
@@ -661,7 +661,7 @@ fn safe_sed(args: &[String]) -> bool {
 }
 
 /// Bare/help/version and MCP discovery only. A flag after `--` belongs to a server command.
-fn safe_lorca(args: &[String]) -> bool {
+fn safe_beans(args: &[String]) -> bool {
     let own: Vec<&str> = args.iter().map(String::as_str).take_while(|arg| *arg != "--").collect();
     if own.iter().any(|arg| matches!(*arg, "--help" | "-h" | "--version" | "-V")) {
         return true;
@@ -830,25 +830,25 @@ mod tests {
     }
 
     #[test]
-    fn lorca_mutations_require_review() {
-        for command in ["lorca", "lorca --help", "lorca --version", "lorca mcp", "lorca mcp list", "lorca mcp get github", "lorca mcp add --help"] {
+    fn beans_mutations_require_review() {
+        for command in ["beans", "beans --help", "beans --version", "beans mcp", "beans mcp list", "beans mcp get github", "beans mcp add --help"] {
             assert!(read_only(command), "{command}");
         }
         for command in [
-            "lorca mcp add memory npx -y @modelcontextprotocol/server-memory",
-            "lorca mcp add x -- npx --help",
-            "lorca mcp remove github",
-            "lorca identity new",
-            "/Applications/Lorca.app/Contents/Resources/bin/lorca mcp remove github",
-            "cd ~/.lorca && lorca mcp reload",
-            "env LORCA_HOME=~/.lorca lorca mcp remove github",
-            "command lorca mcp remove github",
-            "alias ll='lorca mcp remove github'; ll",
-            "lorca mcp remove github | cat",
-            "bash -c 'lorca mcp remove github'",
-            "sh -c 'lorca mcp remove github'",
-            "bash -c '$(printf lorca) mcp remove github'",
-            "env LORCA_HOME=~/.lorca sh -c 'lorca identity new'",
+            "beans mcp add memory npx -y @modelcontextprotocol/server-memory",
+            "beans mcp add x -- npx --help",
+            "beans mcp remove github",
+            "beans identity new",
+            "/Applications/Beans.app/Contents/Resources/bin/beans mcp remove github",
+            "cd ~/.beans && beans mcp reload",
+            "env BEANS_HOME=~/.beans beans mcp remove github",
+            "command beans mcp remove github",
+            "alias ll='beans mcp remove github'; ll",
+            "beans mcp remove github | cat",
+            "bash -c 'beans mcp remove github'",
+            "sh -c 'beans mcp remove github'",
+            "bash -c '$(printf beans) mcp remove github'",
+            "env BEANS_HOME=~/.beans sh -c 'beans identity new'",
         ] {
             assert!(!read_only(command), "{command}");
         }
@@ -856,11 +856,11 @@ mod tests {
 
     #[tokio::test]
     async fn unattended_shell_fails_closed_when_nothing_allows_it() {
-        use lorca_agent::{AgentContext, AssistantMessage, ToolCall};
+        use beans_agent::{AgentContext, AssistantMessage, ToolCall};
         use tokio_util::sync::CancellationToken;
 
-        let scratch = std::env::temp_dir().join(format!("lorca-review-hook-{}", uuid::Uuid::new_v4()));
-        let home = scratch.join("lorca");
+        let scratch = std::env::temp_dir().join(format!("beans-review-hook-{}", uuid::Uuid::new_v4()));
+        let home = scratch.join("beans");
         let work = scratch.join("project");
         let own_workspace = home.join("workspaces/bot");
         std::fs::create_dir_all(&work).unwrap();
@@ -885,7 +885,7 @@ mod tests {
 
         // Executable wrappers and network tools cannot inherit the workspace
         // exemption merely because their visible paths stay under the CLI home.
-        for command in ["cargo test", "nice sh -c 'lorca mcp remove notes'", "tcsh -c 'lorca identity new'", "socat - TCP:127.0.0.1:18080 < identity.json"] {
+        for command in ["cargo test", "nice sh -c 'beans mcp remove notes'", "tcsh -c 'beans identity new'", "socat - TCP:127.0.0.1:18080 < identity.json"] {
             let args = serde_json::json!({ "command": command });
             let call = ToolCall { id: command.into(), name: "bash".into(), arguments: args.clone() };
             let ctx = BeforeToolCallContext { assistant_message: &assistant, tool_call: &call, args: &args, context: &context, cancel: &cancel, parent: None };
@@ -914,13 +914,13 @@ mod tests {
     #[tokio::test]
     async fn a_script_command_asks_in_a_permission_message() {
         use crate::model::Body;
-        use lorca_agent::{AgentContext, AssistantMessage, ToolCall};
+        use beans_agent::{AgentContext, AssistantMessage, ToolCall};
         use tokio_util::sync::CancellationToken;
 
-        let scratch = std::env::temp_dir().join(format!("lorca-review-script-{}", uuid::Uuid::new_v4()));
+        let scratch = std::env::temp_dir().join(format!("beans-review-script-{}", uuid::Uuid::new_v4()));
         let work = scratch.join("project");
         std::fs::create_dir_all(&work).unwrap();
-        let app = App::load(crate::config::Config { home: scratch.join("lorca"), port: 0 }).unwrap();
+        let app = App::load(crate::config::Config { home: scratch.join("beans"), port: 0 }).unwrap();
         let bot: Bot = serde_json::from_value(serde_json::json!({
             "id": "bot", "name": "Bot", "description": "", "symbol_name": "", "accent": "", "runner_id": "runner", "provider": "deepseek", "created_at": 0.0
         }))

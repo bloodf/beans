@@ -15,9 +15,9 @@ use crate::runtime::{self, TurnOutcome};
 use crate::schedule;
 
 #[cfg(feature = "runner")]
-use lorca_agent::codemode::{CodemodeOptions, CodemodeTool, HostFunction};
+use beans_agent::codemode::{CodemodeOptions, CodemodeTool, HostFunction};
 #[cfg(feature = "runner")]
-use lorca_agent::{DirectRunner, Tool, ToolOutcome, ToolResult, ToolRunner};
+use beans_agent::{DirectRunner, Tool, ToolOutcome, ToolResult, ToolRunner};
 #[cfg(feature = "runner")]
 use tokio_util::sync::CancellationToken;
 
@@ -118,7 +118,7 @@ fn clean_check(code: &str) -> Result<Option<String>, String> {
         return Err(format!("Keep the check under {MAX_CHECK_CHARS} characters: it only looks, and the run does the work."));
     }
     #[cfg(feature = "runner")]
-    lorca_agent::codemode::parse_source(code)?;
+    beans_agent::codemode::parse_source(code)?;
     Ok(Some(code.to_string()))
 }
 
@@ -465,7 +465,7 @@ pub async fn run_check(app: &Arc<App>, routine: &Routine, cancel: &CancellationT
         Err(error) => return failed(error.to_string()),
     };
     let files: Vec<Arc<dyn Tool>> =
-        lorca_agent::tools::coding_tools(bot.working_directory(&app.config.home)).into_iter().filter(|tool| CHECK_FILE_TOOLS.contains(&tool.name())).collect();
+        beans_agent::tools::coding_tools(bot.working_directory(&app.config.home)).into_iter().filter(|tool| CHECK_FILE_TOOLS.contains(&tool.name())).collect();
     let catalog = crate::plugins::mcp::turn_catalog_for_bot(app, files, &bot.id);
     let store = Arc::new(crate::scripts::ScriptStore { app: app.clone(), chat_id: dm.meta.id.clone(), bot_id: bot.id.clone() });
     let functions: Vec<Arc<dyn HostFunction>> =
@@ -585,7 +585,7 @@ mod tests {
     /// An App with an identity on a scratch home, so this Device is a Runner, and one bot
     /// `b1` (Chef) assigned to it.
     fn scratch_app() -> ScratchApp {
-        let home = std::env::temp_dir().join(format!("lorca-routines-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("beans-routines-{}", uuid::Uuid::new_v4()));
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Workbench".into())).unwrap();
         let runner_id = app.this_device_id().unwrap();

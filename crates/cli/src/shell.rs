@@ -1,5 +1,5 @@
 //! The `bash` calls on this Runner and the terminal sessions they run in
-//! (`lorca_agent::tools::bash_session`): which chat and bot each belongs to, the card that shows
+//! (`beans_agent::tools::bash_session`): which chat and bot each belongs to, the card that shows
 //! it (the call's row, `Body::Tool.run`), and what ends it. A card follows its call from the
 //! start: Auto-review's question, the command's output while it runs, what it asks, and how it
 //! ended. A command waiting for input outlives the turn that started it, so the bot can answer it
@@ -12,14 +12,14 @@
 //! when it asks something.
 //!
 //! A pty that outlives its turn is a leak unless something ends it: the command exiting, Stop
-//! (in the chat, on the card, or in Running tasks), deleting the chat or its bot, Lorca quitting,
+//! (in the chat, on the card, or in Running tasks), deleting the chat or its bot, Beans quitting,
 //! the idle limit, and the count limit.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lorca_agent::tools::bash_session::{PROMPT_QUIET, WAITING_AFTER};
-use lorca_agent::tools::{BashSession, BashSessions, SessionEnd};
+use beans_agent::tools::bash_session::{PROMPT_QUIET, WAITING_AFTER};
+use beans_agent::tools::{BashSession, BashSessions, SessionEnd};
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
@@ -363,12 +363,12 @@ impl Sessions {
         true
     }
 
-    /// Lorca is quitting: every command still running stops, and its card says so. The cards
+    /// Beans is quitting: every command still running stops, and its card says so. The cards
     /// go up to the relay on the next start.
     pub fn shutdown(&self, app: &App) {
         let sessions: Vec<Arc<BashSession>> = self.entries.lock().unwrap().iter().filter_map(|e| e.session.clone()).collect();
         for session in sessions {
-            session.stop("Stopped when Lorca quit");
+            session.stop("Stopped when Beans quit");
             self.sync_row(app, session.id());
         }
     }
@@ -376,7 +376,7 @@ impl Sessions {
 
 /// A command its call left running ended by itself, and its bot has not read how: a turn for
 /// the bot to hear it and carry on (`kind` `command`). Not after a Stop, the idle limit, or
-/// Lorca quitting, which the user brought about.
+/// Beans quitting, which the user brought about.
 pub(crate) fn wake_job(app: &App, sessions: &Sessions, id: &str) -> Option<crate::model::Job> {
     let (chat_id, bot_id, message_id) = {
         let entries = sessions.entries.lock().unwrap();
@@ -564,7 +564,7 @@ pub async fn serve(app: &Arc<App>, verb: &str, body: &Value) -> Result<Value, St
     }
 }
 
-/// A card left open (Auto-review checking, a question, a command running) by a Lorca that quit
+/// A card left open (Auto-review checking, a question, a command running) by a Beans that quit
 /// before it could say so: the call went with it. Cards of this Runner's own bots only; another
 /// Runner's are its own to keep.
 pub fn close_stale_rows(app: &App) {
@@ -585,7 +585,7 @@ pub fn close_stale_rows(app: &App) {
         if !run.is_open() {
             continue;
         }
-        let reason = "Stopped when Lorca quit".to_string();
+        let reason = "Stopped when Beans quit".to_string();
         run.state = "stopped".into();
         run.prompt = None;
         run.outcome = Some(reason.clone());
@@ -602,23 +602,23 @@ impl Sessions {
     }
 }
 
-/// Give bot commands this Runner's own CLI and address, ahead of another Lorca install.
-pub fn bot_shell_extras(app: &App) -> lorca_agent::login_shell::Extras {
+/// Give bot commands this Runner's own CLI and address, ahead of another Beans install.
+pub fn bot_shell_extras(app: &App) -> beans_agent::login_shell::Extras {
     let path_first = std::env::current_exe()
         .ok()
-        .filter(|exe| exe.file_stem().and_then(|stem| stem.to_str()).is_some_and(|stem| stem.eq_ignore_ascii_case("lorca")))
+        .filter(|exe| exe.file_stem().and_then(|stem| stem.to_str()).is_some_and(|stem| stem.eq_ignore_ascii_case("beans")))
         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
         .into_iter()
         .collect();
-    lorca_agent::login_shell::Extras {
-        variables: vec![("LORCA_HOME".into(), app.config.home.clone().into_os_string()), ("LORCA_PORT".into(), app.config.port.to_string().into())],
+    beans_agent::login_shell::Extras {
+        variables: vec![("BEANS_HOME".into(), app.config.home.clone().into_os_string()), ("BEANS_PORT".into(), app.config.port.to_string().into())],
         path_first,
     }
 }
 /// A codemode shell call uses pipes, not the persistent terminals behind the direct bash tool.
 /// Its nested ToolRunner call must still pass the live bot shell gate and Auto-review hook.
-pub fn script_bash(app: &App, workdir: std::path::PathBuf) -> lorca_agent::tools::BashTool {
-    lorca_agent::tools::BashTool::for_script(workdir).with_extras(bot_shell_extras(app))
+pub fn script_bash(app: &App, workdir: std::path::PathBuf) -> beans_agent::tools::BashTool {
+    beans_agent::tools::BashTool::for_script(workdir).with_extras(bot_shell_extras(app))
 }
 
 /// A turn's reach into the sessions: a bot reaches the ones it started, in the chat it runs in.

@@ -177,24 +177,36 @@ impl IntoResponse for ApiError {
 pub type ApiResult<T> = Result<T, ApiError>;
 
 /// The protocol this relay speaks, in `/v1/health`. A client sends the one it speaks as
-/// `Lorca-Protocol`. 1: group paging, `DELETE /v1/identity`. 2: `POST /v1/machines`.
+/// `Beans-Protocol`. 1: group paging, `DELETE /v1/identity`. 2: `POST /v1/machines`.
 /// 3: durable encrypted policy events. 4: appearance-preserving roster writers.
-pub const PROTOCOL: u32 = 4;
-const MIN_ROSTER_PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
+const MIN_ROSTER_PROTOCOL: u32 = 5;
+const FORMAT: &str = "beans-v2";
+
+fn account_min_protocol(state: &AppState) -> u32 {
+    state.min_protocol.max(PROTOCOL)
+}
 
 fn roster_min_protocol(state: &AppState) -> u32 {
-    state.min_protocol.max(MIN_ROSTER_PROTOCOL)
+    account_min_protocol(state).max(MIN_ROSTER_PROTOCOL)
 }
 
 fn client_protocol(headers: &HeaderMap) -> u32 {
-    headers.get("lorca-protocol").and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok()).unwrap_or(0)
+    let mut values = headers.get_all("beans-protocol").iter();
+    let first = values.next();
+    if values.next().is_some() { return 0; }
+    first.and_then(|value| value.to_str().ok()).and_then(|value| value.parse().ok()).unwrap_or(0)
+}
+
+fn client_format(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all("beans-format").iter();
+    values.next().is_some_and(|value| value.as_bytes() == FORMAT.as_bytes()) && values.next().is_none()
 }
 
 fn upgrade_required(min_protocol: u32) -> Response {
     crate::metrics::METRICS.outdated_clients.add(1);
     (StatusCode::UPGRADE_REQUIRED, Json(json!({
-        "error": "This relay needs a newer Lorca", "min_protocol": min_protocol, "protocol": PROTOCOL
+        "error": "This relay requires Beans v2", "format": FORMAT, "min_protocol": min_protocol, "protocol": PROTOCOL
     }))).into_response()
 }
 
@@ -202,8 +214,9 @@ fn upgrade_required(min_protocol: u32) -> Response {
 /// Public catalogs, `/`, the healthcheck, and `/metrics` need no client protocol.
 async fn require_protocol(State(state): State<AppState>, request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let speaks = client_protocol(request.headers());
-    if speaks < state.min_protocol && request.uri().path().starts_with("/v1/") && request.uri().path() != "/v1/health" {
-        return upgrade_required(state.min_protocol);
+    if request.uri().path().starts_with("/v1/") && request.uri().path() != "/v1/health"
+        && (speaks < account_min_protocol(&state) || !client_format(request.headers())) {
+        return upgrade_required(account_min_protocol(&state));
     }
     next.run(request).await
 }
@@ -249,12 +262,12 @@ pub fn router(state: AppState) -> Router {
 
 /// What a browser opening the relay's address sees.
 async fn root() -> &'static str {
-    "Lorca Relay is running..."
+    "Beans Relay is running..."
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({ "ok": true, "service": "lorca-relay", "protocol": PROTOCOL,
-        "min_protocol": state.min_protocol, "min_roster_protocol": roster_min_protocol(&state),
+    Json(json!({ "ok": true, "service": "beans-relay", "protocol": PROTOCOL,
+        "format": FORMAT, "min_protocol": account_min_protocol(&state), "min_roster_protocol": roster_min_protocol(&state),
         "memory_config_version": 1,
         "version": env!("CARGO_PKG_VERSION") }))
 }

@@ -31,7 +31,7 @@
     },
     {
       "q": "¿Puedo mantener mi suscripción de IA?",
-      "a": "Beans ofrece acceso por suscripción de ChatGPT y Grok. Otros proveedores integrados usan claves API y los servidores compatibles tienen sus propios requisitos. Consulta las reglas del plan y de uso de tu proveedor."
+      "a": "Beans ofrece acceso por suscripción de ChatGPT. El acceso Grok está desactivado hasta verificar el contrato OAuth de Beans. Otros proveedores usan claves API y tienen sus propios requisitos. Consulta sus reglas de uso."
     },
     {
       "q": "¿Mi móvil ejecuta los bots?",
@@ -64,7 +64,7 @@
   "beans": [
     "Un Runner Mac, Windows o Linux que te pertenece. Debe permanecer conectado.",
     "ChatGPT, Grok, Anthropic, DeepSeek, OpenCode y endpoints compatibles.",
-    "Acceso ChatGPT/Grok; claves API para otros proveedores. Las credenciales se sincronizan cifradas entre dispositivos.",
+    "Acceso ChatGPT; OAuth Grok desactivado. Claves API para otros proveedores; credenciales sincronizadas cifradas.",
     "Nombres, instrucciones, proveedor, memoria y Runner asignados a cada bot.",
     "Mensajes directos, grupos de hasta seis bots, menciones y transferencias entre Runners.",
     "Archivos en carpetas, comandos shell, búsqueda web y plugins MCP con permisos.",

@@ -100,7 +100,7 @@ export function Onboarding() {
       return;
     }
     if (!store.isConnected) {
-      presentError(L("The Lorca CLI is not running. Start it with `lorca serve` and try again.").replace("lorca serve", hostInfo().cliCommand));
+      presentError(L("The Beans CLI is not running. Start it with `beans serve` and try again.").replace("beans serve", hostInfo().cliCommand));
       return;
     }
     busy = true;
@@ -297,8 +297,8 @@ export function Onboarding() {
               return (
                 <JoinStep
                   title={L("Restore your identity")}
-                  subtitle={L("Paste the twelve groups from your backup phrase. Everything else is re-derived and unwrapped from the relay.")}
-                  placeholder="k4mq 7rth 2bnz …"
+                  subtitle={L("Paste beans-v2 followed by the thirteen groups from your backup phrase. Everything else is re-derived and unwrapped from the relay.")}
+                  placeholder="beans-v2 k4mq 7rth 2bnz …"
                   note={
                     store.relayURL === null
                       ? L("Restoring unwraps the account key from the relay. Set a relay URL in Settings › Advanced first.")
@@ -317,9 +317,9 @@ export function Onboarding() {
                 <JoinStep
                   title={L("Pair this computer")}
                   subtitle={L(
-                    "On a computer that already has your identity, choose File › Pair a Device in the desktop app or run lorca pair in a terminal, then paste the code here.",
+                    "On a computer that already has your identity, choose File › Pair a Device in the desktop app or run beans pair in a terminal, then paste the code here.",
                   )}
-                  placeholder="lorca://pair?relay=…"
+                  placeholder="beans://pair?v=2&relay=…"
                   note={L("The two Devices run a handshake; the relay only carries the ciphertext. This computer joins as a Runner.")}
                   status={status()}
                   action={L("Pair")}
@@ -494,7 +494,7 @@ function ProviderRows(props: {
   const note = () =>
     props.status() ?? {
       text: props.custom()
-        ? L("Lorca checks the server, then shares it with your paired Devices, encrypted.")
+        ? L("Beans checks the server, then shares it with your paired Devices, encrypted.")
         : usesAPIKey(kind())
           ? L("The key is checked against %@ and shared with your paired Devices, encrypted.", providerName(kind()))
           : L("Tokens from the sign-in are shared with your paired Devices, encrypted."),
@@ -643,7 +643,7 @@ function Done(props: { origin: Origin; botName: string | undefined }) {
         <div class="onboarding-title center">{title()}</div>
         <div class="onboarding-lede">{lede()}</div>
         <Button kind="primary" large class="onboarding-open" ref={(element) => (button = element)} onClick={() => void host.finishOnboarding()}>
-          {L("Open Lorca")}
+          {L("Open Beans")}
         </Button>
       </div>
     </div>

@@ -37,7 +37,7 @@ pub enum Event {
     #[serde(rename = "chat.usage")]
     ChatUsageChanged { chat_id: String, usage: ChatUsage },
     #[serde(rename = "relay.status")]
-    /// `update_required`: the relay refused this build's protocol, and only a newer Lorca
+    /// `update_required`: the relay refused this build's protocol, and only a newer Beans
     /// connects again. `error`: why the last try to connect failed, until one goes through.
     RelayStatus { connected: bool, url: Option<String>, update_required: bool, error: Option<RelayProblem> },
     /// A Device opens this provider authorization URL while the core waits on its loopback

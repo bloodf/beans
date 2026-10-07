@@ -1,6 +1,6 @@
 // The app's model, after the macOS app's AppStore. Everything comes from the CLI over 127.0.0.1;
 // mutations are applied optimistically and confirmed by the events the CLI sends back.
-// `LORCA_MOCK=1` (or `?mock=1` in a browser tab) runs the seeded demo with the in-process reply
+// `BEANS_MOCK=1` (or `?mock=1` in a browser tab) runs the seeded demo with the in-process reply
 // engine instead.
 //
 // The store is plain and synchronous, like the Swift one: its state is read right after it is
@@ -174,7 +174,7 @@ const MEMORY_RPC_METHODS: Readonly<Record<string, true>> = {
 };
 
 export class AppStore {
-  /** The seeded demo (`LORCA_MOCK=1`), which runs without a CLI. */
+  /** The seeded demo (`BEANS_MOCK=1`), which runs without a CLI. */
   get isMock(): boolean {
     return hostInfo().isMock;
   }
@@ -203,7 +203,7 @@ export class AppStore {
   isIdentityDevice = false;
   identityID: string | null = null;
   relayConnected = false;
-  /** The relay refused this build's protocol: it syncs again once Lorca is updated. */
+  /** The relay refused this build's protocol: it syncs again once Beans is updated. */
   relayUpdateRequired = false;
   /** Why the last try to connect to the relay failed, as the CLI words it, until one goes through. */
   relayError: string | null = null;
@@ -320,7 +320,7 @@ export class AppStore {
   }
 
   private async request<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-    if (!this.transport) throw new RequestError(L("The Lorca CLI is not running"));
+    if (!this.transport) throw new RequestError(L("The Beans CLI is not running"));
     try {
       return (await this.transport.request(method, params)) as T;
     } catch (error) {
@@ -1067,7 +1067,7 @@ export class AppStore {
 
   /** A Runner's mcp.json: every server in it, usable or not, here or sealed to that Runner. */
   async mcpServers(runnerID: string): Promise<McpFile> {
-    if (this.isMock) return { path: "~/.lorca/mcp.json", servers: await this.mockMcpServers(runnerID) };
+    if (this.isMock) return { path: "~/.beans-v2/mcp.json", servers: await this.mockMcpServers(runnerID) };
     return toMcpFile(await this.request("mcp.list", { runner_id: runnerID }));
   }
 
@@ -1139,7 +1139,7 @@ export class AppStore {
     return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.reconnect", { runner_id: runnerID, name, fresh })).server);
   }
 
-  /** Reads the Runner's mcp.json again, after an edit made outside Lorca, and answers the file as
+  /** Reads the Runner's mcp.json again, after an edit made outside Beans, and answers the file as
    * it reads now. */
   async reloadMcpServers(runnerID: string): Promise<McpFile> {
     if (this.isMock) return this.mcpServers(runnerID);
@@ -1307,7 +1307,7 @@ export class AppStore {
         botID: id,
         here: true,
         runner: "This computer",
-        path: `~/.lorca/workspaces/${id}`,
+        path: `~/.beans-v2/workspaces/${id}`,
         text: "- 2026-09-10 · from your chat with the user · the user prefers short replies\n- 2026-09-12 · invoices are reconciled on Mondays\n",
         hash: "mock",
         lines: 2,
@@ -1803,7 +1803,7 @@ export class AppStore {
 
   startPairing(): Promise<WirePairStart> {
     if (this.isMock) {
-      return Promise.resolve({ nonce: "482913", pairing_string: "lorca://pair?relay=https%3A%2F%2Florca.app&id=idk_9f2c41ab&ek=ek_57ca0d3b&n=482913" });
+      return Promise.resolve({ nonce: "1qUeEODuTz_A2y5jSZdBqQ", pairing_string: "beans://pair?v=2&relay=https%3A%2F%2Frelay.example&id=Clup-vXLfBF6T2JkKpLqNOpyE9hdQbqXjrIWfdDvLbs&ek=nAanQrXTSxfK1tf7m3V2Fg-65OL84r6MeqmQmWw5uhw&n=1qUeEODuTz_A2y5jSZdBqQ" });
     }
     return this.request<WirePairStart>("pair.start");
   }
@@ -1979,9 +1979,9 @@ export class AppStore {
         const failure = status.failure;
         switch (failure?.kind) {
           case "missing_binary":
-            return L("The lorca CLI is not bundled with this build and is not on PATH.");
+            return L("The beans CLI is not bundled with this build and is not on PATH.");
           case "launch":
-            return L("Could not start %@: %@", failure.binary ?? "lorca", failure.reason ?? "");
+            return L("Could not start %@: %@", failure.binary ?? "beans", failure.reason ?? "");
           case "exited":
             return L("The CLI exited with code %d. See %@.", failure.code ?? 0, failure.log ?? "");
           case "startup_closed":

@@ -3,8 +3,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export function hostLibrary(platform: string): string {
-  if (platform === "darwin") return "liblorca_mobile.dylib";
-  if (platform === "linux") return "liblorca_mobile.so";
+  if (platform === "darwin") return "libbeans_mobile.dylib";
+  if (platform === "linux") return "libbeans_mobile.so";
   throw new Error("Mobile binding generation requires macOS or Linux host");
 }
 export function androidNdk(env: Record<string, string | undefined>, platform: string, exists = existsSync): string {

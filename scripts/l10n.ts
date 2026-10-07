@@ -129,7 +129,7 @@ function report(name: string, used: Map<string, string>, table: Table) {
   return problems
 }
 
-const macKeys = await keysIn(join(ROOT, "macos/Sources/Lorca"), "**/*.swift", /\bL\(\s*"((?:[^"\\]|\\.)*)"(?:,\s*context:\s*"((?:[^"\\]|\\.)*)")?/g, () => false)
+const macKeys = await keysIn(join(ROOT, "macos/Sources/Beans"), "**/*.swift", /\bL\(\s*"((?:[^"\\]|\\.)*)"(?:,\s*context:\s*"((?:[^"\\]|\\.)*)")?/g, () => false)
 const phoneKeys = await keysIn(join(ROOT, "mobile"), "{app,src}/**/*.{ts,tsx}", /\bt\(\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/g, (path) => path.includes("i18n/") || path.endsWith(".test.ts"))
 const desktopKeys = await desktopKeysIn(join(ROOT, "desktop"))
 

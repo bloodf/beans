@@ -8,7 +8,7 @@ import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
 import { router } from "expo-router";
 import { Platform } from "react-native";
-import * as core from "../../modules/lorca-core";
+import * as core from "../../modules/beans-core";
 import { useStore } from "./store";
 
 /// The chat a notification is about. iOS carries it as the data the extension set; Android's

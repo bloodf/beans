@@ -24,7 +24,7 @@ type Preferences struct {
 	SendOnReturn   bool   `json:"sendOnReturn"`
 	ShowTimestamps bool   `json:"showTimestamps"`
 	RelayURL       string `json:"relayURL"`
-	// CLIPort is the port the app looks for the CLI on. `LORCA_PORT` wins, so a second app
+	// CLIPort is the port the app looks for the CLI on. `BEANS_PORT` wins, so a second app
 	// instance can run against its own CLI.
 	CLIPort int `json:"cliPort"`
 	// AppLanguage is the language the app's own words are in ("en", "zh-Hans"); empty follows
@@ -74,7 +74,7 @@ func (s *prefsStore) load() {
 	if err != nil {
 		return
 	}
-	s.path = filepath.Join(dir, "preferences.json")
+	s.path = filepath.Join(dir, "preferences-v2.json")
 	if data, err := os.ReadFile(s.path); err == nil {
 		_ = json.Unmarshal(data, &s.value)
 	}
@@ -88,13 +88,13 @@ func (s *prefsStore) get() Preferences {
 	return value
 }
 
-// cliPort is the port in force: `LORCA_PORT`, else the saved one, else this build's default.
+// cliPort is the port in force: `BEANS_PORT`, else the saved one, else this build's default.
 func (s *prefsStore) cliPort() int {
 	return s.get().CLIPort
 }
 
 func cliPortLocked(value Preferences) int {
-	if raw := os.Getenv("LORCA_PORT"); raw != "" {
+	if raw := os.Getenv("BEANS_PORT"); raw != "" {
 		if port, err := strconv.Atoi(raw); err == nil && port > 0 {
 			return port
 		}

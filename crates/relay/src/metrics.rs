@@ -154,13 +154,13 @@ struct Page(String);
 
 impl Page {
     fn family(&mut self, name: &str, kind: &str, help: &str) {
-        self.0.push_str(&format!("# HELP lorca_relay_{name} {help}\n# TYPE lorca_relay_{name} {kind}\n"));
+        self.0.push_str(&format!("# HELP beans_relay_{name} {help}\n# TYPE beans_relay_{name} {kind}\n"));
     }
 
     fn sample(&mut self, name: &str, labels: &[(&str, &str)], value: impl std::fmt::Display) {
         let labels: Vec<String> = labels.iter().map(|(key, value)| format!("{key}=\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))).collect();
         let labels = if labels.is_empty() { String::new() } else { format!("{{{}}}", labels.join(",")) };
-        self.0.push_str(&format!("lorca_relay_{name}{labels} {value}\n"));
+        self.0.push_str(&format!("beans_relay_{name}{labels} {value}\n"));
     }
 
     fn one(&mut self, name: &str, kind: &str, help: &str, labels: &[(&str, &str)], value: impl std::fmt::Display) {
@@ -245,17 +245,17 @@ mod tests {
     fn the_page_is_prometheus_text() {
         let stats = Stats { identities: 2, blobs: vec![("chat".into(), 3, 40), ("file".into(), 1, 9000)], push_tokens: vec![("apns".into(), 1)], ..Stats::default() };
         let page = render(Some(&stats), 4, 2, "abc");
-        assert!(page.contains("# TYPE lorca_relay_blobs gauge\nlorca_relay_blobs{kind=\"chat\"} 3\nlorca_relay_blobs{kind=\"file\"} 1\n"), "{page}");
-        assert!(page.contains("lorca_relay_blob_bytes{kind=\"file\"} 9000\n"));
-        assert!(page.contains("lorca_relay_sockets{instance=\"abc\"} 4\n"));
-        assert!(page.contains("lorca_relay_pushes_total{platform=\"fcm\",result=\"gone\",instance=\"abc\"} 0\n"));
+        assert!(page.contains("# TYPE beans_relay_blobs gauge\nbeans_relay_blobs{kind=\"chat\"} 3\nbeans_relay_blobs{kind=\"file\"} 1\n"), "{page}");
+        assert!(page.contains("beans_relay_blob_bytes{kind=\"file\"} 9000\n"));
+        assert!(page.contains("beans_relay_sockets{instance=\"abc\"} 4\n"));
+        assert!(page.contains("beans_relay_pushes_total{platform=\"fcm\",result=\"gone\",instance=\"abc\"} 0\n"));
         // Every sample line is `name{labels} value` under a family that was declared.
         for line in page.lines().filter(|line| !line.starts_with('#')) {
             let name = line.split(['{', ' ']).next().unwrap();
             assert!(page.contains(&format!("# TYPE {name} ")), "{line}");
             assert!(line.rsplit(' ').next().unwrap().parse::<f64>().is_ok(), "{line}");
         }
-        assert!(!render(None, 0, 0, "abc").contains("lorca_relay_identities"));
+        assert!(!render(None, 0, 0, "abc").contains("beans_relay_identities"));
     }
 
     #[test]

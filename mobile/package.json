@@ -57,7 +57,7 @@
     "android": "expo run:android",
     "typecheck": "tsc --noEmit",
     "test": "bun test --isolate src",
-    "core": "bun run modules/lorca-core/build.ts",
+    "core": "bun run modules/beans-core/build.ts",
     "postinstall": "bun run ../scripts/release-eas-native.ts"
   },
   "private": true

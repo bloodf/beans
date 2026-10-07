@@ -1,6 +1,6 @@
 [package]
-name = "lorca-agent"
-description = "Agent loop, tools, and provider adapters for Lorca (after pi-agent-core)"
+name = "beans-agent"
+description = "Agent loop, tools, and provider adapters for Beans (after pi-agent-core)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,9 +11,9 @@ default = ["codemode"]
 codemode = ["dep:rquickjs"]
 
 [dependencies]
-lorca-models = { path = "../models" }
-lorca-provider-auth = { path = "../provider-auth" }
-lorca-tls = { path = "../tls" }
+beans-models = { path = "../models" }
+beans-provider-auth = { path = "../provider-auth" }
+beans-tls = { path = "../tls" }
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true

@@ -92,7 +92,7 @@
       },
       {
         "title": "Conecta un proveedor de IA",
-        "body": "Inicia sesión con ChatGPT o Grok, o pega una clave API de DeepSeek."
+        "body": "Inicia sesión con ChatGPT, o pega una clave API de DeepSeek."
       },
       {
         "title": "Habla con Chef",
@@ -121,7 +121,7 @@
       },
       {
         "q": "¿Qué IA utiliza?",
-        "a": "Tu propia cuenta o clave API. Inicia sesión con ChatGPT o Grok, o añade una clave de DeepSeek. Cada bot puede usar un proveedor distinto y puedes cambiarlo cuando quieras."
+        "a": "Tu propia cuenta o clave API. Inicia sesión con ChatGPT, o añade una clave de DeepSeek. Cada bot puede usar un proveedor distinto y puedes cambiarlo cuando quieras."
       },
       {
         "q": "¿Qué puede hacer un bot en mi ordenador?",
@@ -256,7 +256,7 @@
       "Archivos, memoria, rutinas y herramientas MCP"
     ],
     "subscriptionTitle": "¿Ya tienes una suscripción?",
-    "subscriptionBody": "Conecta ChatGPT o Grok con una cuenta compatible. Los límites de uso del proveedor siguen aplicándose.",
+    "subscriptionBody": "Conecta ChatGPT con una cuenta compatible. El acceso Grok está desactivado hasta verificar el contrato OAuth de Beans. Se aplican los límites del proveedor.",
     "apiTitle": "¿Prefieres una clave API?",
     "apiBody": "Conecta Anthropic, DeepSeek, OpenCode o un endpoint compatible. El proveedor factura el uso según sus tarifas.",
     "costNote": "El uso de IA se cobra por separado. Más bots pueden consumir más de tu cuota. Tu ordenador también debe permanecer conectado.",

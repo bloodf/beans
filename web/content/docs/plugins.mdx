@@ -8,7 +8,7 @@ A plugin gives bots tools for a service or an app. Under the hood a plugin is on
 
 ## The marketplace
 
-Click the marketplace icon (four circles) at the bottom right of the sidebar, or choose **File › Marketplace…** (⇧⌘M, or Ctrl+Shift+M on Windows and Linux). It lists **Featured Plugins** and **Featured Bots** first, then everything by category. **View all** under a featured section lists every plugin or every bot. Search finds plugins and bots together. The marketplace comes from lorca.app, so new plugins and bots show up without updating Beans.
+Click the marketplace icon (four circles) at the bottom right of the sidebar, or choose **File › Marketplace…** (⇧⌘M, or Ctrl+Shift+M on Windows and Linux). It lists **Featured Plugins** and **Featured Bots** first, then everything by category. **View all** under a featured section lists every plugin or every bot. Search finds plugins and bots together. The marketplace comes from beans.app, so new plugins and bots show up without updating Beans.
 
 The marketplace has these plugins:
 
@@ -64,7 +64,7 @@ Any [MCP](https://modelcontextprotocol.io) server can be a plugin: a command the
 
 A remote server that needs an account asks for it when Beans first connects: the server reads **Needs a sign-in**, and **Sign in**, on its sheet or on a card a bot posts, signs in with OAuth as for a marketplace plugin, and **Sign Out** on its sheet forgets the sign-in. A server that takes a token instead gets it in a header, such as `Authorization: Bearer …`.
 
-The servers live in `mcp.json` in Beans's folder (`~/.lorca/mcp.json`), in the format Claude Desktop, Cursor, and Claude Code use, so you can copy one from their configs or edit the file by hand. After editing it, click **Reload** on its row in **Settings › Plugins**, or run `lorca mcp reload`:
+The servers live in `mcp.json` in Beans's folder (`~/.beans-v2/mcp.json`), in the format Claude Desktop, Cursor, and Claude Code use, so you can copy one from their configs or edit the file by hand. After editing it, click **Reload** on its row in **Settings › Plugins**, or run `beans mcp reload`:
 
 ```json
 {
@@ -94,4 +94,4 @@ To keep some of a server's tools from bots, turn off their switches on the serve
 
 A server that doesn't register apps on the fly takes the one you registered with it in `oauth`: `clientId`, `clientSecret` (which can be `${SECRET}`), and the `callbackPort` or `callbackUrl` you registered, whose sign-in opens in the Runner's own browser. `clientName` registers Beans under another name, for a server that only takes names it knows; `scope` asks for more access; and `authServerMetadataUrl` points at the right authorization server when the server names the wrong one. When a server answers that a call needs more access than the sign-in has, it asks you to sign in again, for that access too.
 
-Bots call a server's tools by its name, `notes__read_file`, and reading tools run at once while the rest go through [Auto-review](/docs/auto-review), as for any plugin. A server that offers resources, such as files or records, also gets tools to list and read them, `notes__list_mcp_resources` and `notes__read_mcp_resource`; binary resources are saved to a file the bot can open. The [command line](/docs/cli#mcp-servers) manages the same file: `lorca mcp add`, `list`, `get`, `remove`, `reload`, `sign-out`, and `import` from another app.
+Bots call a server's tools by its name, `notes__read_file`, and reading tools run at once while the rest go through [Auto-review](/docs/auto-review), as for any plugin. A server that offers resources, such as files or records, also gets tools to list and read them, `notes__list_mcp_resources` and `notes__read_mcp_resource`; binary resources are saved to a file the bot can open. The [command line](/docs/cli#mcp-servers) manages the same file: `beans mcp add`, `list`, `get`, `remove`, `reload`, `sign-out`, and `import` from another app.

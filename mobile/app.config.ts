@@ -3,7 +3,7 @@ import releasePackage from "../package.json";
 
 export default (): ExpoConfig => {
   const development =
-    process.env.LORCA_MOBILE_VARIANT === "development" ||
+    process.env.BEANS_MOBILE_VARIANT === "development" ||
     process.env.EAS_BUILD_PROFILE === "development";
   const appName = development ? "Beans Dev" : "Beans";
   const appId = development ? "ai.amoena.beans.dev" : "ai.amoena.beans";
@@ -35,7 +35,7 @@ export default (): ExpoConfig => {
     ...(owner ? { owner } : {}),
     ...(projectId ? { extra: { eas: { projectId } } } : {}),
     version: releasePackage.version,
-    scheme: development ? ["beans-dev", "lorca"] : ["beans", "lorca"],
+    scheme: development ? ["beans-dev", "beans"] : ["beans"],
     orientation: "portrait",
     icon,
     userInterfaceStyle: "automatic",
@@ -57,7 +57,7 @@ export default (): ExpoConfig => {
     },
     android: {
       package: appId,
-      // FCM tokens for pushes: set BEANS_GOOGLE_SERVICES_FILE to your Firebase google-services.json.
+      // Android prebuild requires an existing operator-owned Firebase client file.
       ...(process.env.BEANS_GOOGLE_SERVICES_FILE ? { googleServicesFile: process.env.BEANS_GOOGLE_SERVICES_FILE } : {}),
       adaptiveIcon: {
         backgroundColor: adaptiveIconBackgroundColor,
@@ -113,6 +113,7 @@ export default (): ExpoConfig => {
       "./plugins/with-scene-lifecycle",
       "./plugins/with-android-release-signing",
       "./plugins/with-android-locale-defaults",
+      "./plugins/with-android-push-config",
       "./plugins/with-ios-release-signing",
       "expo-web-browser",
     ],

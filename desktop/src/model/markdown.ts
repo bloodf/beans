@@ -1,4 +1,4 @@
-// Markdown for message bodies, folded into the block structure every Lorca app renders: the same
+// Markdown for message bodies, folded into the block structure every Beans app renders: the same
 // Block and Span shapes as `crates/markdown` (pulldown-cmark), which the macOS and phone apps
 // link. Here markdown-it reads the text (CommonMark, with tables and strikethrough; task list
 // markers are read as pulldown-cmark reads them), and the fold follows the crate's, bare links

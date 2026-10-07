@@ -9,9 +9,9 @@ After Happy’s layering, the Device that creates or restores the identity is th
 | Master secret (32 bytes) | Root. Backup as a base32 phrase (13 groups of 4).                                   | `~/.lorca/identity.json`, mode 0600. Stays on the identity device.                                 |
 | Content keypair          | X25519, HKDF from master. Secret unseals the DEK. Public key seals it.              | Secret on Devices that have the master. Public key on the relay.                                     |
 | Identity signing key     | Ed25519, HKDF from master.                                                          | Private local. Public key on the relay; the identity id is `hash(pubkey)`.                           |
-| Account DEK              | Random XChaCha20-Poly1305 key. Encrypts roster, chats, messages, machine metadata, provider credentials. | Made locally. On the relay as a `key` blob **sealed** to the content public key; handed to each paired machine inside the sealed pairing reply. |
+| Account DEK              | Random XChaCha20-Poly1305 key. Encrypts roster, chats, messages, machine metadata, provider credentials and memory configuration. | Made locally. On the relay as a `key` blob **sealed** to the content public key; handed to each paired machine inside the sealed pairing reply. |
 | Machine keypair          | One 32-byte secret per Device → HKDF → Ed25519 signing key + X25519 box key.        | `~/.lorca/machine.json`. Public keys on the relay, attested by the identity or by the Device that paired it. |
-| Chat/job envelopes       | Account DEK for roster/chat/machine/credentials blobs; sealed box to the Runner’s box key for jobs. | Relay stores ciphertext.                                                                          |
+| Chat/job envelopes       | Account DEK for roster/chat/machine/credentials/memory_config blobs; sealed box to the Runner’s box key for jobs. | Relay stores ciphertext. |
 | Push key                 | HKDF from the account DEK. Seals what a push says.                                  | Every Device derives it. An iPhone keeps a copy in its app group's keychain for the notification extension. |
 | Ephemeral pairing key    | X25519, one handshake.                                                              | Devices; discarded after pairing.                                                                    |
 
@@ -35,7 +35,7 @@ Any paired Device can unpair any other from its Device list (`device.unpair`), a
 
 The relay's machine list is the list of paired Devices. A Device reads it when its sync socket opens and whenever the relay signals `machines`, and drops a Device it no longer lists, so the other Devices see an unpaired one leave at once; a stale `machine` blob for a key the relay does not list is ignored. The unpaired Device learns when its socket closes and the relay refuses the next one: a `410` from the relay makes its CLI forget the identity (keys, credentials, chats), and the app shows onboarding. That holds for the identity device too: a phone can unpair a lost computer, and the backup phrase restores the identity on a new machine key.
 
-Forgetting the identity clears account-owned SQLite state in one transaction, including queued blobs, roster baselines, pending chat creation identities, and codemode script values. A new identity in the same data directory does not inherit the forgotten account's pending ownership or stored script data.
+Forgetting the identity clears account-owned SQLite state in one transaction, including queued blobs, roster baselines, pending chat creation identities, codemode values, encrypted memory configuration, frozen memory deliveries, deletion fences and private Runner bindings. Memory adapters, approvals and in-flight calls are invalidated. A new identity in the same data directory inherits none of that state; unpairing does not issue remote memory-bank deletion.
 
 A machine the relay lists that never sent a `machine` blob is an unknown Device (`sync::settle_unknown_machines`): the snapshot and `roster.changed` list it after the others with `unknown: true` and no name or `os`, and the apps show Unknown Device with a note to unpair a machine nobody recognizes. Any paired Device can attest one, so none stays hidden from the Device list. A Device takes a machine for unknown only once its pull has caught up since its socket opened, so one still reading the log does not mistake the Devices whose blobs it has yet to read, and only ten minutes after the relay attested it, which is time enough for a Device that pairs to send its blob (`lorca pair <string>` sends it before it exits). A blob that arrives later makes it a Device like any other.
 
@@ -58,7 +58,7 @@ The relay stores:
 
 - Identity public key and content public key; machine signing and box public keys with their attestation: the identity’s signature, or the paired machine that attested them
 - Blob ids, kinds, sequence numbers, timestamps, size
-- A blob's slot: the random id of the message it is a version of, `roster`, `credentials`, `machine-<machine public key>`, or `read-<chat id>`
+- A blob's slot: the random id of the message it is a version of, `roster`, `credentials`, `memory_config`, `machine-<machine public key>`, or `read-<chat id>`
 - A blob's group: the random id of the chat a message, read mark, or attachment belongs to, and the ids of deleted chats
 - Recipient machine public key on an envelope (so a Runner can fetch its jobs)
 - Which machine public keys have a sync socket open (presence), and when each last connected or disconnected
@@ -79,3 +79,7 @@ The account has one set of provider credentials (`crates/cli/src/credentials.rs`
 - **Connecting** an API key checks it against the provider from the Device where it was typed. A subscription sign-in opens the browser on that Device, and Cancel in the Mac and desktop apps' connect sheet stops one still waiting there (`providers.auth.cancel`), so finishing in the browser afterwards connects nothing; the phone uses an in-app browser so its embedded core can receive the provider's loopback callback. **Disconnecting** removes the credential from every Device, and deletes a custom provider.
 - **Unpairing** a Device makes its CLI delete `credentials.json` with the rest of the account.
 - **Bot create** may target any paired Runner. The relay payload is ciphertext of the profile.
+
+## Account memory configuration
+
+Every Device merges the separate account-DEK-encrypted `memory_config` blob. Connections/secrets, embedding metadata, per-bot binding/consent and tombstones do not live in provider credentials. Private SQLite commits encrypted config with its ciphertext outbox atomically. Unknown fields survive logical-version/Device-tie-break merging; disconnects carry explicit tombstones. Runner-local database/model/runtime paths stay private. See [Memory services](memory-services.md) for dispatch, plaintext service destinations and deletion limits.

@@ -192,9 +192,9 @@ enum CustomAPI: String, CaseIterable, Hashable {
         while root.hasSuffix("/") { root.removeLast() }
         let pasted: [String] =
             switch self {
-            case .chatCompletions: ["/chat/completions"]
-            case .responses: ["/responses"]
-            case .messages: ["/v1/messages", "/v1"]
+            case .chatCompletions: ["/chat/completions", "/models"]
+            case .responses: ["/responses", "/models"]
+            case .messages: ["/v1/messages", "/v1/models", "/v1", "/messages", "/models"]
             }
         if let suffix = pasted.first(where: { root.hasSuffix($0) }) { root.removeLast(suffix.count) }
         return root + path
@@ -217,6 +217,19 @@ struct CustomModel: Hashable {
     var thinkingCanDisable: Bool? = nil
 
     var displayName: String { name ?? id }
+
+    func merging(_ discovered: CustomModel) -> CustomModel {
+        var model = self
+        model.name = discovered.name ?? name
+        model.contextWindow = discovered.contextWindow ?? contextWindow
+        model.maxOutput = discovered.maxOutput ?? maxOutput
+        model.images = discovered.images ?? images
+        model.reasoning = discovered.reasoning ?? reasoning
+        model.tools = discovered.tools ?? tools
+        model.thinkingFormat = discovered.thinkingFormat ?? thinkingFormat
+        model.thinkingCanDisable = discovered.thinkingCanDisable ?? thinkingCanDisable
+        return model
+    }
 }
 
 /// A server people often add: its API, its base URL, and where its key comes from.
@@ -225,13 +238,15 @@ struct CustomProviderPreset: Hashable {
     let api: CustomAPI
     let baseURL: String
     let keyPlaceholder: String
-    var integration: String? = nil
+    var compatible: Bool = false
 
     /// Services in the cloud, for the Add Provider menu.
     static var cloud: [CustomProviderPreset] {
         [
-            CustomProviderPreset(name: "DurinDoor", api: .chatCompletions, baseURL: "",
-                keyPlaceholder: L("Optional for a server on your network"), integration: "durindoor"),
+            CustomProviderPreset(name: "OpenAI Compatible", api: .chatCompletions, baseURL: "",
+                keyPlaceholder: L("Optional API key"), compatible: true),
+            CustomProviderPreset(name: "Anthropic Compatible", api: .messages, baseURL: "",
+                keyPlaceholder: L("Optional API key"), compatible: true),
             CustomProviderPreset(
                 name: "OpenAI", api: .responses, baseURL: "https://api.openai.com/v1",
                 keyPlaceholder: L("sk-… from platform.openai.com")),
@@ -280,7 +295,7 @@ enum ModelChecklist {
     /// with the listing's facts, the rest of the old listing goes, and the new one follows.
     static func merge(_ models: [CustomModel], keeping keep: (String) -> Bool, with listed: [CustomModel]) -> [CustomModel] {
         let facts = Dictionary(listed.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        var merged = models.filter { keep($0.id) }.map { model in facts[model.id] ?? model }
+        var merged = models.filter { keep($0.id) }.map { model in facts[model.id].map { model.merging($0) } ?? model }
         var seen = Set(merged.map(\.id))
         for model in listed where seen.insert(model.id).inserted { merged.append(model) }
         return merged

@@ -211,7 +211,7 @@ mod tests {
                 let mut request = [0u8; 2048];
                 let read = socket.read(&mut request).unwrap();
                 assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /v1/models "));
-                let body = r#"{"data":[{"id":"qwen3:8b","context_window":40960},{"id":"nomic-embed-text"}]}"#;
+                let body = r#"{"data":[{"id":"qwen3:8b","context_window":40960},{"id":"nomic-embed-text","capabilities":{"completion_chat":false}}]}"#;
                 let reply = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 socket.write_all(reply.as_bytes()).unwrap();
             }
@@ -229,8 +229,8 @@ mod tests {
         let deleted = call("providers.disconnect", serde_json::json!({ "kind": "custom:lab" }));
         assert!(!deleted["result"]["providers"].as_array().unwrap().iter().any(|p| p["kind"] == "custom:lab"));
 
-        // The Device build shares SQLite with the desktop core, but stores only the app view
-        // of tool activity because a phone never rebuilds a model transcript.
+        // The Device build stores only the app view of tool activity. Workspace tests unify
+        // the desktop runner feature, which retains the transcript; check the app view in both.
         let chat_id = "mobile-chat";
         core.app.state.lock().unwrap().chats.push(lorca::model::Chat {
             meta: lorca::model::ChatMeta {
@@ -267,7 +267,7 @@ mod tests {
         );
         let tool_id = tool.id.clone();
         core.app.upsert_message(tool, false);
-        let stored = core.app.message(chat_id, &tool_id).unwrap();
+        let stored = core.app.message(chat_id, &tool_id).unwrap().for_app();
         let lorca::model::Body::Tool { detail, arguments, result, .. } = stored.body else { panic!("a tool row") };
         assert_eq!(detail.chars().count(), 400);
         assert!(arguments.is_null());

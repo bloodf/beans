@@ -661,11 +661,11 @@ pub fn blob(connection: &Connection, identity_pubkey: &str, machine_pubkey: &str
 }
 
 /// Deletes an individually removable blob and returns its kind. Missing or protected
-/// roster/policy rows return `None`; the caller removes a deleted `file`'s object afterwards.
+/// roster/policy/memory_config rows return `None`; the caller removes a deleted `file`'s object afterwards.
 pub fn delete_blob(connection: &mut Connection, identity_pubkey: &str, id: &str) -> rusqlite::Result<Option<String>> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let row: Option<(i64, String)> = tx
-        .prepare_cached("DELETE FROM blobs WHERE id = ?1 AND identity_pubkey = ?2 AND kind NOT IN ('roster', 'policy') RETURNING size, kind")?
+        .prepare_cached("DELETE FROM blobs WHERE id = ?1 AND identity_pubkey = ?2 AND kind NOT IN ('roster', 'policy', 'memory_config') RETURNING size, kind")?
         .query_row(params![id, identity_pubkey], |row| Ok((row.get(0)?, row.get(1)?)))
         .optional()?;
     let Some((size, kind)) = row else { return Ok(None) };

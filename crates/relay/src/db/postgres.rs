@@ -766,7 +766,7 @@ impl Store for Postgres {
         let mut client = self.client().await?;
         let tx = client.transaction().await?;
         lock_identity(&tx, identity_pubkey).await?;
-        let Some(row) = tx.query_opt("DELETE FROM blobs WHERE id = $1 AND identity_pubkey = $2 AND kind NOT IN ('roster', 'policy') RETURNING size, kind", &[&id, &identity_pubkey]).await? else {
+        let Some(row) = tx.query_opt("DELETE FROM blobs WHERE id = $1 AND identity_pubkey = $2 AND kind NOT IN ('roster', 'policy', 'memory_config') RETURNING size, kind", &[&id, &identity_pubkey]).await? else {
             return Ok(None);
         };
         give_back(&tx, identity_pubkey, row.get(0)).await?;

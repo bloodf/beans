@@ -61,7 +61,7 @@ export default function SettingsScreen() {
   // other server. A preset the account has already opens that provider, checked.
   const customProviderChoices: MenuChoice[] = [
     ...CUSTOM_PRESETS.map((preset, index) => {
-      const existing = preset.integration ? providers.find((provider) => isCustomProvider(provider.kind) && provider.integration === preset.integration) : customProviderNamed(preset.name, providers);
+      const existing = preset.compatible ? undefined : customProviderNamed(preset.name, providers);
       const next = CUSTOM_PRESETS[index + 1];
       return {
         title: preset.name,
@@ -273,7 +273,7 @@ export default function SettingsScreen() {
                 key={provider.kind}
                 title={providerLabel(provider.kind, providers)}
                 subtitle={provider.detail || undefined}
-                detail={t("Connected")}
+                detail={t("Configured")}
                 onPress={() => router.push({ pathname: "/settings/custom-provider", params: { kind: provider.kind } })}
                 chevron
               />

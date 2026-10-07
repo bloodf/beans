@@ -7,8 +7,9 @@ import { L } from "../../l10n";
 import * as Format from "../../model/format";
 import type { Bot, BotMemory } from "../../model/models";
 import { errorText, store } from "../../model/store";
-import { TextArea } from "../controls";
+import { Button, TextArea } from "../controls";
 import { alert, presentSheet, Sheet } from "../overlay";
+import { presentBotMemoryService } from "./memoryService";
 
 export function presentMemory(bot: Bot, memory: BotMemory, onSaved: () => void): void {
   presentSheet((dismiss) => <MemorySheet bot={bot} memory={memory} onSaved={onSaved} dismiss={dismiss} />);
@@ -91,6 +92,7 @@ function MemorySheet(props: { bot: Bot; memory: BotMemory; onSaved: () => void; 
       width={560}
       confirm={L("Save")}
       confirmDisabled={saving()}
+      leading={<Button disabled={saving()} onClick={() => presentBotMemoryService(props.bot)}>{L("Memory service…")}</Button>}
       onConfirm={() => void save(memory.hash)}
       onCancel={props.dismiss}
     >

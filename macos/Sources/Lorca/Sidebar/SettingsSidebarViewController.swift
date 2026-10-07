@@ -86,8 +86,6 @@ final class SettingsSidebarViewController: NSViewController {
             // The list runs the pane's full height under the header, inset by the safe area.
             scrollView.automaticallyAdjustsContentInsets = true
             scrollView.contentInsets = NSEdgeInsets()
-            // The gap between the search bar and the first pane, as the chats' sidebar has it.
-            container.additionalSafeAreaInsets.top = 5
             scrollView.pin(to: container)
         } else {
             let divider = HairlineView()

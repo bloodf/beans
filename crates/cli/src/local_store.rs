@@ -12,7 +12,7 @@ use crate::app::{OutboxItem, SentJob, Slot, State};
 use crate::model::{Author, Body, LiveTurn, Message};
 
 pub struct LocalStore {
-    connection: Mutex<Connection>,
+    pub(crate) connection: Mutex<Connection>,
 }
 
 pub struct Upsert {
@@ -150,6 +150,23 @@ impl LocalStore {
                  routine_id TEXT,
                  runner_id  TEXT NOT NULL,
                  sent_at    REAL NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS memory_config (
+                 id INTEGER PRIMARY KEY CHECK(id=1), ciphertext BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS memory_deliveries (
+                 id TEXT PRIMARY KEY NOT NULL, bot_id TEXT NOT NULL,
+                 state TEXT NOT NULL, json TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS memory_deliveries_bot ON memory_deliveries(bot_id,state);
+             CREATE TABLE IF NOT EXISTS memory_fences (
+                 bot_id TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS memory_runner_bindings (
+                 key TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS memory_turn_admissions (
+                 job_id TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL
              );
              PRAGMA user_version = 1;",
         )?;
@@ -1210,6 +1227,11 @@ impl LocalStore {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
         for table in [
+            "memory_config",
+            "memory_deliveries",
+            "memory_fences",
+            "memory_runner_bindings",
+            "memory_turn_admissions",
             "roster_baseline",
             "pending_chat_creates",
             "codemode_store",
@@ -1236,7 +1258,7 @@ impl LocalStore {
     }
 }
 
-fn queue_outbox_tx(tx: &Transaction<'_>, item: &OutboxItem) -> anyhow::Result<()> {
+pub(crate) fn queue_outbox_tx(tx: &Transaction<'_>, item: &OutboxItem) -> anyhow::Result<()> {
     let waiting: Option<i64> = match item.slot.as_ref() {
         Some(slot) => tx
             .query_row(

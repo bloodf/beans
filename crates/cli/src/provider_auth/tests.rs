@@ -9,7 +9,7 @@ fn durindoor_public_catalog_keeps_combos_without_a_kind() {
         {"id":"guard","owned_by":"combo"},
         {"id":"web","owned_by":"combo","kind":"webSearch"}
     ]});
-    let listed = durindoor_models(&body).unwrap();
+    let listed = listed_models(&body).unwrap();
     assert_eq!(listed.into_iter().filter(|(not_chat,_)| !not_chat).map(|(_,m)| m.id).collect::<Vec<_>>(), ["image-helper", "audio-review", "guard"]);
 }
 
@@ -74,10 +74,6 @@ fn model_lists_tell_windows_inputs_and_what_is_not_for_chat() {
     assert_eq!((model.context_window, model.images), (Some(131_072), Some(true)));
     assert!(listed_model(&json!({ "id": "mistral-embed", "capabilities": { "completion_chat": false } })).unwrap().0);
     assert_eq!(listed_model(&json!({ "id": "qwen3-32b", "max_model_len": 40960 })).unwrap().1.context_window, Some(40_960));
-    // OpenAI lists models chat cannot use.
-    assert!(listed_model(&json!({ "id": "text-embedding-3-large", "object": "model" })).unwrap().0);
-    assert!(listed_model(&json!({ "id": "gpt-4o-mini-tts" })).unwrap().0);
-    assert!(listed_model(&json!({ "id": "gpt-image-1" })).unwrap().0);
     assert!(listed_model(&json!({ "id": "black-forest-labs/FLUX.1-schnell", "type": "image" })).unwrap().0);
     assert!(!listed_model(&json!({ "id": "meta-llama/Llama-4-Scout", "type": "chat" })).unwrap().0);
     assert!(listed_model(&json!({ "id": "" })).is_none());
@@ -125,11 +121,10 @@ fn input(name: &str, api: &str, base_url: &str, models: &[&str]) -> CustomInput 
 }
 
 #[tokio::test]
-async fn durindoor_probes_access_before_public_models_and_keeps_identity_on_edit() {
+async fn legacy_discovery_uses_only_models_and_keeps_identity_on_edit() {
     let scratch = scratch_app();
     let list = json!({ "data": [{ "id": "image-helper", "kind": "llm", "capabilities": { "tools": true, "reasoning": false } }] }).to_string();
-    let (root, server) = serve(vec![("200 OK", json!({"ok": true}).to_string()), ("200 OK", list.clone()),
-        ("200 OK", json!({"ok": true}).to_string()), ("200 OK", list)]);
+    let (root, server) = serve(vec![("200 OK", list.clone()), ("200 OK", list)]);
     let mut gateway = input("DurinDoor", "chat-completions", &root, &[]);
     gateway.integration = Some("durindoor".into());
     let kind = connect_custom(&scratch.0, gateway).await.unwrap();
@@ -137,9 +132,7 @@ async fn durindoor_probes_access_before_public_models_and_keeps_identity_on_edit
     edited.kind = Some(kind.clone());
     connect_custom(&scratch.0, edited).await.unwrap();
     let requests = server.join().unwrap();
-    assert!(requests[0].starts_with("GET /v1/realtime/auth "));
-    assert!(requests[1].starts_with("GET /v1/models "));
-    assert!(requests[2].starts_with("GET /v1/realtime/auth "));
+    assert!(requests.iter().all(|request| request.starts_with("GET /v1/models ")));
     assert!(!requests.iter().any(|r| r.to_ascii_lowercase().contains("authorization:")));
     let credentials = scratch.0.credentials.lock().unwrap();
     assert_eq!(credentials.custom[&kind].integration, Some(CustomIntegration::Durindoor));
@@ -148,17 +141,12 @@ async fn durindoor_probes_access_before_public_models_and_keeps_identity_on_edit
 }
 
 #[tokio::test]
-async fn durindoor_probe_rejects_unsupported_malformed_and_oversized_bodies() {
+async fn discovery_rejects_malformed_and_oversized_bodies() {
     let scratch = scratch_app();
-    for (status, body, expected) in [
-        ("404 Not Found", "{}".into(), "does not support the access probe"),
-        ("200 OK", "{\"ok\":false}".into(), "did not admit"),
-        ("200 OK", "not json".into(), "did not answer like an API"),
-        ("200 OK", " ".repeat(AUTH_RESPONSE_LIMIT + 1), "too large"),
-    ] {
-        let (root, server) = serve(vec![(status, body)]);
-        assert!(list_custom_models(&scratch.0, "DurinDoor", "chat-completions", &root, "", Some("durindoor")).await.unwrap_err().contains(expected));
-        assert_eq!(server.join().unwrap().len(), 1);
+    for body in ["not json".into(), " ".repeat(MODEL_RESPONSE_LIMIT + 1)] {
+        let (root, server) = serve(vec![("200 OK", body)]);
+        assert!(list_custom_models(&scratch.0, "Legacy", "chat-completions", &root, "", Some("durindoor")).await.is_err());
+        server.join().unwrap();
     }
     let (root, server) = serve(vec![("200 OK", " ".repeat(MODEL_RESPONSE_LIMIT + 1))]);
     assert!(list_custom_models(&scratch.0, "Generic", "chat-completions", &root, "", None).await.unwrap_err().contains("too large"));
@@ -205,7 +193,7 @@ async fn durindoor_rejected_access_never_fetches_public_models_or_saves() {
     gateway.integration = Some("durindoor".into());
     gateway.api_key = "fixture-key-not-real".into();
     assert_eq!(connect_custom(&scratch.0, gateway).await.unwrap_err(), "DurinDoor rejected that key");
-    assert!(server.join().unwrap()[0].starts_with("GET /v1/realtime/auth "));
+    assert!(server.join().unwrap()[0].starts_with("GET /v1/models "));
     assert!(scratch.0.credentials.lock().unwrap().custom.is_empty());
 }
 
@@ -215,7 +203,7 @@ async fn a_custom_provider_takes_the_models_its_server_lists() {
     let app = &scratch.0;
     let list = json!({ "object": "list", "data": [
         { "id": "qwen3:8b", "object": "model" },
-        { "id": "nomic-embed-text", "object": "model" },
+        { "id": "nomic-embed-text", "object": "model", "capabilities": { "completion_chat": false } },
         { "id": "llava", "object": "model", "context_window": 8192 }
     ]});
     let (root, server) = serve(vec![("200 OK", list.to_string())]);
@@ -284,7 +272,7 @@ async fn a_custom_provider_needs_a_key_it_takes_and_models_to_offer() {
 async fn the_picker_gets_the_chat_models_or_hears_there_is_no_list() {
     let scratch = scratch_app();
     let app = &scratch.0;
-    let list = json!({ "data": [{ "id": "gpt-6-sol", "context_window": 1050000 }, { "id": "text-embedding-3-small" }] });
+    let list = json!({ "data": [{ "id": "gpt-6-sol", "context_window": 1050000 }, { "id": "text-embedding-3-small", "type":"embedding" }] });
     let (root, server) = serve(vec![("200 OK", list.to_string()), ("404 Not Found", "{}".into()), ("401 Unauthorized", "{}".into())]);
     let models = list_custom_models(app, "OpenAI", "responses", &format!("{root}/v1/responses"), " sk-1 ", None).await.unwrap().unwrap();
     assert_eq!(models.iter().map(|m| (m.id.as_str(), m.context_window)).collect::<Vec<_>>(), [("gpt-6-sol", Some(1_050_000))]);
@@ -300,7 +288,7 @@ async fn the_picker_gets_the_chat_models_or_hears_there_is_no_list() {
 async fn refresh_adds_models_but_preserves_manual_ids_url_key_and_unchanged_stamp() {
     let scratch = scratch_app();
     let app = &scratch.0;
-    let list = json!({ "data": [{ "id": "new", "context_window": 128000 }, { "id": "nomic-embed-text" }] }).to_string();
+    let list = json!({ "data": [{ "id": "new", "context_window": 128000 }, { "id": "nomic-embed-text", "type":"embedding" }] }).to_string();
     let (root, server) = serve(vec![("404 Not Found", "{}".into()), ("200 OK", list.clone()), ("200 OK", list)]);
     let mut provider = input("Lab", "responses", &root, &["picked"]);
     provider.api_key = "secret".into();
@@ -381,4 +369,156 @@ async fn deleting_a_custom_provider_reaches_every_device_as_a_change() {
     assert!(credentials.changed_at.contains_key(&kind), "the deletion is a change the merge carries");
     drop(credentials);
     assert_eq!(disconnect(app, &kind).unwrap_err(), format!("Unknown provider {kind}"));
+}
+
+#[tokio::test]
+async fn compatible_discovery_errors_are_not_unsupported_listing() {
+    let scratch = scratch_app();
+    for (status, body) in [
+        ("429 Too Many Requests", "{}".into()),
+        ("503 Service Unavailable", "{}".into()),
+        ("200 OK", json!({"status":"ok"}).to_string()),
+    ] {
+        let (root, server) = serve(vec![(status, body)]);
+        assert!(connect_custom(&scratch.0, input("Compatible", "responses", &root, &["manual"])).await.is_err());
+        server.join().unwrap();
+        assert!(scratch.0.credentials.lock().unwrap().custom.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn compatible_messages_discovery_follows_official_cursors() {
+    let scratch = scratch_app();
+    let (root, server) = serve(vec![
+        ("200 OK", json!({"data":[{"id":"claude-a","type":"model","display_name":"A"}],"has_more":true,"first_id":"claude-a","last_id":"claude-a"}).to_string()),
+        ("200 OK", json!({"data":[{"id":"audio-helper","type":"model"}],"has_more":false,"first_id":"audio-helper","last_id":"audio-helper"}).to_string()),
+    ]);
+    let found = list_custom_models(&scratch.0, "Compatible", "messages", &format!("{root}/v1/messages"), "fixture-key", None).await.unwrap().unwrap();
+    assert_eq!(found.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["claude-a", "audio-helper"]);
+    let requests = server.join().unwrap();
+    assert!(requests[0].starts_with("GET /v1/models?limit=1000 "));
+    assert!(requests[1].starts_with("GET /v1/models?limit=1000&after_id=claude-a "));
+    for request in requests {
+        assert!(request.contains("x-api-key: fixture-key"));
+        assert!(request.contains("anthropic-version: 2023-06-01"));
+        assert!(!request.contains("authorization:"));
+    }
+}
+
+#[test]
+fn compatible_catalog_preserves_callable_ids_without_word_guesses() {
+    let models = listed_models(&json!({"data":[
+        {"id":"image-helper"}, {"id":"audio-review"}, {"id":"guard"},
+        {"id":"combo","kind":"combo"}, {"id":"future","kind":"future-kind"},
+        {"id":"opaque","capabilities":{"completion_chat":false}},
+        {"id":"embed","type":"embedding"}
+    ]})).unwrap();
+    assert_eq!(models.into_iter().filter(|(not_chat, _)| !not_chat).map(|(_, m)| m.id).collect::<Vec<_>>(), ["image-helper", "audio-review", "guard", "combo", "future"]);
+}
+
+#[tokio::test]
+async fn compatible_edit_and_refresh_preserve_sparse_metadata_and_saved_identity() {
+    let scratch = scratch_app();
+    let full = json!({"data":[
+        {"id":"guard/Combo","display_name":"Saved alias","capabilities":{"contextWindow":200000,"maxOutput":32000,"vision":true,"reasoning":true,"tools":true,"thinkingFormat":"openai","thinkingCanDisable":true}},
+        {"id":"manual"}
+    ]}).to_string();
+    let sparse = json!({"data":[{"id":"guard/Combo","capabilities":{"vision":false,"reasoning":false,"tools":false}},{"id":"new"}]}).to_string();
+    let (root, server) = serve(vec![("200 OK", full), ("200 OK", sparse.clone()), ("200 OK", sparse), ("503 Service Unavailable", "{}".into())]);
+    let mut first = input("Historical label", "chat-completions", &format!("{root}/v1"), &["manual","guard/Combo"]);
+    first.api_key = "fixture-key".into();
+    first.integration = Some("durindoor".into());
+    let kind = connect_custom(&scratch.0, first).await.unwrap();
+    let before = scratch.0.credentials.lock().expect("credentials lock").custom[&kind].clone();
+    let bot: crate::model::Bot = serde_json::from_value(json!({
+        "id":"fixture-bot","name":"Fixture bot","description":"","symbol_name":"bolt","accent":"blue",
+        "runner_id":"fixture-runner","provider":kind,"model":"guard/Combo","created_at":1.0
+    })).unwrap();
+    scratch.0.state.lock().expect("state lock").bots.push(bot.clone());
+    let mut edit = input("Historical label", "chat-completions", &before.base_url, &["manual","guard/Combo"]);
+    edit.kind = Some(kind.clone());
+    edit.api_key = before.api_key.clone();
+    connect_custom(&scratch.0, edit).await.unwrap();
+    assert_eq!(refresh_custom_models(&scratch.0).await.unwrap(), 1);
+    let saved = scratch.0.credentials.lock().expect("credentials lock").custom[&kind].clone();
+    assert_eq!((saved.name.as_str(), saved.api, saved.api_key.as_str(), saved.created_at, saved.integration), (before.name.as_str(), before.api, before.api_key.as_str(), before.created_at, before.integration));
+    assert_eq!(saved.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["manual","guard/Combo","new"]);
+    assert_eq!((saved.models[1].name.as_deref(), saved.models[1].context_window, saved.models[1].max_output), (Some("Saved alias"),Some(200000),Some(32000)));
+    assert_eq!((saved.models[1].images,saved.models[1].reasoning,saved.models[1].tools), (Some(false),Some(false),Some(false)));
+    assert!(saved.levels(&saved.models[1]).is_empty());
+    assert!(refresh_custom_models(&scratch.0).await.is_err());
+    assert_eq!(scratch.0.credentials.lock().expect("credentials lock").custom[&kind], saved);
+    assert_eq!(Credentials::load(&scratch.0.config).custom[&kind], saved);
+    assert_eq!(scratch.0.state.lock().expect("state lock").bots[0], bot);
+    assert!(server.join().unwrap().iter().all(|request| request.starts_with("GET /v1/models ")));
+}
+
+#[tokio::test]
+async fn compatible_save_failure_keeps_in_memory_and_synced_credentials_unchanged() {
+    let scratch = scratch_app();
+    let before = serde_json::to_value(&*scratch.0.credentials.lock().expect("credentials lock")).unwrap();
+    std::fs::create_dir(scratch.0.config.credentials_path()).unwrap();
+    let (root, server) = serve(vec![("405 Method Not Allowed", "{}".into())]);
+    assert_eq!(connect_custom(&scratch.0, input("OpenAI Compatible", "chat-completions", &root, &["manual"])).await.unwrap_err(), "Could not save provider");
+    server.join().unwrap();
+    assert_eq!(serde_json::to_value(&*scratch.0.credentials.lock().expect("credentials lock")).unwrap(), before);
+}
+
+#[tokio::test]
+async fn compatible_connections_are_not_singletons_by_display_name() {
+    let scratch = scratch_app();
+    let (root, server) = serve(vec![("404 Not Found","{}".into()),("404 Not Found","{}".into())]);
+    let a = connect_custom(&scratch.0, input("OpenAI Compatible","chat-completions",&root,&["guard"])).await.unwrap();
+    let b = connect_custom(&scratch.0, input("OpenAI Compatible","responses",&root,&["guard"])).await.unwrap();
+    server.join().unwrap();
+    assert_ne!(a,b);
+    let credentials = scratch.0.credentials.lock().expect("credentials lock");
+    assert_eq!(credentials.custom[&a].name,credentials.custom[&b].name);
+    assert_eq!(credentials.custom[&a].integration,None);
+    assert_eq!(credentials.custom[&b].integration,None);
+}
+
+#[tokio::test]
+async fn compatible_messages_discovery_rejects_missing_repeated_and_excessive_cursors() {
+    let scratch = scratch_app();
+    for pages in [
+        vec![json!({"data":[{"id":"a"}],"has_more":true})],
+        vec![json!({"data":[{"id":"a"}],"has_more":true,"last_id":"a"}); 2],
+        (0..16).map(|i| json!({"data":[{"id":i.to_string()}],"has_more":true,"last_id":i.to_string()})).collect(),
+    ] {
+        let (root, server) = serve(pages.into_iter().map(|body| ("200 OK",body.to_string())).collect());
+        let error = list_custom_models(&scratch.0,"Compatible","messages",&root,"",None).await.unwrap_err();
+        assert!(error.contains("cursor") || error.contains("pagination limit"), "{error}");
+        server.join().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn compatible_failed_edit_persistence_retains_key_selection_metadata_and_stamp() {
+    let scratch = scratch_app();
+    let full = json!({"data":[{"id":"saved","capabilities":{"vision":true,"contextWindow":200000}}]}).to_string();
+    let (root, server) = serve(vec![("200 OK",full),("405 Method Not Allowed","{}".into())]);
+    let mut first = input("Saved name","responses",&root,&["saved"]);
+    first.api_key = "fixture-original-key".into();
+    let kind = connect_custom(&scratch.0,first).await.unwrap();
+    let before = serde_json::to_value(&*scratch.0.credentials.lock().expect("credentials lock")).unwrap();
+    std::fs::remove_file(scratch.0.config.credentials_path()).unwrap();
+    std::fs::create_dir(scratch.0.config.credentials_path()).unwrap();
+    let mut edit = input("Changed name","responses",&root,&["different"]);
+    edit.kind = Some(kind);
+    edit.api_key = "fixture-replacement-key".into();
+    assert_eq!(connect_custom(&scratch.0,edit).await.unwrap_err(),"Could not save provider");
+    server.join().unwrap();
+    assert_eq!(serde_json::to_value(&*scratch.0.credentials.lock().expect("credentials lock")).unwrap(),before);
+}
+
+#[tokio::test]
+async fn compatible_discovery_bounds_total_bytes_across_pages() {
+    let scratch = scratch_app();
+    let page = json!({"data":[{"id":"a"}],"has_more":true,"last_id":"a"}).to_string();
+    let first = format!("{page}{}", " ".repeat(MODEL_RESPONSE_LIMIT / 2));
+    let second = format!("{{\"data\":[{{\"id\":\"b\"}}],\"has_more\":false}}{}", " ".repeat(MODEL_RESPONSE_LIMIT / 2));
+    let (root,server) = serve(vec![("200 OK",first),("200 OK",second)]);
+    assert!(list_custom_models(&scratch.0,"Compatible","messages",&root,"",None).await.unwrap_err().contains("too large"));
+    server.join().unwrap();
 }

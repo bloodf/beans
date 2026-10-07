@@ -20,7 +20,6 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 const OPENCODE_BASE_URL: &str = "https://opencode.ai/zen";
 const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go";
 const MODEL_RESPONSE_LIMIT: usize = 1024 * 1024;
-const AUTH_RESPONSE_LIMIT: usize = 16 * 1024;
 
 fn discovery_client() -> Result<reqwest::Client, String> {
     lorca_tls::client_builder().redirect(reqwest::redirect::Policy::none())
@@ -28,7 +27,7 @@ fn discovery_client() -> Result<reqwest::Client, String> {
         .map_err(|_| "Could not initialize provider connection".into())
 }
 
-async fn bounded_json(mut response: reqwest::Response, name: &str, limit: usize) -> Result<Value, String> {
+async fn bounded_json(mut response: reqwest::Response, name: &str, limit: usize) -> Result<(Value, usize), String> {
     if response.content_length().is_some_and(|length| length > limit as u64) {
         return Err(format!("{name} response is too large"));
     }
@@ -37,7 +36,8 @@ async fn bounded_json(mut response: reqwest::Response, name: &str, limit: usize)
         if bytes.len().saturating_add(chunk.len()) > limit { return Err(format!("{name} response is too large")); }
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|_| format!("{name} did not answer like an API. Check the base URL."))
+    let value = serde_json::from_slice(&bytes).map_err(|_| format!("{name} did not answer like an API. Check the base URL."))?;
+    Ok((value, bytes.len()))
 }
 
 fn integration_root(api: CustomApi, base_url: &str, integration: Option<CustomIntegration>) -> Result<String, String> {
@@ -49,23 +49,6 @@ fn integration_root(api: CustomApi, base_url: &str, integration: Option<CustomIn
     Ok(if root.ends_with("/v1") { root.to_string() } else { format!("{root}/v1") })
 }
 
-async fn integration_models(app: &Arc<App>, name: &str, api: CustomApi, root: &str, key: &str, integration: Option<CustomIntegration>) -> Result<Option<Vec<(bool, CustomModel)>>, String> {
-    if integration == Some(CustomIntegration::Durindoor) {
-        let request = discovery_client()?.get(format!("{root}/realtime/auth"));
-        let request = if key.is_empty() { request } else { request.bearer_auth(key) };
-        let response = request.send().await.map_err(|_| format!("{name} unreachable. Check the URL on this Device."))?;
-        match response.status() {
-            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => return Err(if key.is_empty() { format!("{name} needs an API key") } else { format!("{name} rejected that key") }),
-            status if status.is_success() => {
-                if bounded_json(response, name, AUTH_RESPONSE_LIMIT).await?["ok"] != true {
-                    return Err("DurinDoor access probe did not admit this Device".into());
-                }
-            }
-            _ => return Err("This DurinDoor deployment does not support the access probe. Update the server; no inference was sent.".into()),
-        }
-    }
-    list_models(app, name, api, root, key, integration == Some(CustomIntegration::Durindoor)).await
-}
 
 fn env_url(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.trim().is_empty()).map(|s| s.trim_end_matches('/').to_string())
@@ -216,9 +199,10 @@ pub struct CustomInput {
 /// output cap, and whether it sees images; a server without one still works with the model ids
 /// the user gave.
 pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String, String> {
+    let snapshot = input.kind.as_ref().and_then(|kind| app.credentials.lock().expect("credentials lock").custom.get(kind).cloned());
     let requested_integration = CustomIntegration::parse(input.integration.as_deref())?;
-    let integration = requested_integration.or_else(|| input.kind.as_ref().and_then(|kind| app.credentials.lock().unwrap().custom.get(kind).and_then(|provider| provider.integration)));
-    let name = if integration == Some(CustomIntegration::Durindoor) && input.name.trim().is_empty() { "DurinDoor".into() } else { input.name.trim().to_string() };
+    let integration = requested_integration.or_else(|| snapshot.as_ref().and_then(|provider| provider.integration));
+    let name = input.name.trim().to_string();
     if name.is_empty() {
         return Err("Name the provider".into());
     }
@@ -229,7 +213,7 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
     let base_url = integration_root(api, &input.base_url, integration)?;
     let api_key = input.api_key.trim().to_string();
     let mut ids: Vec<String> = Vec::new();
-    for id in input.models.iter().map(|id| id.trim()).filter(|id| !id.is_empty()) {
+    for id in input.models.iter().filter(|id| !id.trim().is_empty()) {
         if !ids.iter().any(|seen| seen == id) {
             ids.push(id.to_string());
         }
@@ -241,53 +225,70 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
     }
     {
         let credentials = app.credentials.lock().unwrap();
-        let taken = credentials.kinds().into_iter().filter(|kind| Some(kind) != input.kind.as_ref()).any(|kind| credentials.label(&kind).eq_ignore_ascii_case(&name));
+        let taken = PROVIDER_KINDS.iter().any(|kind| credentials.label(kind).eq_ignore_ascii_case(&name));
         if taken {
             return Err(format!("A provider named {name} exists already"));
         }
     }
 
-    let listed = integration_models(app, &name, api, &base_url, &api_key, integration).await?;
+    let listed = list_models(&name, api, &base_url, &api_key).await?;
     let models = if ids.is_empty() {
         let listed = listed.ok_or_else(|| format!("{name} publishes no model list. Add the model ids yourself."))?;
-        let chat: Vec<CustomModel> = listed.into_iter().filter(|model| !model.0).map(|model| model.1).collect();
+        let chat: Vec<CustomModel> = listed.into_iter().filter(|model| !model.0).map(|(_, discovered)| {
+            match snapshot.as_ref().and_then(|provider| provider.models.iter().find(|model| model.id == discovered.id)) {
+                Some(saved) => {
+                    let mut model = saved.clone();
+                    model.merge_metadata(&discovered);
+                    model
+                }
+                None => discovered,
+            }
+        }).collect();
         if chat.is_empty() {
             return Err(format!("{name} lists no models. Add the model ids yourself."));
         }
         chat
     } else {
         let listed = listed.unwrap_or_default();
-        ids.into_iter()
-            .map(|id| match listed.iter().find(|(_, model)| model.id == id) {
-                Some((_, model)) => model.clone(),
-                None => CustomModel { id, name: None, context_window: None, max_output: None, images: None, ..Default::default() },
-            })
-            .collect()
+        ids.into_iter().map(|id| {
+            let mut model = snapshot.as_ref().and_then(|provider| provider.models.iter().find(|model| model.id == id)).cloned()
+                .unwrap_or_else(|| CustomModel { id, ..Default::default() });
+            if let Some((_, discovered)) = listed.iter().find(|(_, discovered)| discovered.id == model.id) {
+                model.merge_metadata(discovered);
+            }
+            model
+        }).collect()
     };
 
-    let (kind, created_at) = {
-        let credentials = app.credentials.lock().unwrap();
+    let kind = {
+        let mut credentials = app.credentials.lock().expect("credentials lock");
         let kind = input.kind.clone().unwrap_or_else(|| custom_kind(&credentials, &name));
         let created_at = credentials.custom.get(&kind).map(|provider| provider.created_at).unwrap_or_else(config::now_unix);
-        (kind, created_at)
+        if input.kind.is_some() && credentials.custom.get(&kind) != snapshot.as_ref() {
+            return Err("The provider changed while connecting. Open it again.".into());
+        }
+        let provider = CustomProvider { name, api, base_url, api_key, models, created_at, integration };
+        let mut next = credentials.clone();
+        next.custom.insert(kind.clone(), provider);
+        next.touch(&kind);
+        next.save(&app.config).map_err(|_| "Could not save provider")?;
+        *credentials = next;
+        kind
     };
-    let provider = CustomProvider { name, api, base_url, api_key, models, created_at, integration };
-    app.update_credentials(&kind, |credentials| {
-        credentials.custom.insert(kind.clone(), provider);
-    })
-    .map_err(|e| e.to_string())?;
+    app.push_credentials();
+    app.emit(app.roster_summary());
     Ok(kind)
 }
 
 /// The chat models a custom provider's server lists, for the apps' model picker: `None` when
 /// the server publishes no list. The base URL is read as `connect_custom` reads it, and a key
 /// the server refuses or a server that cannot be reached fails the same way.
-pub async fn list_custom_models(app: &Arc<App>, name: &str, api: &str, base_url: &str, api_key: &str, integration: Option<&str>) -> Result<Option<Vec<CustomModel>>, String> {
+pub async fn list_custom_models(_app: &Arc<App>, name: &str, api: &str, base_url: &str, api_key: &str, integration: Option<&str>) -> Result<Option<Vec<CustomModel>>, String> {
     let name = Some(name.trim()).filter(|name| !name.is_empty()).unwrap_or("The server");
     let api = CustomApi::parse(api.trim()).ok_or_else(|| format!("Unknown API {}", api.trim()))?;
     let integration = CustomIntegration::parse(integration)?;
     let root = integration_root(api, base_url, integration)?;
-    let listed = integration_models(app, name, api, &root, api_key.trim(), integration).await?;
+    let listed = list_models(name, api, &root, api_key.trim()).await?;
     Ok(listed.map(|models| models.into_iter().filter(|(not_chat, _)| !not_chat).map(|(_, model)| model).collect()))
 }
 
@@ -302,7 +303,11 @@ pub async fn refresh_custom_models(app: &Arc<App>) -> Result<usize, String> {
     let mut changed = 0;
     let mut failed = None;
     for (kind, snapshot, stamp) in providers {
-        let listed = match integration_models(app, &snapshot.name, snapshot.api, &snapshot.base_url, &snapshot.api_key, snapshot.integration).await {
+        let discovery = match integration_root(snapshot.api, &snapshot.base_url, snapshot.integration) {
+            Ok(root) => list_models(&snapshot.name, snapshot.api, &root, &snapshot.api_key).await,
+            Err(error) => Err(error),
+        };
+        let listed = match discovery {
             Ok(Some(listed)) => listed,
             Ok(None) => continue,
             Err(_) => {
@@ -367,9 +372,9 @@ fn custom_kind(credentials: &Credentials, name: &str) -> String {
 fn custom_root(api: CustomApi, base_url: &str) -> Result<String, String> {
     let url = custom_base_url(Some(base_url))?.ok_or("Enter the server's base URL")?;
     let endpoint: &[&str] = match api {
-        CustomApi::ChatCompletions => &["/chat/completions"],
-        CustomApi::Responses => &["/responses"],
-        CustomApi::Messages => &["/v1/messages", "/v1"],
+        CustomApi::ChatCompletions => &["/chat/completions", "/models"],
+        CustomApi::Responses => &["/responses", "/models"],
+        CustomApi::Messages => &["/v1/messages", "/v1/models", "/v1", "/messages", "/models"],
     };
     Ok(endpoint.iter().find_map(|path| url.strip_suffix(path)).unwrap_or(&url).to_string())
 }
@@ -377,28 +382,52 @@ fn custom_root(api: CustomApi, base_url: &str) -> Result<String, String> {
 /// The models a custom provider's server lists, each with whether it is not for chat
 /// (embeddings, speech, images); `None` when the server publishes no list. A key the server
 /// refuses, or a server that cannot be reached, fails.
-async fn list_models(_app: &Arc<App>, name: &str, api: CustomApi, root: &str, api_key: &str, durindoor: bool) -> Result<Option<Vec<(bool, CustomModel)>>, String> {
-    let mut request = match api {
-        CustomApi::ChatCompletions | CustomApi::Responses => {
-            let request = discovery_client()?.get(format!("{root}/models"));
-            if api_key.is_empty() { request } else { request.bearer_auth(api_key) }
+async fn list_models(name: &str, api: CustomApi, root: &str, api_key: &str) -> Result<Option<Vec<(bool, CustomModel)>>, String> {
+    const MAX_PAGES: usize = 16;
+    let client = discovery_client()?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut cursor = None;
+    let mut cursors = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut models = Vec::new();
+    let mut remaining_bytes = MODEL_RESPONSE_LIMIT;
+    for page in 0..MAX_PAGES {
+        let mut request = match api {
+            CustomApi::ChatCompletions | CustomApi::Responses => {
+                let request = client.get(format!("{root}/models"));
+                if api_key.is_empty() { request } else { request.bearer_auth(api_key) }
+            }
+            CustomApi::Messages => {
+                let mut request = client.get(format!("{root}/v1/models")).query(&[("limit", "1000")])
+                    .header("anthropic-version", ANTHROPIC_VERSION);
+                if let Some(cursor) = &cursor { request = request.query(&[("after_id", cursor)]); }
+                if api_key.is_empty() { request } else { request.header("x-api-key", api_key) }
+            }
+        };
+        request = request.timeout(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        let response = request.send().await.map_err(|_| format!("{name} unreachable. Check the URL on this Device."))?;
+        match response.status() {
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED if page == 0 => return Ok(None),
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => return Err(if api_key.is_empty() { format!("{name} needs an API key") } else { format!("{name} rejected that key") }),
+            status if !status.is_success() => return Err(format!("{name} model discovery failed ({status})")),
+            _ => {}
         }
-        CustomApi::Messages => {
-            let request = discovery_client()?.get(format!("{root}/v1/models?limit=1000")).header("anthropic-version", ANTHROPIC_VERSION);
-            if api_key.is_empty() { request } else { request.header("x-api-key", api_key) }
+        let (body, bytes) = bounded_json(response, name, remaining_bytes).await?;
+        remaining_bytes -= bytes;
+        let listed = listed_models(&body).ok_or_else(|| format!("{name} did not answer with a model list"))?;
+        models.extend(listed.into_iter().filter(|(_, model)| seen.insert(model.id.clone())));
+        if body.get("has_more").is_some_and(|value| !value.is_boolean()) {
+            return Err(format!("{name} model list has invalid pagination metadata"));
         }
-    };
-    request = request.timeout(std::time::Duration::from_secs(20));
-    let response = request.send().await.map_err(|e| format!("{name} unreachable: {}", lorca_tls::describe(&e)))?;
-    match response.status() {
-        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN if api_key.is_empty() => Err(format!("{name} needs an API key")),
-        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(format!("{name} rejected that key")),
-        status if status.is_success() => {
-            let body = bounded_json(response, name, MODEL_RESPONSE_LIMIT).await?;
-            Ok(if durindoor { durindoor_models(&body) } else { listed_models(&body) })
+        if api != CustomApi::Messages || body.get("has_more").and_then(Value::as_bool) != Some(true) {
+            return Ok(Some(models));
         }
-        _ => Ok(None),
+        let next = body["last_id"].as_str().filter(|id| !id.is_empty())
+            .ok_or_else(|| format!("{name} model list is missing its pagination cursor"))?;
+        if !cursors.insert(next.to_string()) { return Err(format!("{name} model list repeated its pagination cursor")); }
+        cursor = Some(next.to_string());
     }
+    Err(format!("{name} model list exceeds the pagination limit"))
 }
 
 /// A model list in the shape OpenAI, Anthropic, and most gateways and local servers answer
@@ -406,29 +435,10 @@ async fn list_models(_app: &Arc<App>, name: &str, api: CustomApi, root: &str, ap
 fn listed_models(body: &Value) -> Option<Vec<(bool, CustomModel)>> {
     let entries = body.get("data").or_else(|| body.get("models")).unwrap_or(body).as_array()?;
     let mut seen = std::collections::HashSet::new();
-    Some(entries.iter().filter_map(listed_model).filter(|(_, model)| seen.insert(model.id.clone())).collect())
+    let models = entries.iter().map(listed_model).collect::<Option<Vec<_>>>()?;
+    Some(models.into_iter().filter(|(_, model)| seen.insert(model.id.clone())).collect())
 }
 
-/// DurinDoor's default `/models` catalog contains callable chat ids, including aliases and
-/// combos without a `kind`. Explicit non-chat metadata still wins over that route contract.
-fn durindoor_models(body: &Value) -> Option<Vec<(bool, CustomModel)>> {
-    let entries = body.get("data").or_else(|| body.get("models")).unwrap_or(body).as_array()?;
-    let mut seen = std::collections::HashSet::new();
-    Some(entries.iter().filter_map(|entry| {
-        let (_, model) = listed_model(entry)?;
-        let not_chat = entry.pointer("/capabilities/completion_chat").and_then(Value::as_bool) == Some(false)
-            || entry["kind"].as_str().is_some_and(|kind| !matches!(kind, "llm" | "chat" | "imageToText"))
-            || entry["type"].as_str().is_some_and(|kind| NOT_CHAT_TYPES.contains(&kind))
-            || entry.pointer("/architecture/output_modalities").and_then(Value::as_array).is_some_and(|outputs| !outputs.iter().any(|output| output == "text"));
-        seen.insert(model.id.clone()).then_some((not_chat, model))
-    }).collect())
-}
-
-/// Words in the ids of models a server lists that chat cannot use: embeddings, rerankers,
-/// speech, transcription, realtime audio, image and video generation, moderation, and
-/// completion-only base models.
-const NOT_CHAT_WORDS: [&str; 14] =
-    ["embed", "rerank", "whisper", "tts", "transcribe", "realtime", "audio", "dall-e", "image", "sora", "moderation", "babbage", "davinci", "guard"];
 
 /// The `type` a model list (Together's) gives a model chat cannot use.
 const NOT_CHAT_TYPES: [&str; 8] = ["embedding", "rerank", "image", "audio", "transcribe", "moderation", "video", "tts"];
@@ -436,7 +446,7 @@ const NOT_CHAT_TYPES: [&str; 8] = ["embedding", "rerank", "image", "audio", "tra
 /// One entry of a model list, read for the fields servers use for a model's name, window,
 /// output cap, and inputs, and whether it is a model chat cannot use.
 fn listed_model(entry: &Value) -> Option<(bool, CustomModel)> {
-    let id = entry["id"].as_str().or_else(|| entry["name"].as_str()).map(str::trim).filter(|id| !id.is_empty())?.to_string();
+    let id = entry["id"].as_str().or_else(|| entry["name"].as_str()).filter(|id| !id.trim().is_empty())?.to_string();
     let number = |paths: &[&str]| paths.iter().find_map(|path| entry.pointer(path).and_then(Value::as_u64)).filter(|n| *n > 0);
     let name = ["display_name", "name"]
         .iter()
@@ -447,15 +457,11 @@ fn listed_model(entry: &Value) -> Option<(bool, CustomModel)> {
     let context_window = number(&["/context_length", "/context_window", "/max_model_len", "/max_context_length", "/max_input_tokens", "/top_provider/context_length", "/capabilities/contextWindow", "/contextLength"]);
     let max_output = number(&["/max_output_tokens", "/max_completion_tokens", "/top_provider/max_completion_tokens", "/capabilities/maxOutput"]);
     let inputs = entry.pointer("/architecture/input_modalities").or_else(|| entry.pointer("/modalities/input")).and_then(Value::as_array);
-    let images = inputs.map(|inputs| inputs.iter().any(|input| input == "image")).or_else(|| entry.pointer("/capabilities/vision").and_then(Value::as_bool));
-    let lower = id.to_ascii_lowercase();
-    let chat = entry.pointer("/capabilities/completion_chat").and_then(Value::as_bool)
-        .or_else(|| entry["kind"].as_str().map(|kind| matches!(kind, "llm" | "chat" | "imageToText")))
-        .or_else(|| entry["type"].as_str().filter(|kind| *kind == "chat").map(|_| true));
-    let not_chat = chat == Some(false) || (chat.is_none() && (
-        NOT_CHAT_WORDS.iter().any(|word| lower.contains(word))
+    let images = entry.pointer("/capabilities/vision").and_then(Value::as_bool).or_else(|| inputs.map(|inputs| inputs.iter().any(|input| input == "image")));
+    let not_chat = entry.pointer("/capabilities/completion_chat").and_then(Value::as_bool) == Some(false)
+        || entry["kind"].as_str().is_some_and(|kind| NOT_CHAT_TYPES.contains(&kind) || matches!(kind, "webSearch" | "imageGeneration" | "textToSpeech" | "speechToText" | "completion"))
         || entry["type"].as_str().is_some_and(|kind| NOT_CHAT_TYPES.contains(&kind))
-        || entry.pointer("/architecture/output_modalities").and_then(Value::as_array).is_some_and(|outputs| !outputs.iter().any(|output| output == "text"))));
+        || entry.pointer("/architecture/output_modalities").and_then(Value::as_array).is_some_and(|outputs| !outputs.iter().any(|output| output == "text"));
     let reasoning = entry.pointer("/capabilities/reasoning").and_then(Value::as_bool);
     let tools = entry.pointer("/capabilities/tools").and_then(Value::as_bool);
     let thinking_format = entry.pointer("/capabilities/thinkingFormat").and_then(Value::as_str).map(str::to_string);

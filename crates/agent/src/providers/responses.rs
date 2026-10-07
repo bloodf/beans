@@ -335,7 +335,14 @@ pub(crate) async fn pump(
                 return;
             }
         };
-        for event in parser.push(&chunk) {
+        let events = match parser.push_bounded(&chunk) {
+            Ok(events) => events,
+            Err(message) => {
+                let _ = tx.send(AssistantEvent::Error { message: message.into(), aborted: false }).await;
+                return;
+            }
+        };
+        for event in events {
             let Ok(value) = serde_json::from_str::<Value>(&event.data) else { continue };
             let kind = value["type"].as_str().map(str::to_string).or(event.event.clone()).unwrap_or_default();
             match state.apply(&kind, &value, &tx).await {

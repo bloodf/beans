@@ -30,6 +30,8 @@ pub const DEEPSEEK_DEFAULT_MODEL: &str = super::openai_compat::DEEPSEEK_DEFAULT_
 const USER_AGENT: &str = concat!("lorca-agent/", env!("CARGO_PKG_VERSION"));
 /// The most `cache_control` marks a request may carry.
 const MAX_CACHE_MARKS: usize = 4;
+/// Answer allowance kept inside the output cap when thinking uses a token budget.
+const THINKING_ANSWER_RESERVE: u64 = 1024;
 
 pub struct AnthropicProvider {
     pub provider_id: String,
@@ -50,6 +52,8 @@ pub struct AnthropicProvider {
     pub max_tokens: u64,
     /// Whether the model takes images; a text-only model gets a note in their place.
     pub supports_images: bool,
+    /// An explicitly tool-incompatible model refuses tool-bearing requests before sending.
+    pub supports_tools: bool,
     /// `cache_control: ephemeral` on the system prompt, the last tool, and the last user block,
     /// so the conversation prefix is cached between turns.
     pub cache: bool,
@@ -77,6 +81,7 @@ impl AnthropicProvider {
             info: models::find(provider_id, model),
             max_tokens: 16384,
             supports_images: true,
+            supports_tools: true,
             cache: true,
             eager_tool_streaming: true,
             max_retries: 2,
@@ -122,6 +127,12 @@ impl AnthropicProvider {
         self
     }
 
+    pub fn without_redirects(mut self) -> Self {
+        self.client = lorca_tls::client_builder().redirect(reqwest::redirect::Policy::none())
+            .build().expect("a client over a built TLS config");
+        self
+    }
+
     /// The `thinking` and `output_config` fields for the level, and the output cap that leaves
     /// room for a token budget.
     fn thinking_fields(&self, max_tokens: u64) -> (Option<Value>, Option<Value>, u64) {
@@ -137,8 +148,9 @@ impl AnthropicProvider {
         match (mode, level) {
             (ThinkingMode::Budget, ThinkingLevel::Off) => (None, None, max_tokens),
             (ThinkingMode::Budget, level) => {
-                let budget = thinking_budget(level);
-                (Some(json!({ "type": "enabled", "budget_tokens": budget })), None, max_tokens.max(budget + 1024))
+                let cap = self.info.as_ref().map(|info| info.max_output).filter(|cap| *cap > 0).unwrap_or(u64::MAX);
+                let budget = thinking_budget(level).min(cap.saturating_sub(THINKING_ANSWER_RESERVE));
+                (Some(json!({ "type": "enabled", "budget_tokens": budget })), None, max_tokens.max(budget + THINKING_ANSWER_RESERVE))
             }
             // No effort, so the default `high`, the most `between_tools` takes.
             (ThinkingMode::AdaptiveBetweenTools, ThinkingLevel::Off) => (Some(json!({ "type": "between_tools" })), None, max_tokens),
@@ -630,9 +642,20 @@ impl Provider for AnthropicProvider {
 
     async fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream {
         let (tx, rx) = mpsc::channel(64);
+        if !self.supports_tools && (!request.tools.is_empty() || !self.server_tools.is_empty()) {
+            let _ = tx.send(AssistantEvent::Error { message: format!("{} does not support tools. Choose a tool-capable model for this bot.", self.model), aborted: false }).await;
+            return channel_stream(rx);
+        }
         let mut body = self.body(&request);
         let options = request.options.clone();
         options.before_payload(&mut body);
+        if body["thinking"]["type"] == "enabled" {
+            let budget = body["thinking"]["budget_tokens"].as_u64().unwrap_or(0);
+            if budget < 1024 || body["max_tokens"].as_u64().unwrap_or(0).saturating_sub(budget) < THINKING_ANSWER_RESERVE {
+                let _ = tx.send(AssistantEvent::Error { message: "Budget thinking needs at least 1024 thinking tokens plus a 1024-token answer reserve. Use default thinking or a model with a larger output cap.".into(), aborted: false }).await;
+                return channel_stream(rx);
+            }
+        }
         let api_key = options.api_key(&self.api_key).await;
         let url = format!("{}/v1/messages", self.base_url);
         let client = self.client.clone();
@@ -686,7 +709,14 @@ impl Provider for AnthropicProvider {
                         return;
                     }
                 };
-                for event in parser.push(&chunk) {
+                let events = match parser.push_bounded(&chunk) {
+                    Ok(events) => events,
+                    Err(message) => {
+                        let _ = tx.send(AssistantEvent::Error { message: message.into(), aborted: false }).await;
+                        return;
+                    }
+                };
+                for event in events {
                     let Ok(value) = crate::json::parse_json_with_repair(&event.data) else {
                         tracing::debug!(data = %event.data, "unparsed sse chunk");
                         continue;
@@ -867,6 +897,47 @@ mod tests {
         let mut request_capped = request(vec![LlmMessage::User(UserMessage::text("hi"))]);
         request_capped.max_tokens = Some(500);
         assert_eq!(AnthropicProvider::deepseek("k", None).body(&request_capped)["max_tokens"], 500);
+    }
+
+    fn budget_provider(cap: u64) -> AnthropicProvider {
+        let mut provider = AnthropicProvider::new("custom:budget", "http://127.0.0.1:9", "", "budget-alias").with_thinking(Some(ThinkingLevel::Max));
+        let mut info = (*models::find("anthropic", "claude-haiku-4-5").unwrap()).clone();
+        info.max_output = cap;
+        provider.info = Some(Arc::new(info));
+        provider.max_retries = 0;
+        provider
+    }
+
+    #[test]
+    fn budget_thinking_reserves_answer_tokens_before_the_model_cap_is_applied() {
+        for (cap, expected_budget) in [(2048, 1024), (4095, 3071), (4096, 3072)] {
+            let mut request = request(vec![LlmMessage::User(UserMessage::text("hi"))]);
+            request.max_tokens = Some(128);
+            let body = budget_provider(cap).body(&request);
+            assert_eq!(body["thinking"]["budget_tokens"], expected_budget, "cap {cap}");
+            assert_eq!(body["max_tokens"], cap);
+            assert_eq!(body["max_tokens"].as_u64().unwrap() - body["thinking"]["budget_tokens"].as_u64().unwrap(), 1024);
+        }
+        let mut off = budget_provider(2047);
+        off.thinking_level = Some(ThinkingLevel::Off);
+        let body = off.body(&request(Vec::new()));
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["max_tokens"], 2047);
+    }
+
+    #[tokio::test]
+    async fn budget_thinking_rejects_caps_that_cannot_fit_minimum_thinking_and_answer_reserve() {
+        for cap in [1024, 2047] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let mut provider = budget_provider(cap);
+            provider.base_url = format!("http://{}", listener.local_addr().unwrap());
+            let mut request = request(Vec::new());
+            request.options = request.options.with_timeout(std::time::Duration::from_millis(100));
+            let events: Vec<_> = provider.stream(request, CancellationToken::new()).await.collect().await;
+            assert!(matches!(&events[..], [AssistantEvent::Error { message, aborted: false }] if message.contains("1024") && message.contains("answer")), "{events:?}");
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock), "rejected before sending any request");
+        }
     }
 
     #[test]

@@ -2,11 +2,6 @@ import XCTest
 @testable import Lorca
 
 final class CustomProviderTests: XCTestCase {
-    func testDurinDoorPresetHasExplicitIdentityAndNoEndpoint() {
-        let preset = CustomProviderPreset.cloud.first { $0.name == "DurinDoor" }
-        XCTAssertEqual(preset?.integration, "durindoor")
-        XCTAssertEqual(preset?.baseURL, "")
-    }
 
     func testTheNoteNamesTheURLTheCLICalls() {
         XCTAssertEqual(CustomAPI.chatCompletions.endpoint(for: " https://openrouter.ai/api/v1/ "), "https://openrouter.ai/api/v1/chat/completions")
@@ -44,6 +39,18 @@ final class CustomProviderTests: XCTestCase {
         XCTAssertEqual(merged[1].contextWindow, 128_000, "the listing's facts replace the kept row's")
         // A server with no list keeps only what was picked or typed, none of the last server's.
         XCTAssertEqual(ModelChecklist.merge(merged, keeping: { $0 == "typed" }, with: []).map(\.id), ["typed"])
+    }
+
+    func testSparseDiscoveryPreservesSavedFactsAndExplicitFalseClearsCapabilities() {
+        let saved = CustomModel(id: "image-helper", name: "Saved", contextWindow: 200_000, images: true, maxOutput: 32_000, reasoning: true, tools: true, thinkingFormat: "openai", thinkingCanDisable: true)
+        let merged = ModelChecklist.merge([saved], keeping: { _ in true }, with: [CustomModel(id: "image-helper", images: false, reasoning: false, tools: false)])
+        XCTAssertEqual(merged[0].name, "Saved")
+        XCTAssertEqual(merged[0].contextWindow, 200_000)
+        XCTAssertEqual(merged[0].maxOutput, 32_000)
+        XCTAssertEqual(merged[0].images, false)
+        XCTAssertEqual(merged[0].reasoning, false)
+        XCTAssertEqual(merged[0].tools, false)
+        XCTAssertEqual(merged[0].thinkingFormat, "openai")
     }
 
     func testTheSearchFieldFiltersOrOffersToAdd() {

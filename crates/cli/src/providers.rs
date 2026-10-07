@@ -93,9 +93,8 @@ pub fn supports_vision(app: &App, kind: &str, model: Option<&str>) -> bool {
     if is_custom(kind) {
         let credentials = app.credentials.lock().unwrap();
         let Some(provider) = credentials.custom.get(kind) else { return false };
-        let model = model.map(str::trim).filter(|m| !m.is_empty()).or_else(|| provider.models.first().map(|m| m.id.as_str()));
-        return model.is_some_and(|model| provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.images)
-            .or_else(|| models::find_any(model).map(|entry| entry.images)).unwrap_or(false));
+        let model = model.filter(|m| !m.trim().is_empty()).or_else(|| provider.models.first().map(|m| m.id.as_str()));
+        return model.is_some_and(|model| provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.images).unwrap_or(false));
     }
     built_in_vision(kind, model)
 }
@@ -140,11 +139,10 @@ pub fn default_model(kind: &str) -> String {
 pub fn review_model(app: &App, kind: &str) -> (String, Option<ThinkingLevel>) {
     if is_custom(kind) {
         let credentials = app.credentials.lock().unwrap();
-        let Some(model) = credentials.custom.get(kind).and_then(|p| p.models.first().map(|m| m.id.clone())) else {
-            return (String::new(), None);
-        };
-        let thinking = models::find_any(&model).and_then(|known| known.levels.first().copied());
-        return (model, thinking);
+        let Some(provider) = credentials.custom.get(kind) else { return (String::new(), None) };
+        let Some(model) = provider.models.first() else { return (String::new(), None) };
+        let thinking = provider.levels(model).first().copied();
+        return (model.id.clone(), thinking);
     }
     let model = models::review_model(kind).unwrap_or_default();
     let thinking = models::find(kind, &model).and_then(|info| info.levels.first().copied()).unwrap_or(ThinkingLevel::Off);
@@ -157,7 +155,7 @@ pub fn thinking_level(bot: &crate::model::Bot) -> Option<ThinkingLevel> {
 }
 
 pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: Option<ThinkingLevel>) -> Result<Arc<dyn Provider>, String> {
-    let model = model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_string);
+    let model = model.filter(|m| !m.trim().is_empty()).map(str::to_string);
     match kind {
         kind if is_custom(kind) => {
             let credentials = app.credentials.lock().unwrap();
@@ -321,12 +319,9 @@ fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking:
     let info = Arc::new(custom_model_info(kind, provider, model));
     match provider.api {
         CustomApi::ChatCompletions => {
-            let mut adapter = OpenAiCompatProvider::new(kind, &provider.base_url, &provider.api_key, model).with_thinking(thinking);
-            if provider.integration == Some(crate::credentials::CustomIntegration::Durindoor) {
-                adapter = adapter.without_redirects();
-                adapter.reasoning_effort_none = true;
-                adapter.supports_tools = provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.tools).unwrap_or(true);
-            }
+            let mut adapter = OpenAiCompatProvider::new(kind, &provider.base_url, &provider.api_key, model).without_redirects().with_thinking(thinking);
+            adapter.reasoning_effort_none = true;
+            adapter.supports_tools = provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.tools).unwrap_or(true);
             adapter.supports_images = info.images;
             adapter.info = Some(info);
             // OpenAI's own field; servers such as Gemini's refuse a request with one they lack.
@@ -334,15 +329,19 @@ fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking:
             Arc::new(adapter)
         }
         CustomApi::Responses => {
-            let mut adapter = OpenAiResponsesProvider::new(kind, &provider.base_url, &provider.api_key, model).with_thinking(thinking);
+            let mut adapter = OpenAiResponsesProvider::new(kind, &provider.base_url, &provider.api_key, model).without_redirects().with_thinking(thinking);
+            adapter.supports_tools = provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.tools).unwrap_or(true);
+            adapter.prompt_cache_key = false;
             adapter.supports_images = info.images;
             adapter.info = Some(info);
             Arc::new(adapter)
         }
         CustomApi::Messages => {
-            let mut adapter = AnthropicProvider::new(kind, &provider.base_url, &provider.api_key, model).with_thinking(thinking);
+            let mut adapter = AnthropicProvider::new(kind, &provider.base_url, &provider.api_key, model).without_redirects().with_thinking(thinking);
+            adapter.supports_tools = provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.tools).unwrap_or(true);
             adapter.supports_images = info.images;
-            adapter.max_tokens = if info.max_output > 0 { 32_000 } else { 16_384 };
+            adapter.cache = false;
+            adapter.max_tokens = if info.max_output > 0 { info.max_output.min(32_000) } else { 16_384 };
             adapter.info = Some(info);
             // Arguments streamed as they are generated are Anthropic's own extension.
             adapter.eager_tool_streaming = false;
@@ -351,30 +350,27 @@ fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking:
     }
 }
 
-/// Custom metadata belongs to the adapter for one turn. It uses current catalog facts without
-/// retaining old catalog versions or leaking a static entry after a provider changes.
+/// Custom capabilities come only from this connection, never a similarly named catalog model.
 fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> ModelInfo {
     let listed = provider.models.iter().find(|entry| entry.id == model);
-    let known = models::find_any(model);
-    let durindoor = provider.integration == Some(crate::credentials::CustomIntegration::Durindoor);
-    let thinking = match known.as_ref() {
-        _ if durindoor => ThinkingMode::Effort,
-        Some(known) => known.thinking,
-        None if provider.api == CustomApi::Messages => ThinkingMode::Budget,
-        None => ThinkingMode::Effort,
-    };
+    let thinking = if provider.api == CustomApi::Messages {
+        match listed.and_then(|entry| entry.thinking_format.as_deref()) {
+            Some("claude-adaptive") => ThinkingMode::Adaptive,
+            _ => ThinkingMode::Budget,
+        }
+    } else { ThinkingMode::Effort };
     ModelInfo {
         id: model.to_string(),
-        name: listed.and_then(|entry| entry.name.clone()).or_else(|| known.as_ref().map(|entry| entry.name.clone())).unwrap_or_else(|| model.to_string()),
+        name: listed.and_then(|entry| entry.name.clone()).unwrap_or_else(|| model.to_string()),
         provider: kind.to_string(),
-        context_window: listed.and_then(|entry| entry.context_window).or_else(|| known.as_ref().map(|entry| entry.context_window)).unwrap_or(0),
-        max_output: listed.and_then(|entry| entry.max_output).or_else(|| known.as_ref().map(|entry| entry.max_output)).unwrap_or(0),
-        reasoning: listed.and_then(|entry| entry.reasoning).unwrap_or_else(|| !durindoor && known.as_ref().is_some_and(|entry| entry.reasoning)),
-        images: listed.and_then(|entry| entry.images).or_else(|| known.as_ref().map(|entry| entry.images)).unwrap_or(false),
+        context_window: listed.and_then(|entry| entry.context_window).unwrap_or(0),
+        max_output: listed.and_then(|entry| entry.max_output).unwrap_or(0),
+        reasoning: listed.and_then(|entry| entry.reasoning).unwrap_or(false),
+        images: listed.and_then(|entry| entry.images).unwrap_or(false),
         rates: Rates { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 },
         tiers: Vec::new(),
         thinking,
-        levels: listed.map(|entry| provider.levels(entry)).unwrap_or_else(|| if durindoor { Vec::new() } else { crate::credentials::custom_levels(model) }),
+        levels: listed.map(|entry| provider.levels(entry)).unwrap_or_default(),
         wire: None,
     }
 }
@@ -409,7 +405,7 @@ fn env_url(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use parking_lot::Mutex;
     use crate::credentials::CustomModel;
 
     struct CaptureProvider(Arc<Mutex<Option<ModelRequest>>>);
@@ -425,7 +421,7 @@ mod tests {
         }
 
         async fn stream(&self, request: ModelRequest, _cancel: CancellationToken) -> AssistantEventStream {
-            *self.0.lock().unwrap() = Some(request);
+            *self.0.lock() = Some(request);
             Box::pin(futures::stream::empty())
         }
     }
@@ -512,7 +508,7 @@ mod tests {
         add_custom(app, "custom:lab", CustomApi::ChatCompletions, vec![model("qwen3:8b"), model("llama4")]);
         assert_eq!(review_model(app, "custom:lab"), ("qwen3:8b".into(), None));
         add_custom(app, "custom:proxy", CustomApi::Messages, vec![model("anthropic/claude-haiku-4-5")]);
-        assert_eq!(review_model(app, "custom:proxy"), ("anthropic/claude-haiku-4-5".into(), Some(ThinkingLevel::Off)));
+        assert_eq!(review_model(app, "custom:proxy"), ("anthropic/claude-haiku-4-5".into(), None));
         assert_eq!(review_model(app, "custom:gone"), (String::new(), None));
     }
 
@@ -543,15 +539,15 @@ mod tests {
         assert!(provider.supports_images());
         assert!(supports_vision(app, "custom:vision-lab", None));
 
-        // The catalog knows a gateway's model by its id; the cost stays zero.
+        // A familiar model ID is not a capability declaration.
         let known = provider_for(app, "custom:vision-lab", Some("anthropic/claude-sonnet-5"), None).unwrap();
         let info = known.model_info().unwrap();
-        assert_eq!((info.context_window, info.images, info.rates.input), (1_000_000, true, 0.0));
+        assert_eq!((info.context_window, info.images, info.rates.input), (0, false, 0.0));
 
-        // Nothing known: no window, text only, the common levels.
+        // Nothing advertised: no window, text only, no guessed thinking.
         let unknown = provider_for(app, "custom:vision-lab", Some("mystery"), Some(ThinkingLevel::Max)).unwrap();
         let info = unknown.model_info().unwrap();
-        assert_eq!((info.context_window, info.images, info.clamp_level(ThinkingLevel::Max)), (0, false, Some(ThinkingLevel::High)));
+        assert_eq!((info.context_window, info.images, info.clamp_level(ThinkingLevel::Max)), (0, false, None));
         assert!(!supports_vision(app, "custom:vision-lab", Some("mystery")));
 
         // A running provider holds its own metadata even after the custom catalog changes.
@@ -564,6 +560,53 @@ mod tests {
         assert_eq!(provider_for(app, "custom:vision-lab", None, None).err().unwrap(), "vision-lab is not connected");
     }
 
+    #[tokio::test]
+    async fn selected_aliases_keep_their_identity_and_metadata_on_each_wire() {
+        use futures::StreamExt;
+        use lorca_agent::{AssistantEvent, LlmMessage, UserMessage};
+        let cases = [
+            (CustomApi::ChatCompletions, "/v1", "data: {\"choices\":[{\"delta\":{\"content\":\"fixture\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+            (CustomApi::Responses, "/v1", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{}}}\n\n"),
+            (CustomApi::Messages, "", "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+        ];
+        for (api, suffix, fixture) in cases {
+            let scratch = scratch_app();
+            let app = &scratch.0;
+            add_custom(app, "custom:aliases", api, vec![model("exact-alias"), CustomModel { images: Some(true), context_window: Some(12_345), ..model(" exact-alias ") }]);
+            let adapter = provider_for(app, "custom:aliases", Some(" exact-alias "), None).unwrap();
+            assert_eq!(adapter.model_id(), " exact-alias ");
+            assert_eq!(adapter.model_info().unwrap().context_window, 12_345);
+            assert!(supports_vision(app, "custom:aliases", Some(" exact-alias ")));
+            assert!(!supports_vision(app, "custom:aliases", Some("exact-alias")));
+            assert_eq!(provider_for(app, "custom:aliases", Some(" \t\n "), None).unwrap().model_id(), "exact-alias");
+            let (root, server) = answer_once(fixture);
+            app.credentials.lock().unwrap().custom.get_mut("custom:aliases").unwrap().base_url = format!("{root}{suffix}");
+            let request = ModelRequest { system_prompt: String::new(), messages: vec![LlmMessage::User(UserMessage::text("hello"))], tools: Vec::new(), cache_points: Vec::new(), max_tokens: Some(32), options: Default::default() };
+            let events: Vec<_> = provider_for(app, "custom:aliases", Some(" exact-alias "), None).unwrap().stream(request, CancellationToken::new()).await.collect().await;
+            assert!(events.iter().any(|event| matches!(event, AssistantEvent::Done { .. })), "{events:?}");
+            let seen = server.join().unwrap();
+            let body: serde_json::Value = serde_json::from_str(seen.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(body["model"], " exact-alias ");
+        }
+    }
+
+    #[tokio::test]
+    async fn bot_updates_preserve_nonblank_model_ids_and_clear_blank_selections() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Fixture".into())).unwrap();
+        let created = crate::api::dispatch(app, "bots.create", serde_json::json!({
+            "name": "Alias bot", "runner_id": app.this_device_id().unwrap(), "provider": "custom:aliases", "model": "initial"
+        })).await.unwrap();
+        let id = created["bot"]["id"].as_str().unwrap();
+        for selection in [" exact-alias ", "\tcombo/ALIAS\n", " \t\n "] {
+            let updated = crate::api::dispatch(app, "bots.update", serde_json::json!({ "id": id, "model": selection })).await.unwrap();
+            let expected = (!selection.trim().is_empty()).then_some(selection);
+            assert_eq!(updated["bot"]["model"].as_str(), expected);
+            assert_eq!(app.bot(id).unwrap().model.as_deref(), expected);
+        }
+    }
+
     /// Answers one model call with `body` as a stream and hands back the request it got.
     fn answer_once(body: &'static str) -> (String, std::thread::JoinHandle<String>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -571,11 +614,22 @@ mod tests {
         let server = std::thread::spawn(move || {
             use std::io::{Read, Write};
             let (mut socket, _) = listener.accept().unwrap();
-            let mut request = [0u8; 8192];
-            let read = socket.read(&mut request).unwrap();
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0u8; 8192];
+                let read = socket.read(&mut chunk).unwrap();
+                assert!(read > 0, "request ended before its body");
+                request.extend_from_slice(&chunk[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some((headers, body)) = text.split_once("\r\n\r\n") {
+                    let length: usize = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").map(str::to_string)).unwrap().parse().unwrap();
+                    if body.len() >= length { break; }
+                }
+            }
             let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             socket.write_all(reply.as_bytes()).unwrap();
-            String::from_utf8_lossy(&request[..read]).to_ascii_lowercase()
+            String::from_utf8(request).unwrap()
         });
         (root, server)
     }
@@ -596,6 +650,7 @@ mod tests {
         let cases = [
             (CustomApi::ChatCompletions, "/v1", "data: [DONE]\n\n", "post /v1/chat/completions "),
             (CustomApi::Messages, "", "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "post /v1/messages "),
+            (CustomApi::Responses, "/v1", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{}}}\n\n", "post /v1/responses "),
         ];
         for (api, path, body, line) in cases {
             let (root, server) = answer_once(body);
@@ -604,24 +659,13 @@ mod tests {
             app.credentials.lock().unwrap().custom.insert(kind.clone(), provider);
             let mut stream = provider_for(app, &kind, None, None).unwrap().stream(request(), CancellationToken::new()).await;
             while stream.next().await.is_some() {}
-            let seen = server.join().unwrap();
+            let seen = server.join().unwrap().to_ascii_lowercase();
             assert!(seen.starts_with(line), "{seen}");
             assert!(!seen.contains("\r\nauthorization:") && !seen.contains("\r\nx-api-key:"), "{seen}");
             assert!(!seen.contains("prompt_cache_key"), "{seen}");
         }
     }
 
-    #[test]
-    fn a_custom_messages_server_thinks_by_budget() {
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        add_custom(app, "custom:proxy", CustomApi::Messages, vec![model("glm-6"), model("claude-opus-5")]);
-        let provider = provider_for(app, "custom:proxy", None, None).unwrap();
-        let info = provider.model_info().unwrap();
-        assert_eq!(info.thinking, ThinkingMode::Budget);
-        let claude = provider_for(app, "custom:proxy", Some("claude-opus-5"), None).unwrap();
-        assert_eq!(claude.model_info().unwrap().thinking, ThinkingMode::Adaptive);
-    }
 
     #[tokio::test]
     async fn opencode_requests_identify_lorca_and_carry_the_conversation() {
@@ -636,8 +680,109 @@ mod tests {
             options: lorca_agent::RequestOptions::default().with_session_id("chat-1"),
         };
         let _ = provider.stream(request, CancellationToken::new()).await;
-        let request = seen.lock().unwrap().take().unwrap();
+        let request = seen.lock().take().unwrap();
         assert_eq!(request.options.headers.get("User-Agent").map(String::as_str), Some(USER_AGENT));
         assert_eq!(request.options.headers.get("x-opencode-session").map(String::as_str), Some("chat-1"));
+    }
+
+    /// Fixtures use the official streamed shapes, without contacting a provider:
+    /// https://platform.openai.com/docs/api-reference/chat/streaming
+    /// https://platform.openai.com/docs/api-reference/responses-streaming
+    /// https://platform.claude.com/docs/en/api/messages-streaming
+    #[tokio::test]
+    async fn compatible_metadata_drives_each_official_wire_without_id_guesses() {
+        use futures::StreamExt;
+        use lorca_agent::{AssistantEvent, ContentPart, LlmMessage, UserMessage};
+        let cases = [
+            (CustomApi::ChatCompletions, "/v1", "/v1/chat/completions", "openai", "data: {\"choices\":[{\"delta\":{\"content\":\"fixture\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"),
+            (CustomApi::Responses, "/v1", "/v1/responses", "openai", "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{}}}\n\n"),
+            (CustomApi::Messages, "", "/v1/messages", "claude-adaptive", "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+            (CustomApi::Messages, "", "/v1/messages", "claude-budget", "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"),
+        ];
+        for (api, suffix, endpoint, format, fixture) in cases {
+            for capability in [None, Some(false), Some(true)] {
+                let (root, server) = answer_once(fixture);
+                let listed = CustomModel { id: "claude-opus-5".into(), images: capability, reasoning: capability, tools: capability, thinking_format: Some(format.into()), thinking_can_disable: Some(true), max_output: Some(4096), ..Default::default() };
+                let provider = CustomProvider { name: "Neutral".into(), api, base_url: format!("{root}{suffix}"), api_key: "fixture-key".into(), models: vec![listed], created_at: 1, integration: None };
+                let adapter = custom_provider("custom:neutral", &provider, "claude-opus-5", Some(ThinkingLevel::Medium));
+                let request = ModelRequest {
+                    system_prompt: "fixture system".into(),
+                    messages: vec![LlmMessage::User(UserMessage { content: vec![ContentPart::text("fixture input"), ContentPart::Image { data: "AA==".into(), mime_type: "image/png".into() }], timestamp: 0 })],
+                    tools: Vec::new(), cache_points: Vec::new(), max_tokens: Some(128),
+                    options: Default::default(),
+                };
+                let events: Vec<_> = adapter.stream(request, CancellationToken::new()).await.collect().await;
+                assert!(events.iter().any(|event| matches!(event, AssistantEvent::Done { stop_reason: lorca_agent::StopReason::Stop, .. })), "{events:?}");
+                assert!(!events.iter().any(|event| matches!(event, AssistantEvent::Error { .. })), "{events:?}");
+                let seen = server.join().unwrap();
+                let (headers, body) = seen.split_once("\r\n\r\n").unwrap();
+                assert!(headers.starts_with(&format!("POST {endpoint} ")));
+                let body: serde_json::Value = serde_json::from_str(body).unwrap();
+                assert_eq!(body["model"], "claude-opus-5");
+                assert_eq!(adapter.supports_images(), capability == Some(true));
+                assert_eq!(body.to_string().contains("data:image/png;base64,AA==") || body.to_string().contains("\"data\":\"AA==\""), capability == Some(true));
+                match api {
+                    CustomApi::Messages => {
+                        assert!(headers.contains("x-api-key: fixture-key"));
+                        assert!(headers.contains("anthropic-version: 2023-06-01"));
+                        assert!(!headers.contains("authorization:"));
+                        assert_eq!(body.get("thinking").is_some(), capability == Some(true));
+                        if capability == Some(true) {
+                            if format == "claude-budget" {
+                                assert_eq!(body["thinking"]["type"], "enabled");
+                                assert_eq!(body["thinking"]["budget_tokens"], 3072);
+                                assert_eq!(body["max_tokens"], 4096);
+                                assert!(body.get("output_config").is_none());
+                            } else {
+                                assert_eq!(body["thinking"]["type"], "adaptive");
+                                assert_eq!(body["output_config"]["effort"], "medium");
+                            }
+                        }
+                        assert!(!body.to_string().contains("cache_control"));
+                    }
+                    CustomApi::ChatCompletions | CustomApi::Responses => {
+                        assert!(headers.contains("authorization: Bearer fixture-key"));
+                        assert!(!headers.contains("x-api-key:"));
+                        if api == CustomApi::ChatCompletions {
+                            assert_eq!(body.get("reasoning_effort").is_some(), capability == Some(true));
+                            if capability == Some(true) { assert_eq!(body["reasoning_effort"], "medium"); }
+                        } else {
+                            assert_eq!(body.get("reasoning").is_some(), capability == Some(true));
+                            if capability == Some(true) { assert_eq!(body["reasoning"]["effort"], "medium"); }
+                        }
+                    }
+                }
+                assert!(body.get("prompt_cache_key").is_none());
+            }
+            let provider = CustomProvider { name: "Neutral".into(), api, base_url: "http://127.0.0.1:9".into(), api_key: String::new(), models: vec![CustomModel { tools: Some(false), ..model("no-tools") }], created_at: 1, integration: None };
+            let request = ModelRequest { system_prompt: String::new(), messages: Vec::new(), tools: vec![lorca_agent::ToolSpec { name: "read".into(), description: "fixture".into(), parameters: serde_json::json!({"type":"object"}) }], cache_points: Vec::new(), max_tokens: None, options: Default::default() };
+            let events: Vec<_> = custom_provider("custom:neutral", &provider, "no-tools", None).stream(request, CancellationToken::new()).await.collect().await;
+            assert!(matches!(&events[0], AssistantEvent::Error { message, aborted: false } if message.contains("does not support tools")));
+        }
+    }
+
+    #[tokio::test]
+    async fn compatible_inference_never_redirects_credentials_on_any_wire() {
+        use futures::StreamExt;
+        use std::io::{Read, Write};
+        for api in CustomApi::ALL {
+            let sink = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            sink.set_nonblocking(true).unwrap();
+            let destination = format!("http://{}/capture",sink.local_addr().unwrap());
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let root = format!("http://{}",listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut socket,_) = listener.accept().unwrap();
+                let mut request = [0u8;8192];
+                socket.read(&mut request).unwrap();
+                write!(socket,"HTTP/1.1 307 Temporary Redirect\r\nLocation: {destination}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            });
+            let provider = CustomProvider { name:"Neutral".into(),api,base_url:root,api_key:"fixture-key".into(),models:vec![model("alias")],created_at:1,integration:None };
+            let request = ModelRequest { system_prompt:String::new(),messages:Vec::new(),tools:Vec::new(),cache_points:Vec::new(),max_tokens:Some(32),options:Default::default() };
+            let events:Vec<_> = custom_provider("custom:neutral",&provider,"alias",None).stream(request,CancellationToken::new()).await.collect().await;
+            server.join().unwrap();
+            assert!(events.iter().any(|event| matches!(event,lorca_agent::AssistantEvent::Error { message,aborted:false } if message.contains("307"))),"{events:?}");
+            assert_eq!(sink.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock);
+        }
     }
 }

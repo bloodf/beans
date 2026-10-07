@@ -17,13 +17,15 @@ final class AvatarLifecycleTests: XCTestCase {
         let store = AppStore.shared
         guard store.client.state == .disconnected else { throw XCTSkip("Does not mutate a connected account") }
         let id = store.createBot(name: "Sidebar scope regression", symbolName: "sparkles", accent: .indigo, runnerID: "test", provider: .deepseek)
-        let dm = try XCTUnwrap(store.chats.first { $0.isDM && $0.botIDs == [id] })
+        // Mock bot creation does not create a DM; own the complete graph in either mode.
+        let dmID = store.dm(with: id)
         let groupID = store.createChat(kind: .group, with: [id], title: "Scope regression")
         defer {
             store.setMockWorking(id, in: groupID, false)
             store.deleteChat(groupID)
-            store.deleteChat(dm.id)
+            store.deleteChat(dmID)
         }
+        let dm = try XCTUnwrap(store.chat(dmID))
         store.setMockWorking(id, in: groupID, true)
         XCTAssertFalse(SidebarChatCell.Content(chat: dm, store: store).isWorking)
         XCTAssertTrue(SidebarChatCell.Content(chat: try XCTUnwrap(store.chat(groupID)), store: store).isWorking)

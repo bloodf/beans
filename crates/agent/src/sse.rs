@@ -9,6 +9,7 @@ pub struct SseEvent {
 #[derive(Default)]
 pub struct SseParser {
     buffer: Vec<u8>,
+    received: usize,
 }
 
 impl SseParser {
@@ -30,6 +31,16 @@ impl SseParser {
             }
         }
         events
+    }
+
+    /// Bound the entire inference body before buffering an unterminated event.
+    pub fn push_bounded(&mut self, chunk: &[u8]) -> Result<Vec<SseEvent>, &'static str> {
+        const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
+        if chunk.len() > MAX_STREAM_BYTES.saturating_sub(self.received) {
+            return Err("Provider stream is too large");
+        }
+        self.received += chunk.len();
+        Ok(self.push(chunk))
     }
 }
 
@@ -85,5 +96,16 @@ mod tests {
         assert_eq!(events[0].data, "{\"a\":1}");
         assert_eq!(events[1].event.as_deref(), Some("done"));
         assert_eq!(events[1].data, "x");
+    }
+
+    #[test]
+    fn an_unterminated_or_cumulative_stream_is_bounded_before_buffering() {
+        let mut parser = SseParser::new();
+        parser.received = 32 * 1024 * 1024 - 8;
+        assert_eq!(parser.push_bounded(b"data:x\n\n").unwrap()[0].data, "x");
+        assert_eq!(parser.push_bounded(b"x").unwrap_err(), "Provider stream is too large");
+        let mut parser = SseParser::new();
+        assert!(parser.push_bounded(&vec![b'x';32 * 1024 * 1024 + 1]).is_err());
+        assert!(parser.buffer.is_empty());
     }
 }

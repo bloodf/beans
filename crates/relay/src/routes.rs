@@ -255,6 +255,7 @@ async fn root() -> &'static str {
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({ "ok": true, "service": "lorca-relay", "protocol": PROTOCOL,
         "min_protocol": state.min_protocol, "min_roster_protocol": roster_min_protocol(&state),
+        "memory_config_version": 1,
         "version": env!("CARGO_PKG_VERSION") }))
 }
 

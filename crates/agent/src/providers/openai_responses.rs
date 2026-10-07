@@ -29,6 +29,10 @@ pub struct OpenAiResponsesProvider {
     pub model: String,
     /// Whether the model takes images; a text-only model gets a note in their place.
     pub supports_images: bool,
+    /// An explicitly tool-incompatible model refuses tool-bearing requests before sending.
+    pub supports_tools: bool,
+    /// Optional OpenAI-specific session routing hint.
+    pub prompt_cache_key: bool,
     /// Where tool results' images go: a user message after the outputs by default, since a
     /// gateway may take only a string `output`; `InOutput` for OpenAI's own API.
     pub tool_images: ToolImages,
@@ -53,6 +57,8 @@ impl OpenAiResponsesProvider {
             api_key: api_key.to_string(),
             model: model.to_string(),
             supports_images: info.as_ref().map(|model| model.images).unwrap_or(true),
+            supports_tools: true,
+            prompt_cache_key: true,
             tool_images: ToolImages::UserMessage,
             max_retries: 2,
             max_retry_delay_ms: DEFAULT_MAX_RETRY_DELAY_MS,
@@ -64,6 +70,12 @@ impl OpenAiResponsesProvider {
 
     pub fn with_thinking(mut self, level: Option<ThinkingLevel>) -> Self {
         self.thinking_level = level;
+        self
+    }
+
+    pub fn without_redirects(mut self) -> Self {
+        self.client = lorca_tls::client_builder().redirect(reqwest::redirect::Policy::none())
+            .build().expect("a client over a built TLS config");
         self
     }
 
@@ -92,7 +104,7 @@ impl OpenAiResponsesProvider {
         if let Some(max_tokens) = request.max_tokens {
             body["max_output_tokens"] = Value::from(max_tokens);
         }
-        if let Some(session_id) = &request.options.session_id {
+        if let Some(session_id) = request.options.session_id.as_ref().filter(|_| self.prompt_cache_key) {
             body["prompt_cache_key"] = Value::String(session_id.clone());
         }
         let level = self.thinking_level.and_then(|level| match self.info.as_ref() {
@@ -142,6 +154,10 @@ impl Provider for OpenAiResponsesProvider {
         cancel: CancellationToken,
     ) -> AssistantEventStream {
         let (tx, rx) = mpsc::channel(64);
+        if !self.supports_tools && !request.tools.is_empty() {
+            let _ = tx.send(AssistantEvent::Error { message: format!("{} does not support tools. Choose a tool-capable model for this bot.", self.model), aborted: false }).await;
+            return channel_stream(rx);
+        }
         let mut body = self.body(&request);
         let options = request.options.clone();
         options.before_payload(&mut body);

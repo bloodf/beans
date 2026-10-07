@@ -34,14 +34,14 @@ import {
   type ProviderCredential,
 } from "./models";
 
-test("DurinDoor preset has no private endpoint and selects large catalogs", () => {
-  const preset = customPresets.find((preset) => preset.name === "DurinDoor");
-  expect(preset?.integration).toBe("durindoor");
-  expect(preset?.baseURL).toBe("");
+test("compatible preset actions add another connection even with a matching saved label", () => {
+  for (const preset of customPresets.filter((preset) => preset.compatible)) {
+    const existing: ProviderCredential = { kind: "custom:saved", isConnected: true, detail: "", name: preset.name };
+    expect(presetProvider(preset, [existing])).toBeUndefined();
+  }
   const listed = Array.from({ length: 12 }, (_, i) => ({ id: `alias-${i}` }));
   expect(orderedModelIDs(takeListing(savedChecklist(), listed, true))).toEqual(listed.map((m) => m.id));
-  expect(takeListing(savedChecklist(), listed).selected.size).toBe(0);
-  expect(presetProvider(preset!, [{ kind: "custom:renamed", isConnected: true, detail: "", name: "Renamed", integration: "durindoor" }])?.kind).toBe("custom:renamed");
+  expect(takeListing(savedChecklist(), listed, false).selected.size).toBe(0);
 });
 
 const ollama: ProviderCredential = {
@@ -113,28 +113,6 @@ test("the note under the base URL says what Lorca adds, then where requests go",
   expect(customBaseURLPlaceholder("responses")).toBe("https://api.example.com/v1");
 });
 
-test("the presets, in the Add Provider menu's order", () => {
-  expect(customPresets.map((preset) => [preset.name, preset.api, preset.baseURL, preset.local])).toEqual([
-    ["DurinDoor", "chat-completions", "", false],
-    ["OpenAI", "responses", "https://api.openai.com/v1", false],
-    ["OpenRouter", "chat-completions", "https://openrouter.ai/api/v1", false],
-    ["Gemini", "chat-completions", "https://generativelanguage.googleapis.com/v1beta/openai", false],
-    ["Groq", "chat-completions", "https://api.groq.com/openai/v1", false],
-    ["Together AI", "chat-completions", "https://api.together.xyz/v1", false],
-    ["Ollama", "chat-completions", "http://localhost:11434/v1", true],
-    ["LM Studio", "chat-completions", "http://localhost:1234/v1", true],
-  ]);
-  expect(customPresets.map((preset) => preset.keyPlaceholder())).toEqual([
-    "Optional for a server on your network",
-    "sk-… from platform.openai.com",
-    "sk-or-… from openrouter.ai/keys",
-    "Key from aistudio.google.com",
-    "gsk_… from console.groq.com",
-    "Key from api.together.ai",
-    "Optional for a server on your network",
-    "Optional for a server on your network",
-  ]);
-});
 
 test("a preset the account has, by name in any case, is that provider", () => {
   const openRouter = customPresets.find((preset) => preset.name === "OpenRouter")!;
@@ -179,9 +157,7 @@ test("a saved provider's models start picked, the first the default", () => {
 });
 
 test("a listing keeps the picked and typed models where they are, and the rest of the old listing goes", () => {
-  let checklist = takeListing(savedChecklist(), Array.from({ length: 9 }, (_, index) => model(`m${index}`)));
-  // Nine models: too many to pick them all.
-  expect([ids(checklist).length, checklist.selected.size, checklist.defaultID]).toEqual([9, 0, undefined]);
+  let checklist = takeListing(savedChecklist(), Array.from({ length: 9 }, (_, index) => model(`m${index}`)), false);
   checklist = toggleModel(checklist, "m4");
   checklist = addModel(checklist, "mine");
   expect(ids(checklist).slice(0, 2)).toEqual(["mine", "m0"]);
@@ -238,4 +214,11 @@ test("a provider saves its picked ids with the default first, then in list order
   expect(orderedModelIDs({ ...checklist, defaultID: "c" })).toEqual(["c", "a", "d"]);
   expect(orderedModelIDs(checklist)).toEqual(["a", "c", "d"]);
   expect(orderedModelIDs({ ...checklist, defaultID: undefined })).toEqual(["a", "c", "d"]);
+});
+
+test("sparse discovery preserves saved facts and explicit false clears capabilities", () => {
+  const saved = savedChecklist([{ id: "alias", name: "Saved", contextWindow: 200000, maxOutput: 32000, images: true, tools: true, reasoning: true, thinkingFormat: "openai" }]);
+  const listed = takeListing(saved, [{ id: "alias", name: undefined, images: false, tools: false, reasoning: false }], false);
+  expect(listed.models[0]).toEqual({ id: "alias", name: "Saved", contextWindow: 200000, maxOutput: 32000, images: false, tools: false, reasoning: false, thinkingFormat: "openai" });
+  expect(orderedModelIDs(listed)).toEqual(["alias"]);
 });

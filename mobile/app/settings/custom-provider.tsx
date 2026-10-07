@@ -55,9 +55,10 @@ export default function CustomProviderScreen() {
   // as it is while a delete started here takes the provider out of the store.
   const [saved] = useState(status);
   const adding = kind ? undefined : customPreset(param(params.preset));
-  const integration = saved?.integration ?? adding?.integration;
-  const durindoor = integration === "durindoor";
-  const [customize, setCustomize] = useState(!durindoor);
+  const integration = saved?.integration;
+  const simpleSetup = !saved && adding?.compatible === true;
+  const [customize, setCustomize] = useState(!simpleSetup);
+  const autoSelect = useRef(!saved);
   const [name, setName] = useState(saved?.name ?? adding?.name ?? "");
   const [api, setAPI] = useState<CustomAPI>(customAPI(saved?.api ?? adding?.api).id);
   const [baseURL, setBaseURL] = useState(saved?.base_url ?? adding?.baseURL ?? "");
@@ -87,16 +88,14 @@ export default function CustomProviderScreen() {
   useEffect(() => {
     if (!saved) return;
     let current = true;
-    engine
-      .providerAPIKey(saved.kind)
-      .then(({ api_key }) => {
-        if (current) savedKey.current = api_key ?? "";
-        if (current && api_key) setAPIKey((typed) => typed || api_key);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (current) setKeyLoaded(true);
-      });
+    engine.providerAPIKey(saved.kind).then(({ api_key }) => {
+      if (!current) return;
+      savedKey.current = api_key ?? "";
+      setAPIKey((typed) => typed || api_key || "");
+      setKeyLoaded(true);
+    }).catch((cause) => {
+      if (current) setError(messageOf(cause));
+    });
     return () => {
       current = false;
     };
@@ -117,7 +116,10 @@ export default function CustomProviderScreen() {
       engine
         .listCustomModels({ name: name.trim() || defaultProviderName(url), api, baseURL: url, apiKey, integration })
         .then(({ listed, models }) => {
-          if (ask === asked.current) takeModelListing(listed, models, durindoor);
+          if (ask === asked.current) {
+            takeModelListing(listed, models, autoSelect.current);
+            if (listed && models.length) autoSelect.current = false;
+          }
         })
         .catch((cause) => {
           if (ask === asked.current) setModelListing({ state: "error", message: messageOf(cause) });
@@ -145,9 +147,10 @@ export default function CustomProviderScreen() {
   const requestURL = customRequestURL(api, baseURL);
   // On a phone, localhost is the phone: the server must be named as the Runners reach it.
   const local = !!adding?.local || isLoopbackHost(host);
-  const urlNote = durindoor ? t("Localhost belongs to this Device. Setup checks access here; each Runner must reach the same URL. Access admitted does not prove the key was recognized when keyless mode is enabled.") : [
+  const urlNote = [
     requestURL ? t("Requests go to {url}.", { url: requestURL }) : t("Beans adds {path} to it.", { path: protocol.path }),
     local ? t("Use the address of the computer running it, as your Runners reach it.") : undefined,
+    t("Model listing checks reachability, not inference access. Each Runner must reach this URL."),
   ]
     .filter(Boolean)
     .join("\n");
@@ -157,7 +160,7 @@ export default function CustomProviderScreen() {
   // Left empty, the name is the preset's whose server the URL names, else the host.
   const fallbackName = defaultProviderName(baseURL);
   const providerName = name.trim() || fallbackName;
-  const canSave = !working && !!providerName && isHTTPURL(baseURL) && picked.length > 0;
+  const canSave = !working && keyLoaded && !!providerName && isHTTPURL(baseURL) && picked.length > 0;
 
   async function save() {
     if (!canSave) return;
@@ -225,7 +228,7 @@ export default function CustomProviderScreen() {
         keyboardDismissMode="on-drag"
         keyboardShouldPersistTaps="handled"
       >
-        {!durindoor && <Section footer={t("Any server that speaks OpenAI’s or Anthropic’s API, such as a gateway or a model server on your network. Encrypted and shared with your paired Devices.")}>
+        {customize && <Section footer={t("Any server that speaks OpenAI’s or Anthropic’s API, such as a gateway or a model server on your network. Encrypted and shared with your paired Devices.")}>
           <FieldRow
             label={t("Name")}
             value={name}
@@ -241,7 +244,7 @@ export default function CustomProviderScreen() {
             menu={{
               title: t("API"),
               value: protocol.title,
-              choices: CUSTOM_APIS.map((choice) => ({ title: choice.title, selected: choice.id === api, onPress: () => setAPI(choice.id) })),
+              choices: integration ? [] : CUSTOM_APIS.map((choice) => ({ title: choice.title, selected: choice.id === api, onPress: () => setAPI(choice.id) })),
             }}
           />
         </Section>}
@@ -274,7 +277,7 @@ export default function CustomProviderScreen() {
           />
         </Section>
 
-        {durindoor ? <Section footer={modelListingNote(listing)}><Row title={t("Models")} detail={picked.length ? t("{count} selected", { count: picked.length }) : t("None")} onPress={() => setCustomize(!customize)} /></Section> : null}
+        {simpleSetup ? <Section><Row title={t("Advanced")} onPress={() => setCustomize(!customize)} /></Section> : null}
         {customize && <Section footer={modelListingNote(listing)}>
           <Row
             title={t("Models")}

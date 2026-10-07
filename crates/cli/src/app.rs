@@ -159,6 +159,9 @@ pub struct App {
     pub identity: Mutex<Option<IdentityFile>>,
     pub machine: Mutex<Option<MachineFile>>,
     pub credentials: Mutex<Credentials>,
+    pub memory_config: parking_lot::Mutex<crate::memory_service::config::MemoryConfig>,
+    #[cfg(feature = "runner")]
+    pub memory_runtime: crate::memory_service::dispatch::MemoryRuntime,
     pub state: Mutex<State>,
     /// Serializes local roster edits through their queue write with sync's rebase and apply.
     pub(crate) roster_edit: Mutex<()>,
@@ -259,6 +262,8 @@ impl App {
         let plugins = crate::plugins::Store::load(&config);
         let marketplace = crate::marketplace::Updates::load(&config);
         let store = LocalStore::open(&config.database_path())?;
+        let memory_config = crate::memory_service::load(&store, machine.as_ref().and_then(|m| m.dek().ok()))?;
+        store.recover_memory_queue()?;
         let mut state = store.load_state()?;
         for bot in &mut state.bots {
             bot.normalize_description();
@@ -277,6 +282,9 @@ impl App {
             identity: Mutex::new(identity),
             machine: Mutex::new(machine),
             credentials: Mutex::new(credentials),
+            memory_config: parking_lot::Mutex::new(memory_config),
+            #[cfg(feature = "runner")]
+            memory_runtime: crate::memory_service::dispatch::MemoryRuntime::default(),
             state: Mutex::new(state),
             roster_edit: Mutex::new(()),
             store,
@@ -577,6 +585,9 @@ impl App {
         self.steering_queues.lock().unwrap().clear();
         #[cfg(feature = "runner")]
         self.step_interrupts.lock().unwrap().clear();
+        #[cfg(feature = "runner")]
+        self.memory_runtime.cancel_all();
+        *self.memory_config.lock() = crate::memory_service::config::MemoryConfig::default();
         *self.identity.lock().unwrap() = None;
         *self.machine.lock().unwrap() = None;
         *self.credentials.lock().unwrap() = Credentials::default();
@@ -1042,6 +1053,7 @@ impl App {
     // MARK: - Roster mutations (local + roster upload)
 
     pub fn roster_summary(&self) -> Event {
+        let memory = self.memory_summary();
         let state = self.state.lock().unwrap();
         Event::RosterChanged {
             devices: self.devices_out(&state),
@@ -1052,6 +1064,7 @@ impl App {
             paused: state.paused,
             providers: self.credentials.lock().unwrap().statuses(),
             models: models_out(),
+            memory,
         }
     }
 
@@ -1077,6 +1090,8 @@ impl App {
     }
 
     pub fn stop_for_pause(&self) {
+        #[cfg(feature = "runner")]
+        self.memory_runtime.cancel_all();
         for job in self.running_jobs.lock().unwrap().values() { job.cancel.cancel(); }
         #[cfg(feature = "runner")]
         {
@@ -1250,6 +1265,8 @@ impl App {
     /// group whose last bot was deleted goes with it; the other groups keep their transcript.
     pub fn delete_bot(&self, id: &str) -> anyhow::Result<()> {
         let _edit = self.roster_edit.lock().unwrap();
+        if self.bot(id).is_none() { anyhow::bail!("Unknown bot"); }
+        self.invalidate_bot_memory(id)?;
         let (removed_chat_ids, policy) = {
             let mut state = self.state.lock().unwrap();
             let deleted_bot = state.bots.iter().find(|bot| bot.id == id).cloned().ok_or_else(|| anyhow::anyhow!("Unknown bot"))?;
@@ -1940,6 +1957,7 @@ impl App {
             "paused": state.paused,
             "providers": self.credentials.lock().unwrap().statuses(),
             "models": models_out(),
+            "memory": self.memory_summary(),
             "running_chat_ids": self.running_chat_ids(),
             "running_turns": self.running_turns(),
         })

@@ -141,6 +141,38 @@ export function attachmentID(): string {
   return `att-${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+const MEMORY_RPC_METHODS: Readonly<Record<string, true>> = {
+  "memory.connections.list": true,
+  "memory.connections.set": true,
+  "memory.connections.disconnect": true,
+  "memory.embeddings.set": true,
+  "memory.embeddings.remove": true,
+  "memory.preferences.get": true,
+  "memory.preferences.set": true,
+  "memory.service.health": true,
+  "memory.service.recall": true,
+  "memory.service.retain": true,
+  "memory.service.inspect": true,
+  "memory.service.reflect": true,
+  "memory.service.advanced": true,
+  "memory.operations.list": true,
+  "memory.operations.retry": true,
+  "memory.operations.status": true,
+  "memory.operations.cancel": true,
+  "memory.service.delete": true,
+  "memory.embeddings.local.preview": true,
+  "memory.embeddings.local.apply": true,
+  "memory.embeddings.local.status": true,
+  "memory.pgvector.initialize.preview": true,
+  "memory.pgvector.initialize.apply": true,
+  "memory.lance.binding.preview": true,
+  "memory.lance.binding.apply": true,
+  "memory.lance.export.preview": true,
+  "memory.lance.export.apply": true,
+  "memory.lance.import.preview": true,
+  "memory.lance.import.apply": true,
+};
+
 export class AppStore {
   /** The seeded demo (`LORCA_MOCK=1`), which runs without a CLI. */
   get isMock(): boolean {
@@ -294,6 +326,13 @@ export class AppStore {
     } catch (error) {
       throw new RequestError(errorText(error));
     }
+  }
+
+  /** Trusted memory UI uses only the frozen memory RPCs, never the general transport. */
+  async memoryRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (!Object.hasOwn(MEMORY_RPC_METHODS, method)) throw new RequestError(L("Unsupported memory request"));
+    if (this.isMock) throw new RequestError(L("Memory services are unavailable in demo mode."));
+    return this.request<unknown>(method, params);
   }
 
   private async bootstrap(generation: number): Promise<void> {
@@ -1885,7 +1924,7 @@ export class AppStore {
   }): Promise<CustomProviderKind> {
     const name = options.name.trim();
     const baseURL = options.baseURL.trim();
-    const models = options.models.map((id) => id.trim()).filter((id) => id !== "");
+    const models = options.models.filter((id) => id.trim() !== "");
     if (this.isMock) {
       const kind = options.kind ?? (`custom:${name.toLowerCase().replaceAll(" ", "-")}` as const);
       const saved: ProviderCredential = { kind, isConnected: true, detail: baseURL, baseURL, name, api: options.api, models: models.map((id) => ({ id, levels: ["low", "medium", "high"] })) };

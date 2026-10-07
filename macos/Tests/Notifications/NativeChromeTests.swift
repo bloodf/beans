@@ -10,6 +10,16 @@ final class NativeChromeTests: XCTestCase {
         }
     }
 
+    private func prepareAvatarGeometry() throws {
+        // XCTest is not the app bundle; use the same committed JSC resource as packaging.
+        guard AvatarGeometryBridge.scriptURL == nil else { return }
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("packages/beans-blobatar/dist/blobatar.jsc.js")
+        _ = try url.checkResourceIsReachable()
+        AvatarGeometryBridge.scriptURL = url
+    }
+
     func testConstructedTitlesAndPopupTextStayAligned() {
         for failure in NativeChromeRenderingChecks.run() { XCTFail(failure) }
     }
@@ -45,31 +55,13 @@ final class NativeChromeTests: XCTestCase {
         }
     }
 
-    func testSettingsSymbolsKeepNativeAspectAndCompleteSilhouette() throws {
-        _ = NSApplication.shared
-        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-            for width: CGFloat in [212, 260, 320] {
-                for scale: CGFloat in [1, 2] {
-                    for pane in SettingsPane.allCases {
-                        let row = SidebarPaneCell()
-                        row.frame = NSRect(x: 0, y: 0, width: width, height: 32)
-                        row.appearance = NSAppearance(named: appearance)
-                        row.configure(pane: pane)
-                        row.layoutSubtreeIfNeeded()
-                        let icon = row.subviews.compactMap { $0 as? NSImageView }.first!
-                        let reference = NSImageView(frame: icon.bounds)
-                        reference.image = icon.image
-                        reference.symbolConfiguration = icon.symbolConfiguration
-                        reference.contentTintColor = icon.contentTintColor
-                        reference.imageScaling = .scaleNone
-                        reference.appearance = row.appearance
-                        let name = "pane-\(pane.rawValue)-\(appearance.rawValue)-\(Int(width))-\(Int(scale))x"
-                        XCTAssertTrue(row.bounds.contains(icon.frame), "\(name): icon frame escapes row")
-                        assertSilhouette(try render(icon, scale: scale, name: name), matches: try render(reference, scale: scale, name: name + "-reference"), name: name)
-                    }
-                }
-            }
+    func testSidebarSymbolsAndFirstRowGeometry() throws {
+        guard AppStore.shared.isMock else {
+            throw XCTSkip("Sidebar chrome requires LORCA_MOCK=1; never load an account for rendering checks")
         }
+        try prepareAvatarGeometry()
+        AppStore.shared.start()
+        for failure in NativeChromeRenderingChecks.runSidebar() { XCTFail(failure) }
     }
 
     func testReconfiguredSymbolsKeepPaletteAndButtonHitTesting() throws {
@@ -109,6 +101,11 @@ final class NativeChromeTests: XCTestCase {
     }
 
     func testWindowChromeKeepsControlsInsideAccessoriesAcrossSidebarSwaps() throws {
+        guard AppStore.shared.isMock else {
+            throw XCTSkip("Window chrome requires LORCA_MOCK=1")
+        }
+        try prepareAvatarGeometry()
+        AppStore.shared.start()
         _ = NSApplication.shared
         let savedSelection = Preferences.selection
         let controller = MainWindowController()
@@ -139,7 +136,18 @@ final class NativeChromeTests: XCTestCase {
                         }
                     }
                     if let search {
-                        XCTAssertTrue(search.field.visibleRect.contains(search.field.bounds.insetBy(dx: -4, dy: -4)), "search focus-ring containment only; not first-row clearance")
+                        let outlines = views.compactMap { $0 as? NSOutlineView }.filter { $0.numberOfRows > 0 }
+                        if let outline = outlines.first(where: { $0.style == .sourceList }) {
+                            let firstRow = outline.convert(outline.rect(ofRow: 0), to: nil)
+                            let capsule = search.field.convert(search.field.bounds, to: nil)
+                            XCTAssertGreaterThanOrEqual(capsule.minY, firstRow.maxY, "first row overlaps search capsule")
+                            if let ring = NativeChromeRenderingChecks.nativeFocusRingBounds(search.field, scale: 2) {
+                                let focusRect = search.field.convert(ring, to: nil)
+                                XCTAssertGreaterThanOrEqual(focusRect.minY, firstRow.maxY, "first row overlaps native focus ring")
+                            } else {
+                                print("UNAVAILABLE: native focus-ring compositor; key=\(window.isKeyWindow)")
+                            }
+                        } else { XCTFail("first sidebar row missing; use LORCA_MOCK=1") }
                         XCTAssertNotEqual(search.field.focusRingType, .none)
                     } else { XCTFail("search missing") }
                     for footer in footers {

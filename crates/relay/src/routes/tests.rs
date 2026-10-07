@@ -196,6 +196,7 @@ async fn appearance_roster_floor_cannot_be_lowered_and_old_writers_have_no_effec
     assert_eq!(health["protocol"], 4);
     assert_eq!(health["min_protocol"], 3);
     assert_eq!(health["min_roster_protocol"], 4);
+    assert_eq!(health["memory_config_version"], 1);
     assert_eq!(relay.client.health(&relay.url).await.unwrap(), 4);
     let body = json!({"id":"capable","kind":"roster","slot":"roster","expected_slot_seq":0,"ciphertext":"AQ"});
     let response = relay.http.put(format!("{}/v1/blobs", relay.url)).header("lorca-protocol", "4")
@@ -228,9 +229,10 @@ async fn protected_blob_delete_rejects_protocol3_and4_without_row_sequence_or_us
     if let Ok(url) = std::env::var("LORCA_RELAY_TEST_POSTGRES") { databases.push(Some(url)); }
     for database in databases {
         let relay = Relay::start_database(0, crate::push::Pusher::new(None, None), None, 3, database.as_deref()).await;
-        for (id, kind, ciphertext) in [("roster", "roster", "bG9vaw"), ("policy", "policy", "cGF1c2U")] {
+        for (id, kind, ciphertext) in [("roster", "roster", "bG9vaw"), ("policy", "policy", "cGF1c2U"), ("memory_config","memory_config","AQ")] {
             let mut body = json!({"id":id,"kind":kind,"ciphertext":ciphertext});
             if kind == "roster" { body["slot"] = json!("roster"); body["expected_slot_seq"] = json!(0); }
+            if kind=="memory_config" {body["slot"]=json!("memory_config");}
             let response = relay.http.put(format!("{}/v1/blobs", relay.url)).bearer_auth(&relay.token)
                 .json(&body).send().await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -238,15 +240,15 @@ async fn protected_blob_delete_rejects_protocol3_and4_without_row_sequence_or_us
         let before = relay.http.get(format!("{}/v1/blobs?since=0", relay.url)).bearer_auth(&relay.token)
             .send().await.unwrap().json::<Value>().await.unwrap();
         for protocol in [3, 4] {
-            for id in ["roster", "policy"] {
+            for id in ["roster", "policy", "memory_config"] {
                 let response = relay.http.delete(format!("{}/v1/blobs/{id}", relay.url)).header("lorca-protocol", protocol)
                     .bearer_auth(&relay.token).send().await.unwrap();
                 assert_eq!(response.status(), StatusCode::NOT_FOUND, "protocol {protocol}: {id}");
                 let after = relay.http.get(format!("{}/v1/blobs?since=0", relay.url)).bearer_auth(&relay.token)
                     .send().await.unwrap().json::<Value>().await.unwrap();
                 assert_eq!(after, before, "protocol {protocol}: {id} changed rows or head sequence");
-                assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 1, 10).await.is_ok());
-                assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 2, 10).await.is_err(),
+                assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 1, 11).await.is_ok());
+                assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 2, 11).await.is_err(),
                     "protocol {protocol}: {id} changed stored usage");
             }
         }
@@ -259,8 +261,8 @@ async fn protected_blob_delete_rejects_protocol3_and4_without_row_sequence_or_us
                 .bearer_auth(&relay.token).send().await.unwrap();
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
             assert!(relay.state.db.blob(&relay.identity, &relay.machine, &id).await.unwrap().is_none());
-            assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 1, 10).await.is_ok());
-            assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 2, 10).await.is_err());
+            assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 1, 11).await.is_ok());
+            assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 2, 11).await.is_err());
         }
     }
 }
@@ -277,8 +279,11 @@ async fn appearance_health_fails_closed_without_an_enforced_supported_roster_flo
         json!({"protocol":4,"min_protocol":3,"min_roster_protocol":"4"}),
         json!({"protocol":4,"min_protocol":null,"min_roster_protocol":4}),
         json!({"protocol":4,"min_protocol":3,"min_roster_protocol":4}),
+        json!({"protocol":4,"min_protocol":3,"min_roster_protocol":4,"memory_config_version":1}),
+        json!({"protocol":4,"min_protocol":3,"min_roster_protocol":4,"memory_config_version":"1"}),
+        json!({"protocol":4,"min_protocol":3,"min_roster_protocol":4,"memory_config_version":2}),
     ] {
-        let expected = health == json!({"protocol":4,"min_protocol":3,"min_roster_protocol":4});
+        let expected = health == json!({"protocol":4,"min_protocol":3,"min_roster_protocol":4,"memory_config_version":1});
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let response = health.clone();

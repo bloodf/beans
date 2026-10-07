@@ -8,9 +8,36 @@ use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OnceCell};
 use tokio::time::timeout;
 
+type Preflight = Result<Duration, String>;
+static CLI_PREFLIGHT: OnceCell<Preflight> = OnceCell::const_new();
+
+async fn warm_binary(once: &OnceCell<Preflight>, mut command: Command) -> Preflight {
+    once.get_or_init(|| async {
+        let started = std::time::Instant::now();
+        let output = timeout(Duration::from_secs(30), command.kill_on_drop(true).output())
+            .await.map_err(|_| "executable preflight timed out".to_string())?
+            .map_err(|error| format!("executable preflight failed: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("executable preflight exited {}", output.status));
+        }
+        Ok(started.elapsed())
+    }).await.clone()
+}
+
+async fn prepare_cli() {
+    let home = Home::new();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lorca"));
+    command.env_clear().env("RUST_LOG", "off").env("HOME", &home.0).env("USERPROFILE", &home.0);
+    if let Some(root) = std::env::var_os("SystemRoot") { command.env("SystemRoot", root); }
+    command.arg("--home").arg(&home.0).arg("--help").stdin(Stdio::null());
+    let elapsed = warm_binary(&CLI_PREFLIGHT, command).await.expect("CLI executable preflight succeeds");
+    // macOS can validate a newly linked, large debug Mach-O before Rust main starts. This
+    // cold measurement stays visible and precedes, rather than extends, readiness deadlines.
+    eprintln!("CLI executable preflight (outside readiness deadline): {elapsed:?}");
+}
 struct Home(std::path::PathBuf);
 
 impl Home {
@@ -52,6 +79,7 @@ impl Drop for Home {
 
 #[tokio::test]
 async fn readiness_is_flushed_with_logs_disabled_and_the_websocket_is_ready() {
+    prepare_cli().await;
     let home = Home::new();
     let mut child = home.serve(0).spawn().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
@@ -105,6 +133,7 @@ async fn readiness_is_flushed_with_logs_disabled_and_the_websocket_is_ready() {
 
 #[tokio::test]
 async fn a_failed_bind_exits_without_announcing_readiness() {
+    prepare_cli().await;
     let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let home = Home::new();
     let output = timeout(
@@ -185,6 +214,7 @@ async fn relay(client: tokio::net::TcpStream, serve_port: u16, release: Arc<Noti
 /// right after `lorca mcp import`) waits for it instead of reporting it not ready.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_mcp_list_waits_for_a_healthy_server_still_connecting() {
+    prepare_cli().await;
     let home = Home::new();
     // Dropped first on any exit: aborts the MCP server, the proxy, and its relays.
     let mut tasks = tokio::task::JoinSet::new();
@@ -232,6 +262,7 @@ async fn live_mcp_list_waits_for_a_healthy_server_still_connecting() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_add_flags_and_import_skip_existing_without_exposing_secrets() {
+    prepare_cli().await;
     let home = Home::new();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let remote_url = format!("http://127.0.0.1:{}/mcp", listener.local_addr().unwrap().port());
@@ -263,8 +294,9 @@ async fn mcp_add_flags_and_import_skip_existing_without_exposing_secrets() {
     server.abort();
 }
 
-#[test]
-fn mcp_list_fails_for_enabled_invalid_entries_but_not_disabled_ones() {
+#[tokio::test]
+async fn mcp_list_fails_for_enabled_invalid_entries_but_not_disabled_ones() {
+    prepare_cli().await;
     let home = Home::new();
     std::fs::create_dir_all(&home.0).unwrap();
     std::fs::write(home.0.join("mcp.json"), r#"{"mcpServers":{"broken":{"command":""}}}"#).unwrap();
@@ -277,9 +309,55 @@ fn mcp_list_fails_for_enabled_invalid_entries_but_not_disabled_ones() {
 
 #[tokio::test]
 async fn bare_lorca_lists_the_commands_and_starts_nothing() {
+    prepare_cli().await;
     let home = Home::new();
     let output = Command::new(env!("CARGO_BIN_EXE_lorca")).env("LORCA_HOME", &home.0).env("RUST_LOG", "off").stdin(Stdio::null()).output();
     let output = timeout(Duration::from_secs(10), output).await.expect("it returns rather than serving").unwrap();
     assert!(output.status.success());
     assert!(!home.0.exists(), "a help page makes no data folder");
+}
+
+#[cfg(unix)]
+fn delayed_preflight_fixture(home: &Home, fail: bool) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(&home.0).unwrap();
+    let script = home.0.join("cold-cli");
+    let count = home.0.join("count");
+    std::fs::write(&script, format!("#!/bin/sh\nprintf x >> \"$1\"\nsleep 0.2\nexit {}\n", if fail { 9 } else { 0 })).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    (script, count)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cold_executable_preflight_finishes_once_before_concurrent_readiness_timers() {
+    let home = Home::new();
+    let (script, count) = delayed_preflight_fixture(&home, false);
+    let once = OnceCell::new();
+    let run = || async {
+        let mut command = Command::new(&script);
+        command.arg(&count);
+        warm_binary(&once, command).await.unwrap();
+        timeout(Duration::from_millis(50), Command::new("/usr/bin/true").output()).await.unwrap().unwrap()
+    };
+    let (a, b, c) = tokio::join!(run(), run(), run());
+    assert!(a.status.success() && b.status.success() && c.status.success());
+    assert_eq!(std::fs::read(&count).unwrap(), b"x");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn executable_preflight_failure_is_shared() {
+    let home = Home::new();
+    let (script, count) = delayed_preflight_fixture(&home, true);
+    let once = OnceCell::new();
+    let run = || async {
+        let mut command = Command::new(&script);
+        command.arg(&count);
+        warm_binary(&once, command).await
+    };
+    let (a, b) = tokio::join!(run(), run());
+    assert_eq!(a, b);
+    assert!(a.unwrap_err().contains("exited"));
+    assert_eq!(std::fs::read(&count).unwrap(), b"x");
 }

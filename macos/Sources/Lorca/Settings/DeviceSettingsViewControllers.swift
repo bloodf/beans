@@ -125,7 +125,7 @@ final class ProvidersSettingsViewController: SettingsPaneViewController {
                 symbol: credential.kind.symbolName,
                 title: credential.kind.name,
                 subtitle: "\(credential.kind.subtitle) · \(credential.detail)",
-                state: credential.isConnected ? L("Connected") : nil,
+                state: credential.isConnected ? (credential.kind.isCustom ? L("Configured") : L("Connected")) : nil,
                 stateColor: .systemGreen,
                 actionTitle: credential.isConnected ? (disconnects ? L("Disconnect") : L("Edit…")) : L("Connect…"),
                 destructive: disconnects
@@ -200,7 +200,8 @@ final class ProvidersSettingsViewController: SettingsPaneViewController {
     }
 
     private func existing(preset: CustomProviderPreset) -> ProviderCredential? {
-        store.providers.first { $0.kind.isCustom && (preset.integration != nil ? $0.integration == preset.integration : $0.name?.caseInsensitiveCompare(preset.name) == .orderedSame) }
+        guard !preset.compatible else { return nil }
+        return store.providers.first { $0.kind.isCustom && $0.name?.caseInsensitiveCompare(preset.name) == .orderedSame }
     }
 
     @objc private func addPreset(_ sender: NSMenuItem) {

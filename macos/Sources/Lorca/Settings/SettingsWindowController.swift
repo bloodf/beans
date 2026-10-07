@@ -139,6 +139,9 @@ final class GeneralSettingsViewController: SettingsPaneViewController {
         account.setRows([
             AccessoryRow(key: L("Pause all bots"), accessory: pauseSwitch),
             NoteRow(text: L("Pausing stops new bot turns and routines on every paired Device.")),
+            AccessoryRow(key: L("Memory connections"), accessory: MemoryActionButton("Manage…") { [weak self] in
+                self?.presentAsSheet(MemorySettingsViewController())
+            }),
         ])
         addSection(account)
         store.observe(self) { [weak self] event in

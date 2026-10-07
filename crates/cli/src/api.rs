@@ -114,6 +114,8 @@ fn store_avatar(app: &Arc<App>, avatar: Option<Option<crate::files::OutgoingFile
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Value, String> {
     match method {
+        method if method.starts_with("memory.") && !matches!(method, "memory.read" | "memory.write") =>
+            crate::memory_service::api::dispatch(app, method, params).await,
         "hello" => Ok(json!({
             "version": crate::config::VERSION,
             "has_identity": app.has_identity(),
@@ -307,7 +309,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 }
                 bot.legacy_instructions.clear();
                 if let Some(v) = opt_string(&params, "provider") { bot.provider = v; }
-                if let Some(v) = params["model"].as_str() { bot.model = Some(v.trim().to_string()).filter(|m| !m.is_empty()); }
+                if let Some(v) = params["model"].as_str() { bot.model = Some(v).filter(|m| !m.trim().is_empty()).map(str::to_string); }
                 if let Some(v) = params["thinking"].as_str() { bot.thinking = Some(v.trim().to_string()).filter(|t| !t.is_empty()); }
                 if let Some(v) = opt_string(&params, "runner_id") { bot.runner_id = v; }
                 if let Some(v) = params["workdir"].as_str() { bot.workdir = Some(v.to_string()).filter(|w| !w.trim().is_empty()); }

@@ -21,9 +21,13 @@ cli = ["runner", "server", "dep:usage", "dep:tracing-subscriber"]
 # Connecting and disconnecting account providers. Devices use this without the agent loop.
 provider-auth = ["dep:lorca-provider-auth"]
 # Running bots: the agent loop, providers, tools. Off for a Device that only takes part.
-runner = ["provider-auth", "dep:lorca-agent", "dep:open", "dep:rmcp", "dep:mcp_http", "dep:process-wrap"]
+runner = ["provider-auth", "dep:lorca-agent", "dep:open", "dep:rmcp", "dep:mcp_http", "dep:process-wrap", "memory-pgvector", "memory-lance"]
 # The local websocket the desktop app connects to.
 server = ["dep:axum"]
+# Vector/native SDKs are linked only by Runners, never the phone core.
+memory-pgvector = ["dep:pgvector", "dep:tokio-postgres", "dep:memory-postgres-rustls", "dep:percent-encoding"]
+memory-lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:axum"]
+embedding-local = ["runner", "dep:ort", "dep:tokenizers"]
 
 [dependencies]
 lorca-agent = { path = "../agent", optional = true }
@@ -68,6 +72,18 @@ if-addrs = "0.15.0"
 mcp_http = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "stream", "rustls", "http2", "system-proxy"], optional = true }
 rmcp = { version = "3.4.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth", "reqwest"], optional = true }
 process-wrap = { version = "10", features = ["tokio1"], optional = true }
+pgvector = { version = "=0.4.2", features = ["postgres"], optional = true }
+tokio-postgres = { workspace = true, features = ["with-serde_json-1"], optional = true }
+memory-postgres-rustls = { package = "tokio-postgres-rustls", version = "=0.14.0", features = ["ring"], optional = true }
+percent-encoding = { version = "=2.3.2", optional = true }
+lancedb = { version = "=0.40.0", default-features = false, features = ["remote"], optional = true }
+# Arrow 60 is newer but ABI-incompatible with the official SDK's Arrow 58.
+arrow-array = { version = "=58.4.0", optional = true }
+arrow-schema = { version = "=58.4.0", optional = true }
+arrow-ipc = { version = "=58.4.0", optional = true }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-27"], optional = true }
+# Latest compatible stable API; 1.0 RC removes Tokenizer and padding/truncation.
+tokenizers = { version = "=0.22.2", default-features = false, features = ["onig"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Native handle-relative draft paths and parent process watches need NT file APIs.
@@ -75,3 +91,4 @@ windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_Fil
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+tempfile = "=3.27.0"

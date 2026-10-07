@@ -60,7 +60,11 @@ final class MemoryViewController: SheetViewController {
             gauge.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
         ])
 
-        setButtons(confirm: L("Save"))
+        let service = MemoryActionButton("Memory Service…") { [weak self] in
+            guard let self else { return }
+            self.presentAsSheet(BotMemoryServiceViewController(bot: self.bot))
+        }
+        setButtons(confirm: L("Save"), leading: service)
         updateGauge()
     }
 

@@ -221,6 +221,21 @@ fn retry_delay(response: &reqwest::Response, retry_index: u32, max_delay_ms: u64
     Ok(Duration::from_millis((exponential * jitter) as u64))
 }
 
+async fn bounded_error_body(mut response: reqwest::Response, cancel: &CancellationToken) -> Result<String, RequestFailure> {
+    const LIMIT: usize = 64 * 1024;
+    let mut bytes = Vec::new();
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel.cancelled() => return Err(RequestFailure::Aborted),
+            chunk = response.chunk() => chunk,
+        };
+        let Some(chunk) = chunk.map_err(|_| RequestFailure::Transport("Could not read provider error".into()))? else { break };
+        if chunk.len() > LIMIT.saturating_sub(bytes.len()) { return Ok("Provider error body is too large".into()); }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Sends the request `build` makes, retrying a retryable failure up to `max_retries` times.
 /// Returns the successful response, or why the last attempt failed.
 pub async fn send_with_retry(
@@ -244,7 +259,7 @@ pub async fn send_with_retry(
                 let retryable = retries_left > 0 && is_retryable_status(&response);
                 let delay = if retryable { retry_delay(&response, max_retries - retries_left, max_delay_ms) } else { Ok(Duration::ZERO) };
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let body = bounded_error_body(response, cancel).await?;
                 match (retryable, delay) {
                     (true, Ok(delay)) => (RequestFailure::Status { status, body }, Some(delay)),
                     (true, Err(reason)) => return Err(RequestFailure::Status { status, body: format!("{reason}. {}", summarize_error_body(&body)) }),

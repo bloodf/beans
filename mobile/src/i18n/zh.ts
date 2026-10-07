@@ -207,7 +207,6 @@ export const zh: Record<string, string> = {
   "Last seen {count}m ago": "{count} 分钟前在线",
   "Last seen just now": "刚刚在线",
   "Loading models…": "正在加载模型…",
-  "Localhost belongs to this Device. Setup checks access here; each Runner must reach the same URL. Access admitted does not prove the key was recognized when keyless mode is enabled.": "localhost 指此设备。设置会检查本机访问权限；每个运行端都必须能访问同一 URL。允许无密钥访问时，访问获准不代表所填密钥已被识别。",
   "Long press to choose the language": "长按以选择语言",
   "Look": "外观",
   "Look for": "外观适用于",
@@ -448,4 +447,8 @@ export const zh: Record<string, string> = {
   "Your browser opens a {name} sign-in. The tokens are shared with your paired Devices, encrypted with your account key; the relay cannot read them.": "浏览器会打开 {name} 登录页面。令牌会使用你的账户密钥加密并同步到已配对的设备；中继无法读取。",
   "Your changes to this look will be lost.": "你对此外观的更改将会丢失。",
   "Your own colors are used as chosen, even when the contrast is low.": "你选择的颜色会照常使用，即使对比度较低。",
+  "Advanced": "高级",
+  "Optional API key": "可选 API 密钥",
+  "Model listing checks reachability, not inference access. Each Runner must reach this URL.": "模型列表仅验证可达性，不验证推理权限。每个运行端都必须能访问此 URL。",
+  "Configured": "已配置",
 };

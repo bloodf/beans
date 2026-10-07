@@ -1,0 +1,28 @@
+.memory-service-sheet { min-height: 0; overflow: hidden; }
+.memory-service-sheet > .sheet-header,
+.memory-service-sheet > .sheet-buttons { flex-shrink: 0; }
+.memory-service-sheet > .sheet-content { flex: 1 1 auto; min-height: 0; overflow-y: auto; gap: 14px; }
+.memory-service-sheet > .sheet-buttons { position: static; padding-top: 12px; background: var(--sheet-bg, var(--window)); }
+.memory-form-row { display: grid; grid-template-columns: minmax(120px, 32%) minmax(0, 1fr); gap: 12px; align-items: start; }
+.memory-form-label { padding-top: 5px; line-height: 1.45; }
+.memory-form-control { display: flex; flex-direction: column; align-items: stretch; gap: 8px; min-width: 0; }
+.memory-form-control .popup-button { align-self: flex-start; max-width: 100%; }
+.memory-note { color: var(--label-2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.memory-error { color: var(--red); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.memory-section { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; padding-top: 16px; border-top: 1px solid var(--separator); }
+.memory-section h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.memory-section p { margin: 0; }
+.memory-list-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; padding-block: 6px; }
+.memory-list-row > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.memory-inline-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.memory-binding { display: flex; flex-direction: column; gap: 10px; border: 1px solid var(--separator); border-radius: 8px; padding: 12px; min-width: 0; }
+.memory-binding legend { padding-inline: 4px; font-size: 12px; }
+.memory-output { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; font: 12px/1.5 ui-monospace, monospace; padding: 12px; margin: 0; border: 1px solid var(--separator); border-radius: 8px; }
+.memory-preview-value { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
+.memory-service-sheet textarea { min-height: 100px; resize: vertical; }
+@media (max-width: 540px) {
+  .memory-form-row { grid-template-columns: 1fr; gap: 6px; }
+  .memory-form-label { padding-top: 0; }
+  .memory-list-row { align-items: flex-start; flex-direction: column; gap: 8px; }
+}
+.memory-form-fields { display: flex; flex-direction: column; gap: 14px; margin: 0; padding: 0; border: 0; min-width: 0; }

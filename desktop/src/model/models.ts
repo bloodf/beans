@@ -232,7 +232,7 @@ export function customBaseURLPlaceholder(api: CustomAPI): string {
  * `/v1/messages` or `/v1`), then the API's path goes on. */
 export function customEndpoint(api: CustomAPI, baseURL: string): string {
   const root = baseURL.trim().replace(/\/+$/, "");
-  const pasted = (api === "messages" ? ["/v1/messages", "/v1"] : [customAPIPath(api)]).find((path) => root.endsWith(path));
+  const pasted = (api === "messages" ? ["/v1/messages", "/v1/models", "/v1", "/messages", "/models"] : [customAPIPath(api), "/models"]).find((path) => root.endsWith(path));
   return (pasted ? root.slice(0, -pasted.length) : root) + customAPIPath(api);
 }
 
@@ -282,7 +282,7 @@ export function suggestedProviderName(baseURL: string): string {
 
 /** A server people often add, with what the sheet fills in for it. */
 export interface CustomPreset {
-  integration?: "durindoor";
+  compatible?: boolean;
   /** A product name, the same in every language. */
   name: string;
   api: CustomAPI;
@@ -295,7 +295,8 @@ export interface CustomPreset {
 
 /** What Add Provider… offers, in its menu's order: hosted APIs, then servers on the user's network. */
 export const customPresets: CustomPreset[] = [
-  { name: "DurinDoor", integration: "durindoor", api: "chat-completions", baseURL: "", local: false, keyPlaceholder: () => L("Optional for a server on your network") },
+  { name: "OpenAI Compatible", compatible: true, api: "chat-completions", baseURL: "", local: false, keyPlaceholder: () => L("Optional API key") },
+  { name: "Anthropic Compatible", compatible: true, api: "messages", baseURL: "", local: false, keyPlaceholder: () => L("Optional API key") },
   { name: "OpenAI", api: "responses", baseURL: "https://api.openai.com/v1", local: false, keyPlaceholder: () => L("sk-… from platform.openai.com") },
   { name: "OpenRouter", api: "chat-completions", baseURL: "https://openrouter.ai/api/v1", local: false, keyPlaceholder: () => L("sk-or-… from openrouter.ai/keys") },
   {
@@ -314,8 +315,9 @@ export const customPresets: CustomPreset[] = [
 /** The custom provider the account has under a preset's name, in any case, which the preset's menu
  * item opens instead of adding another. */
 export function presetProvider(preset: CustomPreset, providers: readonly ProviderCredential[]): ProviderCredential | undefined {
+  if (preset.compatible) return undefined;
   const name = preset.name.toLowerCase();
-  return providers.find((provider) => isCustomKind(provider.kind) && (preset.integration ? provider.integration === preset.integration : provider.name?.toLowerCase() === name));
+  return providers.find((provider) => isCustomKind(provider.kind) && provider.name?.toLowerCase() === name);
 }
 
 /** A model a custom provider offers, with what its server's model list says of it. */
@@ -354,22 +356,22 @@ export function savedChecklist(models: readonly CustomModel[] = []): ModelCheckl
   return { models, selected: new Set(models.map((model) => model.id)), added: new Set(), defaultID: models[0]?.id };
 }
 
-/** Takes a new listing: the models to keep (picked or added by hand) stay where they are with the
- * listing's facts, the rest of the old listing goes, and the new one follows. With nothing picked
- * yet, a list of eight models or fewer, as a model server on the user's network has, starts picked,
- * its first the default. An empty listing, a server with none, keeps only the models to keep. */
-export function takeListing(checklist: ModelChecklist, listed: readonly CustomModel[], selectAll = false): ModelChecklist {
+/** Merge advertised facts into saved selections; only a new setup selects the full listing. */
+export function takeListing(checklist: ModelChecklist, listed: readonly CustomModel[], selectAll = true): ModelChecklist {
   const facts = new Map<string, CustomModel>();
   for (const model of listed) if (!facts.has(model.id)) facts.set(model.id, model);
   const keep = (id: string) => checklist.selected.has(id) || checklist.added.has(id);
-  const models = checklist.models.filter((model) => keep(model.id)).map((model) => facts.get(model.id) ?? model);
+  const models = checklist.models.filter((model) => keep(model.id)).map((model) => {
+    const discovered = facts.get(model.id);
+    return discovered ? { ...model, ...Object.fromEntries(Object.entries(discovered).filter(([, value]) => value !== undefined && value !== null)) } : model;
+  });
   const seen = new Set(models.map((model) => model.id));
   for (const model of listed) {
     if (seen.has(model.id)) continue;
     seen.add(model.id);
     models.push(model);
   }
-  if (checklist.selected.size > 0 || listed.length === 0 || (listed.length > 8 && !selectAll)) return { ...checklist, models };
+  if (checklist.selected.size > 0 || listed.length === 0 || !selectAll) return { ...checklist, models };
   return { ...checklist, models, selected: new Set(listed.map((model) => model.id)), defaultID: listed[0]?.id };
 }
 

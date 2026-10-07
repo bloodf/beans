@@ -96,6 +96,12 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String, running: crate::u
 async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     let body = &request.body;
     match request.verb.as_str() {
+        verb if crate::memory_service::api::is_setup_method(verb) => {
+            if app.device(&request.requested_by).is_none() { return Err("requester_unknown".into()); }
+            crate::memory_service::api::serve_as(app,verb,body.clone(),&request.requested_by).await
+        },
+        verb if verb.starts_with("memory.service.") || verb.starts_with("memory.operations.") =>
+            crate::memory_service::api::serve(app, verb, body.clone()).await,
         "memory.read" => memory_read(app, body["bot_id"].as_str().ok_or("missing bot_id")?),
         "memory.write" => {
             let text = body["text"].as_str().ok_or("missing text")?;

@@ -56,14 +56,6 @@ impl CustomApi {
     }
 }
 
-/// The thinking levels a custom provider's model takes: the catalog's for a model it knows by
-/// id, else low, medium, and high, which every server with a reasoning setting understands. An
-/// unknown server has no one way to turn its thinking off, so Off is not among them; the
-/// provider's default sends nothing.
-pub fn custom_levels(model: &str) -> Vec<lorca_models::ThinkingLevel> {
-    use lorca_models::ThinkingLevel::{High, Low, Medium};
-    lorca_models::find_any(model).map(|known| known.levels.clone()).unwrap_or_else(|| vec![Low, Medium, High])
-}
 
 /// A model offered to a bot, including its display name and supported thinking levels.
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +87,21 @@ pub struct CustomModel {
     pub thinking_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_can_disable: Option<bool>,
+}
+
+impl CustomModel {
+    /// A sparse list updates only advertised facts, including explicit `false`.
+    pub fn merge_metadata(&mut self, discovered: &Self) -> bool {
+        let mut changed = false;
+        macro_rules! take {
+            ($($field:ident),+) => { $(if discovered.$field.is_some() && self.$field != discovered.$field {
+                self.$field.clone_from(&discovered.$field);
+                changed = true;
+            })+ };
+        }
+        take!(name, context_window, max_output, images, reasoning, tools, thinking_format, thinking_can_disable);
+        changed
+    }
 }
 
 /// Integration identity is independent of the editable name and endpoint.
@@ -132,14 +139,18 @@ pub struct CustomProvider {
 }
 
 impl CustomProvider {
-    /// DurinDoor translates OpenAI effort words to these documented native formats.
-    /// Unknown or absent formats never receive speculative reasoning parameters.
+    /// Thinking controls require an explicit format supported by the selected wire.
+    /// Legacy gateway formats retain their declared effort translation.
     pub fn levels(&self, model: &CustomModel) -> Vec<lorca_models::ThinkingLevel> {
         use lorca_models::ThinkingLevel::{Off, Minimal, Low, Medium, High, XHigh, Max};
-        if self.integration != Some(CustomIntegration::Durindoor) {
-            return custom_levels(&model.id);
-        }
         if model.reasoning != Some(true) { return Vec::new(); }
+        if self.integration.is_none() {
+            let supported = match self.api {
+                CustomApi::ChatCompletions | CustomApi::Responses => model.thinking_format.as_deref() == Some("openai"),
+                CustomApi::Messages => matches!(model.thinking_format.as_deref(), Some("claude-adaptive" | "claude-budget")),
+            };
+            if !supported { return Vec::new(); }
+        }
         let mut levels = match model.thinking_format.as_deref() {
             Some("openai") => vec![Minimal, Low, Medium, High, XHigh],
             Some("claude-adaptive") => vec![Low, Medium, High, Max],
@@ -147,23 +158,13 @@ impl CustomProvider {
             Some("gemini-level") => vec![Minimal, Low, Medium, High],
             Some("gemini-budget" | "qwen" | "hunyuan" | "step") => vec![Low, Medium, High],
             Some("kimi") => vec![Low, Medium, High, Max],
-            Some("deepseek") => if model.id.contains("deepseek-v4.") { vec![Low, Medium, High, XHigh, Max] } else if model.id.contains("deepseek-v4-") { vec![High, Max] } else { vec![High] },
+            Some("deepseek") => vec![High],
             Some("opencode" | "ollama") => vec![Low, Medium, High, Max],
             Some("commandcode") => vec![Low, Medium, High, XHigh, Max],
             Some("openai-low-high-max") => vec![Low, High, Max],
             Some("zai" | "minimax") => vec![Low],
             _ => return Vec::new(),
         };
-        let id = model.id.to_ascii_lowercase();
-        if matches!(model.thinking_format.as_deref(), Some("openai")) && (id.contains("gpt-6-sol") || id.contains("gpt-6-luna") || id.contains("gpt-6-astra")) {
-            levels = vec![Low, Medium, High, XHigh, Max];
-        } else if model.thinking_format.as_deref() == Some("openai") && (id.contains("gpt-5.6-sol") || id.contains("gpt-5.6-terra") || id.contains("gpt-5.6-luna")) {
-            levels.push(Max);
-        } else if model.thinking_format.as_deref() == Some("claude-adaptive") && id.contains("opus-5-5") {
-            levels = vec![Low, Medium, High, XHigh, Max];
-        } else if model.thinking_format.as_deref() == Some("kimi") && id.contains("kimi-k3") {
-            levels = vec![Max];
-        }
         if model.thinking_can_disable == Some(true) && !matches!(model.thinking_format.as_deref(), Some("gemini-level" | "commandcode" | "openai-low-high-max")) { levels.insert(0, Off); }
         levels
     }
@@ -174,10 +175,7 @@ impl CustomProvider {
         let mut changed = false;
         for model in discovered {
             if let Some(existing) = self.models.iter_mut().find(|existing| existing.id == model.id) {
-                if *existing != model {
-                    *existing = model;
-                    changed = true;
-                }
+                changed |= existing.merge_metadata(&model);
             } else {
                 self.models.push(model);
                 changed = true;
@@ -438,7 +436,7 @@ mod tests {
         model.id = "cx/gpt-6-sol".into();
         model.thinking_format = Some("openai".into());
         model.thinking_can_disable = Some(false);
-        assert_eq!(gateway.levels(&model), [Low, Medium, High, XHigh, Max]);
+        assert_eq!(gateway.levels(&model), [lorca_models::ThinkingLevel::Minimal, Low, Medium, High, XHigh]);
         model.thinking_format = Some("future-format".into());
         assert!(gateway.levels(&model).is_empty());
         model.thinking_format = None;
@@ -448,7 +446,7 @@ mod tests {
         assert!(gateway.levels(&model).is_empty());
         let legacy: CustomProvider = serde_json::from_value(serde_json::json!({"name":"Legacy","api":"chat-completions","base_url":"http://localhost/v1","models":[{"id":"unknown"}],"created_at":1})).unwrap();
         assert_eq!(legacy.integration, None);
-        assert_eq!(legacy.levels(&legacy.models[0]), custom_levels("unknown"));
+        assert!(legacy.levels(&legacy.models[0]).is_empty());
     }
 
     #[test]
@@ -514,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn offered_models_follow_custom_order_and_catalog_levels() {
+    fn offered_models_follow_custom_order_without_guessed_levels() {
         let mut credentials = Credentials::default();
         let mut lab = custom("Lab", 1);
         lab.models.push(CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus".into()), context_window: None, max_output: None, images: None, ..Default::default() });
@@ -522,7 +520,7 @@ mod tests {
         let models = credentials.models("custom:lab");
         assert_eq!(models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["m", "anthropic/claude-opus-5"]);
         assert_eq!(models[1].name, "Opus");
-        assert_eq!(models[1].levels, custom_levels("anthropic/claude-opus-5"));
+        assert!(models[1].levels.is_empty());
         assert_eq!(credentials.models("anthropic")[0].id, lorca_models::for_provider("anthropic")[0].id);
         assert!(credentials.models("custom:gone").is_empty());
     }
@@ -555,10 +553,7 @@ mod tests {
         let mine = &statuses[PROVIDER_KINDS.len()];
         assert_eq!((mine.kind.as_str(), mine.is_connected, mine.detail.as_str()), ("custom:mine", true, "http://lab/v1"));
         assert_eq!(mine.models.len(), 1);
-        // An unknown model takes the levels every server understands; the catalog's model its own.
-        use lorca_models::ThinkingLevel::{High, Low, Medium};
-        assert_eq!(mine.models[0].levels, [Low, Medium, High]);
-        assert_eq!(custom_levels("anthropic/claude-opus-5"), lorca_models::find("anthropic", "claude-opus-5").unwrap().levels);
+        assert!(mine.models[0].levels.is_empty());
         assert!(ours.connected_kinds().contains(&"custom:router".to_string()));
     }
 
@@ -575,7 +570,7 @@ mod tests {
         // A custom provider's, named as its server names them, with the levels each takes.
         let lab = credentials.models("custom:lab");
         assert_eq!(lab.iter().map(|m| (m.id.as_str(), m.name.as_str())).collect::<Vec<_>>(), [("m", "m"), ("anthropic/claude-opus-5", "Opus 5")]);
-        assert_eq!(lab[1].levels, custom_levels("anthropic/claude-opus-5"));
+        assert!(lab[1].levels.is_empty());
         assert!(credentials.models("custom:gone").is_empty());
     }
 
@@ -591,5 +586,32 @@ mod tests {
         assert_eq!(ours.opencode.as_ref().unwrap().api_key, "zen-new");
         assert_eq!(ours.opencode_go.as_ref().unwrap().api_key, "go-key");
         assert_eq!(ours.statuses().into_iter().map(|status| status.kind).collect::<Vec<_>>(), PROVIDER_KINDS);
+    }
+
+    #[test]
+    fn encrypted_legacy_credentials_sync_preserves_names_keys_order_and_discriminator() {
+        let fixture = serde_json::json!({
+            "custom": {
+                "custom:legacy": {
+                    "name":"User-selected historical name","api":"chat-completions",
+                    "base_url":"https://gateway.example/v1","api_key":"fixture-key",
+                    "created_at":12,"integration":"durindoor",
+                    "models":[{"id":"guard/Combo","tools":false,"images":false,"context_window":200000},{"id":"manual"}]
+                },
+                "custom:generic": {
+                    "name":"Unrecognized label","api":"messages","base_url":"https://proxy.example",
+                    "api_key":"","created_at":13,"models":[{"id":"claude-opus-5"}]
+                }
+            },
+            "changed_at":{"custom:legacy":14.0,"custom:generic":15.0}
+        });
+        let source: Credentials = serde_json::from_value(fixture).unwrap();
+        let envelope = crate::crypto::encrypt_json(&[42;32],"credentials",&source).unwrap();
+        let remote: Credentials = crate::crypto::decrypt_json(&[42;32],"credentials",&envelope).unwrap();
+        let mut paired = Credentials::default();
+        assert_eq!(paired.merge(&remote).taken, ["custom:generic","custom:legacy"]);
+        assert_eq!(serde_json::to_value(&paired).unwrap(),serde_json::to_value(&source).unwrap());
+        assert_eq!(paired.custom["custom:legacy"].models.iter().map(|m|m.id.as_str()).collect::<Vec<_>>(),["guard/Combo","manual"]);
+        assert!(paired.models("custom:generic")[0].levels.is_empty());
     }
 }

@@ -35,6 +35,7 @@ import { open, revealed, settingsDeviceID } from "../root";
 import { AccessoryRow, ActionRow, BotRow, EditableRow, KeyValueRow, NoteRow, PluginRow, Section, StatusRow } from "../sections";
 import { presentConnectProvider } from "../sheets/connectProvider";
 import { presentAddProviderMenu, presentCustomProvider } from "../sheets/customProvider";
+import { presentMemoryConnections } from "../sheets/memoryService";
 import { presentMcpServer } from "../sheets/mcpServer";
 import { presentPlugin } from "../sheets/plugin";
 import { Entries } from "./search";
@@ -147,6 +148,7 @@ export function GeneralPane() {
             />
           </AccessoryRow>
           <NoteRow text={accountPaused() ? L("Paused on every Device") : L("Bots can run on their Runners")} />
+          <ActionRow label={L("Memory")} actionTitle={L("Manage…")} onAction={presentMemoryConnections} />
         </Section>
       </Show>
       <Section title={L("Chats")} style="heading">
@@ -331,7 +333,7 @@ function ProvidersPane() {
                   symbol={providerSymbol(credential().kind)}
                   title={providerName(credential().kind, providers())}
                   subtitle={`${providerSubtitle(credential().kind)} · ${credential().detail}`}
-                  state={credential().isConnected ? L("Connected") : undefined}
+                  state={credential().isConnected ? (isCustomKind(credential().kind) ? L("Configured") : L("Connected")) : undefined}
                   stateColor="var(--green)"
                   actionTitle={credential().isConnected ? (disconnects() ? L("Disconnect") : L("Edit…")) : L("Connect…")}
                   destructive={disconnects()}

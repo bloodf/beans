@@ -29,6 +29,7 @@ pub const KINDS: &[&str] = &[
     "response",
     "machine",
     "credentials",
+    "memory_config",
     "key",
     "file",
 ];

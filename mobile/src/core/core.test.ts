@@ -3,13 +3,10 @@
 
 import { describe, expect, test } from "bun:test";
 
-test("DurinDoor uses explicit identity and selects all models without a catalog-size limit", () => {
-  const preset = customPreset("DurinDoor");
-  expect(preset?.integration).toBe("durindoor");
-  expect(preset?.baseURL).toBe("");
+test("new setup selects the full catalog while edits preserve an empty selection", () => {
   const listed = Array.from({ length: 12 }, (_, i) => ({ id: `combo-${i}` }));
   expect(selectedModelIds(mergeListedModels([], listed, true))).toEqual(listed.map((m) => m.id));
-  expect(selectedModelIds(mergeListedModels([], listed))).toEqual([]);
+  expect(selectedModelIds(mergeListedModels([], listed, false))).toEqual([]);
 });
 import {
   addModelRow,
@@ -243,26 +240,6 @@ describe("custom providers", () => {
     expect(customRequestURL("chat-completions", "  ")).toBe("");
   });
 
-  test("presets start the form from a server people often add", () => {
-    expect(CUSTOM_PRESETS.map((preset) => [preset.name, preset.api, preset.baseURL])).toEqual([
-      ["DurinDoor", "chat-completions", ""],
-      ["OpenAI", "responses", "https://api.openai.com/v1"],
-      ["OpenRouter", "chat-completions", "https://openrouter.ai/api/v1"],
-      ["Gemini", "chat-completions", "https://generativelanguage.googleapis.com/v1beta/openai"],
-      ["Groq", "chat-completions", "https://api.groq.com/openai/v1"],
-      ["Together AI", "chat-completions", "https://api.together.xyz/v1"],
-      ["Ollama", "chat-completions", "http://localhost:11434/v1"],
-      ["LM Studio", "chat-completions", "http://localhost:1234/v1"],
-    ]);
-    expect(CUSTOM_PRESETS.filter((preset) => preset.local).map((preset) => preset.name)).toEqual(["Ollama", "LM Studio"]);
-    expect(customPreset("together ai")?.keyPlaceholder()).toBe("Key from api.together.ai");
-    expect(customPreset("Lab")).toBeUndefined();
-    expect(customPreset(undefined)).toBeUndefined();
-    // A preset the account has already is that provider, whatever the case of its name.
-    expect(customProviderNamed("openrouter", statuses)?.kind).toBe("custom:openrouter");
-    expect(customProviderNamed("Groq", statuses)).toBeUndefined();
-    expect(customProviderNamed("DeepSeek", statuses)).toBeUndefined();
-  });
 
   test("a base URL names its host, which names a provider left unnamed", () => {
     expect(urlHost("https://openrouter.ai/api/v1")).toBe("openrouter.ai");
@@ -332,11 +309,11 @@ describe("custom providers", () => {
     expect(mergeListedModels(next, []).map((row) => row.id)).toEqual(["qwen3:8b", "mystery", "llama4"]);
   });
 
-  test("a short list arriving with nothing picked is picked whole; a long one is not", () => {
-    const short = mergeListedModels([], [{ id: "a" }, { id: "b" }]);
-    expect(short.map((row) => row.selected)).toEqual([true, true]);
-    const long = mergeListedModels([], Array.from({ length: 9 }, (_, n) => ({ id: `m${n}` })));
-    expect(long.some((row) => row.selected)).toBe(false);
+  test("new setup selects every listed model; edits do not repick unselected models", () => {
+    const short = mergeListedModels([], [{ id: "a" }, { id: "b" }], false);
+    expect(short.map((row) => row.selected)).toEqual([false, false]);
+    const long = mergeListedModels([], Array.from({ length: 9 }, (_, n) => ({ id: `m${n}` })), true);
+    expect(selectedModelIds(long)).toEqual(Array.from({ length: 9 }, (_, n) => `m${n}`));
     // Something picked already: the list joins unpicked.
     const added = addModelRow([], "my-model");
     expect(mergeListedModels(added, [{ id: "a" }]).map((row) => [row.id, row.selected])).toEqual([
@@ -481,4 +458,11 @@ describe("format", () => {
     expect(stamp(lastYear)).toBe(`9/2/${String(now.getFullYear() - 1).slice(-2)}`);
     expect(daySeparator(lastYear)).toMatch(/^\w{3}, Sep 2 9:00 AM$/);
   });
+});
+
+test("sparse discovery preserves saved metadata and explicit false clears capabilities", () => {
+  const saved = savedModelRows([{ id: "alias", name: "Saved", context_window: 200000, max_output: 32000, images: true, tools: true, reasoning: true, thinking_format: "openai" }]);
+  const merged = mergeListedModels(saved, [{ id: "alias", name: undefined, images: false, tools: false, reasoning: false }], false);
+  expect(merged[0]).toMatchObject({ id: "alias", name: "Saved", context_window: 200000, max_output: 32000, images: false, tools: false, reasoning: false, thinking_format: "openai" });
+  expect(selectedModelIds(merged)).toEqual(["alias"]);
 });

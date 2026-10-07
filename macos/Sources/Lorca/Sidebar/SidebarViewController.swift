@@ -56,8 +56,6 @@ final class SidebarViewController: NSViewController {
         if SidebarChrome.floats {
             // The root hangs the search bar and the footer on the split view item, and the list
             // runs the pane's full height beneath them, inset by the safe area they extend.
-            // The gap between the search bar and the first chat.
-            container.additionalSafeAreaInsets.top = 5
             container.addSubview(listHost)
             listHost.pin(to: container)
             view = container
@@ -492,7 +490,7 @@ final class SidebarSearchBar: NSView, NSSearchFieldDelegate {
         translatesAutoresizingMaskIntoConstraints = false
 
         field.placeholderString = placeholder
-        field.controlSize = .large
+        field.controlSize = .regular
         field.sendsSearchStringImmediately = true
         field.sendsWholeSearchString = false
         field.delegate = self
@@ -504,8 +502,8 @@ final class SidebarSearchBar: NSView, NSSearchFieldDelegate {
         addSubview(field)
 
         NSLayoutConstraint.activate([
-            // Room for the focus ring between the field and the first row.
-            heightAnchor.constraint(equalToConstant: 40),
+            // Keep native focus clearance inside the strip; floating accessories add their own list inset.
+            heightAnchor.constraint(equalToConstant: 32),
             field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarChrome.floats ? 0 : 10),
             field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: SidebarChrome.floats ? 0 : -10),
             field.centerYAnchor.constraint(equalTo: centerYAnchor),

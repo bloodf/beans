@@ -14,7 +14,7 @@ const BULK_BLOBS: usize = 20;
 
 /// What a pull takes. `file` blobs are left out: a transcript fetches them by id when it
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
-pub const POLL_KINDS: &str = "roster,policy,chat,machine,credentials,job,job_cancel,job_result,request,response";
+pub const POLL_KINDS: &str = "roster,policy,chat,machine,credentials,memory_config,job,job_cancel,job_result,request,response";
 
 pub async fn run(app: Arc<App>) {
     let mut failures: u32 = 0;
@@ -213,6 +213,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         }
         if std::mem::take(&mut credentials_due) {
             app.push_credentials_if_owed();
+            app.push_memory_config().map_err(|e| local_relay_error(e.into()))?;
         }
         if app.presence_stale.swap(false, Ordering::Relaxed) {
             refresh_presence(app, &url, &token).await?;
@@ -239,7 +240,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
 }
 
 /// Everything a Device polls for but the messages.
-const NOT_CHAT_KINDS: &str = "roster,policy,machine,credentials,job,job_cancel,job_result,request,response";
+const NOT_CHAT_KINDS: &str = "roster,policy,machine,credentials,memory_config,job,job_cancel,job_result,request,response";
 /// How much of each chat a Device takes when it first syncs: what a bot's turn reads.
 const FIRST_SYNC_MESSAGES: usize = 400;
 /// Messages to a page when reading a chat backwards.
@@ -469,11 +470,11 @@ async fn pull_controls(app: &Arc<App>, url: &str, token: &str, machine_file: &cr
     let Ok(machine) = machine_file.machine() else { return Ok(()) };
     let mut since = app.state.lock().unwrap().last_seq;
     loop {
-        let (blobs, _) = app.relay.list_blobs(url, token, since, "policy,job_cancel,job_result,request,response").await?;
+        let (blobs, _) = app.relay.list_blobs(url, token, since, "policy,memory_config,job_cancel,job_result,request,response").await?;
         let Some(last) = blobs.last().map(|blob| blob.seq) else { return Ok(()) };
         for blob in &blobs {
             let applies = match blob.kind.as_str() {
-                "policy" => true,
+                "policy" | "memory_config" => true,
                 "job_cancel" => unb64(&blob.ciphertext)
                     .ok()
                     .and_then(|ciphertext| crate::crypto::unseal_json::<JobCancel>(&machine.box_secret, &ciphertext).ok())
@@ -493,7 +494,7 @@ async fn pull_controls(app: &Arc<App>, url: &str, token: &str, machine_file: &cr
                 _ => false,
             };
             if applies {
-                apply_blob(app, machine_file, blob);
+                apply_incoming_blob(app,machine_file,blob,true)?;
             }
         }
         since = last;
@@ -892,6 +893,16 @@ fn local_relay_error(error: anyhow::Error) -> RelayError {
 
 fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn,
     remember: bool) -> Result<(), RelayError> {
+    if blob.kind == "memory_config" {
+        let _edit = app.roster_edit.lock().unwrap();
+        if remember && app.state.lock().unwrap().applied_blob_ids.contains(&blob.id) { return Ok(()); }
+        let dek = machine_file.dek().map_err(local_relay_error)?;
+        let config = crate::crypto::decrypt_json::<crate::memory_service::config::MemoryConfig>(
+            &dek, "memory_config", &unb64(&blob.ciphertext).map_err(local_relay_error)?).map_err(local_relay_error)?;
+        app.apply_memory_config(&config).map_err(|e| local_relay_error(e.into()))?;
+        if remember { remember_applied(&mut app.state.lock().unwrap(), &blob.id); }
+        return Ok(());
+    }
     if blob.kind != "roster" {
         if remember { apply_blob(app, machine_file, blob); }
         else { apply_blob_contents(app, machine_file, blob); }
@@ -971,7 +982,7 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
 }
 
 pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
-    if blob.kind == "roster" {
+    if matches!(blob.kind.as_str(), "roster" | "memory_config") {
         if let Err(error) = apply_incoming_blob(app, machine_file, blob, true) {
             tracing::warn!(%error, "applying roster blob");
         }
@@ -1137,6 +1148,9 @@ fn apply_policy(app: &Arc<App>, policy: PolicyBlob) {
                 }
             }
         }
+    }
+    for bot_id in &removed_bots {
+        if let Err(error)=app.invalidate_bot_memory(bot_id) { tracing::error!(%error,"invalidating removed bot memory"); }
     }
     if newly_paused { app.stop_for_pause(); }
     if !removed.is_empty() {

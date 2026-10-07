@@ -1794,7 +1794,7 @@ final class AppStore {
     ) async throws -> ProviderCredential.Kind {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let models = models.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let models = models.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         if isMock {
             let kind = kind ?? .custom(ProviderCredential.Kind.customPrefix + name.lowercased().replacingOccurrences(of: " ", with: "-"))
             let saved = ProviderCredential(

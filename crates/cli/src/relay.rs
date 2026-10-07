@@ -234,9 +234,9 @@ impl RelayClient {
         match (number("protocol"), number("min_protocol"), number("min_roster_protocol")) {
             (Some(protocol), Some(min), Some(roster_min))
                 if protocol >= PROTOCOL && min <= PROTOCOL && (MIN_ROSTER_PROTOCOL..=PROTOCOL).contains(&roster_min)
-                    && roster_min >= min => Ok(protocol),
+                    && roster_min >= min && number("memory_config_version") == Some(1) => Ok(protocol),
             _ => Err(RelayError { status: Some(426), message:
-                "Relay update required: this client needs protocol 4 and an enforced, compatible roster-write floor advertised in health".into() }),
+                "Relay update required: protocol 4, compatible roster floor and memory_config_version 1 are required".into() }),
         }
     }
 

@@ -435,7 +435,14 @@ impl Provider for OpenAiCompatProvider {
                         return;
                     }
                 };
-                for event in parser.push(&chunk) {
+                let events = match parser.push_bounded(&chunk) {
+                    Ok(events) => events,
+                    Err(message) => {
+                        let _ = tx.send(AssistantEvent::Error { message: message.into(), aborted: false }).await;
+                        return;
+                    }
+                };
+                for event in events {
                     if event.data.trim() == "[DONE]" {
                         continue;
                     }

@@ -141,6 +141,7 @@ export default function ChatInfoScreen() {
         <Section>
           <FieldRow label={t("Name")} value={botName} onChangeText={setBotName} onBlur={() => void commitBotName()} autoCapitalize="words" returnKeyType="done" submitBehavior="blurAndSubmit" textAlign="right" />
           <Row title={t("Description")} subtitle={bot.description || undefined} subtitleLines={2} chevron onPress={() => router.push(`/chat-info/description/${bot.id}`)} />
+          <Row title="Memory" subtitle="Own-bot service, recall, capture and Runner setup" chevron onPress={() => router.push(`/chat-info/memory/${bot.id}`)} />
         </Section>
       )}
 

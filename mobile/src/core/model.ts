@@ -415,7 +415,7 @@ export function customRequestURL(api: CustomAPI, baseURL: string): string {
   let root = baseURL.trim().replace(/\/+$/, "");
   if (!root) return "";
   const { path } = customAPI(api);
-  const pasted = api === "messages" ? [path, "/v1"] : [path];
+  const pasted = api === "messages" ? ["/v1/messages", "/v1/models", "/v1", "/messages", "/models"] : [path, "/models"];
   const endpoint = pasted.find((suffix) => root.endsWith(suffix));
   if (endpoint) root = root.slice(0, -endpoint.length);
   return root + path;
@@ -441,7 +441,7 @@ export function isLoopbackHost(host: string): boolean {
 /// A server people often add, to start the form from: its product name, protocol, and base URL.
 /// `local` ones run on the user's own computer.
 export interface CustomPreset {
-  integration?: "durindoor";
+  compatible?: boolean;
   name: string;
   api: CustomAPI;
   baseURL: string;
@@ -450,7 +450,8 @@ export interface CustomPreset {
 }
 
 export const CUSTOM_PRESETS: readonly CustomPreset[] = [
-  { name: "DurinDoor", integration: "durindoor", api: "chat-completions", baseURL: "", keyPlaceholder: () => t("Optional for a server on your network") },
+  { name: "OpenAI Compatible", compatible: true, api: "chat-completions", baseURL: "", keyPlaceholder: () => t("Optional API key") },
+  { name: "Anthropic Compatible", compatible: true, api: "messages", baseURL: "", keyPlaceholder: () => t("Optional API key") },
   { name: "OpenAI", api: "responses", baseURL: "https://api.openai.com/v1", keyPlaceholder: () => t("sk-… from platform.openai.com") },
   { name: "OpenRouter", api: "chat-completions", baseURL: "https://openrouter.ai/api/v1", keyPlaceholder: () => t("sk-or-… from openrouter.ai/keys") },
   { name: "Gemini", api: "chat-completions", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", keyPlaceholder: () => t("Key from aistudio.google.com") },
@@ -477,7 +478,7 @@ export function defaultProviderName(baseURL: string): string {
   return presetForURL(baseURL)?.name ?? urlHost(baseURL);
 }
 
-/// The account's custom provider with this name, which the core keeps unique ignoring case.
+/// The first saved custom provider with this label, for named hosted presets.
 export function customProviderNamed(name: string, providers: readonly ProviderStatus[]): ProviderStatus | undefined {
   const wanted = name.trim().toLowerCase();
   return providers.find((p) => isCustomProvider(p.kind) && p.name?.trim().toLowerCase() === wanted);
@@ -513,17 +514,18 @@ export function savedModelRows(models: readonly CustomModel[]): ModelRow[] {
 
 /// The rows once the server's list arrives: the user's rows first, with what the list says of
 /// them; then rows picked from an earlier list that this one lacks; then the list in its order,
-/// keeping what was picked. When nothing is picked and the list is short, all of it is.
-export function mergeListedModels(rows: readonly ModelRow[], listed: readonly CustomModel[], selectAll = false): ModelRow[] {
+/// keeping the edited selection. A new setup selects the whole catalog.
+export function mergeListedModels(rows: readonly ModelRow[], listed: readonly CustomModel[], selectAll = true): ModelRow[] {
   const byId = new Map<string, CustomModel>();
   for (const model of listed) if (!byId.has(model.id)) byId.set(model.id, model);
-  const user = rows.filter((row) => row.source === "user").map((row) => (byId.has(row.id) ? { ...row, ...byId.get(row.id)!, selected: row.selected, source: row.source } : row));
+  const user = rows.filter((row) => row.source === "user").map((row) => (byId.has(row.id) ? { ...row, ...Object.fromEntries(Object.entries(byId.get(row.id)!).filter(([, value]) => value !== undefined && value !== null)), selected: row.selected, source: row.source } : row));
   const userIds = new Set(user.map((row) => row.id));
   const picked = new Set(rows.filter((row) => row.source === "server" && row.selected).map((row) => row.id));
   const kept = rows.filter((row) => row.source === "server" && row.selected && !byId.has(row.id) && !userIds.has(row.id));
-  const server: ModelRow[] = [...byId.values()].filter((model) => !userIds.has(model.id)).map((model) => ({ ...model, selected: picked.has(model.id), source: "server" }));
+  const previous = new Map(rows.map((row) => [row.id, row]));
+  const server: ModelRow[] = [...byId.values()].filter((model) => !userIds.has(model.id)).map((model) => ({ ...previous.get(model.id), ...Object.fromEntries(Object.entries(model).filter(([, value]) => value !== undefined && value !== null)), id: model.id, selected: picked.has(model.id), source: "server" }));
   const merged = [...user, ...kept, ...server];
-  if (byId.size > 0 && (byId.size <= 8 || selectAll) && !merged.some((row) => row.selected)) return merged.map((row) => (byId.has(row.id) ? { ...row, selected: true } : row));
+  if (byId.size > 0 && selectAll && !merged.some((row) => row.selected)) return merged.map((row) => (byId.has(row.id) ? { ...row, selected: true } : row));
   return merged;
 }
 

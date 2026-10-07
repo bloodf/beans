@@ -138,22 +138,32 @@ extension SettingsPane {
     }
 }
 
+/// Auto Layout sizes the complete glyph box, not the symbol's smaller alignment rectangle.
+private final class SidebarPaneIconView: NSImageView {
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets() }
+}
+
 final class SidebarPaneCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("SidebarPaneCell")
 
-    private let icon = NSImageView()
+    private let icon = SidebarPaneIconView()
     private let title = Build.label("", font: .systemFont(ofSize: 13))
 
     init() {
         super.init(frame: .zero)
         icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.imageScaling = .scaleNone
+        icon.imageAlignment = .alignCenter
         addSubview(icon)
         addSubview(title)
 
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarMetric.inset),
+            icon.centerXAnchor.constraint(
+                equalTo: leadingAnchor, constant: SidebarMetric.inset + SidebarMetric.slot / 2),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: SidebarMetric.slot),
+            // The glyph box is independent of the column slot and includes the symbol's optical outsets.
+            icon.widthAnchor.constraint(equalToConstant: 28),
+            icon.heightAnchor.constraint(equalToConstant: 28),
 
             title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarMetric.textLeading),
             title.centerYAnchor.constraint(equalTo: centerYAnchor),

@@ -64,6 +64,9 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
     if app.chat(&job.chat_id).is_none() {
         return TurnOutcome::Skipped;
     }
+    let memory_access = if job.routine_id.is_none() && matches!(job.kind.as_str(), "turn" | "room_turn" | "message") {
+        crate::memory_service::admission::admit_turn(app,job,&cancel).unwrap_or_else(|_|{app.memory_changed(Some(&bot.id),"capture_admission_failed");None})
+    } else { None };
     // A command's end that the bot has read already, in a turn that ran meanwhile, needs no
     // turn of its own.
     let command_end = match job.kind.as_str() {
@@ -147,6 +150,15 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
     ];
     tools.extend(memory_tools(app, &store, &chat));
     tools.push(Arc::new(Recall { app: app.clone(), store: store.clone(), bot: bot.clone() }));
+    if let Some(access) = &memory_access {
+        let initialized = if app.memory_runtime.backend(&access.scope).is_ok() { Ok(()) } else {
+            tokio::time::timeout(std::time::Duration::from_secs(5),
+                crate::memory_service::setup::initialize(app,access,cancel.clone())).await
+                .unwrap_or_else(|_|Err(crate::memory_service::types::MemoryError::new("service_timeout")))
+        };
+        if initialized.is_ok() { tools.extend(crate::memory_service::tools::tools(app,access)); }
+        else { app.memory_changed(Some(&bot.id),"degraded"); }
+    }
     // Commands run in terminals of their own, kept on this Runner past the turn when they
     // wait for input.
     let sessions = Arc::new(crate::shell::TurnSessions::new(app, &chat.meta.id, &bot.id));
@@ -220,10 +232,15 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         }
         _ => None,
     };
+    let remote_memory = if let Some(access) = &memory_access {
+        let query = app.message(&job.chat_id,&job.trigger_message_id).and_then(|m|match m.body {Body::Text{text,..}=>Some(text),_=>None}).unwrap_or_default();
+        crate::memory_service::dispatch::automatic_recall(app,access,&query,cancel.clone()).await
+    } else { None };
     let notes = TurnNotes {
         recent_work: recent_work_brief(app, &bot, &chat.meta.id, now_secs() as i64),
         cue: if job.kind == "room_turn" { Some(room_turn_cue(app, &chat, &bot, job)) } else { command_end.clone().or(check_found) },
         setup: job.setup.as_ref().map(|setup| setup_cue(app, setup)),
+        remote_memory,
     };
     let (mut messages, mut cache_points) = with_turn_notes(messages, &notes);
 
@@ -241,6 +258,7 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         failed: false,
         last_error: None,
         last_said: None,
+        capture_message_ids: memory_access.as_ref().filter(|a|a.consent_revision.is_some()&&a.capture_cap>0).map(|_|Vec::new()),
         tools_used: Vec::new(),
         plugin_tools: plugin_tools.clone(),
         shown_len: 0,
@@ -335,26 +353,22 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         app.shell_sessions.stop_chat(&chat.meta.id);
         app.unqueue_chat(&chat.meta.id);
     }
-    let mut state = sink.0.lock().unwrap();
-    state.finish();
-    let outcome = if state.sent {
-        TurnOutcome::Sent
-    } else if failed || state.failed {
-        TurnOutcome::Skipped
-    } else {
-        TurnOutcome::Pass
+    let (outcome, capture_ids, line) = {
+        let mut state = sink.0.lock().unwrap();
+        state.finish();
+        let outcome = if state.sent { TurnOutcome::Sent }
+            else if failed || state.failed { TurnOutcome::Skipped }
+            else { TurnOutcome::Pass };
+        if let Some(error) = state.last_error.as_deref().filter(|_| state.failed) {
+            crate::push::failed(app, &chat, &bot, error);
+        } else if let (TurnOutcome::Sent, Some(said)) = (outcome, state.last_said.as_deref()) {
+            crate::push::reply(app, &chat, &bot, said);
+        }
+        let line = turn_log_line(state.last_said.as_deref(), &state.tools_used, outcome == TurnOutcome::Skipped);
+        let capture_ids = if !failed && !state.failed { state.capture_message_ids.take() } else { None };
+        (outcome, capture_ids, line)
     };
-    // A terminal error takes priority over anything the bot said before it failed.
-    // Context recovery above finishes before we choose the notification.
-    if let Some(error) = state.last_error.as_deref().filter(|_| state.failed) {
-        crate::push::failed(app, &chat, &bot, error);
-    } else if let (TurnOutcome::Sent, Some(said)) = (outcome, state.last_said.as_deref()) {
-        crate::push::reply(app, &chat, &bot, said);
-    }
-    // One line in the bot's daily log per turn that did something, written by the Runner, so
-    // the bot's other chats can find out what happened here without the transcript.
-    if let Some(line) = turn_log_line(state.last_said.as_deref(), &state.tools_used, outcome == TurnOutcome::Skipped) {
-        drop(state);
+    if let Some(line) = line {
         let source = match &routine {
             Some(routine) => format!("routine \"{}\"", routine.name),
             None => format!("in {}", chat_source(app, &chat)),
@@ -362,6 +376,9 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         if let Err(error) = store.append_log(&line, Some(&source), now_secs() as i64) {
             tracing::warn!(%error, "writing the turn to the daily log");
         }
+    }
+    if let (Some(access), Some(ids)) = (&memory_access, capture_ids) {
+        crate::memory_service::tools::capture_completed(app,access,&job.chat_id,&job.trigger_message_id,&ids,cancel).await;
     }
     outcome
 }
@@ -865,6 +882,7 @@ struct TurnNotes {
     cue: Option<String>,
     /// The first turn of a bot added from a marketplace template.
     setup: Option<String>,
+    remote_memory: Option<String>,
 }
 
 /// The rebuilt transcript followed by the turn's notes, and the transcript's cache points.
@@ -881,6 +899,9 @@ fn with_turn_notes(mut messages: Vec<AgentMessage>, notes: &TurnNotes) -> (Vec<A
     }
     if let Some(setup) = &notes.setup {
         messages.push(AgentMessage::User(UserMessage::text(setup.clone())));
+    }
+    if let Some(evidence) = &notes.remote_memory {
+        messages.push(AgentMessage::User(UserMessage::text(evidence.clone())));
     }
     (messages, cache_points)
 }
@@ -1021,6 +1042,7 @@ struct TurnState {
     last_error: Option<String>,
     /// The last text that reached the chat, for the daily log.
     last_said: Option<String>,
+    capture_message_ids: Option<Vec<String>>,
     /// Tools the turn ran, in first-use order, for the daily log.
     tools_used: Vec<String>,
     /// The turn's plugin catalog, for the plugin a script is using ("Using GitHub…").
@@ -1325,6 +1347,9 @@ impl TurnState {
         message.created_at = now_secs();
         message.body = Body::text(text);
         message.state = MessageState::Complete;
+        if let Some(ids) = &mut self.capture_message_ids {
+            if ids.len() < 127 { ids.push(message.id.clone()); }
+        }
         self.app.upsert_message(message, true);
         self.sent = true;
         self.last_said = Some(text.to_string());
@@ -3023,11 +3048,11 @@ mod tests {
             },
             _ => String::new(),
         };
-        let none = TurnNotes { recent_work: None, cue: None, setup: None };
+        let none = TurnNotes { recent_work: None, cue: None, setup: None, remote_memory: None };
 
         // In a group the bot's last reply is followed by everyone else's messages.
         let transcript = vec![AgentMessage::user("plan it?"), reply("I'll draft it."), AgentMessage::user("[Scout]: done"), AgentMessage::user("thanks")];
-        let notes = TurnNotes { recent_work: Some("[Recently in your other chats …]".into()), cue: Some("[Your turn in the group …]".into()), setup: None };
+        let notes = TurnNotes { recent_work: Some("[Recently in your other chats …]".into()), cue: Some("[Your turn in the group …]".into()), setup: None, remote_memory: None };
         let (messages, points) = with_turn_notes(transcript.clone(), &notes);
         assert_eq!(points, vec![4, 1], "the transcript's end, and the last turn's before the bot's reply");
         assert_eq!(messages[4..].iter().map(said).collect::<Vec<_>>(), ["[Recently in your other chats …]", "[Your turn in the group …]"]);
@@ -3696,6 +3721,7 @@ mod tests {
             failed: false,
             last_error: None,
             last_said: None,
+            capture_message_ids: None,
             tools_used: Vec::new(),
             plugin_tools: crate::plugins::mcp::turn_catalog(app, Vec::new()),
             shown_len: 0,
@@ -4502,8 +4528,9 @@ mod tests {
         assert_eq!(app.bot("b2").unwrap().model, None);
         use crate::credentials::{CustomApi, CustomModel, CustomProvider};
         app.credentials.lock().unwrap().custom.insert("custom:router".into(), CustomProvider {
-            name: "Router".into(), api: CustomApi::ChatCompletions, base_url: "http://router/v1".into(), api_key: String::new(),
-            models: vec![CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus".into()), context_window: None, max_output: None, images: None, ..Default::default() }], created_at: 1, integration: None,
+            name: "Router".into(), api: CustomApi::Messages, base_url: "http://router".into(), api_key: String::new(),
+            models: vec![CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus".into()), context_window: None, max_output: None, images: None,
+                reasoning: Some(true), thinking_format: Some("claude-adaptive".into()), thinking_can_disable: Some(true), ..Default::default() }], created_at: 1, integration: None,
         });
         run(json!({ "provider": "custom:router", "model": "claude-opus-5", "thinking": "max" })).await.unwrap();
         let scout = app.bot("b2").unwrap();
@@ -4623,8 +4650,11 @@ mod tests {
         assert_eq!(runs(), ("anthropic".into(), Some("claude-next".into()), Some("minimal".into())));
 
         // A custom provider offers its saved models, found by the id after a gateway's `vendor/`.
-        let models = ["anthropic/claude-opus-5", "qwen3:8b"].map(|id| CustomModel { id: id.into(), name: None, context_window: None, max_output: None, images: None, ..Default::default() }).to_vec();
-        let router = CustomProvider { name: "Router".into(), api: CustomApi::ChatCompletions, base_url: "http://router/v1".into(), api_key: String::new(), models, created_at: 1, integration: None };
+        let models = vec![
+            CustomModel { id: "anthropic/claude-opus-5".into(), reasoning: Some(true), thinking_format: Some("claude-adaptive".into()), thinking_can_disable: Some(true), ..Default::default() },
+            CustomModel { id: "qwen3:8b".into(), ..Default::default() },
+        ];
+        let router = CustomProvider { name: "Router".into(), api: CustomApi::Messages, base_url: "http://router".into(), api_key: String::new(), models, created_at: 1, integration: None };
         app.credentials.lock().unwrap().custom.insert("custom:router".into(), router);
         edit(json!({ "provider": "custom:router", "model": "claude-opus-5", "thinking": "max" })).await.unwrap();
         assert_eq!(runs(), ("custom:router".into(), Some("anthropic/claude-opus-5".into()), Some("max".into())));

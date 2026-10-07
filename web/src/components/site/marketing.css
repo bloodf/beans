@@ -611,7 +611,7 @@
 .comparison-page {
   padding-top: 55px;
 }
-.comparison-page > h1 {
+.comparison-hero h1 {
   font-size: clamp(2.8rem, 6vw, 5rem);
   margin-top: 40px;
 }

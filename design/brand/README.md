@@ -12,9 +12,21 @@ The editable vector masters contain Bézier paths with flat fills, transparent b
 | beans-mark-mono.svg | Single-color mark; inherits currentColor |
 | beans-logo-mono.svg | Single-color full logo; inherits currentColor |
 | beans-app-icon.svg | Opaque square coral icon with off-white mark |
+| beans-app-icon-dev.svg | Near-black development icon with coral mark |
+| beans-adaptive-icon.svg | Transparent off-white Android foreground |
+| beans-adaptive-icon-dev.svg | Transparent coral Android development foreground |
 
 Colors: coral `#F26744`, near-black `#181A18`, off-white `#F7F8F4`.
 
-The vectors are clean Potrace traces of the generated identity artwork, with speckles suppressed and curve optimization. The source PNGs retain the original image-generation output. Platform PNG/ICNS exports remain the ones packaged by release 1.0.14. SVG masters can produce future exports at any size. The website serves the square SVG mark.
+The vectors are clean Potrace traces of the generated identity artwork, with speckles suppressed and curve optimization. The source PNGs in this directory retain the original image-generation output. Platform PNG/ICNS exports come from the SVG masters. The website serves the square SVG mark. Published 1.0.14 binaries retain their immutable packaged assets.
+
+## Export platform assets
+
+On macOS, install the isolated renderer and run the export script. It requires Node.js, Python 3 with Pillow, and macOS `iconutil`. It writes production and development app icons, Android transparent adaptive foregrounds, splash images, desktop tray/onboarding images, Mac ICNS files and website PNG/SVG assets. iOS icons have opaque RGB pixels.
+
+```sh
+npm install --prefix temp/beans-brand-renderer --no-save --package-lock=false @resvg/resvg-js@2.6.2
+NODE_PATH="$PWD/temp/beans-brand-renderer/node_modules" node scripts/export-brand-assets.cjs
+```
 
 `prompts.md` records the built-in image-generation prompts. `beans-play-feature.png` is the 1024 × 500 Play listing graphic.

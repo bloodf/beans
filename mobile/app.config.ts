@@ -11,7 +11,7 @@ export default (): ExpoConfig => {
   const icon = development ? "./assets/icon-dev.png" : "./assets/icon.png";
   const splash = development ? "./assets/splash-icon-dev.png" : "./assets/splash-icon.png";
   const favicon = development ? "./assets/favicon-dev.png" : "./assets/favicon.png";
-  const adaptiveIconBackgroundColor = development ? "#ffbe00" : "#F26744";
+  const adaptiveIconBackgroundColor = development ? "#181A18" : "#F26744";
   const eas = Boolean(process.env.EAS_BUILD_PROFILE);
   const owner = process.env.BEANS_EXPO_OWNER;
   const projectId = process.env.BEANS_EXPO_PROJECT_ID;
@@ -61,7 +61,7 @@ export default (): ExpoConfig => {
       ...(process.env.BEANS_GOOGLE_SERVICES_FILE ? { googleServicesFile: process.env.BEANS_GOOGLE_SERVICES_FILE } : {}),
       adaptiveIcon: {
         backgroundColor: adaptiveIconBackgroundColor,
-        foregroundImage: icon,
+        foregroundImage: development ? "./assets/adaptive-icon-dev.png" : "./assets/adaptive-icon.png",
       },
       predictiveBackGestureEnabled: true,
       versionCode: Number(buildNumber),

@@ -1,6 +1,6 @@
 export const en = {
   meta: {
-    title: 'Lorca',
+    title: 'Beans',
     description:
       'AI teammates that run on your own computer. Chat with one or several at once, let them work with your files, and they coordinate the work among themselves.',
   },
@@ -13,9 +13,9 @@ export const en = {
     download: 'Download',
   },
   hero: {
-    badge: 'Now on Windows and Linux',
-    title: 'AI teammates<br/>for <accent>real</accent> work.',
-    body: 'Chat with one teammate, or put several in a group chat. They can read and edit your files, run commands, and remember what you tell them. Give them a job and they coordinate the work among themselves.',
+    badge: 'Personal AI, across your devices',
+    title: 'Your AI.<br/>Your <accent>space.</accent>',
+    body: 'A team of AI bots on your computer. Give them work, connect your tools, and keep chatting from your phone.',
     how: 'See how it works',
     platforms: 'For Mac, Windows, and Linux. iPhone and iPad in beta.',
   },
@@ -23,7 +23,7 @@ export const en = {
     eyebrow: 'Group chats',
     title: 'Several bots in one chat.',
     body: 'Post in a group and each bot is offered a turn, one at a time. A bot replies when the message is addressed to it or when it has useful information to add. Otherwise it skips its turn. Mention a bot by name and it goes first.',
-    alt: 'Lorca on macOS: a Researcher, Developer, and Project Manager prepare a launch together in a group chat across two Runners.',
+    alt: 'Beans on macOS: a Researcher, Developer, and Project Manager prepare a launch together in a group chat across two Runners.',
   },
   relay: {
     eyebrow: 'Privacy',
@@ -61,11 +61,11 @@ export const en = {
   faq: {
     title: 'Questions',
     items: [
-      { q: 'Do I need an account or a server?', a: 'No. Lorca runs on your own computer, with no sign-up and nothing to host. Your backup phrase is your account.' },
+      { q: 'Do I need an account or a server?', a: 'Your backup phrase identifies your account. Bots run on your computer. Pairing and sync use a relay you choose or host.' },
       { q: 'What does it run on?', a: 'Mac, Windows, and Linux, with the app or only the command line. iPhone and iPad are in beta, for chatting with your bots. A bot on any of your computers can join the same group chats.' },
       { q: 'Which AI does it use?', a: 'Your own account or API key. Sign in with ChatGPT or Grok, or add a DeepSeek API key. Each bot can use a different provider, and you can change it any time.' },
       { q: 'What can a bot do on my computer?', a: 'Read, edit, and create files and run commands in the folder you give it. It runs with your user permissions on that computer and shows you what it ran.' },
-      { q: 'Can anyone read my chats?', a: 'No. Chats are encrypted on your computer before they sync. The relay stores only encrypted data and has no key, so it cannot read bot names, chat titles, or messages.' },
+      { q: 'Can anyone read my chats?', a: 'Your paired devices can read your chats. The relay handles encrypted data without its keys. The AI provider you choose processes the content sent to it to generate replies.' },
     ],
   },
   cta: {
@@ -73,10 +73,10 @@ export const en = {
     body: 'Download for Mac, Windows, or Linux.',
   },
   docs: {
-    title: 'Lorca Docs',
+    title: 'Beans Docs',
   },
   download: {
-    title: 'Download Lorca',
+    title: 'Download Beans',
     description: 'Check client download availability for Mac, Windows, Linux, Android and iOS, or install the CLI.',
     version: 'Version {{version}}',
     unavailable: 'No published download is available for this platform yet.',
@@ -96,7 +96,7 @@ export const en = {
     },
     linux: {
       title: 'Linux',
-      body: 'Chat with your bots and run them on your Linux computer. The command installs Lorca in your home folder, without root, and Lorca keeps itself up to date.',
+      body: 'Chat with your bots and run them on your Linux computer. The command installs Beans in your home folder, without root, and Beans keeps itself up to date.',
       action: 'Download for Linux',
       deb: 'Or install the Debian package for <amd64>x64</amd64> or <arm64>Arm64</arm64>. It updates when you install the next one.',
       system: 'x64 and Arm64',
@@ -113,7 +113,7 @@ export const en = {
       action: 'Download APK',
     },
     cli: {
-      title: 'Lorca CLI',
+      title: 'Beans CLI',
       body: 'Makes a computer a Runner: it runs your bots, with no chat window. The Mac, Windows, and Linux apps have it built in, so you need it only on a computer without the app. Pair it with your account, then create bots for it from the desktop app or your phone.',
       unix: 'macOS and Linux',
       windows: 'Windows (PowerShell)',
@@ -124,6 +124,7 @@ export const en = {
   },
   footer: {
     privacy: 'Privacy',
+    support: 'Support',
     faq: 'FAQ',
     download: 'Download',
   },

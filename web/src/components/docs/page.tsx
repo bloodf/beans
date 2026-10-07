@@ -122,7 +122,7 @@ export function DocsPage({ lang, data }: { lang: Language; data: DocsData }) {
           title: (
             <>
               <Logo className="size-6" />
-              <span className="font-semibold tracking-tight">Lorca</span>
+              <span className="font-semibold tracking-tight">Beans</span>
               <span className="text-fd-muted-foreground">{t('nav.docs')}</span>
             </>
           ),

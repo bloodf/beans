@@ -90,3 +90,5 @@ Create store records/listings, screenshots, age/content ratings, privacy policy,
 - [Apple enrollment](https://developer.apple.com/programs/enroll/)
 - [Google registration](https://support.google.com/googleplay/android-developer/answer/6112435)
 - [Google personal-account tests](https://support.google.com/googleplay/android-developer/answer/14151465)
+
+EAS artifact downloads follow HTTPS redirects only across the enumerated Expo API and artifact hosts, including `api.expo.dev` and `wf-artifacts.eascdn.net`. The downloader rejects credentials in URLs, unlisted hosts, redirect loops, oversized files, and non-ZIP payloads before recording artifact hashes.

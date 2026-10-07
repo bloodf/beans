@@ -12,23 +12,23 @@ import { Button } from '#/components/ui/button'
 import { RelayDiagram } from './diagram'
 import { Logo } from './logo'
 import { LanguageLink, SectionLink, docsPath, downloadPath } from './nav'
-import { Pixels } from './pixels'
 
 export function Hero() {
   const { t, i18n } = useTranslation()
   return (
-    <section id="top" className="mx-auto max-w-4xl px-5 pt-20 text-center sm:pt-28">
+    <section id="top" className="beans-hero mx-auto grid max-w-6xl items-center gap-12 px-5 pt-16 pb-12 sm:pt-24 lg:grid-cols-[1.2fr_0.8fr]">
+      <div>
       <p className="mb-5 inline-flex items-center gap-2 rounded-full border bg-foreground/5 px-3 py-1 text-xs font-medium text-foreground/80">
-        <span className="size-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400" />
+        <span className="size-1.5 rounded-full bg-[#F26744]" />
         {t('hero.badge')}
       </p>
-      <h1 className="display text-[3.4rem] text-balance sm:text-[4.6rem] lg:text-[5.2rem]">
+      <h1 className="display text-[3.8rem] text-balance sm:text-[5.4rem] lg:text-[6.4rem]">
         <Trans i18nKey="hero.title" components={{ accent: <span className="brush" /> }} />
       </h1>
-      <p className="mx-auto mt-7 max-w-2xl text-lg text-pretty text-muted-foreground sm:text-xl">
+      <p className="mt-7 max-w-lg text-lg text-pretty text-muted-foreground sm:text-xl">
         {t('hero.body')}
       </p>
-      <div className="mt-9 flex flex-col justify-center gap-3 sm:flex-row">
+      <div className="mt-9 flex flex-col gap-3 sm:flex-row">
         <Button asChild size="lg" className="h-12 rounded-full px-7 text-base">
           <Link to={downloadPath(i18n.language)}>{t('nav.download')}</Link>
         </Button>
@@ -36,23 +36,22 @@ export function Hero() {
           <SectionLink id="turns">{t('hero.how')}</SectionLink>
         </Button>
       </div>
-      <p className="mt-4 text-sm text-muted-foreground/80">{t('hero.platforms')}</p>
+      </div>
+      <div className="beans-hero-art" aria-hidden="true">
+        <img src="/brand/beans-mark.png" alt="" width={1280} height={1280} className="w-full" />
+      </div>
     </section>
   )
 }
 
 function Stage({
   id,
-  seed,
-  eyebrow,
   title,
   body,
   children,
   bare = false,
 }: {
   id: string
-  seed: 2 | 8 | 11
-  eyebrow: string
   title: React.ReactNode
   body: string
   children: React.ReactNode
@@ -63,15 +62,13 @@ function Stage({
     <section id={id} className="mx-auto max-w-6xl scroll-mt-8 px-5 py-10">
       <div className="panel overflow-hidden">
         <div className="px-6 pt-10 pb-8 sm:px-12 sm:pt-14">
-          <p className="text-xs font-semibold tracking-[0.18em] text-muted-foreground/80 uppercase">{eyebrow}</p>
           <h2 className="display mt-3 max-w-3xl text-4xl sm:text-5xl">{title}</h2>
           <p className="mt-5 max-w-3xl text-lg leading-relaxed text-muted-foreground">{body}</p>
         </div>
         {bare ? (
           children
         ) : (
-          <div className="grain relative">
-            <Pixels seed={seed} className="absolute inset-0 h-full w-full" />
+          <div className="beans-stage relative">
             <div className="relative px-4 py-10 sm:px-12 sm:py-14">{children}</div>
           </div>
         )}
@@ -85,8 +82,6 @@ export function Turns() {
   return (
     <Stage
       id="turns"
-      seed={2}
-      eyebrow={t('turns.eyebrow')}
       title={t('turns.title')}
       body={t('turns.body')}
     >
@@ -108,8 +103,6 @@ export function Relay() {
   return (
     <Stage
       id="relay"
-      seed={8}
-      eyebrow={t('relay.eyebrow')}
       title={t('relay.title')}
       body={t('relay.body')}
     >
@@ -133,9 +126,7 @@ export function Tools() {
   return (
     <Stage
       id="tools"
-      seed={8}
       bare
-      eyebrow={t('tools.eyebrow')}
       title={t('tools.title')}
       body={t('tools.body')}
     >
@@ -202,13 +193,12 @@ export function CallToAction() {
   const { t, i18n } = useTranslation()
   return (
     <section className="mx-auto max-w-6xl px-5 pb-20">
-      <div className="grain relative overflow-hidden rounded-[28px]">
-        <Pixels seed={11} className="absolute inset-0 h-full w-full" />
+      <div className="beans-cta relative overflow-hidden rounded-[28px]">
         <div className="relative px-6 py-20 text-center">
           <Logo className="mx-auto size-16 drop-shadow-2xl" />
-          <h2 className="display mt-6 text-4xl text-white sm:text-6xl">{t('cta.title')}</h2>
-          <p className="mx-auto mt-4 max-w-md text-white/80">{t('cta.body')}</p>
-          <Button asChild size="lg" className="mt-8 h-12 rounded-full bg-white px-7 text-base text-zinc-900 hover:bg-white/90">
+          <h2 className="display mt-6 text-4xl text-foreground sm:text-6xl">{t('cta.title')}</h2>
+          <p className="mx-auto mt-4 max-w-md text-muted-foreground">{t('cta.body')}</p>
+          <Button asChild size="lg" className="mt-8 h-12 rounded-full px-7 text-base">
             <Link to={downloadPath(i18n.language)}>{t('nav.download')}</Link>
           </Button>
         </div>
@@ -224,10 +214,11 @@ export function Footer() {
       <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 px-5 py-8 text-sm text-muted-foreground/80 sm:flex-row">
         <div className="flex items-center gap-2">
           <Logo className="size-5" />
-          <span>© {new Date().getFullYear()} Lorca</span>
+          <span>© {new Date().getFullYear()} Beans</span>
         </div>
-        <nav className="flex gap-6">
-          <SectionLink id="relay" className="hover:text-foreground">{t('footer.privacy')}</SectionLink>
+        <nav className="flex flex-wrap justify-center gap-x-6 gap-y-3">
+          <a href="/privacy.html" className="hover:text-foreground">{t('footer.privacy')}</a>
+          <a href="/support.html" className="hover:text-foreground">{t('footer.support')}</a>
           <SectionLink id="faq" className="hover:text-foreground">{t('footer.faq')}</SectionLink>
           <Link to={docsPath(i18n.language)} className="hover:text-foreground">{t('nav.docs')}</Link>
           <Link to={downloadPath(i18n.language)} className="hover:text-foreground">{t('footer.download')}</Link>

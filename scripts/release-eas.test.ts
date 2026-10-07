@@ -41,6 +41,13 @@ test("downloads and stages exact finished APK/AAB/store IPA with hashes, never U
       if (oldOwner === undefined) delete process.env.BEANS_EXPO_OWNER; else process.env.BEANS_EXPO_OWNER = oldOwner;
     }
     await expect(stageEasBuild({ ...build, status: "ERRORED" }, "github", revision, directory)).rejects.toThrow();
+    const redirects = ["https://api.expo.dev/builds/artifact", "https://wf-artifacts.eascdn.net/build.ipa"];
+    fetcher.mockImplementation(async () => redirects.length
+      ? new Response(null, { status: 307, headers: { location: redirects.shift()! } }) as any
+      : new Response(new Uint8Array([0x50, 0x4b, 3, 4, 1])) as any);
+    expect((await downloadArtifact("https://expo.dev/artifacts/build.ipa")).length).toBe(5);
+    fetcher.mockImplementation(async () => new Response(null, { status: 307, headers: { location: "https://evil.eascdn.net/build.ipa" } }) as any);
+    await expect(downloadArtifact(build.artifacts.buildUrl)).rejects.toThrow("trusted HTTPS");
     fetcher.mockImplementation(async () => new Response("denied", { status: 403 }) as any);
     await expect(downloadArtifact(build.artifacts.buildUrl)).rejects.toThrow("403");
     fetcher.mockImplementation(async () => new Response(null, { status: 302, headers: { location: "http://localhost/secret" } }) as any);

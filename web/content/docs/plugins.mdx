@@ -8,7 +8,7 @@ A plugin gives bots tools for a service or an app. Under the hood a plugin is on
 
 ## The marketplace
 
-Click the marketplace icon (four circles) at the bottom right of the sidebar, or choose **File › Marketplace…** (⇧⌘M, or Ctrl+Shift+M on Windows and Linux). It lists **Featured Plugins** and **Featured Bots** first, then everything by category. **View all** under a featured section lists every plugin or every bot. Search finds plugins and bots together. The marketplace comes from lorca.app, so new plugins and bots show up without updating Lorca.
+Click the marketplace icon (four circles) at the bottom right of the sidebar, or choose **File › Marketplace…** (⇧⌘M, or Ctrl+Shift+M on Windows and Linux). It lists **Featured Plugins** and **Featured Bots** first, then everything by category. **View all** under a featured section lists every plugin or every bot. Search finds plugins and bots together. The marketplace comes from lorca.app, so new plugins and bots show up without updating Beans.
 
 The marketplace has these plugins:
 
@@ -30,7 +30,7 @@ Plugins are installed **per Runner**. Every bot on that computer can use every p
 
 ## On-demand tools
 
-A bot starts a turn with only a small catalog of the plugins installed on its Runner. Lorca connects an MCP server and gives the model matching tool schemas only when the task needs that capability. The selected tools remain available for the rest of that turn, while unrelated plugin catalogs stay out of the model's context.
+A bot starts a turn with only a small catalog of the plugins installed on its Runner. Beans connects an MCP server and gives the model matching tool schemas only when the task needs that capability. The selected tools remain available for the rest of that turn, while unrelated plugin catalogs stay out of the model's context.
 
 ## Install a plugin
 
@@ -62,9 +62,9 @@ Any [MCP](https://modelcontextprotocol.io) server can be a plugin: a command the
 
 **Settings › Plugins** lists them under **MCP Servers** for the Runner picked in the toolbar. **Add Server…** takes a name and either the command (with its environment variables) or the URL (with its headers). Paste the JSON a server's README gives, or a whole `mcpServers` block from Claude Desktop or Cursor, into any field, and the sheet reads it; several servers are added at once. Once saved, the sheet shows whether the server started and the tools it offered, with **Reconnect**, a switch that turns it off, and **Remove**. A server you turn off keeps its settings and sign-in, and no bot sees it.
 
-A remote server that needs an account asks for it when Lorca first connects: the server reads **Needs a sign-in**, and **Sign in**, on its sheet or on a card a bot posts, signs in with OAuth as for a marketplace plugin, and **Sign Out** on its sheet forgets the sign-in. A server that takes a token instead gets it in a header, such as `Authorization: Bearer …`.
+A remote server that needs an account asks for it when Beans first connects: the server reads **Needs a sign-in**, and **Sign in**, on its sheet or on a card a bot posts, signs in with OAuth as for a marketplace plugin, and **Sign Out** on its sheet forgets the sign-in. A server that takes a token instead gets it in a header, such as `Authorization: Bearer …`.
 
-The servers live in `mcp.json` in Lorca's folder (`~/.lorca/mcp.json`), in the format Claude Desktop, Cursor, and Claude Code use, so you can copy one from their configs or edit the file by hand. After editing it, click **Reload** on its row in **Settings › Plugins**, or run `lorca mcp reload`:
+The servers live in `mcp.json` in Beans's folder (`~/.lorca/mcp.json`), in the format Claude Desktop, Cursor, and Claude Code use, so you can copy one from their configs or edit the file by hand. After editing it, click **Reload** on its row in **Settings › Plugins**, or run `lorca mcp reload`:
 
 ```json
 {
@@ -88,10 +88,10 @@ The servers live in `mcp.json` in Lorca's folder (`~/.lorca/mcp.json`), in the f
 }
 ```
 
-`${VAR}` reads a variable from your shell's environment, and `${VAR:-default}` falls back to the default; a header or variable whose value is not set is left out. `description` tells bots what the server is for, `cwd` is the folder a command starts in, `timeout` is how many seconds a call may go without an answer (ten minutes when unset), and `"oauth": false` stops a remote server from signing in. Lorca keeps the fields it does not know, and the order you wrote.
+`${VAR}` reads a variable from your shell's environment, and `${VAR:-default}` falls back to the default; a header or variable whose value is not set is left out. `description` tells bots what the server is for, `cwd` is the folder a command starts in, `timeout` is how many seconds a call may go without an answer (ten minutes when unset), and `"oauth": false` stops a remote server from signing in. Beans keeps the fields it does not know, and the order you wrote.
 
 To keep some of a server's tools from bots, turn off their switches on the server's sheet, or write them in `toolExposure`, as pi does: `{ "delete_*": "hidden", "delete_draft": "codemode" }` hides every tool whose name starts with `delete_` except `delete_draft`, since a name wins over a pattern. `"exposure": "hidden"` hides every tool the server's `toolExposure` doesn't name.
 
-A server that doesn't register apps on the fly takes the one you registered with it in `oauth`: `clientId`, `clientSecret` (which can be `${SECRET}`), and the `callbackPort` or `callbackUrl` you registered, whose sign-in opens in the Runner's own browser. `clientName` registers Lorca under another name, for a server that only takes names it knows; `scope` asks for more access; and `authServerMetadataUrl` points at the right authorization server when the server names the wrong one. When a server answers that a call needs more access than the sign-in has, it asks you to sign in again, for that access too.
+A server that doesn't register apps on the fly takes the one you registered with it in `oauth`: `clientId`, `clientSecret` (which can be `${SECRET}`), and the `callbackPort` or `callbackUrl` you registered, whose sign-in opens in the Runner's own browser. `clientName` registers Beans under another name, for a server that only takes names it knows; `scope` asks for more access; and `authServerMetadataUrl` points at the right authorization server when the server names the wrong one. When a server answers that a call needs more access than the sign-in has, it asks you to sign in again, for that access too.
 
 Bots call a server's tools by its name, `notes__read_file`, and reading tools run at once while the rest go through [Auto-review](/docs/auto-review), as for any plugin. A server that offers resources, such as files or records, also gets tools to list and read them, `notes__list_mcp_resources` and `notes__read_mcp_resource`; binary resources are saved to a file the bot can open. The [command line](/docs/cli#mcp-servers) manages the same file: `lorca mcp add`, `list`, `get`, `remove`, `reload`, `sign-out`, and `import` from another app.

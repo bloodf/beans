@@ -19,7 +19,7 @@ export function validateEasBuild(value: any, profile: Profile, revision: string,
 }
 export function validateArtifactUrl(value: string): URL {
   const url = new URL(value);
-  if (url.protocol !== "https:" || url.username || url.password || !["artifacts.eascdn.net", "expo.dev", "exp.host", "storage.googleapis.com"].includes(url.hostname)) throw new Error("EAS artifact URL must use a trusted HTTPS artifact host");
+  if (url.protocol !== "https:" || url.username || url.password || !["artifacts.eascdn.net", "wf-artifacts.eascdn.net", "api.expo.dev", "expo.dev", "exp.host", "storage.googleapis.com"].includes(url.hostname)) throw new Error("EAS artifact URL must use a trusted HTTPS artifact host");
   return url;
 }
 export async function downloadArtifact(value: string): Promise<Uint8Array> {

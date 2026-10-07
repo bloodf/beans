@@ -8,7 +8,7 @@ import { tanstackStart } from '@tanstack/react-start/plugin/vite'
 
 import viteReact from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
-import { cloudflare } from '@cloudflare/vite-plugin'
+import { nitro } from 'nitro/vite'
 import { fumadocsMdx } from 'fumadocs-mdx/vite'
 
 import { fetchDesktopRelease } from './src/lib/desktop-release.ts'
@@ -53,9 +53,9 @@ const config = defineConfig(async ({ command }) => ({
     servedFiles(),
     fumadocsMdx(),
     devtools(),
-    cloudflare({ viteEnvironment: { name: 'ssr' } }),
     tailwindcss(),
     tanstackStart(),
+    nitro(),
     viteReact(),
   ],
 }))

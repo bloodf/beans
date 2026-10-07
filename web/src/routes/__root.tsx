@@ -17,12 +17,6 @@ export const Route = createRootRoute({
       { name: 'twitter:card', content: 'summary_large_image' },
     ],
     links: [
-      { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
-      { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossOrigin: 'anonymous' },
-      {
-        rel: 'stylesheet',
-        href: 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap',
-      },
       { rel: 'stylesheet', href: appCss },
       { rel: 'icon', href: '/favicon.png', type: 'image/png', sizes: '64x64' },
     ],
@@ -44,15 +38,6 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       <head>
         <script dangerouslySetInnerHTML={{ __html: followAppearance }} />
         <HeadContent />
-        {/* Analytics for production builds. The shell keeps this tag mounted, so it runs once per
-            page load; a head() script is put back after a client-side navigation and runs again. */}
-        {import.meta.env.PROD && (
-          <script
-            defer
-            src="https://u.egoist.dev/script.js"
-            data-website-id="645b6601-b372-48f5-905a-0bc5c0f0ddf7"
-          />
-        )}
       </head>
       <body>
         <I18nextProvider i18n={i18nFor(lng)}>{children}</I18nextProvider>

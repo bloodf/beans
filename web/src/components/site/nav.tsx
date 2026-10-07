@@ -5,7 +5,7 @@ import { Button } from '#/components/ui/button'
 import { type Language, languages, names, pathIn, paths } from '#/i18n'
 import { Logo } from './logo'
 
-export const SITE = 'https://lorca.app'
+export const SITE = 'https://usebeans.app'
 
 const links = [
   { id: 'turns', label: 'nav.turns' },
@@ -59,11 +59,11 @@ export function LanguageLink({ className }: { className?: string }) {
 export function Nav() {
   const { t, i18n } = useTranslation()
   return (
-    <header className="sticky top-4 z-40 mt-4 px-4">
-      <div className="mx-auto flex h-14 max-w-4xl items-center justify-between rounded-full pr-4 pl-5 bg-zinc-200/50 backdrop-blur-xl dark:bg-zinc-900/80 dark:border">
+    <header className="sticky top-0 z-40 border-b bg-background/95 px-4 backdrop-blur-xl">
+      <div className="mx-auto flex h-18 max-w-6xl items-center justify-between gap-4">
         <SectionLink id="top" className="flex items-center gap-2 font-semibold tracking-tight">
           <Logo className="size-10" />
-          Lorca
+          <span className="text-2xl font-extrabold tracking-[-0.06em]">beans</span>
         </SectionLink>
         <nav className="hidden items-center gap-6 text-sm text-muted-foreground md:flex">
           {links.map((link) => (

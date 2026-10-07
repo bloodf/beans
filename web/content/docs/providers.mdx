@@ -21,8 +21,8 @@ DeepSeek, Anthropic, ChatGPT, and Grok search the web on the provider's side. Gr
 
 In the desktop or phone app, open **Settings › Providers**, select a provider, and choose **Connect**.
 
-- **API key:** paste the key. Lorca checks it against the provider before saving.
-- **Sign-in:** your browser opens the provider's own sign-in page. Lorca never sees your password.
+- **API key:** paste the key. Beans checks it against the provider before saving.
+- **Sign-in:** your browser opens the provider's own sign-in page. Beans never sees your password.
 
 From a terminal:
 
@@ -45,11 +45,11 @@ Any server that speaks OpenAI's Chat Completions or Responses API, or Anthropic'
 
 - **Name:** what the apps call it.
 - **API:** OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages.
-- **API base URL:** the root the API's paths go under, such as `https://openrouter.ai/api/v1` or `http://localhost:11434/v1`. The sheet shows the full URL Lorca will call.
+- **API base URL:** the root the API's paths go under, such as `https://openrouter.ai/api/v1` or `http://localhost:11434/v1`. The sheet shows the full URL Beans will call.
 - **API key:** leave it empty for a server that takes none.
 - **Models:** as you fill in the server, its models appear with their context window and whether they see images. Check the ones bots can use and pick the default. For a model the server doesn't list, type its ID in the search field and add it.
 
-Lorca checks the server again when you save, which checks the key. A custom provider syncs to your other devices like any credential, and its bots run on whichever Runner they are assigned to, so a model server on your network has to be reachable from that Runner. Spending shows as $0, since Lorca does not know what the server charges.
+Beans checks the server again when you save, which checks the key. A custom provider syncs to your other devices like any credential, and its bots run on whichever Runner they are assigned to, so a model server on your network has to be reachable from that Runner. Spending shows as $0, since Beans does not know what the server charges.
 
 From a terminal:
 

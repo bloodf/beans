@@ -2,7 +2,7 @@ import type { Messages } from './en'
 
 export const zh: Messages = {
   meta: {
-    title: 'Lorca',
+    title: 'Beans',
     description:
       '运行在你自己电脑上的 AI 队友。可以单聊，也可以拉群，让它们处理你的文件和任务，它们会自己分工协作。',
   },
@@ -25,7 +25,7 @@ export const zh: Messages = {
     eyebrow: '群聊',
     title: '多个智能体，一个群聊。',
     body: '在群里发一条消息，每个智能体会依次轮到一次。消息是发给它的，或者它有有用的信息要补充，它才回复；否则就跳过这一轮。@ 某个智能体的名字，它会先回复。',
-    alt: 'macOS 上的 Lorca：研究员、开发者和项目经理分别在两台运行设备上工作，在群聊中一起准备产品发布。',
+    alt: 'macOS 上的 Beans：研究员、开发者和项目经理分别在两台运行设备上工作，在群聊中一起准备产品发布。',
   },
   relay: {
     eyebrow: '隐私',
@@ -63,22 +63,22 @@ export const zh: Messages = {
   faq: {
     title: '常见问题',
     items: [
-      { q: '需要注册账号或者服务器吗？', a: '不需要。Lorca 在你自己的电脑上运行，不用注册，也不用架服务器。你的备份短语就是你的账户。' },
+      { q: '需要注册账号或者服务器吗？', a: '备份短语用于识别你的账户。智能体在你的电脑上运行，设备配对和同步使用你选择或自行部署的中继。' },
       { q: '支持哪些平台？', a: 'Mac、Windows 和 Linux，用应用或只用命令行都可以。iPhone 和 iPad 版正在公测，用来和智能体聊天。你任何一台电脑上的智能体都能加入同一个群聊。' },
       { q: '它用的是哪家 AI？', a: '你自己的账号或 API 密钥。登录 ChatGPT 或 Grok，或者添加一个 DeepSeek API 密钥。每个智能体可以用不同的服务商，随时可以换。' },
       { q: '智能体能在我的电脑上做什么？', a: '在你给它的文件夹里读取、修改、新建文件和运行命令。它以你的用户权限在那台电脑上运行，并告诉你它运行了什么。' },
-      { q: '有人能看到我的聊天记录吗？', a: '不能。聊天记录在同步之前就已在你的电脑上加密。中继只保存加密数据，没有密钥，所以看不到智能体名字、聊天标题和消息内容。' },
+      { q: '有人能看到我的聊天记录吗？', a: '你配对的设备可以读取聊天。中继处理加密数据，但没有解密密钥。你选择的 AI 服务商会处理发送给它的内容，以生成回复。' },
     ],
   },
   cta: {
-    title: '开始使用 Lorca。',
+    title: '开始使用 Beans。',
     body: '下载 Mac、Windows 或 Linux 版。',
   },
   docs: {
-    title: 'Lorca 文档',
+    title: 'Beans 文档',
   },
   download: {
-    title: '下载 Lorca',
+    title: '下载 Beans',
     description: '查看 Mac、Windows、Linux、Android 和 iOS 客户端的下载可用情况，或安装 CLI。',
     version: '版本 {{version}}',
     unavailable: '此平台尚无已发布的下载文件。',
@@ -98,7 +98,7 @@ export const zh: Messages = {
     },
     linux: {
       title: 'Linux',
-      body: '和智能体聊天，并在你的 Linux 电脑上运行它们。这条命令把 Lorca 安装到你的主目录，不需要 root，之后 Lorca 会自动更新。',
+      body: '和智能体聊天，并在你的 Linux 电脑上运行它们。这条命令把 Beans 安装到你的主目录，不需要 root，之后 Beans 会自动更新。',
       action: '下载 Linux 版',
       deb: '也可以安装 <amd64>x64</amd64> 或 <arm64>Arm64</arm64> 的 Debian 软件包，它在你安装下一个软件包时更新。',
       system: 'x64 和 Arm64',
@@ -115,7 +115,7 @@ export const zh: Messages = {
       action: '下载 APK',
     },
     cli: {
-      title: 'Lorca CLI',
+      title: 'Beans CLI',
       body: '让一台电脑成为 Runner：它运行你的智能体，但没有聊天界面。Mac、Windows 和 Linux 应用都已内置 CLI，只有在没装应用的电脑上才需要单独安装。把它和你的账户配对，再用桌面应用或手机为它创建智能体。',
       unix: 'macOS 和 Linux',
       windows: 'Windows（PowerShell）',
@@ -126,6 +126,7 @@ export const zh: Messages = {
   },
   footer: {
     privacy: '隐私',
+    support: '支持',
     faq: '常见问题',
     download: '下载',
   },

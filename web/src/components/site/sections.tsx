@@ -22,6 +22,7 @@ export function Hero() {
   const { t, i18n } = useTranslation()
   return (
     <section id="top" className="beans-hero">
+      <div className="gradient-wash motion-island" aria-hidden="true" />
       <div className="hero-copy motion-island">
         <h1 className="hero-title display" aria-label={t('hero.accessibleTitle')}>
           <span aria-hidden="true">

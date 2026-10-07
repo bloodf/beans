@@ -1,6 +1,13 @@
 'use client'
 
-import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react'
 import { Pause, Play } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
@@ -24,7 +31,7 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
     () => matchMedia('(prefers-reduced-motion: reduce)').matches,
     () => true,
   )
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
 
   useEffect(() => {
     const element = root.current
@@ -35,7 +42,9 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
           entry.target.dataset.active = String(entry.isIntersecting)
       }
     })
-    element.querySelectorAll('.motion-island').forEach((island) => observer.observe(island))
+    element
+      .querySelectorAll('.motion-island')
+      .forEach((island) => observer.observe(island))
     const visibility = () => {
       element.dataset.pageVisible = String(!document.hidden)
     }
@@ -49,7 +58,8 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const element = root.current
-    if (!element || reduced || paused || !element.querySelector('.beans-hero')) return
+    if (!element || reduced || paused || !element.querySelector('.beans-hero'))
+      return
     let disposed = false
     let revert = () => {}
     void Promise.all([import('gsap'), import('gsap/ScrollTrigger')])
@@ -146,7 +156,9 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
                 },
               },
             )
-            for (const section of gsap.utils.toArray<HTMLElement>('.story-heading')) {
+            for (const section of gsap.utils.toArray<HTMLElement>(
+              '.story-heading',
+            )) {
               gsap.from(section, {
                 y: 35,
                 duration: 0.85,
@@ -159,7 +171,9 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
                 clearProps: 'all',
               })
             }
-            for (const [index, card] of gsap.utils.toArray<HTMLElement>('.bento-card').entries()) {
+            for (const [index, card] of gsap.utils
+              .toArray<HTMLElement>('.bento-card')
+              .entries()) {
               gsap.fromTo(
                 card,
                 { y: 65 + (index % 2) * 35, rotateX: 7, scale: 0.96 },
@@ -247,6 +261,7 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
       <div
         ref={root}
         className="beans-experience"
+        lang={i18n.language}
         data-motion={reduced || paused ? 'still' : 'running'}
       >
         <div className="reading-progress" aria-hidden="true" />

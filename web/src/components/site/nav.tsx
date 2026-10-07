@@ -1,8 +1,16 @@
-import { Link, useLocation } from '@tanstack/react-router'
+import { Link, useLocation, useNavigate } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '#/components/ui/button'
-import { type Language, languages, names, pathIn, paths } from '#/i18n'
+import {
+  currentLanguage,
+  isLanguage,
+  languages,
+  names,
+  pathIn,
+  paths,
+  localizedPath,
+} from '#/i18n'
 
 export const SITE = 'https://usebeans.app'
 
@@ -15,7 +23,7 @@ const links = [
 
 /// The docs in the page's language: `/docs` and `/zh/docs`, or one of their pages: `/docs/cli`.
 export function docsPath(lng: string, page?: string) {
-  const docs = lng === 'en' ? '/docs' : `/${lng}/docs`
+  const docs = lng === 'zh' ? '/zh/docs' : '/docs'
   return page ? `${docs}/${page}` : docs
 }
 
@@ -23,7 +31,7 @@ export function docsPath(lng: string, page?: string) {
 /// app's disk image, the Windows installer, the Linux install script and Debian packages, the
 /// iPhone beta, and the CLI installer.
 export function downloadPath(lng: string) {
-  return lng === 'en' ? '/download' : `/${lng}/download`
+  return localizedPath(lng, '/download')
 }
 
 /// A section of the landing page, from any page: `/#faq` and `/zh#faq`. It is the current page
@@ -36,7 +44,7 @@ export function SectionLink({
   const { i18n } = useTranslation()
   return (
     <Link
-      to={paths[i18n.language as Language]}
+      to={paths[currentLanguage(i18n.language)]}
       hash={id}
       activeOptions={{ includeHash: true }}
       resetScroll={false}
@@ -45,15 +53,30 @@ export function SectionLink({
   )
 }
 
-/// A link to the same page in the other language.
 export function LanguageLink({ className }: { className?: string }) {
-  const { i18n } = useTranslation()
-  const pathname = useLocation({ select: (location) => location.pathname })
-  const other = languages.find((lng) => lng !== i18n.language) as Language
+  const { t, i18n } = useTranslation()
+  const location = useLocation()
+  const navigate = useNavigate()
   return (
-    <Link viewTransition to={pathIn(other, pathname)} lang={other} className={className}>
-      {names[other]}
-    </Link>
+    <select
+      className={`site-language-select ${className ?? ''}`}
+      aria-label={t('nav.language')}
+      value={currentLanguage(i18n.language)}
+      onChange={(event) => {
+        const value = event.currentTarget.value
+        if (!isLanguage(value)) return
+        void navigate({
+          to: pathIn(value, location.pathname) + location.searchStr,
+          hash: location.hash,
+        })
+      }}
+    >
+      {languages.map((language) => (
+        <option key={language} value={language} lang={language}>
+          {names[language]}
+        </option>
+      ))}
+    </select>
   )
 }
 
@@ -63,7 +86,10 @@ export function Nav() {
   return (
     <header className="site-nav sticky top-0 z-40 border-b bg-background/95 px-4 backdrop-blur-xl">
       <div className="mx-auto flex h-18 max-w-[1400px] items-center justify-between gap-4">
-        <SectionLink id="top" className="flex items-center gap-2 font-semibold tracking-tight">
+        <SectionLink
+          id="top"
+          className="flex items-center gap-2 font-semibold tracking-tight"
+        >
           <img
             src="/brand/beans-logo.svg"
             alt="Beans"
@@ -79,7 +105,7 @@ export function Nav() {
             className="hidden w-36 dark:block"
           />
         </SectionLink>
-        <nav className="hidden items-center gap-6 text-sm text-muted-foreground md:flex">
+        <nav className="hidden items-center gap-6 text-sm text-muted-foreground xl:flex">
           {links.map((link) => (
             <SectionLink
               key={link.id}
@@ -90,7 +116,7 @@ export function Nav() {
             </SectionLink>
           ))}
           <Link
-            to={i18n.language === 'zh' ? '/zh/compare' : '/compare'}
+            to={localizedPath(i18n.language, '/compare')}
             className="transition-colors hover:text-foreground"
           >
             {t('nav.compare')}

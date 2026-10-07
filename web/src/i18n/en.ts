@@ -6,6 +6,7 @@ export const en = {
       'AI teammates that run on your own computer. Chat with one or several at once, let them work with your files, and they coordinate the work among themselves.',
   },
   nav: {
+    language: 'Language',
     costs: 'Costs',
     compare: 'Compare',
     turns: 'Group chats',

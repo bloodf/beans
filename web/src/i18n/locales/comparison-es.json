@@ -1,0 +1,160 @@
+{
+  "title": "Elige dónde trabaja tu IA.",
+  "description": "Una comparación detallada de Beans, OpenBot, Grok Bot y Claude Code. Conoce el flujo, los modelos, la ruta de tus datos y el coste real antes de elegir.",
+  "versus": "Beans vs {{product}}",
+  "overview": "De un vistazo",
+  "matrix": "La visión completa",
+  "matrixBody": "Doce diferencias prácticas basadas en los mecanismos descritos en la documentación de cada producto.",
+  "caption": "Ejecución, modelos, herramientas, privacidad y costes",
+  "matters": "Lo que importa",
+  "contents": "En esta página",
+  "details": "Qué significan estas diferencias",
+  "choose": "¿Qué encaja con tu trabajo?",
+  "chooseBeans": "Elige Beans cuando…",
+  "chooseOther": "Considera {{product}} cuando…",
+  "beansFit": "Quieres bots con nombre, conexiones directas a modelos, conversaciones en grupo y emparejamiento cifrado entre ordenadores y móviles. Puedes mantener el ordenador asignado conectado.",
+  "costTitle": "Separa la aplicación de la factura de IA.",
+  "appPrice": "Aplicación Beans",
+  "providerPrice": "Proveedor de IA",
+  "providerCost": "Tu suscripción o uso de la API",
+  "machinePrice": "Ordenador en ejecución",
+  "machineCost": "Tu hardware, energía y conexión",
+  "costBody": "Beans es gratis, pero el uso de modelos puede tener coste. Cada bot utiliza su proveedor conectado y el trabajo en paralelo puede consumir más cuota. Un Runner debe estar conectado; mantener un servidor propio también cuesta.",
+  "start": "Prueba el flujo antes de decidir.",
+  "startBody": "Explora la interfaz real en la demo de la página principal y comprueba las descargas publicadas para tu dispositivo. La demo usa datos de ejemplo y respuestas simuladas sin un proveedor conectado.",
+  "demo": "Explorar la demo",
+  "faq": "Preguntas antes de cambiar",
+  "questions": [
+    {
+      "q": "¿La sincronización cifrada impide que el modelo vea mi prompt?",
+      "a": "No. La sincronización y la inferencia son procesos distintos. Beans cifra los datos entre dispositivos, pero el proveedor de IA procesa el contenido enviado para generar una respuesta."
+    },
+    {
+      "q": "¿Puedo mantener mi suscripción de IA?",
+      "a": "Beans ofrece acceso por suscripción de ChatGPT y Grok. Otros proveedores integrados usan claves API y los servidores compatibles tienen sus propios requisitos. Consulta las reglas del plan y de uso de tu proveedor."
+    },
+    {
+      "q": "¿Mi móvil ejecuta los bots?",
+      "a": "No. Un móvil emparejado es un dispositivo de chat. Cada bot trabaja en un Runner Mac, Windows o Linux. Si está desconectado, el trabajo espera."
+    },
+    {
+      "q": "¿Son rankings de rendimiento?",
+      "a": "No. Estas páginas comparan mecanismos y flujos documentados. No presentan mediciones de velocidad, calidad, ahorro de tokens o fiabilidad."
+    }
+  ],
+  "sources": "Fuentes, alcance y actualizaciones",
+  "freshness": "Revisado el 7 de octubre de 2026. Las funciones, la disponibilidad, los planes y los límites pueden cambiar. Consulta la documentación oficial antes de comprar o migrar.",
+  "official": "Documentación oficial",
+  "architecture": "Arquitectura de Beans",
+  "more": "Sigue comparando",
+  "labels": [
+    "Dónde se ejecuta el trabajo",
+    "Conexiones de modelos",
+    "Suscripciones y API",
+    "Compañeros con nombre",
+    "Colaboración",
+    "Archivos y herramientas",
+    "Trabajo en el navegador",
+    "Contexto persistente",
+    "Tareas programadas",
+    "Otros dispositivos",
+    "Datos y privacidad",
+    "Cuánto pagas"
+  ],
+  "beans": [
+    "Un Runner Mac, Windows o Linux que te pertenece. Debe permanecer conectado.",
+    "ChatGPT, Grok, Anthropic, DeepSeek, OpenCode y endpoints compatibles.",
+    "Acceso ChatGPT/Grok; claves API para otros proveedores. Las credenciales se sincronizan cifradas entre dispositivos.",
+    "Nombres, instrucciones, proveedor, memoria y Runner asignados a cada bot.",
+    "Mensajes directos, grupos de hasta seis bots, menciones y transferencias entre Runners.",
+    "Archivos en carpetas, comandos shell, búsqueda web y plugins MCP con permisos.",
+    "Búsqueda web y lectura de páginas. La aplicación actual no tiene navegador gráfico integrado.",
+    "Notas e historial en tus dispositivos, con sincronización cifrada a través del relay.",
+    "Las rutinas se ejecutan en el ordenador asignado, que debe estar conectado a la hora prevista.",
+    "Empareja ordenadores y móviles. Los móviles permiten conversar; los Runners ejecutan las herramientas.",
+    "El relay transmite datos cifrados. Tus dispositivos los descifran; el modelo recibe los prompts enviados.",
+    "Aplicación gratis. Suscripciones, uso de API y costes del ordenador se pagan por separado."
+  ],
+  "topics": [
+    {
+      "title": "La ejecución cambia tu día a día.",
+      "body": "Cada bot de Beans tiene un Runner asignado. Trabaja en las carpetas de ese ordenador con tus permisos de usuario. Elegir un entorno local o una máquina gestionada en la nube cambia los archivos disponibles, lo que debe seguir conectado y quién mantiene el entorno."
+    },
+    {
+      "title": "Elige el proveedor sin cambiar de compañero.",
+      "body": "Beans guarda la función del bot por separado del modelo. Las credenciales pertenecen a tu cuenta y se sincronizan cifradas entre dispositivos. Una suscripción y una clave API tienen facturaciones distintas; una no incluye automáticamente la otra."
+    },
+    {
+      "title": "Colaborar es más que abrir ventanas en paralelo.",
+      "body": "Beans ofrece chats individuales y grupos de hasta seis bots. Las menciones dirigen un turno a un bot y las transferencias pasan tareas entre compañeros. Distintos Runners pueden participar en la misma conversación, reuniendo tus ordenadores."
+    },
+    {
+      "title": "Las herramientas usan los permisos que les das.",
+      "body": "Los bots pueden trabajar con archivos, ejecutar comandos y usar herramientas MCP. Revisa los flujos de permisos y las herramientas instaladas. Ejecutar comandos con tus permisos es distinto de aislarlos en un sandbox del sistema operativo."
+    },
+    {
+      "title": "Separa la privacidad del dispositivo y la del modelo.",
+      "body": "Beans cifra los datos antes de sincronizarlos. El relay no puede descifrar los chats. La inferencia sigue enviando contenido al proveedor elegido. Revisa tanto la sincronización como su política de datos al decidir qué compartir."
+    },
+    {
+      "title": "Planifica el trabajo cuando no estás.",
+      "body": "Tu móvil permite hablar con bots de ordenadores emparejados. No sustituye su Runner. Las rutinas y los nuevos turnos necesitan el ordenador asignado conectado. Para trabajo continuo, elige un ordenador o servidor que puedas mantener encendido y considera su mantenimiento."
+    }
+  ],
+  "products": {
+    "openbot": {
+      "intro": "Ambas aplicaciones organizan equipos de IA. Beans conecta modelos directamente y empareja dispositivos con cifrado. OpenBot reúne herramientas de agentes en un espacio compartido, con ejecución local y servidor alojado opcional.",
+      "good": "Quieres Codex o Claude Code en un espacio compartido, un navegador integrado o la ejecución alojada opcional de OpenBot.",
+      "other": [
+        "Escritorio local; servidor alojado opcional.",
+        "Codex, Claude Code, Gemini, Grok, OpenCode, Cursor, Cline; modelos locales o compatibles.",
+        "Suscripciones de las herramientas o acceso mediante API.",
+        "Agentes con nombres, instrucciones y espacios persistentes.",
+        "Canales compartidos, mensajes entre agentes y transferencias.",
+        "Archivos, comandos, plugins y skills.",
+        "Navegador integrado controlado por agentes.",
+        "El espacio y la conversación persisten al cambiar de proveedor.",
+        "Rutinas programadas y colas con pausa, reanudación y cancelación.",
+        "Escritorio y conexiones a servidores de equipo.",
+        "Datos en la máquina local o el servidor elegido; los proveedores reciben prompts.",
+        "Aplicación gratis; uso de IA y alojamiento se cobran por separado."
+      ]
+    },
+    "grok-bot": {
+      "intro": "Beans usa el ordenador que asignas. Grok Bot ofrece un ordenador gestionado que sigue trabajando con el portátil cerrado. La elección cambia tus responsabilidades de operación y la conexión de herramientas.",
+      "good": "Quieres un ordenador gestionado, bots que trabajen con el portátil cerrado y acceso mediante un plan Cursor o Grok compatible.",
+      "other": [
+        "Ordenador persistente en una nube gestionada.",
+        "Servicio Grok Bot.",
+        "Planes Cursor, Grok, Teams o Enterprise compatibles.",
+        "Bots con funciones y contexto de trabajo conservado.",
+        "Varios bots colaboran en hilos compartidos.",
+        "Los bots inician sesión en aplicaciones y usan herramientas en su ordenador.",
+        "Interacción con sitios y aplicaciones en el ordenador.",
+        "Contexto conservado y aprendizaje compartido entre bots.",
+        "Rutinas programadas; trabaja con el portátil cerrado.",
+        "Acceso de escritorio e iOS descrito en las preguntas del producto.",
+        "Servicio gestionado; consulta sus términos y políticas de datos.",
+        "Plan de pago compatible con uso incluido; el uso extra puede cobrarse."
+      ]
+    },
+    "claude-code": {
+      "intro": "Beans organiza bots con nombre para distintos trabajos. Claude Code se centra en código, comandos de desarrollo y sesiones de programación en terminal, editor, aplicación de escritorio o web.",
+      "good": "Tu trabajo principal es programar y quieres sesiones orientadas al repositorio, integración con editores o las herramientas de Claude Code.",
+      "other": [
+        "Sesiones locales o en la nube alojada, según la interfaz.",
+        "Claude; algunas interfaces también admiten otros proveedores.",
+        "Suscripción Claude o acceso a Anthropic Console.",
+        "Sesiones y agentes configurados para desarrollo.",
+        "Agentes en paralelo y flujos de programación.",
+        "Leer y editar código, ejecutar comandos y conectar herramientas MCP.",
+        "Herramientas web e integración con navegador según la interfaz.",
+        "Instrucciones del proyecto, memoria y contexto de sesión.",
+        "Rutinas en la nube, tareas de escritorio y /loop en el terminal.",
+        "Terminal, IDE, escritorio, web y opciones de control remoto.",
+        "Permisos y sandbox configurables; se aplican las políticas del proveedor.",
+        "Suscripción o uso de API según la conexión."
+      ]
+    }
+  }
+}

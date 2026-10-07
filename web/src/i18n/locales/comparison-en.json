@@ -1,0 +1,160 @@
+{
+  "title": "Choose where your AI works.",
+  "description": "A detailed comparison of Beans, OpenBot, Grok Bot, and Claude Code. Understand the workflow, model choices, data path, and real cost before you choose.",
+  "versus": "Beans vs {{product}}",
+  "overview": "At a glance",
+  "matrix": "The full picture",
+  "matrixBody": "Twelve practical differences, based on the mechanisms described in each product’s documentation.",
+  "caption": "Execution, models, tools, privacy, and costs",
+  "matters": "What matters",
+  "contents": "On this page",
+  "details": "What these differences mean",
+  "choose": "Which fits your work?",
+  "chooseBeans": "Choose Beans when…",
+  "chooseOther": "Consider {{product}} when…",
+  "beansFit": "You want named bots with direct model connections, group conversations, and encrypted pairing between computers and phones. You are comfortable keeping the assigned computer online.",
+  "costTitle": "Separate the app from the AI bill.",
+  "appPrice": "Beans app",
+  "providerPrice": "AI provider",
+  "providerCost": "Your subscription or API usage",
+  "machinePrice": "Running computer",
+  "machineCost": "Your hardware, power, and connectivity",
+  "costBody": "Beans is free. That does not make model usage free. Each bot uses its connected provider, and parallel work can consume more allowance. A Runner needs to be online; using your own server also has operating costs.",
+  "start": "Try the workflow before deciding.",
+  "startBody": "Explore the actual desktop interface in the homepage demo, then check the published downloads for your device. The demo uses sample data and simulated replies, not a connected AI provider.",
+  "demo": "Explore the app demo",
+  "faq": "Questions before you switch",
+  "questions": [
+    {
+      "q": "Does encrypted sync mean the model cannot see my prompt?",
+      "a": "No. Device sync and model inference are separate. Beans encrypts data between paired devices, but your selected AI provider processes the content you send it to generate a reply."
+    },
+    {
+      "q": "Can I keep my existing AI subscription?",
+      "a": "Beans offers ChatGPT and Grok subscription sign-in. Other built-in providers use API keys, and compatible servers have their own access requirements. Check your provider’s plan and usage rules."
+    },
+    {
+      "q": "Does my phone run the bots?",
+      "a": "No. A paired phone is a chat device. Each bot runs on an assigned Mac, Windows, or Linux Runner. Work waits if that Runner is offline."
+    },
+    {
+      "q": "Are these performance rankings?",
+      "a": "No. These pages compare documented mechanisms and workflows. They do not claim speed, quality, token savings, or reliability measurements."
+    }
+  ],
+  "sources": "Sources, scope, and updates",
+  "freshness": "Checked October 7, 2026. Product capabilities, availability, plans, and limits can change. Consult the linked official documentation before purchasing or migrating.",
+  "official": "Official documentation",
+  "architecture": "Beans architecture",
+  "more": "Keep comparing",
+  "labels": [
+    "Where work runs",
+    "Model connections",
+    "Subscriptions and APIs",
+    "Named teammates",
+    "Collaboration",
+    "Files and tools",
+    "Browser work",
+    "Persistent context",
+    "Scheduled work",
+    "Other devices",
+    "Data and privacy",
+    "What you pay"
+  ],
+  "beans": [
+    "An assigned Mac, Windows, or Linux Runner that you own. It needs to remain online.",
+    "ChatGPT, Grok, Anthropic, DeepSeek, OpenCode, and compatible model endpoints.",
+    "ChatGPT/Grok sign-in; API keys for other providers. Credentials sync encrypted to paired devices.",
+    "Persistent bot names, instructions, provider selection, memory, and an assigned Runner.",
+    "Direct messages, groups of up to six bots, mentions, and handoffs across Runners.",
+    "Folder-based file work, shell commands, web search, and MCP plugins with permission flows.",
+    "Web search and page reading. The current app does not provide a built-in graphical browser.",
+    "Bot notes and chat history on your devices, with encrypted sync through the relay.",
+    "Bot routines run on the assigned computer, which must be online when work is due.",
+    "Pair computers and phones. Phones let you chat; desktop Runners execute the tools.",
+    "The relay carries ciphertext. Paired devices decrypt it; your selected model receives sent prompts.",
+    "Free app. Provider subscriptions/API usage and your computer’s operating costs are separate."
+  ],
+  "topics": [
+    {
+      "title": "Execution changes your everyday workflow.",
+      "body": "A Beans bot has one assigned Runner. It works in that computer’s folders with that computer’s user permissions. Choosing a local workspace or a managed cloud machine changes which files are available, what stays online, and who maintains the environment."
+    },
+    {
+      "title": "Pick the provider without replacing the teammate.",
+      "body": "Beans stores a bot’s role separately from its model choice. Provider credentials belong to your account and sync encrypted to paired devices. A subscription login and an API key are different billing arrangements; having one does not automatically include the other."
+    },
+    {
+      "title": "Collaboration is more than parallel windows.",
+      "body": "Beans has one-to-one chats and group chats with up to six bots. Mentions direct a turn to a bot, and handoffs pass work between teammates. Different Runners can contribute to the same chat, so the conversation can span your computers."
+    },
+    {
+      "title": "Tools use the permissions you give them.",
+      "body": "Bots can work with files, execute commands, and use connected MCP tools. Review the app’s permission flows and the tools you install. Running a command with your user’s permissions is different from isolating it in an operating-system sandbox."
+    },
+    {
+      "title": "Separate device privacy from model privacy.",
+      "body": "Beans encrypts account data before relay sync. The relay cannot decrypt the chat blobs. Inference still sends content to the model provider you choose. Review both the sync mechanism and that provider’s data policy when deciding what to share."
+    },
+    {
+      "title": "Plan for work while you are away.",
+      "body": "Your phone lets you talk to bots on paired computers. It does not replace their Runner. Routines and new turns need the assigned computer online. For always-on work, choose a computer or server you can keep running and account for its maintenance."
+    }
+  ],
+  "products": {
+    "openbot": {
+      "intro": "Both apps organize AI teammates. Beans connects models directly and pairs your devices with encrypted sync. OpenBot brings existing agent tools into a shared workspace, with local execution and an optional hosted server.",
+      "good": "You want tools such as Codex or Claude Code inside a shared workspace, a built-in browser, or OpenBot’s optional hosted execution.",
+      "other": [
+        "Local desktop; optional hosted server.",
+        "Codex, Claude Code, Gemini, Grok, OpenCode, Cursor, Cline; compatible/local models.",
+        "Existing tool subscriptions or API access.",
+        "Persistent agent names, instructions, and workspaces.",
+        "Shared channels, agent messages, and handoffs.",
+        "Files, commands, plugins, and skills.",
+        "Built-in browser that agents can control.",
+        "Agent workspace and conversation persist across provider changes.",
+        "Scheduled routines and queues with pause, resume, and cancel.",
+        "Desktop access and team-server connections.",
+        "Data on the local machine or selected server; providers receive prompts.",
+        "Free desktop app; provider usage and hosted servers cost separately."
+      ]
+    },
+    "grok-bot": {
+      "intro": "Beans runs on a computer you assign. Grok Bot offers a managed computer that can continue working when your laptop is closed. The choice changes your operating responsibilities and how you connect tools.",
+      "good": "You want a managed computer, bots that work while your laptop is closed, and access through an eligible Cursor or Grok plan.",
+      "other": [
+        "Persistent managed cloud computer.",
+        "Grok Bot service.",
+        "Eligible Cursor, Grok, Teams, or Enterprise plans.",
+        "Bots with roles and retained working context.",
+        "Multiple bots collaborate in shared threads.",
+        "Bots sign into apps and use tools on their computer.",
+        "Computer interaction with websites and apps.",
+        "Retained context and shared learning between bots.",
+        "Scheduled routines; can keep working with your laptop closed.",
+        "Desktop and iOS access described in the product FAQ.",
+        "Managed service; consult its data terms and policies.",
+        "Eligible paid plan with included usage; extra usage can be billed."
+      ]
+    },
+    "claude-code": {
+      "intro": "Beans is a workspace for named bots across different jobs. Claude Code focuses on codebases, development commands, and coding sessions in the terminal, editor, desktop app, or web.",
+      "good": "Your main job is coding, and you want repository-oriented sessions, editor integrations, or Claude Code’s development tooling.",
+      "other": [
+        "Local sessions and hosted cloud sessions, depending on surface.",
+        "Claude; selected surfaces also support third-party providers.",
+        "Claude subscription or Anthropic Console access.",
+        "Coding sessions and agents configured for development tasks.",
+        "Parallel agents and coding workflows.",
+        "Read/edit code, execute commands, and connect MCP tools.",
+        "Web tools and browser integrations depend on surface.",
+        "Project instructions, memory, and session context.",
+        "Cloud routines, desktop tasks, and /loop in the terminal.",
+        "Terminal, IDE, desktop, web; remote-control options.",
+        "Configurable permissions and sandboxing; provider data policies apply.",
+        "Subscription or API usage, depending on how you connect."
+      ]
+    }
+  }
+}

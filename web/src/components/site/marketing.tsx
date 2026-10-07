@@ -1,3 +1,4 @@
+import { localizedPath } from '#/i18n'
 import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import {
@@ -109,7 +110,10 @@ export function BentoFeatures() {
       </div>
       <div className="bento-grid">
         {c.cards.map((card, index) => (
-          <article key={card.title} className={`bento-card bento-${index} motion-island`}>
+          <article
+            key={card.title}
+            className={`bento-card bento-${index} motion-island`}
+          >
             <div className="bento-art" aria-hidden="true">
               {visuals[index]}
             </div>
@@ -212,7 +216,7 @@ export const comparisonNames = [
 export function ComparisonLinks() {
   const c = useMarketingCopy()
   const { i18n } = useTranslation()
-  const base = i18n.language === 'zh' ? '/zh/compare' : '/compare'
+  const base = localizedPath(i18n.language, '/compare')
   return (
     <section id="compare" className="story-section comparison-links">
       <div className="story-heading">
@@ -222,8 +226,7 @@ export function ComparisonLinks() {
       <div className="comparison-grid">
         {comparisonNames.map((item) => (
           <Link
-            to={base === '/zh/compare' ? '/zh/compare/$product' : '/compare/$product'}
-            params={{ product: item.slug }}
+            to={localizedPath(i18n.language, `/compare/${item.slug}`)}
             key={item.slug}
           >
             <span>
@@ -245,7 +248,7 @@ export function ComparisonLinks() {
 export function MarketingFooter() {
   const c = useMarketingCopy()
   const { i18n } = useTranslation()
-  const base = i18n.language === 'zh' ? '/zh/compare' : '/compare'
+  const base = localizedPath(i18n.language, '/compare')
   return (
     <footer className="marketing-footer">
       <div className="footer-inner">
@@ -297,8 +300,7 @@ export function MarketingFooter() {
           {comparisonNames.map((item) => (
             <Link
               key={item.slug}
-              to={base === '/zh/compare' ? '/zh/compare/$product' : '/compare/$product'}
-              params={{ product: item.slug }}
+              to={localizedPath(i18n.language, `/compare/${item.slug}`)}
             >
               Beans vs {item.name}
             </Link>

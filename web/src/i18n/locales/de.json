@@ -1,0 +1,281 @@
+{
+  "motion": {
+    "pause": "Animationen pausieren",
+    "resume": "Animationen fortsetzen"
+  },
+  "meta": {
+    "title": "Beans | KI-Team auf deinem Computer",
+    "description": "Ein KI-Team, das auf deinem Computer arbeitet. Sprich mit einem oder mehreren Bots, lass sie mit deinen Dateien arbeiten und Aufgaben untereinander koordinieren."
+  },
+  "nav": {
+    "costs": "Kosten",
+    "compare": "Vergleichen",
+    "turns": "Gruppenchats",
+    "relay": "Datenschutz",
+    "tools": "Funktionen",
+    "faq": "Fragen",
+    "docs": "Dokumentation (Englisch)",
+    "download": "Herunterladen",
+    "language": "Sprache"
+  },
+  "hero": {
+    "badge": "Deine KI auf all deinen Geräten",
+    "title": "<lead>Deine KI.</lead><br/>Dein <accent>Raum.</accent>",
+    "accessibleTitle": "Deine KI. Dein Raum.",
+    "body": "Mach aus einer Aufgabe Teamarbeit. Gib deinen Bots Dateien, Werkzeuge und einen gemeinsamen Chat. Dein Computer führt die Arbeit aus.",
+    "how": "So funktioniert es",
+    "platforms": "Mac, Windows und Linux. Chatte auf deinem Handy weiter."
+  },
+  "turns": {
+    "eyebrow": "Gruppenchats",
+    "title": "Eine Aufgabe. Ein ganzes Team.",
+    "body": "Bring Recherche, Entwicklung und Projektleitung in einem Chat zusammen. Gib jedem Bot eine Rolle, erwähne den gewünschten Bot und lass andere beitragen, wenn sie etwas Nützliches hinzufügen können.",
+    "alt": "Beans auf macOS: Researcher, Developer und Project Manager bereiten in einem Gruppenchat auf zwei Runnern einen Launch vor."
+  },
+  "relay": {
+    "eyebrow": "Datenschutz",
+    "title": "Deine Arbeit bleibt bei dir.",
+    "body": "Dein Computer führt die Bots aus. Dein gewählter KI-Anbieter erzeugt ihre Antworten. Kopple dein Handy und nimm den Chat mit. Deine Geräte synchronisieren sich Ende-zu-Ende-verschlüsselt.",
+    "alt": "Verschlüsselte Daten gelangen über das Relay vom Computer zum Handy. Nur deine Geräte können sie entschlüsseln.",
+    "caption": "Darstellung der verschlüsselten Gerätesynchronisierung.",
+    "states": {
+      "encrypt": "Verschlüsseln",
+      "forward": "Weiterleiten",
+      "decrypt": "Entschlüsseln"
+    },
+    "nodes": {
+      "computer": {
+        "title": "Dein Computer",
+        "body": "Vor dem Senden verschlüsselt"
+      },
+      "relay": {
+        "title": "Relay",
+        "body": "Leitet verschlüsselte Daten weiter. Kann sie nicht entschlüsseln."
+      },
+      "phone": {
+        "title": "Dein Handy",
+        "body": "Mit deinem Schlüssel entschlüsselt"
+      }
+    }
+  },
+  "tools": {
+    "eyebrow": "Werkzeuge",
+    "title": "Dateien, Befehle und das Web.",
+    "body": "Mehr als Antworten: Gib einem Bot einen Arbeitsordner und deine Werkzeuge. Er kann recherchieren, schreiben und Änderungen vornehmen, die du prüfen kannst.",
+    "kinds": {
+      "files": {
+        "title": "Dateien",
+        "body": "Öffnet, bearbeitet und erstellt Dateien im zugewiesenen Ordner und führt dort Befehle aus."
+      },
+      "web": {
+        "title": "Web",
+        "body": "Durchsucht das Web und liest Seiten."
+      },
+      "memory": {
+        "title": "Gedächtnis",
+        "body": "Behält Notizen über Chats hinweg, damit du dich nicht wiederholen musst."
+      },
+      "plugins": {
+        "title": "Apps",
+        "body": "Verbindet GitHub, Notion, Linear und andere Apps. Fragt zuerst nach Erlaubnis."
+      }
+    }
+  },
+  "chef": {
+    "eyebrow": "Erste Schritte",
+    "title": "Lerne deinen ersten Kollegen kennen.",
+    "body": "Jedes neue Konto beginnt mit einem Bot: Chef. Erzähle ihm von deiner Arbeit. Er schlägt Bots für bestimmte Aufgaben vor und erstellt sie nach deiner Zustimmung. Du kannst jeden Bot später umbenennen oder löschen.",
+    "steps": [
+      {
+        "title": "Konto erstellen",
+        "body": "Keine E-Mail, kein Passwort. Du erhältst eine Wiederherstellungsphrase zum Aufschreiben."
+      },
+      {
+        "title": "KI-Anbieter verbinden",
+        "body": "Melde dich mit ChatGPT oder Grok an oder füge einen DeepSeek-API-Schlüssel ein."
+      },
+      {
+        "title": "Mit Chef sprechen",
+        "body": "Erzähle von deiner Arbeit und bestätige die vorgeschlagenen Bots."
+      },
+      {
+        "title": "Weiteren Computer hinzufügen",
+        "body": "Füge einen Kopplungscode ein und wähle, welche Bots dort laufen."
+      }
+    ]
+  },
+  "faq": {
+    "title": "Fragen",
+    "items": [
+      {
+        "q": "Ist Beans kostenlos?",
+        "a": "Ja. Beans kostet 0 US-Dollar. Du bezahlst deinen KI-Anbieter direkt über ein geeignetes Abo oder die API-Nutzung. Seine Limits und Preise gelten separat."
+      },
+      {
+        "q": "Brauche ich ein Konto oder einen Server?",
+        "a": "Deine Wiederherstellungsphrase identifiziert dein Konto. Bots laufen auf deinem Computer. Kopplung und Synchronisierung nutzen ein Relay, das du auswählst oder selbst hostest."
+      },
+      {
+        "q": "Auf welchen Geräten läuft es?",
+        "a": "Mac, Windows und Linux, als App oder über die Befehlszeile. iPhone und iPad sind für Chats mit deinen Bots in der Beta. Bots auf verschiedenen Computern können denselben Gruppenchats beitreten."
+      },
+      {
+        "q": "Welche KI wird verwendet?",
+        "a": "Dein eigenes Konto oder dein API-Schlüssel. Melde dich mit ChatGPT oder Grok an oder füge einen DeepSeek-Schlüssel hinzu. Jeder Bot kann einen anderen Anbieter nutzen, den du jederzeit ändern kannst."
+      },
+      {
+        "q": "Was kann ein Bot auf meinem Computer tun?",
+        "a": "Dateien im zugewiesenen Ordner lesen, bearbeiten und erstellen sowie Befehle ausführen. Er nutzt deine Benutzerrechte auf diesem Computer und zeigt, was er ausgeführt hat."
+      },
+      {
+        "q": "Kann jemand meine Chats lesen?",
+        "a": "Deine gekoppelten Geräte können die Chats lesen. Das Relay verarbeitet verschlüsselte Daten ohne die Schlüssel. Der gewählte KI-Anbieter verarbeitet gesendete Inhalte, um Antworten zu erzeugen."
+      }
+    ]
+  },
+  "cta": {
+    "title": "Gib deiner nächsten Aufgabe ein Team.",
+    "body": "Lade Beans herunter, verbinde deinen KI-Anbieter und erzähle Chef, woran du arbeiten möchtest."
+  },
+  "docs": {
+    "title": "Beans-Dokumentation"
+  },
+  "download": {
+    "title": "Beans herunterladen",
+    "description": "Prüfe Downloads für Mac, Windows, Linux, Android und iOS oder installiere die CLI.",
+    "version": "Version {{version}}",
+    "unavailable": "Für diese Plattform gibt es noch keinen veröffentlichten Download.",
+    "loadFailed": "Die neueste Version konnte nicht geladen werden. Lade die Seite neu und versuche es erneut.",
+    "mac": {
+      "title": "Mac",
+      "body": "Chatte mit deinen Bots und führe sie auf deinem Mac aus.",
+      "action": "Für Mac herunterladen",
+      "system": "macOS {{version}} oder neuer",
+      "appleSilicon": "Apple silicon"
+    },
+    "windows": {
+      "title": "Windows",
+      "body": "Chatte mit deinen Bots und führe sie auf deinem Windows-PC aus. Sie nutzen die Bash aus <git>Git for Windows</git> für Befehle. Installiere es daher ebenfalls.",
+      "action": "Für Windows herunterladen",
+      "system": "x64"
+    },
+    "linux": {
+      "title": "Linux",
+      "body": "Chatte mit deinen Bots und führe sie auf deinem Linux-Computer aus. Der Befehl installiert Beans ohne Root-Rechte in deinem Benutzerordner. Beans aktualisiert sich selbst.",
+      "action": "Für Linux herunterladen",
+      "deb": "Oder installiere das Debian-Paket für <amd64>x64</amd64> oder <arm64>Arm64</arm64>. Es wird aktualisiert, wenn du die nächste Version installierst.",
+      "system": "x64 und Arm64"
+    },
+    "ios": {
+      "title": "iPhone und iPad",
+      "body": "Chatte mit deinen Bots, während sie auf deinem Computer weiterarbeiten. Scanne zum Koppeln den QR-Code in der Desktop-App.",
+      "action": "IPA herunterladen",
+      "note": "Ad-hoc-IPAs lassen sich nur auf Geräten installieren, die im Signierungsprofil registriert sind. Die iOS-Installation muss genehmigt werden."
+    },
+    "android": {
+      "title": "Android",
+      "body": "Chatte von deinem Android-Handy mit deinen Bots.",
+      "action": "APK herunterladen"
+    },
+    "cli": {
+      "title": "Beans CLI",
+      "body": "Macht einen Computer zum Runner: Er führt Bots ohne Chatfenster aus. Die Mac-, Windows- und Linux-Apps enthalten die CLI bereits. Du brauchst sie nur auf einem Computer ohne App. Kopple ihn mit deinem Konto und erstelle Bots über die Desktop-App oder dein Handy.",
+      "unix": "macOS und Linux",
+      "windows": "Windows (PowerShell)",
+      "note": "<docs>CLI-Dokumentation</docs>",
+      "copy": "Kopieren",
+      "copied": "Kopiert"
+    }
+  },
+  "footer": {
+    "privacy": "Datenschutz",
+    "support": "Support",
+    "faq": "Fragen",
+    "download": "Herunterladen"
+  },
+  "marketing": {
+    "free": "Kostenlos. Deine KI, deine Wahl.",
+    "demoTitle": "Deine Bots. In der echten App.",
+    "demoBody": "Wähle einen Bot oder Gruppenchat in der Seitenleiste. Erkunde dieselbe Oberfläche wie in der Windows- und Linux-App.",
+    "demo": "Interaktive Demo",
+    "demoNote": "Die echte Desktop-Oberfläche mit den Beispieldaten und simulierten Antworten der App. Keine Anbieter, Dateien oder Werkzeuge sind verbunden. Auf kleinen Bildschirmen kannst du seitlich scrollen. Die App bietet Englisch und Chinesisch; Beispielchats sind auf Englisch.",
+    "featuresTitle": "Kleine App. Viele Möglichkeiten.",
+    "featuresBody": "Gute Arbeit steckt im Detail. Gib jedem Teammitglied eine Rolle, einen Ordner und die nötigen Werkzeuge.",
+    "cards": [
+      {
+        "title": "Ein Team in einem Chat.",
+        "body": "Benannte Bots mit eigenen Anweisungen. Bring sie in einer Gruppe zusammen, erwähne Kollegen und übergib Aufgaben."
+      },
+      {
+        "title": "Deine Dateien. Echte Änderungen.",
+        "body": "Lies, bearbeite und erstelle Dateien. Führe Befehle im zugewiesenen Ordner aus und sieh dir das Ergebnis an."
+      },
+      {
+        "title": "Mach dort weiter, wo du aufgehört hast.",
+        "body": "Bots behalten Notizen über Chats hinweg. Gib ihnen einmal Kontext und baue beim nächsten Mal darauf auf."
+      },
+      {
+        "title": "Wiederkehrende Arbeit als Routine.",
+        "body": "Plane Aufgaben für einen Bot auf seinem Computer. Der Runner muss für die Ausführung online sein."
+      },
+      {
+        "title": "Werkzeuge für deine Arbeit.",
+        "body": "Verbinde Apps über MCP-Plugins. Prüfe Berechtigungsanfragen, bevor ein Werkzeug Zugriff erhält."
+      },
+      {
+        "title": "Am Schreibtisch. In der Tasche.",
+        "body": "Chatte auf einem gekoppelten Handy weiter. Dein Computer führt die Aufgabe aus; verschlüsselte Antworten kommen zu dir."
+      }
+    ],
+    "preview": "Illustrative Aufgabendetails",
+    "read": "Projektnotizen lesen",
+    "handoff": "Scout → Builder",
+    "review": "Chef → Du",
+    "files": "Projektordner",
+    "edited": "Entwurf aktualisiert",
+    "remembered": "Für das nächste Mal gespeichert",
+    "memory": "Schreibe klar und direkt. Bewahre Quellen bei der Recherche auf.",
+    "routine": "Wöchentlicher Projektüberblick",
+    "schedule": "Montags · 09:00",
+    "permission": "Erlaubnis erforderlich",
+    "permissionBody": "Verbinde die Werkzeuge deiner Wahl.",
+    "devices": "Computer → verschlüsseltes Relay → Handy",
+    "providersTitle": "Deine Lieblings-KIs. Hier vereint.",
+    "providersBody": "Nutze ein geeignetes Abo, einen API-Schlüssel oder einen kompatiblen Modellserver. Wähle für jeden Bot einen Anbieter.",
+    "subscription": "Abo-Anmeldung",
+    "api": "API-Schlüssel",
+    "compatible": "Kompatible Server",
+    "compatibleBody": "OpenAI- oder Anthropic-kompatible Endpunkte, einschließlich deines eigenen Modellservers.",
+    "providerDocs": "Anbieter einrichten",
+    "pricingTitle": "Die App ist kostenlos. Du hast die Wahl.",
+    "priceBody": "Beans kostet 0 US-Dollar. Du bezahlst deinen KI-Anbieter direkt über dein Abo oder die API-Nutzung.",
+    "priceLabel": "für Beans",
+    "included": [
+      "Desktop-Apps und gekoppelte Handys",
+      "Benannte Bots und Gruppenchats",
+      "Dateien, Gedächtnis, Routinen und MCP-Werkzeuge"
+    ],
+    "subscriptionTitle": "Schon ein Abo?",
+    "subscriptionBody": "Verbinde ChatGPT oder Grok mit einem geeigneten Konto. Die Nutzungslimits deines Anbieters gelten weiterhin.",
+    "apiTitle": "Lieber ein API-Schlüssel?",
+    "apiBody": "Verbinde Anthropic, DeepSeek, OpenCode oder einen kompatiblen Endpunkt. Der Anbieter berechnet die Nutzung nach seinen Tarifen.",
+    "costNote": "KI-Nutzung wird separat abgerechnet. Mehr Bots können mehr von deinem Kontingent verbrauchen. Dein Computer muss ebenfalls online bleiben.",
+    "compareTitle": "Finde den passenden Ort für deine KI.",
+    "compareBody": "Vergleiche Ausführung, Modellverbindungen und Kosten.",
+    "compareAll": "Alle Vergleiche ansehen",
+    "footerBody": "KI-Team auf deinem Computer. Deine Modelle, deine Werkzeuge, dein Raum.",
+    "product": "Produkt",
+    "resources": "Ressourcen",
+    "providers": "Anbieter",
+    "comparisons": "Vergleiche",
+    "source": "Quellcode",
+    "releases": "Versionen",
+    "privacy": "Datenschutz (Englisch)",
+    "support": "Support (Englisch)",
+    "costs": "Kosten",
+    "features": "Funktionen",
+    "docs": "Dokumentation (Englisch)",
+    "download": "Beans herunterladen",
+    "footerNote": "Für Mac, Windows, Linux und gekoppelte Handys."
+  }
+}

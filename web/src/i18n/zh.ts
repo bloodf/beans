@@ -8,6 +8,7 @@ export const zh: Messages = {
       '运行在你自己电脑上的 AI 队友。可以单聊，也可以拉群，让它们处理你的文件和任务，它们会自己分工协作。',
   },
   nav: {
+    language: '语言',
     costs: '费用',
     compare: '比较',
     turns: '群聊',

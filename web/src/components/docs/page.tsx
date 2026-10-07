@@ -17,7 +17,7 @@ import { Suspense, use } from 'react'
 import { useMDXComponents } from '#/components/mdx'
 import { Logo } from '#/components/site/logo'
 import { downloadPath, SITE } from '#/components/site/nav'
-import { i18nFor, type Language, names, paths } from '#/i18n'
+import { i18nFor, type DocsLanguage as Language, names, paths } from '#/i18n'
 import { docs, docsI18n, docsRoute, markdownUrl, source } from '#/lib/source'
 
 const translations = docsI18n.translations().extend(uiTranslations()).preset('zh', zhCN())

@@ -8,7 +8,8 @@ function previewHost(): Plugin {
     name: "beans-website-preview-host",
     enforce: "pre",
     resolveId(id, importer) {
-      if (id === "../mygo" && importer?.endsWith("/src/host/index.ts")) return "\0beans-preview-native";
+      if (id === "../mygo" && importer?.endsWith("/src/host/index.ts"))
+        return "\0beans-preview-native";
     },
     load(id) {
       if (id !== "\0beans-preview-native") return;
@@ -21,18 +22,39 @@ function previewHost(): Plugin {
     },
     transform(source, id) {
       const replace = (before: string, after: string) => {
-        if (!source.includes(before)) throw new Error(`Preview host contract changed: ${id}: ${before}`);
+        if (!source.includes(before))
+          throw new Error(`Preview host contract changed: ${id}: ${before}`);
         source = source.replaceAll(before, after);
       };
       if (id.endsWith("/src/ui/App.tsx")) {
-        replace('import { createRouter, useNavigate }', 'import { createRouter, memoryHistory, useNavigate }');
-        replace('export const Router = createRouter({', 'export const Router = createRouter({ history: memoryHistory("/"),');
+        replace(
+          "import { createRouter, useNavigate }",
+          "import { createRouter, memoryHistory, useNavigate }",
+        );
+        replace(
+          "export const Router = createRouter({",
+          'export const Router = createRouter({ history: memoryHistory("/"),',
+        );
       } else if (id.endsWith("/src/host/index.ts")) {
-        replace("export const inApp = isMyGo();", "export const inApp = false;");
-        replace('isMock: query.get("mock") === "1"', 'isMock: true');
+        replace(
+          "export const inApp = isMyGo();",
+          "export const inApp = false;",
+        );
+        replace('isMock: query.get("mock") === "1"', "isMock: true");
         replace('name: "Lorca Dev"', 'name: "Beans demo"');
         replace('"lorca.prefs"', '"beans.website-preview.prefs"');
-        replace('visible: document.visibilityState === "visible"', 'visible: document.visibilityState === "visible" && document.documentElement.dataset.previewPaused !== "true"');
+        replace(
+          'appLanguage: ""',
+          'appLanguage: query.get("language") === "zh" ? "zh" : "en"',
+        );
+        replace(
+          'const port = Number(query.get("port"));',
+          'prefs = { ...prefs, appLanguage: query.get("language") === "zh" ? "zh" : "en" }; const port = Number(query.get("port"));',
+        );
+        replace(
+          'visible: document.visibilityState === "visible"',
+          'visible: document.visibilityState === "visible" && document.documentElement.dataset.previewPaused !== "true"',
+        );
       } else if (id.endsWith("/src/main.tsx")) {
         source += `\nwindow.addEventListener("message", (event) => {
           if (event.source !== window.parent || event.origin !== window.location.origin) return;
@@ -44,7 +66,10 @@ function previewHost(): Plugin {
       return { code: source, map: null };
     },
     transformIndexHtml(html) {
-      return html.replace('<title>Lorca</title>', '<title>Beans — app demo</title><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'self\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; font-src \'self\'; connect-src \'none\'; form-action \'none\'; base-uri \'none\'">');
+      return html.replace(
+        "<title>Lorca</title>",
+        "<title>Beans — app demo</title><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; form-action 'none'; base-uri 'none'\">",
+      );
     },
   };
 }
@@ -54,7 +79,9 @@ export default defineConfig({
   base: "/app-preview/",
   plugins: [previewHost(), solid()],
   build: {
-    outDir: fileURLToPath(new URL("../web/public/app-preview", import.meta.url)),
+    outDir: fileURLToPath(
+      new URL("../web/public/app-preview", import.meta.url),
+    ),
     emptyOutDir: true,
     target: ["chrome110", "safari16"],
     cssTarget: ["chrome110", "safari16"],

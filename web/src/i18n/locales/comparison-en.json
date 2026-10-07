@@ -1,6 +1,6 @@
 {
   "title": "Choose where your AI works.",
-  "description": "A detailed comparison of Beans, OpenBot, Grok Bot, and Claude Code. Understand the workflow, model choices, data path, and real cost before you choose.",
+  "description": "Compare Beans with OpenClaw, Hermes Agent, Grok Bot, OpenAI Dots, OpenBot and Claude Code. Understand execution, models, privacy, collaboration and costs.",
   "versus": "Beans vs {{product}}",
   "overview": "At a glance",
   "matrix": "The full picture",
@@ -154,6 +154,60 @@
         "Terminal, IDE, desktop, web; remote-control options.",
         "Configurable permissions and sandboxing; provider data policies apply.",
         "Subscription or API usage, depending on how you connect."
+      ]
+    },
+    "openclaw": {
+      "intro": "OpenClaw connects agents to messaging apps through a gateway you operate. Beans provides a dedicated chat app with encrypted device pairing. Both support multiple agents; their setup and data paths differ.",
+      "good": "You want agents in existing messaging apps, configurable channel routing, and control over a self-hosted gateway.",
+      "other": [
+        "Your gateway on a computer or server.",
+        "Multiple providers, local models, routing and failover.",
+        "Provider-specific API keys or supported sign-in methods.",
+        "Separate agent identities, workspaces and session histories.",
+        "Multi-agent routing, delegation and team presets.",
+        "Files, execution, skills and connected tools.",
+        "Managed browser and browser-control tools.",
+        "Persistent sessions, workspace notes and memory tools.",
+        "Scheduling and background work while the gateway runs.",
+        "Messaging channels, Control UI and companion apps.",
+        "You operate the gateway; model and channel services process shared data.",
+        "Open-source app; model usage, hosting and connected services cost separately."
+      ]
+    },
+    "hermes": {
+      "intro": "Hermes combines persistent memory, reusable skills and configurable execution backends. Its Bot Mode supports specialist teams. Beans uses named bots assigned to your computers with encrypted sync between paired devices.",
+      "good": "You want reusable skills, a learning loop, messaging integrations, or execution through local, container, SSH and cloud backends.",
+      "other": [
+        "Local, container, SSH or configured cloud backend.",
+        "Nous Portal, OpenRouter, OpenAI and compatible endpoints.",
+        "Provider subscription or API credentials, depending on connection.",
+        "Durable specialist bots in Bot Mode.",
+        "Group chats, mentions and isolated subagent delegation.",
+        "Terminal tools, skills and MCP servers.",
+        "Search, extraction and browser tools.",
+        "Persistent memory, skill learning and session recall.",
+        "Built-in cron with delivery through messaging platforms.",
+        "CLI, desktop app and messaging gateway.",
+        "Data follows your backend and provider choices; hosted tools process submitted content.",
+        "Free MIT-licensed app; model, tool and hosting charges depend on setup."
+      ]
+    },
+    "dots": {
+      "intro": "Dots is OpenAI’s managed personal agent in ChatGPT. It has a cloud computer and carries context across connected channels. Beans runs a team of bots on your assigned computers with direct provider connections.",
+      "good": "You want a managed agent inside ChatGPT, connected apps and background work without maintaining a Runner.",
+      "other": [
+        "OpenAI-managed cloud computer; optional connection to your devices.",
+        "OpenAI service powered by GPT-6 Astra.",
+        "Eligible ChatGPT plans; not a bring-your-own-provider interface.",
+        "A named primary dot; specialist dots are previewed separately.",
+        "Delegates work to Codex and ChatGPT Work; dot teams are announced as future work.",
+        "Cloud computer and permissioned plugins.",
+        "Its own browser; optional access to your connected computer.",
+        "Retained context and configurable sharing with ChatGPT Memory.",
+        "Always-on work and read-only proactive research.",
+        "ChatGPT desktop, web and mobile, Slack and Teams.",
+        "Service-side encryption at rest and in transit; plan and training settings apply.",
+        "First dot included in eligible paid plans, with work allowances and delegated-task limits."
       ]
     }
   }

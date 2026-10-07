@@ -12,32 +12,12 @@ import {
   type Language,
 } from '#/i18n'
 
-const products = {
-  openbot: {
-    name: 'OpenBot',
-    sources: [
-      'https://openbot.run/',
-      'https://openbot.run/guides/openbot-hosted-servers',
-      'https://openbot.run/news/one-agent-many-providers',
-      'https://openbot.run/news/your-work-stays-on-your-computer',
-    ],
-  },
-  'grok-bot': { name: 'Grok Bot', sources: ['https://x.ai/bot'] },
-  'claude-code': {
-    name: 'Claude Code',
-    sources: [
-      'https://code.claude.com/docs/en/overview',
-      'https://code.claude.com/docs/en/security',
-      'https://code.claude.com/docs/en/costs',
-      'https://code.claude.com/docs/en/permissions',
-    ],
-  },
-}
-export type ComparisonSlug = keyof typeof products
-const slugs: ComparisonSlug[] = ['openbot', 'grok-bot', 'claude-code']
-export function isComparisonSlug(value: string): value is ComparisonSlug {
-  return Object.hasOwn(products, value)
-}
+import {
+  comparisonProducts as products,
+  comparisonSlugs as slugs,
+  type ComparisonSlug,
+} from './comparison-products'
+export { isComparisonSlug, type ComparisonSlug } from './comparison-products'
 export function comparisonHead(lng: Language, slug?: ComparisonSlug) {
   const t = i18nFor(lng).t
   const copy = t('comparison', { returnObjects: true })

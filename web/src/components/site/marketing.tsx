@@ -1,3 +1,4 @@
+import { comparisonNames } from './comparison-products'
 import { localizedPath } from '#/i18n'
 import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
@@ -208,11 +209,6 @@ export function Pricing() {
     </section>
   )
 }
-export const comparisonNames = [
-  { slug: 'openbot', name: 'OpenBot' },
-  { slug: 'grok-bot', name: 'Grok Bot' },
-  { slug: 'claude-code', name: 'Claude Code' },
-] as const
 export function ComparisonLinks() {
   const c = useMarketingCopy()
   const { i18n } = useTranslation()

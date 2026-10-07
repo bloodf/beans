@@ -1,6 +1,6 @@
 {
   "title": "Elige dónde trabaja tu IA.",
-  "description": "Una comparación detallada de Beans, OpenBot, Grok Bot y Claude Code. Conoce el flujo, los modelos, la ruta de tus datos y el coste real antes de elegir.",
+  "description": "Compara Beans con OpenClaw, Hermes Agent, Grok Bot, OpenAI Dots, OpenBot y Claude Code. Conoce la ejecución, los modelos, la privacidad, la colaboración y los costes.",
   "versus": "Beans vs {{product}}",
   "overview": "De un vistazo",
   "matrix": "La visión completa",
@@ -154,6 +154,60 @@
         "Terminal, IDE, escritorio, web y opciones de control remoto.",
         "Permisos y sandbox configurables; se aplican las políticas del proveedor.",
         "Suscripción o uso de API según la conexión."
+      ]
+    },
+    "openclaw": {
+      "intro": "OpenClaw conecta agentes a apps de mensajería mediante una pasarela que tú administras. Beans ofrece una app de chat con emparejamiento cifrado. Ambos admiten varios agentes; cambian la configuración y el recorrido de los datos.",
+      "good": "Quieres agentes en tus apps de mensajería, enrutamiento configurable y control de una pasarela autohospedada.",
+      "other": [
+        "Tu pasarela en un ordenador o servidor.",
+        "Varios proveedores, modelos locales, enrutamiento y alternativas ante fallos.",
+        "Claves de API o métodos de inicio de sesión admitidos por cada proveedor.",
+        "Identidades, espacios de trabajo e historiales separados por agente.",
+        "Enrutamiento entre agentes, delegación y plantillas de equipo.",
+        "Archivos, ejecución de comandos, skills y herramientas conectadas.",
+        "Navegador administrado y herramientas de control del navegador.",
+        "Sesiones persistentes, notas del espacio de trabajo y herramientas de memoria.",
+        "Programación y trabajo en segundo plano mientras la pasarela esté activa.",
+        "Canales de mensajería, panel de control y apps complementarias.",
+        "Administras la pasarela; los proveedores y servicios de mensajería procesan los datos compartidos.",
+        "App de código abierto; modelos, alojamiento y servicios conectados tienen costes separados."
+      ]
+    },
+    "hermes": {
+      "intro": "Hermes combina memoria persistente, skills reutilizables y entornos de ejecución configurables. Bot Mode admite equipos de especialistas. Beans asigna bots a tus ordenadores y sincroniza los dispositivos emparejados con cifrado.",
+      "good": "Quieres skills reutilizables, aprendizaje continuo, integraciones de mensajería o ejecución local, en contenedores, por SSH o en la nube.",
+      "other": [
+        "Ejecución local, en contenedores, por SSH o en un entorno de nube configurado.",
+        "Nous Portal, OpenRouter, OpenAI y endpoints compatibles.",
+        "Suscripción o credenciales de API según la conexión.",
+        "Bots especialistas persistentes en Bot Mode.",
+        "Chats de grupo, menciones y delegación a subagentes aislados.",
+        "Herramientas de terminal, skills y servidores MCP.",
+        "Búsqueda, extracción de contenido y herramientas de navegador.",
+        "Memoria persistente, aprendizaje de skills y recuperación de sesiones.",
+        "Cron integrado con entrega mediante plataformas de mensajería.",
+        "CLI, app de escritorio y pasarela de mensajería.",
+        "Los datos siguen tus elecciones de entorno y proveedor; las herramientas alojadas procesan el contenido enviado.",
+        "App gratuita con licencia MIT; los costes de modelos, herramientas y alojamiento dependen de la configuración."
+      ]
+    },
+    "dots": {
+      "intro": "Dots es el agente personal administrado de OpenAI en ChatGPT. Tiene un ordenador en la nube y conserva contexto entre canales conectados. Beans ejecuta un equipo en tus ordenadores, con conexiones directas a proveedores.",
+      "good": "Quieres un agente administrado en ChatGPT, apps conectadas y trabajo en segundo plano sin mantener un Runner.",
+      "other": [
+        "Ordenador en la nube de OpenAI; conexión opcional a tus dispositivos.",
+        "Servicio de OpenAI con GPT-6 Astra.",
+        "Planes elegibles de ChatGPT; no permite elegir libremente un proveedor de modelos.",
+        "Un dot principal con nombre; los dots especialistas tienen una presentación preliminar separada.",
+        "Delega en Codex y ChatGPT Work; los equipos de dots se anuncian como función futura.",
+        "Ordenador en la nube y plugins con permisos.",
+        "Navegador propio; acceso opcional a tu ordenador conectado.",
+        "Contexto persistente y uso compartido configurable con ChatGPT Memory.",
+        "Trabajo continuo e investigación proactiva de solo lectura.",
+        "ChatGPT en escritorio, web y móvil, Slack y Teams.",
+        "Cifrado en el servicio, en reposo y en tránsito; se aplican los ajustes del plan y del entrenamiento.",
+        "Primer dot incluido en planes de pago elegibles, con cuotas de trabajo y límites en tareas delegadas."
       ]
     }
   }

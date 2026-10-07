@@ -1,6 +1,6 @@
 {
   "title": "Escolha onde sua IA trabalha.",
-  "description": "Uma comparação detalhada entre Beans, OpenBot, Grok Bot e Claude Code. Entenda o fluxo de trabalho, os modelos, o caminho dos dados e os custos antes de escolher.",
+  "description": "Compare o Beans com OpenClaw, Hermes Agent, Grok Bot, OpenAI Dots, OpenBot e Claude Code. Entenda execução, modelos, privacidade, colaboração e custos.",
   "versus": "Beans vs {{product}}",
   "overview": "Visão geral",
   "matrix": "O panorama completo",
@@ -154,6 +154,60 @@
         "Terminal, IDE, desktop, web e opções de controle remoto.",
         "Permissões e sandbox configuráveis; políticas do provedor se aplicam.",
         "Assinatura ou uso de API, conforme a conexão."
+      ]
+    },
+    "openclaw": {
+      "intro": "O OpenClaw conecta agentes a aplicativos de mensagens por um gateway que você opera. O Beans oferece um app de chat com pareamento criptografado. Ambos aceitam vários agentes; a configuração e o caminho dos dados diferem.",
+      "good": "Você quer agentes nos seus apps de mensagens, roteamento configurável e controle de um gateway hospedado por você.",
+      "other": [
+        "Seu gateway em um computador ou servidor.",
+        "Vários provedores, modelos locais, roteamento e alternativas em caso de falha.",
+        "Chaves de API ou formas de login aceitas por cada provedor.",
+        "Identidades, espaços de trabalho e históricos separados por agente.",
+        "Roteamento entre agentes, delegação e equipes predefinidas.",
+        "Arquivos, execução de comandos, skills e ferramentas conectadas.",
+        "Navegador gerenciado e ferramentas de controle do navegador.",
+        "Sessões persistentes, notas do espaço de trabalho e ferramentas de memória.",
+        "Agendamento e trabalho em segundo plano enquanto o gateway está ativo.",
+        "Canais de mensagens, painel de controle e apps auxiliares.",
+        "Você opera o gateway; provedores e serviços de mensagens processam os dados compartilhados.",
+        "App de código aberto; uso de modelos, hospedagem e serviços conectados têm custos separados."
+      ]
+    },
+    "hermes": {
+      "intro": "O Hermes combina memória persistente, skills reutilizáveis e ambientes de execução configuráveis. O Bot Mode aceita equipes de especialistas. O Beans usa bots atribuídos aos seus computadores e sincronização criptografada entre dispositivos pareados.",
+      "good": "Você quer skills reutilizáveis, aprendizado contínuo, integrações com mensagens ou execução local, em contêiner, por SSH ou na nuvem.",
+      "other": [
+        "Execução local, em contêiner, por SSH ou em um ambiente de nuvem configurado.",
+        "Nous Portal, OpenRouter, OpenAI e endpoints compatíveis.",
+        "Assinatura ou credenciais de API, conforme a conexão.",
+        "Bots especialistas persistentes no Bot Mode.",
+        "Conversas em grupo, menções e delegação a subagentes isolados.",
+        "Ferramentas de terminal, skills e servidores MCP.",
+        "Busca, extração de conteúdo e ferramentas de navegador.",
+        "Memória persistente, aprendizado de skills e recuperação de sessões.",
+        "Cron integrado com entrega por plataformas de mensagens.",
+        "CLI, app desktop e gateway de mensagens.",
+        "Os dados seguem suas escolhas de ambiente e provedor; ferramentas hospedadas processam o conteúdo enviado.",
+        "App gratuito com licença MIT; modelos, ferramentas e hospedagem custam conforme a configuração."
+      ]
+    },
+    "dots": {
+      "intro": "O Dots é o agente pessoal gerenciado da OpenAI no ChatGPT. Tem um computador na nuvem e mantém contexto entre canais conectados. O Beans executa uma equipe nos seus computadores, com conexão direta aos provedores.",
+      "good": "Você quer um agente gerenciado no ChatGPT, apps conectados e trabalho em segundo plano sem manter um Runner.",
+      "other": [
+        "Computador na nuvem da OpenAI; conexão opcional aos seus dispositivos.",
+        "Serviço da OpenAI com GPT-6 Astra.",
+        "Planos elegíveis do ChatGPT; não é uma interface para escolher seu próprio provedor.",
+        "Um dot principal com nome; dots especialistas têm prévia separada.",
+        "Delega ao Codex e ao ChatGPT Work; equipes de dots são uma proposta futura.",
+        "Computador na nuvem e plugins com permissões.",
+        "Navegador próprio; acesso opcional ao seu computador conectado.",
+        "Contexto persistente e compartilhamento configurável com a memória do ChatGPT.",
+        "Trabalho contínuo e pesquisa proativa somente de leitura.",
+        "ChatGPT desktop, web e celular, Slack e Teams.",
+        "Criptografia no serviço, em repouso e em trânsito; regras do plano e de treinamento se aplicam.",
+        "Primeiro dot incluído em planos pagos elegíveis, com franquias de trabalho e limites nas tarefas delegadas."
       ]
     }
   }

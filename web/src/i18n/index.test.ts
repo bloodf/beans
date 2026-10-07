@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  comparisonProducts,
+  comparisonSlugs,
+  isComparisonSlug,
+} from '../components/site/comparison-products'
+import {
   htmlLang,
   i18nFor,
   languageForLocale,
@@ -66,5 +71,28 @@ describe('published website languages', () => {
     const portugueseTitle = i18nFor('pt-BR').t('hero.accessibleTitle')
     expect(portugueseTitle).not.toBe(englishTitle)
     expect(i18nFor('en').t('hero.accessibleTitle')).toBe(englishTitle)
+  })
+})
+
+describe('published comparisons', () => {
+  for (const language of languages) {
+    test(`${language}: each published product has every matrix row`, () => {
+      const copy = i18nFor(language).t('comparison', { returnObjects: true })
+      expect(copy.labels).toHaveLength(12)
+      expect(copy.beans).toHaveLength(copy.labels.length)
+      expect(Object.keys(copy.products).sort()).toEqual(
+        [...comparisonSlugs].sort(),
+      )
+      for (const slug of comparisonSlugs) {
+        expect(isComparisonSlug(slug)).toBe(true)
+        expect(copy.products[slug].other).toHaveLength(copy.labels.length)
+        expect(copy.products[slug].intro).toBeTruthy()
+        expect(copy.products[slug].good).toBeTruthy()
+        expect(comparisonProducts[slug].sources.length).toBeGreaterThan(0)
+      }
+    })
+  }
+  test('unknown products are not published comparisons', () => {
+    expect(isComparisonSlug('missing')).toBe(false)
   })
 })

@@ -1,6 +1,6 @@
 {
   "title": "Wähle, wo deine KI arbeitet.",
-  "description": "Beans, OpenBot, Grok Bot und Claude Code im Detail. Vergleiche Arbeitsabläufe, Modelle, Datenwege und tatsächliche Kosten, bevor du dich entscheidest.",
+  "description": "Vergleiche Beans mit OpenClaw, Hermes Agent, Grok Bot, OpenAI Dots, OpenBot und Claude Code. Erfahre mehr über Ausführung, Modelle, Datenschutz, Zusammenarbeit und Kosten.",
   "versus": "Beans vs {{product}}",
   "overview": "Auf einen Blick",
   "matrix": "Das Gesamtbild",
@@ -154,6 +154,60 @@
         "Terminal, IDE, Desktop, Web und Fernsteuerung.",
         "Konfigurierbare Berechtigungen und Sandbox; Anbieterrichtlinien gelten.",
         "Abo oder API-Nutzung je nach Verbindung."
+      ]
+    },
+    "openclaw": {
+      "intro": "OpenClaw verbindet Agenten über ein selbst betriebenes Gateway mit Messenger-Apps. Beans bietet eine eigene Chat-App mit verschlüsselter Gerätekopplung. Beide unterstützen mehrere Agenten; Einrichtung und Datenwege unterscheiden sich.",
+      "good": "Du möchtest Agenten in deinen Messengern, konfigurierbares Routing und Kontrolle über ein selbst betriebenes Gateway.",
+      "other": [
+        "Dein Gateway auf einem Computer oder Server.",
+        "Mehrere Anbieter, lokale Modelle, Routing und Ausweichmodelle.",
+        "Anbieterspezifische API-Schlüssel oder unterstützte Anmeldungen.",
+        "Eigene Identitäten, Arbeitsbereiche und Sitzungsverläufe je Agent.",
+        "Agenten-Routing, Delegation und Teamvorlagen.",
+        "Dateien, Befehlsausführung, Skills und verbundene Werkzeuge.",
+        "Verwalteter Browser und Werkzeuge zur Browsersteuerung.",
+        "Dauerhafte Sitzungen, Arbeitsbereichsnotizen und Speicherwerkzeuge.",
+        "Zeitplanung und Hintergrundarbeit bei laufendem Gateway.",
+        "Messenger-Kanäle, Control UI und Begleit-Apps.",
+        "Du betreibst das Gateway; Modell- und Nachrichtendienste verarbeiten geteilte Daten.",
+        "Open-Source-App; Modellnutzung, Hosting und verbundene Dienste kosten separat."
+      ]
+    },
+    "hermes": {
+      "intro": "Hermes verbindet dauerhaften Speicher, wiederverwendbare Skills und konfigurierbare Ausführungsumgebungen. Bot Mode unterstützt Spezialistenteams. Beans ordnet benannte Bots deinen Computern zu und synchronisiert gekoppelte Geräte verschlüsselt.",
+      "good": "Du möchtest wiederverwendbare Skills, einen Lernprozess, Messenger-Integrationen oder lokale, Container-, SSH- und Cloud-Ausführung.",
+      "other": [
+        "Lokal, im Container, per SSH oder in einer konfigurierten Cloud-Umgebung.",
+        "Nous Portal, OpenRouter, OpenAI und kompatible Endpunkte.",
+        "Anbieterabo oder API-Zugang, abhängig von der Verbindung.",
+        "Dauerhafte Spezialisten-Bots im Bot Mode.",
+        "Gruppenchats, Erwähnungen und Delegation an isolierte Unteragenten.",
+        "Terminalwerkzeuge, Skills und MCP-Server.",
+        "Suche, Inhaltsextraktion und Browserwerkzeuge.",
+        "Dauerhafter Speicher, Skill-Lernen und Sitzungsabruf.",
+        "Integriertes Cron mit Zustellung über Messenger-Plattformen.",
+        "CLI, Desktop-App und Messenger-Gateway.",
+        "Datenwege hängen von Backend und Anbieter ab; gehostete Werkzeuge verarbeiten übermittelte Inhalte.",
+        "Kostenlose MIT-lizenzierte App; Modell-, Werkzeug- und Hostingkosten hängen von der Einrichtung ab."
+      ]
+    },
+    "dots": {
+      "intro": "Dots ist OpenAIs verwalteter persönlicher Agent in ChatGPT. Er hat einen Cloud-Computer und behält Kontext über verbundene Kanäle hinweg. Beans betreibt ein Bot-Team auf deinen zugewiesenen Computern mit direkten Anbieterzugängen.",
+      "good": "Du möchtest einen verwalteten Agenten in ChatGPT, verbundene Apps und Hintergrundarbeit ohne eigenen Runner-Betrieb.",
+      "other": [
+        "Von OpenAI verwalteter Cloud-Computer; optionale Verbindung zu deinen Geräten.",
+        "OpenAI-Dienst mit GPT-6 Astra.",
+        "Berechtigte ChatGPT-Tarife; keine Oberfläche für frei gewählte Modellanbieter.",
+        "Ein benannter primärer Dot; Spezialisten-Dots werden separat vorgestellt.",
+        "Delegiert an Codex und ChatGPT Work; Dot-Teams sind als künftige Funktion angekündigt.",
+        "Cloud-Computer und Plugins mit Berechtigungen.",
+        "Eigener Browser; optionaler Zugriff auf deinen verbundenen Computer.",
+        "Dauerhafter Kontext und konfigurierbarer Austausch mit ChatGPT Memory.",
+        "Dauerhafte Arbeit und proaktive Recherche mit reinem Lesezugriff.",
+        "ChatGPT auf Desktop, Web und Mobilgeräten, Slack und Teams.",
+        "Dienstseitige Verschlüsselung bei Speicherung und Übertragung; Tarif- und Trainingseinstellungen gelten.",
+        "Erster Dot in berechtigten Bezahltarifen enthalten, mit Arbeitskontingenten und Limits für delegierte Aufgaben."
       ]
     }
   }

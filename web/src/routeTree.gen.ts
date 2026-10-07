@@ -15,11 +15,15 @@ import { Route as LlmsFullDottxtRouteImport } from './routes/llms-full[.]txt'
 import { Route as LlmsDottxtRouteImport } from './routes/llms[.]txt'
 import { Route as ZhRouteImport } from './routes/zh'
 import { Route as ApiSearchRouteImport } from './routes/api/search'
+import { Route as CompareIndexRouteImport } from './routes/compare.index'
+import { Route as CompareProductRouteImport } from './routes/compare.$product'
 import { Route as DocsSplatRouteImport } from './routes/docs/$'
 import { Route as DocsChar123Char125DotmdRouteImport } from './routes/docs/{$}[.]md'
 import { Route as ZhDownloadRouteImport } from './routes/zh_/download'
 import { Route as ZhLlmsFullDottxtRouteImport } from './routes/zh_/llms-full[.]txt'
 import { Route as ZhLlmsDottxtRouteImport } from './routes/zh_/llms[.]txt'
+import { Route as ZhCompareIndexRouteImport } from './routes/zh_/compare.index'
+import { Route as ZhCompareProductRouteImport } from './routes/zh_/compare.$product'
 import { Route as ZhDocsSplatRouteImport } from './routes/zh_/docs/$'
 import { Route as ZhDocsChar123Char125DotmdRouteImport } from './routes/zh_/docs/{$}[.]md'
 
@@ -53,6 +57,16 @@ const ApiSearchRoute = ApiSearchRouteImport.update({
   path: '/api/search',
   getParentRoute: () => rootRouteImport,
 } as any)
+const CompareIndexRoute = CompareIndexRouteImport.update({
+  id: '/compare/',
+  path: '/compare/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CompareProductRoute = CompareProductRouteImport.update({
+  id: '/compare/$product',
+  path: '/compare/$product',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DocsSplatRoute = DocsSplatRouteImport.update({
   id: '/docs/$',
   path: '/docs/$',
@@ -78,6 +92,16 @@ const ZhLlmsDottxtRoute = ZhLlmsDottxtRouteImport.update({
   path: '/zh/llms.txt',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ZhCompareIndexRoute = ZhCompareIndexRouteImport.update({
+  id: '/zh_/compare/',
+  path: '/zh/compare/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ZhCompareProductRoute = ZhCompareProductRouteImport.update({
+  id: '/zh_/compare/$product',
+  path: '/zh/compare/$product',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ZhDocsSplatRoute = ZhDocsSplatRouteImport.update({
   id: '/zh_/docs/$',
   path: '/zh/docs/$',
@@ -97,13 +121,17 @@ export interface FileRoutesByFullPath {
   '/llms.txt': typeof LlmsDottxtRoute
   '/zh': typeof ZhRoute
   '/api/search': typeof ApiSearchRoute
+  '/compare/$product': typeof CompareProductRoute
   '/docs/$': typeof DocsSplatRoute
   '/docs/{$}.md': typeof DocsChar123Char125DotmdRoute
   '/zh/download': typeof ZhDownloadRoute
   '/zh/llms-full.txt': typeof ZhLlmsFullDottxtRoute
   '/zh/llms.txt': typeof ZhLlmsDottxtRoute
+  '/compare/': typeof CompareIndexRoute
+  '/zh/compare/$product': typeof ZhCompareProductRoute
   '/zh/docs/$': typeof ZhDocsSplatRoute
   '/zh/docs/{$}.md': typeof ZhDocsChar123Char125DotmdRoute
+  '/zh/compare/': typeof ZhCompareIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -112,13 +140,17 @@ export interface FileRoutesByTo {
   '/llms.txt': typeof LlmsDottxtRoute
   '/zh': typeof ZhRoute
   '/api/search': typeof ApiSearchRoute
+  '/compare/$product': typeof CompareProductRoute
   '/docs/$': typeof DocsSplatRoute
   '/docs/{$}.md': typeof DocsChar123Char125DotmdRoute
   '/zh/download': typeof ZhDownloadRoute
   '/zh/llms-full.txt': typeof ZhLlmsFullDottxtRoute
   '/zh/llms.txt': typeof ZhLlmsDottxtRoute
+  '/compare': typeof CompareIndexRoute
+  '/zh/compare/$product': typeof ZhCompareProductRoute
   '/zh/docs/$': typeof ZhDocsSplatRoute
   '/zh/docs/{$}.md': typeof ZhDocsChar123Char125DotmdRoute
+  '/zh/compare': typeof ZhCompareIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -128,13 +160,17 @@ export interface FileRoutesById {
   '/llms.txt': typeof LlmsDottxtRoute
   '/zh': typeof ZhRoute
   '/api/search': typeof ApiSearchRoute
+  '/compare/$product': typeof CompareProductRoute
   '/docs/$': typeof DocsSplatRoute
   '/docs/{$}.md': typeof DocsChar123Char125DotmdRoute
   '/zh_/download': typeof ZhDownloadRoute
   '/zh_/llms-full.txt': typeof ZhLlmsFullDottxtRoute
   '/zh_/llms.txt': typeof ZhLlmsDottxtRoute
+  '/compare/': typeof CompareIndexRoute
+  '/zh_/compare/$product': typeof ZhCompareProductRoute
   '/zh_/docs/$': typeof ZhDocsSplatRoute
   '/zh_/docs/{$}.md': typeof ZhDocsChar123Char125DotmdRoute
+  '/zh_/compare/': typeof ZhCompareIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -145,13 +181,17 @@ export interface FileRouteTypes {
     | '/llms.txt'
     | '/zh'
     | '/api/search'
+    | '/compare/$product'
     | '/docs/$'
     | '/docs/{$}.md'
     | '/zh/download'
     | '/zh/llms-full.txt'
     | '/zh/llms.txt'
+    | '/compare/'
+    | '/zh/compare/$product'
     | '/zh/docs/$'
     | '/zh/docs/{$}.md'
+    | '/zh/compare/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -160,13 +200,17 @@ export interface FileRouteTypes {
     | '/llms.txt'
     | '/zh'
     | '/api/search'
+    | '/compare/$product'
     | '/docs/$'
     | '/docs/{$}.md'
     | '/zh/download'
     | '/zh/llms-full.txt'
     | '/zh/llms.txt'
+    | '/compare'
+    | '/zh/compare/$product'
     | '/zh/docs/$'
     | '/zh/docs/{$}.md'
+    | '/zh/compare'
   id:
     | '__root__'
     | '/'
@@ -175,13 +219,17 @@ export interface FileRouteTypes {
     | '/llms.txt'
     | '/zh'
     | '/api/search'
+    | '/compare/$product'
     | '/docs/$'
     | '/docs/{$}.md'
     | '/zh_/download'
     | '/zh_/llms-full.txt'
     | '/zh_/llms.txt'
+    | '/compare/'
+    | '/zh_/compare/$product'
     | '/zh_/docs/$'
     | '/zh_/docs/{$}.md'
+    | '/zh_/compare/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -191,13 +239,17 @@ export interface RootRouteChildren {
   LlmsDottxtRoute: typeof LlmsDottxtRoute
   ZhRoute: typeof ZhRoute
   ApiSearchRoute: typeof ApiSearchRoute
+  CompareProductRoute: typeof CompareProductRoute
   DocsSplatRoute: typeof DocsSplatRoute
   DocsChar123Char125DotmdRoute: typeof DocsChar123Char125DotmdRoute
   ZhDownloadRoute: typeof ZhDownloadRoute
   ZhLlmsFullDottxtRoute: typeof ZhLlmsFullDottxtRoute
   ZhLlmsDottxtRoute: typeof ZhLlmsDottxtRoute
+  CompareIndexRoute: typeof CompareIndexRoute
+  ZhCompareProductRoute: typeof ZhCompareProductRoute
   ZhDocsSplatRoute: typeof ZhDocsSplatRoute
   ZhDocsChar123Char125DotmdRoute: typeof ZhDocsChar123Char125DotmdRoute
+  ZhCompareIndexRoute: typeof ZhCompareIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -244,6 +296,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiSearchRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/compare/': {
+      id: '/compare/'
+      path: '/compare'
+      fullPath: '/compare/'
+      preLoaderRoute: typeof CompareIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/compare/$product': {
+      id: '/compare/$product'
+      path: '/compare/$product'
+      fullPath: '/compare/$product'
+      preLoaderRoute: typeof CompareProductRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/docs/$': {
       id: '/docs/$'
       path: '/docs/$'
@@ -279,6 +345,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ZhLlmsDottxtRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/zh_/compare/': {
+      id: '/zh_/compare/'
+      path: '/zh/compare'
+      fullPath: '/zh/compare/'
+      preLoaderRoute: typeof ZhCompareIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/zh_/compare/$product': {
+      id: '/zh_/compare/$product'
+      path: '/zh/compare/$product'
+      fullPath: '/zh/compare/$product'
+      preLoaderRoute: typeof ZhCompareProductRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/zh_/docs/$': {
       id: '/zh_/docs/$'
       path: '/zh/docs/$'
@@ -303,13 +383,17 @@ const rootRouteChildren: RootRouteChildren = {
   LlmsDottxtRoute: LlmsDottxtRoute,
   ZhRoute: ZhRoute,
   ApiSearchRoute: ApiSearchRoute,
+  CompareProductRoute: CompareProductRoute,
   DocsSplatRoute: DocsSplatRoute,
   DocsChar123Char125DotmdRoute: DocsChar123Char125DotmdRoute,
   ZhDownloadRoute: ZhDownloadRoute,
   ZhLlmsFullDottxtRoute: ZhLlmsFullDottxtRoute,
   ZhLlmsDottxtRoute: ZhLlmsDottxtRoute,
+  CompareIndexRoute: CompareIndexRoute,
+  ZhCompareProductRoute: ZhCompareProductRoute,
   ZhDocsSplatRoute: ZhDocsSplatRoute,
   ZhDocsChar123Char125DotmdRoute: ZhDocsChar123Char125DotmdRoute,
+  ZhCompareIndexRoute: ZhCompareIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

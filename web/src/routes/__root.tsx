@@ -10,10 +10,31 @@ export const Route = createRootRoute({
     meta: [
       { charSet: 'utf-8' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-      { name: 'theme-color', content: '#fafafb', media: '(prefers-color-scheme: light)' },
-      { name: 'theme-color', content: '#0f0f12', media: '(prefers-color-scheme: dark)' },
+      {
+        name: 'theme-color',
+        content: '#fafafb',
+        media: '(prefers-color-scheme: light)',
+      },
+      {
+        name: 'theme-color',
+        content: '#0f0f12',
+        media: '(prefers-color-scheme: dark)',
+      },
       { property: 'og:type', content: 'website' },
-      { property: 'og:image', content: '/screens/group.png' },
+      {
+        property: 'og:image',
+        content: 'https://usebeans.app/brand/beans-social-v2.png',
+      },
+      { property: 'og:image:width', content: '1730' },
+      { property: 'og:image:height', content: '909' },
+      {
+        property: 'og:image:alt',
+        content: 'Beans — Your AI. Your space. Coral Beans sculpture on ivory.',
+      },
+      {
+        name: 'twitter:image',
+        content: 'https://usebeans.app/brand/beans-social-v2.png',
+      },
       { name: 'twitter:card', content: 'summary_large_image' },
     ],
     links: [

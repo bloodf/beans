@@ -10,7 +10,7 @@ const links = [
   { id: 'turns', label: 'nav.turns' },
   { id: 'relay', label: 'nav.relay' },
   { id: 'tools', label: 'nav.tools' },
-  { id: 'faq', label: 'nav.faq' },
+  { id: 'costs', label: 'nav.costs' },
 ] as const
 
 /// The docs in the page's language: `/docs` and `/zh/docs`, or one of their pages: `/docs/cli`.
@@ -29,7 +29,10 @@ export function downloadPath(lng: string) {
 /// A section of the landing page, from any page: `/#faq` and `/zh#faq`. It is the current page
 /// only at its own section. Without `resetScroll`, a second click on the section already in the
 /// address bar restores the scroll position the click was made at instead of scrolling to it.
-export function SectionLink({ id, ...props }: { id: string } & Omit<React.ComponentProps<'a'>, 'href'>) {
+export function SectionLink({
+  id,
+  ...props
+}: { id: string } & Omit<React.ComponentProps<'a'>, 'href'>) {
   const { i18n } = useTranslation()
   return (
     <Link
@@ -61,23 +64,51 @@ export function Nav() {
     <header className="site-nav sticky top-0 z-40 border-b bg-background/95 px-4 backdrop-blur-xl">
       <div className="mx-auto flex h-18 max-w-[1400px] items-center justify-between gap-4">
         <SectionLink id="top" className="flex items-center gap-2 font-semibold tracking-tight">
-          <img src="/brand/beans-logo.svg" alt="Beans" width={2161} height={728} className="w-36 dark:hidden" />
-          <img src="/brand/beans-logo-light.svg" alt="Beans" width={2161} height={728} className="hidden w-36 dark:block" />
+          <img
+            src="/brand/beans-logo.svg"
+            alt="Beans"
+            width={2161}
+            height={728}
+            className="w-36 dark:hidden"
+          />
+          <img
+            src="/brand/beans-logo-light.svg"
+            alt="Beans"
+            width={2161}
+            height={728}
+            className="hidden w-36 dark:block"
+          />
         </SectionLink>
         <nav className="hidden items-center gap-6 text-sm text-muted-foreground md:flex">
           {links.map((link) => (
-            <SectionLink key={link.id} id={link.id} className="transition-colors hover:text-foreground">
+            <SectionLink
+              key={link.id}
+              id={link.id}
+              className="transition-colors hover:text-foreground"
+            >
               {t(link.label)}
             </SectionLink>
           ))}
-          <Link viewTransition to={docsPath(i18n.language)} className="transition-colors hover:text-foreground">
+          <Link
+            to={i18n.language === 'zh' ? '/zh/compare' : '/compare'}
+            className="transition-colors hover:text-foreground"
+          >
+            {t('nav.compare')}
+          </Link>
+          <Link
+            viewTransition
+            to={docsPath(i18n.language)}
+            className="transition-colors hover:text-foreground"
+          >
             {t('nav.docs')}
           </Link>
         </nav>
         <div className="flex items-center gap-3">
           <LanguageLink className="text-sm text-muted-foreground transition-colors hover:text-foreground" />
           <Button asChild size="sm" className="rounded-full px-4">
-            <Link viewTransition to={downloadPath(i18n.language)}>{t('nav.download')}</Link>
+            <Link viewTransition to={downloadPath(i18n.language)}>
+              {t('nav.download')}
+            </Link>
           </Button>
         </div>
       </div>

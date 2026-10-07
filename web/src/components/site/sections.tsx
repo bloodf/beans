@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { ArrowDownRight, ArrowUpRight, Brain, FilePen, Globe, Plug } from 'lucide-react'
+import { ArrowDownRight, ArrowUpRight } from 'lucide-react'
 import { Trans, useTranslation } from 'react-i18next'
 
 import {
@@ -11,30 +11,53 @@ import {
 import { Button } from '#/components/ui/button'
 import { RelayDiagram } from './diagram'
 import { Logo } from './logo'
-import { LanguageLink, SectionLink, docsPath, downloadPath } from './nav'
+import { SectionLink, downloadPath } from './nav'
 import { BeanScene } from './bean-scene'
+import { MarketingFooter } from './marketing'
+import { useMarketingCopy } from './marketing-copy'
 import { AnimatedText } from './animated-text'
 
 export function Hero() {
+  const c = useMarketingCopy()
   const { t, i18n } = useTranslation()
   return (
     <section id="top" className="beans-hero">
       <div className="hero-copy motion-island">
-      <h1 className="hero-title display" aria-label={t('hero.accessibleTitle')}>
-        <span aria-hidden="true"><Trans i18nKey="hero.title" components={{ lead: <AnimatedText />, accent: <AnimatedText className="brush" /> }} /></span>
-      </h1>
-      <p className="mt-7 max-w-lg text-lg text-pretty text-muted-foreground sm:text-xl">
-        {t('hero.body')}
-      </p>
-      <div className="mt-9 flex flex-col gap-3 sm:flex-row">
-        <Button asChild size="lg" className="h-12 rounded-full px-7 text-base">
-          <Link viewTransition to={downloadPath(i18n.language)}>{t('nav.download')}<ArrowUpRight size={18} aria-hidden="true" /></Link>
-        </Button>
-        <Button asChild size="lg" variant="outline" className="h-12 rounded-full bg-transparent px-6 text-base shadow-none hover:bg-foreground/5 dark:bg-transparent dark:hover:bg-foreground/5">
-          <SectionLink id="turns">{t('hero.how')}<ArrowDownRight size={18} aria-hidden="true" /></SectionLink>
-        </Button>
-      </div>
-      <p className="hero-platforms">{t('hero.platforms')}</p>
+        <h1 className="hero-title display" aria-label={t('hero.accessibleTitle')}>
+          <span aria-hidden="true">
+            <Trans
+              i18nKey="hero.title"
+              components={{
+                lead: <AnimatedText />,
+                accent: <AnimatedText className="brush" />,
+              }}
+            />
+          </span>
+        </h1>
+        <p className="mt-7 max-w-lg text-lg text-pretty text-muted-foreground sm:text-xl">
+          {t('hero.body')}
+        </p>
+        <div className="mt-9 flex flex-col gap-3 sm:flex-row">
+          <Button asChild size="lg" className="h-12 rounded-full px-7 text-base">
+            <Link viewTransition to={downloadPath(i18n.language)}>
+              {t('nav.download')}
+              <ArrowUpRight size={18} aria-hidden="true" />
+            </Link>
+          </Button>
+          <Button
+            asChild
+            size="lg"
+            variant="outline"
+            className="h-12 rounded-full bg-transparent px-6 text-base shadow-none hover:bg-foreground/5 dark:bg-transparent dark:hover:bg-foreground/5"
+          >
+            <SectionLink id="turns">
+              {t('hero.how')}
+              <ArrowDownRight size={18} aria-hidden="true" />
+            </SectionLink>
+          </Button>
+        </div>
+        <p className="hero-free">{c.free}</p>
+        <p className="hero-platforms">{t('hero.platforms')}</p>
       </div>
       <BeanScene />
     </section>
@@ -66,7 +89,13 @@ function Stage({
           children
         ) : (
           <div className="beans-stage">
-            {id === 'relay' && <div className="relay-orbit" aria-hidden="true"><div /><div /><div /></div>}
+            {id === 'relay' && (
+              <div className="relay-orbit" aria-hidden="true">
+                <div />
+                <div />
+                <div />
+              </div>
+            )}
             <div className="stage-visual">{children}</div>
           </div>
         )}
@@ -75,76 +104,13 @@ function Stage({
   )
 }
 
-export function Turns() {
-  const { t } = useTranslation()
-  return (
-    <Stage
-      id="turns"
-      title={t('turns.title')}
-      body={t('turns.body')}
-    >
-      <img
-        src="/screens/group.png"
-        width={1568}
-        height={993}
-        alt={t('turns.alt')}
-        className="window-frame screen-window mx-auto w-full"
-        loading="lazy"
-        decoding="async"
-      />
-    </Stage>
-  )
-}
-
 export function Relay() {
   const { t } = useTranslation()
   return (
-    <Stage
-      id="relay"
-      title={t('relay.title')}
-      body={t('relay.body')}
-    >
+    <Stage id="relay" title={t('relay.title')} body={t('relay.body')}>
       <div className="mx-auto max-w-4xl">
         <RelayDiagram />
       </div>
-    </Stage>
-  )
-}
-
-/// What a bot can do once it has a folder, in the words a first-time visitor uses.
-const toolKinds = [
-  { key: 'files', icon: FilePen },
-  { key: 'web', icon: Globe },
-  { key: 'memory', icon: Brain },
-  { key: 'plugins', icon: Plug },
-] as const
-
-export function Tools() {
-  const { t } = useTranslation()
-  return (
-    <Stage
-      id="tools"
-      bare
-      title={t('tools.title')}
-      body={t('tools.body')}
-    >
-      <ul className="tool-list">
-        {toolKinds.map(({ key, icon: Icon }) => (
-          <li key={key} className={`tool-row tool-${key} motion-island`}>
-            <Icon className="tool-icon text-violet" strokeWidth={1.5} aria-hidden="true" />
-            <div>
-              <h3 className="text-2xl font-semibold">{t(`tools.kinds.${key}.title`)}</h3>
-              <p className="mt-3 leading-relaxed text-muted-foreground">{t(`tools.kinds.${key}.body`)}</p>
-              <div className="tool-demonstration" aria-hidden="true">
-                <div className="tool-demo-icon"><Icon size={32} strokeWidth={1.5} /></div>
-                <div className="tool-demo-lines"><i /><i /><i /></div>
-                <div className="tool-demo-result"><Icon size={22} strokeWidth={1.5} /></div>
-                <svg className="tool-demo-path" viewBox="0 0 400 100" preserveAspectRatio="none"><path d="M40 50 C120 50 120 25 200 25 S280 50 360 50" /></svg>
-              </div>
-            </div>
-          </li>
-        ))}
-      </ul>
     </Stage>
   )
 }
@@ -156,9 +122,7 @@ export function Chef() {
       <div className="setup-layout">
         <div className="story-heading">
           <h2 className="display mt-3 text-4xl sm:text-5xl">{t('chef.title')}</h2>
-          <p className="mt-5 text-lg leading-relaxed text-muted-foreground">
-            {t('chef.body')}
-          </p>
+          <p className="mt-5 text-lg leading-relaxed text-muted-foreground">{t('chef.body')}</p>
         </div>
         <ol className="setup-list">
           {t('chef.steps', { returnObjects: true }).map(({ title, body }, i) => (
@@ -198,12 +162,17 @@ export function CallToAction() {
   return (
     <section className="story-section story-cta">
       <div className="beans-cta motion-island">
-        <div className="cta-art" aria-hidden="true"><Logo className="cta-mark" /></div>
+        <div className="cta-art" aria-hidden="true">
+          <Logo className="cta-mark" />
+        </div>
         <div className="cta-copy">
           <h2 className="display text-4xl text-foreground sm:text-6xl">{t('cta.title')}</h2>
           <p className="mx-auto mt-4 max-w-md text-muted-foreground">{t('cta.body')}</p>
           <Button asChild size="lg" className="mt-8 h-12 rounded-full px-7 text-base">
-            <Link viewTransition to={downloadPath(i18n.language)}>{t('nav.download')}<ArrowUpRight size={18} aria-hidden="true" /></Link>
+            <Link viewTransition to={downloadPath(i18n.language)}>
+              {t('nav.download')}
+              <ArrowUpRight size={18} aria-hidden="true" />
+            </Link>
           </Button>
         </div>
       </div>
@@ -212,23 +181,5 @@ export function CallToAction() {
 }
 
 export function Footer() {
-  const { t, i18n } = useTranslation()
-  return (
-    <footer className="border-t">
-      <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 px-5 py-8 text-sm text-muted-foreground sm:flex-row">
-        <div className="flex items-center gap-2">
-          <Logo className="size-5" />
-          <span>© {new Date().getFullYear()} Beans</span>
-        </div>
-        <nav className="flex flex-wrap justify-center gap-x-6 gap-y-3">
-          <a href="/privacy.html" className="hover:text-foreground">{t('footer.privacy')}</a>
-          <a href="/support.html" className="hover:text-foreground">{t('footer.support')}</a>
-          <SectionLink id="faq" className="hover:text-foreground">{t('footer.faq')}</SectionLink>
-          <Link viewTransition to={docsPath(i18n.language)} className="hover:text-foreground">{t('nav.docs')}</Link>
-          <Link viewTransition to={downloadPath(i18n.language)} className="hover:text-foreground">{t('footer.download')}</Link>
-          <LanguageLink className="hover:text-foreground" />
-        </nav>
-      </div>
-    </footer>
-  )
+  return <MarketingFooter />
 }

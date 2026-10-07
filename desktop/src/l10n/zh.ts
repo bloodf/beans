@@ -408,6 +408,7 @@ export const zh: Record<string, string> = {
   "Lorca adds %@ to it.": "Lorca 会在其后加上 %@。",
   "Lorca checks each action before it runs and asks you first when needed. Add rules to customize what bots can do automatically.": "Lorca 会在每个操作执行前进行检查，必要时先询问你。添加规则可自定智能体能自动执行的操作。",
   "Lorca checks the server, then shares it with your paired Devices, encrypted.": "Lorca 会先检查服务器，再加密共享给你配对的设备。",
+  "Lorca CLI": "Lorca CLI",
   "Lorca Help": "Lorca 帮助",
   "Lorca runs on Devices you own": "Lorca 运行在你自己的设备上",
   "Lorca talks only to the CLI on this computer. Nothing here is synced; each Device keeps its own settings.": "Lorca 只与这台电脑上的 CLI 通信。这里的设置不会同步，每台设备各自保存。",

@@ -73,6 +73,13 @@ enum Command {
         #[usage(subcommand)]
         command: ChatsCommand,
     },
+    /// CLI self-update is unavailable in Beans; use the signed Beans update mechanism.
+    SelfUpdate,
+    /// Keep lorca serve running in the background, from login on and whenever it stops.
+    Service {
+        #[usage(subcommand)]
+        command: ServiceCommand,
+    },
     /// Show identity, Devices, bots, and relay state.
     Status,
     /// Check the local setup.
@@ -230,6 +237,24 @@ enum ChatsCommand {
 }
 
 #[derive(Subcommands, Debug)]
+enum ServiceCommand {
+    /// Start lorca serve now and at every login: a launchd agent on macOS, a systemd user unit on
+    /// Linux, a sign-in item on Windows.
+    Install,
+    /// Stop lorca serve and no longer start it at login.
+    Uninstall,
+    /// Whether the service is installed and running, and where its log is.
+    Status,
+    /// The supervisor a sign-in starts on Windows.
+    #[usage(hide)]
+    Run {
+        /// A variable for lorca serve, as NAME=value.
+        #[usage(long)]
+        env: Vec<String>,
+    },
+}
+
+#[derive(Subcommands, Debug)]
 enum MarketplaceCommand {
     /// Fetch the configured marketplace feed now, rather than at the next hourly check.
     Reload,
@@ -257,19 +282,26 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| if quiet { "lorca=warn,lorca_agent=warn".into() } else { "lorca=info,lorca_agent=info".into() }))
         .with_target(false)
+        // Colors for a terminal; a service's log file or journal gets plain text.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .with_writer(std::io::stderr)
         .init();
 
     let config = Config::load(cli.home, cli.port);
-    // Update control speaks only to the running service; it opens no data folder.
-    if let Command::Update { command } = command {
-        return update(config.port, command).await;
-    }
+    // Update control and service management open no account data folder.
+    let command = match command {
+        Command::Update { command } => return update(config.port, command).await,
+        Command::Service { command } => return service(&config, command).await,
+        Command::SelfUpdate => anyhow::bail!("{}", lorca::update::UNAVAILABLE),
+        command => command,
+    };
     let app = App::load(config)?;
 
     match command {
         Command::Serve { parent_pid, ready_stdout } => {
             app.close_orphan_proposals()?;
+            lorca::service::trim_log();
+            lorca::update::start(&app);
             runtime::resume_sent_jobs(&app);
             // A command a Lorca that quit left waiting went with it; its row says so now.
             {
@@ -363,6 +395,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Marketplace { command: MarketplaceCommand::Reload } => reload(&app, "marketplace.reload", lorca::marketplace::enable, "marketplace").await,
         Command::Models { command: ModelsCommand::Reload } => reload(&app, "models.reload", lorca::catalog::enable, "model catalog").await,
         Command::Chats { command } => chats(&app, command).await,
+        Command::SelfUpdate => unreachable!("disabled before the data folder opens"),
+        Command::Service { .. } => unreachable!(),
         Command::Status => {
             let snapshot = app.snapshot();
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
@@ -954,6 +988,58 @@ async fn reload(app: &std::sync::Arc<App>, method: &str, enable: fn(&App), what:
     Ok(())
 }
 
+/// `lorca service`.
+async fn service(config: &Config, command: ServiceCommand) -> anyhow::Result<()> {
+    use lorca::service;
+    match command {
+        ServiceCommand::Install => {
+            // Another lorca serve on the port would keep the service's from starting.
+            if !service::status(config).running.is_some() && serve_call(config.port, "hello", &serde_json::json!({})).await?.is_some() {
+                anyhow::bail!(
+                    "A lorca serve already answers on port {}. Stop it first; on a computer with the Lorca app, the app runs lorca serve itself.",
+                    config.port
+                );
+            }
+            let status = service::install(config)?;
+            match status.running {
+                Some(pid) => println!("lorca serve runs in the background (pid {pid}) and starts again at every login. Log: {}", status.log),
+                None => println!("Installed the service, but lorca serve is not running yet. Log: {}", status.log),
+            }
+        }
+        ServiceCommand::Uninstall => {
+            if service::uninstall(config)? {
+                println!("Stopped lorca serve; it no longer starts at login.");
+            } else {
+                println!("The service is not installed.");
+            }
+        }
+        ServiceCommand::Status => {
+            let status = service::status(config);
+            match (status.installed, status.running) {
+                (true, Some(pid)) => println!("Installed, running (pid {pid}). Log: {}", status.log),
+                (true, None) => println!("Installed, not running. Log: {}", status.log),
+                (false, _) => println!("Not installed. Run lorca service install to keep lorca serve running."),
+            }
+        }
+        ServiceCommand::Run { env } => {
+            #[cfg(windows)]
+            {
+                let env: Vec<(String, String)> = env.iter().filter_map(|pair| pair.split_once('=')).map(|(name, value)| (name.to_string(), value.to_string())).collect();
+                for (name, value) in &env {
+                    std::env::set_var(name, value);
+                }
+                let config = Config::load(None, None);
+                return service::supervise(&config, &env);
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = env;
+                anyhow::bail!("lorca service run is the supervisor on Windows; elsewhere the system's own service manager runs lorca serve.");
+            }
+        }
+    }
+    Ok(())
+}
 
 /// One request to the `lorca serve` on `port`; `None` when nothing listens there.
 async fn serve_call(port: u16, method: &str, params: &serde_json::Value) -> anyhow::Result<Option<Result<serde_json::Value, String>>> {

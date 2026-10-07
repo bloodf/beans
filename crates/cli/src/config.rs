@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_PORT: u16 = 4862;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const SELF_UPDATE_UNAVAILABLE: &str = "CLI self-update is unavailable in Beans; use the signed Beans update mechanism.";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -64,6 +65,12 @@ impl Config {
         self.home.join("mcp.json")
     }
 
+    /// The CLI's own updates: the last check, a restart into a new release under way, and a
+    /// release that went back.
+    pub fn update_path(&self) -> PathBuf {
+        self.home.join("update.json")
+    }
+
     pub fn ensure_home(&self) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.home)?;
         set_private(&self.home)?;
@@ -79,6 +86,9 @@ pub struct Settings {
     /// An explicit marketplace feed override; otherwise use the selected relay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marketplace_url: Option<String>,
+    /// Retained self-update preference; Beans does not enable the unadapted updater.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
 }
 
 impl Settings {

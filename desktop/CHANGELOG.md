@@ -16,6 +16,54 @@ and the update window shows it.
 - Manage MCP servers in Settings › Plugins: add a command or URL, edit its configuration, sign in, toggle tools, and reload `mcp.json`. Taskbar titles name the current chat or pane followed by the app name.
 - Built-in model and marketplace catalogs update from the selected Beans relay, with a bundled offline fallback; bots can change their own or a teammate's model and supported thinking level.
 - A running codemode script shows its latest command in the working row; reviewed script commands and MCP resources use the same per-bot controls as direct tools.
+- Devices report their CLI version. Standalone Runners support `lorca service install`; CLI self-update remains unavailable in Beans.
+
+## [0.1.3]
+
+- The marketplace comes from lorca.app, so new plugins and bots show up without an update, and
+  plugins you installed from it get their fixes the same way. Lorca checks when it starts, when the
+  app connects, and when you or a bot look through the marketplace, at most once an hour, and a bot
+  that can't find a plugin you asked for checks again first. `lorca marketplace reload` checks
+  right away.
+- A bot's scripts can run commands, edit files, and use its memory, as pi's do, not just read and
+  write files and call plugins. A script can run a command for each project or file it finds, keep
+  going when one fails, and hand the bot only what matters. Auto-review checks each command with
+  the script that runs it, and one that needs your permission asks in the chat.
+- While a bot's script runs a command, the working row says which, as it does for a command the
+  bot runs itself, and bots can read a plugin's whole instructions from its server, not just their
+  start.
+- Window titles end with ` - Lorca`, so the taskbar and Alt+Tab say which app a chat belongs
+  to.
+
+## [0.1.2]
+
+- Your own MCP servers: Settings › Plugins has an MCP Servers section, where you add a server by
+  the command that runs it or its URL, or paste its JSON from a README or another app's settings,
+  and edit, turn off, or remove it. Each server shows how it stands and the tools it offers, with
+  Sign in when it asks for one, and every bot on that computer can use it. Lorca keeps them in
+  `mcp.json` in its folder, in the format Claude Desktop, Cursor, and Claude Code use; after
+  editing the file by hand, click Reload. Servers that offer resources, such as files or records,
+  give bots tools to list and read them. Pick another Runner in Settings to manage its servers.
+- MCP servers take a `timeout` for slow tools; can keep tools from bots, with a switch beside each
+  tool on the server's sheet or `toolExposure` in mcp.json, as pi writes it; and can sign in where a
+  server wants an app registered with it, with the redirect port or URL it was registered with, a
+  name to register under, and the authorization server's address when the server names the wrong
+  one. A server that needs more access asks you to sign in again for it.
+- `lorca mcp` lists, adds, removes, turns on or off, hides tools of, reloads, and signs in to or out
+  of MCP servers from a terminal, and `lorca mcp import` adds the servers Claude Desktop, Claude
+  Code, Cursor, Windsurf, VS Code, or Gemini CLI have on the computer.
+- Bots can add an MCP server the marketplace lacks, as its README gives it: the `lorca` command is
+  in their shell, pointed at their Runner, and Auto-review checks each change it makes, asking you
+  when you didn't ask for it.
+- Plugin servers are sturdier. One that fails to start says why, in the words it printed, and one
+  that stopped starts again on the next call instead of failing until Lorca restarts. Stopping a
+  server also stops what it started, such as npx's node; a call you stop is called off at the
+  server; servers start side by side, so a slow one holds up no other; a server's new tools reach
+  bots without a reconnect; and a remote server that is busy for a moment is tried again. A server
+  whose tool list never ends no longer hangs while it connects, and an image a tool returns that no
+  model takes, such as an SVG, is named instead of failing every later turn of the chat. A bot that
+  calls a tool by a wrong name hears the closest right ones. A sign-in is never sent to another
+  host when a server's address changes, and a plugin's sheet now has Sign Out beside Sign in again.
 - Custom providers: Add Provider… in Settings' Providers pane adds OpenAI, OpenRouter, Gemini,
   Groq, Together AI, Ollama, LM Studio, or any other server that speaks OpenAI's Chat Completions
   or Responses API or Anthropic's Messages API, such as a gateway or a model server on your

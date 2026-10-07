@@ -449,6 +449,9 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
         if !unknown {
             rows.append(KeyValueRow(key: L("OS"), value: "\(device.os.displayName) · \(device.osVersion)"))
         }
+        if !device.version.isEmpty {
+            rows.append(KeyValueRow(key: L("Lorca CLI"), value: device.version))
+        }
         rows.append(
             KeyValueRow(
                 key: L("Role"),
@@ -474,6 +477,7 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
         rows.append(unpair)
         machineSection.setRows(rows)
     }
+
 }
 
 final class DeviceHeaderView: NSView {

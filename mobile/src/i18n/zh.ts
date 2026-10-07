@@ -211,6 +211,7 @@ export const zh: Record<string, string> = {
   "Look": "外观",
   "Look for": "外观适用于",
   "Love": "喜爱",
+  "Lorca CLI": "Lorca CLI",
   "Low": "低",
   "Machine": "机器",
   "Machine key": "机器密钥",

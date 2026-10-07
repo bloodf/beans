@@ -2,6 +2,8 @@
 
 `crates/cli`, binary `lorca`. Local websocket for the app. Files live under the private data directory: `~/.lorca/` by default and for standalone Lorca, `~/.lorca-dev/` when launched by the Windows/Linux development app, or the explicit `--home` / `LORCA_HOME`. The macOS Beans bundles set `~/.beans/` (port `4864`) and `~/.beans-dev/` (port `4865`) respectively. It contains `identity.json` (master secret, identity devices only), `machine.json` (machine secret, identity and content public keys, account DEK, `name`, `os`), `credentials.json` (the account’s providers, as last merged), `settings.json` (relay URL), `lorca.sqlite3` (WAL-mode plaintext local state), and `files/<attachment id>` (attachment bytes, sent from here or fetched from the relay). SQLite holds devices, bots, chat metadata, routines, Auto-review, usage, compactions, sync bookkeeping, messages, the durable relay outbox, the jobs this Device has asked other Runners to do, and pending plugin actions.
 
+The home also holds private `mcp.json`, source-bound `catalog.json` and `marketplace.json` caches, and `plugins/`. JSON/database files are mode 0600 inside the mode-0700 home; SQLite keeps its WAL/SHM companions there. The retained updater's `update.json` is not read or mutated while CLI self-update is disabled.
+
 Commands:
 
 - `lorca serve` — the app connects here; `lorca` alone lists the commands and starts nothing, so a bot's `lorca` never starts a second service
@@ -12,6 +14,8 @@ Commands:
 - `lorca marketplace reload` / `lorca models reload` — force a check of the configured public feed through the running service, or update its source-bound cache for the next startup. Bundled catalogs remain available offline.
 - `lorca chats list` / `lorca chats set-owner <group> <bot>` — list chats and group owners, or choose a member as owner by case-insensitive title/name or exact id. Ambiguous names require an id. Changes reach the running service over its websocket, or update the local store and run one sync pass.
 - `lorca status` / `doctor`
+- `lorca service install` / `uninstall` / `status` — keep `lorca serve` running from login on ([Service management](service-updates.md#service-management)).
+- `lorca self-update` — reports that CLI self-update is unavailable in Beans, before opening account data or making network requests.
 
 Bind: `127.0.0.1:4862` (`--port`, `LORCA_PORT`). Relay: `LORCA_RELAY_URL`. If the port is busy the CLI fails loudly.
 
@@ -20,19 +24,7 @@ Outgoing requests (providers and their sign-ins, the relay, MCP servers over HTT
 
 Over HTTPS, those requests, lorca.app's, and the relay's sync socket check certificates with one rustls config per process, from `crates/tls` (`lorca-tls`). On macOS and Windows the system decides, through rustls-platform-verifier: the Keychain or the Windows certificate store, as in the browser, so a root an administrator installed for a TLS-inspecting proxy such as Zscaler is trusted. `SSL_CERT_FILE` there names a PEM file of more roots to trust beside the system's; a file that does not read is logged and skipped. On Linux the CLI trusts the system's CA store, or what `SSL_CERT_FILE` and `SSL_CERT_DIR` name in its place (rustls-native-certs), together with the Mozilla roots it carries (webpki-roots), so a container without a CA store still connects. The phone core trusts the carried roots alone. `reqwest::Client::new()` would trust only reqwest's bundled roots, so Device code builds its clients with `lorca_tls::client()` or `client_builder()` (HTTP/1.1); the MCP client, on reqwest 0.13, takes `client_config` and offers h2. A provider check or turn whose request fails reads `lorca_tls::describe`: reqwest's words, then the last cause in the chain, so a certificate the system does not trust says `invalid peer certificate` where a refused connection says so.
 
-## Installing the CLI
-
-The website's `install-cli.sh` / `install-cli.ps1` download `lorca` from stable `beans-v<root version>` releases in `bloodf/beans`. They select macOS arm64, Linux arm64/x86-64 or Windows x86-64, check the adjacent SHA-256 checksum, rename the executable into `~/.local/bin` (or `LORCA_INSTALL_DIR`), and update shell/user PATH unless `LORCA_NO_MODIFY_PATH=1`. `LORCA_VERSION` selects a release; the installed CLI reports its Cargo component version. Linux uses static musl; Windows uses the Universal CRT and Git for Windows' bash (`LORCA_SHELL` can select another shell). See [release and server-update mechanisms](../releasing-cli.md).
-
-Stable publication defaults to server scope, which supplies Linux CLI archives; macOS and Windows standalone installs need `LORCA_VERSION` selecting a full release with their archive. The adjacent checksum is archive-integrity checking, not signed automatic-update readiness. The server updater verifies the schema-1 manifest and detached Ed25519 signature against the Beans public anchor, requires its server/updater inventory, and derives asset URLs from the fixed release repository.
-
-## Runner update drain
-
-`lorca update status|prepare|cancel` talks only to an existing local service. `LORCA_UPDATE_TOKEN_FILE` enables token-authenticated prepare/cancel; without it, mutations are disabled. A renewable lease closes new admission under the same lock used by work producers while existing turns, rooms, routines, routine checks, commands left running, command continuations and remote waits finish. Renewing an unexpired lease retains its id; a restart drops the lease. Status is ready only while a lease is prepared and admitted work and running jobs are empty; it reports the Runner pid, active/jobs counts and remaining lifetime. Cancel or expiry resumes admission and wakes sync. Account Pause is unchanged.
-
-The relay sync cursor stops before an envelope it cannot admit, preserving queued work. While held, sync continues polling controls and completion envelopes: account Pause policy, running-job Stop and requests answering or controlling existing work still apply, as do `job_result` envelopes matching a pending `job_id` and `response` envelopes matching a pending `request_id`. These completions let already-admitted running waits finish under the lease without advancing the held cursor or admitting queued jobs. Unmatched completions and cancellations for jobs not running here remain on the relay for the main pull. Held envelopes replay after the lease ends; policy replays by version and consumed envelopes replay as no-ops, preserving deduplication. The external signed updater upgrades and verifies the relay first, then drains/replaces Runners. Installing this control into an old Runner is an explicit bootstrap operation. Binary/catalog rollback never silently restores an incompatible database.
-
-The macOS app uses this same admission control for installation, not a snapshot-only guard: its launcher supplies the build-home `native-update-token`, and guarded quit takes a 1,800-second lease before rechecking work, signed readiness and actual selected-relay health. Final status, Runner process identity, the conservative monotonic lease deadline and native draft/quit safety must still permit installation. The lease remains held across a postponed Sparkle handoff; failed/canceled quits release it without stopping admitted work. An external CLI needs compatible drain control and the matching native token. See [the macOS updater](macos-app.md) and [native drain prerequisites](../releasing-mac.md#atomic-runner-admission-drain).
+Installation, standalone services and Runner admission drain are described in [CLI service and updates](service-updates.md).
 
 ## Agent loop
 

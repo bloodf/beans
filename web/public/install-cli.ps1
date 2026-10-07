@@ -1,8 +1,8 @@
-# Installs the Lorca CLI on Windows: https://lorca.app/docs/cli
+# Installs the Beans CLI on Windows: https://usebeans.app/docs/cli
 #
-#   irm https://lorca.app/install-cli.ps1 | iex
+#   irm https://usebeans.app/install-cli.ps1 | iex
 #
-# It downloads the Windows build from the latest release of github.com/egoist/lorca, checks it
+# It downloads the Windows build from the latest bloodf/beans release, checks it
 # against the checksum published beside it, puts lorca.exe in ~\.local\bin, and adds that folder
 # to your user PATH. Run it again to update. Settings, as environment variables set before it
 # runs:
@@ -106,11 +106,11 @@
     $lorcaHome = $env:LORCA_HOME
     if (-not $lorcaHome) { $lorcaHome = Join-Path $HOME '.lorca' }
     if (Test-Path (Join-Path $lorcaHome 'machine.json')) {
-        Write-Host 'If lorca serve is running, restart it to run the new version.'
+        Write-Host 'If lorca serve is running, restart it to run the new version. CLI self-update is unavailable in Beans.'
     } else {
         Write-Host 'To make this computer a Runner, pair it with your account and start the service:'
         Write-Host "  lorca pair 'lorca://pair?...'   # from Pair a Device in the app"
-        Write-Host '  lorca serve'
+        Write-Host '  lorca service install           # runs lorca serve now and at every sign-in'
     }
-    Write-Host 'Docs: https://lorca.app/docs/cli'
+    Write-Host 'Docs: https://usebeans.app/docs/cli'
 }

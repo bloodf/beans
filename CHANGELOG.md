@@ -7,6 +7,9 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 ## [Unreleased]
 
 - Beans uses unified signed GitHub release readiness for relay-first server updates and guarded desktop install-on-quit, with Android APK and ad-hoc iOS IPA release assets.
+- `lorca service install` keeps a standalone Runner running from login on. Devices report their CLI version; the unadapted upstream CLI self-updater remains disabled in Beans, including discovery and installation.
+
+## [0.1.10]
 
 - Group inspectors offer Make Owner, and `lorca chats list` / `chats set-owner` expose the same group ownership from the terminal.
 - Lossless PNG optimizations reduce bundled image sizes without changing their decoded pixels.

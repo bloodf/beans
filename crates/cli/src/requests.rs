@@ -91,8 +91,9 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String, running: crate::u
 /// What this Runner can be asked. The memory verbs check that the bot runs here: a request
 /// that reached the wrong machine is refused, not forwarded. The plugin verbs act on this
 /// Runner's own installs, and the `mcp.*` verbs on its mcp.json; the permission verb answers a
-/// card a bot here is waiting on; the bash verbs type into, or stop, a command a bot here left
-/// waiting; Send now has a turn here read a message it holds.
+/// card a bot here is waiting on; the bash verbs type into, stop, or background a command here;
+/// Send now has a turn here read a message it holds. The separate self_update verbs
+/// remain fail-closed in Beans; update.status/prepare/cancel belong to local drain control.
 async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     let body = &request.body;
     match request.verb.as_str() {
@@ -121,6 +122,10 @@ async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
             let message_id = body["message_id"].as_str().ok_or("missing message_id")?;
             crate::turns::send_now(app, chat_id, message_id).map(|sent| json!({ "sent": sent }))
         }
+        #[cfg(feature = "cli")]
+        "self_update.install" => crate::update::install_now(app).await,
+        #[cfg(feature = "cli")]
+        "self_update.auto" => crate::update::set_auto(app, body["on"].as_bool().ok_or("missing on")?),
         other => Err(format!("Unknown request {other}")),
     }
 }

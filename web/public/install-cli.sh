@@ -49,7 +49,7 @@ detect_target() {
 	case $os in
 		Darwin) os=macos ;;
 		Linux) os=linux ;;
-		MINGW* | MSYS* | CYGWIN*) die "on Windows, install from PowerShell: irm https://lorca.app/install-cli.ps1 | iex" ;;
+		MINGW* | MSYS* | CYGWIN*) die "on Windows, install from PowerShell: irm https://usebeans.app/install-cli.ps1 | iex" ;;
 		*) die "there is no Lorca CLI for $os yet" ;;
 	esac
 	case $cpu in
@@ -174,11 +174,11 @@ main() {
 
 	say ""
 	if [ -f "${LORCA_HOME:-$HOME/.lorca}/machine.json" ]; then
-		say "If lorca serve is running, restart it to run the new version."
+		say "If lorca serve is running, restart it to run the new version. CLI self-update is unavailable in Beans."
 	else
 		say "To make this computer a Runner, pair it with your account and start the service:"
 		say "  lorca pair 'lorca://pair?...'   # from Pair a Device in the app"
-		say "  lorca serve"
+		say "  lorca service install           # runs lorca serve now and at every login"
 	fi
 	say "Docs: https://lorca.app/docs/cli"
 }

@@ -51,6 +51,8 @@ pub async fn run(app: Arc<App>) {
                 let outdated = error.is_update_required();
                 if outdated && !app.relay_update_required.swap(true, Ordering::Relaxed) {
                     app.emit_relay_status();
+                    #[cfg(feature = "cli")]
+                    crate::update::relay_refused(&app);
                 }
                 // A try that never connected says why, until one does. A socket that worked and
                 // then ended says nothing, since the next try usually connects, and neither does
@@ -1617,7 +1619,7 @@ mod tests {
         let entry = snapshot["devices"].as_array().unwrap().iter().find(|d| d["id"] == silent.as_str()).unwrap();
         assert_eq!((entry["name"].as_str(), entry["os"].as_str(), entry["is_this_device"].as_bool()), (Some(""), Some(""), Some(false)));
 
-        let device = Device { id: silent.clone(), name: "Laptop".into(), model: String::new(), os: "windows".into(), os_version: String::new(), box_pubkey: String::new(), plugins: Vec::new(), updated_at: now };
+        let device = Device { id: silent.clone(), name: "Laptop".into(), model: String::new(), os: "windows".into(), os_version: String::new(), box_pubkey: String::new(), plugins: Vec::new(), version: String::new(), update: None, updated_at: now };
         upsert_device(&mut app.state.lock().unwrap().devices, device);
         assert!(unknown().is_empty(), "its blob landed");
         assert!(settle_unknown_machines(app));
@@ -2909,7 +2911,7 @@ mod tests {
         let paired = crate::keys::Machine::generate();
         let before = MachineBlob { device: Device { id: paired.pubkey(), name: "Paired laptop".into(),
             model: String::new(), os: "macos".into(), os_version: String::new(), box_pubkey: paired.box_pubkey(),
-            plugins: Vec::new(), updated_at: 1 }, turns: Vec::new() };
+            plugins: Vec::new(), version: String::new(), update: None, updated_at: 1 }, turns: Vec::new() };
         let mut after = before.clone();
         after.device.name = "Renamed laptop".into();
         after.device.updated_at = 3;
@@ -3045,7 +3047,7 @@ mod tests {
         {
             let mut state = app.state.lock().unwrap();
             state.devices.push(Device { id: runner.pubkey(), name: "Other Runner".into(), model: String::new(), os: "linux".into(),
-                os_version: String::new(), box_pubkey: runner.box_pubkey(), plugins: Vec::new(), updated_at: 1 });
+                os_version: String::new(), box_pubkey: runner.box_pubkey(), plugins: Vec::new(), version: String::new(), update: None, updated_at: 1 });
             state.device_online.insert(runner.pubkey());
             state.last_seq = 1;
         }

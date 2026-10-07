@@ -825,6 +825,7 @@ function DevicePane() {
               <Show when={current().os !== "unknown"}>
                 <KeyValueRow label={L("OS")} value={`${osDisplayName(current().os)} · ${current().osVersion}`} />
               </Show>
+              <Show when={current().version}><KeyValueRow label={L("Lorca CLI")} value={current().version} /></Show>
               <KeyValueRow label={L("Role")} value={isRunner(current()) ? L("Runner · runs bots with its own credentials") : L("Device · never runs bots")} />
               <KeyValueRow label={L("Last seen")} value={current().status === "online" ? L("Active now") : Format.lastSeen(current().lastSeen)} />
               <KeyValueRow label={L("Relay")} value={relay()} monospaced />
@@ -842,6 +843,7 @@ function DevicePane() {
     </PaneFrame>
   );
 }
+
 
 // MARK: - The small window
 

@@ -48,6 +48,8 @@ lorca-cli-windows-x86_64.zip
 
 The scripts choose the computer's OS/CPU, verify the adjacent checksum and replace the executable by rename. `LORCA_VERSION` selects a root release version; `lorca --version` reports the Cargo component version. `LORCA_INSTALL_DIR`, `LORCA_NO_MODIFY_PATH` and `LORCA_DOWNLOAD_URL` retain their existing installer meanings. An Intel Mac and Windows on Arm are not supplied. The standalone CLI checksums protect archive integrity; they are not the signed automatic-update readiness verifier.
 
+Standalone CLI self-update is unavailable in Beans, even with `LORCA_SELF_UPDATE` set at compile time. Discovery and installation entry points reject before HTTP or file changes; no competing CLI publication workflow is enabled. Beans updates use the signed readiness and drain mechanisms below.
+
 When the latest release is server-only, Mac and Windows standalone CLI installers need `LORCA_VERSION` selecting a full release that actually contains their archive. The installers do not synthesize missing platform assets.
 
 ## Server and Runner updates

@@ -177,6 +177,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             }
             Ok(Value::Null)
         }
+        // Beans never asks another Device to install from the unadapted upstream feed.
+        "device.update" | "device.auto_update" => Err(crate::config::SELF_UPDATE_UNAVAILABLE.into()),
         "identity.forget" => {
             crate::sync::revoke_self(app).await;
             app.forget_identity().map_err(|e| e.to_string())?;

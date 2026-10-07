@@ -1,12 +1,15 @@
 /* Product-led bento and interactive preview. */
 .beans-hero {
-  min-height: 0;
-  padding-block: 3rem 1rem;
-  grid-template-columns: 1.3fr 0.7fr;
+  max-width: none;
+  min-height: clamp(640px, calc(100svh - 72px), 860px);
+  padding-block: clamp(4rem, 7vh, 6rem) clamp(4rem, 8vh, 7rem);
+  padding-inline: max(var(--site-gutter), calc((100% - var(--site-width)) / 2 + var(--site-gutter)));
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: clamp(2rem, 5vw, 6rem);
 }
 .beans-hero .hero-scene {
-  width: min(100%, 370px);
-  justify-self: end;
+  width: min(100%, 540px);
+  justify-self: center;
 }
 .hero-free {
   color: var(--foreground);
@@ -718,17 +721,17 @@
 }
 @media (max-width: 767px) {
   .beans-hero {
-    grid-template-columns: 1fr;
-    padding-block: 38px 0;
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+    padding-block: 3rem 2rem;
+    gap: 1.5rem;
   }
   .beans-hero .hero-scene {
-    position: absolute;
-    right: -70px;
-    top: 5px;
-    width: 220px;
-    opacity: 0.14;
-    z-index: 0;
-    pointer-events: none;
+    position: relative;
+    width: min(100%, 320px);
+    justify-self: center;
+    margin-top: 0;
+    opacity: 1;
   }
   .hero-copy {
     z-index: 1;
@@ -923,6 +926,10 @@
 }
 .beans-hero > .gradient-wash {
   border-radius: 0;
+  mask-image: linear-gradient(to bottom, transparent, black 18%, black 65%, transparent);
+  background:
+    radial-gradient(ellipse at 78% 42%, rgb(242 103 68 / 20%), transparent 55%),
+    radial-gradient(ellipse at 26% 60%, rgb(239 172 126 / 10%), transparent 60%);
 }
 .site-language-select {
   width: 136px;

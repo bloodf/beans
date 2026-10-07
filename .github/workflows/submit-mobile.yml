@@ -1,0 +1,47 @@
+name: Submit Beans mobile testing
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Finalized beans-v<root version> release
+        required: true
+        type: string
+      platform:
+        required: true
+        type: choice
+        options: [android, ios]
+permissions:
+  contents: read
+concurrency:
+  group: beans-submit-${{ inputs.tag }}-${{ inputs.platform }}
+  cancel-in-progress: false
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    environment: mobile-submit
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      BEANS_EXPO_OWNER: ${{ vars.BEANS_EXPO_OWNER }}
+      BEANS_EXPO_PROJECT_ID: ${{ vars.BEANS_EXPO_PROJECT_ID }}
+      BEANS_APPLE_TEAM_ID: ${{ vars.BEANS_APPLE_TEAM_ID }}
+      BEANS_ASC_APP_ID: ${{ vars.BEANS_ASC_APP_ID }}
+      BEANS_ASC_KEY_ID: ${{ secrets.BEANS_ASC_KEY_ID }}
+      BEANS_ASC_ISSUER_ID: ${{ secrets.BEANS_ASC_ISSUER_ID }}
+      BEANS_ASC_KEY_P8: ${{ secrets.BEANS_ASC_KEY_P8 }}
+      BEANS_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.BEANS_PLAY_SERVICE_ACCOUNT_JSON }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: oven-sh/setup-bun@v2
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      - run: bun install --frozen-lockfile && bun install --cwd mobile --frozen-lockfile
+      - name: Verify signed release and submit exact recorded build to testing only
+        env:
+          TAG: ${{ inputs.tag }}
+          PLATFORM: ${{ inputs.platform }}
+        run: bun run scripts/submit-eas.ts "$TAG" "$PLATFORM"

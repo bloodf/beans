@@ -2,7 +2,7 @@
 // xcframework plus Swift bindings under ios/, shared libraries plus Kotlin bindings under
 // android/. Run from mobile/: `bun run core` (or `bun run core ios` / `bun run core android`).
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { androidNdk, hostLibrary } from "../../../scripts/release-build-inputs.ts";
 import { join, resolve } from "node:path";
 
 const MODULE = import.meta.dir;
@@ -19,24 +19,15 @@ async function run(cmd: string[], env: Record<string, string> = {}) {
   if (code !== 0) throw new Error(`${cmd[0]} exited with ${code}`);
 }
 
-function ndkHome(): string {
-  if (process.env.ANDROID_NDK_HOME) return process.env.ANDROID_NDK_HOME;
-  const sdk = process.env.ANDROID_HOME ?? join(homedir(), "Library/Android/sdk");
-  const versions = readdirSync(join(sdk, "ndk")).sort();
-  const latest = versions.at(-1);
-  if (!latest) throw new Error("No Android NDK under " + join(sdk, "ndk"));
-  return join(sdk, "ndk", latest);
-}
-
 // The host dylib carries the UniFFI metadata the bindings are generated from. It takes the
 // generator's features: a cdylib's file name carries no feature hash, so builds with two feature
 // sets overwrite each other's outputs and both crates compile again on every run.
-await run(["cargo", "build", "-p", "lorca-mobile", "--features", "bindgen"]);
-const bindgen = ["cargo", "run", "-q", "-p", "lorca-mobile", "--features", "bindgen", "--bin", "uniffi-bindgen", "--", "generate", "--library", join(TARGET, "debug/liblorca_mobile.dylib")];
+await run(["cargo", "build", "--locked", "-p", "lorca-mobile", "--features", "bindgen"]);
+const bindgen = ["cargo", "run", "--locked", "-q", "-p", "lorca-mobile", "--features", "bindgen", "--bin", "uniffi-bindgen", "--", "generate", "--library", join(TARGET, "debug", hostLibrary(process.platform))];
 
 if (wantIos) {
-  await run(["cargo", "build", "-p", "lorca-mobile", "--release", "--target", "aarch64-apple-ios"]);
-  await run(["cargo", "build", "-p", "lorca-mobile", "--release", "--target", "aarch64-apple-ios-sim"]);
+  await run(["cargo", "build", "--locked", "-p", "lorca-mobile", "--release", "--target", "aarch64-apple-ios"]);
+  await run(["cargo", "build", "--locked", "-p", "lorca-mobile", "--release", "--target", "aarch64-apple-ios-sim"]);
   const generated = join(MODULE, "ios/generated");
   rmSync(generated, { recursive: true, force: true });
   await run([...bindgen, "--language", "swift", "--out-dir", generated]);
@@ -66,7 +57,7 @@ if (wantIos) {
 if (wantAndroid) {
   const jniLibs = join(MODULE, "android/src/main/jniLibs");
   rmSync(jniLibs, { recursive: true, force: true });
-  await run(["cargo", "ndk", "-t", "arm64-v8a", "-t", "x86_64", "-o", jniLibs, "build", "-p", "lorca-mobile", "--release"], { ANDROID_NDK_HOME: ndkHome() });
+  await run(["cargo", "ndk", "-t", "arm64-v8a", "-t", "x86_64", "-o", jniLibs, "build", "--locked", "-p", "lorca-mobile", "--release"], { ANDROID_NDK_HOME: androidNdk(process.env, process.platform) });
   const java = join(MODULE, "android/src/main/java");
   rmSync(join(java, "uniffi"), { recursive: true, force: true });
   await run([...bindgen, "--language", "kotlin", "--no-format", "--out-dir", java]);

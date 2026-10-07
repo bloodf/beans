@@ -94,7 +94,7 @@ function RowView(props: { row: ChatRow; chat: Chat; onReply: (message: Message) 
   const showsAvatar = () => group() && message()?.author.kind === "bot";
   const cardAvatar = () => {
     track.roster();
-    return showsAvatar() && message() ? authorAvatar(message()!.author) : undefined;
+    return showsAvatar() && message() ? authorAvatar(message()!.author, props.chat.id) : undefined;
   };
   return (
     <Switch>
@@ -110,6 +110,7 @@ function RowView(props: { row: ChatRow; chat: Chat; onReply: (message: Message) 
           return (
             <WorkingCell
               bots={bots()}
+              chatID={props.chat.id}
               activity={activity(botIDs(), props.chat)}
               showsName={group()}
             />
@@ -150,7 +151,7 @@ function RowView(props: { row: ChatRow; chat: Chat; onReply: (message: Message) 
         {(marker) => {
           const handoff = () => handoffMode(marker(), props.chat);
           return (
-            <Show when={handoff()}>{(value) => <HandoffCell mode={value().mode} reason={value().reason} groupStart={groupStart()} />}</Show>
+            <Show when={handoff()}>{(value) => <HandoffCell mode={value().mode} reason={value().reason} groupStart={groupStart()} chatID={props.chat.id} />}</Show>
           );
         }}
       </Match>

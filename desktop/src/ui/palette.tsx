@@ -461,7 +461,7 @@ function Palette() {
                       {row.item.icon.kind === "symbol" ? (
                         <Icon name={row.item.icon.name} size={16} strokeWidth={1.8} />
                       ) : (
-                        <AvatarCluster contents={row.item.icon.bots.map(botAvatar)} slot={22} />
+                        <AvatarCluster contents={row.item.icon.bots.map((bot) => botAvatar(bot))} slot={22} />
                       )}
                     </span>
                     <span class="palette-title">{highlighted(row.item.title, query())}</span>

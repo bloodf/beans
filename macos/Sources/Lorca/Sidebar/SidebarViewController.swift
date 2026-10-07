@@ -146,10 +146,13 @@ final class SidebarViewController: NSViewController {
             switch event {
             case .chatsChanged, .chatChanged:
                 self?.rebuild()
+            case let .respondingChanged(id), let .messageChanged(id, _), let .messageRemoved(id, _):
+                self?.refreshCells(in: id)
             case .snapshotReplaced:
                 self?.rebuild()
                 self?.footer.update()
             case .connectionChanged, .rosterChanged:
+                self?.rebuild()
                 self?.footer.update()
             default:
                 break
@@ -236,11 +239,12 @@ final class SidebarViewController: NSViewController {
 
     /// Updates the rows the outline view holds cells for, on screen or kept ready beside it.
     /// The other rows get theirs when they scroll into view.
-    private func refreshCells() {
+    private func refreshCells(in chatID: Chat.ID? = nil) {
         guard listInstalled else { return }
         outlineView.enumerateAvailableRowViews { rowView, row in
             guard let cell = rowView.view(atColumn: 0) as? SidebarChatCell,
-                let id = (outlineView.item(atRow: row) as? SidebarNode)?.chatID, let chat = store.chat(id)
+                let id = (outlineView.item(atRow: row) as? SidebarNode)?.chatID,
+                chatID == nil || chatID == id, let chat = store.chat(id)
             else { return }
             cell.configure(SidebarChatCell.Content(chat: chat, store: store))
             cell.shortcutNumber = shortcutNumber(forRow: row)
@@ -502,8 +506,8 @@ final class SidebarSearchBar: NSView, NSSearchFieldDelegate {
         NSLayoutConstraint.activate([
             // Room for the focus ring between the field and the first row.
             heightAnchor.constraint(equalToConstant: 40),
-            field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            field.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarChrome.floats ? 0 : 10),
+            field.trailingAnchor.constraint(equalTo: trailingAnchor, constant: SidebarChrome.floats ? 0 : -10),
             field.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
@@ -590,9 +594,9 @@ final class SidebarFooterView: NSView {
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 38),
-            buttons.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            buttons.leadingAnchor.constraint(equalTo: leadingAnchor, constant: SidebarChrome.floats ? 0 : 10),
             buttons.centerYAnchor.constraint(equalTo: centerYAnchor),
-            marketplace.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            marketplace.trailingAnchor.constraint(equalTo: trailingAnchor, constant: SidebarChrome.floats ? 0 : -10),
             pausedLabel.leadingAnchor.constraint(greaterThanOrEqualTo: buttons.trailingAnchor, constant: 8),
             pausedLabel.trailingAnchor.constraint(lessThanOrEqualTo: marketplace.leadingAnchor, constant: -8),
             pausedLabel.centerYAnchor.constraint(equalTo: buttons.centerYAnchor),

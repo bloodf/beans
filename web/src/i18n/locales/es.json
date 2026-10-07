@@ -1,0 +1,281 @@
+{
+  "motion": {
+    "pause": "Pausar animaciones",
+    "resume": "Reanudar animaciones"
+  },
+  "meta": {
+    "title": "Beans | Equipo de IA en tu ordenador",
+    "description": "Un equipo de IA que trabaja en tu ordenador. Habla con uno o varios bots, deja que trabajen con tus archivos y coordinen las tareas entre ellos."
+  },
+  "nav": {
+    "costs": "Costes",
+    "compare": "Comparar",
+    "turns": "Chats en grupo",
+    "relay": "Privacidad",
+    "tools": "Funciones",
+    "faq": "Preguntas",
+    "docs": "Documentación (en inglés)",
+    "download": "Descargar",
+    "language": "Idioma"
+  },
+  "hero": {
+    "badge": "Tu IA en todos tus dispositivos",
+    "title": "<lead>Tu IA.</lead><br/>Tu <accent>espacio.</accent>",
+    "accessibleTitle": "Tu IA. Tu espacio.",
+    "body": "Convierte una tarea en trabajo en equipo. Dale a tus bots archivos, herramientas y un chat compartido. Tu ordenador ejecuta el trabajo.",
+    "how": "Descubre cómo funciona",
+    "platforms": "Mac, Windows y Linux. Sigue conversando desde el móvil."
+  },
+  "turns": {
+    "eyebrow": "Chats en grupo",
+    "title": "Una tarea. Todo un equipo.",
+    "body": "Reúne a tu investigador, desarrollador y responsable de proyecto en una conversación. Asigna una función a cada bot, menciona al que necesites y deja que los demás aporten cuando tengan algo útil.",
+    "alt": "Beans en macOS: Researcher, Developer y Project Manager preparan un lanzamiento en un chat en grupo con dos Runners."
+  },
+  "relay": {
+    "eyebrow": "Privacidad",
+    "title": "Tu trabajo se queda contigo.",
+    "body": "Tu ordenador ejecuta los bots. El proveedor de IA que elijas genera sus respuestas. Empareja tu móvil para llevarte la conversación, con sincronización cifrada de extremo a extremo entre tus dispositivos.",
+    "alt": "Los datos cifrados pasan del ordenador al móvil a través del relay. Solo tus dispositivos pueden descifrarlos.",
+    "caption": "Ilustración de la sincronización cifrada entre dispositivos.",
+    "states": {
+      "encrypt": "Cifrando",
+      "forward": "Reenviando",
+      "decrypt": "Descifrando"
+    },
+    "nodes": {
+      "computer": {
+        "title": "Tu ordenador",
+        "body": "Cifrado antes de enviar"
+      },
+      "relay": {
+        "title": "Relay",
+        "body": "Reenvía datos cifrados. No puede descifrarlos."
+      },
+      "phone": {
+        "title": "Tu móvil",
+        "body": "Descifrado con tu clave"
+      }
+    }
+  },
+  "tools": {
+    "eyebrow": "Herramientas",
+    "title": "Archivos, comandos y la web.",
+    "body": "Ve más allá de las respuestas. Dale una carpeta a un bot y conecta tus herramientas para que investigue, escriba y haga cambios que puedas revisar.",
+    "kinds": {
+      "files": {
+        "title": "Archivos",
+        "body": "Abre, edita y crea archivos en la carpeta que le asignas y ejecuta comandos allí."
+      },
+      "web": {
+        "title": "Web",
+        "body": "Busca en la web y lee páginas."
+      },
+      "memory": {
+        "title": "Memoria",
+        "body": "Guarda notas entre chats para que no tengas que repetirte."
+      },
+      "plugins": {
+        "title": "Aplicaciones",
+        "body": "Conecta GitHub, Notion, Linear y otras aplicaciones. Primero pide permiso."
+      }
+    }
+  },
+  "chef": {
+    "eyebrow": "Primeros pasos",
+    "title": "Conoce a tu primer compañero.",
+    "body": "Cada cuenta empieza con un bot, Chef. Cuéntale en qué trabajas y te propondrá bots para tareas concretas. Apruébalos y Chef los creará. Puedes cambiarles el nombre o eliminarlos después.",
+    "steps": [
+      {
+        "title": "Crea tu cuenta",
+        "body": "Sin correo ni contraseña. Recibes una frase de recuperación para guardar."
+      },
+      {
+        "title": "Conecta un proveedor de IA",
+        "body": "Inicia sesión con ChatGPT o Grok, o pega una clave API de DeepSeek."
+      },
+      {
+        "title": "Habla con Chef",
+        "body": "Cuéntale en qué trabajas y aprueba los bots que te proponga."
+      },
+      {
+        "title": "Añade otro ordenador",
+        "body": "Pega un código de emparejamiento y elige qué bots se ejecutarán allí."
+      }
+    ]
+  },
+  "faq": {
+    "title": "Preguntas",
+    "items": [
+      {
+        "q": "¿Beans es gratis?",
+        "a": "Sí. Beans cuesta 0 dólares. Pagas directamente a tu proveedor de IA mediante una suscripción compatible o el uso de la API. Sus límites y tarifas se aplican por separado."
+      },
+      {
+        "q": "¿Necesito una cuenta o un servidor?",
+        "a": "Tu frase de recuperación identifica tu cuenta. Los bots trabajan en tu ordenador. El emparejamiento y la sincronización usan un relay que eliges o alojas."
+      },
+      {
+        "q": "¿En qué dispositivos funciona?",
+        "a": "Mac, Windows y Linux, con la aplicación o desde la línea de comandos. iPhone y iPad están en beta para conversar con tus bots. Bots de distintos ordenadores pueden participar en los mismos chats en grupo."
+      },
+      {
+        "q": "¿Qué IA utiliza?",
+        "a": "Tu propia cuenta o clave API. Inicia sesión con ChatGPT o Grok, o añade una clave de DeepSeek. Cada bot puede usar un proveedor distinto y puedes cambiarlo cuando quieras."
+      },
+      {
+        "q": "¿Qué puede hacer un bot en mi ordenador?",
+        "a": "Leer, editar y crear archivos y ejecutar comandos en la carpeta que le asignas. Usa los permisos de tu usuario en ese ordenador y te muestra lo que ha ejecutado."
+      },
+      {
+        "q": "¿Alguien puede leer mis chats?",
+        "a": "Tus dispositivos emparejados pueden leerlos. El relay maneja datos cifrados sin sus claves. El proveedor de IA procesa el contenido que le envías para generar respuestas."
+      }
+    ]
+  },
+  "cta": {
+    "title": "Dale un equipo a tu próxima tarea.",
+    "body": "Descarga Beans, conecta tu proveedor de IA y cuéntale a Chef en qué quieres trabajar."
+  },
+  "docs": {
+    "title": "Documentación de Beans"
+  },
+  "download": {
+    "title": "Descargar Beans",
+    "description": "Consulta las descargas para Mac, Windows, Linux, Android e iOS, o instala la CLI.",
+    "version": "Versión {{version}}",
+    "unavailable": "Todavía no hay una descarga publicada para esta plataforma.",
+    "loadFailed": "No se pudo cargar la última versión. Recarga la página para volver a intentarlo.",
+    "mac": {
+      "title": "Mac",
+      "body": "Habla con tus bots y ejecútalos en tu Mac.",
+      "action": "Descargar para Mac",
+      "system": "macOS {{version}} o posterior",
+      "appleSilicon": "Apple silicon"
+    },
+    "windows": {
+      "title": "Windows",
+      "body": "Habla con tus bots y ejecútalos en tu PC Windows. Los comandos usan el bash incluido en <git>Git for Windows</git>, así que instálalo también.",
+      "action": "Descargar para Windows",
+      "system": "x64"
+    },
+    "linux": {
+      "title": "Linux",
+      "body": "Habla con tus bots y ejecútalos en tu ordenador Linux. El comando instala Beans en tu carpeta personal, sin root, y Beans se mantiene actualizado.",
+      "action": "Descargar para Linux",
+      "deb": "O instala el paquete Debian para <amd64>x64</amd64> o <arm64>Arm64</arm64>. Se actualiza cuando instalas la siguiente versión.",
+      "system": "x64 y Arm64"
+    },
+    "ios": {
+      "title": "iPhone y iPad",
+      "body": "Habla con tus bots mientras siguen trabajando en el ordenador. Escanea el QR de la aplicación de escritorio para emparejar.",
+      "action": "Descargar IPA",
+      "note": "Los IPA ad hoc solo se instalan en dispositivos registrados en el perfil de firma. La instalación en iOS requiere aprobación."
+    },
+    "android": {
+      "title": "Android",
+      "body": "Habla con tus bots desde tu móvil Android.",
+      "action": "Descargar APK"
+    },
+    "cli": {
+      "title": "Beans CLI",
+      "body": "Convierte un ordenador en Runner: ejecuta bots sin ventana de chat. La CLI ya viene con las aplicaciones de Mac, Windows y Linux, así que solo la necesitas en un ordenador sin la aplicación. Empareja tu cuenta y crea bots desde la aplicación de escritorio o el móvil.",
+      "unix": "macOS y Linux",
+      "windows": "Windows (PowerShell)",
+      "note": "<docs>Documentación de la CLI</docs>",
+      "copy": "Copiar",
+      "copied": "Copiado"
+    }
+  },
+  "footer": {
+    "privacy": "Privacidad",
+    "support": "Soporte",
+    "faq": "Preguntas",
+    "download": "Descargar"
+  },
+  "marketing": {
+    "free": "Gratis. Tu IA, tu elección.",
+    "demoTitle": "Conoce a tus bots. En la aplicación real.",
+    "demoBody": "Selecciona un bot o un chat en grupo en la barra lateral. Explora la misma interfaz que usa la aplicación para Windows y Linux.",
+    "demo": "Demo interactiva",
+    "demoNote": "La interfaz real con los datos de ejemplo y las respuestas simuladas de la aplicación. No hay proveedores, archivos ni herramientas conectados. En pantallas pequeñas, desplázate horizontalmente. La aplicación ofrece inglés y chino; las conversaciones de ejemplo están en inglés.",
+    "featuresTitle": "Una aplicación pequeña. Muchas posibilidades.",
+    "featuresBody": "El trabajo está en los detalles. Dale a cada compañero una función, una carpeta y las herramientas necesarias.",
+    "cards": [
+      {
+        "title": "Un equipo en una conversación.",
+        "body": "Bots con nombre e instrucciones propias. Reúnelos en un grupo, menciona a un compañero y pásales tareas."
+      },
+      {
+        "title": "Tus archivos. Cambios reales.",
+        "body": "Lee, edita y crea archivos. Ejecuta comandos en la carpeta que elijas y revisa el resultado."
+      },
+      {
+        "title": "Continúa donde lo dejaste.",
+        "body": "Los bots guardan notas entre chats. Dales contexto una vez y retoma el trabajo después."
+      },
+      {
+        "title": "Convierte el trabajo repetido en una rutina.",
+        "body": "Programa tareas para un bot en su ordenador. El Runner debe estar conectado para ejecutarlas."
+      },
+      {
+        "title": "Herramientas para tu trabajo.",
+        "body": "Conecta aplicaciones mediante plugins MCP. Revisa los permisos antes de conceder acceso."
+      },
+      {
+        "title": "En tu escritorio. En tu bolsillo.",
+        "body": "Sigue conversando desde un móvil emparejado. Tu ordenador ejecuta la tarea y recibes las respuestas cifradas."
+      }
+    ],
+    "preview": "Detalles ilustrativos de tareas",
+    "read": "Leer notas del proyecto",
+    "handoff": "Scout → Builder",
+    "review": "Chef → Tú",
+    "files": "Carpeta del proyecto",
+    "edited": "Borrador actualizado",
+    "remembered": "Guardado para la próxima vez",
+    "memory": "Usa un tono claro y directo. Guarda las fuentes junto a la investigación.",
+    "routine": "Revisión semanal del proyecto",
+    "schedule": "Lunes · 09:00",
+    "permission": "Permiso necesario",
+    "permissionBody": "Conecta las herramientas que elijas.",
+    "devices": "Ordenador → relay cifrado → móvil",
+    "providersTitle": "Tus IA favoritas. Juntas aquí.",
+    "providersBody": "Usa una suscripción compatible, conecta una clave API o añade un servidor de modelos compatible. Elige un proveedor para cada bot.",
+    "subscription": "Acceso por suscripción",
+    "api": "Clave API",
+    "compatible": "Servidores compatibles",
+    "compatibleBody": "Endpoints compatibles con OpenAI o Anthropic, incluido tu propio servidor de modelos.",
+    "providerDocs": "Configurar proveedores",
+    "pricingTitle": "La aplicación es gratis. Tú eliges.",
+    "priceBody": "Beans cuesta 0 dólares. Pagas directamente a tu proveedor de IA por la suscripción o el uso de la API.",
+    "priceLabel": "por Beans",
+    "included": [
+      "Aplicaciones de escritorio y móviles emparejados",
+      "Bots con nombre y chats en grupo",
+      "Archivos, memoria, rutinas y herramientas MCP"
+    ],
+    "subscriptionTitle": "¿Ya tienes una suscripción?",
+    "subscriptionBody": "Conecta ChatGPT o Grok con una cuenta compatible. Los límites de uso del proveedor siguen aplicándose.",
+    "apiTitle": "¿Prefieres una clave API?",
+    "apiBody": "Conecta Anthropic, DeepSeek, OpenCode o un endpoint compatible. El proveedor factura el uso según sus tarifas.",
+    "costNote": "El uso de IA se cobra por separado. Más bots pueden consumir más de tu cuota. Tu ordenador también debe permanecer conectado.",
+    "compareTitle": "Encuentra el lugar adecuado para tu IA.",
+    "compareBody": "Compara dónde se ejecuta el trabajo, cómo conectar modelos y cuánto pagas.",
+    "compareAll": "Explorar comparaciones",
+    "footerBody": "Equipo de IA en tu ordenador. Tus modelos, tus herramientas, tu espacio.",
+    "product": "Producto",
+    "resources": "Recursos",
+    "providers": "Proveedores",
+    "comparisons": "Comparar",
+    "source": "Código fuente",
+    "releases": "Versiones",
+    "privacy": "Privacidad (en inglés)",
+    "support": "Soporte (en inglés)",
+    "costs": "Costes",
+    "features": "Funciones",
+    "docs": "Documentación (en inglés)",
+    "download": "Descargar Beans",
+    "footerNote": "Para Mac, Windows, Linux y móviles emparejados."
+  }
+}

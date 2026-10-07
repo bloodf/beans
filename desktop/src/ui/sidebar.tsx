@@ -63,8 +63,8 @@ function rowContent(chatID: string): RowContent | undefined {
   const chat = store.chat(chatID);
   if (!chat) return undefined;
   return {
-    avatars: store.botsIn(chat).slice(0, 4).map(botAvatar),
-    isWorking: chat.botIDs.some((id) => store.isWorking(id)),
+    avatars: store.botsIn(chat).slice(0, 4).map((bot) => botAvatar(bot, chat.id)),
+    isWorking: store.isResponding(chat.id),
     title: store.title(chat),
     preview: store.preview(chat),
     stamp: Format.stamp(chat.messages[chat.messages.length - 1]?.createdAt ?? chat.createdAt),

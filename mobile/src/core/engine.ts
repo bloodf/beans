@@ -8,6 +8,7 @@ import { AppState, Platform, type AppStateStatus } from "react-native";
 import * as core from "../../modules/lorca-core";
 import { t } from "../i18n";
 import { hostFacts } from "./host";
+import type { BotLook } from "./look";
 import { providerConnectMethod, type Attachment, type AutoReview, type Bot, type BotCapabilities, type Chat, type ChatMeta, type ChatSearchResults, type ChatUsage, type CustomAPI, type CustomModel, type Message, type ProviderKind, type ProviderStatus } from "./model";
 import { coreHome, loadPrefs, pathOf, wipePrefs } from "./prefs";
 import { clearPushes, installPushHandlers, registerForPushes } from "./push";
@@ -174,7 +175,7 @@ class Engine {
         setThinking(data.chat_id, data.bot_id);
         break;
       case "job.retry":
-        setRetry(data.chat_id, { attempt: data.attempt, max_attempts: data.max_attempts, delay_ms: data.delay_ms });
+        setRetry(data.chat_id, { attempt: data.attempt, max_attempts: data.max_attempts, delay_ms: data.delay_ms, bot_id: data.bot_id });
         break;
       case "chat.usage":
         setChatUsage(data.chat_id, data.usage as ChatUsage);
@@ -289,6 +290,19 @@ class Engine {
     return bot;
   }
 
+  /// Saves a bot's generated look and photo in one `bots.update`, so Save is atomic and
+  /// autosave never happens. `look`: undefined keeps, null resets, an object replaces whole.
+  /// `photo`: undefined keeps, null removes, a file replaces. A failure leaves the store as it was.
+  async saveBotAppearance(id: string, change: { look?: BotLook | null; photo?: PickedFile | null }): Promise<Bot> {
+    const params: Record<string, unknown> = { id };
+    if (change.look !== undefined) params.look = change.look;
+    if (change.photo !== undefined) params.avatar = change.photo ? { path: pathOf(change.photo.uri), name: change.photo.name, mime: change.photo.mime, width: change.photo.width, height: change.photo.height } : null;
+    const { bot } = await core.request<{ bot: Bot }>("bots.update", params);
+    useStore.setState((s) => ({ bots: s.bots.map((current) => (current.id === id ? bot : current)) }));
+    if (change.photo && bot.avatar) markFile(bot.avatar.id, change.photo.uri);
+    return bot;
+  }
+
   /** Core emits roster.changed for accepted changes; avoid presenting unconfirmed permissions. */
   async setBotCapabilities(id: string, capabilities: BotCapabilities): Promise<void> {
     await core.request("bots.update", { id, capabilities });
@@ -390,8 +404,8 @@ class Engine {
   /// with the key. With no model ids the core takes every chat model the server lists. The
   /// provider joins the account's encrypted credentials, shared with every paired Device.
   /// Answers its kind; rejects with what to fix.
-  async saveCustomProvider(input: { kind?: string; name: string; api: CustomAPI; baseURL: string; apiKey: string; models: string[] }): Promise<string> {
-    const params = { ...(input.kind ? { kind: input.kind } : {}), name: input.name, api: input.api, base_url: input.baseURL, api_key: input.apiKey, models: input.models };
+  async saveCustomProvider(input: { kind?: string; integration?: "durindoor"; name: string; api: CustomAPI; baseURL: string; apiKey: string; models: string[] }): Promise<string> {
+    const params = { ...(input.kind ? { kind: input.kind } : {}), name: input.name, integration: input.integration, api: input.api, base_url: input.baseURL, api_key: input.apiKey, models: input.models };
     const { kind, providers } = await core.request<{ kind: string; providers: ProviderStatus[] }>("providers.connect_custom", params);
     useStore.setState({ providers });
     return kind;
@@ -400,8 +414,8 @@ class Engine {
   /// The chat models a custom provider's server lists, in its order, with what it says of them;
   /// `listed` is false when the server publishes no list. Rejects with what is wrong: a key it
   /// refuses, a server out of reach, an answer that is not an API's. `name` goes in the messages.
-  async listCustomModels(input: { name?: string; api: CustomAPI; baseURL: string; apiKey: string }): Promise<{ listed: boolean; models: CustomModel[] }> {
-    const params = { ...(input.name ? { name: input.name } : {}), api: input.api, base_url: input.baseURL, api_key: input.apiKey };
+  async listCustomModels(input: { name?: string; integration?: "durindoor"; api: CustomAPI; baseURL: string; apiKey: string }): Promise<{ listed: boolean; models: CustomModel[] }> {
+    const params = { ...(input.name ? { name: input.name } : {}), integration: input.integration, api: input.api, base_url: input.baseURL, api_key: input.apiKey };
     const { listed, models } = await core.request<{ listed: boolean; models?: CustomModel[] }>("providers.list_models", params);
     return { listed: !!listed, models: models ?? [] };
   }

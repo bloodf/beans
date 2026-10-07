@@ -11,6 +11,7 @@ import { isLive, runsInForeground } from "../../../src/core/model";
 import { useBotMap, useChat } from "../../../src/core/store";
 import { t, useLanguage } from "../../../src/i18n";
 import { BotAvatar } from "../../../src/ui/Avatar";
+import { notifyAvatarScroll } from "../../../src/ui/avatarVisibility";
 import { firstLine } from "../../../src/ui/format";
 import { Row, Section } from "../../../src/ui/forms";
 import { taskState, useNow } from "../../../src/ui/tasks";
@@ -54,7 +55,7 @@ export default function CommandScreen() {
   return (
     <>
       <Stack.Screen options={{ title: body.description ?? firstLine(run.command) }} />
-      <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={styles.content}>
+      <ScrollView onScroll={notifyAvatarScroll} scrollEventThrottle={32} contentInsetAdjustmentBehavior="automatic" contentContainerStyle={styles.content}>
         <Section>
           <Row leading={<BotAvatar bot={bot} size={28} />} title={bot?.name ?? t("The bot")} detail={taskState(run, message.created_at, now)} />
           {background ? (

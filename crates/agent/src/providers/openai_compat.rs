@@ -31,6 +31,8 @@ pub struct OpenAiCompatProvider {
     pub model: String,
     /// Whether the model takes images; a text-only model gets a note in their place.
     pub supports_images: bool,
+    /// Explicit server metadata; absent metadata preserves compatibility.
+    pub supports_tools: bool,
     /// Retries of a request that fails before it streams (408, 409, 429, 5xx, transport).
     pub max_retries: u32,
     pub max_retry_delay_ms: u64,
@@ -42,6 +44,8 @@ pub struct OpenAiCompatProvider {
     /// Sends the session id as `prompt_cache_key`, OpenAI's routing hint for its prompt cache.
     /// Off for a server that refuses fields it does not know.
     pub prompt_cache_key: bool,
+    /// Gateways accepting OpenAI's explicit `none` effort instead of `thinking.disabled`.
+    pub reasoning_effort_none: bool,
     client: reqwest::Client,
 }
 
@@ -53,17 +57,26 @@ impl OpenAiCompatProvider {
             api_key: api_key.to_string(),
             model: model.to_string(),
             supports_images: true,
+            supports_tools: true,
             max_retries: 2,
             max_retry_delay_ms: DEFAULT_MAX_RETRY_DELAY_MS,
             thinking_level: None,
             info: models::find(provider_id, model),
             prompt_cache_key: true,
+            reasoning_effort_none: false,
             client: lorca_tls::client(),
         }
     }
 
     pub fn with_thinking(mut self, level: Option<ThinkingLevel>) -> Self {
         self.thinking_level = level;
+        self
+    }
+
+    /// A credential-bearing gateway connection never follows redirects to another endpoint.
+    pub fn without_redirects(mut self) -> Self {
+        self.client = lorca_tls::client_builder().redirect(reqwest::redirect::Policy::none())
+            .build().expect("a client over a built TLS config");
         self
     }
 
@@ -105,6 +118,7 @@ impl OpenAiCompatProvider {
         let effort = match level {
             None => None,
             // Only a model the catalog says can stop thinking keeps `Off` through the clamp.
+            Some(ThinkingLevel::Off) if self.reasoning_effort_none => Some("none"),
             Some(ThinkingLevel::Off) => {
                 body["thinking"] = json!({ "type": "disabled" });
                 None
@@ -373,6 +387,10 @@ impl Provider for OpenAiCompatProvider {
 
     async fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream {
         let (tx, rx) = mpsc::channel(64);
+        if !self.supports_tools && !request.tools.is_empty() {
+            let _ = tx.send(AssistantEvent::Error { message: format!("{} does not support tools. Choose a tool-capable model for this bot.", self.model), aborted: false }).await;
+            return channel_stream(rx);
+        }
         let mut body = self.body(&request);
         let options = request.options.clone();
         options.before_payload(&mut body);
@@ -458,6 +476,20 @@ mod tests {
 
     fn request(messages: Vec<LlmMessage>) -> ModelRequest {
         ModelRequest { system_prompt: String::new(), messages, tools: Vec::new(), cache_points: Vec::new(), max_tokens: None, options: Default::default() }
+    }
+
+    #[tokio::test]
+    async fn explicit_tool_incompatibility_checks_the_request_not_provider_construction() {
+        let mut provider = OpenAiCompatProvider::new("custom:durindoor", "http://127.0.0.1:9/v1", "", "no-tools");
+        provider.supports_tools = false;
+        let mut turn = request(Vec::new());
+        turn.tools.push(crate::provider::ToolSpec { name: "check".into(), description: "Fixture".into(), parameters: json!({"type":"object"}) });
+        let mut events = provider.stream(turn, CancellationToken::new()).await;
+        assert!(matches!(events.next().await, Some(AssistantEvent::Error { message, aborted: false }) if message.contains("does not support tools")));
+        assert!(events.next().await.is_none());
+        provider.max_retries = 0;
+        let mut events = provider.stream(request(Vec::new()), CancellationToken::new()).await;
+        assert!(matches!(events.next().await, Some(AssistantEvent::Error { message, .. }) if !message.contains("does not support tools")), "tool-free request reaches transport");
     }
 
     /// An assistant turn that called these tools, `(id, name)`, at once.
@@ -570,6 +602,14 @@ mod tests {
 
     #[test]
     fn a_thinking_level_is_the_word_the_model_takes() {
+        let mut gateway = OpenAiCompatProvider::new("custom:durindoor", "http://localhost/v1", "", "alias").with_thinking(Some(ThinkingLevel::Off));
+        let mut info = (*models::find_any("claude-opus-5").unwrap()).clone();
+        info.levels = vec![ThinkingLevel::Off, ThinkingLevel::Low];
+        gateway.info = Some(Arc::new(info));
+        gateway.reasoning_effort_none = true;
+        let none = gateway.body(&request(Vec::new()));
+        assert_eq!(none["reasoning_effort"], "none");
+        assert!(none.get("thinking").is_none());
         let request = request(vec![LlmMessage::User(UserMessage::text("hi"))]);
         let body = |kind: &str, model: &str, level: ThinkingLevel| {
             OpenAiCompatProvider::new(kind, "https://opencode.ai/zen/v1", "k", model).with_thinking(Some(level)).body(&request)

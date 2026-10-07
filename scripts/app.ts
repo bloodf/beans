@@ -178,7 +178,7 @@ export async function codesign(args: string[]): Promise<boolean> {
 
 /** Compile the Rust CLI the app bundles and launches. */
 export async function buildCLI(config: Config): Promise<{ ok: boolean; path: string }> {
-  const args = ["build", "-p", CLI_NAME]
+  const args = ["build", "--locked", "-p", CLI_NAME]
   if (config === "release") args.push("--release")
   const build = await run(["cargo", ...args], { cwd: ROOT })
   return { ok: build.exitCode === 0, path: join(ROOT, "target", config, CLI_NAME) }
@@ -195,7 +195,7 @@ export const MARKDOWN_XCFRAMEWORK = join(PACKAGE_DIR, "Libraries", "LorcaMarkdow
  * xcframework that carries the library and its header to SwiftPM.
  */
 export async function buildMarkdown(config: Config): Promise<{ ok: boolean }> {
-  const args = ["build", "-p", MARKDOWN_CRATE]
+  const args = ["build", "--locked", "-p", MARKDOWN_CRATE]
   if (config === "release") args.push("--release")
   if ((await run(["cargo", ...args], { cwd: ROOT })).exitCode !== 0) return { ok: false }
   // The bindings come from the host dylib's metadata; the debug one is always current after
@@ -204,7 +204,7 @@ export async function buildMarkdown(config: Config): Promise<{ ok: boolean }> {
   const generated = join(ROOT, "target", "markdown-bindings")
   await rm(generated, { recursive: true, force: true })
   const bindgen = await run(
-    ["cargo", "run", "-p", MARKDOWN_CRATE, "--features", "bindgen", "--bin", "uniffi-bindgen", "--", "generate", "--library", dylib, "--language", "swift", "--out-dir", generated],
+    ["cargo", "run", "--locked", "-p", MARKDOWN_CRATE, "--features", "bindgen", "--bin", "uniffi-bindgen", "--", "generate", "--library", dylib, "--language", "swift", "--out-dir", generated],
     { cwd: ROOT },
   )
   if (bindgen.exitCode !== 0) return { ok: false }

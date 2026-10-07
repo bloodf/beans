@@ -1,4 +1,4 @@
-import { FlashList } from "@shopify/flash-list";
+import { AvatarFlashList } from "./AvatarFlashList";
 import { MenuView, type MenuAction, type MenuComponentRef } from "@expo/ui/community/menu";
 import * as Haptics from "expo-haptics";
 import { Link, Stack, useRouter } from "expo-router";
@@ -229,7 +229,7 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
         </Stack.Title>
       ) : null}
       <View style={styles.screen}>
-        <FlashList
+        <AvatarFlashList
           style={styles.list}
           data={data}
           keyExtractor={(item) => ("key" in item ? item.key : item.id)}
@@ -377,7 +377,7 @@ function SearchResultRow({ item, bots, query, onPress }: { item: SearchRow; bots
   const at = item.createdAt ?? lastActivity(item.chat);
   return (
     <Pressable onPress={onPress} style={({ pressed }) => [styles.searchRow, { backgroundColor: pressed ? p.fill : "transparent" }]}>
-      <AvatarCluster bots={members} size={44} />
+      <AvatarCluster bots={members} chatId={item.chat.id} size={44} />
       <View style={styles.searchText}>
         <View style={styles.searchTitleLine}>
           <HighlightedText text={chatTitle(item.chat)} query={query} style={[styles.searchTitle, { color: p.label }]} numberOfLines={1} />

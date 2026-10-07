@@ -2435,6 +2435,7 @@ impl Tool for CreateBot {
             symbol_name,
             accent,
             avatar: None,
+            look: None,
             runner_id: self.bot.runner_id.clone(),
             provider: runs.provider,
             model: runs.model,
@@ -3196,6 +3197,7 @@ mod tests {
             symbol_name: String::new(),
             accent: String::new(),
             avatar: None,
+            look: None,
 
             runner_id: "dev".into(),
             provider: "deepseek".into(),
@@ -4501,7 +4503,7 @@ mod tests {
         use crate::credentials::{CustomApi, CustomModel, CustomProvider};
         app.credentials.lock().unwrap().custom.insert("custom:router".into(), CustomProvider {
             name: "Router".into(), api: CustomApi::ChatCompletions, base_url: "http://router/v1".into(), api_key: String::new(),
-            models: vec![CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus".into()), context_window: None, max_output: None, images: None }], created_at: 1,
+            models: vec![CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus".into()), context_window: None, max_output: None, images: None, ..Default::default() }], created_at: 1, integration: None,
         });
         run(json!({ "provider": "custom:router", "model": "claude-opus-5", "thinking": "max" })).await.unwrap();
         let scout = app.bot("b2").unwrap();
@@ -4621,8 +4623,8 @@ mod tests {
         assert_eq!(runs(), ("anthropic".into(), Some("claude-next".into()), Some("minimal".into())));
 
         // A custom provider offers its saved models, found by the id after a gateway's `vendor/`.
-        let models = ["anthropic/claude-opus-5", "qwen3:8b"].map(|id| CustomModel { id: id.into(), name: None, context_window: None, max_output: None, images: None }).to_vec();
-        let router = CustomProvider { name: "Router".into(), api: CustomApi::ChatCompletions, base_url: "http://router/v1".into(), api_key: String::new(), models, created_at: 1 };
+        let models = ["anthropic/claude-opus-5", "qwen3:8b"].map(|id| CustomModel { id: id.into(), name: None, context_window: None, max_output: None, images: None, ..Default::default() }).to_vec();
+        let router = CustomProvider { name: "Router".into(), api: CustomApi::ChatCompletions, base_url: "http://router/v1".into(), api_key: String::new(), models, created_at: 1, integration: None };
         app.credentials.lock().unwrap().custom.insert("custom:router".into(), router);
         edit(json!({ "provider": "custom:router", "model": "claude-opus-5", "thinking": "max" })).await.unwrap();
         assert_eq!(runs(), ("custom:router".into(), Some("anthropic/claude-opus-5".into()), Some("max".into())));

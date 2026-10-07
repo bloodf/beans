@@ -17,7 +17,7 @@ import { Suspense, use } from 'react'
 import { useMDXComponents } from '#/components/mdx'
 import { Logo } from '#/components/site/logo'
 import { downloadPath, SITE } from '#/components/site/nav'
-import { i18nFor, type Language, names, paths } from '#/i18n'
+import { i18nFor, type DocsLanguage as Language, names, paths } from '#/i18n'
 import { docs, docsI18n, docsRoute, markdownUrl, source } from '#/lib/source'
 
 const translations = docsI18n.translations().extend(uiTranslations()).preset('zh', zhCN())
@@ -122,7 +122,7 @@ export function DocsPage({ lang, data }: { lang: Language; data: DocsData }) {
           title: (
             <>
               <Logo className="size-6" />
-              <span className="font-semibold tracking-tight">Lorca</span>
+              <span className="font-semibold tracking-tight">Beans</span>
               <span className="text-fd-muted-foreground">{t('nav.docs')}</span>
             </>
           ),

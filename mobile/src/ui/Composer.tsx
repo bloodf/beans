@@ -22,6 +22,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ColorValue, type ImageSourcePropType, type StyleProp, type ViewStyle } from "react-native";
 import type { PickedFile } from "../core/engine";
 import { fileSize, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, type Bot } from "../core/model";
+import { notifyAvatarScroll } from "./avatarVisibility";
 import { BotAvatar } from "./Avatar";
 import { automaticLanguage, languageName, pickDictationLanguage, setDictationLanguage, useDictationLanguage, useSupportedLanguages } from "./dictation";
 import { t, useLanguage } from "../i18n";
@@ -429,7 +430,7 @@ export function Composer({
   return (
     <View style={styles.wrap} pointerEvents="box-none">
       {mention && (
-        <ScrollView horizontal keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
+        <ScrollView onScroll={notifyAvatarScroll} scrollEventThrottle={32} horizontal keyboardShouldPersistTaps="always" showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
           {mention.matches.map((bot) => (
             <Pressable key={bot.id} onPress={() => insertMention(bot)} style={({ pressed }) => [styles.chip, { backgroundColor: pressed ? p.secondaryFill : p.cell, opacity: pressed ? 0.8 : 1 }]}>
               <BotAvatar bot={bot} size={20} />

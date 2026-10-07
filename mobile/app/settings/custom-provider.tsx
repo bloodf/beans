@@ -55,6 +55,9 @@ export default function CustomProviderScreen() {
   // as it is while a delete started here takes the provider out of the store.
   const [saved] = useState(status);
   const adding = kind ? undefined : customPreset(param(params.preset));
+  const integration = saved?.integration ?? adding?.integration;
+  const durindoor = integration === "durindoor";
+  const [customize, setCustomize] = useState(!durindoor);
   const [name, setName] = useState(saved?.name ?? adding?.name ?? "");
   const [api, setAPI] = useState<CustomAPI>(customAPI(saved?.api ?? adding?.api).id);
   const [baseURL, setBaseURL] = useState(saved?.base_url ?? adding?.baseURL ?? "");
@@ -112,16 +115,16 @@ export default function CustomProviderScreen() {
     setModelListing({ state: "loading" });
     const timer = setTimeout(() => {
       engine
-        .listCustomModels({ name: name.trim() || defaultProviderName(url), api, baseURL: url, apiKey })
+        .listCustomModels({ name: name.trim() || defaultProviderName(url), api, baseURL: url, apiKey, integration })
         .then(({ listed, models }) => {
-          if (ask === asked.current) takeModelListing(listed, models);
+          if (ask === asked.current) takeModelListing(listed, models, durindoor);
         })
         .catch((cause) => {
           if (ask === asked.current) setModelListing({ state: "error", message: messageOf(cause) });
         });
     }, delay);
     return () => clearTimeout(timer);
-  }, [api, baseURL, apiKey, keyLoaded]);
+  }, [api, baseURL, apiKey, keyLoaded, integration]);
 
   if (kind && (!saved || !isCustomProvider(kind))) {
     return (
@@ -142,7 +145,7 @@ export default function CustomProviderScreen() {
   const requestURL = customRequestURL(api, baseURL);
   // On a phone, localhost is the phone: the server must be named as the Runners reach it.
   const local = !!adding?.local || isLoopbackHost(host);
-  const urlNote = [
+  const urlNote = durindoor ? t("Localhost belongs to this Device. Setup checks access here; each Runner must reach the same URL. Access admitted does not prove the key was recognized when keyless mode is enabled.") : [
     requestURL ? t("Requests go to {url}.", { url: requestURL }) : t("Beans adds {path} to it.", { path: protocol.path }),
     local ? t("Use the address of the computer running it, as your Runners reach it.") : undefined,
   ]
@@ -154,14 +157,14 @@ export default function CustomProviderScreen() {
   // Left empty, the name is the preset's whose server the URL names, else the host.
   const fallbackName = defaultProviderName(baseURL);
   const providerName = name.trim() || fallbackName;
-  const canSave = !working && !!providerName && !!baseURL.trim() && picked.length > 0;
+  const canSave = !working && !!providerName && isHTTPURL(baseURL) && picked.length > 0;
 
   async function save() {
     if (!canSave) return;
     setWorking(true);
     setError(null);
     try {
-      await engine.saveCustomProvider({ kind, name: providerName, api, baseURL, apiKey, models: selectedModelIds(rows, chosenDefault) });
+      await engine.saveCustomProvider({ kind, integration, name: providerName, api, baseURL, apiKey, models: selectedModelIds(rows, chosenDefault) });
       router.back();
     } catch (cause) {
       setError(messageOf(cause));
@@ -222,7 +225,7 @@ export default function CustomProviderScreen() {
         keyboardDismissMode="on-drag"
         keyboardShouldPersistTaps="handled"
       >
-        <Section footer={t("Any server that speaks OpenAI’s or Anthropic’s API, such as a gateway or a model server on your network. Encrypted and shared with your paired Devices.")}>
+        {!durindoor && <Section footer={t("Any server that speaks OpenAI’s or Anthropic’s API, such as a gateway or a model server on your network. Encrypted and shared with your paired Devices.")}>
           <FieldRow
             label={t("Name")}
             value={name}
@@ -241,7 +244,7 @@ export default function CustomProviderScreen() {
               choices: CUSTOM_APIS.map((choice) => ({ title: choice.title, selected: choice.id === api, onPress: () => setAPI(choice.id) })),
             }}
           />
-        </Section>
+        </Section>}
 
         <Section footer={urlNote}>
           <FieldRow
@@ -271,7 +274,8 @@ export default function CustomProviderScreen() {
           />
         </Section>
 
-        <Section footer={modelListingNote(listing)}>
+        {durindoor ? <Section footer={modelListingNote(listing)}><Row title={t("Models")} detail={picked.length ? t("{count} selected", { count: picked.length }) : t("None")} onPress={() => setCustomize(!customize)} /></Section> : null}
+        {customize && <Section footer={modelListingNote(listing)}>
           <Row
             title={t("Models")}
             detail={picked.length ? t("{count} selected", { count: picked.length }) : t("None")}
@@ -291,7 +295,7 @@ export default function CustomProviderScreen() {
           ) : (
             <Row title={t("Default Model")} detail={t("None")} />
           )}
-        </Section>
+        </Section>}
 
         <Section>
           <Row title={kind ? t("Save") : t("Add")} onPress={canSave ? () => void save() : undefined} accessory={working && !refreshing ? <ActivityIndicator /> : undefined} />

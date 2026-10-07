@@ -153,6 +153,7 @@ struct ProviderCredential: Hashable, Identifiable {
     /// A custom provider's name, the protocol its server speaks, and the models it offers.
     var name: String? = nil
     var api: CustomAPI? = nil
+    var integration: String? = nil
     var models: [CustomModel] = []
 }
 
@@ -209,6 +210,11 @@ struct CustomModel: Hashable {
     /// Whether it takes images.
     var images: Bool? = nil
     var levels: [String] = []
+    var maxOutput: Int? = nil
+    var reasoning: Bool? = nil
+    var tools: Bool? = nil
+    var thinkingFormat: String? = nil
+    var thinkingCanDisable: Bool? = nil
 
     var displayName: String { name ?? id }
 }
@@ -219,10 +225,13 @@ struct CustomProviderPreset: Hashable {
     let api: CustomAPI
     let baseURL: String
     let keyPlaceholder: String
+    var integration: String? = nil
 
     /// Services in the cloud, for the Add Provider menu.
     static var cloud: [CustomProviderPreset] {
         [
+            CustomProviderPreset(name: "DurinDoor", api: .chatCompletions, baseURL: "",
+                keyPlaceholder: L("Optional for a server on your network"), integration: "durindoor"),
             CustomProviderPreset(
                 name: "OpenAI", api: .responses, baseURL: "https://api.openai.com/v1",
                 keyPlaceholder: L("sk-… from platform.openai.com")),
@@ -412,8 +421,11 @@ struct Bot: Identifiable, Hashable {
     /// How much the model thinks; nil means the provider's default.
     var thinking: String? = nil
     /// A custom profile image, kept as a `file` blob like a message attachment. Shown in place
-    /// of the symbol and accent once this computer has the bytes.
+    /// of the generated portrait once this computer has the bytes.
     var avatar: Attachment? = nil
+    /// The generated portrait's saved appearance; nil keeps the bot-ID seeded default. Kept
+    /// independently of `avatar`, which wins while it exists.
+    var look: BotLook? = nil
     var capabilities = BotCapabilities()
     var createdAt: Date
 }

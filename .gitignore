@@ -10,3 +10,11 @@ temp/
 target/
 .env
 .env.local
+mobile/credentials.json
+mobile/.credentials/
+mobile/google-services.json
+mobile/.env.local
+.vercel
+
+# Built from the current desktop frontend for the marketing demo.
+web/public/app-preview/

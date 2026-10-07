@@ -123,13 +123,14 @@ enum Wire {
         var baseUrl: String?
         var name: String?
         var api: String?
+        var integration: String?
         var models: [StatusModel]?
 
         func toModel() -> ProviderCredential? {
             guard let kind = ProviderCredential.Kind(wireValue: kind) else { return nil }
             return ProviderCredential(
                 kind: kind, isConnected: isConnected, detail: detail, baseURL: baseUrl, name: name,
-                api: api.flatMap(CustomAPI.init(rawValue:)), models: (models ?? []).map { $0.toModel() })
+                api: api.flatMap(CustomAPI.init(rawValue:)), integration: integration, models: (models ?? []).map { $0.toModel() })
         }
     }
 
@@ -139,10 +140,15 @@ enum Wire {
         var name: String?
         var contextWindow: Int?
         var images: Bool?
+        var maxOutput: Int?
+        var reasoning: Bool?
+        var tools: Bool?
+        var thinkingFormat: String?
+        var thinkingCanDisable: Bool?
         var levels: [String]?
 
         func toModel() -> CustomModel {
-            CustomModel(id: id, name: name, contextWindow: contextWindow, images: images, levels: levels ?? [])
+            CustomModel(id: id, name: name, contextWindow: contextWindow, images: images, levels: levels ?? [], maxOutput: maxOutput, reasoning: reasoning, tools: tools, thinkingFormat: thinkingFormat, thinkingCanDisable: thinkingCanDisable)
         }
     }
 
@@ -341,6 +347,7 @@ enum Wire {
         var model: String?
         var thinking: String?
         var avatar: Attachment?
+        var look: BotLook.Lenient?
         var capabilities: BotCapabilities?
         var createdAt: Double
     }
@@ -654,6 +661,7 @@ extension Wire.Bot {
             model: model,
             thinking: thinking,
             avatar: avatar.map { Attachment(id: $0.id, name: $0.name, mime: $0.mime, size: $0.size, width: $0.width, height: $0.height) },
+            look: look?.value,
             capabilities: capabilities?.toModel() ?? BotCapabilities(),
             createdAt: Date(timeIntervalSince1970: createdAt)
         )

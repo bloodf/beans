@@ -1,5 +1,6 @@
-import { beforeEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, mock, test } from "bun:test";
 import type { Notification, NotificationBehavior, NotificationResponse } from "expo-notifications";
+import { resolveChatBotState } from "./activity";
 import type { Bot, Chat, CommandRun, Message, ProviderModel, ProviderStatus } from "./model";
 
 // Exercise the real engine and store, including message/roster ordering, foreground
@@ -60,7 +61,7 @@ function snapshot(chats: Chat[]) {
 }
 
 const { engine } = await import("./engine");
-const { resetStore, runningTasks, TASK_DELAY_MS, useStore } = await import("./store");
+const { ERROR_DISPLAY_MS, resetStore, runningTasks, TASK_DELAY_MS, useStore } = await import("./store");
 const { workingActivity } = await import("../ui/format");
 await engine.start();
 
@@ -318,4 +319,112 @@ test("a relay status change cannot make old catalogs belong to the new source", 
   expect(useStore.getState().providers).toEqual([]);
   expect(useStore.getState().models).toEqual([]);
   expect(useStore.getState().bots[0].model).toBe("chosen-model");
+});
+
+// Avatar activity: events in, resolver out. The store stamps a failure when it watches the
+// transition, keeps a group's retry with the bot it belongs to, and drops state a turn ended.
+describe("avatar activity from events", () => {
+  const group = (): Chat => ({ ...chat("open"), kind: "group", bot_ids: ["a", "b"] });
+  const text = (id: string, author: Message["author"], state: Message["state"] = { kind: "complete" }): Message =>
+    ({ id, chat_id: "open", author, body: { kind: "text", text: "x" }, state, created_at: 1 });
+  const bot = (id: string): Message["author"] => ({ kind: "bot", bot_id: id });
+  const state = (id: string) => resolveChatBotState(useStore.getState(), "open", id);
+
+  test("a retry belongs to its bot: another member's message leaves it, its own message or turn end clears it", () => {
+    event({ event: "snapshot", data: snapshot([group()]) });
+    event({ event: "job.started", data: { job_id: "ja", chat_id: "open", bot_id: "a" } });
+    event({ event: "job.retry", data: { chat_id: "open", bot_id: "a", attempt: 1, max_attempts: 3, delay_ms: 1000, error: "x" } });
+    expect(state("a")).toBe("retry");
+    event({ event: "message.added", data: { chat_id: "open", message: text("m1", bot("b")) } });
+    expect(state("a")).toBe("retry");
+    event({ event: "message.added", data: { chat_id: "open", message: text("m2", bot("a")) } });
+    expect(useStore.getState().retries).toEqual({});
+    event({ event: "job.retry", data: { chat_id: "open", bot_id: "a", attempt: 2, max_attempts: 3, delay_ms: 1000, error: "x" } });
+    event({ event: "job.finished", data: { job_id: "ja", chat_id: "open", bot_id: "b" } });
+    expect(useStore.getState().retries.open).toBeDefined();
+    event({ event: "job.finished", data: { job_id: "ja", chat_id: "open", bot_id: "a" } });
+    expect(useStore.getState().retries).toEqual({});
+  });
+
+  afterEach(() => jest.useRealTimers());
+
+  test("a failure the phone watches is an error until its entry expires, and the map is left empty", () => {
+    jest.useFakeTimers();
+    event({ event: "snapshot", data: snapshot([group()]) });
+    event({ event: "message.added", data: { chat_id: "open", message: text("f1", bot("a"), { kind: "streaming" }) } });
+    event({ event: "message.updated", data: { chat_id: "open", message: text("f1", bot("a"), { kind: "failed", error: "down" }) } });
+    expect(useStore.getState().failures.f1).toMatchObject({ chatId: "open", botId: "a" });
+    expect(state("a")).toBe("error");
+    expect(state("b")).toBe("idle");
+    jest.advanceTimersByTime(ERROR_DISPLAY_MS - 1);
+    expect(state("a")).toBe("error");
+    jest.advanceTimersByTime(1);
+    expect(useStore.getState().failures).toEqual({});
+    expect(state("a")).toBe("idle");
+  });
+
+  test("the same failure arriving again does not restart the clock, and an old timer cannot end a newer failure", () => {
+    jest.useFakeTimers();
+    event({ event: "snapshot", data: snapshot([group()]) });
+    event({ event: "message.added", data: { chat_id: "open", message: text("f1", bot("a"), { kind: "streaming" }) } });
+    event({ event: "message.updated", data: { chat_id: "open", message: text("f1", bot("a"), { kind: "failed", error: "down" }) } });
+    jest.advanceTimersByTime(3000);
+    event({ event: "message.updated", data: { chat_id: "open", message: text("f1", bot("a"), { kind: "failed", error: "down" }) } });
+    jest.advanceTimersByTime(ERROR_DISPLAY_MS - 3000);
+    expect(useStore.getState().failures).toEqual({});
+    // Retried and failed again: a new entry that the first timer is long done with.
+    event({ event: "message.updated", data: { chat_id: "open", message: text("f1", bot("a"), { kind: "streaming" }) } });
+    event({ event: "message.updated", data: { chat_id: "open", message: text("f1", bot("a"), { kind: "failed", error: "down" }) } });
+    jest.advanceTimersByTime(ERROR_DISPLAY_MS - 1);
+    expect(state("a")).toBe("error");
+    jest.advanceTimersByTime(1);
+    expect(state("a")).toBe("idle");
+  });
+
+  test("a new user message or the bot's next turn ends the error early, another bot's turn does not", () => {
+    jest.useFakeTimers();
+    event({ event: "snapshot", data: snapshot([group()]) });
+    const fail = () => {
+      event({ event: "message.added", data: { chat_id: "open", message: text("f1", bot("a"), { kind: "streaming" }) } });
+      event({ event: "message.updated", data: { chat_id: "open", message: text("f1", bot("a"), { kind: "failed", error: "down" }) } });
+    };
+    fail();
+    event({ event: "message.added", data: { chat_id: "open", message: text("u1", { kind: "you" }) } });
+    expect(state("a")).toBe("idle");
+    event({ event: "message.updated", data: { chat_id: "open", message: text("f1", bot("a"), { kind: "streaming" }) } });
+    fail();
+    event({ event: "job.started", data: { job_id: "jb", chat_id: "open", bot_id: "b" } });
+    expect(useStore.getState().failures.f1).toBeDefined();
+    event({ event: "job.started", data: { job_id: "ja", chat_id: "open", bot_id: "a" } });
+    expect(useStore.getState().failures).toEqual({});
+  });
+
+  test("a failure already in a snapshot never reads as an error", () => {
+    event({ event: "snapshot", data: snapshot([{ ...group(), messages: [text("old", bot("a"), { kind: "failed", error: "down" })] }]) });
+    expect(useStore.getState().failures).toEqual({});
+    expect(state("a")).toBe("idle");
+  });
+
+  test("an open permission waits until the user writes again, even across a group's interleaved replies", () => {
+    event({ event: "snapshot", data: snapshot([group()]) });
+    const card: Message = { ...text("p1", bot("a")), body: { kind: "permission", plugin_id: "p", plugin_name: "P", tool: "t", summary: "", decision: "pending" } };
+    event({ event: "message.added", data: { chat_id: "open", message: card } });
+    event({ event: "message.added", data: { chat_id: "open", message: text("m3", bot("b")) } });
+    expect(state("a")).toBe("waiting");
+    event({ event: "message.added", data: { chat_id: "open", message: text("u2", { kind: "you" }) } });
+    expect(state("a")).toBe("idle");
+  });
+
+  test("removing a message or a chat leaves no failure behind", () => {
+    jest.useFakeTimers();
+    event({ event: "snapshot", data: snapshot([group()]) });
+    for (const id of ["f2", "f3"]) {
+      event({ event: "message.added", data: { chat_id: "open", message: text(id, bot("a"), { kind: "streaming" }) } });
+      event({ event: "message.updated", data: { chat_id: "open", message: text(id, bot("a"), { kind: "failed", error: "down" }) } });
+    }
+    event({ event: "message.removed", data: { chat_id: "open", message_id: "f2" } });
+    expect(Object.keys(useStore.getState().failures)).toEqual(["f3"]);
+    event({ event: "chat.removed", data: { chat_id: "open" } });
+    expect(useStore.getState().failures).toEqual({});
+  });
 });

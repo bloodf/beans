@@ -166,8 +166,9 @@ fn tls() -> Arc<rustls::ClientConfig> {
 
 /// The relay protocol this client speaks, sent as `Lorca-Protocol` with every request. A
 /// relay may refuse one it no longer serves with `426`. 1: group paging, `DELETE /v1/identity`.
-/// 2: `POST /v1/machines`. 3: durable encrypted policy events.
-pub const PROTOCOL: u32 = 3;
+/// 2: `POST /v1/machines`. 3: durable encrypted policy events. 4: appearance-preserving rosters.
+pub const PROTOCOL: u32 = 4;
+const MIN_ROSTER_PROTOCOL: u32 = 4;
 
 const FILE_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
@@ -226,10 +227,17 @@ impl RelayClient {
         Ok(value)
     }
 
-    /// Answers the protocol the relay speaks; 0 from one that does not say.
+    /// Requires advertised enforcement, not only a version: an older writer must not erase look.
     pub async fn health(&self, url: &str) -> RelayResult<u32> {
         let value = Self::check(self.http().get(format!("{url}/v1/health")).send().await?).await?;
-        Ok(value["protocol"].as_u64().unwrap_or(0) as u32)
+        let number = |key: &str| value[key].as_u64().and_then(|value| u32::try_from(value).ok());
+        match (number("protocol"), number("min_protocol"), number("min_roster_protocol")) {
+            (Some(protocol), Some(min), Some(roster_min))
+                if protocol >= PROTOCOL && min <= PROTOCOL && (MIN_ROSTER_PROTOCOL..=PROTOCOL).contains(&roster_min)
+                    && roster_min >= min => Ok(protocol),
+            _ => Err(RelayError { status: Some(426), message:
+                "Relay update required: this client needs protocol 4 and an enforced, compatible roster-write floor advertised in health".into() }),
+        }
     }
 
     /// Signed by the identity: registers the identity (idempotent) and attests one machine.

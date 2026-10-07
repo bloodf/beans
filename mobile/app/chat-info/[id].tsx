@@ -5,6 +5,7 @@ import { chatTitle, engine } from "../../src/core/engine";
 import { botCapabilities, providerKinds, providerLabel, providerModels, PROVIDER_KINDS, thinkingLabel, thinkingLevels, withCustomModels, type Bot, type BotCapabilities, type Routine } from "../../src/core/model";
 import { deviceIsOnline, useBotMap, useChat, useRoutines, useStore, useWorkingBotIds } from "../../src/core/store";
 import { t, useLanguage } from "../../src/i18n";
+import { notifyAvatarScroll } from "../../src/ui/avatarVisibility";
 import { AvatarCluster, BotAvatar } from "../../src/ui/Avatar";
 import { CheckRow, FieldRow, Row, Section, ToggleRow } from "../../src/ui/forms";
 import { lastRunSummary, lastSeen, routineDetail } from "../../src/ui/format";
@@ -123,14 +124,14 @@ export default function ChatInfoScreen() {
     <>
       <Stack.Screen options={{ title: isGroup ? t("Group Info") : t("Details") }} />
       <CloseToolbar label={Platform.OS === "android" ? t("Close") : t("Done")} onClose={() => router.dismiss()} />
-    <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingBottom: 40 }} keyboardDismissMode="on-drag">
+    <ScrollView onScroll={notifyAvatarScroll} scrollEventThrottle={32} contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingBottom: 40 }} keyboardDismissMode="on-drag">
       <View style={styles.hero}>
         {bot ? (
           <Pressable onPress={() => router.push(`/chat-info/look/${bot.id}`)} accessibilityLabel={t("Change {name}'s look", { name: bot.name })} accessibilityRole="button" hitSlop={8}>
-            <BotAvatar bot={bot} size={72} working={working.has(bot.id)} />
+            <BotAvatar bot={bot} chatId={chat.id} size={72} working={working.has(bot.id)} />
           </Pressable>
         ) : (
-          <AvatarCluster bots={members} size={72} working={members.some((m) => working.has(m.id))} />
+          <AvatarCluster bots={members} chatId={chat.id} size={72} working={members.some((m) => working.has(m.id))} />
         )}
         <Text style={[styles.heroTitle, { color: p.label }]}>{chatTitle(chat)}</Text>
         {!bot ? <Text style={[styles.heroSubtitle, { color: p.secondaryLabel }]}>{members.length === 1 ? t("{count} bot", { count: members.length }) : t("{count} bots", { count: members.length })}</Text> : null}
@@ -290,7 +291,7 @@ export default function ChatInfoScreen() {
               key={member.id}
               title={member.name}
               subtitle={providerLabel(member.provider, providers)}
-              leading={<BotAvatar bot={member} size={36} working={working.has(member.id)} />}
+              leading={<BotAvatar bot={member} chatId={chat.id} size={36} working={working.has(member.id)} />}
               accessory={
                 chat.owner_bot_id === member.id ? (
                   <Text style={{ color: p.secondaryLabel, fontSize: 13 }}>{t("Owner")}</Text>

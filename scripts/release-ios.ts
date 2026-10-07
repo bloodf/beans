@@ -51,8 +51,8 @@ const KEPT = join(BUILD_DIR, "kept")
 const ARCHIVE = join(BUILD_DIR, "Beans.xcarchive")
 const EXPORT = join(BUILD_DIR, "export")
 
-// Monotonic build numbers are shared with Android in GitHub release builds.
-const buildNumber = process.env.BUILD_NUMBER ?? String(Math.floor(Date.now() / 1000))
+// Legacy ad-hoc exports require an explicitly allocated number; EAS owns store versions.
+const buildNumber = process.env.BUILD_NUMBER ?? (local ? "1" : "")
 if (!/^[1-9]\d*$/.test(buildNumber) || Number(buildNumber) > 2_100_000_000) {
   die("BUILD_NUMBER must be a positive integer at most 2100000000")
 }

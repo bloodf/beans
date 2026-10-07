@@ -10,22 +10,35 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as LocaleRouteImport } from './routes/$locale'
 import { Route as DownloadRouteImport } from './routes/download'
 import { Route as LlmsFullDottxtRouteImport } from './routes/llms-full[.]txt'
 import { Route as LlmsDottxtRouteImport } from './routes/llms[.]txt'
 import { Route as ZhRouteImport } from './routes/zh'
+import { Route as LocaleDownloadRouteImport } from './routes/$locale_/download'
 import { Route as ApiSearchRouteImport } from './routes/api/search'
+import { Route as CompareIndexRouteImport } from './routes/compare.index'
+import { Route as CompareProductRouteImport } from './routes/compare.$product'
 import { Route as DocsSplatRouteImport } from './routes/docs/$'
 import { Route as DocsChar123Char125DotmdRouteImport } from './routes/docs/{$}[.]md'
 import { Route as ZhDownloadRouteImport } from './routes/zh_/download'
 import { Route as ZhLlmsFullDottxtRouteImport } from './routes/zh_/llms-full[.]txt'
 import { Route as ZhLlmsDottxtRouteImport } from './routes/zh_/llms[.]txt'
+import { Route as LocaleCompareIndexRouteImport } from './routes/$locale_/compare.index'
+import { Route as LocaleCompareProductRouteImport } from './routes/$locale_/compare.$product'
+import { Route as ZhCompareIndexRouteImport } from './routes/zh_/compare.index'
+import { Route as ZhCompareProductRouteImport } from './routes/zh_/compare.$product'
 import { Route as ZhDocsSplatRouteImport } from './routes/zh_/docs/$'
 import { Route as ZhDocsChar123Char125DotmdRouteImport } from './routes/zh_/docs/{$}[.]md'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LocaleRoute = LocaleRouteImport.update({
+  id: '/$locale',
+  path: '/$locale',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DownloadRoute = DownloadRouteImport.update({
@@ -48,9 +61,24 @@ const ZhRoute = ZhRouteImport.update({
   path: '/zh',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LocaleDownloadRoute = LocaleDownloadRouteImport.update({
+  id: '/$locale_/download',
+  path: '/$locale/download',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiSearchRoute = ApiSearchRouteImport.update({
   id: '/api/search',
   path: '/api/search',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CompareIndexRoute = CompareIndexRouteImport.update({
+  id: '/compare/',
+  path: '/compare/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CompareProductRoute = CompareProductRouteImport.update({
+  id: '/compare/$product',
+  path: '/compare/$product',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DocsSplatRoute = DocsSplatRouteImport.update({
@@ -78,6 +106,26 @@ const ZhLlmsDottxtRoute = ZhLlmsDottxtRouteImport.update({
   path: '/zh/llms.txt',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LocaleCompareIndexRoute = LocaleCompareIndexRouteImport.update({
+  id: '/$locale_/compare/',
+  path: '/$locale/compare/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LocaleCompareProductRoute = LocaleCompareProductRouteImport.update({
+  id: '/$locale_/compare/$product',
+  path: '/$locale/compare/$product',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ZhCompareIndexRoute = ZhCompareIndexRouteImport.update({
+  id: '/zh_/compare/',
+  path: '/zh/compare/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ZhCompareProductRoute = ZhCompareProductRouteImport.update({
+  id: '/zh_/compare/$product',
+  path: '/zh/compare/$product',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ZhDocsSplatRoute = ZhDocsSplatRouteImport.update({
   id: '/zh_/docs/$',
   path: '/zh/docs/$',
@@ -92,112 +140,168 @@ const ZhDocsChar123Char125DotmdRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/$locale': typeof LocaleRoute
   '/download': typeof DownloadRoute
   '/llms-full.txt': typeof LlmsFullDottxtRoute
   '/llms.txt': typeof LlmsDottxtRoute
   '/zh': typeof ZhRoute
+  '/$locale/download': typeof LocaleDownloadRoute
   '/api/search': typeof ApiSearchRoute
+  '/compare/$product': typeof CompareProductRoute
   '/docs/$': typeof DocsSplatRoute
   '/docs/{$}.md': typeof DocsChar123Char125DotmdRoute
   '/zh/download': typeof ZhDownloadRoute
   '/zh/llms-full.txt': typeof ZhLlmsFullDottxtRoute
   '/zh/llms.txt': typeof ZhLlmsDottxtRoute
+  '/compare/': typeof CompareIndexRoute
+  '/$locale/compare/$product': typeof LocaleCompareProductRoute
+  '/zh/compare/$product': typeof ZhCompareProductRoute
   '/zh/docs/$': typeof ZhDocsSplatRoute
   '/zh/docs/{$}.md': typeof ZhDocsChar123Char125DotmdRoute
+  '/$locale/compare/': typeof LocaleCompareIndexRoute
+  '/zh/compare/': typeof ZhCompareIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/$locale': typeof LocaleRoute
   '/download': typeof DownloadRoute
   '/llms-full.txt': typeof LlmsFullDottxtRoute
   '/llms.txt': typeof LlmsDottxtRoute
   '/zh': typeof ZhRoute
+  '/$locale/download': typeof LocaleDownloadRoute
   '/api/search': typeof ApiSearchRoute
+  '/compare/$product': typeof CompareProductRoute
   '/docs/$': typeof DocsSplatRoute
   '/docs/{$}.md': typeof DocsChar123Char125DotmdRoute
   '/zh/download': typeof ZhDownloadRoute
   '/zh/llms-full.txt': typeof ZhLlmsFullDottxtRoute
   '/zh/llms.txt': typeof ZhLlmsDottxtRoute
+  '/compare': typeof CompareIndexRoute
+  '/$locale/compare/$product': typeof LocaleCompareProductRoute
+  '/zh/compare/$product': typeof ZhCompareProductRoute
   '/zh/docs/$': typeof ZhDocsSplatRoute
   '/zh/docs/{$}.md': typeof ZhDocsChar123Char125DotmdRoute
+  '/$locale/compare': typeof LocaleCompareIndexRoute
+  '/zh/compare': typeof ZhCompareIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/$locale': typeof LocaleRoute
   '/download': typeof DownloadRoute
   '/llms-full.txt': typeof LlmsFullDottxtRoute
   '/llms.txt': typeof LlmsDottxtRoute
   '/zh': typeof ZhRoute
+  '/$locale_/download': typeof LocaleDownloadRoute
   '/api/search': typeof ApiSearchRoute
+  '/compare/$product': typeof CompareProductRoute
   '/docs/$': typeof DocsSplatRoute
   '/docs/{$}.md': typeof DocsChar123Char125DotmdRoute
   '/zh_/download': typeof ZhDownloadRoute
   '/zh_/llms-full.txt': typeof ZhLlmsFullDottxtRoute
   '/zh_/llms.txt': typeof ZhLlmsDottxtRoute
+  '/compare/': typeof CompareIndexRoute
+  '/$locale_/compare/$product': typeof LocaleCompareProductRoute
+  '/zh_/compare/$product': typeof ZhCompareProductRoute
   '/zh_/docs/$': typeof ZhDocsSplatRoute
   '/zh_/docs/{$}.md': typeof ZhDocsChar123Char125DotmdRoute
+  '/$locale_/compare/': typeof LocaleCompareIndexRoute
+  '/zh_/compare/': typeof ZhCompareIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/$locale'
     | '/download'
     | '/llms-full.txt'
     | '/llms.txt'
     | '/zh'
+    | '/$locale/download'
     | '/api/search'
+    | '/compare/$product'
     | '/docs/$'
     | '/docs/{$}.md'
     | '/zh/download'
     | '/zh/llms-full.txt'
     | '/zh/llms.txt'
+    | '/compare/'
+    | '/$locale/compare/$product'
+    | '/zh/compare/$product'
     | '/zh/docs/$'
     | '/zh/docs/{$}.md'
+    | '/$locale/compare/'
+    | '/zh/compare/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/$locale'
     | '/download'
     | '/llms-full.txt'
     | '/llms.txt'
     | '/zh'
+    | '/$locale/download'
     | '/api/search'
+    | '/compare/$product'
     | '/docs/$'
     | '/docs/{$}.md'
     | '/zh/download'
     | '/zh/llms-full.txt'
     | '/zh/llms.txt'
+    | '/compare'
+    | '/$locale/compare/$product'
+    | '/zh/compare/$product'
     | '/zh/docs/$'
     | '/zh/docs/{$}.md'
+    | '/$locale/compare'
+    | '/zh/compare'
   id:
     | '__root__'
     | '/'
+    | '/$locale'
     | '/download'
     | '/llms-full.txt'
     | '/llms.txt'
     | '/zh'
+    | '/$locale_/download'
     | '/api/search'
+    | '/compare/$product'
     | '/docs/$'
     | '/docs/{$}.md'
     | '/zh_/download'
     | '/zh_/llms-full.txt'
     | '/zh_/llms.txt'
+    | '/compare/'
+    | '/$locale_/compare/$product'
+    | '/zh_/compare/$product'
     | '/zh_/docs/$'
     | '/zh_/docs/{$}.md'
+    | '/$locale_/compare/'
+    | '/zh_/compare/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  LocaleRoute: typeof LocaleRoute
   DownloadRoute: typeof DownloadRoute
   LlmsFullDottxtRoute: typeof LlmsFullDottxtRoute
   LlmsDottxtRoute: typeof LlmsDottxtRoute
   ZhRoute: typeof ZhRoute
+  LocaleDownloadRoute: typeof LocaleDownloadRoute
   ApiSearchRoute: typeof ApiSearchRoute
+  CompareProductRoute: typeof CompareProductRoute
   DocsSplatRoute: typeof DocsSplatRoute
   DocsChar123Char125DotmdRoute: typeof DocsChar123Char125DotmdRoute
   ZhDownloadRoute: typeof ZhDownloadRoute
   ZhLlmsFullDottxtRoute: typeof ZhLlmsFullDottxtRoute
   ZhLlmsDottxtRoute: typeof ZhLlmsDottxtRoute
+  CompareIndexRoute: typeof CompareIndexRoute
+  LocaleCompareProductRoute: typeof LocaleCompareProductRoute
+  ZhCompareProductRoute: typeof ZhCompareProductRoute
   ZhDocsSplatRoute: typeof ZhDocsSplatRoute
   ZhDocsChar123Char125DotmdRoute: typeof ZhDocsChar123Char125DotmdRoute
+  LocaleCompareIndexRoute: typeof LocaleCompareIndexRoute
+  ZhCompareIndexRoute: typeof ZhCompareIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -207,6 +311,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$locale': {
+      id: '/$locale'
+      path: '/$locale'
+      fullPath: '/$locale'
+      preLoaderRoute: typeof LocaleRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/download': {
@@ -237,11 +348,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ZhRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/$locale_/download': {
+      id: '/$locale_/download'
+      path: '/$locale/download'
+      fullPath: '/$locale/download'
+      preLoaderRoute: typeof LocaleDownloadRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/search': {
       id: '/api/search'
       path: '/api/search'
       fullPath: '/api/search'
       preLoaderRoute: typeof ApiSearchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/compare/': {
+      id: '/compare/'
+      path: '/compare'
+      fullPath: '/compare/'
+      preLoaderRoute: typeof CompareIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/compare/$product': {
+      id: '/compare/$product'
+      path: '/compare/$product'
+      fullPath: '/compare/$product'
+      preLoaderRoute: typeof CompareProductRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/docs/$': {
@@ -279,6 +411,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ZhLlmsDottxtRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/$locale_/compare/': {
+      id: '/$locale_/compare/'
+      path: '/$locale/compare'
+      fullPath: '/$locale/compare/'
+      preLoaderRoute: typeof LocaleCompareIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$locale_/compare/$product': {
+      id: '/$locale_/compare/$product'
+      path: '/$locale/compare/$product'
+      fullPath: '/$locale/compare/$product'
+      preLoaderRoute: typeof LocaleCompareProductRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/zh_/compare/': {
+      id: '/zh_/compare/'
+      path: '/zh/compare'
+      fullPath: '/zh/compare/'
+      preLoaderRoute: typeof ZhCompareIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/zh_/compare/$product': {
+      id: '/zh_/compare/$product'
+      path: '/zh/compare/$product'
+      fullPath: '/zh/compare/$product'
+      preLoaderRoute: typeof ZhCompareProductRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/zh_/docs/$': {
       id: '/zh_/docs/$'
       path: '/zh/docs/$'
@@ -298,28 +458,27 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  LocaleRoute: LocaleRoute,
   DownloadRoute: DownloadRoute,
   LlmsFullDottxtRoute: LlmsFullDottxtRoute,
   LlmsDottxtRoute: LlmsDottxtRoute,
   ZhRoute: ZhRoute,
+  LocaleDownloadRoute: LocaleDownloadRoute,
   ApiSearchRoute: ApiSearchRoute,
+  CompareProductRoute: CompareProductRoute,
   DocsSplatRoute: DocsSplatRoute,
   DocsChar123Char125DotmdRoute: DocsChar123Char125DotmdRoute,
   ZhDownloadRoute: ZhDownloadRoute,
   ZhLlmsFullDottxtRoute: ZhLlmsFullDottxtRoute,
   ZhLlmsDottxtRoute: ZhLlmsDottxtRoute,
+  CompareIndexRoute: CompareIndexRoute,
+  LocaleCompareProductRoute: LocaleCompareProductRoute,
+  ZhCompareProductRoute: ZhCompareProductRoute,
   ZhDocsSplatRoute: ZhDocsSplatRoute,
   ZhDocsChar123Char125DotmdRoute: ZhDocsChar123Char125DotmdRoute,
+  LocaleCompareIndexRoute: LocaleCompareIndexRoute,
+  ZhCompareIndexRoute: ZhCompareIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
-
-import type { getRouter } from './router.tsx'
-import type { createStart } from '@tanstack/react-start'
-declare module '@tanstack/react-start' {
-  interface Register {
-    ssr: true
-    router: Awaited<ReturnType<typeof getRouter>>
-  }
-}

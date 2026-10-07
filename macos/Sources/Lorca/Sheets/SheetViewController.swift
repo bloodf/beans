@@ -10,6 +10,10 @@ class SheetViewController: NSViewController {
     private let buttonRow = Build.stack([], orientation: .horizontal, spacing: 10)
 
     private(set) var confirmButton = NSButton()
+    private(set) var cancelButton: NSButton?
+
+    /// Subclasses can keep Cancel and Escape from discarding an in-flight save.
+    var canDismiss: Bool { true }
     private var sheetWidth: CGFloat = 420
 
     init(title: String, subtitle: String, width: CGFloat = 420) {
@@ -72,6 +76,7 @@ class SheetViewController: NSViewController {
             cancelButton.bezelStyle = .rounded
             cancelButton.keyEquivalent = "\u{1b}"
             buttonRow.addArrangedSubview(cancelButton)
+            self.cancelButton = cancelButton
         }
         buttonRow.addArrangedSubview(confirmButton)
     }
@@ -94,6 +99,7 @@ class SheetViewController: NSViewController {
     }
 
     @objc func dismissSheet() {
+        guard canDismiss else { return }
         dismiss(nil)
     }
 

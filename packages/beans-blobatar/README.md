@@ -1,6 +1,6 @@
 # Beans Blobatar
 
-Project-owned, offline avatar generator. Vendored from [Alain00/blobatar](https://github.com/Alain00/blobatar) **2.7.0**, commit [`a7fd546ebede49d0a9fa638945b9e534489782a2`](https://github.com/Alain00/blobatar/commit/a7fd546ebede49d0a9fa638945b9e534489782a2). Source: `packages/blobatar/src` and `packages/react-native/src/index.tsx`, `parts.tsx`. Original copyright **Copyright (c) 2026 Alain**; [MIT license](LICENSE) retained verbatim. Core shape bands, layout, palette, hash, and serialization remain upstream code. Local edits: native imports point into vendored core; hash constructs `TextEncoder` lazily for JavaScriptCore; `jsc.ts` supplies standard UTF-8 encoding in hosts without `TextEncoder`.
+Project-owned, offline avatar generator. Vendored from [Alain00/blobatar](https://github.com/Alain00/blobatar) **2.7.0**, commit [`a7fd546ebede49d0a9fa638945b9e534489782a2`](https://github.com/Alain00/blobatar/commit/a7fd546ebede49d0a9fa638945b9e534489782a2). Source: `packages/blobatar/src` (including `idle.ts`) and `packages/react-native/src/index.tsx`, `parts.tsx`, `animated.tsx`, `worklets.ts`; `test/golden/` is upstream's golden corpus. Original copyright **Copyright (c) 2026 Alain**; [MIT license](LICENSE) retained verbatim. Core shape bands, layout, palette, hash, serialization and idle loops remain upstream code. Local edits: imports point into the vendored tree; hash constructs `TextEncoder` lazily for JavaScriptCore; `jsc.ts` supplies standard UTF-8 encoding in hosts without `TextEncoder`.
 
 ## Seed contract
 
@@ -27,6 +27,14 @@ let svg = context.objectForKeyedSubscript("blobatar")?.call(withArguments: [botI
 let image = svg.flatMap { NSImage(data: Data($0.utf8)) }
 ```
 
+## Appearance, geometry and animation
+
+`appearance.ts` holds the `BotLook` schema (version 1): a base appearance and optional per-state overrides for `idle`, `thinking`, `responding`, `working`, `waiting`, `retry`, `error`. `validateBotLook` rejects unknown fields, unknown enum values, hue outside `[0, 360)` and any palette value that is not uppercase `#RRGGBB`. `resolveBotAppearance` merges a state over the base (palette channels individually); omitted shape, hue and tone keep the values seeded by the bot ID, a missing expression is `idle`, a missing background is `none` (transparent, as upstream draws it) and missing motion is on. Shape and tone pin the upstream `shape` trait and tone position inside their bands, so `botAvatarSVG(botID)` with no look is byte-identical to `blobatar(botID)`.
+
+`botAvatarGeometry` returns the same figure as plain JSON numbers: the core silhouette normalized to 24 cubics (every source segment boundary kept, the rest split by de Casteljau at half the widest angular sweep about the body centre, clockwise from the top), the droplet taper as 4 cubics, nine petal slots (unused ones zero-radius at the body centre), the backdrop as 8 cubics with opacity 0 for `none`, the drawn eyes, the upstream pose, tinted fills and `motionSeeds`. `interpolateAvatarGeometry` lerps all of it, so shapes morph instead of cutting. `avatarFrame(g, timeMs, amp)` composes the upstream idle layer (breathe, bob, glance, blink, tremor, seesaw) into one body matrix and one matrix per eye; `amp` 0 stops every loop, including the tremor and seesaw expressions carry, and draws the static endpoint. `frame.ts` is all `"worklet"` functions, so a Reanimated UI-thread callback can call it; nothing parses SVG per frame. Caching endpoint geometry by bot ID and canonical look is the caller's.
+
+`@beans/blobatar/react-native/animated` is upstream `AnimatedBlobatar`, driven by Reanimated 4 and `react-native-worklets`.
+
 ## Expo / React Native
 
 ```tsx
@@ -38,4 +46,4 @@ Install `react-native-svg` in app (Expo: `npx expo install react-native-svg`). N
 
 ## Regenerating committed JavaScript
 
-From repository root, use `Bun.build({ entrypoints: ["packages/beans-blobatar/index.ts"], target: "browser", format: "esm" })` for `index.js`; use `jsc.ts` with `format: "iife"` for `dist/blobatar.jsc.js`. Keep pinned upstream SHA, license, and core/native source in sync when upgrading. The committed bundles are source-derived; consumers never compile the JSCore bundle on device.
+Run `bun packages/beans-blobatar/build.ts` to regenerate `index.js` and `frame.js` (ESM) and `dist/blobatar.jsc.js` (IIFE that installs every export of `index.ts` as a global); two runs produce identical bytes. `bun test` in this directory runs the schema, geometry, morph, frame and upstream golden tests. Keep pinned upstream SHA, license, and core/native source in sync when upgrading. The committed bundles are source-derived; consumers never compile the JSCore bundle on device.

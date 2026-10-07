@@ -8,6 +8,7 @@ import { deviceName, isRunner, providerLabel, type Device, type PluginStatus } f
 import { deviceIsOnline, useStore } from "../../../src/core/store";
 import { t, useLanguage } from "../../../src/i18n";
 import { BotAvatar } from "../../../src/ui/Avatar";
+import { notifyAvatarScroll } from "../../../src/ui/avatarVisibility";
 import { deviceSymbol } from "../../../src/ui/devices";
 import { Row, Section } from "../../../src/ui/forms";
 import { lastSeen } from "../../../src/ui/format";
@@ -83,7 +84,7 @@ export default function DeviceScreen() {
   return (
     <>
       <Stack.Screen options={{ title: "" }} />
-      <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingBottom: 40 }}>
+      <ScrollView onScroll={notifyAvatarScroll} scrollEventThrottle={32} contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingBottom: 40 }}>
         <View style={styles.header}>
           <Symbol name={deviceSymbol(device.os, device.model)} size={48} color={p.label} />
           <Text style={[styles.name, { color: p.label }]}>{deviceName(device)}</Text>

@@ -22,6 +22,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  release-source:
+    name: Release source fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts
+
   rust-linux:
     name: Rust (Linux)
     runs-on: ubuntu-latest
@@ -41,6 +50,7 @@ jobs:
       LORCA_RELAY_TEST_POSTGRES: postgres://postgres:lorca@127.0.0.1:5432/lorca?sslmode=disable
     steps:
       - uses: actions/checkout@v7
+      - run: python3 -I -B scripts/server-updater.test.py -v
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Cargo unifies features across the packages of one run, and the phone core takes lorca
@@ -89,6 +99,7 @@ jobs:
       - run: swift test
         working-directory: macos
       - run: bun run test:mac-startup
+      - run: sh macos/Tests/run-settings-layout.sh
 
   desktop:
     name: Windows and Linux app

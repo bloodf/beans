@@ -16,13 +16,13 @@ A bot works on its Runner with the same kind of tools a coding agent gets. It ru
 
 Relative paths resolve in the bot's [working directory](/docs/bots#working-directory).
 
-Commands see the same `PATH` and variables as your terminal. On a Mac or Linux, Lorca reads them from your login shell, whether zsh, bash, or fish, when it starts, so `npm`, `cargo`, and `brew` work even when the app started Lorca. Plugin servers get them too. Restart Lorca after you change your shell's configuration.
+Commands see the same `PATH` and variables as your terminal. On a Mac or Linux, Beans reads them from your login shell, whether zsh, bash, or fish, when it starts, so `npm`, `cargo`, and `brew` work even when the app started Beans. Plugin servers get them too. Restart Beans after you change your shell's configuration.
 
 <Callout type="warn" title="A bot has your access">
   Shell commands run as your user and are not limited to the working directory. They can control files, processes, credentials, applications, and the network. Give a bot a description with constraints that match the trust you would give a script you run yourself, and assign bots to a machine you are comfortable with them controlling.
 </Callout>
 
-Before a shell command starts, Lorca parses all of its stages and sends the complete command through [Auto-review](/docs/auto-review). Safe work runs automatically; for risky work, the command's card asks you first. An allowed command retains your user's full access.
+Before a shell command starts, Beans parses all of its stages and sends the complete command through [Auto-review](/docs/auto-review). Safe work runs automatically; for risky work, the command's card asks you first. An allowed command retains your user's full access.
 
 ## The command's card
 
@@ -45,7 +45,7 @@ Each command runs in a terminal of its own, so `sudo`, `ssh`, a key's passphrase
 - **Answer** from the card, on any of your Devices. What you type goes straight to the command. It is never saved in the chat, and the terminal doesn't echo it, so the bot doesn't read it back. Bots are told to leave passwords and one-time codes to you. When the command finishes, the bot hears how it went and carries on.
 - **Stop** from the card or from Running tasks. **Stop** in the desktop app's composer ends the whole turn, its commands included, except those running in the background.
 
-Anything a bot types into a command goes through [Auto-review](/docs/auto-review) first, like a new command. A command still waiting stops by itself after 30 minutes without output, when Lorca quits, and when its chat is deleted. On Windows, commands get no input.
+Anything a bot types into a command goes through [Auto-review](/docs/auto-review) first, like a new command. A command still waiting stops by itself after 30 minutes without output, when Beans quits, and when its chat is deleted. On Windows, commands get no input.
 
 ## On the web
 
@@ -64,4 +64,4 @@ DeepSeek, Anthropic, ChatGPT, and Grok bots search the web and read pages when t
 
 ## Plugin tools
 
-Every [plugin](/docs/plugins) installed on a Runner makes its tools discoverable to the bots there: creating a GitHub issue, reading a Linear ticket, driving a browser. Lorca loads only the matching tool schemas when a task needs them. Actions that change something go through [Auto-review](/docs/auto-review) first.
+Every [plugin](/docs/plugins) installed on a Runner makes its tools discoverable to the bots there: creating a GitHub issue, reading a Linear ticket, driving a browser. Beans loads only the matching tool schemas when a task needs them. Actions that change something go through [Auto-review](/docs/auto-review) first.

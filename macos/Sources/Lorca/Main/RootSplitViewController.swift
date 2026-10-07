@@ -352,8 +352,9 @@ final class RootSplitViewController: NSSplitViewController {
         }
         let controller = NSSplitViewItemAccessoryViewController()
         controller.view = bar
-        // The bars carry the sidebar's own margins.
-        controller.automaticallyAppliesContentInsets = false
+        // AppKit supplies the floating pane's outer safe-area margins; the bars keep
+        // their interior padding. Opting out clips the footer's 28 pt hit areas.
+        controller.automaticallyAppliesContentInsets = true
         if #available(macOS 26.1, *) { controller.preferredScrollEdgeEffectStyle = .soft }
         sidebarAccessories[ObjectIdentifier(bar)] = controller
         return controller

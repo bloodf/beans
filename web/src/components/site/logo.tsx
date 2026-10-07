@@ -1,6 +1,6 @@
 export function Logo({ className = 'size-7' }: { className?: string }) {
-  // Exported from the production macOS icon in macos/Resources/Lorca.icns.
+  // The shared Beans mark stays transparent on light and dark surfaces.
   return (
-    <img src="/icon.png" width={256} height={256} className={className} alt="" aria-hidden="true" />
+    <img src="/brand/beans-mark.svg" width={1254} height={1254} className={className} alt="" aria-hidden="true" />
   )
 }

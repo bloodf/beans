@@ -18,6 +18,8 @@ pub struct ProviderStatus {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api: Option<crate::credentials::CustomApi>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<crate::credentials::CustomIntegration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<StatusModel>,
 }
@@ -115,13 +117,14 @@ pub struct Bot {
     pub name: String,
     /// What the bot does and how it should work, shown in its profile and used in its prompt.
     pub description: String,
-    /// SF Symbol drawn on the accent gradient; the look when there is no image.
+    /// Legacy profile fields retained on the wire; generated avatars use the stable bot id.
     pub symbol_name: String,
     pub accent: String,
-    /// A custom profile image, a `file` blob like a message attachment, shown in place of the
-    /// symbol and accent wherever the bot's avatar appears.
+    /// Uploaded photo, independent of generated appearance, carried as an encrypted `file`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<Attachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub look: Option<crate::appearance::BotLook>,
     pub runner_id: String,
     pub provider: String,
     /// Model id for the provider. `None` means the provider's default.

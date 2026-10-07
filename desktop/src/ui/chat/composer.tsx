@@ -541,7 +541,7 @@ export function Composer(props: {
               <For each={panel().bots}>
                 {(bot, index) => (
                   <div class={["mention-row", { highlighted: index() === mentionIndex() }]} onMouseEnter={() => setMentionIndex(index())} onClick={() => insertMention(bot)}>
-                    <Avatar content={botAvatar(bot)} size={22} />
+                    <Avatar content={botAvatar(bot, props.chatID)} size={22} />
                     <span class="mention-text">
                       <span class="mention-name truncate">{bot.name}</span>
                       <span class="mention-detail truncate">

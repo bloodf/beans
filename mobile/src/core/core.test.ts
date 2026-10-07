@@ -2,6 +2,15 @@
 // pairing-string check, the model helpers, and the formatting the transcript and list share.
 
 import { describe, expect, test } from "bun:test";
+
+test("DurinDoor uses explicit identity and selects all models without a catalog-size limit", () => {
+  const preset = customPreset("DurinDoor");
+  expect(preset?.integration).toBe("durindoor");
+  expect(preset?.baseURL).toBe("");
+  const listed = Array.from({ length: 12 }, (_, i) => ({ id: `combo-${i}` }));
+  expect(selectedModelIds(mergeListedModels([], listed, true))).toEqual(listed.map((m) => m.id));
+  expect(selectedModelIds(mergeListedModels([], listed))).toEqual([]);
+});
 import {
   addModelRow,
   attachmentSummary,
@@ -236,6 +245,7 @@ describe("custom providers", () => {
 
   test("presets start the form from a server people often add", () => {
     expect(CUSTOM_PRESETS.map((preset) => [preset.name, preset.api, preset.baseURL])).toEqual([
+      ["DurinDoor", "chat-completions", ""],
       ["OpenAI", "responses", "https://api.openai.com/v1"],
       ["OpenRouter", "chat-completions", "https://openrouter.ai/api/v1"],
       ["Gemini", "chat-completions", "https://generativelanguage.googleapis.com/v1beta/openai"],

@@ -1,0 +1,1 @@
+Provider SVG marks are from @lobehub/icons-static-svg, obtained from its npm distribution on 2026-10-07. Source: https://github.com/lobehub/lobe-icons. MIT license is included beside the assets. Trademarks belong to their owners. Display identifies compatibility, not endorsement.

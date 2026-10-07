@@ -127,6 +127,33 @@ async fn concurrent_roster_writers_cannot_replace_one_another() {
 }
 
 #[tokio::test]
+async fn protected_blob_delete_keeps_roster_policy_rows_sequence_and_usage() {
+    for (store, _) in backends().await {
+        let who = name("identity");
+        ok!(store.insert_blob(NewBlob { kind: "roster".into(), slot: slot("roster", false),
+            expected_slot_seq: Some(0), ..blob(&who, "roster", b"look") }, 0));
+        ok!(store.insert_blob(NewBlob { kind: "policy".into(), ..blob(&who, "policy", b"pause") }, 0));
+        ok!(store.insert_blob(blob(&who, "consumed", b"ok"), 0));
+        let snapshot = |rows: Vec<BlobRow>| rows.into_iter().map(|row|
+            (row.id, row.kind, row.recipient_machine_pubkey, row.seq, row.ciphertext, row.created_at)).collect::<Vec<_>>();
+        let (rows, seq) = ok!(store.blobs_since(&who, "m", 0, &[], 500, i64::MAX));
+        let before = snapshot(rows);
+        for id in ["roster", "policy"] {
+            assert_eq!(ok!(store.delete_blob(&who, id)), None, "{}", store.describe());
+            let (rows, after_seq) = ok!(store.blobs_since(&who, "m", 0, &[], 500, i64::MAX));
+            assert_eq!(snapshot(rows), before, "{}", store.describe());
+            assert_eq!(after_seq, seq);
+            assert!(used(&store, &who, 1, 12).await && !used(&store, &who, 2, 12).await,
+                "protected deletion changed usage: {}", store.describe());
+        }
+        // Positive control: consumed blobs still delete and release exactly their own bytes.
+        assert_eq!(ok!(store.delete_blob(&who, "consumed")), Some("chat".into()));
+        assert_eq!(ids(&store, &who, "m", 0, i64::MAX).await, ["roster", "policy"]);
+        assert!(used(&store, &who, 1, 10).await && !used(&store, &who, 2, 10).await);
+    }
+}
+
+#[tokio::test]
 async fn a_deleted_group_takes_its_blobs_and_stays_deleted() {
     let _marks = MARKS.read().await;
     for (store, _) in backends().await {

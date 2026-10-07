@@ -25,7 +25,7 @@ final class SettingsSidebarViewController: NSViewController {
         bar.addSubview(back)
         NSLayoutConstraint.activate([
             bar.heightAnchor.constraint(equalToConstant: 38),
-            back.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 10),
+            back.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: SidebarChrome.floats ? 0 : 10),
             back.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
         ])
         return bar

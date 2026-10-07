@@ -2009,17 +2009,27 @@ body.resizing * {
 }
 
 .look-sheet .sheet-content {
-  gap: 0;
+  gap: 16px;
+  overflow-y: auto;
+  padding: 2px;
+  margin-inline: -2px;
+}
+
+.look-sheet .sheet-header,
+.look-sheet .sheet-buttons {
+  flex: none;
 }
 
 .look-preview {
   display: flex;
-  justify-content: center;
-  margin-bottom: 18px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  flex: none;
 }
 
 .look-heading {
-  margin-bottom: 6px;
+  margin: 0 0 8px;
   font-size: 10px;
   font-weight: 600;
   color: var(--label-3);
@@ -2034,7 +2044,62 @@ body.resizing * {
 .look-caption {
   font-size: var(--text-caption);
   line-height: 1.4;
-  color: var(--label-3);
+  color: var(--label-2);
+}
+
+.look-save-error {
+  margin-top: 12px;
+  color: var(--red);
+}
+
+.look-fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+  flex: none;
+}
+
+.look-fields legend {
+  padding: 0;
+  margin-bottom: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.look-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.look-field-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.look-field .popup-button,
+.look-field .text-field {
+  flex: 0 1 240px;
+  min-width: 0;
+}
+
+.look-inheritance {
+  margin-bottom: 12px;
+}
+
+.look-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 8px;
+}
+
+.look-warning {
+  margin-top: 8px;
+  color: var(--label);
+  font-size: var(--text-caption);
 }
 
 .selectable-bot-row {

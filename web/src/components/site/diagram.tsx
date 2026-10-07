@@ -6,12 +6,15 @@ import { useTranslation } from 'react-i18next'
 export function RelayDiagram() {
   const { t } = useTranslation()
   return (
-    <div role="img" aria-label={t('relay.alt')} className="flex flex-col items-center sm:flex-row sm:items-stretch">
-      <Node icon={Laptop} title={t('relay.nodes.computer.title')} body={t('relay.nodes.computer.body')} />
+    <div className="relay-illustration motion-island">
+    <div role="img" aria-label={t('relay.alt')} className="relay-diagram flex flex-col items-center sm:flex-row sm:items-stretch">
+      <Node kind="computer" icon={Laptop} title={t('relay.nodes.computer.title')} body={t('relay.nodes.computer.body')} status={t('relay.states.encrypt')} />
       <Wire />
-      <Node icon={Lock} title={t('relay.nodes.relay.title')} body={t('relay.nodes.relay.body')} accent />
+      <Node kind="relay" icon={Lock} title={t('relay.nodes.relay.title')} body={t('relay.nodes.relay.body')} status={t('relay.states.forward')} accent />
       <Wire second />
-      <Node icon={Smartphone} title={t('relay.nodes.phone.title')} body={t('relay.nodes.phone.body')} />
+      <Node kind="phone" icon={Smartphone} title={t('relay.nodes.phone.title')} body={t('relay.nodes.phone.body')} status={t('relay.states.decrypt')} />
+    </div>
+    <p className="relay-caption">{t('relay.caption')}</p>
     </div>
   )
 }
@@ -21,16 +24,21 @@ function Node({
   title,
   body,
   accent = false,
+  kind,
+  status,
 }: {
   icon: typeof Laptop
   title: string
   body: string
   accent?: boolean
+  kind: 'computer' | 'relay' | 'phone'
+  status: string
 }) {
   return (
-    <div className="flex w-full max-w-64 flex-none flex-col justify-center rounded-2xl border border-white/50 bg-white/85 px-5 py-5 text-center shadow-xl backdrop-blur-md sm:w-52 dark:border-white/10 dark:bg-zinc-900/80">
+    <div className={`relay-node relay-node-${kind}`}>
+    <div className="relay-node-surface">
       <span
-        className={`mx-auto flex size-11 items-center justify-center rounded-full ${
+        className={`relay-node-icon mx-auto flex size-11 items-center justify-center rounded-full ${
           accent ? 'bg-linear-to-br from-violet to-cyan text-white' : 'bg-foreground/[0.06] text-foreground'
         }`}
       >
@@ -38,6 +46,9 @@ function Node({
       </span>
       <p className="mt-3 font-semibold">{title}</p>
       <p className="mt-1 text-sm text-muted-foreground">{body}</p>
+      <div className="relay-work" aria-hidden="true"><span>{status}</span><span className="relay-work-dots"><i /><i /><i /></span></div>
+      <div className="relay-packets" aria-hidden="true"><i /><i /><i /><i /></div>
+    </div>
     </div>
   )
 }
@@ -48,7 +59,7 @@ function Wire({ second = false }: { second?: boolean }) {
   return (
     <div
       className="wire relative h-16 w-0.5 flex-none overflow-hidden rounded-full sm:h-0.5 sm:w-auto sm:flex-1 sm:self-center"
-      style={second ? { animationDelay: '-2.5s' } : undefined}
+      style={{ animationDelay: second ? '2.4s' : '0.8s' }}
     />
   )
 }

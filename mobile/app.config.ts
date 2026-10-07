@@ -11,8 +11,18 @@ export default (): ExpoConfig => {
   const icon = development ? "./assets/icon-dev.png" : "./assets/icon.png";
   const splash = development ? "./assets/splash-icon-dev.png" : "./assets/splash-icon.png";
   const favicon = development ? "./assets/favicon-dev.png" : "./assets/favicon.png";
-  const adaptiveIconBackgroundColor = development ? "#ffbe00" : "#3424f5";
-  const buildNumber = process.env.BUILD_NUMBER ?? String(Math.floor(Date.now() / 1000));
+  const adaptiveIconBackgroundColor = development ? "#181A18" : "#F26744";
+  const eas = Boolean(process.env.EAS_BUILD_PROFILE);
+  const owner = process.env.BEANS_EXPO_OWNER;
+  const projectId = process.env.BEANS_EXPO_PROJECT_ID;
+  if (eas && (!owner || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(projectId ?? ""))) {
+    throw new Error("Link Expo project first: BEANS_EXPO_OWNER and BEANS_EXPO_PROJECT_ID are required for EAS");
+  }
+  if (eas && !development && !/^[A-Z0-9]{10}$/.test(process.env.BEANS_APPLE_TEAM_ID ?? "")) {
+    throw new Error("BEANS_APPLE_TEAM_ID must identify your Apple Developer team for EAS release builds");
+  }
+  // EAS remote versions own store build numbers. Local development does not allocate releases.
+  const buildNumber = process.env.BUILD_NUMBER ?? "1";
   if (!/^[1-9]\d*$/.test(buildNumber) || Number(buildNumber) > 2_100_000_000) {
     throw new Error("BUILD_NUMBER must be a positive integer at most 2100000000");
   }
@@ -22,6 +32,8 @@ export default (): ExpoConfig => {
   return {
     name: appName,
     slug: "beans",
+    ...(owner ? { owner } : {}),
+    ...(projectId ? { extra: { eas: { projectId } } } : {}),
     version: releasePackage.version,
     scheme: development ? ["beans-dev", "lorca"] : ["beans", "lorca"],
     orientation: "portrait",
@@ -37,12 +49,11 @@ export default (): ExpoConfig => {
         NSPhotoLibraryUsageDescription: "Beans attaches photos you pick to a message.",
         CFBundleAllowMixedLocalizations: true,
       },
-      // GitHub builds share a monotonic BUILD_NUMBER with Android; local builds use epoch seconds.
-      buildNumber: process.env.LORCA_IOS_BUILD_NUMBER ?? buildNumber,
+      buildNumber,
       entitlements: {
         "com.apple.security.application-groups": [appGroup],
       },
-      appleTeamId: process.env.BEANS_APPLE_TEAM_ID ?? "GJE9R5VE87",
+      ...(process.env.BEANS_APPLE_TEAM_ID ? { appleTeamId: process.env.BEANS_APPLE_TEAM_ID } : {}),
     },
     android: {
       package: appId,
@@ -50,7 +61,7 @@ export default (): ExpoConfig => {
       ...(process.env.BEANS_GOOGLE_SERVICES_FILE ? { googleServicesFile: process.env.BEANS_GOOGLE_SERVICES_FILE } : {}),
       adaptiveIcon: {
         backgroundColor: adaptiveIconBackgroundColor,
-        foregroundImage: icon,
+        foregroundImage: development ? "./assets/adaptive-icon-dev.png" : "./assets/adaptive-icon.png",
       },
       predictiveBackGestureEnabled: true,
       versionCode: Number(buildNumber),

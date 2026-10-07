@@ -1155,6 +1155,7 @@ impl App {
     pub(crate) fn create_bot_with_dm_prepared(&self, mut bot: Bot, chat_id: Option<String>,
         prepare: impl FnOnce(&mut Bot) -> anyhow::Result<()>) -> anyhow::Result<(Bot, Chat)> {
         let _edit = self.roster_edit.lock().unwrap();
+        if let Some(look) = &bot.look { look.validate().map_err(anyhow::Error::msg)?; }
         bot.normalize_description();
         let runner = self.device(&bot.runner_id).ok_or_else(|| anyhow::anyhow!("Unknown Runner"))?;
         if !runner.is_runner() {
@@ -1221,9 +1222,14 @@ impl App {
             let bot = state.bots.iter_mut().find(|b| b.id == id).ok_or_else(|| anyhow::anyhow!("Unknown bot"))?;
             let old_avatar = bot.avatar.as_ref().map(|avatar| avatar.id.clone());
             let old_capabilities = bot.capabilities.clone();
-            update(bot);
-            bot.normalize_description();
-            let bot = bot.clone();
+            let mut draft = bot.clone();
+            update(&mut draft);
+            if draft.look != bot.look {
+                if let Some(look) = &draft.look { look.validate().map_err(anyhow::Error::msg)?; }
+            }
+            draft.normalize_description();
+            *bot = draft.clone();
+            let bot = draft;
             if let Some(old) = old_avatar.filter(|old| bot.avatar.as_ref().map(|avatar| &avatar.id) != Some(old)) {
                 self.drop_avatar(&mut state, &old);
             }
@@ -2063,6 +2069,7 @@ mod tests {
             symbol_name: "sparkles".into(),
             accent: "indigo".into(),
             avatar: None,
+            look: None,
             runner_id: "runner".into(),
             provider: "deepseek".into(),
             model: None,

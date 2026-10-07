@@ -761,6 +761,7 @@ mod tests {
             symbol_name: String::new(),
             accent: String::new(),
             avatar: None,
+            look: None,
             runner_id: "dev".into(),
             provider: "deepseek".into(),
             model: None,

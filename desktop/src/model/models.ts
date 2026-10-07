@@ -3,6 +3,7 @@
 // the views can tell what changed by identity.
 
 import { L, Lc } from "../l10n";
+import type { BotLook } from "./botLook";
 import * as Format from "./format";
 import { markdownBlocks, plainText } from "./markdown";
 
@@ -184,6 +185,7 @@ export interface ProviderCredential {
    * providers have none. */
   name?: string;
   api?: CustomAPI;
+  integration?: "durindoor";
   models?: CustomModel[];
 }
 
@@ -266,6 +268,7 @@ export function matchingPreset(baseURL: string): CustomPreset | undefined {
   }
   if (url.hostname === "") return undefined;
   return customPresets.find((preset) => {
+    if (!preset.baseURL) return false;
     const known = new URL(preset.baseURL);
     return known.hostname === url.hostname && known.port === url.port;
   });
@@ -279,6 +282,7 @@ export function suggestedProviderName(baseURL: string): string {
 
 /** A server people often add, with what the sheet fills in for it. */
 export interface CustomPreset {
+  integration?: "durindoor";
   /** A product name, the same in every language. */
   name: string;
   api: CustomAPI;
@@ -291,6 +295,7 @@ export interface CustomPreset {
 
 /** What Add Provider… offers, in its menu's order: hosted APIs, then servers on the user's network. */
 export const customPresets: CustomPreset[] = [
+  { name: "DurinDoor", integration: "durindoor", api: "chat-completions", baseURL: "", local: false, keyPlaceholder: () => L("Optional for a server on your network") },
   { name: "OpenAI", api: "responses", baseURL: "https://api.openai.com/v1", local: false, keyPlaceholder: () => L("sk-… from platform.openai.com") },
   { name: "OpenRouter", api: "chat-completions", baseURL: "https://openrouter.ai/api/v1", local: false, keyPlaceholder: () => L("sk-or-… from openrouter.ai/keys") },
   {
@@ -310,7 +315,7 @@ export const customPresets: CustomPreset[] = [
  * item opens instead of adding another. */
 export function presetProvider(preset: CustomPreset, providers: readonly ProviderCredential[]): ProviderCredential | undefined {
   const name = preset.name.toLowerCase();
-  return providers.find((provider) => isCustomKind(provider.kind) && provider.name?.toLowerCase() === name);
+  return providers.find((provider) => isCustomKind(provider.kind) && (preset.integration ? provider.integration === preset.integration : provider.name?.toLowerCase() === name));
 }
 
 /** A model a custom provider offers, with what its server's model list says of it. */
@@ -321,6 +326,10 @@ export interface CustomModel {
   maxOutput?: number;
   /** Whether it takes images. */
   images?: boolean;
+  reasoning?: boolean;
+  tools?: boolean;
+  thinkingFormat?: string;
+  thinkingCanDisable?: boolean;
   /** The thinking levels the CLI says it takes, lowest first: in a provider's status only. */
   levels?: string[];
 }
@@ -349,7 +358,7 @@ export function savedChecklist(models: readonly CustomModel[] = []): ModelCheckl
  * listing's facts, the rest of the old listing goes, and the new one follows. With nothing picked
  * yet, a list of eight models or fewer, as a model server on the user's network has, starts picked,
  * its first the default. An empty listing, a server with none, keeps only the models to keep. */
-export function takeListing(checklist: ModelChecklist, listed: readonly CustomModel[]): ModelChecklist {
+export function takeListing(checklist: ModelChecklist, listed: readonly CustomModel[], selectAll = false): ModelChecklist {
   const facts = new Map<string, CustomModel>();
   for (const model of listed) if (!facts.has(model.id)) facts.set(model.id, model);
   const keep = (id: string) => checklist.selected.has(id) || checklist.added.has(id);
@@ -360,7 +369,7 @@ export function takeListing(checklist: ModelChecklist, listed: readonly CustomMo
     seen.add(model.id);
     models.push(model);
   }
-  if (checklist.selected.size > 0 || listed.length === 0 || listed.length > 8) return { ...checklist, models };
+  if (checklist.selected.size > 0 || listed.length === 0 || (listed.length > 8 && !selectAll)) return { ...checklist, models };
   return { ...checklist, models, selected: new Set(listed.map((model) => model.id)), defaultID: listed[0]?.id };
 }
 
@@ -539,6 +548,8 @@ export interface Bot {
   /** A custom profile image, kept as a `file` blob like a message attachment. Shown in place of
    * the symbol and accent once this computer has the bytes. */
   avatar?: Attachment;
+  /** Generated appearance remains independent of the uploaded image. */
+  look?: BotLook;
   createdAt: number;
 }
 

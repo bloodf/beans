@@ -53,9 +53,9 @@ struct Args {
 
     /// Refuse clients that speak an older protocol than this with `426`, which their apps show
     /// as "update required". A client says which it speaks in `Lorca-Protocol`; one that says
-    /// nothing speaks 0. Policy blobs require protocol 3 clients to keep stale roster writes
-    /// from undoing an account Pause or bot restriction.
-    #[usage(long, env = "LORCA_RELAY_MIN_PROTOCOL", default = "3")]
+    /// nothing speaks 0. Roster writes always require at least protocol 4, independently of
+    /// this generic floor, so older clients cannot erase encrypted bot appearance.
+    #[usage(long, env = "LORCA_RELAY_MIN_PROTOCOL", default = "4")]
     min_protocol: u32,
 
     /// Delete an identity after this many days with no sign of life: no machine seen, no blob

@@ -93,6 +93,9 @@ function CustomProviderSheet(props: {
 }) {
   const existing = props.existing;
   const preset = props.preset;
+  const integration = existing?.integration ?? preset?.integration;
+  const durindoor = integration === "durindoor";
+  const [customize, setCustomize] = createSignal(!durindoor);
   /** The provider being edited; none adds one. */
   const kind = existing && isCustomKind(existing.kind) ? existing.kind : undefined;
   const initialName = existing?.name ?? preset?.name ?? "";
@@ -118,7 +121,7 @@ function CustomProviderSheet(props: {
   const adding = () => addCandidate(search(), checklist().models);
   const rows = () => filterModels(checklist().models, search());
   const isEmpty = () => adding() === undefined && rows().length === 0;
-  const canConfirm = () => !busy() && savedName() !== "" && baseURL().trim() !== "" && checklist().selected.size > 0;
+  const canConfirm = () => !busy() && savedName() !== "" && isUsableBaseURL(baseURL()) && checklist().selected.size > 0;
 
   // MARK: The server's models
 
@@ -138,14 +141,14 @@ function CustomProviderSheet(props: {
       return;
     }
     setListing({ kind: "loading" });
-    const request = { name: savedName(), api: api(), baseURL: root, apiKey: key() };
+    const request = { integration, name: savedName(), api: api(), baseURL: root, apiKey: key() };
     timer = setTimeout(async () => {
       try {
         const listed = await store.listCustomModels(request);
         if (closed || current !== generation) return;
         // A listing replaces the last one, and a server with none leaves no other server's models
         // behind; picked and typed models stay.
-        setChecklist(takeListing(checklist(), listed ?? []));
+        setChecklist(takeListing(checklist(), listed ?? [], durindoor));
         if (listed === null || listed.length === 0) {
           setListing({ kind: "unlisted" });
           return;
@@ -230,7 +233,7 @@ function CustomProviderSheet(props: {
     const saved = savedName();
     begin(L("Checking %@…", saved));
     try {
-      const savedKind = await store.saveCustomProvider({ kind, name: saved, api: api(), baseURL: baseURL(), apiKey: key(), models: orderedModelIDs(checklist()) });
+      const savedKind = await store.saveCustomProvider({ kind, integration, name: saved, api: api(), baseURL: baseURL(), apiKey: key(), models: orderedModelIDs(checklist()) });
       if (closed) return;
       setSpinning(false);
       setStatus({ text: L("%@ connected.", saved), color: "var(--green)" });
@@ -278,6 +281,7 @@ function CustomProviderSheet(props: {
       }
     >
       <div class="custom-provider-form">
+        <Show when={!durindoor}>
         <span class="custom-form-label">{L("Name")}</span>
         <div class="form-control">
           <TextField value={name()} placeholder={suggestedProviderName(baseURL()) || "OpenRouter"} disabled={busy()} label={L("Name")} onInput={setName} />
@@ -296,6 +300,7 @@ function CustomProviderSheet(props: {
             class="fill"
           />
         </div>
+        </Show>
         <span class="custom-form-label">{L("API base URL")}</span>
         <div class="form-control">
           <TextField
@@ -311,7 +316,7 @@ function CustomProviderSheet(props: {
           />
         </div>
         <span />
-        <div class="field-note custom-endpoint-note">{customEndpointNote(api(), baseURL())}</div>
+        <div class="field-note custom-endpoint-note">{durindoor ? L("Localhost belongs to this Device. Setup checks access here; each Runner must reach the same URL. Access admitted does not prove the key was recognized when keyless mode is enabled.") : customEndpointNote(api(), baseURL())}</div>
         <span class="custom-form-label">{L("API key")}</span>
         <div class="form-control">
           {/* A preset needs its key next; an empty sheet starts at the name. */}
@@ -319,7 +324,7 @@ function CustomProviderSheet(props: {
             value={key()}
             placeholder={keyPlaceholder()}
             disabled={busy()}
-            autofocus={!existing && initialName !== ""}
+            autofocus={!existing && initialName !== "" && !durindoor}
             onInput={(value) => {
               setKey(value);
               loadModels(500);
@@ -327,6 +332,8 @@ function CustomProviderSheet(props: {
           />
         </div>
       </div>
+      <Show when={durindoor}><Button onClick={() => setCustomize(!customize())}>{L("Models")}</Button></Show>
+      <Show when={customize()}>
       <div class="custom-models">
         <div class="custom-models-header">
           <span class="custom-models-title">{L("Models")}</span>
@@ -406,6 +413,7 @@ function CustomProviderSheet(props: {
           </span>
         </div>
       </div>
+      </Show>
       <Show when={status()}>
         {(current) => (
           <div class="status-line">

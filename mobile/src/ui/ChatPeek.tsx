@@ -46,7 +46,7 @@ export function ChatPeek({ chat, bots, title }: { chat: Chat; bots: Map<string, 
         </View>
       </View>
       <View style={[styles.header, { backgroundColor: p.background, borderBottomColor: p.separator }]}>
-        <AvatarCluster bots={members} size={28} />
+        <AvatarCluster bots={members} chatId={chat.id} size={28} />
         <Text style={[styles.title, { color: p.label }]} numberOfLines={1}>
           {title}
         </Text>

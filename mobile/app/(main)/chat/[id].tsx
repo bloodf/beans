@@ -1,4 +1,5 @@
-import { FlashList, type FlashListRef } from "@shopify/flash-list";
+import type { FlashListRef } from "@shopify/flash-list";
+import { AvatarFlashList } from "../../../src/ui/AvatarFlashList";
 import { LinearGradient } from "expo-linear-gradient";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useHeaderHeight } from "expo-router/react-navigation";
@@ -799,7 +800,7 @@ export default function ChatScreen() {
               style={styles.titleView}
               accessibilityLabel={t("{title}, info", { title })}
             >
-              <AvatarCluster bots={members} size={30} working={isWorking} />
+              <AvatarCluster bots={members} chatId={id} size={30} working={isWorking} />
               <Text style={[styles.titleText, { color: p.label }]} numberOfLines={1}>
                 {title}
               </Text>
@@ -842,7 +843,7 @@ export default function ChatScreen() {
               accessibilityRole="button"
               accessibilityLabel={t("{title}, info", { title })}
             >
-              <AvatarCluster bots={members} size={30} working={isWorking} />
+              <AvatarCluster bots={members} chatId={id} size={30} working={isWorking} />
               <Text style={[styles.titleText, { color: p.label }]} numberOfLines={1}>
                 {title}
               </Text>
@@ -870,7 +871,7 @@ export default function ChatScreen() {
             pinToBottom();
           }}
         >
-          <FlashList
+          <AvatarFlashList
             renderScrollComponent={ChatScroll}
             ref={listRef}
             data={rows}

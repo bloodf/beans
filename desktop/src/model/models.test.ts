@@ -34,6 +34,16 @@ import {
   type ProviderCredential,
 } from "./models";
 
+test("DurinDoor preset has no private endpoint and selects large catalogs", () => {
+  const preset = customPresets.find((preset) => preset.name === "DurinDoor");
+  expect(preset?.integration).toBe("durindoor");
+  expect(preset?.baseURL).toBe("");
+  const listed = Array.from({ length: 12 }, (_, i) => ({ id: `alias-${i}` }));
+  expect(orderedModelIDs(takeListing(savedChecklist(), listed, true))).toEqual(listed.map((m) => m.id));
+  expect(takeListing(savedChecklist(), listed).selected.size).toBe(0);
+  expect(presetProvider(preset!, [{ kind: "custom:renamed", isConnected: true, detail: "", name: "Renamed", integration: "durindoor" }])?.kind).toBe("custom:renamed");
+});
+
 const ollama: ProviderCredential = {
   kind: "custom:ollama",
   isConnected: true,
@@ -105,6 +115,7 @@ test("the note under the base URL says what Lorca adds, then where requests go",
 
 test("the presets, in the Add Provider menu's order", () => {
   expect(customPresets.map((preset) => [preset.name, preset.api, preset.baseURL, preset.local])).toEqual([
+    ["DurinDoor", "chat-completions", "", false],
     ["OpenAI", "responses", "https://api.openai.com/v1", false],
     ["OpenRouter", "chat-completions", "https://openrouter.ai/api/v1", false],
     ["Gemini", "chat-completions", "https://generativelanguage.googleapis.com/v1beta/openai", false],
@@ -114,6 +125,7 @@ test("the presets, in the Add Provider menu's order", () => {
     ["LM Studio", "chat-completions", "http://localhost:1234/v1", true],
   ]);
   expect(customPresets.map((preset) => preset.keyPlaceholder())).toEqual([
+    "Optional for a server on your network",
     "sk-… from platform.openai.com",
     "sk-or-… from openrouter.ai/keys",
     "Key from aistudio.google.com",

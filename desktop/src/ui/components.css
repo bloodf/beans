@@ -741,6 +741,11 @@ textarea::placeholder {
   cursor: pointer;
 }
 
+.avatar.clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .avatar-disc {
   position: absolute;
   inset: 0;
@@ -750,6 +755,18 @@ textarea::placeholder {
   border-radius: 50%;
   overflow: hidden;
   color: #ffffff;
+}
+
+.avatar-disc.bot {
+  border-radius: 0;
+  overflow: visible;
+}
+
+.generated-avatar {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
 }
 
 .avatar-disc.you {
@@ -775,7 +792,16 @@ textarea::placeholder {
   position: absolute;
   border-radius: 50%;
   background: var(--green);
+}
+
+.presence-dot.active {
   animation: breathe 1.2s ease-in-out infinite alternate;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .presence-dot.active {
+    animation: none;
+  }
 }
 
 @keyframes breathe {

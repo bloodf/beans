@@ -124,8 +124,8 @@ final class GeneralSettingsViewController: SettingsPaneViewController {
     private let appearance = SettingsPopUpButton()
     private let appLanguage = SettingsPopUpButton()
     private let dictationLanguage = SettingsPopUpButton()
-    private lazy var version = ActionRow(
-        key: SettingsEntry.version.row, value: "", tint: .secondaryLabelColor, actionTitle: L("Check for Updates…"))
+    private lazy var version = UpdateStatusRow(
+        key: SettingsEntry.version.row, actionTitle: L("Check for Updates…"))
     private lazy var automaticDownloads = toggle(
         Updater.shared.automaticallyDownloadsUpdates, #selector(toggleAutomaticDownloads))
 

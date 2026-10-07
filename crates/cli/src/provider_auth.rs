@@ -13,12 +13,59 @@ use lorca_provider_auth::grok::{self as grok_oauth, GrokTokens};
 
 use crate::app::App;
 use crate::config;
-use crate::credentials::{is_custom, ApiKeyCredential, Credentials, CustomApi, CustomModel, CustomProvider, CUSTOM_PREFIX, PROVIDER_KINDS};
+use crate::credentials::{is_custom, ApiKeyCredential, Credentials, CustomApi, CustomIntegration, CustomModel, CustomProvider, CUSTOM_PREFIX, PROVIDER_KINDS};
 
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const OPENCODE_BASE_URL: &str = "https://opencode.ai/zen";
 const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go";
+const MODEL_RESPONSE_LIMIT: usize = 1024 * 1024;
+const AUTH_RESPONSE_LIMIT: usize = 16 * 1024;
+
+fn discovery_client() -> Result<reqwest::Client, String> {
+    lorca_tls::client_builder().redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(20)).build()
+        .map_err(|_| "Could not initialize provider connection".into())
+}
+
+async fn bounded_json(mut response: reqwest::Response, name: &str, limit: usize) -> Result<Value, String> {
+    if response.content_length().is_some_and(|length| length > limit as u64) {
+        return Err(format!("{name} response is too large"));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| format!("Could not read {name} response"))? {
+        if bytes.len().saturating_add(chunk.len()) > limit { return Err(format!("{name} response is too large")); }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| format!("{name} did not answer like an API. Check the base URL."))
+}
+
+fn integration_root(api: CustomApi, base_url: &str, integration: Option<CustomIntegration>) -> Result<String, String> {
+    if integration != Some(CustomIntegration::Durindoor) { return custom_root(api, base_url); }
+    if api != CustomApi::ChatCompletions { return Err("DurinDoor uses OpenAI Chat Completions".into()); }
+    let root = custom_root(api, base_url)?;
+    let root = ["/models", "/realtime/auth", "/responses", "/messages"].iter()
+        .find_map(|suffix| root.strip_suffix(suffix)).unwrap_or(&root);
+    Ok(if root.ends_with("/v1") { root.to_string() } else { format!("{root}/v1") })
+}
+
+async fn integration_models(app: &Arc<App>, name: &str, api: CustomApi, root: &str, key: &str, integration: Option<CustomIntegration>) -> Result<Option<Vec<(bool, CustomModel)>>, String> {
+    if integration == Some(CustomIntegration::Durindoor) {
+        let request = discovery_client()?.get(format!("{root}/realtime/auth"));
+        let request = if key.is_empty() { request } else { request.bearer_auth(key) };
+        let response = request.send().await.map_err(|_| format!("{name} unreachable. Check the URL on this Device."))?;
+        match response.status() {
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => return Err(if key.is_empty() { format!("{name} needs an API key") } else { format!("{name} rejected that key") }),
+            status if status.is_success() => {
+                if bounded_json(response, name, AUTH_RESPONSE_LIMIT).await?["ok"] != true {
+                    return Err("DurinDoor access probe did not admit this Device".into());
+                }
+            }
+            _ => return Err("This DurinDoor deployment does not support the access probe. Update the server; no inference was sent.".into()),
+        }
+    }
+    list_models(app, name, api, root, key, integration == Some(CustomIntegration::Durindoor)).await
+}
 
 fn env_url(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.trim().is_empty()).map(|s| s.trim_end_matches('/').to_string())
@@ -42,10 +89,14 @@ fn opencode_root(root: &str) -> &str {
 /// trailing slash.
 fn custom_base_url(base_url: Option<&str>) -> Result<Option<String>, String> {
     let Some(url) = base_url.map(str::trim).filter(|u| !u.is_empty()) else { return Ok(None) };
-    if !url.starts_with("http://") && !url.starts_with("https://") {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "The base URL must be a valid http:// or https:// URL")?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err("The base URL must start with http:// or https://".into());
     }
-    Ok(Some(url.trim_end_matches('/').to_string()))
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("Use a base URL without credentials, a query, or a fragment. Put the key in the API key field.".into());
+    }
+    Ok(Some(parsed.as_str().trim_end_matches('/').to_string()))
 }
 
 /// Checks a DeepSeek key against the API (the given root, or DeepSeek's) before saving both.
@@ -151,6 +202,7 @@ fn save_api_key(app: &Arc<App>, kind: &str, key: &str, base_url: Option<String>)
 pub struct CustomInput {
     /// The provider being edited; `None` adds one.
     pub kind: Option<String>,
+    pub integration: Option<String>,
     pub name: String,
     pub api: String,
     pub base_url: String,
@@ -164,7 +216,9 @@ pub struct CustomInput {
 /// output cap, and whether it sees images; a server without one still works with the model ids
 /// the user gave.
 pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String, String> {
-    let name = input.name.trim().to_string();
+    let requested_integration = CustomIntegration::parse(input.integration.as_deref())?;
+    let integration = requested_integration.or_else(|| input.kind.as_ref().and_then(|kind| app.credentials.lock().unwrap().custom.get(kind).and_then(|provider| provider.integration)));
+    let name = if integration == Some(CustomIntegration::Durindoor) && input.name.trim().is_empty() { "DurinDoor".into() } else { input.name.trim().to_string() };
     if name.is_empty() {
         return Err("Name the provider".into());
     }
@@ -172,7 +226,7 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
         return Err("Keep the name under 40 characters".into());
     }
     let api = CustomApi::parse(input.api.trim()).ok_or_else(|| format!("Unknown API {}", input.api.trim()))?;
-    let base_url = custom_root(api, &input.base_url)?;
+    let base_url = integration_root(api, &input.base_url, integration)?;
     let api_key = input.api_key.trim().to_string();
     let mut ids: Vec<String> = Vec::new();
     for id in input.models.iter().map(|id| id.trim()).filter(|id| !id.is_empty()) {
@@ -193,7 +247,7 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
         }
     }
 
-    let listed = list_models(app, &name, api, &base_url, &api_key).await?;
+    let listed = integration_models(app, &name, api, &base_url, &api_key, integration).await?;
     let models = if ids.is_empty() {
         let listed = listed.ok_or_else(|| format!("{name} publishes no model list. Add the model ids yourself."))?;
         let chat: Vec<CustomModel> = listed.into_iter().filter(|model| !model.0).map(|model| model.1).collect();
@@ -206,7 +260,7 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
         ids.into_iter()
             .map(|id| match listed.iter().find(|(_, model)| model.id == id) {
                 Some((_, model)) => model.clone(),
-                None => CustomModel { id, name: None, context_window: None, max_output: None, images: None },
+                None => CustomModel { id, name: None, context_window: None, max_output: None, images: None, ..Default::default() },
             })
             .collect()
     };
@@ -217,7 +271,7 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
         let created_at = credentials.custom.get(&kind).map(|provider| provider.created_at).unwrap_or_else(config::now_unix);
         (kind, created_at)
     };
-    let provider = CustomProvider { name, api, base_url, api_key, models, created_at };
+    let provider = CustomProvider { name, api, base_url, api_key, models, created_at, integration };
     app.update_credentials(&kind, |credentials| {
         credentials.custom.insert(kind.clone(), provider);
     })
@@ -228,11 +282,12 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
 /// The chat models a custom provider's server lists, for the apps' model picker: `None` when
 /// the server publishes no list. The base URL is read as `connect_custom` reads it, and a key
 /// the server refuses or a server that cannot be reached fails the same way.
-pub async fn list_custom_models(app: &Arc<App>, name: &str, api: &str, base_url: &str, api_key: &str) -> Result<Option<Vec<CustomModel>>, String> {
+pub async fn list_custom_models(app: &Arc<App>, name: &str, api: &str, base_url: &str, api_key: &str, integration: Option<&str>) -> Result<Option<Vec<CustomModel>>, String> {
     let name = Some(name.trim()).filter(|name| !name.is_empty()).unwrap_or("The server");
     let api = CustomApi::parse(api.trim()).ok_or_else(|| format!("Unknown API {}", api.trim()))?;
-    let root = custom_root(api, base_url)?;
-    let listed = list_models(app, name, api, &root, api_key.trim()).await?;
+    let integration = CustomIntegration::parse(integration)?;
+    let root = integration_root(api, base_url, integration)?;
+    let listed = integration_models(app, name, api, &root, api_key.trim(), integration).await?;
     Ok(listed.map(|models| models.into_iter().filter(|(not_chat, _)| !not_chat).map(|(_, model)| model).collect()))
 }
 
@@ -247,7 +302,7 @@ pub async fn refresh_custom_models(app: &Arc<App>) -> Result<usize, String> {
     let mut changed = 0;
     let mut failed = None;
     for (kind, snapshot, stamp) in providers {
-        let listed = match list_models(app, &snapshot.name, snapshot.api, &snapshot.base_url, &snapshot.api_key).await {
+        let listed = match integration_models(app, &snapshot.name, snapshot.api, &snapshot.base_url, &snapshot.api_key, snapshot.integration).await {
             Ok(Some(listed)) => listed,
             Ok(None) => continue,
             Err(_) => {
@@ -322,14 +377,14 @@ fn custom_root(api: CustomApi, base_url: &str) -> Result<String, String> {
 /// The models a custom provider's server lists, each with whether it is not for chat
 /// (embeddings, speech, images); `None` when the server publishes no list. A key the server
 /// refuses, or a server that cannot be reached, fails.
-async fn list_models(app: &Arc<App>, name: &str, api: CustomApi, root: &str, api_key: &str) -> Result<Option<Vec<(bool, CustomModel)>>, String> {
+async fn list_models(_app: &Arc<App>, name: &str, api: CustomApi, root: &str, api_key: &str, durindoor: bool) -> Result<Option<Vec<(bool, CustomModel)>>, String> {
     let mut request = match api {
         CustomApi::ChatCompletions | CustomApi::Responses => {
-            let request = app.http.get(format!("{root}/models"));
+            let request = discovery_client()?.get(format!("{root}/models"));
             if api_key.is_empty() { request } else { request.bearer_auth(api_key) }
         }
         CustomApi::Messages => {
-            let request = app.http.get(format!("{root}/v1/models?limit=1000")).header("anthropic-version", ANTHROPIC_VERSION);
+            let request = discovery_client()?.get(format!("{root}/v1/models?limit=1000")).header("anthropic-version", ANTHROPIC_VERSION);
             if api_key.is_empty() { request } else { request.header("x-api-key", api_key) }
         }
     };
@@ -339,8 +394,8 @@ async fn list_models(app: &Arc<App>, name: &str, api: CustomApi, root: &str, api
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN if api_key.is_empty() => Err(format!("{name} needs an API key")),
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(format!("{name} rejected that key")),
         status if status.is_success() => {
-            let body: Value = response.json().await.map_err(|_| format!("{name} did not answer like an API at {root}. Check the base URL."))?;
-            Ok(listed_models(&body))
+            let body = bounded_json(response, name, MODEL_RESPONSE_LIMIT).await?;
+            Ok(if durindoor { durindoor_models(&body) } else { listed_models(&body) })
         }
         _ => Ok(None),
     }
@@ -350,7 +405,23 @@ async fn list_models(app: &Arc<App>, name: &str, api: CustomApi, root: &str, api
 /// with: `data`, `models`, or a bare array of entries.
 fn listed_models(body: &Value) -> Option<Vec<(bool, CustomModel)>> {
     let entries = body.get("data").or_else(|| body.get("models")).unwrap_or(body).as_array()?;
-    Some(entries.iter().filter_map(listed_model).collect())
+    let mut seen = std::collections::HashSet::new();
+    Some(entries.iter().filter_map(listed_model).filter(|(_, model)| seen.insert(model.id.clone())).collect())
+}
+
+/// DurinDoor's default `/models` catalog contains callable chat ids, including aliases and
+/// combos without a `kind`. Explicit non-chat metadata still wins over that route contract.
+fn durindoor_models(body: &Value) -> Option<Vec<(bool, CustomModel)>> {
+    let entries = body.get("data").or_else(|| body.get("models")).unwrap_or(body).as_array()?;
+    let mut seen = std::collections::HashSet::new();
+    Some(entries.iter().filter_map(|entry| {
+        let (_, model) = listed_model(entry)?;
+        let not_chat = entry.pointer("/capabilities/completion_chat").and_then(Value::as_bool) == Some(false)
+            || entry["kind"].as_str().is_some_and(|kind| !matches!(kind, "llm" | "chat" | "imageToText"))
+            || entry["type"].as_str().is_some_and(|kind| NOT_CHAT_TYPES.contains(&kind))
+            || entry.pointer("/architecture/output_modalities").and_then(Value::as_array).is_some_and(|outputs| !outputs.iter().any(|output| output == "text"));
+        seen.insert(model.id.clone()).then_some((not_chat, model))
+    }).collect())
 }
 
 /// Words in the ids of models a server lists that chat cannot use: embeddings, rerankers,
@@ -373,16 +444,23 @@ fn listed_model(entry: &Value) -> Option<(bool, CustomModel)> {
         .map(str::trim)
         .filter(|name| !name.is_empty() && *name != id)
         .map(str::to_string);
-    let context_window = number(&["/context_length", "/context_window", "/max_model_len", "/max_context_length", "/max_input_tokens", "/top_provider/context_length"]);
-    let max_output = number(&["/max_output_tokens", "/max_completion_tokens", "/top_provider/max_completion_tokens"]);
+    let context_window = number(&["/context_length", "/context_window", "/max_model_len", "/max_context_length", "/max_input_tokens", "/top_provider/context_length", "/capabilities/contextWindow", "/contextLength"]);
+    let max_output = number(&["/max_output_tokens", "/max_completion_tokens", "/top_provider/max_completion_tokens", "/capabilities/maxOutput"]);
     let inputs = entry.pointer("/architecture/input_modalities").or_else(|| entry.pointer("/modalities/input")).and_then(Value::as_array);
     let images = inputs.map(|inputs| inputs.iter().any(|input| input == "image")).or_else(|| entry.pointer("/capabilities/vision").and_then(Value::as_bool));
     let lower = id.to_ascii_lowercase();
-    let not_chat = NOT_CHAT_WORDS.iter().any(|word| lower.contains(word))
+    let chat = entry.pointer("/capabilities/completion_chat").and_then(Value::as_bool)
+        .or_else(|| entry["kind"].as_str().map(|kind| matches!(kind, "llm" | "chat" | "imageToText")))
+        .or_else(|| entry["type"].as_str().filter(|kind| *kind == "chat").map(|_| true));
+    let not_chat = chat == Some(false) || (chat.is_none() && (
+        NOT_CHAT_WORDS.iter().any(|word| lower.contains(word))
         || entry["type"].as_str().is_some_and(|kind| NOT_CHAT_TYPES.contains(&kind))
-        || entry.pointer("/capabilities/completion_chat").and_then(Value::as_bool) == Some(false)
-        || entry.pointer("/architecture/output_modalities").and_then(Value::as_array).is_some_and(|outputs| !outputs.iter().any(|output| output == "text"));
-    Some((not_chat, CustomModel { id, name, context_window, max_output, images }))
+        || entry.pointer("/architecture/output_modalities").and_then(Value::as_array).is_some_and(|outputs| !outputs.iter().any(|output| output == "text"))));
+    let reasoning = entry.pointer("/capabilities/reasoning").and_then(Value::as_bool);
+    let tools = entry.pointer("/capabilities/tools").and_then(Value::as_bool);
+    let thinking_format = entry.pointer("/capabilities/thinkingFormat").and_then(Value::as_str).map(str::to_string);
+    let thinking_can_disable = entry.pointer("/capabilities/thinkingCanDisable").and_then(Value::as_bool);
+    Some((not_chat, CustomModel { id, name, context_window, max_output, images, reasoning, tools, thinking_format, thinking_can_disable }))
 }
 
 /// Runs a ChatGPT sign-in, opening its authorization URL through the Device's UI.
@@ -446,281 +524,4 @@ pub fn disconnect(app: &Arc<App>, kind: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn normalizes_custom_roots() {
-        assert_eq!(custom_base_url(Some(" https://proxy.example/v1/ ")).unwrap(), Some("https://proxy.example/v1".into()));
-        assert_eq!(custom_base_url(Some("  ")).unwrap(), None);
-        assert_eq!(opencode_root("https://proxy.example/v1"), "https://proxy.example");
-        assert!(custom_base_url(Some("proxy.example")).unwrap_err().contains("http://"));
-    }
-
-    #[test]
-    fn a_pasted_endpoint_becomes_the_root_its_protocol_extends() {
-        let root = |api, url| custom_root(api, url).unwrap();
-        assert_eq!(root(CustomApi::ChatCompletions, "https://openrouter.ai/api/v1/"), "https://openrouter.ai/api/v1");
-        assert_eq!(root(CustomApi::ChatCompletions, "http://localhost:11434/v1/chat/completions"), "http://localhost:11434/v1");
-        assert_eq!(root(CustomApi::Responses, "https://gateway.example/v1/responses"), "https://gateway.example/v1");
-        assert_eq!(root(CustomApi::Messages, "https://api.anthropic.com/v1/messages"), "https://api.anthropic.com");
-        assert_eq!(root(CustomApi::Messages, "https://api.moonshot.ai/anthropic"), "https://api.moonshot.ai/anthropic");
-        assert_eq!(custom_root(CustomApi::Messages, " ").unwrap_err(), "Enter the server's base URL");
-    }
-
-    #[test]
-    fn kinds_are_slugs_of_the_name() {
-        let mut credentials = Credentials::default();
-        assert_eq!(custom_kind(&credentials, "OpenRouter"), "custom:openrouter");
-        assert_eq!(custom_kind(&credentials, "  My Mac Studio (LM Studio) "), "custom:my-mac-studio-lm-studio");
-        assert_eq!(custom_kind(&credentials, "本地模型"), "custom:provider");
-        let provider = CustomProvider { name: "OpenRouter".into(), api: CustomApi::ChatCompletions, base_url: String::new(), api_key: String::new(), models: Vec::new(), created_at: 0 };
-        credentials.custom.insert("custom:openrouter".into(), provider);
-        assert_eq!(custom_kind(&credentials, "openrouter!"), "custom:openrouter-2");
-    }
-
-    #[test]
-    fn model_lists_tell_windows_inputs_and_what_is_not_for_chat() {
-        // OpenRouter
-        let (not_chat, model) = listed_model(&json!({
-            "id": "anthropic/claude-sonnet-5", "name": "Anthropic: Claude Sonnet 5", "context_length": 1000000,
-            "architecture": { "input_modalities": ["text", "image"], "output_modalities": ["text"] },
-            "top_provider": { "max_completion_tokens": 128000 }
-        }))
-        .unwrap();
-        assert!(!not_chat);
-        assert_eq!(model.name.as_deref(), Some("Anthropic: Claude Sonnet 5"));
-        assert_eq!((model.context_window, model.max_output, model.images), (Some(1_000_000), Some(128_000), Some(true)));
-        // Anthropic
-        let (_, model) = listed_model(&json!({ "type": "model", "id": "claude-opus-5", "display_name": "Claude Opus 5" })).unwrap();
-        assert_eq!((model.name.as_deref(), model.context_window, model.images), (Some("Claude Opus 5"), None, None));
-        // Mistral and vLLM
-        let (_, model) = listed_model(&json!({ "id": "pixtral-large", "max_context_length": 131072, "capabilities": { "vision": true, "completion_chat": true } })).unwrap();
-        assert_eq!((model.context_window, model.images), (Some(131_072), Some(true)));
-        assert!(listed_model(&json!({ "id": "mistral-embed", "capabilities": { "completion_chat": false } })).unwrap().0);
-        assert_eq!(listed_model(&json!({ "id": "qwen3-32b", "max_model_len": 40960 })).unwrap().1.context_window, Some(40_960));
-        // OpenAI lists models chat cannot use.
-        assert!(listed_model(&json!({ "id": "text-embedding-3-large", "object": "model" })).unwrap().0);
-        assert!(listed_model(&json!({ "id": "gpt-4o-mini-tts" })).unwrap().0);
-        assert!(listed_model(&json!({ "id": "gpt-image-1" })).unwrap().0);
-        assert!(listed_model(&json!({ "id": "black-forest-labs/FLUX.1-schnell", "type": "image" })).unwrap().0);
-        assert!(!listed_model(&json!({ "id": "meta-llama/Llama-4-Scout", "type": "chat" })).unwrap().0);
-        assert!(listed_model(&json!({ "id": "" })).is_none());
-        // A bare array (Together) and Ollama's `models`.
-        assert_eq!(listed_models(&json!([{ "id": "a" }, { "id": "b" }])).unwrap().len(), 2);
-        assert_eq!(listed_models(&json!({ "models": [{ "name": "qwen3:8b" }] })).unwrap()[0].1.id, "qwen3:8b");
-        assert!(listed_models(&json!({ "status": "ok" })).is_none());
-    }
-
-    struct ScratchApp(Arc<App>, std::path::PathBuf);
-
-    impl Drop for ScratchApp {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.1);
-        }
-    }
-
-    fn scratch_app() -> ScratchApp {
-        let home = std::env::temp_dir().join(format!("lorca-provider-auth-{}", uuid::Uuid::new_v4()));
-        ScratchApp(App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap(), home)
-    }
-
-    /// Answers each request with the next status and body, and hands back the request lines.
-    fn serve(answers: Vec<(&'static str, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let root = format!("http://{}", listener.local_addr().unwrap());
-        let server = std::thread::spawn(move || {
-            use std::io::{Read, Write};
-            let mut seen = Vec::new();
-            for (status, body) in answers {
-                let (mut socket, _) = listener.accept().unwrap();
-                let mut request = [0u8; 4096];
-                let read = socket.read(&mut request).unwrap();
-                seen.push(String::from_utf8_lossy(&request[..read]).to_string());
-                let reply = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-                socket.write_all(reply.as_bytes()).unwrap();
-            }
-            seen
-        });
-        (root, server)
-    }
-
-    fn input(name: &str, api: &str, base_url: &str, models: &[&str]) -> CustomInput {
-        CustomInput { name: name.into(), api: api.into(), base_url: base_url.into(), models: models.iter().map(|m| m.to_string()).collect(), ..Default::default() }
-    }
-
-    #[tokio::test]
-    async fn a_custom_provider_takes_the_models_its_server_lists() {
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        let list = json!({ "object": "list", "data": [
-            { "id": "qwen3:8b", "object": "model" },
-            { "id": "nomic-embed-text", "object": "model" },
-            { "id": "llava", "object": "model", "context_window": 8192 }
-        ]});
-        let (root, server) = serve(vec![("200 OK", list.to_string())]);
-        let kind = connect_custom(app, input("Ollama", "chat-completions", &format!("{root}/v1/chat/completions"), &[])).await.unwrap();
-        assert_eq!(kind, "custom:ollama");
-        let request = &server.join().unwrap()[0];
-        assert!(request.starts_with("GET /v1/models "), "{request}");
-        assert!(!request.to_ascii_lowercase().contains("authorization"), "no key, no header");
-
-        let credentials = app.credentials.lock().unwrap();
-        let provider = &credentials.custom["custom:ollama"];
-        assert_eq!(provider.base_url, format!("{root}/v1"));
-        assert_eq!(provider.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["qwen3:8b", "llava"]);
-        assert_eq!(provider.models[1].context_window, Some(8192));
-        let status = credentials.statuses().into_iter().find(|status| status.kind == "custom:ollama").unwrap();
-        assert_eq!((status.name.as_deref(), status.api, status.detail.as_str()), (Some("Ollama"), Some(CustomApi::ChatCompletions), provider.base_url.as_str()));
-        assert!(credentials.changed_at.contains_key("custom:ollama"));
-    }
-
-    #[tokio::test]
-    async fn the_users_models_keep_their_order_and_take_what_the_list_says() {
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        let list = json!({ "data": [{ "id": "claude-opus-5", "display_name": "Claude Opus 5" }], "has_more": false });
-        let (root, server) = serve(vec![("200 OK", list.to_string())]);
-        let mut proxy = input("Claude proxy", "messages", &format!("{root}/v1"), &["claude-sonnet-5", "claude-opus-5", "claude-sonnet-5"]);
-        proxy.api_key = " sk-proxy-1234 ".into();
-        let kind = connect_custom(app, proxy).await.unwrap();
-        let request = &server.join().unwrap()[0];
-        assert!(request.starts_with("GET /v1/models?limit=1000 "), "{request}");
-        assert!(request.contains("x-api-key: sk-proxy-1234"), "{request}");
-        let provider = app.credentials.lock().unwrap().custom[&kind].clone();
-        assert_eq!(provider.base_url, root);
-        assert_eq!(provider.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["claude-sonnet-5", "claude-opus-5"]);
-        assert_eq!(provider.models[1].name.as_deref(), Some("Claude Opus 5"));
-
-        // Saving it again under its kind keeps the kind and when it was added.
-        let (root, server) = serve(vec![("404 Not Found", "{}".into())]);
-        let mut edited = input("Claude", "messages", &root, &["claude-opus-5"]);
-        edited.kind = Some(kind.clone());
-        assert_eq!(connect_custom(app, edited).await.unwrap(), kind);
-        server.join().unwrap();
-        let saved = app.credentials.lock().unwrap().custom[&kind].clone();
-        assert_eq!((saved.name.as_str(), saved.created_at, saved.models.len()), ("Claude", provider.created_at, 1));
-    }
-
-    #[tokio::test]
-    async fn a_custom_provider_needs_a_key_it_takes_and_models_to_offer() {
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        let (root, server) = serve(vec![("401 Unauthorized", "{}".into()), ("401 Unauthorized", "{}".into()), ("404 Not Found", "{}".into())]);
-        let mut keyed = input("Gateway", "chat-completions", &root, &["m"]);
-        keyed.api_key = "bad".into();
-        assert_eq!(connect_custom(app, keyed).await.unwrap_err(), "Gateway rejected that key");
-        assert_eq!(connect_custom(app, input("Gateway", "chat-completions", &root, &["m"])).await.unwrap_err(), "Gateway needs an API key");
-        assert!(connect_custom(app, input("Gateway", "chat-completions", &root, &[])).await.unwrap_err().contains("Add the model ids yourself"));
-        server.join().unwrap();
-
-        assert_eq!(connect_custom(app, input(" ", "chat-completions", &root, &["m"])).await.unwrap_err(), "Name the provider");
-        assert_eq!(connect_custom(app, input("Anthropic", "messages", &root, &["m"])).await.unwrap_err(), "A provider named Anthropic exists already");
-        assert!(connect_custom(app, input("Lab", "completions", &root, &["m"])).await.unwrap_err().starts_with("Unknown API"));
-        assert!(app.credentials.lock().unwrap().custom.is_empty());
-    }
-
-    #[tokio::test]
-    async fn the_picker_gets_the_chat_models_or_hears_there_is_no_list() {
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        let list = json!({ "data": [{ "id": "gpt-6-sol", "context_window": 1050000 }, { "id": "text-embedding-3-small" }] });
-        let (root, server) = serve(vec![("200 OK", list.to_string()), ("404 Not Found", "{}".into()), ("401 Unauthorized", "{}".into())]);
-        let models = list_custom_models(app, "OpenAI", "responses", &format!("{root}/v1/responses"), " sk-1 ").await.unwrap().unwrap();
-        assert_eq!(models.iter().map(|m| (m.id.as_str(), m.context_window)).collect::<Vec<_>>(), [("gpt-6-sol", Some(1_050_000))]);
-        assert_eq!(list_custom_models(app, "", "chat-completions", &root, "").await.unwrap(), None);
-        assert_eq!(list_custom_models(app, "", "chat-completions", &root, "bad").await.unwrap_err(), "The server rejected that key");
-        let requests = server.join().unwrap();
-        assert!(requests[0].starts_with("GET /v1/models ") && requests[0].contains("authorization: Bearer sk-1"), "{}", requests[0]);
-        assert!(list_custom_models(app, "", "chat-completions", "ftp://lab", "").await.unwrap_err().contains("http://"));
-        assert!(app.credentials.lock().unwrap().custom.is_empty(), "listing saves nothing");
-    }
-
-    #[tokio::test]
-    async fn refresh_adds_models_but_preserves_manual_ids_url_key_and_unchanged_stamp() {
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        let list = json!({ "data": [{ "id": "new", "context_window": 128000 }, { "id": "nomic-embed-text" }] }).to_string();
-        let (root, server) = serve(vec![("404 Not Found", "{}".into()), ("200 OK", list.clone()), ("200 OK", list)]);
-        let mut provider = input("Lab", "responses", &root, &["picked"]);
-        provider.api_key = "secret".into();
-        let kind = connect_custom(app, provider).await.unwrap();
-        let before = app.credentials.lock().unwrap().changed_at[&kind];
-        assert_eq!(refresh_custom_models(app).await.unwrap(), 1);
-        let credentials = app.credentials.lock().unwrap().clone();
-        assert_eq!(credentials.custom[&kind].models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["picked", "new"]);
-        assert_eq!(credentials.custom[&kind].models[1].context_window, Some(128_000));
-        assert_eq!((credentials.custom[&kind].base_url.as_str(), credentials.custom[&kind].api_key.as_str()), (root.as_str(), "secret"));
-        assert!(credentials.changed_at[&kind] > before);
-        assert_eq!(refresh_custom_models(app).await.unwrap(), 0);
-        assert_eq!(app.credentials.lock().unwrap().changed_at[&kind], credentials.changed_at[&kind]);
-        assert_eq!(Credentials::load(&app.config).custom[&kind], credentials.custom[&kind]);
-        assert_eq!(server.join().unwrap().len(), 3);
-    }
-
-    #[tokio::test]
-    async fn missing_list_and_rejected_key_leave_catalog_untouched() {
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        let (root, server) = serve(vec![("404 Not Found", "{}".into()), ("404 Not Found", "{}".into()), ("401 Unauthorized", "{}".into())]);
-        let kind = connect_custom(app, input("Lab", "responses", &root, &["picked"])).await.unwrap();
-        let before = app.credentials.lock().unwrap().changed_at[&kind];
-        assert_eq!(refresh_custom_models(app).await.unwrap(), 0);
-        assert_eq!(refresh_custom_models(app).await.unwrap_err(), format!("Could not refresh models for {kind}"));
-        let credentials = app.credentials.lock().unwrap();
-        assert_eq!(credentials.changed_at[&kind], before);
-        assert_eq!(credentials.custom[&kind].models[0].id, "picked");
-        server.join().unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn in_flight_refresh_cannot_restore_a_deleted_provider() {
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let root = format!("http://{}", listener.local_addr().unwrap());
-        let kind = {
-            let (root, server) = serve(vec![("404 Not Found", "{}".into())]);
-            let kind = connect_custom(app, input("Lab", "responses", &root, &["picked"])).await.unwrap();
-            server.join().unwrap();
-            kind
-        };
-        app.update_credentials(&kind, |c| c.custom.get_mut(&kind).unwrap().base_url = root.clone()).unwrap();
-        let (requested, received) = std::sync::mpsc::channel();
-        let (release, proceed) = std::sync::mpsc::channel();
-        let server = std::thread::spawn(move || {
-            use std::io::{Read, Write};
-            let (mut socket, _) = listener.accept().unwrap();
-            let mut request = [0u8; 4096];
-            socket.read(&mut request).unwrap();
-            requested.send(()).unwrap();
-            proceed.recv().unwrap();
-            let body = json!({ "data": [{ "id": "new" }] }).to_string();
-            write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-        });
-        let app_for_refresh = app.clone();
-        let refresh = tokio::spawn(async move { refresh_custom_models(&app_for_refresh).await });
-        received.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        disconnect(app, &kind).unwrap();
-        release.send(()).unwrap();
-        assert_eq!(refresh.await.unwrap().unwrap(), 0);
-        server.join().unwrap();
-        assert!(!app.credentials.lock().unwrap().custom.contains_key(&kind));
-    }
-
-    #[tokio::test]
-    async fn deleting_a_custom_provider_reaches_every_device_as_a_change() {
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        let (root, server) = serve(vec![("404 Not Found", "{}".into())]);
-        let kind = connect_custom(app, input("Lab", "responses", &root, &["gpt-oss-120b"])).await.unwrap();
-        server.join().unwrap();
-        disconnect(app, &kind).unwrap();
-        let credentials = app.credentials.lock().unwrap();
-        assert!(credentials.custom.is_empty());
-        assert!(credentials.changed_at.contains_key(&kind), "the deletion is a change the merge carries");
-        drop(credentials);
-        assert_eq!(disconnect(app, &kind).unwrap_err(), format!("Unknown provider {kind}"));
-    }
-}
+mod tests;

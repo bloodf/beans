@@ -1,22 +1,29 @@
-import { Link, useLocation } from '@tanstack/react-router'
+import { Link, useLocation, useNavigate } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '#/components/ui/button'
-import { type Language, languages, names, pathIn, paths } from '#/i18n'
-import { Logo } from './logo'
+import {
+  currentLanguage,
+  isLanguage,
+  languages,
+  names,
+  pathIn,
+  paths,
+  localizedPath,
+} from '#/i18n'
 
-export const SITE = 'https://lorca.app'
+export const SITE = 'https://usebeans.app'
 
 const links = [
   { id: 'turns', label: 'nav.turns' },
   { id: 'relay', label: 'nav.relay' },
   { id: 'tools', label: 'nav.tools' },
-  { id: 'faq', label: 'nav.faq' },
+  { id: 'costs', label: 'nav.costs' },
 ] as const
 
 /// The docs in the page's language: `/docs` and `/zh/docs`, or one of their pages: `/docs/cli`.
 export function docsPath(lng: string, page?: string) {
-  const docs = lng === 'en' ? '/docs' : `/${lng}/docs`
+  const docs = lng === 'zh' ? '/zh/docs' : '/docs'
   return page ? `${docs}/${page}` : docs
 }
 
@@ -24,17 +31,20 @@ export function docsPath(lng: string, page?: string) {
 /// app's disk image, the Windows installer, the Linux install script and Debian packages, the
 /// iPhone beta, and the CLI installer.
 export function downloadPath(lng: string) {
-  return lng === 'en' ? '/download' : `/${lng}/download`
+  return localizedPath(lng, '/download')
 }
 
 /// A section of the landing page, from any page: `/#faq` and `/zh#faq`. It is the current page
 /// only at its own section. Without `resetScroll`, a second click on the section already in the
 /// address bar restores the scroll position the click was made at instead of scrolling to it.
-export function SectionLink({ id, ...props }: { id: string } & Omit<React.ComponentProps<'a'>, 'href'>) {
+export function SectionLink({
+  id,
+  ...props
+}: { id: string } & Omit<React.ComponentProps<'a'>, 'href'>) {
   const { i18n } = useTranslation()
   return (
     <Link
-      to={paths[i18n.language as Language]}
+      to={paths[currentLanguage(i18n.language)]}
       hash={id}
       activeOptions={{ includeHash: true }}
       resetScroll={false}
@@ -43,42 +53,88 @@ export function SectionLink({ id, ...props }: { id: string } & Omit<React.Compon
   )
 }
 
-/// A link to the same page in the other language.
 export function LanguageLink({ className }: { className?: string }) {
-  const { i18n } = useTranslation()
-  const pathname = useLocation({ select: (location) => location.pathname })
-  const other = languages.find((lng) => lng !== i18n.language) as Language
+  const { t, i18n } = useTranslation()
+  const location = useLocation()
+  const navigate = useNavigate()
   return (
-    <Link to={pathIn(other, pathname)} lang={other} className={className}>
-      {names[other]}
-    </Link>
+    <select
+      className={`site-language-select ${className ?? ''}`}
+      aria-label={t('nav.language')}
+      value={currentLanguage(i18n.language)}
+      onChange={(event) => {
+        const value = event.currentTarget.value
+        if (!isLanguage(value)) return
+        void navigate({
+          to: pathIn(value, location.pathname) + location.searchStr,
+          hash: location.hash,
+        })
+      }}
+    >
+      {languages.map((language) => (
+        <option key={language} value={language} lang={language}>
+          {names[language]}
+        </option>
+      ))}
+    </select>
   )
 }
 
-/// A floating pill, clear of the top edge, that stays put as the page scrolls.
+/// The site header stays visible as the page scrolls.
 export function Nav() {
   const { t, i18n } = useTranslation()
   return (
-    <header className="sticky top-4 z-40 mt-4 px-4">
-      <div className="mx-auto flex h-14 max-w-4xl items-center justify-between rounded-full pr-4 pl-5 bg-zinc-200/50 backdrop-blur-xl dark:bg-zinc-900/80 dark:border">
-        <SectionLink id="top" className="flex items-center gap-2 font-semibold tracking-tight">
-          <Logo className="size-10" />
-          Lorca
+    <header className="site-nav sticky top-0 z-40 border-b bg-background/95 px-4 backdrop-blur-xl">
+      <div className="mx-auto flex h-18 max-w-[1400px] items-center justify-between gap-4">
+        <SectionLink
+          id="top"
+          className="flex items-center gap-2 font-semibold tracking-tight"
+        >
+          <img
+            src="/brand/beans-logo.svg"
+            alt="Beans"
+            width={2161}
+            height={728}
+            className="w-36 dark:hidden"
+          />
+          <img
+            src="/brand/beans-logo-light.svg"
+            alt="Beans"
+            width={2161}
+            height={728}
+            className="hidden w-36 dark:block"
+          />
         </SectionLink>
-        <nav className="hidden items-center gap-6 text-sm text-muted-foreground md:flex">
+        <nav className="hidden items-center gap-6 text-sm text-muted-foreground xl:flex">
           {links.map((link) => (
-            <SectionLink key={link.id} id={link.id} className="transition-colors hover:text-foreground">
+            <SectionLink
+              key={link.id}
+              id={link.id}
+              className="transition-colors hover:text-foreground"
+            >
               {t(link.label)}
             </SectionLink>
           ))}
-          <Link to={docsPath(i18n.language)} className="transition-colors hover:text-foreground">
+          <Link
+            to={localizedPath(i18n.language, '/compare')}
+            className="transition-colors hover:text-foreground"
+          >
+            {t('nav.compare')}
+          </Link>
+          <Link
+            viewTransition
+            to={docsPath(i18n.language)}
+            className="transition-colors hover:text-foreground"
+          >
             {t('nav.docs')}
           </Link>
         </nav>
         <div className="flex items-center gap-3">
           <LanguageLink className="text-sm text-muted-foreground transition-colors hover:text-foreground" />
           <Button asChild size="sm" className="rounded-full px-4">
-            <Link to={downloadPath(i18n.language)}>{t('nav.download')}</Link>
+            <Link viewTransition to={downloadPath(i18n.language)}>
+              {t('nav.download')}
+            </Link>
           </Button>
         </div>
       </div>

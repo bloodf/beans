@@ -39,6 +39,12 @@ test("statuses keep custom providers after the built-in ones and leave out unkno
   expect(toProviders(null)).toEqual([]);
 });
 
+test("DurinDoor status preserves identity and declared capabilities through the wire", () => {
+  const [provider] = toProviders([{ kind: "custom:gateway", name: "Renamed", integration: "durindoor", api: "chat-completions", is_connected: true, detail: "http://localhost/v1", models: [{ id: "alias", context_window: 200000, max_output: 32000, images: true, tools: false, reasoning: false, thinking_format: "future", thinking_can_disable: false, levels: [] }] }]);
+  expect(provider?.integration).toBe("durindoor");
+  expect(provider?.models?.[0]).toMatchObject({ id: "alias", contextWindow: 200000, maxOutput: 32000, images: true, tools: false, reasoning: false, thinkingFormat: "future", thinkingCanDisable: false, levels: [] });
+});
+
 test("a listed model keeps what its server said of it", () => {
   expect(toCustomModel({ id: "llava:13b", name: null, context_window: 4_096, max_output: null, images: true })).toEqual({ id: "llava:13b", contextWindow: 4_096, images: true });
 });

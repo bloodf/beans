@@ -67,7 +67,7 @@ Bot      1──* Job          (a turn on the bot's Runner)
 | Chat / Message     | Account/chat DEK                                          | Encrypted blobs                                        |
 | Job                | Any paired Device may create; the assigned Runner runs it | Sealed envelope to that Runner’s machine box key; deleted once run. A hard Stop sends `job_cancel` to the Device running it; the Runner seals how the turn ended (`job_result`) to the requesting Device, and lists the turn and what it is doing in its `machine` blob for every Device |
 
-A bot's default look is a deterministic Blobatar SVG seeded by its stable `bot.id`; the Mac, phone, and Windows/Linux apps render the same locally generated avatar offline. Legacy `symbol_name` and `accent` remain in bot profiles for wire compatibility but do not affect bot rendering. A profile image of the user's own overrides the default: `avatar` is an attachment record whose bytes travel as an encrypted `file` blob, the same way a message attachment does, and every Device shows the image in place of Blobatar once it has fetched it. Clicking a bot's avatar in the macOS inspector opens the Look sheet. The macOS Profile card keeps Name trailing-aligned and opens Description in its own editing sheet. On the phone, tapping the avatar in Details slides the Look screen in inside the same form sheet (`app/chat-info` has its own stack); Name is trailing-aligned there too, and the Description row pushes a full editor. Details also has native Provider, Model, and Thinking menus under its Runner row.
+A bot's deterministic Blobatar is seeded by its stable `bot.id`. The core stores optional generated `look` settings in the encrypted roster, independently of the photo attachment in `avatar`; appearance-preserving roster writers require protocol 4. See [Bot avatars](docs/architecture/avatars.md) for the shared contract, API, photos, persistence, and rollout requirements.
 
 Creating a bot for Runner B from Device A: A writes an encrypted bot profile into the roster (paired Devices can read it) and pins B’s machine id. Bot create rejects a target whose `os` is not desktop. Turns are job envelopes addressed to B. B decrypts the job, runs the loop with the account’s provider credentials, and uploads encrypted replies.
 
@@ -75,7 +75,7 @@ If B is offline, the envelope waits on the relay until B fetches it. The UI infe
 
 ## Beans releases and server updates
 
-Stable `beans-v<root version>` releases in `bloodf/beans` carry a schema-1 readiness manifest signed with the project-owned Ed25519 key. Publication defaults to server scope; each updater requires its own signed artifact inventory, so server readiness alone does not authorize a client update. Finalized release bytes and inventories are immutable. See [release mechanisms and prerequisites](docs/releasing-cli.md).
+Stable `beans-v<root version>` releases carry signed schema-1 readiness. Manual dispatch selects immutable `server` or `all` scope before building. Each updater requires its own inventory; server readiness does not authorize clients. All scope coordinates desktop installers and exact-source EAS APK/AAB/store IPA builds. Store submission is separate and manual. See [Releases](docs/architecture/releases.md).
 
 The Linux server updater verifies readiness, upgrades and checks the relay first, then drains and replaces Runners using renewable admission leases. Automation requires trusted bootstrap, root-owned target configuration, configured Runner update tokens and explicit timer enablement after a successful manual pass. These mechanisms do not establish publication or live rollout. See [Runner update drain](docs/architecture/runtime.md#runner-update-drain).
 
@@ -95,11 +95,13 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Marketplace](docs/architecture/marketplace.md) | The relay-backed index of plugins and bot templates, offline fallback and updates, bots added from a template, the marketplace sheet |
 | [MCP servers](docs/architecture/mcp-servers.md) | The user's own MCP servers in a Runner's `mcp.json`: the file and other apps' spellings, sign-in, the `mcp.*` methods and `lorca mcp`, the apps' MCP Servers section and server sheet |
 | [Bots, Routines, and Memory](docs/architecture/bots.md) | The lead bot, DMs and groups, group descriptions and ownership, who answers, handoffs between bots, routines and their checks, a bot's memory |
+| [Bot avatars](docs/architecture/avatars.md) | Generated appearance contract, independent photos, validated API edits, encrypted persistence and protocol-4 rollout |
 | [Providers](docs/architecture/providers.md) | Each model provider and its sign-in, custom providers, thinking levels, the model catalog and cost, compaction, retries |
 | [macOS app](docs/architecture/macos-app.md) | The AppKit app: launching the CLI, windows and onboarding, settings, updates, the command palette, sidebar, inspector, Blobatar |
 | [macOS chat](docs/architecture/macos-chat.md) | AppKit transcript, composer, attachments, dictation, and working state |
 | [Windows and Linux app](docs/architecture/desktop-app.md) | The MyGo app: its Go side and Solid page, title bar, commands, updates, development and builds |
 | [Phone app](docs/architecture/phone-app.md) | The Expo app over the Rust core: the native module, pairing, relay status, attachments, dictation, notifications, turns |
+| [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds, testing submissions, accounts and credentials |
 | [Website](docs/architecture/website.md) | `web/`: the site, its docs, and the install scripts it serves |
 | [Languages](docs/architecture/languages.md) | English and Simplified Chinese in each app, and what the CLI words |
 

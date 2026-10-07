@@ -1,0 +1,224 @@
+{
+  "title": "Wähle, wo deine KI arbeitet.",
+  "description": "Vergleiche Beans mit OpenClaw, Hermes Agent, Grok Bot, OpenAI Dots, OpenBot und Claude Code. Erfahre mehr über Ausführung, Modelle, Datenschutz, Zusammenarbeit und Kosten.",
+  "versus": "Beans vs {{product}}",
+  "overview": "Auf einen Blick",
+  "matrix": "Das Gesamtbild",
+  "matrixBody": "Zwölf praktische Unterschiede, anhand der in der jeweiligen Produktdokumentation beschriebenen Mechanismen.",
+  "caption": "Ausführung, Modelle, Werkzeuge, Datenschutz und Kosten",
+  "matters": "Was zählt",
+  "contents": "Auf dieser Seite",
+  "details": "Was diese Unterschiede bedeuten",
+  "choose": "Was passt zu deiner Arbeit?",
+  "chooseBeans": "Wähle Beans, wenn…",
+  "chooseOther": "Ziehe {{product}} in Betracht, wenn…",
+  "beansFit": "Du benannte Bots mit direkten Modellverbindungen, Gruppenchats und verschlüsselter Kopplung zwischen Computern und Handys möchtest. Du kannst den zugewiesenen Computer online halten.",
+  "costTitle": "Trenne die App von der KI-Rechnung.",
+  "appPrice": "Beans-App",
+  "providerPrice": "KI-Anbieter",
+  "providerCost": "Dein Abo oder deine API-Nutzung",
+  "machinePrice": "Laufender Computer",
+  "machineCost": "Deine Hardware, Energie und Verbindung",
+  "costBody": "Beans ist kostenlos, Modellnutzung aber nicht unbedingt. Jeder Bot nutzt seinen verbundenen Anbieter. Parallele Arbeit kann mehr Kontingent verbrauchen. Ein Runner muss online bleiben; auch ein eigener Server hat Betriebskosten.",
+  "start": "Probiere den Ablauf vor der Entscheidung.",
+  "startBody": "Erkunde die echte Desktop-Oberfläche in der Demo auf der Startseite und prüfe die veröffentlichten Downloads für dein Gerät. Die Demo verwendet Beispieldaten und simulierte Antworten ohne verbundenen KI-Anbieter.",
+  "demo": "App-Demo ansehen",
+  "faq": "Fragen vor dem Wechsel",
+  "questions": [
+    {
+      "q": "Kann das Modell meinen Prompt bei verschlüsselter Synchronisierung sehen?",
+      "a": "Ja. Gerätesynchronisierung und Inferenz sind getrennt. Beans verschlüsselt Daten zwischen Geräten. Dein gewählter KI-Anbieter verarbeitet weiterhin gesendete Inhalte, um Antworten zu erzeugen."
+    },
+    {
+      "q": "Kann ich mein vorhandenes KI-Abo behalten?",
+      "a": "Beans bietet ChatGPT- und Grok-Abo-Anmeldung. Andere integrierte Anbieter nutzen API-Schlüssel; kompatible Server haben eigene Zugangsvoraussetzungen. Prüfe die Tarif- und Nutzungsregeln deines Anbieters."
+    },
+    {
+      "q": "Führt mein Handy die Bots aus?",
+      "a": "Nein. Ein gekoppeltes Handy ist ein Chatgerät. Jeder Bot läuft auf einem zugewiesenen Mac-, Windows- oder Linux-Runner. Ist er offline, wartet die Arbeit."
+    },
+    {
+      "q": "Sind das Leistungsrankings?",
+      "a": "Nein. Diese Seiten vergleichen dokumentierte Mechanismen und Abläufe. Sie enthalten keine Messungen zu Geschwindigkeit, Qualität, Tokenersparnis oder Zuverlässigkeit."
+    }
+  ],
+  "sources": "Quellen, Umfang und Aktualität",
+  "freshness": "Geprüft am 7. Oktober 2026. Funktionen, Verfügbarkeit, Tarife und Limits können sich ändern. Lies vor einem Kauf oder Wechsel die verlinkte offizielle Dokumentation.",
+  "official": "Offizielle Dokumentation",
+  "architecture": "Beans-Architektur",
+  "more": "Weitere Vergleiche",
+  "labels": [
+    "Ausführungsort",
+    "Modellverbindungen",
+    "Abos und APIs",
+    "Benannte Teammitglieder",
+    "Zusammenarbeit",
+    "Dateien und Werkzeuge",
+    "Browserarbeit",
+    "Dauerhafter Kontext",
+    "Geplante Arbeit",
+    "Weitere Geräte",
+    "Daten und Datenschutz",
+    "Kosten"
+  ],
+  "beans": [
+    "Dein eigener zugewiesener Mac-, Windows- oder Linux-Runner. Er muss online bleiben.",
+    "ChatGPT, Grok, Anthropic, DeepSeek, OpenCode und kompatible Modellendpunkte.",
+    "ChatGPT/Grok-Anmeldung; API-Schlüssel für andere Anbieter. Zugangsdaten werden verschlüsselt zwischen Geräten synchronisiert.",
+    "Dauerhafte Botnamen, Anweisungen, Anbieterwahl, Gedächtnis und zugewiesener Runner.",
+    "Direktnachrichten, Gruppen mit bis zu sechs Bots, Erwähnungen und Übergaben zwischen Runnern.",
+    "Dateiarbeit im Ordner, Shell-Befehle, Websuche und MCP-Plugins mit Berechtigungsabläufen.",
+    "Websuche und Seitenlesen. Die aktuelle App hat keinen integrierten grafischen Browser.",
+    "Botnotizen und Chatverlauf auf deinen Geräten, verschlüsselt über das Relay synchronisiert.",
+    "Botroutinen laufen auf dem zugewiesenen Computer, der zur geplanten Zeit online sein muss.",
+    "Kopple Computer und Handys. Handys dienen dem Chat; Desktop-Runner führen Werkzeuge aus.",
+    "Das Relay überträgt verschlüsselte Daten. Gekoppelte Geräte entschlüsseln sie; dein Modell erhält gesendete Prompts.",
+    "Kostenlose App. Anbieterabos, API-Nutzung und Betriebskosten deines Computers kommen separat hinzu."
+  ],
+  "topics": [
+    {
+      "title": "Der Ausführungsort verändert deinen Alltag.",
+      "body": "Ein Beans-Bot hat einen zugewiesenen Runner. Er arbeitet in dessen Ordnern mit deinen Benutzerrechten. Ein lokaler Arbeitsbereich oder eine verwaltete Cloud-Maschine bestimmen, welche Dateien verfügbar sind, was online bleibt und wer die Umgebung wartet."
+    },
+    {
+      "title": "Wähle den Anbieter, ohne den Kollegen zu ersetzen.",
+      "body": "Beans speichert die Rolle eines Bots getrennt von der Modellwahl. Zugangsdaten gehören zum Konto und werden verschlüsselt zwischen Geräten synchronisiert. Abo-Anmeldung und API-Schlüssel haben unterschiedliche Abrechnungen. Das eine schließt das andere nicht automatisch ein."
+    },
+    {
+      "title": "Zusammenarbeit ist mehr als parallele Fenster.",
+      "body": "Beans bietet Einzelchats und Gruppen mit bis zu sechs Bots. Erwähnungen richten einen Auftrag an einen Bot; Übergaben reichen Aufgaben weiter. Verschiedene Runner können zu demselben Chat beitragen, sodass Gespräche deine Computer verbinden."
+    },
+    {
+      "title": "Werkzeuge nutzen die gewährten Rechte.",
+      "body": "Bots können Dateien bearbeiten, Befehle ausführen und MCP-Werkzeuge nutzen. Prüfe die Berechtigungsabläufe und installierten Werkzeuge. Ein Befehl mit deinen Benutzerrechten ist etwas anderes als die Isolation in einer Betriebssystem-Sandbox."
+    },
+    {
+      "title": "Trenne Geräte- und Modelldatenschutz.",
+      "body": "Beans verschlüsselt Kontodaten vor der Relay-Synchronisierung. Das Relay kann Chatdaten nicht entschlüsseln. Die Inferenz sendet trotzdem Inhalte an deinen Modellanbieter. Prüfe sowohl die Synchronisierung als auch dessen Datenrichtlinie, bevor du Inhalte teilst."
+    },
+    {
+      "title": "Plane Arbeit während deiner Abwesenheit.",
+      "body": "Dein Handy verbindet dich mit Bots auf gekoppelten Computern. Es ersetzt ihren Runner nicht. Routinen und neue Aufgaben brauchen den zugewiesenen Computer online. Für Dauerbetrieb wähle einen Computer oder Server, den du betreiben und warten kannst."
+    }
+  ],
+  "products": {
+    "openbot": {
+      "intro": "Beide Apps organisieren KI-Teams. Beans verbindet Modelle direkt und koppelt Geräte verschlüsselt. OpenBot vereint bestehende Agentenwerkzeuge in einem gemeinsamen Arbeitsbereich, lokal oder auf einem optionalen gehosteten Server.",
+      "good": "Du möchtest Codex oder Claude Code in einem Arbeitsbereich, einen integrierten Browser oder OpenBots optionale gehostete Ausführung.",
+      "other": [
+        "Lokaler Desktop; optionaler gehosteter Server.",
+        "Codex, Claude Code, Gemini, Grok, OpenCode, Cursor, Cline; kompatible oder lokale Modelle.",
+        "Vorhandene Werkzeugabos oder API-Zugriff.",
+        "Dauerhafte Agentennamen, Anweisungen und Arbeitsbereiche.",
+        "Gemeinsame Kanäle, Agentennachrichten und Übergaben.",
+        "Dateien, Befehle, Plugins und Skills.",
+        "Integrierter Browser unter Agentensteuerung.",
+        "Arbeitsbereich und Gespräch bleiben beim Anbieterwechsel erhalten.",
+        "Geplante Routinen und pausierbare, fortsetzbare, abbrechbare Warteschlangen.",
+        "Desktop und Verbindungen zu einem Teamserver.",
+        "Daten auf lokaler Maschine oder gewähltem Server; Anbieter erhalten Prompts.",
+        "Kostenlose Desktop-App; Anbieternutzung und Hosting kosten separat."
+      ],
+      "tradeoff": "Gehostete Ausführung kostet optional extra. Die lokale App braucht einen laufenden Computer, und Anbieter berechnen Nutzung separat."
+    },
+    "grok-bot": {
+      "intro": "Beans läuft auf deinem zugewiesenen Computer. Grok Bot bietet einen verwalteten Computer, der bei geschlossenem Laptop weiterarbeitet. Das verändert deine Betriebsverantwortung und Werkzeuganbindung.",
+      "good": "Du möchtest einen verwalteten Computer und Bots, die bei geschlossenem Laptop arbeiten, mit Zugang über einen geeigneten Cursor- oder Grok-Tarif.",
+      "other": [
+        "Dauerhafter verwalteter Cloud-Computer.",
+        "Grok-Bot-Dienst.",
+        "Geeignete Cursor-, Grok-, Teams- oder Enterprise-Tarife.",
+        "Bots mit Rollen und erhaltenem Arbeitskontext.",
+        "Mehrere Bots arbeiten in gemeinsamen Threads zusammen.",
+        "Bots melden sich bei Apps an und nutzen Werkzeuge auf ihrem Computer.",
+        "Computerinteraktion mit Websites und Apps.",
+        "Erhaltener Kontext und gemeinsames Lernen zwischen Bots.",
+        "Geplante Routinen; arbeitet bei geschlossenem Laptop weiter.",
+        "Desktop- und iOS-Zugriff laut Produkt-FAQ.",
+        "Verwalteter Dienst; Datenbedingungen und Richtlinien beachten.",
+        "Geeigneter bezahlter Tarif mit Kontingent; Mehrnutzung kann berechnet werden."
+      ],
+      "tradeoff": "Ein berechtigter Bezahltarif ist nötig. Bots teilen einen Cloud-Computer pro Nutzer; zusätzliche Nutzung kann Kosten verursachen."
+    },
+    "claude-code": {
+      "intro": "Beans organisiert benannte Bots für verschiedene Aufgaben. Claude Code konzentriert sich auf Codebasen, Entwicklungsbefehle und Sitzungen im Terminal, Editor, in der Desktop-App oder im Web.",
+      "good": "Programmierung steht im Mittelpunkt und du möchtest repositorybezogene Sitzungen, Editorintegration oder Claude Codes Entwicklungswerkzeuge.",
+      "other": [
+        "Lokale und gehostete Cloud-Sitzungen je nach Oberfläche.",
+        "Claude; bestimmte Oberflächen unterstützen weitere Anbieter.",
+        "Claude-Abo oder Anthropic-Console-Zugang.",
+        "Programmiersitzungen und Agenten für Entwicklungsaufgaben.",
+        "Parallele Agenten und Entwicklungsabläufe.",
+        "Code lesen und bearbeiten, Befehle ausführen, MCP-Werkzeuge verbinden.",
+        "Webwerkzeuge und Browserintegration variieren nach Oberfläche.",
+        "Projektanweisungen, Gedächtnis und Sitzungskontext.",
+        "Cloud-Routinen, Desktop-Aufgaben und /loop im Terminal.",
+        "Terminal, IDE, Desktop, Web und Fernsteuerung.",
+        "Konfigurierbare Berechtigungen und Sandbox; Anbieterrichtlinien gelten.",
+        "Abo oder API-Nutzung je nach Verbindung."
+      ],
+      "tradeoff": "Der Ablauf konzentriert sich auf Softwareentwicklung. Abo- oder API-Limits gelten; lokale Sitzungen brauchen deinen Computer."
+    },
+    "openclaw": {
+      "intro": "OpenClaw verbindet Agenten über ein selbst betriebenes Gateway mit Messenger-Apps. Beans bietet eine eigene Chat-App mit verschlüsselter Gerätekopplung. Beide unterstützen mehrere Agenten; Einrichtung und Datenwege unterscheiden sich.",
+      "good": "Du möchtest Agenten in deinen Messengern, konfigurierbares Routing und Kontrolle über ein selbst betriebenes Gateway.",
+      "other": [
+        "Dein Gateway auf einem Computer oder Server.",
+        "Mehrere Anbieter, lokale Modelle, Routing und Ausweichmodelle.",
+        "Anbieterspezifische API-Schlüssel oder unterstützte Anmeldungen.",
+        "Eigene Identitäten, Arbeitsbereiche und Sitzungsverläufe je Agent.",
+        "Agenten-Routing, Delegation und Teamvorlagen.",
+        "Dateien, Befehlsausführung, Skills und verbundene Werkzeuge.",
+        "Verwalteter Browser und Werkzeuge zur Browsersteuerung.",
+        "Dauerhafte Sitzungen, Arbeitsbereichsnotizen und Speicherwerkzeuge.",
+        "Zeitplanung und Hintergrundarbeit bei laufendem Gateway.",
+        "Messenger-Kanäle, Control UI und Begleit-Apps.",
+        "Du betreibst das Gateway; Modell- und Nachrichtendienste verarbeiten geteilte Daten.",
+        "Open-Source-App; Modellnutzung, Hosting und verbundene Dienste kosten separat."
+      ],
+      "tradeoff": "Du verwaltest Verfügbarkeit, Kanalzugriff und Sicherheit des Gateways. Anbieter- und Hostingkosten hängen von der Einrichtung ab."
+    },
+    "hermes": {
+      "intro": "Hermes verbindet dauerhaften Speicher, wiederverwendbare Skills und konfigurierbare Ausführungsumgebungen. Bot Mode unterstützt Spezialistenteams. Beans ordnet benannte Bots deinen Computern zu und synchronisiert gekoppelte Geräte verschlüsselt.",
+      "good": "Du möchtest wiederverwendbare Skills, einen Lernprozess, Messenger-Integrationen oder lokale, Container-, SSH- und Cloud-Ausführung.",
+      "other": [
+        "Lokal, im Container, per SSH oder in einer konfigurierten Cloud-Umgebung.",
+        "Nous Portal, OpenRouter, OpenAI und kompatible Endpunkte.",
+        "Anbieterabo oder API-Zugang, abhängig von der Verbindung.",
+        "Dauerhafte Spezialisten-Bots im Bot Mode.",
+        "Gruppenchats, Erwähnungen und Delegation an isolierte Unteragenten.",
+        "Terminalwerkzeuge, Skills und MCP-Server.",
+        "Suche, Inhaltsextraktion und Browserwerkzeuge.",
+        "Dauerhafter Speicher, Skill-Lernen und Sitzungsabruf.",
+        "Integriertes Cron mit Zustellung über Messenger-Plattformen.",
+        "CLI, Desktop-App und Messenger-Gateway.",
+        "Datenwege hängen von Backend und Anbieter ab; gehostete Werkzeuge verarbeiten übermittelte Inhalte.",
+        "Kostenlose MIT-lizenzierte App; Modell-, Werkzeug- und Hostingkosten hängen von der Einrichtung ab."
+      ],
+      "tradeoff": "Backends, Werkzeuge und Anbieter müssen konfiguriert werden. Du betreibst die eigene Infrastruktur oder bezahlst gehostete Ausführung."
+    },
+    "dots": {
+      "intro": "Dots ist OpenAIs verwalteter persönlicher Agent in ChatGPT. Er hat einen Cloud-Computer und behält Kontext über verbundene Kanäle hinweg. Beans betreibt ein Bot-Team auf deinen zugewiesenen Computern mit direkten Anbieterzugängen.",
+      "good": "Du möchtest einen verwalteten Agenten in ChatGPT, verbundene Apps und Hintergrundarbeit ohne eigenen Runner-Betrieb.",
+      "other": [
+        "Von OpenAI verwalteter Cloud-Computer; optionale Verbindung zu deinen Geräten.",
+        "OpenAI-Dienst mit GPT-6 Astra.",
+        "Berechtigte ChatGPT-Tarife; keine Oberfläche für frei gewählte Modellanbieter.",
+        "Ein benannter primärer Dot; Spezialisten-Dots werden separat vorgestellt.",
+        "Delegiert an Codex und ChatGPT Work; Dot-Teams sind als künftige Funktion angekündigt.",
+        "Cloud-Computer und Plugins mit Berechtigungen.",
+        "Eigener Browser; optionaler Zugriff auf deinen verbundenen Computer.",
+        "Dauerhafter Kontext und konfigurierbarer Austausch mit ChatGPT Memory.",
+        "Dauerhafte Arbeit und proaktive Recherche mit reinem Lesezugriff.",
+        "ChatGPT auf Desktop, Web und Mobilgeräten, Slack und Teams.",
+        "Dienstseitige Verschlüsselung bei Speicherung und Übertragung; Tarif- und Trainingseinstellungen gelten.",
+        "Erster Dot in berechtigten Bezahltarifen enthalten, mit Arbeitskontingenten und Limits für delegierte Aufgaben."
+      ],
+      "tradeoff": "Zugang hängt von Tarif und Region ab. Du nutzt OpenAIs Dienst; Teams aus mehreren Dots sind eine künftige Funktion."
+    }
+  },
+  "pros": "Vorteile",
+  "cons": "Nachteile",
+  "readComparison": "Vollständigen Vergleich lesen",
+  "beansTradeoff": "Du betreibst den Runner und hältst ihn online. Modellnutzung kostet separat, und die App hat keinen integrierten grafischen Browser."
+}

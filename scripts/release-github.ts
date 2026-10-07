@@ -3,6 +3,7 @@ import { createReadStream } from "node:fs";
 import { copyFile, mkdir, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { readVersion, ROOT } from "./app.ts";
+import { extractReleaseNotes } from "./changelog.ts";
 import { releasePrivateKey, signReleaseBytes } from "./release-signing.ts";
 
 export interface ReleaseArtifact {
@@ -29,6 +30,10 @@ function releaseScope(value: string = "server"): ReleaseScope {
 const repository = "bloodf/beans";
 const stable = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const assetName = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,179}$/;
+// GitHub normalizes spaces in the Windows installer filename when uploading.
+function githubAssetName(name: string): string {
+  return /^Lorca Setup \d+\.\d+\.\d+\.exe$/.test(name) ? name.replaceAll(" ", ".") : name;
+}
 
 function releaseVersion(tag: string): string {
   const version = tag.replace(/^beans-v/, "");
@@ -65,6 +70,9 @@ function classify(name: string, version: string, core: string): Omit<ReleaseArti
   if (cli) return { component: cli[2] ? "checksum" : "cli", platform: cli[1].replace(/\.(?:tar\.gz|zip)$/, ""), version: core };
   if (name === `Beans-${version}.apk`) return { component: "android", platform: "android", version };
   if (name === `Beans-${version}.ipa`) return { component: "ios", platform: "ios", version };
+  if (name === `Beans-${version}-store.ipa`) return { component: "ios-store", platform: "ios", version };
+  if (name === `Beans-${version}.aab`) return { component: "android-store", platform: "android", version };
+  if (/^eas-(github|production|testflight)\.json$/.test(name)) return { component: "provenance", platform: "mobile", version };
   if ([`Beans-${version}.zip`, `Beans-${version}.dmg`, "appcast.xml"].includes(name)) return { component: "macos", platform: "macos-aarch64", version };
   const desktop = name.match(new RegExp(`^(?:update-(windows-amd64|linux-amd64|linux-arm64)\\.json|lorca-${version.replaceAll(".", "\\.")}-(windows-amd64|linux-amd64|linux-arm64)\\.tar\\.gz|install-(linux-amd64|linux-arm64)\\.sh)$`));
   if (desktop) return { component: "desktop", platform: desktop[1] ?? desktop[2] ?? desktop[3], version };
@@ -79,7 +87,8 @@ function required(version: string, scope: ReleaseScope): string[] {
   return [
     ...server,
     ...["macos-aarch64.tar.gz", "linux-aarch64.tar.gz", "linux-x86_64.tar.gz", "windows-x86_64.zip"].flatMap((suffix) => [`lorca-cli-${suffix}`, `lorca-cli-${suffix}.sha256`]),
-    `Beans-${version}.zip`, `Beans-${version}.dmg`, "appcast.xml", `Beans-${version}.apk`, `Beans-${version}.ipa`,
+    `Beans-${version}.zip`, `Beans-${version}.dmg`, "appcast.xml", `Beans-${version}.apk`, `Beans-${version}.aab`, `Beans-${version}-store.ipa`,
+    "eas-github.json", "eas-production.json", "eas-testflight.json",
     ...["windows-amd64", "linux-amd64", "linux-arm64"].flatMap((platform) => [`update-${platform}.json`, `lorca-${version}-${platform}.tar.gz`]),
     `Lorca Setup ${version}.exe`, `lorca_${version}_amd64.deb`, `lorca_${version}_arm64.deb`, "install-linux-amd64.sh", "install-linux-arm64.sh",
   ];
@@ -122,6 +131,22 @@ export async function buildReleaseManifest(tag: string, revision: string, direct
       throw new Error(`CLI checksum differs from archive: ${name}`);
     }
   }
+  if (scope === "all") {
+    const identities = new Set<string>();
+    for (const profile of ["github", "production", "testflight"]) {
+      const proof = await Bun.file(join(directory, `eas-${profile}.json`)).json();
+      const name = `Beans-${version}${profile === "testflight" ? "-store.ipa" : profile === "production" ? ".aab" : ".apk"}`;
+      const artifact = artifacts.find((entry) => entry.name === name)!;
+      if (proof.schema !== 1 || proof.revision !== revision || proof.version !== version || proof.profile !== profile ||
+          proof.artifact !== name || proof.sha256 !== artifact.sha256 || proof.size !== artifact.size ||
+          !/^[a-f0-9-]{36}$/i.test(proof.project ?? "") || !/^[a-f0-9-]{36}$/i.test(proof.buildId ?? "") ||
+          !/^[1-9]\d*$/.test(proof.buildNumber ?? "") || Number(proof.buildNumber) > 2_100_000_000 ||
+          proof.platform !== (profile === "testflight" ? "IOS" : "ANDROID") || identities.has(proof.buildId)) {
+        throw new Error(`Invalid EAS artifact provenance: ${profile}`);
+      }
+      identities.add(proof.buildId);
+    }
+  }
   return { schema: 1, version, revision, protocol: await releaseProtocol(), artifacts };
 }
 export async function writeReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server"): Promise<ReleaseManifest> {
@@ -154,20 +179,29 @@ async function publish(tag: string, revision: string, directory: string, scope: 
     }))),
   ];
   for (const existing of release.assets) {
-    const artifact = expected.find((entry) => entry.name === existing.name);
+    const artifact = expected.find((entry) => githubAssetName(entry.name) === existing.name);
     if (!artifact) throw new Error(`Unexpected existing release asset: ${existing.name}`);
     if (existing.digest !== `sha256:${artifact.sha256}` || existing.size !== artifact.size) {
       throw new Error(`Existing release asset differs: ${existing.name}`);
     }
   }
   if (release.assets.some((asset: { name: string }) => asset.name === "beans-update.json")) {
-    if (expected.some((artifact) => !release.assets.some((asset: { name: string }) => asset.name === artifact.name))) {
+    if (expected.some((artifact) => !release.assets.some((asset: { name: string }) => asset.name === githubAssetName(artifact.name)))) {
       throw new Error("Finalized release is incomplete; immutable readiness cannot be extended or repaired");
     }
   }
   // Artifacts first, detached signature next, manifest last: readiness is per consumer.
   for (const artifact of expected) {
-    if (!release.assets.some((asset: { name: string }) => asset.name === artifact.name)) {
+    if (artifact.name === "beans-update.json.sig") {
+      const uploaded = JSON.parse(await gh(["api", `repos/${repository}/releases/tags/${tag}`]));
+      for (const entry of manifest.artifacts) {
+        const asset = uploaded.assets.find((asset: { name: string }) => asset.name === githubAssetName(entry.name));
+        if (!asset || asset.size !== entry.size || asset.digest !== `sha256:${entry.sha256}`) {
+          throw new Error(`Uploaded release asset differs: ${entry.name}`);
+        }
+      }
+    }
+    if (!release.assets.some((asset: { name: string }) => asset.name === githubAssetName(artifact.name))) {
       await gh(["release", "upload", tag, join(directory, artifact.name), "--repo", repository]);
     }
   }
@@ -224,6 +258,9 @@ if (import.meta.main) {
   if (command === "check" && first && !third && !fourth) {
     const scope = releaseScope(second);
     const version = releaseVersion(first);
+    if (scope === "all" && !extractReleaseNotes(await Bun.file(join(ROOT, "CHANGELOG.md")).text(), version)) {
+      throw new Error(`CHANGELOG.md requires notes for ${version} before all-platform builds`);
+    }
     await releasePrivateKey();
     console.log(`Release ${version}; scope ${scope}; protocol ${await releaseProtocol()}; signing key matches installed trust anchor`);
   } else if (command === "collect" && first && second && !fourth) {

@@ -133,7 +133,7 @@ export function MessageCell(props: {
   };
   const avatar = () => {
     track.roster();
-    return authorAvatar(props.message.author);
+    return authorAvatar(props.message.author, props.chatID);
   };
   const showsName = () => props.showsAvatar && props.groupStart;
   const indent = () => (props.showsAvatar ? ChatMetrics.bubbleIndent : ChatMetrics.horizontalInset);
@@ -277,12 +277,12 @@ export function workingText(names: string[], activity: string | undefined, shows
 
 /** "Chef is working…" after the last message, its words shimmering while a turn runs. A DM reads
  * "Working…"; with one bot at work the line says what it is doing. */
-export function WorkingCell(props: { bots: Bot[]; activity?: string; showsName: boolean }) {
+export function WorkingCell(props: { bots: Bot[]; chatID: string; activity?: string; showsName: boolean }) {
   const text = () => workingText(props.bots.map((bot) => bot.name), props.activity, props.showsName);
   return (
     <div class="working-row" aria-label={props.bots.length === 1 ? L("%@ is working", props.bots[0]!.name) : text()}>
       <span class="working-avatar">
-        <Show when={props.bots[0]}>{(bot) => <Avatar content={botAvatar(bot())} size={ChatMetrics.avatarSize} />}</Show>
+        <Show when={props.bots[0]}>{(bot) => <Avatar content={botAvatar(bot(), props.chatID)} size={ChatMetrics.avatarSize} />}</Show>
       </span>
       <span class="working-text shimmer truncate">{text()}</span>
     </div>
@@ -334,11 +334,11 @@ export function handoffSpokenText(mode: HandoffMode, reason: string): string {
 /** Bot-to-bot messages as markers: "Message from ◉ Name · first line" where one arrived,
  * "Messaged ◉ Name · first line" where one was sent, centered; a handoff between two bots in the
  * same chat keeps both avatars on one line. A click opens the whole message. */
-export function HandoffCell(props: { mode: HandoffMode; reason: string; groupStart: boolean }) {
+export function HandoffCell(props: { mode: HandoffMode; reason: string; groupStart: boolean; chatID: string }) {
   let marker: HTMLButtonElement | undefined;
   const full = () => props.reason.trim();
   const first = () => firstLineOf(full());
-  const avatar = (bot: Bot | undefined): AvatarContent => (bot ? botAvatar(bot) : { kind: "system" });
+  const avatar = (bot: Bot | undefined): AvatarContent => (bot ? botAvatar(bot, props.chatID) : { kind: "system" });
   return (
     <div class={["handoff-row", props.mode.kind === "handoff" ? "handoff" : "centered", { tight: !props.groupStart }]}>
       <button

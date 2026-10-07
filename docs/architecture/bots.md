@@ -8,6 +8,8 @@ A chat has a `kind`. A DM is one bot and never gains or loses members; there is 
 
 Creating a bot reserves its own DM and persists both profiles plus the pending chat-creation marker in one local SQLite transaction before publishing one roster change. A preferred DM id that already belongs to any chat is refused before either object is created; a failed store write leaves neither an orphan bot nor a published capability policy. Other Devices first see the bot and its DM together.
 
+Bot profiles carry optional generated `look` settings independently of the photo in `avatar`. `bots.create` validates the look before image storage; `bots.update` keeps omitted look, resets null, and replaces an object draft. Both travel in the encrypted roster with fieldwise sync. See [Bot avatars](avatars.md) for the contract and protocol-4 writer requirement.
+
 Deleting a bot removes its DM and routines and removes it from every group. A group with other bots keeps its transcript and moves ownership when needed; a group whose last bot was deleted is removed. The macOS sidebar treats Delete on a DM as this bot deletion and says so in its confirmation sheet. Deleting a group removes only that chat.
 
 Who answers, after Grok Bot's rooms:

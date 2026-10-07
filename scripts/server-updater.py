@@ -766,8 +766,8 @@ def wait_for(predicate, timeout, what):
 
 
 def answers_as(target, version, required_protocol, old_pid=0):
-    """The service's process is not `old_pid` and answers as `version`: the relay's health meets
-    the signed protocol requirement, or the Runner's status comes from that process with no lease."""
+    """The service's process is not `old_pid` and answers as `version`: relay health meets
+    the signed protocol and roster-write floor, or Runner status comes from that process with no lease."""
     pid = main_pid(target)
     if pid == 0 or pid == old_pid:
         return False
@@ -775,7 +775,10 @@ def answers_as(target, version, required_protocol, old_pid=0):
         health = relay_health(target)
         return (isinstance(health, dict) and health.get("ok") is True and health.get("service") == "lorca-relay"
                 and type(health.get("protocol")) is int and health["protocol"] >= required_protocol
-                and health.get("version") == version)
+                and health.get("version") == version
+                and (required_protocol < 4
+                     or (type(health.get("min_roster_protocol")) is int
+                         and 4 <= health["min_roster_protocol"] <= required_protocol)))
     status = runner_control(target, ["status"], check=False)
     return (isinstance(status, dict) and status.get("version") == version
             and type(status.get("pid")) is int and status["pid"] == pid

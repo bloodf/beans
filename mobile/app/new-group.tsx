@@ -6,6 +6,7 @@ import { MAX_GROUP_BOTS, providerLabel } from "../src/core/model";
 import { useStore } from "../src/core/store";
 import { t, useLanguage } from "../src/i18n";
 import { BotAvatar } from "../src/ui/Avatar";
+import { notifyAvatarScroll } from "../src/ui/avatarVisibility";
 import { CheckRow, FieldRow, Section } from "../src/ui/forms";
 import { FormToolbar } from "../src/ui/navigation";
 
@@ -35,7 +36,7 @@ export default function NewGroupScreen() {
     <>
       <Stack.Screen options={{ title: t("New Group Chat") }} />
       <FormToolbar cancelLabel={t("Cancel")} saveLabel={t("Create")} saveDisabled={selected.length === 0} onCancel={() => router.dismiss()} onSave={() => void create()} />
-      <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingBottom: 40 }} keyboardDismissMode="on-drag" keyboardShouldPersistTaps="handled">
+      <ScrollView onScroll={notifyAvatarScroll} scrollEventThrottle={32} contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingBottom: 40 }} keyboardDismissMode="on-drag" keyboardShouldPersistTaps="handled">
         <Section title={t("Name")}>
           <FieldRow value={title} onChangeText={setTitle} placeholder={t("Optional")} autoCapitalize="words" returnKeyType="done" />
         </Section>

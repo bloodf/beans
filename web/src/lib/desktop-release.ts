@@ -63,7 +63,7 @@ export function parseDesktopReleases(releases: unknown): DesktopRelease | null {
     const appcast = file('appcast.xml')
     if (!clients.mac && dmg && appcast && file(`Beans-${version}.zip`))
       clients.mac = { version, url: dmg, appcast }
-    const windows = file(`Lorca Setup ${version}.exe`)
+    const windows = file(`Lorca Setup ${version}.exe`) ?? file(`Lorca.Setup.${version}.exe`)
     if (!clients.windows && windows) clients.windows = { version, url: windows }
     const installScript = file('install-linux-amd64.sh')
     const amd64 = file(`lorca_${version}_amd64.deb`)

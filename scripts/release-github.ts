@@ -30,6 +30,10 @@ function releaseScope(value: string = "server"): ReleaseScope {
 const repository = "bloodf/beans";
 const stable = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const assetName = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,179}$/;
+// GitHub normalizes spaces in the Windows installer filename when uploading.
+function githubAssetName(name: string): string {
+  return /^Lorca Setup \d+\.\d+\.\d+\.exe$/.test(name) ? name.replaceAll(" ", ".") : name;
+}
 
 function releaseVersion(tag: string): string {
   const version = tag.replace(/^beans-v/, "");
@@ -175,20 +179,29 @@ async function publish(tag: string, revision: string, directory: string, scope: 
     }))),
   ];
   for (const existing of release.assets) {
-    const artifact = expected.find((entry) => entry.name === existing.name);
+    const artifact = expected.find((entry) => githubAssetName(entry.name) === existing.name);
     if (!artifact) throw new Error(`Unexpected existing release asset: ${existing.name}`);
     if (existing.digest !== `sha256:${artifact.sha256}` || existing.size !== artifact.size) {
       throw new Error(`Existing release asset differs: ${existing.name}`);
     }
   }
   if (release.assets.some((asset: { name: string }) => asset.name === "beans-update.json")) {
-    if (expected.some((artifact) => !release.assets.some((asset: { name: string }) => asset.name === artifact.name))) {
+    if (expected.some((artifact) => !release.assets.some((asset: { name: string }) => asset.name === githubAssetName(artifact.name)))) {
       throw new Error("Finalized release is incomplete; immutable readiness cannot be extended or repaired");
     }
   }
   // Artifacts first, detached signature next, manifest last: readiness is per consumer.
   for (const artifact of expected) {
-    if (!release.assets.some((asset: { name: string }) => asset.name === artifact.name)) {
+    if (artifact.name === "beans-update.json.sig") {
+      const uploaded = JSON.parse(await gh(["api", `repos/${repository}/releases/tags/${tag}`]));
+      for (const entry of manifest.artifacts) {
+        const asset = uploaded.assets.find((asset: { name: string }) => asset.name === githubAssetName(entry.name));
+        if (!asset || asset.size !== entry.size || asset.digest !== `sha256:${entry.sha256}`) {
+          throw new Error(`Uploaded release asset differs: ${entry.name}`);
+        }
+      }
+    }
+    if (!release.assets.some((asset: { name: string }) => asset.name === githubAssetName(artifact.name))) {
       await gh(["release", "upload", tag, join(directory, artifact.name), "--repo", repository]);
     }
   }

@@ -10,7 +10,7 @@
     "generate-routes": "tsr generate",
     "build": "vite build",
     "preview": "vite preview",
-    "deploy": "vercel --prod"
+    "deploy": "cd .. && vercel --prod"
   },
   "dependencies": {
     "@fontsource/manrope": "^5.3.0",

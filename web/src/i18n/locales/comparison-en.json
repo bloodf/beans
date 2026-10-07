@@ -118,7 +118,8 @@
         "Desktop access and team-server connections.",
         "Data on the local machine or selected server; providers receive prompts.",
         "Free desktop app; provider usage and hosted servers cost separately."
-      ]
+      ],
+      "tradeoff": "Hosted execution is an optional extra cost. The local app needs its machine running, and provider usage is separate."
     },
     "grok-bot": {
       "intro": "Beans runs on a computer you assign. Grok Bot offers a managed computer that can continue working when your laptop is closed. The choice changes your operating responsibilities and how you connect tools.",
@@ -136,7 +137,8 @@
         "Desktop and iOS access described in the product FAQ.",
         "Managed service; consult its data terms and policies.",
         "Eligible paid plan with included usage; extra usage can be billed."
-      ]
+      ],
+      "tradeoff": "An eligible paid plan is required. Bots share a cloud computer per user, and extra usage can add charges."
     },
     "claude-code": {
       "intro": "Beans is a workspace for named bots across different jobs. Claude Code focuses on codebases, development commands, and coding sessions in the terminal, editor, desktop app, or web.",
@@ -154,7 +156,8 @@
         "Terminal, IDE, desktop, web; remote-control options.",
         "Configurable permissions and sandboxing; provider data policies apply.",
         "Subscription or API usage, depending on how you connect."
-      ]
+      ],
+      "tradeoff": "Its workflow centers on software development. Subscription or API limits apply, and local sessions depend on your computer."
     },
     "openclaw": {
       "intro": "OpenClaw connects agents to messaging apps through a gateway you operate. Beans provides a dedicated chat app with encrypted device pairing. Both support multiple agents; their setup and data paths differ.",
@@ -172,7 +175,8 @@
         "Messaging channels, Control UI and companion apps.",
         "You operate the gateway; model and channel services process shared data.",
         "Open-source app; model usage, hosting and connected services cost separately."
-      ]
+      ],
+      "tradeoff": "You manage gateway uptime, channel access and security configuration. Provider and hosting costs depend on your setup."
     },
     "hermes": {
       "intro": "Hermes combines persistent memory, reusable skills and configurable execution backends. Its Bot Mode supports specialist teams. Beans uses named bots assigned to your computers with encrypted sync between paired devices.",
@@ -190,7 +194,8 @@
         "CLI, desktop app and messaging gateway.",
         "Data follows your backend and provider choices; hosted tools process submitted content.",
         "Free MIT-licensed app; model, tool and hosting charges depend on setup."
-      ]
+      ],
+      "tradeoff": "Backend, tool and provider choices need configuration. You maintain self-hosted execution or pay for hosted infrastructure."
     },
     "dots": {
       "intro": "Dots is OpenAI’s managed personal agent in ChatGPT. It has a cloud computer and carries context across connected channels. Beans runs a team of bots on your assigned computers with direct provider connections.",
@@ -208,7 +213,12 @@
         "ChatGPT desktop, web and mobile, Slack and Teams.",
         "Service-side encryption at rest and in transit; plan and training settings apply.",
         "First dot included in eligible paid plans, with work allowances and delegated-task limits."
-      ]
+      ],
+      "tradeoff": "Access depends on plan and market. You use OpenAI’s service, and multi-dot teams remain a future feature."
     }
-  }
+  },
+  "pros": "Pros",
+  "cons": "Cons",
+  "readComparison": "Read the full comparison",
+  "beansTradeoff": "You maintain the Runner and keep it online. Model usage costs separately, and the app has no built-in graphical browser."
 }

@@ -1,6 +1,6 @@
 import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
-import { ArrowLeft, ArrowUpRight } from 'lucide-react'
+import { ArrowLeft, ArrowUpRight, Check, Minus } from 'lucide-react'
 import { Nav, SITE, downloadPath } from './nav'
 import { MarketingFooter } from './marketing'
 import { MotionExperience } from './motion'
@@ -91,204 +91,283 @@ export function ComparisonPage({ slug }: { slug?: ComparisonSlug }) {
             <ArrowUpRight size={18} />
           </Link>
         </header>
-        <nav className="comparison-contents" aria-label={c.contents}>
-          {sections.map((section) => (
-            <a key={section.id} href={`#${section.id}`}>
-              {section.title}
-            </a>
-          ))}
-        </nav>
-        <section id="overview" className="comparison-section">
-          <h2 className="display">{c.overview}</h2>
-          <div className="comparison-overview">
-            <article>
-              <h3>Beans</h3>
-              <p>{c.beansFit}</p>
+        {!slug ? (
+          <section className="comparison-bento" aria-label={c.overview}>
+            <article className="comparison-bento-beans">
+              <div>
+                <h2 className="display">Beans</h2>
+                <p>{c.costBody}</p>
+                <Link className="text-link" to={downloadPath(lng)}>
+                  {t('marketing.download')}
+                  <ArrowUpRight size={18} />
+                </Link>
+              </div>
+              <ProsCons
+                pros={c.pros}
+                cons={c.cons}
+                positive={c.beansFit}
+                negative={c.beansTradeoff}
+              />
             </article>
-            {selected.map((key) => (
-              <article key={key}>
-                <h3>{products[key].name}</h3>
-                <p>{c.products[key].intro}</p>
+            {slugs.map((key) => (
+              <article className="comparison-bento-card" key={key}>
+                <h2>{products[key].name}</h2>
+                <ProsCons
+                  pros={c.pros}
+                  cons={c.cons}
+                  positive={c.products[key].good}
+                  negative={c.products[key].tradeoff}
+                />
+                <div className="comparison-bento-cost">
+                  <h3>{t('marketing.costs')}</h3>
+                  <p>{c.products[key].other[11]}</p>
+                </div>
                 <Link
                   className="text-link"
                   to={localizedPath(lng, '/compare/' + key)}
                 >
-                  {t('comparison.versus', { product: products[key].name })}
-                  <ArrowUpRight size={17} />
+                  {c.readComparison}
+                  <ArrowUpRight size={18} />
                 </Link>
               </article>
             ))}
-          </div>
-        </section>
-        <section id="matrix" className="comparison-section">
-          <h2 className="display">{c.matrix}</h2>
-          <p className="comparison-section-intro">{c.matrixBody}</p>
-          <div
-            className="comparison-table-wrap"
-            tabIndex={0}
-            role="region"
-            aria-label={c.caption}
-          >
-            <table className={slug ? '' : 'comparison-table-all'}>
-              <caption>{c.caption}</caption>
-              <thead>
-                <tr>
-                  <th scope="col">{c.matters}</th>
-                  <th scope="col" className="beans-column">
-                    Beans
-                  </th>
-                  {selected.map((key) => (
-                    <th scope="col" key={key}>
-                      <a href={products[key].sources[0]}>
-                        {products[key].name}
-                        <ArrowUpRight size={13} />
-                      </a>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {c.labels.map((label, index) => (
-                  <tr key={label}>
-                    <th scope="row">{label}</th>
-                    <td className="beans-column">{c.beans[index]}</td>
-                    {selected.map((key) => (
-                      <td key={key}>{c.products[key].other[index]}</td>
-                    ))}
-                  </tr>
+          </section>
+        ) : (
+          <>
+            <nav className="comparison-contents" aria-label={c.contents}>
+              {sections.map((section) => (
+                <a key={section.id} href={`#${section.id}`}>
+                  {section.title}
+                </a>
+              ))}
+            </nav>
+            <section id="overview" className="comparison-section">
+              <h2 className="display">{c.overview}</h2>
+              <div className="comparison-overview">
+                <article>
+                  <h3>Beans</h3>
+                  <ProsCons
+                    pros={c.pros}
+                    cons={c.cons}
+                    positive={c.beansFit}
+                    negative={c.beansTradeoff}
+                  />
+                </article>
+                {selected.map((key) => (
+                  <article key={key}>
+                    <h3>{products[key].name}</h3>
+                    <ProsCons
+                      pros={c.pros}
+                      cons={c.cons}
+                      positive={c.products[key].good}
+                      negative={c.products[key].tradeoff}
+                    />
+                    <Link
+                      className="text-link"
+                      to={localizedPath(lng, '/compare/' + key)}
+                    >
+                      {t('comparison.versus', { product: products[key].name })}
+                      <ArrowUpRight size={17} />
+                    </Link>
+                  </article>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-        <section id="details" className="comparison-section">
-          <h2 className="display">{c.details}</h2>
-          <div className="comparison-editorial">
-            {c.topics.map((topic) => (
-              <article key={topic.title}>
-                <h3>{topic.title}</h3>
-                <p>{topic.body}</p>
-              </article>
-            ))}
-          </div>
-        </section>
-        <section
-          id="costs"
-          className="comparison-costs comparison-section motion-island"
-        >
-          <div className="gradient-wash" aria-hidden="true" />
-          <h2 className="display">{c.costTitle}</h2>
-          <p className="comparison-section-intro">{c.costBody}</p>
-          <dl className="comparison-cost-breakdown">
-            <div>
-              <dt>{c.appPrice}</dt>
-              <dd>$0</dd>
-            </div>
-            <div>
-              <dt>{c.providerPrice}</dt>
-              <dd>{c.providerCost}</dd>
-            </div>
-            <div>
-              <dt>{c.machinePrice}</dt>
-              <dd>{c.machineCost}</dd>
-            </div>
-          </dl>
-          {selected.map((key) => (
-            <p className="comparison-other-cost" key={key}>
-              <strong>{products[key].name}</strong> {c.products[key].other[11]}
-            </p>
-          ))}
-        </section>
-        <section id="choose" className="comparison-section">
-          <h2 className="display">{c.choose}</h2>
-          <div className="comparison-choice">
-            <article>
-              <h3>{c.chooseBeans}</h3>
-              <p>{c.beansFit}</p>
-              <Link className="text-link" to={downloadPath(lng)}>
-                {t('marketing.download')}
-                <ArrowUpRight size={17} />
-              </Link>
-            </article>
-            {selected.map((key) => (
-              <article key={key}>
-                <h3>
-                  {t('comparison.chooseOther', { product: products[key].name })}
-                </h3>
-                <p>{c.products[key].good}</p>
-                <a className="text-link" href={products[key].sources[0]}>
-                  {products[key].name}
-                  <ArrowUpRight size={17} />
-                </a>
-              </article>
-            ))}
-          </div>
-        </section>
-        <section id="questions" className="comparison-section comparison-faq">
-          <h2 className="display">{c.faq}</h2>
-          {c.questions.map((item) => (
-            <details key={item.q}>
-              <summary>{item.q}</summary>
-              <p>{item.a}</p>
-            </details>
-          ))}
-        </section>
-        <section id="sources" className="comparison-section comparison-sources">
-          <h2>{c.sources}</h2>
-          <p>{c.freshness}</p>
-          <a href="https://github.com/bloodf/beans/blob/feat/durindoor-fresh-start-releases/ARCHITECTURE.md">
-            {c.architecture}
-            <ArrowUpRight size={15} />
-          </a>
-          {selected.map((key) => (
-            <div key={key}>
-              <h3>{products[key].name}</h3>
-              {products[key].sources.map((source, index) => (
-                <a key={source} href={source}>
-                  {c.official} · {products[key].name}
-                  {index ? ` (${index + 1})` : ''}
-                  <ArrowUpRight size={15} />
-                </a>
-              ))}
-            </div>
-          ))}
-        </section>
-        <section className="comparison-section comparison-final motion-island">
-          <div className="gradient-wash" aria-hidden="true" />
-          <h2 className="display">{c.start}</h2>
-          <p>{c.startBody}</p>
-          <div>
-            <Link
-              className="marketing-button"
-              to={localizedPath(lng, '/')}
-              hash="turns"
+              </div>
+            </section>
+            <section id="matrix" className="comparison-section">
+              <h2 className="display">{c.matrix}</h2>
+              <p className="comparison-section-intro">{c.matrixBody}</p>
+              <div className="comparison-dimensions">
+                {c.labels.map((label, index) => (
+                  <article className="comparison-dimension" key={label}>
+                    <h3>{label}</h3>
+                    <dl>
+                      <div>
+                        <dt>Beans</dt>
+                        <dd>{c.beans[index]}</dd>
+                      </div>
+                      {selected.map((key) => (
+                        <div key={key}>
+                          <dt>{products[key].name}</dt>
+                          <dd>{c.products[key].other[index]}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </article>
+                ))}
+              </div>
+            </section>
+            <section id="details" className="comparison-section">
+              <h2 className="display">{c.details}</h2>
+              <div className="comparison-editorial">
+                {c.topics.map((topic) => (
+                  <article key={topic.title}>
+                    <h3>{topic.title}</h3>
+                    <p>{topic.body}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+            <section
+              id="costs"
+              className="comparison-costs comparison-section motion-island"
             >
-              {c.demo}
-              <ArrowUpRight size={17} />
-            </Link>
-            <Link className="text-link" to={downloadPath(lng)}>
-              {t('marketing.download')}
-              <ArrowUpRight size={17} />
-            </Link>
-          </div>
-        </section>
-        <section className="comparison-section">
-          <h2>{c.more}</h2>
-          <div className="comparison-grid">
-            {slugs
-              .filter((key) => key !== slug)
-              .map((key) => (
-                <Link key={key} to={localizedPath(lng, '/compare/' + key)}>
-                  <span>
-                    {t('comparison.versus', { product: products[key].name })}
-                  </span>
-                  <ArrowUpRight size={22} />
-                </Link>
+              <div className="gradient-wash" aria-hidden="true" />
+              <h2 className="display">{c.costTitle}</h2>
+              <p className="comparison-section-intro">{c.costBody}</p>
+              <dl className="comparison-cost-breakdown">
+                <div>
+                  <dt>{c.appPrice}</dt>
+                  <dd>$0</dd>
+                </div>
+                <div>
+                  <dt>{c.providerPrice}</dt>
+                  <dd>{c.providerCost}</dd>
+                </div>
+                <div>
+                  <dt>{c.machinePrice}</dt>
+                  <dd>{c.machineCost}</dd>
+                </div>
+              </dl>
+              {selected.map((key) => (
+                <p className="comparison-other-cost" key={key}>
+                  <strong>{products[key].name}</strong>{' '}
+                  {c.products[key].other[11]}
+                </p>
               ))}
-          </div>
-        </section>
+            </section>
+            <section id="choose" className="comparison-section">
+              <h2 className="display">{c.choose}</h2>
+              <div className="comparison-choice">
+                <article>
+                  <h3>{c.chooseBeans}</h3>
+                  <p>{c.beansFit}</p>
+                  <Link className="text-link" to={downloadPath(lng)}>
+                    {t('marketing.download')}
+                    <ArrowUpRight size={17} />
+                  </Link>
+                </article>
+                {selected.map((key) => (
+                  <article key={key}>
+                    <h3>
+                      {t('comparison.chooseOther', {
+                        product: products[key].name,
+                      })}
+                    </h3>
+                    <p>{c.products[key].good}</p>
+                    <a className="text-link" href={products[key].sources[0]}>
+                      {products[key].name}
+                      <ArrowUpRight size={17} />
+                    </a>
+                  </article>
+                ))}
+              </div>
+            </section>
+            <section
+              id="questions"
+              className="comparison-section comparison-faq"
+            >
+              <h2 className="display">{c.faq}</h2>
+              {c.questions.map((item) => (
+                <details key={item.q}>
+                  <summary>{item.q}</summary>
+                  <p>{item.a}</p>
+                </details>
+              ))}
+            </section>
+            <section
+              id="sources"
+              className="comparison-section comparison-sources"
+            >
+              <h2>{c.sources}</h2>
+              <p>{c.freshness}</p>
+              <a href="https://github.com/bloodf/beans/blob/feat/durindoor-fresh-start-releases/ARCHITECTURE.md">
+                {c.architecture}
+                <ArrowUpRight size={15} />
+              </a>
+              {selected.map((key) => (
+                <div key={key}>
+                  <h3>{products[key].name}</h3>
+                  {products[key].sources.map((source, index) => (
+                    <a key={source} href={source}>
+                      {c.official} · {products[key].name}
+                      {index ? ` (${index + 1})` : ''}
+                      <ArrowUpRight size={15} />
+                    </a>
+                  ))}
+                </div>
+              ))}
+            </section>
+            <section className="comparison-section comparison-final motion-island">
+              <div className="gradient-wash" aria-hidden="true" />
+              <h2 className="display">{c.start}</h2>
+              <p>{c.startBody}</p>
+              <div>
+                <Link
+                  className="marketing-button"
+                  to={localizedPath(lng, '/')}
+                  hash="turns"
+                >
+                  {c.demo}
+                  <ArrowUpRight size={17} />
+                </Link>
+                <Link className="text-link" to={downloadPath(lng)}>
+                  {t('marketing.download')}
+                  <ArrowUpRight size={17} />
+                </Link>
+              </div>
+            </section>
+            <section className="comparison-section">
+              <h2>{c.more}</h2>
+              <div className="comparison-grid">
+                {slugs
+                  .filter((key) => key !== slug)
+                  .map((key) => (
+                    <Link key={key} to={localizedPath(lng, '/compare/' + key)}>
+                      <span>
+                        {t('comparison.versus', {
+                          product: products[key].name,
+                        })}
+                      </span>
+                      <ArrowUpRight size={22} />
+                    </Link>
+                  ))}
+              </div>
+            </section>
+          </>
+        )}
       </main>
       <MarketingFooter />
     </MotionExperience>
+  )
+}
+
+function ProsCons({
+  pros,
+  cons,
+  positive,
+  negative,
+}: {
+  pros: string
+  cons: string
+  positive: string
+  negative: string
+}) {
+  return (
+    <dl className="comparison-pros-cons">
+      <div>
+        <dt>
+          <Check size={16} aria-hidden="true" />
+          {pros}
+        </dt>
+        <dd>{positive}</dd>
+      </div>
+      <div>
+        <dt>
+          <Minus size={16} aria-hidden="true" />
+          {cons}
+        </dt>
+        <dd>{negative}</dd>
+      </div>
+    </dl>
   )
 }

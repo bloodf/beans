@@ -118,7 +118,8 @@
         "Desktop und Verbindungen zu einem Teamserver.",
         "Daten auf lokaler Maschine oder gewähltem Server; Anbieter erhalten Prompts.",
         "Kostenlose Desktop-App; Anbieternutzung und Hosting kosten separat."
-      ]
+      ],
+      "tradeoff": "Gehostete Ausführung kostet optional extra. Die lokale App braucht einen laufenden Computer, und Anbieter berechnen Nutzung separat."
     },
     "grok-bot": {
       "intro": "Beans läuft auf deinem zugewiesenen Computer. Grok Bot bietet einen verwalteten Computer, der bei geschlossenem Laptop weiterarbeitet. Das verändert deine Betriebsverantwortung und Werkzeuganbindung.",
@@ -136,7 +137,8 @@
         "Desktop- und iOS-Zugriff laut Produkt-FAQ.",
         "Verwalteter Dienst; Datenbedingungen und Richtlinien beachten.",
         "Geeigneter bezahlter Tarif mit Kontingent; Mehrnutzung kann berechnet werden."
-      ]
+      ],
+      "tradeoff": "Ein berechtigter Bezahltarif ist nötig. Bots teilen einen Cloud-Computer pro Nutzer; zusätzliche Nutzung kann Kosten verursachen."
     },
     "claude-code": {
       "intro": "Beans organisiert benannte Bots für verschiedene Aufgaben. Claude Code konzentriert sich auf Codebasen, Entwicklungsbefehle und Sitzungen im Terminal, Editor, in der Desktop-App oder im Web.",
@@ -154,7 +156,8 @@
         "Terminal, IDE, Desktop, Web und Fernsteuerung.",
         "Konfigurierbare Berechtigungen und Sandbox; Anbieterrichtlinien gelten.",
         "Abo oder API-Nutzung je nach Verbindung."
-      ]
+      ],
+      "tradeoff": "Der Ablauf konzentriert sich auf Softwareentwicklung. Abo- oder API-Limits gelten; lokale Sitzungen brauchen deinen Computer."
     },
     "openclaw": {
       "intro": "OpenClaw verbindet Agenten über ein selbst betriebenes Gateway mit Messenger-Apps. Beans bietet eine eigene Chat-App mit verschlüsselter Gerätekopplung. Beide unterstützen mehrere Agenten; Einrichtung und Datenwege unterscheiden sich.",
@@ -172,7 +175,8 @@
         "Messenger-Kanäle, Control UI und Begleit-Apps.",
         "Du betreibst das Gateway; Modell- und Nachrichtendienste verarbeiten geteilte Daten.",
         "Open-Source-App; Modellnutzung, Hosting und verbundene Dienste kosten separat."
-      ]
+      ],
+      "tradeoff": "Du verwaltest Verfügbarkeit, Kanalzugriff und Sicherheit des Gateways. Anbieter- und Hostingkosten hängen von der Einrichtung ab."
     },
     "hermes": {
       "intro": "Hermes verbindet dauerhaften Speicher, wiederverwendbare Skills und konfigurierbare Ausführungsumgebungen. Bot Mode unterstützt Spezialistenteams. Beans ordnet benannte Bots deinen Computern zu und synchronisiert gekoppelte Geräte verschlüsselt.",
@@ -190,7 +194,8 @@
         "CLI, Desktop-App und Messenger-Gateway.",
         "Datenwege hängen von Backend und Anbieter ab; gehostete Werkzeuge verarbeiten übermittelte Inhalte.",
         "Kostenlose MIT-lizenzierte App; Modell-, Werkzeug- und Hostingkosten hängen von der Einrichtung ab."
-      ]
+      ],
+      "tradeoff": "Backends, Werkzeuge und Anbieter müssen konfiguriert werden. Du betreibst die eigene Infrastruktur oder bezahlst gehostete Ausführung."
     },
     "dots": {
       "intro": "Dots ist OpenAIs verwalteter persönlicher Agent in ChatGPT. Er hat einen Cloud-Computer und behält Kontext über verbundene Kanäle hinweg. Beans betreibt ein Bot-Team auf deinen zugewiesenen Computern mit direkten Anbieterzugängen.",
@@ -208,7 +213,12 @@
         "ChatGPT auf Desktop, Web und Mobilgeräten, Slack und Teams.",
         "Dienstseitige Verschlüsselung bei Speicherung und Übertragung; Tarif- und Trainingseinstellungen gelten.",
         "Erster Dot in berechtigten Bezahltarifen enthalten, mit Arbeitskontingenten und Limits für delegierte Aufgaben."
-      ]
+      ],
+      "tradeoff": "Zugang hängt von Tarif und Region ab. Du nutzt OpenAIs Dienst; Teams aus mehreren Dots sind eine künftige Funktion."
     }
-  }
+  },
+  "pros": "Vorteile",
+  "cons": "Nachteile",
+  "readComparison": "Vollständigen Vergleich lesen",
+  "beansTradeoff": "Du betreibst den Runner und hältst ihn online. Modellnutzung kostet separat, und die App hat keinen integrierten grafischen Browser."
 }

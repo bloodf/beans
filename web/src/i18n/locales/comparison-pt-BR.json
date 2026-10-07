@@ -118,7 +118,8 @@
         "Desktop e conexões com servidor de equipe.",
         "Dados na máquina local ou no servidor escolhido; provedores recebem prompts.",
         "Aplicativo desktop gratuito; uso de IA e hospedagem são cobrados separadamente."
-      ]
+      ],
+      "tradeoff": "A execução hospedada tem custo opcional extra. O app local precisa do computador ligado, e os provedores cobram separadamente."
     },
     "grok-bot": {
       "intro": "O Beans usa um computador que você designa. O Grok Bot oferece um computador gerenciado que continua trabalhando com seu notebook fechado. A escolha muda suas responsabilidades de operação e a conexão com ferramentas.",
@@ -136,7 +137,8 @@
         "Acesso desktop e iOS descrito nas perguntas do produto.",
         "Serviço gerenciado; consulte os termos e as políticas de dados.",
         "Plano pago elegível com uso incluído; excedentes podem ser cobrados."
-      ]
+      ],
+      "tradeoff": "É necessário um plano pago elegível. Os bots compartilham um computador na nuvem por usuário, e uso extra pode gerar cobranças."
     },
     "claude-code": {
       "intro": "O Beans organiza bots com nomes para diferentes trabalhos. O Claude Code é voltado a bases de código, comandos de desenvolvimento e sessões de programação no terminal, editor, aplicativo desktop ou web.",
@@ -154,7 +156,8 @@
         "Terminal, IDE, desktop, web e opções de controle remoto.",
         "Permissões e sandbox configuráveis; políticas do provedor se aplicam.",
         "Assinatura ou uso de API, conforme a conexão."
-      ]
+      ],
+      "tradeoff": "O fluxo é voltado ao desenvolvimento de software. Limites de assinatura ou API se aplicam, e sessões locais dependem do computador."
     },
     "openclaw": {
       "intro": "O OpenClaw conecta agentes a aplicativos de mensagens por um gateway que você opera. O Beans oferece um app de chat com pareamento criptografado. Ambos aceitam vários agentes; a configuração e o caminho dos dados diferem.",
@@ -172,7 +175,8 @@
         "Canais de mensagens, painel de controle e apps auxiliares.",
         "Você opera o gateway; provedores e serviços de mensagens processam os dados compartilhados.",
         "App de código aberto; uso de modelos, hospedagem e serviços conectados têm custos separados."
-      ]
+      ],
+      "tradeoff": "Você administra disponibilidade, acesso aos canais e segurança do gateway. Provedores e hospedagem custam conforme a configuração."
     },
     "hermes": {
       "intro": "O Hermes combina memória persistente, skills reutilizáveis e ambientes de execução configuráveis. O Bot Mode aceita equipes de especialistas. O Beans usa bots atribuídos aos seus computadores e sincronização criptografada entre dispositivos pareados.",
@@ -190,7 +194,8 @@
         "CLI, app desktop e gateway de mensagens.",
         "Os dados seguem suas escolhas de ambiente e provedor; ferramentas hospedadas processam o conteúdo enviado.",
         "App gratuito com licença MIT; modelos, ferramentas e hospedagem custam conforme a configuração."
-      ]
+      ],
+      "tradeoff": "Ambientes, ferramentas e provedores precisam de configuração. Você mantém a execução própria ou paga pela infraestrutura hospedada."
     },
     "dots": {
       "intro": "O Dots é o agente pessoal gerenciado da OpenAI no ChatGPT. Tem um computador na nuvem e mantém contexto entre canais conectados. O Beans executa uma equipe nos seus computadores, com conexão direta aos provedores.",
@@ -208,7 +213,12 @@
         "ChatGPT desktop, web e celular, Slack e Teams.",
         "Criptografia no serviço, em repouso e em trânsito; regras do plano e de treinamento se aplicam.",
         "Primeiro dot incluído em planos pagos elegíveis, com franquias de trabalho e limites nas tarefas delegadas."
-      ]
+      ],
+      "tradeoff": "O acesso depende do plano e do mercado. Você usa o serviço da OpenAI, e equipes de dots ainda são uma proposta futura."
     }
-  }
+  },
+  "pros": "Prós",
+  "cons": "Contras",
+  "readComparison": "Ver comparação completa",
+  "beansTradeoff": "Você mantém o Runner online. O uso de modelos custa separadamente, e o app não tem navegador gráfico integrado."
 }

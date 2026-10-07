@@ -118,7 +118,8 @@
         "Escritorio y conexiones a servidores de equipo.",
         "Datos en la máquina local o el servidor elegido; los proveedores reciben prompts.",
         "Aplicación gratis; uso de IA y alojamiento se cobran por separado."
-      ]
+      ],
+      "tradeoff": "La ejecución alojada tiene un coste opcional adicional. La app local necesita el ordenador encendido y los proveedores cobran por separado."
     },
     "grok-bot": {
       "intro": "Beans usa el ordenador que asignas. Grok Bot ofrece un ordenador gestionado que sigue trabajando con el portátil cerrado. La elección cambia tus responsabilidades de operación y la conexión de herramientas.",
@@ -136,7 +137,8 @@
         "Acceso de escritorio e iOS descrito en las preguntas del producto.",
         "Servicio gestionado; consulta sus términos y políticas de datos.",
         "Plan de pago compatible con uso incluido; el uso extra puede cobrarse."
-      ]
+      ],
+      "tradeoff": "Necesitas un plan de pago elegible. Los bots comparten un ordenador en la nube por usuario y el uso extra puede generar cargos."
     },
     "claude-code": {
       "intro": "Beans organiza bots con nombre para distintos trabajos. Claude Code se centra en código, comandos de desarrollo y sesiones de programación en terminal, editor, aplicación de escritorio o web.",
@@ -154,7 +156,8 @@
         "Terminal, IDE, escritorio, web y opciones de control remoto.",
         "Permisos y sandbox configurables; se aplican las políticas del proveedor.",
         "Suscripción o uso de API según la conexión."
-      ]
+      ],
+      "tradeoff": "El flujo se centra en desarrollo de software. Se aplican límites de suscripción o API y las sesiones locales dependen de tu ordenador."
     },
     "openclaw": {
       "intro": "OpenClaw conecta agentes a apps de mensajería mediante una pasarela que tú administras. Beans ofrece una app de chat con emparejamiento cifrado. Ambos admiten varios agentes; cambian la configuración y el recorrido de los datos.",
@@ -172,7 +175,8 @@
         "Canales de mensajería, panel de control y apps complementarias.",
         "Administras la pasarela; los proveedores y servicios de mensajería procesan los datos compartidos.",
         "App de código abierto; modelos, alojamiento y servicios conectados tienen costes separados."
-      ]
+      ],
+      "tradeoff": "Administras la disponibilidad, el acceso a los canales y la seguridad de la pasarela. Proveedores y alojamiento cuestan según la configuración."
     },
     "hermes": {
       "intro": "Hermes combina memoria persistente, skills reutilizables y entornos de ejecución configurables. Bot Mode admite equipos de especialistas. Beans asigna bots a tus ordenadores y sincroniza los dispositivos emparejados con cifrado.",
@@ -190,7 +194,8 @@
         "CLI, app de escritorio y pasarela de mensajería.",
         "Los datos siguen tus elecciones de entorno y proveedor; las herramientas alojadas procesan el contenido enviado.",
         "App gratuita con licencia MIT; los costes de modelos, herramientas y alojamiento dependen de la configuración."
-      ]
+      ],
+      "tradeoff": "Los entornos, las herramientas y los proveedores requieren configuración. Mantienes tu propia infraestructura o pagas por ejecución alojada."
     },
     "dots": {
       "intro": "Dots es el agente personal administrado de OpenAI en ChatGPT. Tiene un ordenador en la nube y conserva contexto entre canales conectados. Beans ejecuta un equipo en tus ordenadores, con conexiones directas a proveedores.",
@@ -208,7 +213,12 @@
         "ChatGPT en escritorio, web y móvil, Slack y Teams.",
         "Cifrado en el servicio, en reposo y en tránsito; se aplican los ajustes del plan y del entrenamiento.",
         "Primer dot incluido en planes de pago elegibles, con cuotas de trabajo y límites en tareas delegadas."
-      ]
+      ],
+      "tradeoff": "El acceso depende del plan y del mercado. Usas el servicio de OpenAI y los equipos de varios dots siguen siendo una función futura."
     }
-  }
+  },
+  "pros": "Ventajas",
+  "cons": "Desventajas",
+  "readComparison": "Ver comparación completa",
+  "beansTradeoff": "Mantienes el Runner conectado. Los modelos tienen costes separados y la app no incluye un navegador gráfico integrado."
 }

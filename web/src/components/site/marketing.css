@@ -1223,3 +1223,52 @@
     padding: 16px;
   }
 }
+
+/* Comparison discovery is a compact bento; details live on each product page. */
+.comparison-bento {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  margin: 48px 0 80px;
+}
+.comparison-bento-beans,
+.comparison-bento-card,
+.comparison-dimension {
+  border-radius: 16px;
+  background: var(--card);
+  padding: clamp(24px, 3vw, 40px);
+}
+.comparison-bento-beans {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 48px;
+  background: color-mix(in srgb, var(--card) 90%, #f26744);
+}
+.comparison-bento-beans h2 { font-size: 40px; margin-bottom: 16px; }
+.comparison-bento-beans p,
+.comparison-pros-cons dd,
+.comparison-bento-cost p,
+.comparison-dimension dd { color: var(--muted-foreground); line-height: 1.7; }
+.comparison-bento-card { display: flex; flex-direction: column; gap: 24px; }
+.comparison-bento-card h2 { font-size: clamp(24px, 2.6vw, 34px); line-height: 1.15; }
+.comparison-pros-cons { display: grid; gap: 24px; }
+.comparison-pros-cons dt { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 8px; }
+.comparison-pros-cons svg { flex-shrink: 0; }
+.comparison-pros-cons > div:first-child svg { color: var(--violet); }
+.comparison-bento-card .text-link { margin-top: auto; padding-top: 16px; border-top: 1px solid var(--border); }
+.comparison-bento-beans .text-link { margin-top: 24px; }
+.comparison-bento-cost h3 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+.comparison-bento-card:focus-within { outline: 2px solid var(--foreground); outline-offset: 4px; }
+.comparison-dimensions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.comparison-dimension h3 { font-size: 23px; line-height: 1.3; margin-bottom: 24px; }
+.comparison-dimension dl { display: grid; gap: 20px; }
+.comparison-dimension dt { font-weight: 600; margin-bottom: 6px; }
+.comparison-dimension dl > div:first-child dt { color: var(--violet); }
+@media (max-width: 760px) {
+  .comparison-bento,
+  .comparison-bento-beans,
+  .comparison-dimensions { grid-template-columns: 1fr; gap: 20px; }
+  .comparison-bento { margin-top: 32px; }
+  .comparison-bento-beans { gap: 32px; }
+}

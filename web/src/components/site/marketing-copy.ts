@@ -2,58 +2,10 @@ import { useTranslation } from 'react-i18next'
 
 const en = {
   free: 'Free to use. Your AI, your choice.',
-  demoTitle: 'Less back-and-forth. More done.',
-  demoBody: 'Give a task to your team. Watch them research, build, and bring the pieces together.',
+  demoTitle: 'Meet your bots. In the actual app.',
+  demoBody: 'Select a bot or group chat in the sidebar. Explore the same interface used by the Windows and Linux app.',
   demo: 'Interactive demo',
-  demoNote: 'A scripted preview. No files, providers, or tools are connected.',
-  team: 'Your team',
-  channel: 'Project launch',
-  you: 'You',
-  run: 'Run this demo',
-  replay: 'Replay demo',
-  done: 'Ready for your review',
-  working: 'Team is working',
-  scenarios: [
-    {
-      name: 'Plan a launch',
-      prompt:
-        'Turn my notes into a launch plan. Research the market, draft the page, and give me a checklist.',
-      messages: [
-        'I’ll split this into research, a first draft, and a launch checklist. Scout, start with the market.',
-        'I found the positioning themes. Keeping the sources alongside the summary for review.',
-        'I’ve drafted the page from your notes and Scout’s findings. The files are ready to review.',
-        'The draft and research are together. Here’s the launch checklist—your turn to make the call.',
-      ],
-      file: 'launch-plan.md',
-      result: ['Review the positioning', 'Approve the page draft', 'Choose a launch date'],
-    },
-    {
-      name: 'Build a feature',
-      prompt:
-        'Review the project folder, build the next feature, and explain the changes before I ship.',
-      messages: [
-        'I’ll coordinate the work. Builder, read the project and propose the change first.',
-        'The relevant files are identified. I’ll keep the change focused and run the project checks.',
-        'The feature is drafted. I’m reviewing the diff against the original request.',
-        'Here are the changes and check results. Review the diff before shipping.',
-      ],
-      file: 'feature-review.md',
-      result: ['Read the change summary', 'Review the file diff', 'Confirm the checks'],
-    },
-    {
-      name: 'Write a brief',
-      prompt:
-        'Read my project notes, pull out the important decisions, and turn them into a clear brief.',
-      messages: [
-        'I’ll organize the brief around the goal, the audience, and the decisions still open.',
-        'I’ve pulled the key points from the notes, keeping assumptions separate from decisions.',
-        'The first draft is ready. I’ve tightened the structure and highlighted the open questions.',
-        'Your brief is ready to review. The original notes stay beside the draft.',
-      ],
-      file: 'project-brief.md',
-      result: ['Check the project goal', 'Resolve open questions', 'Share the approved brief'],
-    },
-  ],
+  demoNote: 'The actual desktop interface with the app’s built-in sample data and simulated replies. No providers, files, or tools are connected. On small screens, scroll sideways to explore.',
   featuresTitle: 'A little app. A lot of possibility.',
   featuresBody:
     'Real work happens in the details. Give each teammate a role, a folder, and the tools it needs.',
@@ -141,55 +93,10 @@ const en = {
 }
 const zh: typeof en = {
   free: '免费使用，自由选择 AI。',
-  demoTitle: '少一点往返，多一点完成。',
-  demoBody: '把任务交给团队，看它们研究、构建并整理结果。',
+  demoTitle: '在真实应用中认识你的智能体。',
+  demoBody: '在侧栏选择智能体或群聊，探索 Windows 和 Linux 应用使用的同一界面。',
   demo: '互动演示',
-  demoNote: '预设演示，未连接文件、模型或工具。',
-  team: '你的团队',
-  channel: '项目发布',
-  you: '你',
-  run: '运行演示',
-  replay: '重播演示',
-  done: '等待你审核',
-  working: '团队正在工作',
-  scenarios: [
-    {
-      name: '准备发布',
-      prompt: '把笔记整理成发布计划，研究市场、起草页面，并给我一份检查清单。',
-      messages: [
-        '我会分成研究、草稿和检查清单。Scout 先研究市场。',
-        '我整理了定位主题，保留来源供审核。',
-        '我根据笔记和研究起草了页面，文件等待审核。',
-        '草稿与研究已整理好。这是发布清单，请你做决定。',
-      ],
-      file: 'launch-plan.md',
-      result: ['检查产品定位', '审核页面草稿', '选择发布日期'],
-    },
-    {
-      name: '构建功能',
-      prompt: '查看项目文件夹，构建下一个功能，并在发布前解释改动。',
-      messages: [
-        '我来协调工作。Builder 先读项目并提出方案。',
-        '相关文件已找到。我会控制改动范围并运行检查。',
-        '功能草稿已完成，正在核对需求和差异。',
-        '改动和检查结果已整理，请在发布前审核。',
-      ],
-      file: 'feature-review.md',
-      result: ['阅读改动说明', '审核文件差异', '确认检查结果'],
-    },
-    {
-      name: '撰写简报',
-      prompt: '阅读项目笔记，提取关键决定并写成清晰的简报。',
-      messages: [
-        '我会按目标、受众和待定事项组织简报。',
-        '关键点已提取，假设和决定单独列出。',
-        '初稿完成，结构已整理，待定问题已标明。',
-        '简报等待审核，原始笔记保留在旁边。',
-      ],
-      file: 'project-brief.md',
-      result: ['检查项目目标', '解决待定问题', '分享审核后的简报'],
-    },
-  ],
+  demoNote: '真实桌面界面，使用应用内置示例数据和模拟回复。未连接模型、文件或工具。小屏幕可横向滚动查看。',
   featuresTitle: '小小应用，大有可能。',
   featuresBody: '真正的工作在细节里。为每位队友分配角色、文件夹和工具。',
   cards: [

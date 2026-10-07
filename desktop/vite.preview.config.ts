@@ -1,0 +1,49 @@
+import { fileURLToPath } from "node:url";
+import solid from "@solidjs/vite-plugin";
+import { defineConfig, type Plugin } from "vite";
+
+// Build the real app UI with a browser-only demo host. Keep native builds untouched.
+function previewHost(): Plugin {
+  return {
+    name: "beans-website-preview-host",
+    enforce: "pre",
+    transform(source, id) {
+      const replace = (before: string, after: string) => {
+        if (!source.includes(before)) throw new Error(`Preview host contract changed: ${id}: ${before}`);
+        source = source.replaceAll(before, after);
+      };
+      if (id.endsWith("/src/ui/App.tsx")) {
+        replace('import { createRouter, useNavigate }', 'import { createRouter, memoryHistory, useNavigate }');
+        replace('export const Router = createRouter({', 'export const Router = createRouter({ history: memoryHistory("/"),');
+      } else if (id.endsWith("/src/host/index.ts")) {
+        replace('isMock: query.get("mock") === "1"', 'isMock: true');
+        replace('name: "Lorca Dev"', 'name: "Beans demo"');
+        replace('"lorca.prefs"', '"beans.website-preview.prefs"');
+        replace('visible: document.visibilityState === "visible"', 'visible: document.visibilityState === "visible" && document.documentElement.dataset.previewPaused !== "true"');
+      } else if (id.endsWith("/src/main.tsx")) {
+        source += `\nwindow.addEventListener("message", (event) => {
+          if (event.source !== window.parent || event.origin !== window.location.origin) return;
+          if (event.data?.type !== "beans-preview-motion" || typeof event.data.paused !== "boolean") return;
+          document.documentElement.dataset.previewPaused = String(event.data.paused);
+          document.dispatchEvent(new Event("visibilitychange"));
+        });\n`;
+      } else return;
+      return { code: source, map: null };
+    },
+    transformIndexHtml(html) {
+      return html.replace('<title>Lorca</title>', '<title>Beans — app demo</title><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'self\'; style-src \'self\' \'unsafe-inline\'; img-src \'self\' data: blob:; font-src \'self\'; connect-src \'none\'; form-action \'none\'; base-uri \'none\'">');
+    },
+  };
+}
+
+export default defineConfig({
+  root: fileURLToPath(new URL(".", import.meta.url)),
+  base: "/app-preview/",
+  plugins: [previewHost(), solid()],
+  build: {
+    outDir: fileURLToPath(new URL("../web/public/app-preview", import.meta.url)),
+    emptyOutDir: true,
+    target: ["chrome110", "safari16"],
+    cssTarget: ["chrome110", "safari16"],
+  },
+});

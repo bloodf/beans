@@ -1,169 +1,175 @@
 <p align="center">
-  <img src="./mobile/assets/icon.png" alt="Beans application icon" width="96" height="96">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./web/public/brand/beans-logo-light.svg">
+    <img src="./web/public/brand/beans-logo.svg" alt="Beans" width="240">
+  </picture>
 </p>
 
-<h1 align="center">Beans</h1>
+<h1 align="center">Your AI. Your space.</h1>
 
 <p align="center">
-  Persistent AI bots you own: chat 1:1 or in groups, hand work between bots, and run them on your own machines.
+  A team of AI bots on your computer.<br>
+  Give them work, connect your tools, and keep chatting from your phone.
 </p>
 
 <p align="center">
-  <a href="#what-is-beans">Overview</a> ·
-  <a href="#how-it-fits-together">Architecture</a> ·
-  <a href="#build-from-source">Build</a> ·
-  <a href="#self-hosting-the-relay">Relay</a> ·
-  <a href="#security-boundaries">Security</a> ·
-  <a href="#contributing">Contributing</a> ·
-  <a href="#license-and-acknowledgments">License</a>
+  <a href="https://usebeans.app/download"><strong>Download Beans</strong></a> ·
+  <a href="https://usebeans.app/#turns">Try the demo</a> ·
+  <a href="https://usebeans.app/docs">Read the docs</a> ·
+  <a href="https://usebeans.app/compare">Compare alternatives</a>
 </p>
 
-## What is Beans?
+<p align="center">
+  <img src="./web/public/brand/beans-social-v2.png" alt="Beans coral sculpture and wordmark. Your AI. Your space." width="960">
+</p>
 
-Beans is a GPL-3.0 fork of [Lorca](https://github.com/egoist/lorca): a Rust agent runtime, an end-to-end encrypted relay, and desktop and phone clients. The macOS and phone builds have their own Beans identities. Runtime identifiers (`lorca` binary, `LORCA_*` variables, `lorca://pair`) intentionally remain compatible with upstream. [BEANS.md](./BEANS.md) describes the fork.
+## Meet your team
 
-- **Bots and chats.** Create named bots, talk to them 1:1, or put 1–6 in a group chat. Bots hand work to each other and orchestrate in the spirit of Grok Bot, and can run scheduled routines.
-- **Your machines do the work.** Each bot runs on one Runner you own. Provider credentials belong to the account and sync as an encrypted blob.
-- **End-to-end encrypted sync.** Identity is a local key pair. The relay stores public keys and ciphertext.
-- **Offline avatar library.** [`@beans/blobatar`](./packages/beans-blobatar/README.md) supplies a deterministic, MIT-licensed avatar generator, including its JavaScriptCore distribution.
-- **Fork mechanisms.** The source includes matching client avatars, account-wide Pause, per-bot capabilities, reviewed file drafts, appearance-preserving protocol-4 reconciliation and custom-provider catalog refresh.
-- **Clients.** macOS (AppKit), Windows and Linux (MyGo), iOS and Android (Expo).
+Beans gives each bot a name, instructions, a model, and memory. Assign it to one of your computers and give it a folder to work in. Chat with it directly, or bring several bots into a group to work together.
 
-> **Development status:** this source includes the avatar library, client controls and protocol-4 appearance preservation. Build and deployment acceptance are separate: a local build does not upgrade your relay or establish live-client acceptance. Upgrade every relay replica before appearance-capable Runners and clients.
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Bots that keep context</h3>
+      <p>Keep dedicated bots for different projects. Their instructions and memory carry across chats, so you can return to the work without repeating your preferences.</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>A team in one conversation</h3>
+      <p>Put up to six bots in a group. Mention a teammate, discuss the work together, and let bots hand tasks to each other.</p>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <h3>Tools on your computer</h3>
+      <p>Bots read and edit files, run commands, search the web, and connect to apps through MCP plugins. Review tool permissions and see the activity in the conversation.</p>
+    </td>
+    <td valign="top">
+      <h3>Continue from your phone</h3>
+      <p>Pair your devices to read and send messages, configure bots, and start work remotely. Scheduled routines run on the bot's assigned computer.</p>
+    </td>
+  </tr>
+</table>
 
-## Interface reference
+The [interactive demo](https://usebeans.app/#turns) uses the actual Windows/Linux app interface. Select bots and group chats in its sidebar. It contains sample conversations and simulated replies; providers, files, and tools are disconnected.
 
-These two images are inherited from the upstream Lorca website (`web/public/screens`). They illustrate the upstream chat UI and are **not** current Beans screenshots or proof that a Beans build ran.
+## Start with one bot
 
-| Direct chat (upstream) | Group chat (upstream) |
-| --- | --- |
-| <img src="./web/public/screens/dm.png" alt="Upstream Lorca direct chat window" width="420"> | <img src="./web/public/screens/group.png" alt="Upstream Lorca group chat window" width="420"> |
+1. [Download Beans](https://usebeans.app/download) for your computer. The download page shows the currently available builds.
+2. Connect an AI provider with a supported subscription sign-in or API key.
+3. Create a bot, choose its model, and assign its computer and working folder.
+4. Start a conversation. Add teammates, scheduled routines, and paired devices when you need them.
 
-## How it fits together
+Keep the assigned computer online for new turns and scheduled work. Your phone sends work to that computer; queued work waits while it is offline.
 
-Every paired machine or phone is a **Device** and records its OS. Desktop Devices (`macos`, `linux`, `windows`) are **Runners**: bots live and run there. Phones and tablets (`ios`, `ipados`, `android`) are Devices, never Runners; they read and write chats, configure credentials, create bots for your Runners and start turns.
+## Free app. Your choice of provider.
+
+**Beans is free and open source.** You pay your AI provider directly for its subscription or API usage. Your computer, hosting, and any paid tools have their own costs.
+
+Supported connections include:
+
+- ChatGPT and Grok through subscription sign-in.
+- Anthropic, DeepSeek, OpenCode Zen, and OpenCode Go through API keys.
+- Custom providers with OpenAI-compatible or Anthropic-compatible APIs, including reachable local model servers that implement a supported API.
+
+Choose a provider and model for each bot. Provider availability and usage limits depend on your account. See [provider setup](https://usebeans.app/docs/providers) and the [provider architecture](./docs/architecture/providers.md) for connection details.
+
+## Your computers do the work
+
+A desktop computer is a **Runner**. It runs the bots assigned to it and calls your model providers. A paired phone or tablet is a **Device** that lets you chat and manage the team.
 
 ```mermaid
 flowchart LR
-  subgraph Runner["Runner (desktop Device)"]
-    App["Native app UI"] <-->|"localhost websocket"| CLI["lorca CLI<br/>keys, agent loop, tools"]
-  end
-  Phone["Phone Device<br/>(not a Runner)"]
-  Relay[("Relay<br/>public keys + ciphertext")]
-  Models["Model providers"]
-  CLI <-->|"signed requests, ciphertext"| Relay
-  Phone <-->|"signed requests, ciphertext"| Relay
-  CLI -->|"account credentials"| Models
+  Desktop["Desktop app"] <-->|"Local connection"| Runner["Runner · Rust CLI"]
+  Runner <-->|"Encrypted sync"| Relay["Relay"]
+  Phone["Paired phone or tablet"] <-->|"Encrypted sync"| Relay
+  Runner -->|"Prompts and tool results"| Provider["Your AI provider"]
+  Runner --> Tools["Files · commands · MCP tools"]
 ```
 
-- The desktop app talks only to its local CLI, and bundles and starts it.
-- The CLI owns identity, the agent loop, tools, relay sync and provider calls.
-- A bot runs on one Runner, using the account's provider credentials there.
+Identity starts with a local key pair. Paired devices share chats, bot profiles, and account provider credentials through an end-to-end encrypted relay. The relay stores public keys and ciphertext and sees connection metadata such as sizes and timing. Your chosen model provider receives the prompts and tool results sent to it.
 
-Read [ARCHITECTURE.md](./ARCHITECTURE.md) first, then the subject docs in [docs/architecture](./docs/architecture) for the parts you touch.
+Bots run tools with your operating-system user's permissions. A working folder supplies context; it is not a filesystem sandbox. Auto-review evaluates tool requests and does not provide an operating-system sandbox. Read the [identity](./docs/architecture/identity.md) and [tools](./docs/architecture/tools.md) docs for the boundaries.
 
-### Supported clients and providers
+## Find the right fit
 
-| Surface | Source | Notes |
-| --- | --- | --- |
-| CLI | [`crates/cli`](./crates/cli) | Rust; macOS, Linux, Windows |
-| macOS app | [`macos/`](./macos) | AppKit, Swift package; deployment target macOS 14, built with the macOS 26 SDK |
-| Windows and Linux app | [`desktop/`](./desktop) | MyGo (Go + system webview) with a Solid page; keeps its upstream identity |
-| Phone app | [`mobile/`](./mobile) | Expo (iOS, Android); pairs as a Device |
-| Relay | [`crates/relay`](./crates/relay) | axum with SQLite or Postgres |
+Each comparison has its own page with pros, cons, costs, and source links:
 
-Providers: API key for DeepSeek, Anthropic, OpenCode Zen and OpenCode Go; subscription sign-in for ChatGPT and Grok (SuperGrok or X Premium+); custom providers that speak OpenAI's or Anthropic's API. See [providers](./docs/architecture/providers.md).
+[OpenClaw](https://usebeans.app/compare/openclaw) · [Hermes Agent](https://usebeans.app/compare/hermes) · [Grok Bot](https://usebeans.app/compare/grok-bot) · [OpenAI Dots](https://usebeans.app/compare/dots) · [OpenBot](https://usebeans.app/compare/openbot) · [Claude Code](https://usebeans.app/compare/claude-code)
+
+The website is available in [English](https://usebeans.app/), [Português do Brasil](https://usebeans.app/pt-br), [简体中文](https://usebeans.app/zh), [Deutsch](https://usebeans.app/de), [Español](https://usebeans.app/es), and [日本語](https://usebeans.app/ja). Product docs are available in English and Chinese. Website translations are separate from native app language support.
 
 ## Build from source
 
-- **All builds:** [Bun](https://bun.sh) and Rust stable, with the standard libraries for the targets you build.
-- **macOS:** Xcode with Swift 6 and the macOS 26 SDK. The deployment target is macOS 14; that is not a claim of verified macOS-14 runtime compatibility.
-- **Windows/Linux desktop:** Go 1.27.1 or newer; cross-platform CLI builds use `cargo-zigbuild`. See [desktop architecture](./docs/architecture/desktop-app.md) for host webview dependencies.
-- **Phones:** Xcode for iOS, or JDK 17 and the Android SDK/NDK for Android. Native Rust-core setup is described in [phone architecture](./docs/architecture/phone-app.md).
+Read [ARCHITECTURE.md](./ARCHITECTURE.md) before changing code, then the subject docs it lists for the parts you touch. Beans builds on [Lorca](https://github.com/egoist/lorca); the CLI binary remains `lorca`, with `LORCA_*` environment variables and `lorca://pair` pairing links.
 
-Start with the fork's working branch:
+Install [Bun](https://bun.sh) and Rust stable. macOS builds need Xcode with Swift 6 and the macOS 26 SDK. Windows/Linux desktop builds need Go 1.27.1 or newer and the host webview dependencies. Phone builds need Xcode for iOS, or JDK 17 and the Android SDK/NDK for Android. See the [macOS](./docs/architecture/macos-app.md), [desktop](./docs/architecture/desktop-app.md), and [phone](./docs/architecture/phone-app.md) build docs.
 
 ```bash
-git clone --branch beans https://github.com/bloodf/beans.git
+git clone --branch feat/durindoor-fresh-start-releases https://github.com/bloodf/beans.git
 cd beans
+# To reproduce a release, check out its beans-v<version> tag before installing.
 bun install
 ```
 
-For phone development, also run `bun install --cwd mobile`: the phone app is not a root Bun workspace.
-
-Choose the development or build command for your platform:
+Choose the command for your platform:
 
 ```bash
-bun run dev           # build and launch Beans Dev (macOS); also starts a local relay on 0.0.0.0:8787
-bun run build         # build Beans.app without installing or launching it
+bun run dev           # Build and launch Beans Dev on macOS, with a local relay
+bun run build         # Build Beans.app
 bun run desktop       # Windows/Linux development app with live reload
-bun run desktop:build # desktop release build for the host (or Linux + Windows x86-64 from a Mac)
-bun run mobile:dev    # Beans Dev on the iOS simulator with Metro
-bun run mobile:phone  # same loop on a connected iPhone
-bun run android       # rebuild the phone core and run the Android development client
-bun run relay         # local relay on 0.0.0.0:8787, database in temp/
-bun run web           # website dev server on http://localhost:3000
+bun run desktop:build # Build the desktop release artifacts
+bun run mobile:dev    # iOS simulator development with Metro
+bun run mobile:phone  # Development on a connected iPhone
+bun run android       # Rebuild the Rust phone core and run the Android client
+bun run web           # Website development on localhost:3000
 ```
 
-`bun run relay` and `bun run dev` listen on every interface so a phone on your network can pair. Use them on trusted networks only. `bun run android:release` builds a signed APK from external signing credentials; see [BEANS.md](./BEANS.md#android-release-build).
+For phone development, first run `bun install --cwd mobile`. The phone app is not a root Bun workspace. Desktop cross-compilation uses `cargo-zigbuild`; platform prerequisites and packaging details are in the build docs above.
 
-### Beans and Beans Dev are isolated
-
-| Build | CLI home | CLI port |
-| --- | --- | --- |
-| Beans (macOS) | `~/.beans` | `4864` |
-| Beans Dev (macOS) | `~/.beans-dev` | `4865` |
-
-Bundle IDs are `ai.amoena.beans` and `ai.amoena.beans.dev`. Upstream Lorca's defaults are a different installation. When you run the CLI yourself, pass the intended home and port explicitly:
+Beans on macOS uses `~/.beans` and CLI port `4864`. Beans Dev uses `~/.beans-dev` and port `4865`. To run the development CLI directly:
 
 ```bash
 cargo run -q -p lorca -- --home "$HOME/.beans-dev" --port 4865 serve
 ```
 
-`bun run reset` is destructive: it resets the selected Beans installation's local data. It is not a setup prerequisite.
+`bun run dev` starts its local relay on every network interface so phones can pair. Use a trusted network. `bun run reset` deletes local installation data; it is not a setup prerequisite.
 
-## Self-hosting the relay
+### Run your own relay
 
-The relay is optional for one Device and required for pairing and sync across Devices. It stores only public keys and ciphertext.
+A relay enables pairing and sync across devices. Run a local instance with:
 
 ```bash
 cargo run -q -p lorca-relay -- --bind 127.0.0.1:8787 --db lorca-relay.db
-# or --db postgres://... for several replicas
 ```
 
-- Set `LORCA_RELAY_SECRET` to a stable random value, or every Device is logged out on restart. Copy [`.env.example`](./.env.example) to `.env` (gitignored) for APNs and FCM push settings; keep key files outside the repository.
-- Point clients at it with `LORCA_RELAY_URL` or Settings › Advanced. Resolution order is in [BEANS.md](./BEANS.md#relay-selection). Rust defaults are unchanged, so configure your own relay explicitly; no hosted Beans relay is provided here.
-- Keep relay and clients on compatible revisions. For appearance sync, upgrade every relay replica first to protocol 4 with an enforced and advertised roster-write floor of at least 4 and protected roster/policy deletion, then upgrade appearance-capable Runners and clients. Relays default to minimum protocol 4 and return `426` to older clients; lowering the generic minimum does not lower the roster-write floor. New clients fail closed on missing or unsupported compatibility evidence. See [protocols](./docs/architecture/protocols.md) and [appearance rollout](./docs/architecture/avatars.md#protocol-compatibility-and-rollout).
-- Behind a proxy, set `LORCA_RELAY_TRUST_PROXY` only if the proxy overwrites `X-Forwarded-For`. A container image recipe is at [`crates/relay/Dockerfile`](./crates/relay/Dockerfile). Details: [relay](./docs/architecture/relay.md).
+Set `LORCA_RELAY_SECRET` to a stable random value so devices remain authenticated across restarts. Configure clients through `LORCA_RELAY_URL` or Settings > Advanced. [`.env.example`](./.env.example) documents push settings. Keep credentials and signing keys outside the repository.
 
-## Security boundaries
+The relay supports SQLite or Postgres and has a [container recipe](./crates/relay/Dockerfile). Follow the [relay](./docs/architecture/relay.md) and [protocol](./docs/architecture/protocols.md) docs for deployment, proxy configuration, and compatible client upgrades.
 
-- The relay cannot read content, but it sees public keys, ciphertext sizes and timing. Do not publish relay addresses, signing material or provider keys.
-- Bots run tools on their Runner with your user's permissions. Auto-review **does not sandbox** a bot; a workspace is context, not a filesystem boundary. Bots on one Runner share the operating-system user.
-- The fork includes local websocket Host/Origin checks, per-bot capabilities, account Pause and file-draft approval. These source mechanisms are not claims about deployed services. An offline Runner cannot enforce changes it has not received. See [tools](./docs/architecture/tools.md) and [bots](./docs/architecture/bots.md).
-- Beans builds do not start Sparkle or the upstream update feed. The upstream scripts `release-mac`, `release-ios`, `release-desktop` and `generate-appcast` and their `docs/releasing-*.md` guides name upstream hosting and are **not** Beans release channels.
+### Source and releases
 
-## Repository map
-
-| Path | Contents |
+| Directory | Contents |
 | --- | --- |
-| `crates/cli`, `crates/agent`, `crates/models`, `crates/provider-auth`, `crates/markdown` | CLI, agent loop, model catalog, provider sign-in, markdown |
-| `crates/relay`, `crates/mobile` | Relay; Rust Device core for phones |
-| `macos/`, `desktop/`, `mobile/` | Native clients |
-| `packages/beans-blobatar` | Avatar generator |
-| `web/` | Landing page and Fumadocs product docs (`web/content/docs`) |
-| `scripts/` | Build, dev and reset scripts |
-| `docs/architecture`, [CHANGELOG.md](./CHANGELOG.md) | Subject docs and changelog |
+| [`crates/`](./crates) | Rust CLI, agent runtime, providers, model catalog, relay, and phone core |
+| [`macos/`](./macos) | AppKit macOS app |
+| [`desktop/`](./desktop) | Go and Solid Windows/Linux app |
+| [`mobile/`](./mobile) | Expo phone app |
+| [`web/`](./web) | Marketing website and product docs |
+| [`design/brand/`](./design/brand) | Editable SVG logo masters, campaign artwork, and brand exports |
+| [`packages/beans-blobatar/`](./packages/beans-blobatar) | Offline avatar generator |
+| [`docs/architecture/`](./docs/architecture) | Architecture subject docs |
+
+Beans releases use signed readiness metadata. macOS release bundles check the Beans Sparkle feed for updates; development builds do not start update checks. Build validation, signed artifact publication, and store submission are separate steps described in [releases](./docs/architecture/releases.md).
 
 ## Contributing
 
-Keep each change to one observable behavior. Read the architecture subject you touch and reuse its mechanism. Exercise the path with an isolated home and local fixtures, add a focused regression, and update the matching architecture doc and the changelog. A build or unit suite does not replace native UI, pairing or deployed-service evidence. Keep credentials, signing material and local operational addresses out of contributions.
+Keep changes focused on an observable behavior. Exercise the path with an isolated home and local fixtures, update the architecture subject for any mechanism you change, and record the change in [CHANGELOG.md](./CHANGELOG.md).
 
-Focused checks:
+Run the checks relevant to your change:
 
 ```bash
 cargo test --locked --workspace --exclude lorca-mobile
-cargo test --locked -p lorca-mobile     # separate: avoids feature unification with the Runner
+cargo test --locked -p lorca-mobile # Separate to avoid Runner feature unification
 bun run check:docs
 bun run l10n
 bun run test:mac-startup
@@ -175,8 +181,10 @@ bun run --cwd desktop test
 go -C desktop test ./...
 ```
 
-[CI](./.github/workflows/test.yml) also covers Linux/Postgres and Windows; local macOS checks do not prove those platforms. Report exact commands, outcomes and unavailable prerequisites.
+[CI](./.github/workflows/test.yml) also checks Linux/Postgres and Windows. Report the commands you ran and any unavailable prerequisites. Native UI, pairing, and deployed services need their own verification.
 
-## License and acknowledgments
+## License and credits
 
-Beans is licensed under [GPL-3.0](./LICENSE). It builds on [Lorca](https://github.com/egoist/lorca) by egoist. The vendored Blobatar avatar source in `packages/beans-blobatar` is MIT-licensed by Alain; see its [LICENSE](./packages/beans-blobatar/LICENSE).
+Beans is licensed under [GPL-3.0](./LICENSE) and builds on [Lorca](https://github.com/egoist/lorca) by egoist. The vendored Blobatar avatar source by Alain is [MIT-licensed](./packages/beans-blobatar/LICENSE).
+
+[Website](https://usebeans.app/) · [Downloads](https://usebeans.app/download) · [Documentation](https://usebeans.app/docs) · [Releases](https://github.com/bloodf/beans/releases) · [Privacy](https://usebeans.app/privacy.html) · [Support](https://usebeans.app/support.html)

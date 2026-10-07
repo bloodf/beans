@@ -3,6 +3,7 @@
 // the views can tell what changed by identity.
 
 import { L, Lc } from "../l10n";
+import type { BotLook } from "./botLook";
 import * as Format from "./format";
 import { markdownBlocks, plainText } from "./markdown";
 
@@ -547,6 +548,8 @@ export interface Bot {
   /** A custom profile image, kept as a `file` blob like a message attachment. Shown in place of
    * the symbol and accent once this computer has the bytes. */
   avatar?: Attachment;
+  /** Generated appearance remains independent of the uploaded image. */
+  look?: BotLook;
   createdAt: number;
 }
 

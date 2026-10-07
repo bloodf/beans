@@ -14,6 +14,7 @@ const chats = counter();
 const roster = counter();
 const connection = counter();
 const everything = counter();
+const avatarActivity = counter();
 const perChat = new Map<string, ReturnType<typeof counter>>();
 const listeners = new Set<(event: StoreEvent) => void>();
 
@@ -28,6 +29,17 @@ function chatCounter(id: string) {
 
 store.subscribe((event) => {
   everything.bump();
+  switch (event.kind) {
+    case "snapshotReplaced":
+    case "connectionChanged":
+    case "chatsChanged":
+    case "chatChanged":
+    case "messageAdded":
+    case "messageChanged":
+    case "messageRemoved":
+    case "respondingChanged":
+      avatarActivity.bump();
+  }
   switch (event.kind) {
     case "snapshotReplaced":
       chats.bump();
@@ -72,6 +84,8 @@ export const track = {
   connection: () => connection.read(),
   /** One chat's messages, turns, and usage. */
   chat: (id: string) => chatCounter(id).read(),
+  /** Current bot activity, including other chats for profile/list aggregation. */
+  avatarActivity: () => avatarActivity.read(),
   /** Any change at all. */
   any: () => everything.read(),
 };

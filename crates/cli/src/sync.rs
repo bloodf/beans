@@ -139,10 +139,8 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         }
         return Ok(());
     };
-    // A relay without durable policy blobs must not accept a roster that could erase Pause.
-    if app.relay.health(&url).await? < crate::relay::PROTOCOL {
-        return Err(RelayError { status: Some(426), message: "Relay update required for encrypted policy sync".into() });
-    }
+    // Health fails closed unless the relay enforces appearance-capable roster writers.
+    app.relay.health(&url).await?;
     let machine = machine_file.machine().map_err(|e| RelayError { status: None, message: e.to_string() })?;
 
     if !machine_file.registered {
@@ -1265,7 +1263,7 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
             }
         };
     }
-    merge_entities!(bots, name, description, symbol_name, accent, avatar, runner_id, provider,
+    merge_entities!(bots, name, description, symbol_name, accent, avatar, look, runner_id, provider,
         model, thinking, legacy_instructions, workdir, capabilities);
     merge_entities!(chats, kind, title, description, owner_bot_id, is_pinned);
     for chat in &mut remote.chats {
@@ -1619,6 +1617,7 @@ mod tests {
     fn bot(id: &str) -> Bot {
         Bot {
             id: id.into(), name: id.into(), description: String::new(), symbol_name: String::new(), accent: String::new(), avatar: None,
+            look: None,
             runner_id: "runner".into(), provider: "deepseek".into(), model: None, thinking: None,
             legacy_instructions: String::new(), workdir: None, capabilities: Capabilities::default(), created_at: 1.0,
         }
@@ -1626,6 +1625,67 @@ mod tests {
 
     fn roster(bot: Bot) -> RosterBlob {
         RosterBlob { bots: vec![bot], ..Default::default() }
+    }
+
+    fn with_look(mut bot: Bot, look: serde_json::Value) -> Bot {
+        let mut wire = serde_json::to_value(&bot).unwrap();
+        wire["look"] = look;
+        bot = serde_json::from_value(wire).unwrap();
+        bot
+    }
+
+    #[test]
+    fn appearance_merge_preserves_remote_look_on_unrelated_edit_and_applies_replace_reset() {
+        use serde_json::json;
+        let original = json!({"version":1,"base":{"shape":"round"}});
+        let remote_look = json!({"version":1,"base":{"shape":"cloud"},"future_metadata":{"revision":2}});
+        let replacement = json!({"version":1,"base":{"tone":"ink"},"states":{"working":{"expression":"thinking"}}});
+        let base = roster(with_look(bot("bot"), original));
+        let mut remote = roster(with_look(bot("bot"), remote_look.clone()));
+        remote.bots[0].description = "Remote description".into();
+        let mut local = base.clone();
+        local.bots[0].name = "Offline name".into();
+        let merged = merge_rosters(remote.clone(), &base, &local);
+        assert_eq!(serde_json::to_value(&merged.bots[0]).unwrap()["look"], remote_look);
+        assert_eq!(merged.bots[0].name, "Offline name");
+        assert_eq!(merged.bots[0].description, "Remote description");
+        for draft in [replacement, serde_json::Value::Null] {
+            local.bots[0] = with_look(local.bots[0].clone(), draft.clone());
+            let merged = merge_rosters(remote.clone(), &base, &local);
+            assert_eq!(serde_json::to_value(&merged.bots[0]).unwrap()["look"], draft);
+            assert_eq!(merged.bots[0].description, "Remote description");
+        }
+    }
+
+    #[test]
+    fn appearance_offline_rebase_uses_latest_local_edit_across_encryption_and_restart() {
+        use serde_json::json;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let base = roster(with_look(bot("bot"), json!({"version":1,"base":{"shape":"round"}})));
+        app.store.observe_roster(1, &base).unwrap();
+        apply_roster(app, base.clone());
+        let first = with_look(bot("bot"), json!({"version":1,"base":{"shape":"cloud"}}));
+        app.update_bot("bot", |bot| *bot = first).unwrap();
+        let captured = app.store.queued_roster().unwrap().unwrap();
+        let latest = json!({"version":1,"base":{"shape":"sun"},"states":{"error":{"expression":"sad"}}});
+        let second = with_look(bot("bot"), latest.clone());
+        app.update_bot("bot", |bot| *bot = second).unwrap();
+        let mut remote = base;
+        remote.bots[0].name = "Remote rename".into();
+        app.store.observe_roster(5, &remote).unwrap();
+        rebase_queued_roster(app, &app.machine_file().unwrap(), captured).unwrap();
+        let encrypted = app.store.queued_roster().unwrap().unwrap();
+        let merged: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &encrypted.ciphertext).unwrap();
+        assert_eq!(serde_json::to_value(&merged.bots[0]).unwrap()["look"], latest);
+        assert_eq!(merged.bots[0].name, "Remote rename");
+        assert_eq!(app.store.roster_baseline("queued").unwrap().unwrap().0, 5);
+        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(serde_json::to_value(restarted.bot("bot").unwrap()).unwrap()["look"], latest);
+        assert_eq!(restarted.store.queued_roster().unwrap().unwrap().ciphertext, encrypted.ciphertext);
     }
 
     fn policy(device: &str, counter: u64, paused: Option<bool>, capabilities: Option<Capabilities>) -> PolicyBlob {
@@ -2054,6 +2114,9 @@ mod tests {
             state.routines.clear();
         }
         a.0.push_roster();
+        let draft = json!({"version":1,"base":{"shape":"cloud","background":"none"},"states":{"working":{"tone":"ink"}}});
+        a.0.update_bot("bot", |bot| bot.look = Some(crate::appearance::BotLook::parse(&draft).unwrap())).unwrap();
+        b.0.update_bot("bot", |bot| bot.name = "Remote bot rename".into()).unwrap();
         for (app, id) in [(&a.0, "offline"), (&b.0, "x")] {
             app.create_chat(ChatMeta { id: id.into(), kind: "dm".into(), title: None,
                 bot_ids: vec!["bot".into()], owner_bot_id: Some("bot".into()), description: None, is_pinned: false, created_at: 1.0 }).unwrap();
@@ -2089,6 +2152,9 @@ mod tests {
         assert!(roster.chats.iter().find(|chat| chat.id == "group").unwrap().is_pinned);
         assert!(!roster.routines.iter().any(|routine| routine.id == "routine"));
         assert!(roster.bots.iter().any(|bot| bot.name == "new-bot"));
+        let merged_bot = roster.bots.iter().find(|bot| bot.id == "bot").unwrap();
+        assert_eq!(serde_json::to_value(merged_bot).unwrap()["look"], draft);
+        assert_eq!(merged_bot.name, "Remote bot rename");
         let expected = a.0.state.lock().unwrap().roster_slot_seq;
         let seq = a.0.relay.put_blob(&url, "token", merged.clone(), expected).await.unwrap();
         a.0.state.lock().unwrap().roster_slot_seq = seq;
@@ -2101,6 +2167,8 @@ mod tests {
         assert!(a.0.message("offline", &offline.id).is_some());
         assert_eq!(b.0.chat("group").unwrap().meta.title.as_deref(), Some("Offline rename"));
         assert!(!b.0.state.lock().unwrap().routines.iter().any(|routine| routine.id == "routine"));
+        assert_eq!(serde_json::to_value(b.0.bot("bot").unwrap()).unwrap()["look"], draft);
+        assert_eq!(b.0.bot("bot").unwrap().name, "Remote bot rename");
         assert!(a.0.message("group", &group_message.id).is_some());
         assert!(a.0.store.outbox().unwrap().iter().any(|item| item.id == offline_file.id));
         task.abort();

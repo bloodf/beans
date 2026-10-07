@@ -1,52 +1,47 @@
 // Bot avatars are deterministic local SVGs keyed by bot ID, or the user's uploaded image.
 // You and system keep their own discs; working dots and group layouts use the same circles.
 
-import { blobatar } from "@beans/blobatar";
-import { For, Show } from "solid-js";
+import { createSignal, For, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { L } from "../l10n";
+import type { BotLook, BotAvatarState } from "../model/botLook";
+import { track } from "../model/reactive";
 import type { Author, Bot } from "../model/models";
 import { store } from "../model/store";
 import { Icon } from "./icons";
+import { GeneratedAvatar } from "./generatedAvatar";
+import { watchAvatarVisibility } from "./avatarVisibility";
 
 export type AvatarContent =
-  | { kind: "bot"; id: string }
+  | { kind: "bot"; id: string; look?: BotLook; state?: BotAvatarState }
   | { kind: "image"; url: string }
   | { kind: "you" }
   | { kind: "system" };
 
 /** Uploaded image when fetched locally, otherwise the bot's deterministic SVG. */
-export function botAvatar(bot: Bot): AvatarContent {
-  const url = store.avatarURL(bot);
+export function botAvatar(bot: Bot, chatID?: string): AvatarContent {
+  track.roster();
+  track.avatarActivity();
+  const current = store.bot(bot.id) ?? bot;
+  const url = store.avatarURL(current);
   if (url) return { kind: "image", url };
-  return { kind: "bot", id: bot.id };
+  return { kind: "bot", id: current.id, look: current.look, state: store.botAvatarState(current.id, chatID) };
 }
 
-export function authorAvatar(author: Author): AvatarContent {
+export function authorAvatar(author: Author, chatID?: string): AvatarContent {
   if (author.kind === "you") return { kind: "you" };
   if (author.kind === "system") return { kind: "system" };
   const bot = store.bot(author.botID);
-  return bot ? botAvatar(bot) : { kind: "system" };
+  return bot ? botAvatar(bot, chatID) : { kind: "system" };
 }
 
 export function sameAvatar(a: AvatarContent, b: AvatarContent): boolean {
   if (a.kind !== b.kind) return false;
-  if (a.kind === "bot" && b.kind === "bot") return a.id === b.id;
+  if (a.kind === "bot" && b.kind === "bot") return a.id === b.id && a.look === b.look && a.state === b.state;
   if (a.kind === "image" && b.kind === "image") return a.url === b.url;
   return true;
 }
 
-const svgURLs = new Map<string, string>();
-
-function botSVGURL(id: string): string {
-  let url = svgURLs.get(id);
-  if (!url) {
-    // SVG is generated in-package from the ID; encoding keeps markup out of the DOM.
-    url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(blobatar(id))}`;
-    svgURLs.set(id, url);
-  }
-  return url;
-}
 
 /** Where the working dot sits: over the bottom-right edge of a circle `size` across. */
 function presence(size: number) {
@@ -75,8 +70,8 @@ function AvatarDisc(props: { content: AvatarContent; size: number; working?: boo
       <Show when={props.content.kind === "image"}>
         <img src={props.content.kind === "image" ? props.content.url : undefined} alt="" draggable="false" />
       </Show>
-      <Show when={props.content.kind === "bot"}>
-        <img src={props.content.kind === "bot" ? botSVGURL(props.content.id) : undefined} alt="" draggable="false" />
+      <Show when={props.content.kind === "bot" ? props.content : undefined}>
+        {(content) => <GeneratedAvatar id={content().id} look={content().look} state={content().state} />}
       </Show>
       <Show when={props.content.kind === "you" || props.content.kind === "system"}>
         <Icon name={props.content.kind === "you" ? "person.fill" : "gearshape.fill"} size={Math.round(props.size * 0.5)} strokeWidth={props.size >= 40 ? 2 : 2.4} />
@@ -86,10 +81,14 @@ function AvatarDisc(props: { content: AvatarContent; size: number; working?: boo
 }
 
 function PresenceDot(props: { size: number }) {
+  let element: HTMLSpanElement | undefined;
+  const [active, setActive] = createSignal(false);
+  onSettled(() => element ? watchAvatarVisibility(element, (visible, reducedMotion) => setActive(visible && !reducedMotion)) : undefined);
   const place = () => presence(props.size);
   return (
     <span
-      class="presence-dot"
+      ref={(span) => (element = span)}
+      class={["presence-dot", { active: active() }]}
       style={{ width: `${place().dot}px`, height: `${place().dot}px`, left: `${place().x}px`, top: `${place().y}px` }}
     />
   );
@@ -110,8 +109,17 @@ export function Avatar(props: {
       class={["avatar", props.class, { clickable: !!props.onClick }]}
       style={{ width: `${size()}px`, height: `${size()}px` }}
       title={props.onClick ? L("Change look") : props.title}
+      aria-label={props.onClick ? L("Change look") : undefined}
+      tabindex={props.onClick ? 0 : undefined}
       role={props.onClick ? "button" : undefined}
       onClick={() => props.onClick?.()}
+      onKeyDown={(event) => {
+        if (props.onClick && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          event.stopPropagation();
+          props.onClick();
+        }
+      }}
     >
       <AvatarDisc content={props.content} size={size()} working={props.working} />
       <Show when={props.working}>

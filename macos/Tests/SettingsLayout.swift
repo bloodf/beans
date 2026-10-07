@@ -96,6 +96,7 @@ struct SettingsLayoutChecks {
                 check(labels[1].stringValue == status, "updates status changed")
             }
         }
+        failures += NativeChromeRenderingChecks.run()
         guard failures.isEmpty else {
             failures.forEach { print("FAIL: \($0)") }
             exit(1)

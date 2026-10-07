@@ -85,6 +85,9 @@ const ANDROID: Record<string, string> = {
   "bolt.horizontal.fill": "electric_bolt",
   "flame.fill": "local_fire_department",
   "puzzlepiece.extension": "extension",
+  dice: "casino",
+  "arrow.uturn.backward": "undo",
+  "arrow.counterclockwise": "restart_alt",
 };
 
 export interface SymbolProps {

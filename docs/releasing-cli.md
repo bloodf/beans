@@ -60,7 +60,9 @@ After reviewing the configuration and backup/recovery procedure, run `sudo syste
 
 The updater verifies signed readiness and streamed asset hashes, extracts only `lorca`, `lorca-relay`, `models/v1.json` and `marketplace/v1.json`, and rejects links, traversal, unexpected archive entries and wrong-architecture executables. Root-owned private state serializes passes and records progress. A target already recorded as current is checked against its live process and version before it can be skipped.
 
-The relay moves first. SQLite backup uses the database owner's privileges and SQLite's online backup API; an externally managed backup must be explicitly acknowledged in configuration. The relay must answer health with the expected component version and compatible protocol before any Runner moves.
+The relay moves first. SQLite backup uses the database owner's privileges and SQLite's online backup API; an externally managed backup must be explicitly acknowledged in configuration. The relay must answer health with the expected component version and `protocol` at least the signed manifest's protocol before any Runner moves. For signed protocol 4 or newer, `min_roster_protocol` must also be an integer between 4 and the signed protocol inclusive: missing, malformed, too-low or unsupported floors fail closed. This also applies to already-installed target rechecks, even when the generic `min_protocol` is 3. Signed protocol-3 releases retain their existing health checks.
+
+Run the isolated health-compatibility regressions with `python3 -B scripts/server-updater.test.py -v`; they do not start services or install releases.
 
 A Runner service must already support `lorca update status|prepare|cancel` and set `LORCA_UPDATE_TOKEN_FILE`. Prepare closes new work admission under a lease while existing jobs finish. The updater renews the lease while waiting; expiry or cancel resumes work. Account Pause is unchanged, active jobs are not cancelled, and held relay envelopes keep their cursor position. A first installation therefore requires a controlled bootstrap upgrade, not an old Runner pretending to drain.
 

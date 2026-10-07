@@ -9,6 +9,8 @@ and the update window shows it.
 - Group member rows offer Make Owner from their context menu, with the current owner identified in the inspector.
 - Lossless PNG optimizations reduce bundled image sizes without changing their decoded pixels.
 - Bots show stable offline Blobatar portraits on Windows and Linux, matching the Mac and phone; encrypted uploaded photos still override them.
+- The Look sheet waits for photo changes to save, keeps rejected drafts open with an error, and preserves generated-look settings when uploading or removing a photo. Avatar editing is keyboard accessible, and Reduce Motion disables working-dot pulsing.
+- Avatar visibility ignores late native window-state responses from disposed subscriptions after a view is remounted. Failed snapshots log the native operation and original error, including after disposal.
 - Settings can pause the account and refresh custom-provider model lists. Each bot's inspector controls shell, built-in file writes, and installed-plugin access.
 - A proposed draft appears as a review card with full content and destination; Approve & save creates a new workspace file only after confirmation.
 - Manage MCP servers in Settings › Plugins: add a command or URL, edit its configuration, sign in, toggle tools, and reload `mcp.json`. Taskbar titles name the current chat or pane followed by the app name.

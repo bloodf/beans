@@ -231,8 +231,8 @@ final class SidebarChatCell: NSTableCellView {
 
         @MainActor
         init(chat: Chat, store: AppStore) {
-            avatars = store.bots(in: chat).prefix(4).map { AvatarView.content(for: $0, store: store) }
-            isWorking = chat.botIDs.contains { store.isWorking($0) }
+            avatars = store.bots(in: chat).prefix(4).map { AvatarView.content(for: $0, store: store, in: chat.id) }
+            isWorking = !store.workingBots(in: chat.id).isEmpty
             title = store.title(for: chat)
             preview = store.preview(for: chat)
             stamp = Format.stamp(chat.lastActivity)

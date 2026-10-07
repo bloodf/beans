@@ -8,6 +8,8 @@
 
 import { cliTransport, hostInfo, type CLIState, type FileInfo, type Transport } from "../host";
 import { L } from "../l10n";
+import { aggregateAvatarActivity, avatarActivity } from "./avatarActivity";
+import { lookProblem, lookErrors, type BotLook, type BotAvatarState } from "./botLook";
 import {
   attachmentSummary,
   authorBotID,
@@ -119,6 +121,7 @@ interface RunningJob {
   /** Empty while a group exchange is between member turns. */
   botID: string;
   routineID?: string;
+  previousMessages?: ReadonlySet<string>;
 }
 
 export class RequestError extends Error {}
@@ -202,6 +205,10 @@ export class AppStore {
   private retryNotes = new Map<string, string>();
   /** The bot whose model is reasoning in a chat, until its next message or the end of its turn. */
   private thinkingBots = new Map<string, string>();
+  private retryBots = new Map<string, string>();
+  /** Live failures only, never reconstructed from transcript history. */
+  private avatarErrors = new Map<string, { botID: string; until: number }>();
+  private avatarErrorTimers = new Map<string, number>();
 
   /** Where each attachment's bytes are on this computer, and the address a page shows them from. */
   private attachmentFiles = new Map<string, { path: string; url: string }>();
@@ -256,11 +263,12 @@ export class AppStore {
       this.isBootstrapping = true;
       this.bootstrapEvents = [];
       this.reportedWatchedChat = undefined;
-      if (this.isConnected) {
-        this.isConnected = false;
-        this.runningJobs = [];
-        this.thinkingBots.clear();
-      }
+      this.isConnected = false;
+      this.runningJobs = [];
+      this.thinkingBots.clear();
+      this.retryNotes.clear();
+      this.retryBots.clear();
+      this.clearAvatarErrors();
     }
     this.emit({ kind: "connectionChanged" });
   }
@@ -315,6 +323,10 @@ export class AppStore {
   }
 
   private apply(snapshot: WireSnapshot): void {
+    this.retryNotes.clear();
+    this.retryBots.clear();
+    this.thinkingBots.clear();
+    this.clearAvatarErrors();
     this.hasIdentity = snapshot.has_identity;
     this.isIdentityDevice = snapshot.is_identity_device;
     this.identityID = snapshot.identity_id ?? null;
@@ -347,9 +359,11 @@ export class AppStore {
       chatID: turn.chat_id,
       botID: turn.bot_id,
       routineID: turn.routine_id ?? undefined,
+      previousMessages: new Set(this.chat(turn.chat_id)?.messages.map((message) => message.id)),
     }));
     for (const id of snapshot.running_chat_ids) {
-      if (!this.runningJobs.some((job) => job.chatID === id)) this.runningJobs.push({ id: `chat:${id}`, chatID: id, botID: "" });
+      if (!this.runningJobs.some((job) => job.chatID === id)) this.runningJobs.push({ id: `chat:${id}`, chatID: id, botID: "",
+        previousMessages: new Set(this.chat(id)?.messages.map((message) => message.id)) });
     }
     this.sortChats();
     for (const chat of this.chats) for (const message of chat.messages) this.noteCommand(message, chat.id);
@@ -396,12 +410,25 @@ export class AppStore {
       case "message.added":
       case "message.updated": {
         const payload = data as { chat_id: string; message: WireMessage };
-        if (this.retryNotes.has(payload.chat_id)) {
+        const botID = payload.message.author.kind === "bot" ? payload.message.author.bot_id : undefined;
+        if (botID && this.retryBots.get(payload.chat_id) === botID) {
           this.retryNotes.delete(payload.chat_id);
+          this.retryBots.delete(payload.chat_id);
           this.emit({ kind: "respondingChanged", chatID: payload.chat_id });
         }
         // The thinking bot's next message (a tool call, a reply) is where its thinking went.
-        const botID = payload.message.author.bot_id;
+        const current = payload.message.author.kind === "bot" && botID
+          ? this.runningJobs.find((job) => job.chatID === payload.chat_id && job.botID === botID) : undefined;
+        if (current && !current.previousMessages?.has(payload.message.id) && payload.message.state.kind === "failed") {
+          const key = `${payload.chat_id}:${botID}`;
+          clearTimeout(this.avatarErrorTimers.get(key));
+          this.avatarErrors.set(key, { botID: botID!, until: Date.now() + 5000 });
+          this.avatarErrorTimers.set(key, window.setTimeout(() => {
+            this.avatarErrors.delete(key);
+            this.avatarErrorTimers.delete(key);
+            this.emit({ kind: "respondingChanged", chatID: payload.chat_id });
+          }, 5000));
+        }
         if (name === "message.added" && botID && this.thinkingBots.get(payload.chat_id) === botID) {
           this.thinkingBots.delete(payload.chat_id);
         }
@@ -420,6 +447,10 @@ export class AppStore {
 
       case "chat.removed": {
         const payload = data as { chat_id: string };
+        this.retryNotes.delete(payload.chat_id);
+        this.retryBots.delete(payload.chat_id);
+        this.thinkingBots.delete(payload.chat_id);
+        this.clearAvatarErrors(payload.chat_id);
         this.chats = this.chats.filter((chat) => chat.id !== payload.chat_id);
         this.runningJobs = this.runningJobs.filter((job) => job.chatID !== payload.chat_id);
         this.emit({ kind: "chatsChanged" });
@@ -428,9 +459,15 @@ export class AppStore {
 
       case "job.started": {
         const job = data as WireJobEvent;
+        this.clearAvatarErrors(job.chat_id, job.bot_id);
+        if (this.retryBots.get(job.chat_id) === job.bot_id) {
+          this.retryBots.delete(job.chat_id);
+          this.retryNotes.delete(job.chat_id);
+        }
         // A snapshot may already list it.
         this.runningJobs = this.runningJobs.filter((running) => running.id !== `pending:${job.chat_id}` && running.id !== job.job_id);
-        this.runningJobs.push({ id: job.job_id, chatID: job.chat_id, botID: job.bot_id, routineID: job.routine_id ?? undefined });
+        this.runningJobs.push({ id: job.job_id, chatID: job.chat_id, botID: job.bot_id, routineID: job.routine_id ?? undefined,
+          previousMessages: new Set(this.chat(job.chat_id)?.messages.map((message) => message.id)) });
         if (!this.jobStarts.has(job.job_id)) this.jobStarts.set(job.job_id, Date.now());
         this.emit({ kind: "respondingChanged", chatID: job.chat_id });
         this.emit({ kind: "chatsChanged" });
@@ -440,7 +477,10 @@ export class AppStore {
       case "job.finished": {
         const job = data as WireJobEvent;
         this.runningJobs = this.runningJobs.filter((running) => running.id !== job.job_id);
-        this.retryNotes.delete(job.chat_id);
+        if (!job.bot_id || this.retryBots.get(job.chat_id) === job.bot_id) {
+          this.retryNotes.delete(job.chat_id);
+          this.retryBots.delete(job.chat_id);
+        }
         if (!job.bot_id || this.thinkingBots.get(job.chat_id) === job.bot_id) this.thinkingBots.delete(job.chat_id);
         this.emit({ kind: "respondingChanged", chatID: job.chat_id });
         this.emit({ kind: "chatsChanged" });
@@ -456,6 +496,7 @@ export class AppStore {
         const retry = data as WireJobRetry;
         const seconds = Math.max(1, Math.round(retry.delay_ms / 1000));
         this.retryNotes.set(retry.chat_id, L("Retrying (%d of %d) in %d s", retry.attempt, retry.max_attempts, seconds));
+        this.retryBots.set(retry.chat_id, retry.bot_id);
         this.emit({ kind: "respondingChanged", chatID: retry.chat_id });
         break;
       }
@@ -660,6 +701,13 @@ export class AppStore {
   setConnected(connected: boolean): void {
     if (this.isConnected === connected) return;
     this.isConnected = connected;
+    if (!connected) {
+      this.runningJobs = [];
+      this.thinkingBots.clear();
+      this.retryNotes.clear();
+      this.retryBots.clear();
+      this.clearAvatarErrors();
+    }
     this.emit({ kind: "connectionChanged" });
   }
 
@@ -832,33 +880,33 @@ export class AppStore {
     this.perform("bots.update", params);
   }
 
-  /** The bot's symbol and accent, the look under and behind its image. */
-  setBotLook(id: string, symbolName: string, accent: Accent): void {
-    if (!this.bot(id)) return;
-    this.updateBot(id, (bot) => ({ ...bot, symbolName, accent }));
+  /** One confirmed update for a whole Look draft. Rejection leaves the account and
+   * draft untouched; undefined fields preserve independently saved appearance/photos. */
+  async saveBotLook(id: string, look: BotLook | null | undefined, image: FileInfo | null | undefined): Promise<void> {
+    if (!this.bot(id)) throw new RequestError(L("This bot no longer exists."));
+    const problem = lookProblem(look);
+    if (problem) throw new RequestError(problem === lookErrors.unsupported
+      ? L("Unsupported avatar appearance. Update the app to edit it.")
+      : L("Invalid avatar appearance."));
+    const params: Record<string, unknown> = { id };
+    if (look !== undefined) params.look = look;
+    let avatar: Attachment | undefined;
+    if (image !== undefined) {
+      if (image) {
+        avatar = { id: attachmentID(), name: image.name, mime: image.mime.startsWith("image/") ? image.mime : "image/png", size: image.size };
+        params.avatar = { id: avatar.id, path: image.path, name: avatar.name, mime: avatar.mime };
+      } else params.avatar = null;
+    }
+    if (!this.isMock) await this.request("bots.update", params);
+    if (avatar && image) this.attachmentFiles.set(avatar.id, { path: image.path, url: image.url });
+    this.updateBot(id, (bot) => ({
+      ...bot,
+      ...(look !== undefined ? { look: look ?? undefined } : {}),
+      ...(image !== undefined ? { avatar } : {}),
+    }));
     this.emit({ kind: "rosterChanged" });
     this.emit({ kind: "chatsChanged" });
-    this.perform("bots.update", { id, symbol_name: symbolName, accent });
-  }
-
-  /** A custom profile image from a file on this computer (null removes the current one). The CLI
-   * copies it into its store, uploads it as a `file` blob, and names it in the roster, which comes
-   * back as the bot's `avatar` for every Device. */
-  setBotAvatar(id: string, file: FileInfo | null): void {
-    if (!this.bot(id)) return;
-    if (file) {
-      const attachment: Attachment = { id: attachmentID(), name: file.name, mime: file.mime.startsWith("image/") ? file.mime : "image/png", size: file.size };
-      this.attachmentFiles.set(attachment.id, { path: file.path, url: file.url });
-      this.updateBot(id, (bot) => ({ ...bot, avatar: attachment }));
-      this.emit({ kind: "rosterChanged" });
-      this.emit({ kind: "chatsChanged" });
-      this.perform("bots.update", { id, avatar: { id: attachment.id, path: file.path, name: attachment.name, mime: attachment.mime } });
-    } else {
-      this.updateBot(id, (bot) => ({ ...bot, avatar: undefined }));
-      this.emit({ kind: "rosterChanged" });
-      this.emit({ kind: "chatsChanged" });
-      this.perform("bots.update", { id, avatar: null });
-    }
+    for (const chat of this.chats) if (chat.botIDs.includes(id)) this.emit({ kind: "chatChanged", chatID: chat.id });
   }
 
   /** Changes this bot's allowed local tools and installed plugins on its Runner. */
@@ -1284,6 +1332,17 @@ export class AppStore {
       this.runningJobs = this.runningJobs.filter((job) => !cancelled.includes(job));
       for (const job of cancelled) this.jobStarts.delete(job.id);
       for (const chatID of removed) this.retryNotes.delete(chatID);
+      this.clearAvatarErrors(undefined, botID);
+      for (const chatID of removed) {
+        this.retryBots.delete(chatID);
+        this.clearAvatarErrors(chatID);
+      }
+      for (const [chatID, retrying] of this.retryBots) {
+        if (retrying === botID) {
+          this.retryBots.delete(chatID);
+          this.retryNotes.delete(chatID);
+        }
+      }
       for (const [chatID, thinking] of [...this.thinkingBots]) {
         if (thinking === botID || removed.has(chatID)) this.thinkingBots.delete(chatID);
       }
@@ -1300,6 +1359,8 @@ export class AppStore {
     this.runningJobs = this.runningJobs.filter((job) => job.chatID !== id);
     for (const job of cancelled) this.jobStarts.delete(job.id);
     this.retryNotes.delete(id);
+    this.retryBots.delete(id);
+    this.clearAvatarErrors(id);
     this.thinkingBots.delete(id);
     this.emit({ kind: "chatsChanged" });
     this.perform("chats.delete", { chat_id: id });
@@ -1397,6 +1458,13 @@ export class AppStore {
     const chat = this.chat(chatID);
     if (!chat || !canRemoveBot(chat)) return;
     this.replaceChat({ ...chat, botIDs: chat.botIDs.filter((member) => member !== botID) });
+    this.runningJobs = this.runningJobs.filter((job) => job.chatID !== chatID || job.botID !== botID);
+    this.clearAvatarErrors(chatID, botID);
+    if (this.retryBots.get(chatID) === botID) {
+      this.retryBots.delete(chatID);
+      this.retryNotes.delete(chatID);
+    }
+    if (this.thinkingBots.get(chatID) === botID) this.thinkingBots.delete(chatID);
     this.emit({ kind: "chatChanged", chatID });
     this.emit({ kind: "chatsChanged" });
     this.perform("chats.remove_bot", { chat_id: chatID, bot_id: botID });
@@ -1474,7 +1542,9 @@ export class AppStore {
     // away so the working row appears with the send.
     if (chat.botIDs.length > 0) {
       const pendingID = `pending:${chatID}`;
-      this.runningJobs.push({ id: pendingID, chatID, botID: isDM(chat) ? chat.botIDs[0]! : "" });
+      this.clearAvatarErrors(chatID);
+      this.runningJobs.push({ id: pendingID, chatID, botID: isDM(chat) ? chat.botIDs[0]! : "",
+        previousMessages: new Set(this.chat(chatID)?.messages.map((message) => message.id)) });
       this.emit({ kind: "respondingChanged", chatID });
       this.emit({ kind: "chatsChanged" });
       setTimeout(() => {
@@ -1595,11 +1665,38 @@ export class AppStore {
     return this.runningJobs.some((job) => job.botID === botID);
   }
 
+  botAvatarState(botID: string, chatID?: string): BotAvatarState {
+    const chats = chatID ? [chatID] : this.chats.filter((chat) => chat.botIDs.includes(botID)).map((chat) => chat.id);
+    return aggregateAvatarActivity(chats.map((id) => {
+      const jobs = this.runningJobs.filter((job) => job.chatID === id && job.botID === botID);
+      return avatarActivity(botID, {
+        active: jobs.length > 0,
+        messages: (this.chat(id)?.messages ?? []).filter((message) => jobs.some((job) => !job.previousMessages?.has(message.id))),
+        retrying: this.retryBots.get(id) === botID,
+        thinking: this.thinkingBots.get(id) === botID,
+        errorUntil: this.avatarErrors.get(`${id}:${botID}`)?.until,
+      });
+    }));
+  }
+
+  private clearAvatarErrors(chatID?: string, botID?: string): void {
+    for (const [key, error] of this.avatarErrors) {
+      if (chatID && key !== `${chatID}:${error.botID}`) continue;
+      if (botID && error.botID !== botID) continue;
+      clearTimeout(this.avatarErrorTimers.get(key));
+      this.avatarErrorTimers.delete(key);
+      this.avatarErrors.delete(key);
+    }
+  }
+
   /** The mock reply engine's turns, so the demo shows the same working state as the CLI. */
   setMockWorking(botID: string, chatID: string, working: boolean): void {
     const id = `mock:${chatID}:${botID}`;
     this.runningJobs = this.runningJobs.filter((job) => job.id !== id);
-    if (working) this.runningJobs.push({ id, chatID, botID });
+    if (working) {
+      this.clearAvatarErrors(chatID, botID);
+      this.runningJobs.push({ id, chatID, botID, previousMessages: new Set(this.chat(chatID)?.messages.map((message) => message.id)) });
+    }
     this.emit({ kind: "respondingChanged", chatID });
     this.emit({ kind: "chatsChanged" });
   }

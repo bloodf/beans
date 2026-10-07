@@ -8,6 +8,8 @@ struct Relay {
     state: AppState,
     url: String,
     token: String,
+    identity: String,
+    machine: String,
     client: RelayClient,
     http: reqwest::Client,
     home: std::path::PathBuf,
@@ -24,6 +26,15 @@ impl Relay {
     }
 
     async fn start_catalogs(quota_bytes: u64, pusher: crate::push::Pusher, files: Option<(&[u8], &[u8])>) -> Self {
+        Self::start_protocol(quota_bytes, pusher, files, PROTOCOL).await
+    }
+
+    async fn start_protocol(quota_bytes: u64, pusher: crate::push::Pusher, files: Option<(&[u8], &[u8])>, min_protocol: u32) -> Self {
+        Self::start_database(quota_bytes, pusher, files, min_protocol, None).await
+    }
+
+    async fn start_database(quota_bytes: u64, pusher: crate::push::Pusher, files: Option<(&[u8], &[u8])>,
+        min_protocol: u32, database: Option<&str>) -> Self {
         let home = std::env::temp_dir().join(format!("lorca-binary-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         let catalog_dir = home.join("catalogs");
@@ -34,8 +45,13 @@ impl Relay {
             std::fs::write(catalog_dir.join("marketplace/v1.json"), marketplace).unwrap();
         }
         let local = Arc::new(db::Local::default());
-        let db = db::open(home.join("relay.db").to_str().unwrap(), local.clone()).await.unwrap();
-        db.register_identity("identity", "content", "machine", "box", "attestation").await.unwrap();
+        let path = home.join("relay.db");
+        let db = db::open(database.unwrap_or(path.to_str().unwrap()), local.clone()).await.unwrap();
+        let (identity, machine) = if database.is_some() {
+            let suffix = uuid::Uuid::new_v4();
+            (format!("identity-{suffix}"), format!("machine-{suffix}"))
+        } else { ("identity".into(), "machine".into()) };
+        db.register_identity(&identity, "content", &machine, "box", "attestation").await.unwrap();
         let state = AppState {
             db,
             local,
@@ -45,7 +61,7 @@ impl Relay {
             identity_limiter: Arc::new(crate::limit::RateLimiter::new(0.0, 1)),
             trust_proxy: false,
             uploads: Some(Arc::new(tokio::sync::Semaphore::new(1))),
-            min_protocol: PROTOCOL,
+            min_protocol,
             catalogs: Catalogs::load(Some(&catalog_dir)),
             metrics_token: None,
             stats: Arc::new(crate::metrics::StatsCache::default()),
@@ -59,7 +75,7 @@ impl Relay {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let app = router(state.clone());
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let token = issue_token(&state.secret, "identity", "machine").0;
+        let token = issue_token(&state.secret, &identity, &machine).0;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("lorca-protocol", PROTOCOL.into());
         let http = reqwest::Client::builder().default_headers(headers).build().unwrap();
@@ -67,6 +83,8 @@ impl Relay {
             state,
             url,
             token,
+            identity,
+            machine,
             client: RelayClient::new().unwrap(),
             http,
             home,
@@ -169,6 +187,108 @@ async fn roster_put_requires_expected_slot_seq_and_reports_conflict() {
     let next = put("two", Some(seq)).send().await.unwrap();
     assert_eq!(next.status(), StatusCode::OK);
     assert_eq!(next.json::<Value>().await.unwrap()["seq"], seq + 1);
+}
+
+#[tokio::test]
+async fn appearance_roster_floor_cannot_be_lowered_and_old_writers_have_no_effects() {
+    let relay = Relay::start_protocol(0, crate::push::Pusher::new(None, None), None, 3).await;
+    let health = reqwest::get(format!("{}/v1/health", relay.url)).await.unwrap().json::<Value>().await.unwrap();
+    assert_eq!(health["protocol"], 4);
+    assert_eq!(health["min_protocol"], 3);
+    assert_eq!(health["min_roster_protocol"], 4);
+    assert_eq!(relay.client.health(&relay.url).await.unwrap(), 4);
+    let body = json!({"id":"capable","kind":"roster","slot":"roster","expected_slot_seq":0,"ciphertext":"AQ"});
+    let response = relay.http.put(format!("{}/v1/blobs", relay.url)).header("lorca-protocol", "4")
+        .bearer_auth(&relay.token).json(&body).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let seq = response.json::<Value>().await.unwrap()["seq"].as_i64().unwrap();
+    let usage = relay.state.db.stats().await.unwrap().usage_bytes;
+    for header in ["3", "2", "0", "garbage", "4294967296"] {
+        let mut old = body.clone();
+        old["id"] = json!("old");
+        old["expected_slot_seq"] = json!(seq);
+        let response = relay.http.put(format!("{}/v1/blobs", relay.url)).header("lorca-protocol", header)
+            .bearer_auth(&relay.token).json(&old).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED, "{header}");
+        assert!(relay.state.db.blob("identity", "machine", "old").await.unwrap().is_none());
+        assert_eq!(relay.state.db.blob("identity", "machine", "capable").await.unwrap().unwrap().seq, seq);
+        assert_eq!(relay.state.db.stats().await.unwrap().usage_bytes, usage);
+    }
+    let no_header = reqwest::Client::new().put(format!("{}/v1/blobs", relay.url)).bearer_auth(&relay.token)
+        .json(&body).send().await.unwrap();
+    assert_eq!(no_header.status(), StatusCode::UPGRADE_REQUIRED);
+    // A lower generic minimum still permits protocol-3 account reads, not roster replacement.
+    assert_eq!(relay.http.get(format!("{}/v1/machines", relay.url)).header("lorca-protocol", "3")
+        .bearer_auth(&relay.token).send().await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn protected_blob_delete_rejects_protocol3_and4_without_row_sequence_or_usage_changes() {
+    let mut databases = vec![None];
+    if let Ok(url) = std::env::var("LORCA_RELAY_TEST_POSTGRES") { databases.push(Some(url)); }
+    for database in databases {
+        let relay = Relay::start_database(0, crate::push::Pusher::new(None, None), None, 3, database.as_deref()).await;
+        for (id, kind, ciphertext) in [("roster", "roster", "bG9vaw"), ("policy", "policy", "cGF1c2U")] {
+            let mut body = json!({"id":id,"kind":kind,"ciphertext":ciphertext});
+            if kind == "roster" { body["slot"] = json!("roster"); body["expected_slot_seq"] = json!(0); }
+            let response = relay.http.put(format!("{}/v1/blobs", relay.url)).bearer_auth(&relay.token)
+                .json(&body).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let before = relay.http.get(format!("{}/v1/blobs?since=0", relay.url)).bearer_auth(&relay.token)
+            .send().await.unwrap().json::<Value>().await.unwrap();
+        for protocol in [3, 4] {
+            for id in ["roster", "policy"] {
+                let response = relay.http.delete(format!("{}/v1/blobs/{id}", relay.url)).header("lorca-protocol", protocol)
+                    .bearer_auth(&relay.token).send().await.unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "protocol {protocol}: {id}");
+                let after = relay.http.get(format!("{}/v1/blobs?since=0", relay.url)).bearer_auth(&relay.token)
+                    .send().await.unwrap().json::<Value>().await.unwrap();
+                assert_eq!(after, before, "protocol {protocol}: {id} changed rows or head sequence");
+                assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 1, 10).await.is_ok());
+                assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 2, 10).await.is_err(),
+                    "protocol {protocol}: {id} changed stored usage");
+            }
+        }
+        for protocol in [3, 4] {
+            let id = format!("consumed-{protocol}");
+            let response = relay.http.put(format!("{}/v1/blobs", relay.url)).header("lorca-protocol", protocol)
+                .bearer_auth(&relay.token).json(&json!({"id":id,"kind":"chat","ciphertext":"b2s"})).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let response = relay.http.delete(format!("{}/v1/blobs/{id}", relay.url)).header("lorca-protocol", protocol)
+                .bearer_auth(&relay.token).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert!(relay.state.db.blob(&relay.identity, &relay.machine, &id).await.unwrap().is_none());
+            assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 1, 10).await.is_ok());
+            assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 2, 10).await.is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn appearance_health_fails_closed_without_an_enforced_supported_roster_floor() {
+    for health in [
+        json!({"protocol":3,"min_protocol":3,"min_roster_protocol":3}),
+        json!({"protocol":4}),
+        json!({"protocol":4,"min_protocol":3,"min_roster_protocol":3}),
+        json!({"protocol":4,"min_protocol":5,"min_roster_protocol":5}),
+        json!({"protocol":4,"min_protocol":3,"min_roster_protocol":5}),
+        json!({"protocol":4294967300_u64,"min_protocol":3,"min_roster_protocol":4}),
+        json!({"protocol":4,"min_protocol":3,"min_roster_protocol":"4"}),
+        json!({"protocol":4,"min_protocol":null,"min_roster_protocol":4}),
+        json!({"protocol":4,"min_protocol":3,"min_roster_protocol":4}),
+    ] {
+        let expected = health == json!({"protocol":4,"min_protocol":3,"min_roster_protocol":4});
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let response = health.clone();
+        let app = Router::new().route("/v1/health", get(move || { let response = response.clone(); async move { Json(response) } }));
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let result = RelayClient::new().unwrap().health(&url).await;
+        task.abort();
+        assert_eq!(result.is_ok(), expected, "{health}: {result:?}");
+        if !expected { assert_eq!(result.unwrap_err().status, Some(426)); }
+    }
 }
 
 #[tokio::test]

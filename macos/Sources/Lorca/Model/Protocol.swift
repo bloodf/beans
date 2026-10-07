@@ -347,6 +347,7 @@ enum Wire {
         var model: String?
         var thinking: String?
         var avatar: Attachment?
+        var look: BotLook.Lenient?
         var capabilities: BotCapabilities?
         var createdAt: Double
     }
@@ -660,6 +661,7 @@ extension Wire.Bot {
             model: model,
             thinking: thinking,
             avatar: avatar.map { Attachment(id: $0.id, name: $0.name, mime: $0.mime, size: $0.size, width: $0.width, height: $0.height) },
+            look: look?.value,
             capabilities: capabilities?.toModel() ?? BotCapabilities(),
             createdAt: Date(timeIntervalSince1970: createdAt)
         )

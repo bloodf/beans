@@ -20,6 +20,15 @@ fn opt_string(params: &Value, key: &str) -> Option<String> {
     params[key].as_str().map(str::to_string).filter(|s| !s.is_empty())
 }
 
+/// Missing keeps the generated settings; null resets them independently of a photo.
+fn look(params: &Value) -> Result<Option<Option<crate::appearance::BotLook>>, String> {
+    match params.get("look") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(value) => crate::appearance::BotLook::parse(value).map(|look| Some(Some(look))),
+    }
+}
+
 fn capabilities(params: &Value) -> Result<Option<Capabilities>, String> {
     params.get("capabilities").map(|value| {
         let object = value.as_object().ok_or("capabilities must be an object")?;
@@ -230,6 +239,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "update.status" | "update.prepare" | "update.cancel" => crate::update_control::dispatch(app, method, &params),
 
         "bots.create" => {
+            let look = look(&params)?.flatten();
             // A bot from the marketplace starts from its template's profile, with the routines
             // and the first turn `marketplace::welcome` gives it.
             let template = match opt_string(&params, "template_id") {
@@ -250,6 +260,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 symbol_name: opt_string(&params, "symbol_name").or_else(|| from_template(|t| &t.symbol_name)).unwrap_or_else(|| "sparkles".into()),
                 accent: opt_string(&params, "accent").or_else(|| from_template(|t| &t.accent)).unwrap_or_else(|| "indigo".into()),
                 avatar: None,
+                look,
                 runner_id,
                 provider: opt_string(&params, "provider").unwrap_or_else(|| "deepseek".into()),
                 model: opt_string(&params, "model"),
@@ -280,12 +291,14 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             // The image is copied and queued before the roster names it, so every Device can
             // fetch the blob by the time it reads the profile.
             let capabilities = capabilities(&params)?;
+            let look = look(&params)?;
             let avatar = store_avatar(app, avatar_file(&params)?)?;
             let bot = app.update_bot(&id, |bot| {
                 if let Some(v) = opt_string(&params, "name") { bot.name = v; }
                 if let Some(v) = opt_string(&params, "symbol_name") { bot.symbol_name = v; }
                 if let Some(v) = opt_string(&params, "accent") { bot.accent = v; }
                 if let Some(v) = avatar { bot.avatar = v; }
+                if let Some(v) = look { bot.look = v; }
                 if let Some(v) = params["description"].as_str() {
                     bot.description = v.trim().to_string();
                 } else if let Some(v) = params["instructions"].as_str() {

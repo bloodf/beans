@@ -224,7 +224,7 @@ export function MessageRow({
   return (
     <SwipeToReply onReply={onReply}>
     <View style={[styles.messageRow, { paddingTop: groupStart ? 14 : 3 }, isYou ? styles.messageRowYou : styles.messageRowBot]}>
-      {showsAvatar && <View style={{ width: AVATAR + GUTTER, alignSelf: "flex-end" }}>{groupEnd && <BotAvatar bot={bot} size={AVATAR} />}</View>}
+      {showsAvatar && <View style={{ width: AVATAR + GUTTER, alignSelf: "flex-end" }}>{groupEnd && <BotAvatar bot={bot} chatId={message.chat_id} size={AVATAR} />}</View>}
       <View style={[styles.bubbleColumn, { maxWidth: columnWidth }, isYou && styles.bubbleColumnYou]}>
         {showsName && (
           <Text style={[styles.author, { color: p.secondaryLabel }]} numberOfLines={1}>
@@ -377,7 +377,7 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
     <View style={[styles.messageRow, { paddingTop: row.groupStart ? 14 : 6 }]}>
       {showsAvatar && (
         <View style={{ width: AVATAR + GUTTER, alignSelf: "flex-end" }}>
-          <BotAvatar bot={row.bot} size={AVATAR} />
+          <BotAvatar bot={row.bot} chatId={row.message.chat_id} size={AVATAR} />
         </View>
       )}
       <View style={[styles.permission, { backgroundColor: p.cell, borderColor: p.separator }]}>
@@ -533,7 +533,7 @@ export function CommandRow({
     <View style={[styles.messageRow, { paddingTop: row.groupStart ? 14 : 6 }]}>
       {showsAvatar && (
         <View style={{ width: AVATAR + GUTTER, alignSelf: "flex-end" }}>
-          <BotAvatar bot={row.bot} size={AVATAR} />
+          <BotAvatar bot={row.bot} chatId={row.message.chat_id} size={AVATAR} />
         </View>
       )}
       <View style={[styles.permission, { backgroundColor: p.cell, borderColor: p.separator }]}>
@@ -717,7 +717,7 @@ export function WorkingRow({ chatId, bots, isGroup }: { chatId: string; bots: Bo
       : (activity ?? (isGroup && names.length === 1 ? t("{name} is working…", { name: names[0] }) : t("Working…")));
   return (
     <View style={[styles.messageRow, styles.messageRowBot, { paddingTop: 14, alignItems: "center" }]}>
-      <View style={{ width: AVATAR + GUTTER }}>{bots[0] && <BotAvatar bot={bots[0]} size={AVATAR} />}</View>
+      <View style={{ width: AVATAR + GUTTER }}>{bots[0] && <BotAvatar bot={bots[0]} chatId={chatId} size={AVATAR} />}</View>
       <ShimmerView style={styles.working}>
         <Text style={[styles.caption, { color: p.label }]} numberOfLines={1}>
           {label}

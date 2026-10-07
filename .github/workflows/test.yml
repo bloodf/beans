@@ -50,6 +50,7 @@ jobs:
       LORCA_RELAY_TEST_POSTGRES: postgres://postgres:lorca@127.0.0.1:5432/lorca?sslmode=disable
     steps:
       - uses: actions/checkout@v7
+      - run: python3 -I -B scripts/server-updater.test.py -v
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Cargo unifies features across the packages of one run, and the phone core takes lorca

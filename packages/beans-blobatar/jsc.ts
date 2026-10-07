@@ -23,5 +23,6 @@ if (typeof globalThis.TextEncoder === "undefined") {
   } as typeof TextEncoder;
 }
 
-import { blobatar } from "./index";
-(globalThis as typeof globalThis & { blobatar: typeof blobatar }).blobatar = blobatar;
+import * as api from "./index";
+// Every export is a pure function or a frozen list; install them as globals for Swift to call.
+Object.assign(globalThis, api);

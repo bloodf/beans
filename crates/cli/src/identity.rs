@@ -76,6 +76,7 @@ fn create_lead_bot(app: &Arc<App>) {
         symbol_name: "sparkles".into(),
         accent: "indigo".into(),
         avatar: None,
+        look: None,
         runner_id,
         provider: "deepseek".into(),
         model: None,

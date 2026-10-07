@@ -17,11 +17,25 @@ export interface Running {
   routineId?: string;
 }
 
+/// How long a reply the phone watched fail shows as an error, in ms.
+export const ERROR_DISPLAY_MS = 8000;
+
+/// A bot's reply the phone watched fail. The store removes it when the time is up, so the
+/// avatars read as an error exactly while this entry exists.
+export interface Failure {
+  chatId: string;
+  botId: string;
+  /// When the phone saw it fail, in ms; the expiry timer only removes the entry it set.
+  at: number;
+}
+
 /// A model call that failed in a way worth another try, asked again after `delay_ms`.
 export interface Retry {
   attempt: number;
   max_attempts: number;
   delay_ms: number;
+  /// The bot whose call failed; a group room has one retry per chat.
+  bot_id?: string;
 }
 
 export interface StoreState {
@@ -59,6 +73,9 @@ export interface StoreState {
   thinking: Record<string, string>;
   /// A model call waiting to be asked again, by chat id, until the chat hears more.
   retries: Record<string, Retry>;
+  /// Replies the phone watched fail, by message id. A failure it did not watch (history, a
+  /// snapshot) is never here.
+  failures: Record<string, Failure>;
   /// "Chef stopped without replying", by chat id, after a turn ends with nothing said.
   statuses: Record<string, string>;
   /// Commands that started running while the phone watched, by row id, until they have run for
@@ -96,6 +113,7 @@ function empty(): Omit<StoreState, "ready" | "dictation_lang" | "appActive" | "a
     running: {},
     thinking: {},
     retries: {},
+    failures: {},
     statuses: {},
     pendingTasks: {},
     openChatId: null,
@@ -240,6 +258,7 @@ export function upsertMessage(message: Message, isNew = true): { added: boolean 
   let added = false;
   let previous: Message | undefined;
   let started = false;
+  let watchedFail: Failure | null = null;
   useStore.setState((s) => {
     let chats = s.chats;
     if (!chats.some((c) => c.id === message.chat_id)) {
@@ -261,15 +280,26 @@ export function upsertMessage(message: Message, isNew = true): { added: boolean 
     });
     // A bot that spoke is no longer "stopped without replying".
     const statuses = message.author.kind === "bot" && message.body.kind === "text" && s.statuses[message.chat_id] ? omit(s.statuses, message.chat_id) : s.statuses;
-    const retries = omit(s.retries, message.chat_id);
+    // A model call's retry ends with the next word from its bot or from the user, not with
+    // another member's message in a group.
+    const retry = s.retries[message.chat_id];
+    const retries = retry && (!retry.bot_id || message.author.kind !== "bot" || message.author.bot_id === retry.bot_id) ? omit(s.retries, message.chat_id) : s.retries;
     const thought = isNew && message.author.kind === "bot" && s.thinking[message.chat_id] === message.author.bot_id;
     const thinking = thought ? omit(s.thinking, message.chat_id) : s.thinking;
+    // A bot's reply seen failing now is an avatar error until its entry expires; one that was
+    // already failed does not restart the clock.
+    watchedFail = message.author.kind === "bot" && message.state.kind === "failed" && previous?.state.kind !== "failed" ? { chatId: message.chat_id, botId: message.author.bot_id, at: Date.now() } : null;
+    const failures = watchedFail ? { ...s.failures, [message.id]: watchedFail } : message.state.kind !== "failed" ? omit(s.failures, message.id) : s.failures;
     // A command that starts running here waits to count as a running task.
     started = runsInTerminal(message) && !runsInTerminal(previous);
     const pendingTasks = started ? { ...s.pendingTasks, [message.id]: true as const } : runsInTerminal(message) ? s.pendingTasks : omit(s.pendingTasks, message.id);
-    return { chats, statuses, retries, thinking, pendingTasks };
+    return { chats, statuses, retries, thinking, pendingTasks, failures };
   });
   if (started) setTimeout(() => useStore.setState((s) => ({ pendingTasks: omit(s.pendingTasks, message.id) })), TASK_DELAY_MS);
+  if (watchedFail) {
+    const { at } = watchedFail;
+    setTimeout(() => useStore.setState((s) => (s.failures[message.id]?.at === at ? { failures: omit(s.failures, message.id) } : s)), ERROR_DISPLAY_MS);
+  }
   return { added };
 }
 
@@ -277,6 +307,7 @@ export function removeMessage(chatId: string, messageId: string) {
   useStore.setState((s) => ({
     chats: s.chats.map((chat) => (chat.id === chatId ? { ...chat, messages: chat.messages.filter((m) => m.id !== messageId) } : chat)),
     pendingTasks: omit(s.pendingTasks, messageId),
+    failures: omit(s.failures, messageId),
   }));
 }
 
@@ -286,6 +317,7 @@ export function removeChat(chatId: string) {
     statuses: omit(s.statuses, chatId),
     thinking: omit(s.thinking, chatId),
     retries: omit(s.retries, chatId),
+    failures: Object.fromEntries(Object.entries(s.failures).filter(([, f]) => f.chatId !== chatId)),
   }));
 }
 
@@ -311,7 +343,10 @@ export function setRunning(jobId: string, running: Running | null) {
     const next = { ...s.running };
     if (running) next[jobId] = running;
     else delete next[jobId];
-    return { running: next };
+    if (!running) return { running: next };
+    // A bot's new turn ends the error its last failed reply showed.
+    const failures = Object.fromEntries(Object.entries(s.failures).filter(([, f]) => f.chatId !== running.chatId || (running.botId !== "" && f.botId !== running.botId)));
+    return { running: next, failures };
   });
 }
 
@@ -328,10 +363,13 @@ export function setRetry(chatId: string, retry: Retry) {
 /// A turn ended: its retry is over, and so is its bot's thinking. An empty `botId` is a group
 /// exchange, which ends every member's.
 export function endActivity(chatId: string, botId: string) {
-  useStore.setState((s) => ({
-    retries: omit(s.retries, chatId),
-    thinking: !botId || s.thinking[chatId] === botId ? omit(s.thinking, chatId) : s.thinking,
-  }));
+  useStore.setState((s) => {
+    const retry = s.retries[chatId];
+    return {
+      retries: !botId || !retry?.bot_id || retry.bot_id === botId ? omit(s.retries, chatId) : s.retries,
+      thinking: !botId || s.thinking[chatId] === botId ? omit(s.thinking, chatId) : s.thinking,
+    };
+  });
 }
 
 export function setStatus(chatId: string, text: string | null) {

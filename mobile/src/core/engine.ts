@@ -8,6 +8,7 @@ import { AppState, Platform, type AppStateStatus } from "react-native";
 import * as core from "../../modules/lorca-core";
 import { t } from "../i18n";
 import { hostFacts } from "./host";
+import type { BotLook } from "./look";
 import { providerConnectMethod, type Attachment, type AutoReview, type Bot, type BotCapabilities, type Chat, type ChatMeta, type ChatSearchResults, type ChatUsage, type CustomAPI, type CustomModel, type Message, type ProviderKind, type ProviderStatus } from "./model";
 import { coreHome, loadPrefs, pathOf, wipePrefs } from "./prefs";
 import { clearPushes, installPushHandlers, registerForPushes } from "./push";
@@ -174,7 +175,7 @@ class Engine {
         setThinking(data.chat_id, data.bot_id);
         break;
       case "job.retry":
-        setRetry(data.chat_id, { attempt: data.attempt, max_attempts: data.max_attempts, delay_ms: data.delay_ms });
+        setRetry(data.chat_id, { attempt: data.attempt, max_attempts: data.max_attempts, delay_ms: data.delay_ms, bot_id: data.bot_id });
         break;
       case "chat.usage":
         setChatUsage(data.chat_id, data.usage as ChatUsage);
@@ -286,6 +287,19 @@ class Engine {
   async updateBot(id: string, update: Partial<Pick<Bot, "name" | "description">>): Promise<Bot> {
     const { bot } = await core.request<{ bot: Bot }>("bots.update", { id, ...update });
     useStore.setState((s) => ({ bots: s.bots.map((current) => (current.id === id ? bot : current)) }));
+    return bot;
+  }
+
+  /// Saves a bot's generated look and photo in one `bots.update`, so Save is atomic and
+  /// autosave never happens. `look`: undefined keeps, null resets, an object replaces whole.
+  /// `photo`: undefined keeps, null removes, a file replaces. A failure leaves the store as it was.
+  async saveBotAppearance(id: string, change: { look?: BotLook | null; photo?: PickedFile | null }): Promise<Bot> {
+    const params: Record<string, unknown> = { id };
+    if (change.look !== undefined) params.look = change.look;
+    if (change.photo !== undefined) params.avatar = change.photo ? { path: pathOf(change.photo.uri), name: change.photo.name, mime: change.photo.mime, width: change.photo.width, height: change.photo.height } : null;
+    const { bot } = await core.request<{ bot: Bot }>("bots.update", params);
+    useStore.setState((s) => ({ bots: s.bots.map((current) => (current.id === id ? bot : current)) }));
+    if (change.photo && bot.avatar) markFile(bot.avatar.id, change.photo.uri);
     return bot;
   }
 

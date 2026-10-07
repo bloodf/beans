@@ -178,17 +178,32 @@ pub type ApiResult<T> = Result<T, ApiError>;
 
 /// The protocol this relay speaks, in `/v1/health`. A client sends the one it speaks as
 /// `Lorca-Protocol`. 1: group paging, `DELETE /v1/identity`. 2: `POST /v1/machines`.
-/// 3: durable encrypted policy events.
-pub const PROTOCOL: u32 = 3;
+/// 3: durable encrypted policy events. 4: appearance-preserving roster writers.
+pub const PROTOCOL: u32 = 4;
+const MIN_ROSTER_PROTOCOL: u32 = 4;
+
+fn roster_min_protocol(state: &AppState) -> u32 {
+    state.min_protocol.max(MIN_ROSTER_PROTOCOL)
+}
+
+fn client_protocol(headers: &HeaderMap) -> u32 {
+    headers.get("lorca-protocol").and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok()).unwrap_or(0)
+}
+
+fn upgrade_required(min_protocol: u32) -> Response {
+    crate::metrics::METRICS.outdated_clients.add(1);
+    (StatusCode::UPGRADE_REQUIRED, Json(json!({
+        "error": "This relay needs a newer Lorca", "min_protocol": min_protocol, "protocol": PROTOCOL
+    }))).into_response()
+}
 
 /// Turns away clients older than `--min-protocol` on account protocol routes.
 /// Public catalogs, `/`, the healthcheck, and `/metrics` need no client protocol.
 async fn require_protocol(State(state): State<AppState>, request: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    let speaks = request.headers().get("lorca-protocol").and_then(|value| value.to_str().ok()).and_then(|value| value.trim().parse::<u32>().ok()).unwrap_or(0);
+    let speaks = client_protocol(request.headers());
     if speaks < state.min_protocol && request.uri().path().starts_with("/v1/") && request.uri().path() != "/v1/health" {
-        crate::metrics::METRICS.outdated_clients.add(1);
-        let body = Json(json!({ "error": "This relay needs a newer Lorca", "min_protocol": state.min_protocol, "protocol": PROTOCOL }));
-        return (StatusCode::UPGRADE_REQUIRED, body).into_response();
+        return upgrade_required(state.min_protocol);
     }
     next.run(request).await
 }
@@ -237,8 +252,10 @@ async fn root() -> &'static str {
     "Lorca Relay is running..."
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "ok": true, "service": "lorca-relay", "protocol": PROTOCOL, "version": env!("CARGO_PKG_VERSION") }))
+async fn health(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "ok": true, "service": "lorca-relay", "protocol": PROTOCOL,
+        "min_protocol": state.min_protocol, "min_roster_protocol": roster_min_protocol(&state),
+        "version": env!("CARGO_PKG_VERSION") }))
 }
 
 fn random_nonce(len: usize) -> String {
@@ -406,7 +423,10 @@ pub fn valid_id(id: &str) -> bool {
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
 }
 
-async fn put_blob(State(state): State<AppState>, auth: Auth, Json(body): Json<PutBlob>) -> ApiResult<Json<Value>> {
+async fn put_blob(State(state): State<AppState>, auth: Auth, headers: HeaderMap, Json(body): Json<PutBlob>) -> ApiResult<Response> {
+    if body.kind == "roster" && client_protocol(&headers) < roster_min_protocol(&state) {
+        return Ok(upgrade_required(roster_min_protocol(&state)));
+    }
     if !db::KINDS.contains(&body.kind.as_str()) {
         return Err(ApiError::bad_request("Unknown blob kind"));
     }
@@ -454,10 +474,10 @@ async fn put_blob(State(state): State<AppState>, auth: Auth, Json(body): Json<Pu
     };
     let inserted = state.db.insert_blob(blob, state.quota_bytes).await?;
     if inserted.existing {
-        return Ok(Json(json!({ "id": id, "seq": inserted.seq, "existing": true })));
+        return Ok(Json(json!({ "id": id, "seq": inserted.seq, "existing": true })).into_response());
     }
     state.db.publish(db::Event::Blobs { identity: auth.identity_pubkey.clone(), recipient: body.recipient_machine_pubkey.clone() }).await;
-    Ok(Json(json!({ "id": id, "seq": inserted.seq })))
+    Ok(Json(json!({ "id": id, "seq": inserted.seq })).into_response())
 }
 
 #[derive(Debug, Deserialize)]

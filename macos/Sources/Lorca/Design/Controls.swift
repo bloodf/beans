@@ -251,6 +251,39 @@ final class HoverButton: NSButton {
     private var tracking: NSTrackingArea?
     private var isHovered = false { didSet { needsDisplay = true } }
 
+    // NSButtonCell clips SF Symbol optical outsets to imageRect at 1×. An image view
+    // draws the complete symbol while the button keeps its native action, focus and hit area.
+    private final class SymbolView: NSImageView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+    private var symbolView: SymbolView?
+
+    private func syncSymbolView() {
+        guard let image else {
+            symbolView?.image = nil
+            symbolView?.isHidden = true
+            return
+        }
+        let view = symbolView ?? SymbolView(frame: bounds)
+        if symbolView == nil {
+            view.autoresizingMask = [.width, .height]
+            view.imageScaling = .scaleNone
+            view.setAccessibilityElement(false)
+            addSubview(view)
+            symbolView = view
+        }
+        view.image = image
+        view.symbolConfiguration = symbolConfiguration
+        view.contentTintColor = contentTintColor
+        view.alphaValue = isEnabled ? 1 : 0.5
+        view.isHidden = label != nil
+    }
+
+    override var image: NSImage? { didSet { syncSymbolView() } }
+    override var symbolConfiguration: NSImage.SymbolConfiguration? { didSet { syncSymbolView() } }
+    override var contentTintColor: NSColor? { didSet { syncSymbolView() } }
+    override var isEnabled: Bool { didSet { syncSymbolView() } }
+
     /// With a `title` the button is the symbol and the word, as wide as they need.
     init(
         symbol: String, pointSize: CGFloat = 15, title: String? = nil, tooltip: String, target: AnyObject?,
@@ -267,6 +300,7 @@ final class HoverButton: NSButton {
         toolTip = tooltip
         self.target = target
         self.action = action
+        syncSymbolView()
     }
 
     /// A word alone, such as View all, as wide as it needs, with a symbol after it for a link that
@@ -281,6 +315,7 @@ final class HoverButton: NSButton {
         contentTintColor = .secondaryLabelColor
         self.target = target
         self.action = action
+        syncSymbolView()
     }
 
     @available(*, unavailable)
@@ -293,6 +328,7 @@ final class HoverButton: NSButton {
         didSet {
             guard label != oldValue else { return }
             if let label { setAccessibilityTitle(label) }
+            syncSymbolView()
             invalidateIntrinsicContentSize()
             needsDisplay = true
         }
@@ -337,6 +373,12 @@ final class HoverButton: NSButton {
     // The push bezel's layout padding would stretch the square hover fill into a rectangle.
     override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsets() }
 
+    override func layout() {
+        super.layout()
+        syncSymbolView()
+        symbolView?.frame = bounds
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
@@ -378,7 +420,7 @@ final class HoverButton: NSButton {
             NSColor.labelColor.withAlphaComponent(isHighlighted ? 0.14 : 0.08).setFill()
             NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
         }
-        guard let labelText else { return super.draw(dirtyRect) }
+        guard let labelText else { return }
         // The capitals sit on the button's center line. NSButton is flipped, so the line's top is
         // the baseline less the ascender.
         let font = Self.labelFont
@@ -537,6 +579,6 @@ final class SettingsPopUpButton: NSPopUpButton {
         let titleRect = NSRect(
             x: Self.leading, y: ((bounds.height - height) / 2).rounded(),
             width: max(0, platter.minX - Self.gap - Self.leading), height: ceil(height))
-        title.draw(with: titleRect, options: [.truncatesLastVisibleLine])
+        title.draw(with: titleRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
 }

@@ -317,8 +317,17 @@ if (typeof window !== "undefined") {
 /** Whether this page's window is where the user looks: in front, shown, not minimized. */
 export function watchWindowState(listener: (state: WindowState) => void): () => void {
   if (inApp) {
-    void Host.windowState().then(listener);
-    return events.windowState.on(listener);
+    let disposed = false;
+    void Host.windowState().then((state) => {
+      if (!disposed) listener(state);
+    }, (error: unknown) => {
+      console.error("Host.WindowState failed:", error);
+    });
+    const unsubscribe = events.windowState.on(listener);
+    return () => {
+      disposed = true;
+      unsubscribe();
+    };
   }
   const report = () => listener({ focused: document.hasFocus(), visible: document.visibilityState === "visible", minimized: false, fullScreen: false });
   report();

@@ -2435,6 +2435,7 @@ impl Tool for CreateBot {
             symbol_name,
             accent,
             avatar: None,
+            look: None,
             runner_id: self.bot.runner_id.clone(),
             provider: runs.provider,
             model: runs.model,
@@ -3196,6 +3197,7 @@ mod tests {
             symbol_name: String::new(),
             accent: String::new(),
             avatar: None,
+            look: None,
 
             runner_id: "dev".into(),
             provider: "deepseek".into(),

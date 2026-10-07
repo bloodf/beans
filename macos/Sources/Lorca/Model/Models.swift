@@ -421,8 +421,11 @@ struct Bot: Identifiable, Hashable {
     /// How much the model thinks; nil means the provider's default.
     var thinking: String? = nil
     /// A custom profile image, kept as a `file` blob like a message attachment. Shown in place
-    /// of the symbol and accent once this computer has the bytes.
+    /// of the generated portrait once this computer has the bytes.
     var avatar: Attachment? = nil
+    /// The generated portrait's saved appearance; nil keeps the bot-ID seeded default. Kept
+    /// independently of `avatar`, which wins while it exists.
+    var look: BotLook? = nil
     var capabilities = BotCapabilities()
     var createdAt: Date
 }

@@ -100,6 +100,11 @@ final class AppStore {
     /// When each turn in flight was first seen, so a finished turn's reply can be told from
     /// what the bot said before it.
     private var jobStarts: [String: Date] = [:]
+    /// Per-chat, per-bot retry and turn-end state for avatar looks; `activityExpiry` redraws
+    /// once an error look runs out and is cancelled when the turn's state goes away.
+    private var activity = BotActivityLedger()
+    private var activityExpiry: [BotActivityLedger.Key: DispatchWorkItem] = [:]
+    private var failedTurns: Set<BotActivityLedger.Key> = []
     /// When this app saw each command start running in its terminal, by row.
     private var commandStarts: [Message.ID: Date] = [:]
     /// How long a command runs before it counts as a running task.
@@ -171,6 +176,7 @@ final class AppStore {
                     self.isConnected = false
                     self.runningJobs.removeAll()
                     self.thinkingBots.removeAll()
+                    self.resetActivity()
                     self.emit(.connectionChanged)
                 }
             }
@@ -287,6 +293,7 @@ final class AppStore {
         providers = (snapshot.providers ?? []).compactMap { $0.toModel() }
         catalog = (snapshot.models ?? []).compactMap { $0.toModel() }
         runningJobs = (snapshot.runningTurns ?? []).map { ($0.jobId, $0.chatId, $0.botId, $0.routineId) }
+        resetActivity()
         for id in snapshot.runningChatIds where !runningJobs.contains(where: { $0.chatID == id }) {
             runningJobs.append(("chat:\(id)", id, "", nil))
         }
@@ -326,6 +333,11 @@ final class AppStore {
                 merged.append(chat)
             }
             chats = merged
+            let activityKeys = Set(activity.turnEnds.keys).union(activity.retrying).union(activityExpiry.keys).union(failedTurns)
+            for key in activityKeys {
+                if !chats.contains(where: { $0.id == key.chatID }) { removeActivity(chatID: key.chatID) }
+                if !bots.contains(where: { $0.id == key.botID }) { removeActivity(botID: key.botID) }
+            }
             sortChats()
             emit(.rosterChanged)
             emit(.chatsChanged)
@@ -333,15 +345,24 @@ final class AppStore {
 
         case "message.added", "message.updated":
             guard let payload = decode(Wire.MessageEvent.self) else { return }
-            if retryNotes[payload.chatId] != nil {
-                retryNotes[payload.chatId] = nil
-                emit(.respondingChanged(payload.chatId))
+            if let botID = payload.message.author.botId {
+                let key = BotActivityLedger.Key(chatID: payload.chatId, botID: botID)
+                if retryNotes.removeValue(forKey: key) != nil { emit(.respondingChanged(payload.chatId)) }
+                activity.settleRetry(botID, in: payload.chatId)
+            } else if payload.message.author.kind == "you" {
+                removeActivity(chatID: payload.chatId)
             }
             // The thinking bot's next message (a tool call, a reply) is where its thinking went.
             if name == "message.added", let botID = payload.message.author.botId, thinkingBots[payload.chatId] == botID {
                 thinkingBots[payload.chatId] = nil
             }
             upsert(payload.message.toModel(), in: payload.chatId)
+            if let botID = payload.message.author.botId, payload.message.state.kind == "failed" {
+                failedTurns.insert(.init(chatID: payload.chatId, botID: botID))
+                if !runningJobs.contains(where: { $0.chatID == payload.chatId && $0.botID == botID }) {
+                    noteTurnEnded(botID, in: payload.chatId)
+                }
+            }
 
         case "message.removed":
             guard let payload = decode(Wire.MessageRemoved.self),
@@ -355,6 +376,7 @@ final class AppStore {
             guard let payload = decode(Wire.ChatRemoved.self) else { return }
             chats.removeAll { $0.id == payload.chatId }
             runningJobs.removeAll { $0.chatID == payload.chatId }
+            removeActivity(chatID: payload.chatId)
             emit(.chatsChanged)
 
         case "job.started":
@@ -363,13 +385,23 @@ final class AppStore {
             runningJobs.removeAll { $0.id == "pending:\(job.chatId)" || $0.id == job.jobId }
             runningJobs.append((job.jobId, job.chatId, job.botId, job.routineId))
             jobStarts[job.jobId] = jobStarts[job.jobId] ?? Date()
+            if !job.botId.isEmpty {
+                activity.turnStarted(job.botId, in: job.chatId)
+                failedTurns.remove(.init(chatID: job.chatId, botID: job.botId))
+                retryNotes.removeValue(forKey: .init(chatID: job.chatId, botID: job.botId))
+                activityExpiry.removeValue(forKey: .init(chatID: job.chatId, botID: job.botId))?.cancel()
+            }
             emit(.respondingChanged(job.chatId))
             emit(.chatsChanged)
 
         case "job.finished":
             guard let job = decode(Wire.JobEvent.self) else { return }
             runningJobs.removeAll { $0.id == job.jobId }
-            retryNotes[job.chatId] = nil
+            if job.botId.isEmpty {
+                retryNotes = retryNotes.filter { $0.key.chatID != job.chatId }
+            } else {
+                retryNotes.removeValue(forKey: .init(chatID: job.chatId, botID: job.botId))
+            }
             if job.botId.isEmpty || thinkingBots[job.chatId] == job.botId {
                 thinkingBots[job.chatId] = nil
             }
@@ -378,17 +410,25 @@ final class AppStore {
             if let startedAt = jobStarts.removeValue(forKey: job.jobId), !job.botId.isEmpty {
                 emit(.turnFinished(job.chatId, job.botId, startedAt))
             }
+            if job.botId.isEmpty {
+                activity.settleRetry("", in: job.chatId)
+            } else {
+                noteTurnEnded(job.botId, in: job.chatId)
+            }
 
         case "job.retry":
             guard let retry = decode(Wire.JobRetry.self) else { return }
             let seconds = max(1, Int((Double(retry.delayMs) / 1000).rounded()))
-            retryNotes[retry.chatId] = L("Retrying (%d of %d) in %d s", retry.attempt, retry.maxAttempts, seconds)
+            retryNotes[.init(chatID: retry.chatId, botID: retry.botId)] = L("Retrying (%d of %d) in %d s", retry.attempt, retry.maxAttempts, seconds)
+            activity.retry(retry.botId, in: retry.chatId)
             emit(.respondingChanged(retry.chatId))
+            emit(.chatsChanged)
 
         case "job.thinking":
             guard let job = decode(Wire.JobThinking.self) else { return }
             thinkingBots[job.chatId] = job.botId
             emit(.respondingChanged(job.chatId))
+            emit(.chatsChanged)
 
         case "chat.usage":
             guard let payload = decode(Wire.ChatUsageEvent.self),
@@ -715,35 +755,37 @@ final class AppStore {
 
     private struct PauseResult: Decodable { let paused: Bool }
 
-    /// The bot's symbol and accent, the look under and behind its image.
-    func setBotLook(_ id: Bot.ID, symbolName: String, accent: Accent) {
+    private struct BotUpdated: Decodable { let bot: Wire.Bot }
+
+    /// Saves the look and photo in one request and waits for the CLI, so the Look sheet keeps its
+    /// draft when the save fails. Nothing changes here until the CLI answers with the saved bot.
+    func saveBotLook(_ id: Bot.ID, look: BotLookChange, photo: BotPhotoChange) async throws {
+        guard bots.contains(where: { $0.id == id }), let params = BotLookChange.updateParams(id, look: look, photo: photo) else { return }
+        let saved: Bot
+        if isMock {
+            guard var bot = bot(id) else { return }
+            if case let .replace(value) = look { bot.look = value }
+            if case .reset = look { bot.look = nil }
+            switch photo {
+            case .keep: break
+            case .remove: bot.avatar = nil
+            case let .set(url):
+                let attachment = Attachment(id: "att-\(UUID().uuidString.lowercased().prefix(12))", name: url.lastPathComponent, mime: "image/png", size: 0)
+                attachmentURLs[attachment.id] = url
+                bot.avatar = attachment
+            }
+            saved = bot
+        } else {
+            saved = try await client.request("bots.update", params, as: BotUpdated.self).bot.toModel()
+            if case let .set(url) = photo, let attachment = saved.avatar {
+                attachmentURLs[attachment.id] = url
+            }
+        }
         guard let index = bots.firstIndex(where: { $0.id == id }) else { return }
-        bots[index].symbolName = symbolName
-        bots[index].accent = accent
+        bots[index] = saved
         emit(.rosterChanged)
         emit(.chatsChanged)
-        perform("bots.update", ["id": id, "symbol_name": symbolName, "accent": accent.rawValue])
-    }
-
-    /// A custom profile image from a file on this computer (nil removes the current one). The CLI
-    /// copies it into its store, uploads it as a `file` blob, and names it in the roster, which
-    /// comes back as the bot's `avatar` for every Device.
-    func setBotAvatar(_ id: Bot.ID, fileURL: URL?) {
-        guard bots.contains(where: { $0.id == id }) else { return }
-        if let fileURL {
-            let attachment = Attachment(id: "att-\(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(12))", name: fileURL.lastPathComponent, mime: "image/png", size: 0)
-            if let image = NSImage(contentsOf: fileURL) { avatarImages[attachment.id] = image }
-            attachmentURLs[attachment.id] = fileURL
-            if let index = bots.firstIndex(where: { $0.id == id }) { bots[index].avatar = attachment }
-            emit(.rosterChanged)
-            emit(.chatsChanged)
-            perform("bots.update", ["id": id, "avatar": ["id": attachment.id, "path": fileURL.path, "name": attachment.name, "mime": attachment.mime]])
-        } else {
-            if let index = bots.firstIndex(where: { $0.id == id }) { bots[index].avatar = nil }
-            emit(.rosterChanged)
-            emit(.chatsChanged)
-            perform("bots.update", ["id": id, "avatar": NSNull()])
-        }
+        for chat in chats where chat.botIDs.contains(id) { emit(.chatChanged(chat.id)) }
     }
 
     /// Provider, model, and thinking level a bot runs with. nil means the provider's default.
@@ -1138,10 +1180,10 @@ final class AppStore {
     }
 
     /// "Retrying (2 of 3) in 4 s", while a turn's model call waits to be asked again.
-    private var retryNotes: [Chat.ID: String] = [:]
+    private var retryNotes: [BotActivityLedger.Key: String] = [:]
 
     func retryNote(for chatID: Chat.ID) -> String? {
-        retryNotes[chatID]
+        retryNotes.filter { $0.key.chatID == chatID }.sorted { $0.key.botID < $1.key.botID }.first?.value
     }
 
     /// The bot whose model is reasoning in a chat, until its next message or the end of its turn.
@@ -1187,8 +1229,9 @@ final class AppStore {
             let cancelledJobIDs = Set(cancelledJobs.map(\.id))
             runningJobs.removeAll { cancelledJobIDs.contains($0.id) }
             for job in cancelledJobs { jobStarts.removeValue(forKey: job.id) }
-            for chatID in removedChatIDs { retryNotes.removeValue(forKey: chatID) }
             thinkingBots = thinkingBots.filter { $0.value != botID && !removedChatIDs.contains($0.key) }
+            removeActivity(botID: botID)
+            for chatID in removedChatIDs { removeActivity(chatID: chatID) }
 
             emit(.rosterChanged)
             for chatID in changedChatIDs { emit(.chatChanged(chatID)) }
@@ -1202,8 +1245,8 @@ final class AppStore {
         let cancelledJobs = runningJobs.filter { $0.chatID == id }
         runningJobs.removeAll { $0.chatID == id }
         for job in cancelledJobs { jobStarts.removeValue(forKey: job.id) }
-        retryNotes.removeValue(forKey: id)
         thinkingBots.removeValue(forKey: id)
+        removeActivity(chatID: id)
         emit(.chatsChanged)
         perform("chats.delete", ["chat_id": id])
     }
@@ -1507,6 +1550,62 @@ final class AppStore {
         runningJobs.contains { $0.botID == botID }
     }
 
+    /// What the bot's portrait shows in one chat, from the job and message signals.
+    func avatarState(of botID: Bot.ID, in chatID: Chat.ID, now: Date = Date()) -> BotAvatarState {
+        guard let chat = chat(chatID) else { return .idle }
+        let isRunning = runningJobs.contains { $0.chatID == chatID && $0.botID == botID }
+        return BotActivity.state(BotActivity.signals(
+            of: botID, in: chat.messages, isRunning: isRunning, isThinking: isThinking(botID, in: chatID),
+            isRetrying: activity.isRetrying(botID, in: chatID), finishedAt: activity.finishedAt(botID, in: chatID), now: now))
+    }
+
+    /// What the bot's portrait shows where no chat is in view: the strongest state across its chats.
+    func avatarState(of botID: Bot.ID, now: Date = Date()) -> BotAvatarState {
+        BotActivity.aggregate(chats.lazy.filter { $0.botIDs.contains(botID) }.map { self.avatarState(of: botID, in: $0.id, now: now) })
+    }
+
+    /// Notes a turn's end and redraws once its error look expires; a newer end replaces the timer.
+    private func noteTurnEnded(_ botID: Bot.ID, in chatID: Chat.ID) {
+        activity.settleRetry(botID, in: chatID)
+        let key = BotActivityLedger.Key(chatID: chatID, botID: botID)
+        guard failedTurns.remove(key) != nil else { return }
+        activity.turnEnded(botID, in: chatID, at: Date())
+        activityExpiry.removeValue(forKey: key)?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            activityExpiry[key] = nil
+            emit(.respondingChanged(chatID))
+            emit(.chatsChanged)
+        }
+        activityExpiry[key] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + BotActivity.errorDuration, execute: work)
+        emit(.respondingChanged(chatID))
+        emit(.chatsChanged)
+    }
+
+    private func resetActivity() {
+        activity.reset()
+        failedTurns.removeAll()
+        retryNotes.removeAll()
+        thinkingBots.removeAll()
+        for work in activityExpiry.values { work.cancel() }
+        activityExpiry.removeAll()
+    }
+
+    private func removeActivity(chatID: Chat.ID) {
+        activity.remove(chatID: chatID)
+        failedTurns = failedTurns.filter { $0.chatID != chatID }
+        retryNotes = retryNotes.filter { $0.key.chatID != chatID }
+        for key in activityExpiry.keys where key.chatID == chatID { activityExpiry.removeValue(forKey: key)?.cancel() }
+    }
+
+    private func removeActivity(botID: Bot.ID) {
+        activity.remove(botID: botID)
+        failedTurns = failedTurns.filter { $0.botID != botID }
+        retryNotes = retryNotes.filter { $0.key.botID != botID }
+        for key in activityExpiry.keys where key.botID == botID { activityExpiry.removeValue(forKey: key)?.cancel() }
+    }
+
     /// The mock reply engine's turns, so the demo shows the same working state as the CLI.
     func setMockWorking(_ botID: Bot.ID, in chatID: Chat.ID, _ working: Bool) {
         let id = "mock:\(chatID):\(botID)"
@@ -1721,6 +1820,7 @@ final class AppStore {
     func resetMockData() {
         guard isMock else { return }
         for chat in chats { replyEngine?.cancel(chatID: chat.id) }
+        resetActivity()
         devices = MockData.devices()
         bots = MockData.bots()
         chats = MockData.chats()

@@ -1,6 +1,7 @@
 // The domain model as the core reports it over the JSON API (crates/cli/src/model.rs and the
 // snapshot in app.rs). Field names are the wire names.
 
+import type { BotLook } from "./look";
 import { t } from "../i18n";
 
 export const MAX_GROUP_BOTS = 6;
@@ -117,6 +118,8 @@ export interface Bot {
   accent: Accent | string;
   /** A custom profile image, a `file` blob like a message attachment; shown in place of Blobatar. */
   avatar?: Attachment;
+  /** Saved generated appearance; missing is the bot-id seeded default. A photo, when set, shows instead. */
+  look?: BotLook;
   runner_id: string;
   provider: string;
   model?: string;

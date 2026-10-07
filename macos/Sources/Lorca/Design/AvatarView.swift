@@ -13,11 +13,13 @@ enum Glyph {
     }
 }
 
-/// Circular bot portrait from bundled Blobatar, or the bot's own image. Also renders
-/// "you" and devices.
+/// A bot's generated portrait, drawn by `AvatarRenderLayer` from shared numeric geometry in its
+/// own shape and background, or the bot's own image clipped to a circle. Also renders "you" and
+/// devices.
 final class AvatarView: NSView {
     enum Content: Hashable {
-        case bot(id: String)
+        /// A generated portrait: the bot's saved look (nil is the seeded default) in `state`.
+        case bot(id: String, look: BotLook? = nil, state: BotAvatarState = .idle)
         /// A custom profile image, drawn aspect-filled inside the circle.
         case image(NSImage)
         case you
@@ -25,7 +27,20 @@ final class AvatarView: NSView {
     }
 
     var content: Content = .system {
-        didSet { if content != oldValue { needsDisplay = true } }
+        didSet { if content != oldValue { showContent() } }
+    }
+
+    private let portrait = AvatarRenderLayer()
+
+    private func showContent() {
+        if case let .bot(id, look, state) = content {
+            portrait.isHidden = false
+            portrait.show(id: id, look: look, state: state)
+        } else {
+            portrait.clear()
+            portrait.isHidden = true
+        }
+        needsDisplay = true
     }
 
     /// Set, a click on the avatar calls this and the pointer becomes a hand over it.
@@ -62,15 +77,46 @@ final class AvatarView: NSView {
 
     private let presence = PresenceLayer()
 
-    private func syncPresence() {
-        let box = NSRect(x: 0, y: 0, width: diameter, height: diameter)
+    private var box: NSRect {
+        NSRect(x: 0, y: 0, width: diameter, height: diameter)
             .offsetBy(dx: (bounds.width - diameter) / 2, dy: (bounds.height - diameter) / 2)
-        presence.sync(isWorking: isWorking, in: box, on: layer, flipped: isFlipped)
+    }
+
+    private func syncPresence() {
+        let box = box
+        presence.sync(isWorking: isWorking, in: box, on: layer, flipped: isFlipped, view: self)
+        portrait.cutouts = isWorking
+            ? [AvatarView.presenceRect(in: box).insetBy(dx: -2, dy: -2).offsetBy(dx: -box.minX, dy: -box.minY)] : []
     }
 
     override func layout() {
         super.layout()
+        portrait.frame = box
         syncPresence()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        portrait.setScale(window?.backingScaleFactor ?? 2)
+        portrait.wake()
+        presence.refreshMotion()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        portrait.setScale(window?.backingScaleFactor ?? 2)
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        portrait.wake()
+        presence.refreshMotion()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        portrait.wake()
+        presence.refreshMotion()
     }
 
     var diameter: CGFloat {
@@ -87,6 +133,9 @@ final class AvatarView: NSView {
         super.init(frame: NSRect(x: 0, y: 0, width: diameter, height: diameter))
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
+        portrait.host = self
+        portrait.isHidden = true
+        layer?.addSublayer(portrait)
     }
 
     @available(*, unavailable)
@@ -99,8 +148,7 @@ final class AvatarView: NSView {
     override var allowsVibrancy: Bool { false }
 
     override func draw(_ dirtyRect: NSRect) {
-        let box = NSRect(x: 0, y: 0, width: diameter, height: diameter)
-            .offsetBy(dx: (bounds.width - diameter) / 2, dy: (bounds.height - diameter) / 2)
+        let box = box
         AvatarView.render(content, in: box)
         if isWorking { AvatarView.clearPresenceRing(in: box) }
     }
@@ -121,18 +169,14 @@ final class AvatarView: NSView {
     }
 
     /// Draws one avatar into the current context. Shared with `AvatarClusterView`,
-    /// which packs several of these into a single view.
+    /// which packs several of these into a single view. A generated portrait is the view's
+    /// `AvatarRenderLayer`, not a drawing.
     static func render(_ content: Content, in box: NSRect) {
         let path = NSBezierPath(ovalIn: box)
 
         switch content {
-        case let .bot(id):
-            let image = BlobatarImage.image(for: id)
-            NSGraphicsContext.saveGraphicsState()
-            path.addClip()
-            image.draw(in: box, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
-            NSGraphicsContext.restoreGraphicsState()
-
+        case .bot:
+            break
         case let .image(image):
             NSGraphicsContext.saveGraphicsState()
             path.addClip()
@@ -174,48 +218,24 @@ final class AvatarView: NSView {
         image.draw(in: NSRect(origin: origin, size: size))
     }
 
-    static func content(for author: Message.Author, store: AppStore) -> Content {
+    static func content(for author: Message.Author, store: AppStore, in chatID: Chat.ID? = nil) -> Content {
         switch author {
         case .you: .you
         case .system: .system
         case let .bot(id):
-            store.bot(id).map { content(for: $0, store: store) } ?? .system
+            store.bot(id).map { AvatarView.content(for: $0, store: store, in: chatID) } ?? .system
         }
     }
 
     /// The bot's image when it has one and this computer has the bytes (the store fetches them and
-    /// redraws otherwise), else its deterministic portrait from the bot ID.
+    /// redraws otherwise), else its generated portrait with its saved look. `chatID` picks what the
+    /// bot is doing there; without one it is the strongest state across its chats.
     @MainActor
-    static func content(for bot: Bot, store: AppStore? = nil) -> Content {
-        if let image = (store ?? AppStore.shared).avatarImage(for: bot) { return .image(image) }
-        return .bot(id: bot.id)
-    }
-}
-
-/// One JavaScriptCore instance and decoded image per bot ID; bundled SVG never leaves the app.
-@MainActor
-private enum BlobatarImage {
-    private static let context: JSContext = {
-        guard let url = Bundle.main.url(forResource: "blobatar.jsc", withExtension: "js"),
-              let script = try? String(contentsOf: url, encoding: .utf8),
-              let context = JSContext() else {
-            preconditionFailure("Bundled Blobatar generator missing")
-        }
-        context.evaluateScript(script)
-        precondition(context.exception == nil, "Bundled Blobatar generator failed: \(context.exception!)")
-        return context
-    }()
-    private static var images: [String: NSImage] = [:]
-
-    static func image(for id: String) -> NSImage {
-        if let image = images[id] { return image }
-        let svg = context.objectForKeyedSubscript("blobatar").call(withArguments: [id])
-        guard context.exception == nil, let text = svg?.toString(),
-              let image = NSImage(data: Data(text.utf8)) else {
-            preconditionFailure("Blobatar could not render bot \(id)")
-        }
-        images[id] = image
-        return image
+    static func content(for bot: Bot, store: AppStore? = nil, in chatID: Chat.ID? = nil) -> Content {
+        let store = store ?? AppStore.shared
+        if let image = store.avatarImage(for: bot) { return .image(image) }
+        let state = chatID.map { store.avatarState(of: bot.id, in: $0) } ?? store.avatarState(of: bot.id)
+        return .bot(id: bot.id, look: bot.look, state: state)
     }
 }
 
@@ -237,10 +257,36 @@ final class AvatarClusterView: NSView {
     }
 
     private let presence = PresenceLayer()
+    /// One portrait layer per slot, back to front; generated slots animate, others stay hidden.
+    private let portraits = (0..<4).map { _ in AvatarRenderLayer() }
 
     private func syncPresence() {
         guard let box = boxes().last else { return }
-        presence.sync(isWorking: isWorking, in: box, on: layer, flipped: isFlipped)
+        presence.sync(isWorking: isWorking, in: box, on: layer, flipped: isFlipped, view: self)
+        syncPortraits()
+    }
+
+    /// Places each slot's layer and cuts the rings drawn views clear: under the front avatars and
+    /// the working dot.
+    private func syncPortraits() {
+        let boxes = boxes()
+        for (index, portrait) in portraits.enumerated() {
+            guard index < contents.count, case let .bot(id, look, state) = contents[index] else {
+                portrait.clear()
+                portrait.isHidden = true
+                continue
+            }
+            let box = boxes[index]
+            portrait.frame = box
+            portrait.isHidden = false
+            portrait.show(id: id, look: look, state: state)
+            var cutouts = boxes.dropFirst(index + 1).prefix(contents.count - index - 1)
+                .map { $0.insetBy(dx: -ring, dy: -ring).offsetBy(dx: -box.minX, dy: -box.minY) }
+            if isWorking, index == contents.count - 1 {
+                cutouts.append(AvatarView.presenceRect(in: box).insetBy(dx: -2, dy: -2).offsetBy(dx: -box.minX, dy: -box.minY))
+            }
+            portrait.cutouts = cutouts
+        }
     }
 
     override func layout() {
@@ -248,11 +294,42 @@ final class AvatarClusterView: NSView {
         syncPresence()
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        for portrait in portraits {
+            portrait.setScale(window?.backingScaleFactor ?? 2)
+            portrait.wake()
+        }
+        presence.refreshMotion()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        for portrait in portraits { portrait.setScale(window?.backingScaleFactor ?? 2) }
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        for portrait in portraits { portrait.wake() }
+        presence.refreshMotion()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        for portrait in portraits { portrait.wake() }
+        presence.refreshMotion()
+    }
+
     init(slot: CGFloat) {
         self.slot = slot
         super.init(frame: NSRect(x: 0, y: 0, width: slot, height: slot))
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
+        for portrait in portraits {
+            portrait.host = self
+            portrait.isHidden = true
+            layer?.addSublayer(portrait)
+        }
     }
 
     @available(*, unavailable)
@@ -271,6 +348,7 @@ final class AvatarClusterView: NSView {
         guard next != self.contents else { return }
         self.contents = next
         needsDisplay = true
+        syncPresence()
     }
 
     /// Cells of a 2×2 grid that overlap slightly, ordered back to front so the
@@ -326,11 +404,14 @@ final class AvatarClusterView: NSView {
 
 /// The green working dot: a layer so it can breathe (scale 1 → 0.8 over 2.4 s) while the
 /// avatar underneath stays a plain drawing.
+@MainActor
 final class PresenceLayer: CALayer {
+    private weak var hostView: NSView?
     override init() {
         super.init()
         backgroundColor = NSColor.systemGreen.cgColor
         isHidden = true
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshMotion), name: AvatarClock.environmentDidChange, object: nil)
     }
 
     override init(layer: Any) {
@@ -340,7 +421,8 @@ final class PresenceLayer: CALayer {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func sync(isWorking: Bool, in box: NSRect, on host: CALayer?, flipped: Bool) {
+    func sync(isWorking: Bool, in box: NSRect, on host: CALayer?, flipped: Bool, view: NSView) {
+        hostView = view
         guard let host else { return }
         if superlayer !== host { host.addSublayer(self) }
         CATransaction.begin()
@@ -353,7 +435,12 @@ final class PresenceLayer: CALayer {
         backgroundColor = NSColor.systemGreen.cgColor
         isHidden = !isWorking
         CATransaction.commit()
-        if isWorking {
+        refreshMotion()
+    }
+
+    @objc func refreshMotion() {
+        let visible = hostView.map(AvatarClock.isVisible) ?? false
+        if !isHidden && visible && !AvatarClock.shared.reducesMotion {
             if animation(forKey: "breathe") == nil {
                 let pulse = CABasicAnimation(keyPath: "transform.scale")
                 pulse.fromValue = 1

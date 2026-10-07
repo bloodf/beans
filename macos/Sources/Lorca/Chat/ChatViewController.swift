@@ -757,7 +757,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
 
     /// The bot's avatar for a card in a group; nil in a DM.
     private func cardAvatar(for message: Message) -> AvatarView.Content? {
-        showsAvatar(for: message) ? AvatarView.content(for: message.author, store: store) : nil
+        showsAvatar(for: message) ? AvatarView.content(for: message.author, store: store, in: chatID) : nil
     }
 
     /// The plugin behind a `<plugin>__<tool>` row, by name, from the bot's Runner.
@@ -897,7 +897,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     groupStart: groupStart,
                     authorName: name,
                     nameColor: nameColor,
-                    avatarContent: AvatarView.content(for: message.author, store: store),
+                    avatarContent: AvatarView.content(for: message.author, store: store, in: chatID),
                     segments: layout.rendered(for: message).segments,
                     attachments: items,
                     quote: message.replyTo.map { (name: authorName(of: $0.author), text: $0.text) },

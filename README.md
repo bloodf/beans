@@ -26,10 +26,10 @@ Beans is a GPL-3.0 fork of [Lorca](https://github.com/egoist/lorca): a Rust agen
 - **Your machines do the work.** Each bot runs on one Runner you own. Provider credentials belong to the account and sync as an encrypted blob.
 - **End-to-end encrypted sync.** Identity is a local key pair. The relay stores public keys and ciphertext.
 - **Offline avatar library.** [`@beans/blobatar`](./packages/beans-blobatar/README.md) supplies a deterministic, MIT-licensed avatar generator, including its JavaScriptCore distribution.
-- **Fork development.** Matching client avatars, account-wide Pause, per-bot capabilities, reviewed file drafts, protocol-3 reconciliation and custom-provider catalog refresh are being integrated.
+- **Fork mechanisms.** The source includes matching client avatars, account-wide Pause, per-bot capabilities, reviewed file drafts, appearance-preserving protocol-4 reconciliation and custom-provider catalog refresh.
 - **Clients.** macOS (AppKit), Windows and Linux (MyGo), iOS and Android (Expo).
 
-> **Development status:** this source includes the avatar library, client controls and protocol-3 changes. Build and deployment acceptance are separate: a local build does not upgrade your relay or establish live-client acceptance. Upgrade the relay before protocol-3 Runners and clients.
+> **Development status:** this source includes the avatar library, client controls and protocol-4 appearance preservation. Build and deployment acceptance are separate: a local build does not upgrade your relay or establish live-client acceptance. Upgrade every relay replica before appearance-capable Runners and clients.
 
 ## Interface reference
 
@@ -133,7 +133,7 @@ cargo run -q -p lorca-relay -- --bind 127.0.0.1:8787 --db lorca-relay.db
 
 - Set `LORCA_RELAY_SECRET` to a stable random value, or every Device is logged out on restart. Copy [`.env.example`](./.env.example) to `.env` (gitignored) for APNs and FCM push settings; keep key files outside the repository.
 - Point clients at it with `LORCA_RELAY_URL` or Settings › Advanced. Resolution order is in [BEANS.md](./BEANS.md#relay-selection). Rust defaults are unchanged, so configure your own relay explicitly; no hosted Beans relay is provided here.
-- Keep relay and clients on compatible revisions. For the in-progress protocol-3 cutover, upgrade every relay replica first and require minimum protocol 3 before upgrading clients. New clients refuse older relays; upgraded relays return `426` to older clients. See [protocols](./docs/architecture/protocols.md).
+- Keep relay and clients on compatible revisions. For appearance sync, upgrade every relay replica first to protocol 4 with an enforced and advertised roster-write floor of at least 4 and protected roster/policy deletion, then upgrade appearance-capable Runners and clients. Relays default to minimum protocol 4 and return `426` to older clients; lowering the generic minimum does not lower the roster-write floor. New clients fail closed on missing or unsupported compatibility evidence. See [protocols](./docs/architecture/protocols.md) and [appearance rollout](./docs/architecture/avatars.md#protocol-compatibility-and-rollout).
 - Behind a proxy, set `LORCA_RELAY_TRUST_PROXY` only if the proxy overwrites `X-Forwarded-For`. A container image recipe is at [`crates/relay/Dockerfile`](./crates/relay/Dockerfile). Details: [relay](./docs/architecture/relay.md).
 
 ## Security boundaries

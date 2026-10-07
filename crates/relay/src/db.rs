@@ -306,8 +306,9 @@ pub trait Store: Send + Sync {
     /// transcript in order.
     async fn group_page(&self, identity_pubkey: &str, group: &str, before: i64, limit: usize, max_bytes: i64) -> ApiResult<(Vec<GroupSlot>, bool)>;
     async fn blob(&self, identity_pubkey: &str, machine_pubkey: &str, id: &str) -> ApiResult<Option<BlobRow>>;
-    /// Deletes a blob and gives its bytes back to the identity's usage. Returns its kind, or
-    /// `None` when there was none; the caller removes a `file`'s object afterwards.
+    /// Atomically deletes an individually removable blob and releases its bytes. Roster and
+    /// policy rows are protected: they and missing ids return `None`. No pre-delete lookup.
+    /// The caller removes a deleted `file`'s object afterwards.
     async fn delete_blob(&self, identity_pubkey: &str, id: &str) -> ApiResult<Option<String>>;
     /// Deletes every blob of a group and marks the group deleted for good. Returns the ids of
     /// the `file` blobs among them; the caller removes their objects afterwards.

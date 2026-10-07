@@ -1,6 +1,7 @@
 import type { Messages } from './en'
 
 export const zh: Messages = {
+  motion: { pause: '暂停动画', resume: '继续动画' },
   meta: {
     title: 'Beans',
     description:

@@ -6,6 +6,7 @@
 /* The docs (Fumadocs UI), colored from the tokens below. */
 @import 'fumadocs-ui/css/shadcn.css';
 @import 'fumadocs-ui/css/preset.css';
+@import './components/site/experience.css';
 
 @custom-variant dark (@media (prefers-color-scheme: dark));
 

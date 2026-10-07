@@ -1,4 +1,5 @@
 export const en = {
+  motion: { pause: 'Pause motion', resume: 'Resume motion' },
   meta: {
     title: 'Beans',
     description:

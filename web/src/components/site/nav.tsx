@@ -48,7 +48,7 @@ export function LanguageLink({ className }: { className?: string }) {
   const pathname = useLocation({ select: (location) => location.pathname })
   const other = languages.find((lng) => lng !== i18n.language) as Language
   return (
-    <Link to={pathIn(other, pathname)} lang={other} className={className}>
+    <Link viewTransition to={pathIn(other, pathname)} lang={other} className={className}>
       {names[other]}
     </Link>
   )
@@ -58,8 +58,8 @@ export function LanguageLink({ className }: { className?: string }) {
 export function Nav() {
   const { t, i18n } = useTranslation()
   return (
-    <header className="sticky top-0 z-40 border-b bg-background/95 px-4 backdrop-blur-xl">
-      <div className="mx-auto flex h-18 max-w-6xl items-center justify-between gap-4">
+    <header className="site-nav sticky top-0 z-40 border-b bg-background/95 px-4 backdrop-blur-xl">
+      <div className="mx-auto flex h-18 max-w-[1400px] items-center justify-between gap-4">
         <SectionLink id="top" className="flex items-center gap-2 font-semibold tracking-tight">
           <img src="/brand/beans-logo.svg" alt="Beans" width={2161} height={728} className="w-36 dark:hidden" />
           <img src="/brand/beans-logo-light.svg" alt="Beans" width={2161} height={728} className="hidden w-36 dark:block" />
@@ -70,14 +70,14 @@ export function Nav() {
               {t(link.label)}
             </SectionLink>
           ))}
-          <Link to={docsPath(i18n.language)} className="transition-colors hover:text-foreground">
+          <Link viewTransition to={docsPath(i18n.language)} className="transition-colors hover:text-foreground">
             {t('nav.docs')}
           </Link>
         </nav>
         <div className="flex items-center gap-3">
           <LanguageLink className="text-sm text-muted-foreground transition-colors hover:text-foreground" />
           <Button asChild size="sm" className="rounded-full px-4">
-            <Link to={downloadPath(i18n.language)}>{t('nav.download')}</Link>
+            <Link viewTransition to={downloadPath(i18n.language)}>{t('nav.download')}</Link>
           </Button>
         </div>
       </div>

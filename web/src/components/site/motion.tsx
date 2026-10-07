@@ -55,10 +55,15 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
           gsap.fromTo('.screen-window', { rotateX: 22, rotateZ: -4, scale: 0.84, y: 60 }, { rotateX: 0, rotateZ: 0, scale: 1, y: 0, ease: 'none', scrollTrigger: { trigger: '#turns', start: 'top 85%', end: 'center 45%', scrub: 0.7 } })
           ScrollTrigger.create({ trigger: '#relay', start: 'top bottom', end: 'bottom top', toggleClass: 'in-view' })
           gsap.fromTo('.relay-orbit', { rotate: -28, scale: 0.85 }, { rotate: 20, scale: 1.1, ease: 'none', scrollTrigger: { trigger: '#relay', start: 'top bottom', end: 'bottom top', scrub: 1 } })
+          gsap.fromTo('.relay-node', { y: 100, rotateX: 22, scale: 0.88 }, { y: 0, rotateX: 0, scale: 1, stagger: 0.12, ease: 'none', scrollTrigger: { trigger: '.relay-diagram', start: 'top 95%', end: 'center 65%', scrub: 0.8 } })
+          gsap.fromTo('.relay-diagram .wire', { scale: 0.2 }, { scale: 1, ease: 'none', scrollTrigger: { trigger: '.relay-diagram', start: 'top 90%', end: 'center 60%', scrub: 0.8 } })
           for (const section of gsap.utils.toArray<HTMLElement>('.story-heading')) {
             gsap.from(section, { y: 35, duration: 0.85, ease: 'power3.out', scrollTrigger: { trigger: section, start: 'top 90%', once: true }, clearProps: 'all' })
           }
-          gsap.from('.tool-row', { x: 35, stagger: 0.1, duration: 0.7, ease: 'power3.out', scrollTrigger: { trigger: '#tools', start: 'top 75%', once: true }, clearProps: 'all' })
+          for (const row of gsap.utils.toArray<HTMLElement>('.tool-row')) {
+            gsap.fromTo(row, { x: 60, rotateY: -8 }, { x: 0, rotateY: 0, ease: 'none', scrollTrigger: { trigger: row, start: 'top 95%', end: 'top 65%', scrub: 0.6 } })
+          }
+          gsap.fromTo('.example-workbench', { rotateX: 10, y: 55 }, { rotateX: 0, y: 0, ease: 'none', scrollTrigger: { trigger: '.story-examples', start: 'top 90%', end: 'center 65%', scrub: 0.6 } })
           gsap.from('.setup-step', { y: 28, stagger: 0.08, duration: 0.7, ease: 'power3.out', scrollTrigger: { trigger: '#start', start: 'top 80%', once: true }, clearProps: 'all' })
           for (const step of gsap.utils.toArray<HTMLElement>('.setup-step')) {
             ScrollTrigger.create({ trigger: step, start: 'top 72%', end: 'bottom 25%', toggleClass: 'step-active' })

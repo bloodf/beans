@@ -13,14 +13,15 @@ import { RelayDiagram } from './diagram'
 import { Logo } from './logo'
 import { LanguageLink, SectionLink, docsPath, downloadPath } from './nav'
 import { BeanScene } from './bean-scene'
+import { AnimatedText } from './animated-text'
 
 export function Hero() {
   const { t, i18n } = useTranslation()
   return (
     <section id="top" className="beans-hero">
-      <div className="hero-copy">
-      <h1 className="hero-title display">
-        <Trans i18nKey="hero.title" components={{ accent: <span className="brush" /> }} />
+      <div className="hero-copy motion-island">
+      <h1 className="hero-title display" aria-label={t('hero.accessibleTitle')}>
+        <span aria-hidden="true"><Trans i18nKey="hero.title" components={{ lead: <AnimatedText />, accent: <AnimatedText className="brush" /> }} /></span>
       </h1>
       <p className="mt-7 max-w-lg text-lg text-pretty text-muted-foreground sm:text-xl">
         {t('hero.body')}
@@ -33,25 +34,10 @@ export function Hero() {
           <SectionLink id="turns">{t('hero.how')}<ArrowDownRight size={18} aria-hidden="true" /></SectionLink>
         </Button>
       </div>
+      <p className="hero-platforms">{t('hero.platforms')}</p>
       </div>
       <BeanScene />
     </section>
-  )
-}
-
-export function CapabilityRibbon() {
-  const { t } = useTranslation()
-  const labels = toolKinds.map(({ key }) => t(`tools.kinds.${key}.title`))
-  return (
-    <div className="capability-ribbon motion-island" aria-hidden="true">
-      <div className="ribbon-track">
-        {[0, 1, 2, 3].map((copy) => (
-          <div className="ribbon-group" key={copy}>
-            {labels.map((label) => <span key={label}><img src="/brand/beans-mark.svg" alt="" width={28} height={28} />{label}</span>)}
-          </div>
-        ))}
-      </div>
-    </div>
   )
 }
 
@@ -142,14 +128,19 @@ export function Tools() {
       title={t('tools.title')}
       body={t('tools.body')}
     >
-      {/* Hairlines are the grid's own background showing through one-pixel gaps. */}
       <ul className="tool-list">
         {toolKinds.map(({ key, icon: Icon }) => (
-          <li key={key} className="tool-row">
+          <li key={key} className={`tool-row tool-${key} motion-island`}>
             <Icon className="tool-icon text-violet" strokeWidth={1.5} aria-hidden="true" />
             <div>
               <h3 className="text-2xl font-semibold">{t(`tools.kinds.${key}.title`)}</h3>
               <p className="mt-3 leading-relaxed text-muted-foreground">{t(`tools.kinds.${key}.body`)}</p>
+              <div className="tool-demonstration" aria-hidden="true">
+                <div className="tool-demo-icon"><Icon size={32} strokeWidth={1.5} /></div>
+                <div className="tool-demo-lines"><i /><i /><i /></div>
+                <div className="tool-demo-result"><Icon size={22} strokeWidth={1.5} /></div>
+                <svg className="tool-demo-path" viewBox="0 0 400 100" preserveAspectRatio="none"><path d="M40 50 C120 50 120 25 200 25 S280 50 360 50" /></svg>
+              </div>
             </div>
           </li>
         ))}

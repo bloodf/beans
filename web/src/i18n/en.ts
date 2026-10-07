@@ -1,7 +1,7 @@
 export const en = {
   motion: { pause: 'Pause motion', resume: 'Resume motion' },
   meta: {
-    title: 'Beans',
+    title: 'Beans | AI teammates on your computer',
     description:
       'AI teammates that run on your own computer. Chat with one or several at once, let them work with your files, and they coordinate the work among themselves.',
   },
@@ -15,22 +15,36 @@ export const en = {
   },
   hero: {
     badge: 'Personal AI, across your devices',
-    title: 'Your AI.<br/>Your <accent>space.</accent>',
-    body: 'A team of AI bots on your computer. Give them work, connect your tools, and keep chatting from your phone.',
+    title: '<lead>Your AI.</lead><br/>Your <accent>space.</accent>',
+    accessibleTitle: 'Your AI. Your space.',
+    body: 'Turn a task into a team. Give your bots files to work on, tools to connect, and a shared chat. Your computer runs the work.',
     how: 'See how it works',
-    platforms: 'For Mac, Windows, and Linux. iPhone and iPad in beta.',
+    platforms: 'Mac, Windows, and Linux. Keep chatting from your phone.',
   },
   turns: {
     eyebrow: 'Group chats',
-    title: 'Several bots in one chat.',
-    body: 'Post in a group and each bot is offered a turn, one at a time. A bot replies when the message is addressed to it or when it has useful information to add. Otherwise it skips its turn. Mention a bot by name and it goes first.',
+    title: 'One task. A whole team.',
+    body: 'Bring your researcher, developer, and project manager into one conversation. Give each bot a role, mention the one you need, and let the others contribute when they have something useful to add.',
     alt: 'Beans on macOS: a Researcher, Developer, and Project Manager prepare a launch together in a group chat across two Runners.',
+  },
+  examples: {
+    title: 'What will you work on?',
+    body: 'Start with a request. Give your bots a role and a folder, then keep the research, decisions, and changes in one conversation.',
+    choose: 'Choose an example workflow',
+    caption: 'Illustrative workflows. Outputs depend on your provider, connected tools, and instructions.',
+    items: [
+      { name: 'Research', prompt: 'Compare the options and write a recommendation with sources.', steps: ['Search and read the sources', 'Compare the approaches', 'Write a recommendation'] },
+      { name: 'Build', prompt: 'Review this project and help me implement the next feature.', steps: ['Read the project files', 'Edit and run commands', 'Review the changes together'] },
+      { name: 'Write', prompt: 'Turn these notes into a clear project brief.', steps: ['Read your notes', 'Draft the brief', 'Refine it in the same chat'] },
+    ],
   },
   relay: {
     eyebrow: 'Privacy',
-    title: 'Runs on your computer.',
-    body: 'Your bots work with files and run commands on your computer, using the AI provider you connect. Pair your phone or another computer to keep chatting across devices. Chats are encrypted before syncing through the relay, so only your devices can decrypt them.',
+    title: 'Your work stays with you.',
+    body: 'Your computer runs the bots. Your chosen AI provider generates their replies. Pair your phone to take the conversation with you, with end-to-end encrypted sync between your devices.',
     alt: 'Encrypted data goes from your computer through the relay to your phone. Only your devices can decrypt it.',
+    caption: 'Illustration of encrypted device sync.',
+    states: { encrypt: 'Encrypting', forward: 'Forwarding', decrypt: 'Decrypting' },
     nodes: {
       computer: { title: 'Your computer', body: 'Encrypted before sending' },
       relay: { title: 'Relay', body: "Forwards encrypted data. Can't decrypt it." },
@@ -40,7 +54,7 @@ export const en = {
   tools: {
     eyebrow: 'Tools',
     title: 'Files, commands, and the web.',
-    body: 'Give a bot a folder on any of your computers. It works inside that folder, on that computer, and shows you what it ran.',
+    body: 'Go beyond answers. Give a bot a working folder, connect the tools you use, and let it research, write, and make changes you can inspect.',
     kinds: {
       files: { title: 'Files', body: 'Opens, edits, and creates files in the folder you give it, and runs commands there.' },
       web: { title: 'Web', body: 'Searches the web and reads pages.' },
@@ -50,7 +64,7 @@ export const en = {
   },
   chef: {
     eyebrow: 'Getting started',
-    title: 'Start with one bot.',
+    title: 'Meet your first teammate.',
     body: 'Every new account starts with one bot, Chef. Tell Chef what you work on and it suggests a few bots, each for one kind of task. Approve them and Chef creates them. You can rename or delete any bot later.',
     steps: [
       { title: 'Create your account', body: 'No email, no password. You get a backup phrase to write down.' },
@@ -70,8 +84,8 @@ export const en = {
     ],
   },
   cta: {
-    title: 'Get started.',
-    body: 'Download for Mac, Windows, or Linux.',
+    title: 'Give your next task a team.',
+    body: 'Download Beans, connect your AI provider, and tell Chef what you want to work on.',
   },
   docs: {
     title: 'Beans Docs',

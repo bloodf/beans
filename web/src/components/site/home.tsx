@@ -1,6 +1,7 @@
 import { i18nFor, type Language, languages, paths } from '#/i18n'
 import { Nav, SITE } from './nav'
-import { CallToAction, CapabilityRibbon, Chef, FAQ, Footer, Hero, Relay, Tools, Turns } from './sections'
+import { CallToAction, Chef, FAQ, Footer, Hero, Relay, Tools, Turns } from './sections'
+import { WorkExamples } from './work-examples'
 import { MotionExperience } from './motion'
 import displayFont from '@fontsource/manrope/files/manrope-latin-800-normal.woff2?url'
 import type { LinkHTMLAttributes } from 'react'
@@ -30,8 +31,8 @@ export function Home() {
       <Nav />
       <main>
         <Hero />
-        <CapabilityRibbon />
         <Turns />
+        <WorkExamples />
         <Relay />
         <Tools />
         <Chef />

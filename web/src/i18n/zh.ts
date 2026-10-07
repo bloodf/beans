@@ -3,7 +3,7 @@ import type { Messages } from './en'
 export const zh: Messages = {
   motion: { pause: '暂停动画', resume: '继续动画' },
   meta: {
-    title: 'Beans',
+    title: 'Beans | 在你的电脑上运行的 AI 队友',
     description:
       '运行在你自己电脑上的 AI 队友。可以单聊，也可以拉群，让它们处理你的文件和任务，它们会自己分工协作。',
   },
@@ -17,22 +17,36 @@ export const zh: Messages = {
   },
   hero: {
     badge: 'Windows 和 Linux 版现已推出',
-    title: '拉个群，<br/>让 AI 队友<accent>分工</accent>。',
+    title: '<lead>拉个群，</lead><br/>让 AI 队友<accent>分工</accent>。',
+    accessibleTitle: '拉个群，让 AI 队友分工。',
     body: '和一个队友单聊，或者把几个拉进一个群聊。它们可以读写你的文件、运行命令，并记住你说过的话。交给它们一件事，它们会自己分工协作。',
     how: '看看它怎么运作',
     platforms: '支持 Mac、Windows 和 Linux，iPhone 和 iPad 版正在公测。',
   },
   turns: {
     eyebrow: '群聊',
-    title: '多个智能体，一个群聊。',
-    body: '在群里发一条消息，每个智能体会依次轮到一次。消息是发给它的，或者它有有用的信息要补充，它才回复；否则就跳过这一轮。@ 某个智能体的名字，它会先回复。',
+    title: '一个任务，一整个团队。',
+    body: '把研究员、开发者和项目经理放进同一个对话。为每个智能体分配角色，@ 你需要的队友，其他队友有有用的信息时再参与。',
     alt: 'macOS 上的 Beans：研究员、开发者和项目经理分别在两台运行设备上工作，在群聊中一起准备产品发布。',
+  },
+  examples: {
+    title: '你想完成什么工作？',
+    body: '从一个请求开始。给智能体分配角色和文件夹，在同一个对话里完成研究、讨论和修改。',
+    choose: '选择一个工作流程示例',
+    caption: '工作流程示意。结果取决于服务商、连接的工具和你的指令。',
+    items: [
+      { name: '研究', prompt: '比较这些方案，并写一份附带来源的建议。', steps: ['搜索并阅读来源', '比较不同方案', '撰写建议'] },
+      { name: '开发', prompt: '审查这个项目，帮我实现下一个功能。', steps: ['阅读项目文件', '修改并运行命令', '一起审查修改'] },
+      { name: '写作', prompt: '把这些笔记整理成清晰的项目说明。', steps: ['阅读你的笔记', '起草项目说明', '在同一对话中完善'] },
+    ],
   },
   relay: {
     eyebrow: '隐私',
-    title: '在你的电脑上运行。',
-    body: '智能体使用你连接的 AI 服务，在你的电脑上处理文件、运行命令。配对手机或另一台电脑，就能跨设备继续聊天。聊天记录在通过中继同步前加密，只有你的设备能解密。',
+    title: '工作由你掌控。',
+    body: '你的电脑运行智能体，你选择的 AI 服务商生成回复。配对手机，随时继续对话，设备间通过端到端加密同步。',
     alt: '加密数据从你的电脑经过中继传到你的手机，只有你的设备能解密。',
+    caption: '设备间加密同步示意。',
+    states: { encrypt: '加密中', forward: '转发中', decrypt: '解密中' },
     nodes: {
       computer: { title: '你的电脑', body: '发送前已加密' },
       relay: { title: '中继', body: '只负责传输，无法解密' },
@@ -72,8 +86,8 @@ export const zh: Messages = {
     ],
   },
   cta: {
-    title: '开始使用 Beans。',
-    body: '下载 Mac、Windows 或 Linux 版。',
+    title: '把下一个任务交给团队。',
+    body: '下载 Beans，连接 AI 服务商，告诉幕僚长你想完成什么工作。',
   },
   docs: {
     title: 'Beans 文档',

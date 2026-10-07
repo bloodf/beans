@@ -32,7 +32,7 @@ export function BeanScene() {
   useEffect(() => { controller.current?.setPaused(paused) }, [paused, ready])
 
   return (
-    <div className="hero-scene" aria-hidden="true" data-ready={ready && !reduced}>
+    <div className="hero-scene motion-island" aria-hidden="true" data-ready={ready && !reduced}>
       <div className="scene-orbit scene-orbit-one" />
       <div className="scene-orbit scene-orbit-two" />
       <div className="scene-floor" />

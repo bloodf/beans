@@ -4,6 +4,7 @@ import {
   Scene, Vector3, WebGLRenderer,
 } from 'three'
 import { SVGLoader } from 'three/addons/loaders/SVGLoader.js'
+import { createEnergyField } from './energy-field'
 
 export type BeanSceneController = {
   setPaused: (paused: boolean) => void
@@ -31,6 +32,7 @@ export async function createBeanScene({ host, signal, onUnavailable }: {
   canvas.setAttribute('aria-hidden', 'true')
   const material = new MeshPhysicalMaterial({ color: '#F26744', metalness: 0.28, roughness: 0.27, clearcoat: 1, clearcoatRoughness: 0.2 })
   const sculpture = new Group()
+  const energy = createEnergyField()
   const geometries: ExtrudeGeometry[] = []
   try {
     const data = new SVGLoader().parse(svg)
@@ -46,6 +48,7 @@ export async function createBeanScene({ host, signal, onUnavailable }: {
     sculpture.scale.setScalar(3.15 / Math.max(dimensions.x, dimensions.y))
     sculpture.scale.y *= -1
     scene.add(sculpture)
+    scene.add(energy.mesh)
     scene.add(new AmbientLight('#fff5ee', 0.7))
     scene.add(new HemisphereLight('#ffffff', '#b84220', 1.6))
     const key = new DirectionalLight('#fff8ed', 3)
@@ -58,6 +61,8 @@ export async function createBeanScene({ host, signal, onUnavailable }: {
   } catch (error) {
     for (const geometry of geometries) geometry.dispose()
     material.dispose()
+    energy.geometry.dispose()
+    energy.material.dispose()
     renderer.dispose()
     throw error
   }
@@ -81,9 +86,11 @@ export async function createBeanScene({ host, signal, onUnavailable }: {
     if (!paused) elapsed += delta
     if (!paused) {
       rotationX += (pointerY * 0.25 - 0.12 - rotationX) * 0.06
-      rotationY += (pointerX * 0.5 - 0.35 + Math.sin(elapsed * 0.38) * 0.2 - rotationY) * 0.06
-      sculpture.rotation.set(rotationX, rotationY, -0.1 + Math.sin(elapsed * 0.3) * 0.09)
-      sculpture.position.y = Math.sin(elapsed * 0.9) * 0.09
+      rotationY += (pointerX * 0.65 - 0.35 + Math.sin(elapsed * 0.55) * 0.32 - rotationY) * 0.06
+      sculpture.rotation.set(rotationX, rotationY, -0.1 + Math.sin(elapsed * 0.42) * 0.13)
+      sculpture.position.y = Math.sin(elapsed * 1.1) * 0.12
+      energy.material.uniforms.time.value = elapsed
+      energy.material.uniforms.pointer.value.set(pointerX, pointerY)
     }
     renderer.render(scene, camera)
     if (!paused) frame = requestAnimationFrame(draw)
@@ -148,6 +155,8 @@ export async function createBeanScene({ host, signal, onUnavailable }: {
       document.removeEventListener('visibilitychange', visibility)
       for (const geometry of geometries) geometry.dispose()
       material.dispose()
+      energy.geometry.dispose()
+      energy.material.dispose()
       renderer.dispose()
       renderer.forceContextLoss()
       canvas.remove()

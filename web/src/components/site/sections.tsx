@@ -39,6 +39,22 @@ export function Hero() {
   )
 }
 
+export function CapabilityRibbon() {
+  const { t } = useTranslation()
+  const labels = toolKinds.map(({ key }) => t(`tools.kinds.${key}.title`))
+  return (
+    <div className="capability-ribbon motion-island" aria-hidden="true">
+      <div className="ribbon-track">
+        {[0, 1, 2, 3].map((copy) => (
+          <div className="ribbon-group" key={copy}>
+            {labels.map((label) => <span key={label}><img src="/brand/beans-mark.svg" alt="" width={28} height={28} />{label}</span>)}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function Stage({
   id,
   title,
@@ -190,7 +206,7 @@ export function CallToAction() {
   const { t, i18n } = useTranslation()
   return (
     <section className="story-section story-cta">
-      <div className="beans-cta">
+      <div className="beans-cta motion-island">
         <div className="cta-art" aria-hidden="true"><Logo className="cta-mark" /></div>
         <div className="cta-copy">
           <h2 className="display text-4xl text-foreground sm:text-6xl">{t('cta.title')}</h2>

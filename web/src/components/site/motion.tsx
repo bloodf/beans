@@ -24,6 +24,21 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const element = root.current
+    if (!element) return
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.target instanceof HTMLElement) entry.target.dataset.active = String(entry.isIntersecting)
+      }
+    })
+    element.querySelectorAll('.motion-island').forEach((island) => observer.observe(island))
+    const visibility = () => { element.dataset.pageVisible = String(!document.hidden) }
+    visibility()
+    document.addEventListener('visibilitychange', visibility)
+    return () => { observer.disconnect(); document.removeEventListener('visibilitychange', visibility) }
+  }, [])
+
+  useEffect(() => {
+    const element = root.current
     if (!element || reduced || paused) return
     let disposed = false
     let revert = () => {}
@@ -34,9 +49,10 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
         const media = gsap.matchMedia()
         media.add('(prefers-reduced-motion: no-preference)', () => {
           gsap.from('.hero-copy > *', { y: 24, opacity: 0.55, duration: 0.85, stagger: 0.09, ease: 'power3.out', clearProps: 'all' })
+          gsap.from('.hero-scene', { scale: 0.7, rotate: -18, duration: 1.3, ease: 'power3.out' })
           gsap.to('.reading-progress', { scaleX: 1, ease: 'none', scrollTrigger: { trigger: element, start: 'top top', end: 'bottom bottom', scrub: true } })
           gsap.to('.hero-scene', { yPercent: 18, rotation: 8, ease: 'none', scrollTrigger: { trigger: '.beans-hero', start: 'top top', end: 'bottom top', scrub: 0.8 } })
-          gsap.fromTo('.screen-window', { rotateX: 14, rotateZ: -3, scale: 0.88, y: 70 }, { rotateX: 0, rotateZ: 0, scale: 1, y: 0, ease: 'none', scrollTrigger: { trigger: '#turns', start: 'top 85%', end: 'center 45%', scrub: 0.7 } })
+          gsap.fromTo('.screen-window', { rotateX: 22, rotateZ: -4, scale: 0.84, y: 60 }, { rotateX: 0, rotateZ: 0, scale: 1, y: 0, ease: 'none', scrollTrigger: { trigger: '#turns', start: 'top 85%', end: 'center 45%', scrub: 0.7 } })
           ScrollTrigger.create({ trigger: '#relay', start: 'top bottom', end: 'bottom top', toggleClass: 'in-view' })
           gsap.fromTo('.relay-orbit', { rotate: -28, scale: 0.85 }, { rotate: 20, scale: 1.1, ease: 'none', scrollTrigger: { trigger: '#relay', start: 'top bottom', end: 'bottom top', scrub: 1 } })
           for (const section of gsap.utils.toArray<HTMLElement>('.story-heading')) {
@@ -44,6 +60,9 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
           }
           gsap.from('.tool-row', { x: 35, stagger: 0.1, duration: 0.7, ease: 'power3.out', scrollTrigger: { trigger: '#tools', start: 'top 75%', once: true }, clearProps: 'all' })
           gsap.from('.setup-step', { y: 28, stagger: 0.08, duration: 0.7, ease: 'power3.out', scrollTrigger: { trigger: '#start', start: 'top 80%', once: true }, clearProps: 'all' })
+          for (const step of gsap.utils.toArray<HTMLElement>('.setup-step')) {
+            ScrollTrigger.create({ trigger: step, start: 'top 72%', end: 'bottom 25%', toggleClass: 'step-active' })
+          }
           gsap.fromTo('.cta-mark', { y: 60, rotate: -16, scale: 0.75 }, { y: 0, rotate: 0, scale: 1, ease: 'none', scrollTrigger: { trigger: '.beans-cta', start: 'top bottom', end: 'center 65%', scrub: 0.8 } })
         })
       }, element)

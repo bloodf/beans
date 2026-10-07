@@ -26,8 +26,8 @@ import { Footer } from './sections'
 const GIT_FOR_WINDOWS = 'https://git-scm.com/downloads/win'
 /// The CLI's install commands, one per shell.
 const INSTALL = [
-  { shell: 'download.cli.unix', prompt: '$', command: 'curl -fsSL https://raw.githubusercontent.com/bloodf/beans/main/web/public/install-cli.sh | sh' },
-  { shell: 'download.cli.windows', prompt: 'PS>', command: 'irm https://raw.githubusercontent.com/bloodf/beans/main/web/public/install-cli.ps1 | iex' },
+  { shell: 'download.cli.unix', prompt: '$', command: 'curl -fsSL https://usebeans.app/install-cli.sh | sh' },
+  { shell: 'download.cli.windows', prompt: 'PS>', command: 'irm https://usebeans.app/install-cli.ps1 | iex' },
 ] as const
 
 export type MacRelease = {

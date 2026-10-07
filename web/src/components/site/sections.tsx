@@ -38,7 +38,7 @@ export function Hero() {
       </div>
       </div>
       <div className="beans-hero-art" aria-hidden="true">
-        <img src="/brand/beans-mark.png" alt="" width={1280} height={1280} className="w-full" />
+        <img src="/brand/beans-mark.svg" alt="" width={1254} height={1254} className="w-full" />
       </div>
     </section>
   )

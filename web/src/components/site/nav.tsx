@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next'
 
 import { Button } from '#/components/ui/button'
 import { type Language, languages, names, pathIn, paths } from '#/i18n'
-import { Logo } from './logo'
 
 export const SITE = 'https://usebeans.app'
 
@@ -55,15 +54,15 @@ export function LanguageLink({ className }: { className?: string }) {
   )
 }
 
-/// A floating pill, clear of the top edge, that stays put as the page scrolls.
+/// The site header stays visible as the page scrolls.
 export function Nav() {
   const { t, i18n } = useTranslation()
   return (
     <header className="sticky top-0 z-40 border-b bg-background/95 px-4 backdrop-blur-xl">
       <div className="mx-auto flex h-18 max-w-6xl items-center justify-between gap-4">
         <SectionLink id="top" className="flex items-center gap-2 font-semibold tracking-tight">
-          <Logo className="size-10" />
-          <span className="text-2xl font-extrabold tracking-[-0.06em]">beans</span>
+          <img src="/brand/beans-logo.svg" alt="Beans" width={2161} height={728} className="w-36 dark:hidden" />
+          <img src="/brand/beans-logo-light.svg" alt="Beans" width={2161} height={728} className="hidden w-36 dark:block" />
         </SectionLink>
         <nav className="hidden items-center gap-6 text-sm text-muted-foreground md:flex">
           {links.map((link) => (

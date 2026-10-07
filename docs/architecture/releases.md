@@ -2,6 +2,8 @@
 
 ## Source and readiness
 
+The all-platform preflight requires nonempty changelog notes matching the root version before builds start; desktop updater packaging consumes those notes.
+
 [Release Beans](../../.github/workflows/release.yml) runs only by manual dispatch. Choose `server` or `all` **before** building against an already published stable `beans-v<root package.json version>` tag. Publishing a tag does not start a server finalizer. The checkout must match GitHub's exact tag commit; finalization rechecks it. Server scope needs only the Ed25519 update signing key and builds Linux x86_64/aarch64 CLI/server bundles. All scope adds CLI installation checks, Windows/Linux desktop installers, notarized arm64 Mac DMG/update ZIP and three completed EAS phone builds. Scope cannot change after readiness exists; use a new version/tag.
 
 Distribution assets upload first, detached signature next, `beans-update.json` last. Schema 1 binds root version, revision, relay protocol and each asset's component, platform, version, SHA-256 and size. Existing assets must have identical bytes; unexpected or changed bytes fail before upload. Readiness cannot be repaired or extended. Retry interrupted uploads using original staged artifacts, not rebuilt desktop binaries. The server updater verifies readiness, upgrades the relay first, then drains Runners; see [runtime](runtime.md#runner-update-drain) and [CLI release operations](../releasing-cli.md).

@@ -3,6 +3,7 @@ import { createReadStream } from "node:fs";
 import { copyFile, mkdir, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { readVersion, ROOT } from "./app.ts";
+import { extractReleaseNotes } from "./changelog.ts";
 import { releasePrivateKey, signReleaseBytes } from "./release-signing.ts";
 
 export interface ReleaseArtifact {
@@ -244,6 +245,9 @@ if (import.meta.main) {
   if (command === "check" && first && !third && !fourth) {
     const scope = releaseScope(second);
     const version = releaseVersion(first);
+    if (scope === "all" && !extractReleaseNotes(await Bun.file(join(ROOT, "CHANGELOG.md")).text(), version)) {
+      throw new Error(`CHANGELOG.md requires notes for ${version} before all-platform builds`);
+    }
     await releasePrivateKey();
     console.log(`Release ${version}; scope ${scope}; protocol ${await releaseProtocol()}; signing key matches installed trust anchor`);
   } else if (command === "collect" && first && second && !fourth) {

@@ -1,12 +1,28 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildReleaseManifest } from "./release-github.ts";
-import { readVersion } from "./app.ts";
+import { readVersion, ROOT } from "./app.ts";
 const paths: string[] = [];
 afterEach(async () => { await Promise.all(paths.map((path) => rm(path, { recursive: true, force: true }))); });
+test("all-platform CLI preflight rejects missing notes before loading private credentials", async () => {
+  const path = await mkdtemp(join(tmpdir(), "beans-release-preflight-")); paths.push(path);
+  await mkdir(join(path, "scripts"));
+  await mkdir(join(path, "updates"));
+  for (const name of ["app.ts", "changelog.ts", "release-signing.ts", "release-github.ts"]) {
+    await copyFile(join(ROOT, "scripts", name), join(path, "scripts", name));
+  }
+  await copyFile(join(ROOT, "updates", "public-key.txt"), join(path, "updates", "public-key.txt"));
+  await writeFile(join(path, "package.json"), JSON.stringify({ version: "1.0.13" }, null, 2));
+  await writeFile(join(path, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\nPending changes.\n");
+  const result = Bun.spawnSync([process.execPath, join(path, "scripts", "release-github.ts"), "check", "beans-v1.0.13", "all"], {
+    cwd: path, env: { ...process.env, BEANS_UPDATE_PRIVATE_KEY: "" },
+  });
+  expect(result.exitCode).not.toBe(0);
+  expect(result.stderr.toString()).toContain("CHANGELOG.md requires notes for 1.0.13");
+});
 async function server() {
   const path = await mkdtemp(join(tmpdir(), "beans-release-fixture-")); paths.push(path);
   for (const name of ["beans-server-linux-x86_64.tar.gz", "beans-server-linux-aarch64.tar.gz", "beans-server-updater.py"]) await writeFile(join(path, name), "fixture");

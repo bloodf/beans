@@ -37,6 +37,12 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 - The marketplace adds plugins for 飞书, 飞书项目, 滴答清单, 腾讯文档, 秘塔 AI 搜索, 知乎, 高德地图, and 可灵. 飞书, 飞书项目, 滴答清单, 腾讯文档, and 可灵 sign in with your account in the browser; 秘塔 AI 搜索 and 知乎 take an API key from their sites, and 高德地图 a Web Service key from the Amap console.
 - Settings › Devices can unpair this Mac too: Lorca forgets the account's keys, credentials, and chats here and goes back to onboarding. When this Mac holds your identity, the confirmation says that your backup phrase becomes the only way to restore it.
 
+## [1.0.13]
+
+- Mobile releases use EAS-managed signing and build numbers for the Android APK, Google Play app bundle, and TestFlight IPA, with exact-source provenance in the signed release inventory.
+- Release profiles pin Bun 1.4.2 to read the checked-in lockfile on EAS workers.
+- The all-platform release checks for matching changelog notes before starting builds.
+
 ## [1.0.11]
 
 The first server-only Beans release targets Linux relay, Runner and updater assets

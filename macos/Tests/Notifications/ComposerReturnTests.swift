@@ -25,6 +25,15 @@ final class ComposerReturnTests: XCTestCase {
 
     override func setUp() async throws {
         _ = NSApplication.shared
+        // XCTest is not the app bundle: point the picker's avatars at the committed JSC resource
+        // the packaging step copies, the same way the other native fixtures do.
+        if AvatarGeometryBridge.scriptURL == nil {
+            let url = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent("packages/beans-blobatar/dist/blobatar.jsc.js")
+            _ = try url.checkResourceIsReachable()
+            AvatarGeometryBridge.scriptURL = url
+        }
         savedArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
         sent = []
         composer = ComposerView()
@@ -33,8 +42,10 @@ final class ComposerReturnTests: XCTestCase {
         composer.onSend = { [unowned self] text, files, _, _ in sent.append((text, files.count)) }
         window = NSWindow(contentRect: composer.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = composer
-        window.makeKeyAndOrderFront(nil)
-        composer.focus()
+        // A hosted test process need not be the active app, so the window is not required to be
+        // key; `press` sends to this window directly and checks the first responder instead.
+        window.orderFront(nil)
+        XCTAssertTrue(window.makeFirstResponder(textView), "text view refused first responder")
         textView = try XCTUnwrap(find(ComposerTextView.self, in: composer))
         XCTAssertTrue(window.firstResponder === textView)
     }
@@ -69,11 +80,14 @@ final class ComposerReturnTests: XCTestCase {
         return nil
     }
 
-    /// Dispatches as the app does, so `NSApp.currentEvent` and `keyDown` both see the event.
-    /// A local monitor records what `sendEvent` delivered, so a press that was dropped, or that
-    /// dequeued some other event, fails here instead of passing a "sent 0" assertion.
-    private func press(_ flags: NSEvent.ModifierFlags = [], keyCode: UInt16 = 36) throws {
-        XCTAssertTrue(window.isKeyWindow, "composer window is not key")
+    /// Delivers a real key event to the composer window with `window.sendEvent`, which routes
+    /// to the first responder's production `keyDown` and `interpretKeyEvents` without needing
+    /// the hosted test process to be the active app (so no `NSApp` queue, which would also
+    /// let another event be dequeued). The existing `onKeyCommand` hook is wrapped, not
+    /// replaced, to record the commands AppKit produced; that proves the key reached the text
+    /// view's command path. Returns the selector names, in order.
+    @discardableResult
+    private func press(_ flags: NSEvent.ModifierFlags = [], keyCode: UInt16 = 36) throws -> [String] {
         XCTAssertTrue(window.firstResponder === textView, "text view is not first responder")
         let character = keyCode == 48 ? "\t" : keyCode == 76 ? "\u{3}" : "\r"
         let event = try XCTUnwrap(
@@ -81,20 +95,15 @@ final class ComposerReturnTests: XCTestCase {
                 with: .keyDown, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
                 windowNumber: window.windowNumber, context: nil, characters: character,
                 charactersIgnoringModifiers: character, isARepeat: false, keyCode: keyCode))
-        var delivered: [NSEvent] = []
-        let monitor = try XCTUnwrap(
-            NSEvent.addLocalMonitorForEvents(matching: .keyDown) { delivered.append($0); return $0 })
-        defer { NSEvent.removeMonitor(monitor) }
-        NSApp.postEvent(event, atStart: true)
-        let next = try XCTUnwrap(
-            NSApp.nextEvent(matching: .keyDown, until: Date(timeIntervalSinceNow: 1), inMode: .default, dequeue: true),
-            "posted key event was not dequeued")
-        XCTAssertEqual(next.keyCode, keyCode)
-        XCTAssertEqual(next.modifierFlags.intersection(.deviceIndependentFlagsMask), flags)
-        XCTAssertEqual(next.windowNumber, window.windowNumber)
-        NSApp.sendEvent(next)
-        XCTAssertEqual(delivered.count, 1, "key event did not reach sendEvent exactly once")
-        XCTAssertEqual(delivered.first?.keyCode, keyCode)
+        let original = try XCTUnwrap(textView.onKeyCommand, "composer did not install its key hook")
+        var commands: [String] = []
+        textView.onKeyCommand = { selector in
+            commands.append(NSStringFromSelector(selector))
+            return original(selector)
+        }
+        defer { textView.onKeyCommand = original }
+        window.sendEvent(event)
+        return commands
     }
 
     private func type(_ text: String) {

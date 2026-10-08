@@ -2,8 +2,9 @@ import AppKit
 import XCTest
 @testable import Beans
 
-/// Real `ComposerView`, `MentionPanel` and key routing: events go through `NSApp.sendEvent`
-/// into the composer's own text view, and the observable outputs are `onSend`, the field text
+/// Real `ComposerView`, `MentionPanel` and key routing: key events go to the composer's window
+/// with `window.sendEvent`, which reaches the text view's own `keyDown`, and the observable
+/// outputs are `onSend`, the field text
 /// and attachments. Reads `AppStore.shared` only through the picker's runner lookup. The
 /// send-on-Return preference is overridden in `UserDefaults.argumentDomain`, a volatile domain
 /// that outranks the stored value and never reaches disk, so nothing persistent is written

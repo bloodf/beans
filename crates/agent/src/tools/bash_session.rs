@@ -1244,6 +1244,67 @@ mod tests {
         assert!(t.host.get(&session_id(&menu)).unwrap().reads_keys());
     }
 
+    /// Drive the real writer to Pending after a partial syscall, then let Stop win while
+    /// its cloned fd remains open. A socket pair gives controlled capacity without a child
+    /// consuming input or terminal line discipline discarding bytes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_fences_a_partial_writer_holding_a_cloned_fd() {
+        use std::future::Future;
+        use std::io::Read;
+        use std::os::fd::{AsRawFd, OwnedFd};
+        use std::os::unix::net::UnixStream;
+        use std::task::{Context, Poll, Wake, Waker};
+
+        struct Noop;
+        impl Wake for Noop {
+            fn wake(self: Arc<Self>) {}
+        }
+        let (writer, mut reader) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let capacity: libc::c_int = 4096;
+        assert_eq!(unsafe {
+            libc::setsockopt(writer.as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF,
+                (&capacity as *const libc::c_int).cast(), std::mem::size_of_val(&capacity) as _)
+        }, 0);
+        let fd = Arc::new(tokio::io::unix::AsyncFd::new(OwnedFd::from(writer)).unwrap());
+        // Wait for the reactor before manual polling; no sleep or scheduling guess.
+        drop(fd.writable().await.unwrap());
+        let now = Instant::now();
+        let session = BashSession {
+            id: new_id(), command: "controlled writer".into(), pid: 0, started: now,
+            background: false.into(),
+            state: Mutex::new(SessionState { output: Output::new(), last_output: now,
+                last_input: now, end: None, read: 0, drained: false }),
+            changed: watch::channel(0).0,
+            master: Mutex::new(Some(fd)), closed: CancellationToken::new(),
+        };
+        let payload = vec![b'x'; 1024 * 1024];
+        let mut write = std::pin::pin!(session.write(&payload));
+        let waker = Waker::from(Arc::new(Noop));
+        let mut context = Context::from_waker(&waker);
+        assert!(write.as_mut().poll(&mut context).is_pending());
+        let mut accepted = Vec::new();
+        assert_eq!(reader.read_to_end(&mut accepted).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        assert!(!accepted.is_empty() && accepted.len() < payload.len(), "partial input accepted before Stop");
+        assert_eq!(accepted, payload[..accepted.len()]);
+        session.stop("Stopped");
+        // Draining made the cloned fd writable again. Stop must prevent another syscall,
+        // and wake/refuse this outstanding write rather than waiting for WRITE_TIMEOUT.
+        match write.as_mut().poll(&mut context) {
+            Poll::Ready(Err(error)) => assert_eq!(error, "The command has ended"),
+            result => panic!("stopped partial writer must finish immediately: {result:?}"),
+        }
+        let mut after_stop = Vec::new();
+        match reader.read_to_end(&mut after_stop) {
+            Ok(_) => {}
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock),
+        }
+        assert!(after_stop.is_empty(), "no suffix accepted after the stop fence");
+        assert_eq!(session.end(), Some(SessionEnd::Stopped("Stopped".into())));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn stop_kills_the_whole_process_group() {

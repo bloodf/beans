@@ -5,6 +5,7 @@ import { basename, join, resolve } from "node:path";
 import { readVersion, ROOT } from "./app.ts";
 import { extractReleaseNotes } from "./changelog.ts";
 import { releasePrivateKey, signReleaseBytes } from "./release-signing.ts";
+import { verifyEasBinary } from "./release-eas.ts";
 
 export interface ReleaseArtifact {
   name: string;
@@ -133,7 +134,7 @@ export async function buildReleaseManifest(tag: string, revision: string, direct
   }
   if (scope === "all") {
     const identities = new Set<string>();
-    for (const profile of ["github", "production", "testflight"]) {
+    for (const profile of ["github", "production", "testflight"] as const) {
       const proof = await Bun.file(join(directory, `eas-${profile}.json`)).json();
       const name = `Beans-${version}${profile === "testflight" ? "-store.ipa" : profile === "production" ? ".aab" : ".apk"}`;
       const artifact = artifacts.find((entry) => entry.name === name)!;
@@ -145,6 +146,9 @@ export async function buildReleaseManifest(tag: string, revision: string, direct
         throw new Error(`Invalid EAS artifact provenance: ${profile}`);
       }
       identities.add(proof.buildId);
+      const bytes = new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer());
+      if (createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) throw new Error(`EAS binary changed during finalization: ${profile}`);
+      await verifyEasBinary(bytes, profile, version, proof.buildNumber);
     }
   }
   return { schema: 1, version, revision, protocol: await releaseProtocol(), artifacts };

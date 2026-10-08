@@ -5,23 +5,22 @@ import { join } from "node:path";
 import { readVersion } from "./app.ts";
 import { downloadArtifact, runEasRelease, stageEasBuild, validateEasBuild } from "./release-eas.ts";
 import { androidNdk, hostLibrary } from "./release-build-inputs.ts";
+import { archiveFixture } from "./release-archive-fixture.ts";
 
 const revision = "a".repeat(40);
 const project = "11111111-1111-4111-8111-111111111111";
 const build = { id: "22222222-2222-4222-8222-222222222222", status: "FINISHED", platform: "ANDROID", appIdentifier: "ai.amoena.beans", distribution: "STORE", buildProfile: "github", gitCommitHash: revision, appVersion: "1.0.11", appBuildVersion: "42", app: { id: project }, artifacts: { buildUrl: "https://artifacts.eascdn.net/build.apk" } };
-test("downloads and stages exact finished APK/AAB/store IPA with hashes, never URLs", async () => {
+test("valid ZIP transport never authorizes missing native modules or successful staging", async () => {
   const directory = await mkdtemp(join(tmpdir(), "beans-eas-test-"));
   const previous = process.env.BEANS_EXPO_PROJECT_ID;
   process.env.BEANS_EXPO_PROJECT_ID = project;
-  const fetcher = spyOn(globalThis, "fetch").mockImplementation(async () => new Response(new Uint8Array([0x50, 0x4b, 3, 4, 1])) as any);
+  const payload = archiveFixture();
+  const fetcher = spyOn(globalThis, "fetch").mockImplementation(async () => new Response(payload) as any);
   try {
     for (const [profile, platform, suffix] of [["github", "ANDROID", ".apk"], ["production", "ANDROID", ".aab"], ["testflight", "IOS", "-store.ipa"]] as const) {
-      await stageEasBuild({ ...build, appVersion: readVersion(), platform, buildProfile: profile }, profile, revision, directory);
-      const proof = await Bun.file(join(directory, `eas-${profile}.json`)).json();
-      expect(proof.artifact).toBe(`Beans-${readVersion()}${suffix}`);
-      expect(proof.sha256).toHaveLength(64);
-      expect(proof.revision).toBe(revision);
-      expect(JSON.stringify(proof)).not.toContain("https");
+      await expect(stageEasBuild({ ...build, appVersion: readVersion(), platform, buildProfile: profile }, profile, revision, directory)).rejects.toThrow(/manifest|module/);
+      expect(await Bun.file(join(directory, `eas-${profile}.json`)).exists()).toBe(false);
+      expect(await Bun.file(join(directory, `Beans-${readVersion()}${suffix}`)).exists()).toBe(false);
     }
     const oldToken = process.env.EXPO_TOKEN;
     const oldOwner = process.env.BEANS_EXPO_OWNER;
@@ -29,8 +28,8 @@ test("downloads and stages exact finished APK/AAB/store IPA with hashes, never U
     process.env.BEANS_EXPO_OWNER = "test-owner";
     try {
       const git = (args: string[]) => ({ exitCode: 0, stdout: Buffer.from(args.includes("rev-parse") ? revision : "") }) as any;
-      await runEasRelease(["build", "github", revision, join(directory, "fresh")], async (args) => { expect(args).toContain("--wait"); return [{ ...build, appVersion: readVersion() }]; }, git);
-      await runEasRelease(["build", "github", revision, join(directory, "retry"), build.id], async (args) => { expect(args[0]).toBe("build:view"); return { ...build, appVersion: readVersion() }; }, git);
+      await expect(runEasRelease(["build", "github", revision, join(directory, "fresh")], async () => [{ ...build, appVersion: readVersion() }], git)).rejects.toThrow("manifest missing");
+      await expect(runEasRelease(["build", "github", revision, join(directory, "retry"), build.id], async () => ({ ...build, appVersion: readVersion() }), git)).rejects.toThrow("manifest missing");
       await expect(runEasRelease(["build", "github", revision, directory], async () => [], git)).rejects.toThrow("exactly one");
       await expect(runEasRelease(["build", "github", revision, directory], async () => [], () => ({ exitCode: 0, stdout: Buffer.from("dirty") }) as any)).rejects.toThrow("clean");
       await expect(runEasRelease(["bad"], async () => [], git)).rejects.toThrow("usage");
@@ -44,8 +43,8 @@ test("downloads and stages exact finished APK/AAB/store IPA with hashes, never U
     const redirects = ["https://api.expo.dev/builds/artifact", "https://wf-artifacts.eascdn.net/build.ipa"];
     fetcher.mockImplementation(async () => redirects.length
       ? new Response(null, { status: 307, headers: { location: redirects.shift()! } }) as any
-      : new Response(new Uint8Array([0x50, 0x4b, 3, 4, 1])) as any);
-    expect((await downloadArtifact("https://expo.dev/artifacts/build.ipa")).length).toBe(5);
+      : new Response(payload) as any);
+    expect(await downloadArtifact("https://expo.dev/artifacts/build.ipa")).toEqual(new Uint8Array(payload));
     fetcher.mockImplementation(async () => new Response(null, { status: 307, headers: { location: "https://evil.eascdn.net/build.ipa" } }) as any);
     await expect(downloadArtifact(build.artifacts.buildUrl)).rejects.toThrow("trusted HTTPS");
     fetcher.mockImplementation(async () => new Response("denied", { status: 403 }) as any);

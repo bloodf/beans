@@ -13,7 +13,11 @@ use crate::provider_auth;
 use crate::{identity, pairing, requests, routines, runtime};
 
 fn string(params: &Value, key: &str) -> Result<String, String> {
-    params[key].as_str().map(str::to_string).filter(|s| !s.is_empty()).ok_or_else(|| format!("missing {key}"))
+    match &params[key] {
+        Value::String(text) if !text.is_empty() => Ok(text.clone()),
+        Value::Null | Value::String(_) => Err(format!("missing {key}")),
+        _ => Err(format!("{key} must be a string")),
+    }
 }
 
 fn opt_string(params: &Value, key: &str) -> Option<String> {
@@ -296,6 +300,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             // fetch the blob by the time it reads the profile.
             let capabilities = capabilities(&params)?;
             let look = look(&params)?;
+            app.bot(&id).ok_or("Unknown bot")?;
             let avatar = store_avatar(app, avatar_file(&params)?)?;
             let bot = app.update_bot(&id, |bot| {
                 if let Some(v) = opt_string(&params, "name") { bot.name = v; }
@@ -351,24 +356,30 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({ "chat": chat }))
         }
         "chats.send" => {
-            let files: Vec<crate::files::OutgoingFile> = serde_json::from_value(params["attachments"].clone()).unwrap_or_default();
-            let mut attachments = Vec::new();
-            for file in &files {
-                attachments.push(crate::files::store(app, file).map_err(|e| e.to_string())?);
+            // Every field is checked before the first file is copied. Absent and null mean "not given".
+            let chat_id = string(&params, "chat_id")?;
+            app.chat(&chat_id).ok_or("Unknown chat")?;
+            let optional = |key: &str| match params.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(text)) => Ok(Some(text.clone())),
+                Some(_) => Err(format!("{key} must be a string")),
+            };
+            let text = optional("text")?;
+            let (message_id, reply_to) = (optional("message_id")?, optional("reply_to")?);
+            // Fixed messages: a serde error could echo the offending value.
+            let files: Vec<crate::files::OutgoingFile> = match params.get("attachments") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(value) => serde_json::from_value(value.clone()).map_err(|_| "attachments must be an array of files")?,
+            };
+            let mentions: Vec<String> = match params.get("mentions") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(value) => serde_json::from_value(value.clone()).map_err(|_| "mentions must be an array of strings")?,
+            };
+            if text.is_none() && files.is_empty() {
+                return Err("missing text".into());
             }
-            let text = opt_string(&params, "text").unwrap_or_default();
-            let mentions: Vec<String> = serde_json::from_value(params["mentions"].clone()).unwrap_or_default();
-            let message =
-                runtime::send_user_message(
-                    app.clone(),
-                    &string(&params, "chat_id")?,
-                    &text,
-                    opt_string(&params, "message_id"),
-                    attachments,
-                    mentions,
-                    opt_string(&params, "reply_to"),
-                )
-                    .map_err(|e| e.to_string())?;
+            let message = runtime::send_user_message(app.clone(), &chat_id, &text.unwrap_or_default(), message_id, files, mentions, reply_to)
+                .map_err(|e| e.to_string())?;
             Ok(json!({ "message": message }))
         }
         "files.path" => {

@@ -51,7 +51,7 @@ The local API authors only these fields and supported version/enums. It rejects 
 - `look: null`: reset generated settings only;
 - look object: replace the complete validated draft, including base and states.
 
-Validation precedes avatar file storage, outbox writes, and profile mutation. `App::update_bot` validates a changed look on a candidate profile before committing it. Image storage and deletion continue to use the existing independent attachment path.
+Validation precedes avatar file storage, outbox writes, and profile mutation. `bots.update` checks bot existence before storing an avatar. `App::update_bot` validates a changed look on a candidate profile before committing it. Image storage and deletion use the independent attachment path; source preparation stages bytes before replacing an existing attachment id.
 
 The bot profile lives in local SQLite JSON and inside the account-encrypted roster. Fieldwise roster reconciliation treats `look` as one replace/reset field: an unrelated offline rename retains the remote look, while a changed local look replaces that field without erasing a remote rename, photo, or description. Concurrent changes to the same look resolve through the queued local intent and conditional roster slot writes, not subfield patching. Frozen baseline, encrypted outbox, submitted snapshots, and CAS recovery retain intent across retries and restart. See [Protocols](protocols.md#cli--relay).
 

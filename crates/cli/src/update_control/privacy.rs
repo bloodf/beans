@@ -236,10 +236,11 @@ mod native {
     fn existing_windows_token_and_directory_are_refused_without_repair() {
         use windows_sys::Win32::Security::{
             Authorization::{
-                ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-                SetSecurityInfo,
+                ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SetSecurityInfo,
             },
-            GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
+            GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_OWNER,
+            TokenOwner,
         };
         let mut token = std::ptr::null_mut();
         assert_ne!(
@@ -262,6 +263,14 @@ mod native {
             0
         );
         let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        let user_sid = unsafe {
+            sid(
+                user.User.Sid.cast(),
+                buffer.as_ptr().cast(),
+                std::mem::size_of_val(&buffer),
+            )
+        }
+        .expect("synthetic fixture TokenUser SID");
         let mut text = std::ptr::null_mut();
         assert_ne!(
             unsafe { ConvertSidToStringSidW(user.User.Sid, &mut text) },
@@ -275,7 +284,34 @@ mod native {
         unsafe {
             LocalFree(text.cast());
         }
-        let set_acl = |file: &File, extra: &str| {
+        let mut owner_buffer = [0usize; 128];
+        assert_ne!(
+            unsafe {
+                GetTokenInformation(
+                    token.0,
+                    TokenOwner,
+                    owner_buffer.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&owner_buffer) as u32,
+                    &mut needed,
+                )
+            },
+            0,
+            "query synthetic fixture TokenOwner: {}",
+            io::Error::last_os_error()
+        );
+        let default_owner = unsafe { &*owner_buffer.as_ptr().cast::<TOKEN_OWNER>() };
+        let default_owner = unsafe {
+            sid(
+                default_owner.Owner.cast(),
+                owner_buffer.as_ptr().cast(),
+                std::mem::size_of_val(&owner_buffer),
+            )
+        }
+        .expect("synthetic fixture TokenOwner SID");
+        eprintln!(
+            "synthetic fixture TokenUser={user_text}; TokenOwner SID bytes={default_owner:02x?}"
+        );
+        let set_acl = |file: &File, extra: &str, establish_owner: bool| {
             let text: Vec<_> = format!("D:P(A;;FA;;;{user_text}){extra}")
                 .encode_utf16()
                 .chain([0])
@@ -308,17 +344,30 @@ mod native {
                     SetSecurityInfo(
                         file.as_raw_handle(),
                         SE_FILE_OBJECT,
-                        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                        std::ptr::null_mut(),
+                        DACL_SECURITY_INFORMATION
+                            | PROTECTED_DACL_SECURITY_INFORMATION
+                            | if establish_owner {
+                                OWNER_SECURITY_INFORMATION
+                            } else {
+                                0
+                            },
+                        if establish_owner {
+                            user.User.Sid
+                        } else {
+                            std::ptr::null_mut()
+                        },
                         std::ptr::null_mut(),
                         acl,
                         std::ptr::null(),
                     )
                 },
-                0
+                0,
+                "set synthetic owner/DACL (establish_owner={establish_owner}): {}",
+                io::Error::last_os_error()
             );
         };
-        let snapshot = |file: &File| {
+        let snapshot = |file: &File, label: &str| {
+            let mut owner = std::ptr::null_mut();
             let mut descriptor = std::ptr::null_mut();
             assert_eq!(
                 unsafe {
@@ -326,52 +375,123 @@ mod native {
                         file.as_raw_handle(),
                         SE_FILE_OBJECT,
                         OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-                        std::ptr::null_mut(),
+                        &mut owner,
                         std::ptr::null_mut(),
                         std::ptr::null_mut(),
                         std::ptr::null_mut(),
                         &mut descriptor,
                     )
                 },
-                0
+                0,
+                "query synthetic {label} owner/DACL"
             );
             let descriptor = Descriptor(descriptor);
             let size = unsafe { GetSecurityDescriptorLength(descriptor.0) } as usize;
-            unsafe { std::slice::from_raw_parts(descriptor.0.cast::<u8>(), size) }.to_vec()
+            let owner = unsafe { sid(owner.cast(), descriptor.0.cast(), size) }
+                .expect("synthetic object owner SID");
+            let mut text = std::ptr::null_mut();
+            assert_ne!(
+                unsafe {
+                    ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                        descriptor.0,
+                        1,
+                        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                        &mut text,
+                        std::ptr::null_mut(),
+                    )
+                },
+                0,
+                "format synthetic {label} owner/DACL: {}",
+                io::Error::last_os_error()
+            );
+            let text = Descriptor(text.cast());
+            let length = (0..32768)
+                .find(|&i| unsafe { *text.0.cast::<u16>().add(i) } == 0)
+                .expect("bounded synthetic security descriptor text");
+            let text = String::from_utf16(unsafe {
+                std::slice::from_raw_parts(text.0.cast::<u16>(), length)
+            })
+            .unwrap();
+            eprintln!(
+                "synthetic {label}: {text}; owner_matches_TokenUser={}",
+                owner == user_sid
+            );
+            (
+                owner.to_vec(),
+                unsafe { std::slice::from_raw_parts(descriptor.0.cast::<u8>(), size) }.to_vec(),
+            )
         };
         let home = tempfile::tempdir().unwrap();
         let directory = OpenOptions::new()
             .read(true)
-            .access_mode(0x60001)
+            .access_mode(0xE0001) // READ_CONTROL | WRITE_DAC | WRITE_OWNER | FILE_READ_DATA
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(home.path())
             .unwrap();
-        set_acl(&directory, "");
+        snapshot(&directory, "directory before setup");
+        // Only freshly created synthetic objects receive explicit TokenUser ownership.
+        set_acl(&directory, "", true);
         let path = home.path().join("token");
         let secret = "x".repeat(32);
         std::fs::write(&path, &secret).unwrap();
         let file = OpenOptions::new()
             .read(true)
-            .access_mode(0x60001)
+            .access_mode(0xE0001) // READ_CONTROL | WRITE_DAC | WRITE_OWNER | FILE_READ_DATA
             .open(&path)
             .unwrap();
-        set_acl(&file, "");
-        assert_eq!(crate::update_control::read_token(&path).unwrap(), secret);
-        for (target, grant) in [
-            (&file, "(A;;FR;;;WD)"),
-            (&file, "(A;;FR;;;BA)"),
-            (&directory, "(A;;GW;;;WD)"),
-        ] {
-            set_acl(target, grant);
-            let before = snapshot(target);
-            assert!(crate::update_control::read_token(&path).is_err());
-            assert_eq!(std::fs::read_to_string(&path).unwrap(), secret);
+        snapshot(&file, "token before setup");
+        set_acl(&file, "", true);
+        let baseline = || {
             assert_eq!(
-                snapshot(target),
-                before,
-                "existing owner/DACL is never repaired"
+                snapshot(&file, "baseline token").0,
+                user_sid,
+                "synthetic token owner is TokenUser"
             );
-            set_acl(target, "");
+            assert_eq!(
+                snapshot(&directory, "baseline directory").0,
+                user_sid,
+                "synthetic directory owner is TokenUser"
+            );
+            validate(&file, true).expect("synthetic token owner/DACL admission");
+            validate(&directory, false).expect("synthetic directory owner/DACL admission");
+            validate_token(&file).expect("synthetic token final path and actual parent admission");
+            assert_eq!(crate::update_control::read_token(&path).unwrap(), secret);
+        };
+        baseline();
+        for (target, private, grant) in [
+            (&file, true, "(A;;FR;;;WD)"),
+            (&file, true, "(A;;FR;;;BA)"),
+            (&directory, false, "(A;;GW;;;WD)"),
+        ] {
+            set_acl(target, grant, false);
+            let token_before = snapshot(&file, "token before refusal");
+            let directory_before = snapshot(&directory, "directory before refusal");
+            let bytes_before = std::fs::read(&path).unwrap();
+            assert_eq!(
+                validate(target, private).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            assert!(
+                crate::update_control::read_token(&path).is_err(),
+                "unsafe synthetic grant {grant} must be refused"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                bytes_before,
+                "synthetic token bytes are never repaired"
+            );
+            assert_eq!(
+                snapshot(&file, "token after refusal"),
+                token_before,
+                "token owner/DACL is never repaired"
+            );
+            assert_eq!(
+                snapshot(&directory, "directory after refusal"),
+                directory_before,
+                "directory owner/DACL is never repaired"
+            );
+            set_acl(target, "", false);
+            baseline();
         }
     }
 }

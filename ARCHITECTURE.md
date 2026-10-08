@@ -108,7 +108,7 @@ beans/
   mobile/              # Expo app for iOS and Android: a paired Device over the core (modules/beans-core)
   web/                 # the site
   scripts/             # bun scripts: dev loop, bundle build, macOS release, the desktop app's dev loop and builds, string and doc checks
-  .github/workflows/   # release.yml: unified signed Beans releases; test.yml: every app's and crate's tests on each pull request; docs.yml: the doc check
+  .github/workflows/   # release.yml: manual signed Beans releases; test.yml: full release-PR test matrix; docs.yml: release-PR doc check; catalog.yml: release-PR catalog/index check
 ```
 
 `bun run android` rebuilds the Rust core for Android, then builds and runs the Expo dev client on the Android emulator. `cd mobile && bun run core` rebuilds the Rust core for both phone platforms; `bun run mobile:dev` is the iOS development loop described below.

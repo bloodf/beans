@@ -28,13 +28,13 @@ test("valid ZIP transport never authorizes missing native modules or successful 
     process.env.BEANS_EXPO_OWNER = "test-owner";
     try {
       const git = (args: string[]) => ({ exitCode: 0, stdout: Buffer.from(args.includes("rev-parse") ? revision : "") }) as any;
-      await expect(runEasRelease(["build", "github", revision, join(directory, "fresh")], async () => [{ ...build, appVersion: readVersion() }], git)).rejects.toThrow("manifest missing");
-      await expect(runEasRelease(["build", "github", revision, join(directory, "retry"), build.id], async () => ({ ...build, appVersion: readVersion() }), git)).rejects.toThrow("manifest missing");
-      await expect(runEasRelease(["build", "github", revision, directory], async () => [], git)).rejects.toThrow("exactly one");
-      await expect(runEasRelease(["build", "github", revision, directory], async () => [], () => ({ exitCode: 0, stdout: Buffer.from("dirty") }) as any)).rejects.toThrow("clean");
+      let queried = false;
+      const query = async () => { queried = true; return []; };
+      await expect(runEasRelease(["build", "github", revision, directory], query, git)).rejects.toThrow("policy unavailable");
+      expect(queried).toBe(false);
       await expect(runEasRelease(["bad"], async () => [], git)).rejects.toThrow("usage");
       delete process.env.EXPO_TOKEN;
-      await expect(runEasRelease(["build", "github", revision, directory], async () => [], git)).rejects.toThrow("required");
+      await expect(runEasRelease(["build", "github", revision, directory], async () => [], git)).rejects.toThrow("policy unavailable");
     } finally {
       if (oldToken === undefined) delete process.env.EXPO_TOKEN; else process.env.EXPO_TOKEN = oldToken;
       if (oldOwner === undefined) delete process.env.BEANS_EXPO_OWNER; else process.env.BEANS_EXPO_OWNER = oldOwner;

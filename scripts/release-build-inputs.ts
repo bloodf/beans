@@ -21,15 +21,76 @@ export function androidNdk(env: Record<string, string | undefined>, platform: st
 export type MobileReleaseProfile = "github" | "production" | "testflight";
 
 // Public pins are independently approved inputs, never inferred from candidate bytes.
-// Rotation/lineage and Apple verification are unsupported and fail closed.
+// Admission checks the exact current signer set, not absence of artifact lineage.
 export type PublicTrustPolicy =
   | { profile: "github"; signerSha256: string[]; rotation: "none" }
   | { profile: "production"; uploadSignerSha256: string; rotation: "none" }
   | { profile: "testflight"; teamId: string; certificateSha256: string[] };
 export type PublicTrustPolicies = Partial<{ [P in MobileReleaseProfile]: Extract<PublicTrustPolicy, { profile: P }> }>;
 
+export function validatePublicTrustPolicy(value: unknown, profile: MobileReleaseProfile): PublicTrustPolicy {
+  const policy = value as PublicTrustPolicy;
+  if (!policy || typeof policy !== "object" || policy.profile !== profile) throw new Error(`Binary approved public trust policy unavailable for ${profile}`);
+  if (policy.profile === "github") {
+    if (policy.rotation !== "none" || !Array.isArray(policy.signerSha256)) throw new Error("Invalid APK current-signer policy");
+    approveSigners(policy.signerSha256, policy.signerSha256);
+  } else if (policy.profile === "production") {
+    if (policy.rotation !== "none") throw new Error("Invalid AAB upload-signer policy");
+    approveSigners([policy.uploadSignerSha256], [policy.uploadSignerSha256]);
+  } else {
+    if (!/^[A-Z0-9]{10}$/.test(policy.teamId) || !Array.isArray(policy.certificateSha256)) throw new Error("Invalid IPA public policy");
+    approveSigners(policy.certificateSha256, policy.certificateSha256);
+  }
+  return policy;
+}
+
+export function preflightMobileTrust(profile: MobileReleaseProfile, value: unknown): PublicTrustPolicy {
+  const policy = validatePublicTrustPolicy(value, profile);
+  if (profile === "testflight") throw new Error("IPA cryptographic trust verification unsupported; all-platform publication blocked");
+  for (const tool of profile === "github" ? ["unzip", "aapt2", "apksigner", "java"] : ["unzip", "bundletool", "jarsigner", "keytool", "java"]) {
+    if (!Bun.which(tool)) throw new Error(`Binary inspection tool unavailable: ${tool}`);
+  }
+  return policy;
+}
+
+export function preflightReleaseTrust(scope: "server" | "all", policies: PublicTrustPolicies): void {
+  if (scope === "server") return;
+  for (const profile of ["github", "production", "testflight"] as const) validatePublicTrustPolicy(policies[profile], profile);
+  // No all-platform build/sign/publication starts while required IPA is unsupported.
+  preflightMobileTrust("testflight", policies.testflight);
+}
+
+export async function publicTrustArguments(args: string[]): Promise<{ args: string[]; policies: PublicTrustPolicies }> {
+  const index = args.indexOf("--public-trust-policy");
+  if (index < 0) return { args, policies: {} };
+  if (index !== args.length - 2 || !args[index + 1]) throw new Error("--public-trust-policy <public-json-path> must be the final argument");
+  const file = Bun.file(args[index + 1]);
+  if (file.size > 64 * 1024) throw new Error("Public trust policy exceeds 64 KiB");
+  const value = await file.json();
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !["github", "production", "testflight"].includes(key))) throw new Error("Invalid public trust profile map");
+  const policies: PublicTrustPolicies = {};
+  for (const profile of ["github", "production", "testflight"] as const) {
+    if (Object.hasOwn(value, profile)) Object.assign(policies, { [profile]: validatePublicTrustPolicy(value[profile], profile) });
+  }
+  return { args: args.slice(0, index), policies };
+}
+
+export function apkCurrentSigners(output: string): string[] {
+  const counts = [...output.matchAll(/^Number of signers: ([1-9]\d*)\r?$/gm)];
+  const records = output.split(/\r?\n/).filter(line => /^Signer #.* certificate SHA-256 digest:/.test(line));
+  const count = counts.length === 1 ? Number(counts[0][1]) : 0;
+  if (!Number.isSafeInteger(count) || !count || records.length !== count) throw new Error("Incomplete APK signer enumeration");
+  const signers = records.map((line, index) => {
+    const match = line.match(/^Signer #([1-9]\d*) certificate SHA-256 digest: ([a-fA-F0-9]{64})$/);
+    if (!match || Number(match[1]) !== index + 1) throw new Error("Incomplete APK signer enumeration");
+    return match[2].toLowerCase();
+  });
+  if (output.split(/\r?\n/).filter(line => line.startsWith("Number of signers:")).length !== 1) throw new Error("Incomplete APK signer enumeration");
+  return signers;
+}
+
 function approveSigners(actual: string[], expected: string[]): void {
-  if (!expected.length || expected.some(pin => !/^[a-f0-9]{64}$/.test(pin)) || new Set(expected).size !== expected.length ||
+  if (!expected.length || expected.some(pin => typeof pin !== "string" || !/^[a-f0-9]{64}$/.test(pin)) || new Set(expected).size !== expected.length ||
       !actual.length || new Set(actual).size !== actual.length || actual.length !== expected.length || actual.some(pin => !expected.includes(pin))) {
     throw new Error("Binary signer differs from approved public trust policy");
   }
@@ -73,7 +134,7 @@ export function inspectReleaseArchive(bytes: Uint8Array): string[] {
 // These commands inspect public artifacts only. Missing tools never downgrade verification.
 function inspect(args: string[], maxBuffer = 1024 * 1024): string {
   if (!Bun.which(args[0])) throw new Error(`Binary inspection tool unavailable: ${args[0]}`);
-  const result = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe", timeout: 30_000, maxBuffer });
+  const result = Bun.spawnSync(args, { env: { ...process.env, LC_ALL: "C", LANG: "C" }, stdout: "pipe", stderr: "pipe", timeout: 30_000, maxBuffer });
   if (result.exitCode !== 0) throw new Error(`Binary inspection tool failed: ${args[0]}`);
   return result.stdout.toString();
 }
@@ -90,24 +151,21 @@ export function inspectMobileBinary(path: string, profile: MobileReleaseProfile,
     const identity = packages[0]?.match(/^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'(?:\s|$)/);
     if (packages.length !== 1 || !identity || identity[1] !== "ai.amoena.beans" || identity[2] !== number || identity[3] !== version) throw new Error("APK native identity differs from release");
     const signatures = inspect(["apksigner", "verify", "--verbose", "--print-certs", path]);
-    if (!policy || policy.profile !== profile) throw new Error(`Binary approved public trust policy unavailable for ${profile}`);
-    if (policy.rotation !== "none") throw new Error("APK signer rotation/lineage unsupported");
-    const signers = [...signatures.matchAll(/^Signer #\d+ certificate SHA-256 digest: ([a-fA-F0-9]{64})\r?$/gm)].map(match => match[1].toLowerCase());
-    approveSigners(signers, policy.signerSha256);
+    const approved = validatePublicTrustPolicy(policy, profile) as Extract<PublicTrustPolicy, { profile: "github" }>;
+    approveSigners(apkCurrentSigners(signatures), approved.signerSha256);
   } else if (profile === "production") {
     if (!entries.includes("base/manifest/AndroidManifest.xml")) throw new Error("AAB base module manifest missing");
     // bundletool decodes the actual protobuf base manifest; aapt2 does not inspect AABs.
     const values = ["/manifest/@package", "/manifest/@android:versionName", "/manifest/@android:versionCode"].map(xpath => inspect(["bundletool", "dump", "manifest", `--bundle=${path}`, "--module=base", `--xpath=${xpath}`]).trim());
     if (values[0] !== "ai.amoena.beans" || values[1] !== version || values[2] !== number) throw new Error("AAB native identity differs from release");
-    const signatures = inspect(["jarsigner", "-verify", "-verbose", "-certs", path]);
+    const signatures = inspect(["jarsigner", "-J-Duser.language=en", "-J-Duser.country=US", "-verify", "-verbose", "-certs", path]);
     // jarsigner can exit zero for unsigned archives. It is not an approved-signer gate.
     if (!signatures.includes("jar verified.") || signatures.includes("unsigned entries")) throw new Error("AAB signature verification failed");
-    if (!policy || policy.profile !== profile) throw new Error(`Binary approved public trust policy unavailable for ${profile}`);
-    if (policy.rotation !== "none") throw new Error("AAB upload signer rotation unsupported");
+    const approved = validatePublicTrustPolicy(policy, profile) as Extract<PublicTrustPolicy, { profile: "production" }>;
     // keytool reads the JAR signer, not an arbitrary unsigned certificate member.
     // Multiple signers or certificate chains are unsupported rather than guessed.
     const certificates = inspect(["keytool", "-printcert", "-rfc", "-jarfile", path]).match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
-    approveSigners(certificates.map(pem => new X509Certificate(pem).fingerprint256.replaceAll(":", "").toLowerCase()), [policy.uploadSignerSha256]);
+    approveSigners(certificates.map(pem => new X509Certificate(pem).fingerprint256.replaceAll(":", "").toLowerCase()), [approved.uploadSignerSha256]);
   } else {
     const apps = entries.filter(name => /^Payload\/[^/]+\.app\/Info\.plist$/.test(name));
     if (apps.length !== 1) throw new Error("IPA main app manifest missing or ambiguous");

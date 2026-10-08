@@ -8,7 +8,7 @@ import { readVersion, ROOT } from "./app.ts";
 import { archiveFixture } from "./release-archive-fixture.ts";
 const paths: string[] = [];
 afterEach(async () => { await Promise.all(paths.map((path) => rm(path, { recursive: true, force: true }))); });
-test("all-platform CLI preflight rejects missing notes before loading private credentials", async () => {
+test("all-platform CLI preflight rejects missing public policy before loading private credentials", async () => {
   const path = await mkdtemp(join(tmpdir(), "beans-release-preflight-")); paths.push(path);
   await mkdir(join(path, "scripts"));
   await mkdir(join(path, "updates"));
@@ -22,7 +22,7 @@ test("all-platform CLI preflight rejects missing notes before loading private cr
     cwd: path, env: { ...process.env, BEANS_UPDATE_PRIVATE_KEY: "" },
   });
   expect(result.exitCode).not.toBe(0);
-  expect(result.stderr.toString()).toContain("CHANGELOG.md requires notes for 1.0.13");
+  expect(result.stderr.toString()).toContain("public trust policy unavailable");
 });
 async function server() {
   const path = await mkdtemp(join(tmpdir(), "beans-release-fixture-")); paths.push(path);

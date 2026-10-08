@@ -4,9 +4,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile, copyFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readVersion } from "./app.ts";
-import { stageEasBuild, verifyEasBinary } from "./release-eas.ts";
-import { buildReleaseManifest } from "./release-github.ts";
-import type { PublicTrustPolicy } from "./release-build-inputs.ts";
+import { runEasRelease, stageEasBuild, verifyEasBinary } from "./release-eas.ts";
+import { buildReleaseManifest, writeReleaseManifest } from "./release-github.ts";
+import { apkCurrentSigners, preflightMobileTrust, type PublicTrustPolicy } from "./release-build-inputs.ts";
 
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 function run(args: string[]) {
@@ -48,6 +48,39 @@ test("test-only signed APK accepts explicit pin and rejects signer, identity, ha
     await stageEasBuild(build, "github", revision, inventory, policy);
     const proof = JSON.parse(await readFile(join(inventory, "eas-github.json"), "utf8"));
     expect(proof.sha256).toBe(sha(bytes));
+    const policyFile = join(root, "public-policy.json");
+    await writeFile(policyFile, JSON.stringify({ github: policy }));
+    let queried = false;
+    const query = async () => { queried = true; return [build]; };
+    const git = (args: string[]) => ({ exitCode: 0, stdout: Buffer.from(args.includes("rev-parse") ? revision : "") }) as any;
+    await expect(runEasRelease(["build", "github", revision, join(root, "no-policy")], query, git)).rejects.toThrow("policy unavailable");
+    expect(queried).toBe(false);
+    const oldToken = process.env.EXPO_TOKEN, oldOwner = process.env.BEANS_EXPO_OWNER;
+    process.env.EXPO_TOKEN = "fixture-only"; process.env.BEANS_EXPO_OWNER = "fixture-only";
+    try {
+      await runEasRelease(["build", "github", revision, join(root, "caller-positive"), "--public-trust-policy", policyFile], query, git);
+      expect(JSON.parse(await readFile(join(root, "caller-positive", "eas-github.json"), "utf8")).sha256).toBe(sha(bytes));
+    } finally {
+      if (oldToken === undefined) delete process.env.EXPO_TOKEN; else process.env.EXPO_TOKEN = oldToken;
+      if (oldOwner === undefined) delete process.env.BEANS_EXPO_OWNER; else process.env.BEANS_EXPO_OWNER = oldOwner;
+    }
+    const allPolicies = { github: policy, production: { profile: "production", uploadSignerSha256: policy.signerSha256[0], rotation: "none" }, testflight: { profile: "testflight", teamId: "TESTONLY00", certificateSha256: policy.signerSha256 } } as const;
+    const allFile = join(root, "all-public-policy.json");
+    await writeFile(allFile, JSON.stringify(allPolicies));
+    queried = false;
+    await expect(runEasRelease(["build", "testflight", revision, join(root, "ipa"), "--public-trust-policy", allFile], query, git)).rejects.toThrow("IPA cryptographic trust verification unsupported");
+    expect(queried).toBe(false);
+    await expect(writeReleaseManifest(`beans-v${version}`, revision, inventory, "all", allPolicies as any)).rejects.toThrow("IPA cryptographic trust verification unsupported");
+    for (const command of ["check", "manifest", "publish"]) {
+      const positional = command === "check" ? [`beans-v${version}`, "all"] : [`beans-v${version}`, revision, inventory, "all"];
+      const child = Bun.spawnSync([process.execPath, "scripts/release-github.ts", command, ...positional, "--public-trust-policy", allFile], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+      expect(child.exitCode).not.toBe(0);
+      expect(child.stderr.toString()).toContain("IPA cryptographic trust verification unsupported");
+    }
+    const enumeration = `Number of signers: 1\nSigner #1 certificate SHA-256 digest: ${policy.signerSha256[0]}\n`;
+    expect(apkCurrentSigners(enumeration)).toEqual(policy.signerSha256);
+    for (const malformed of [enumeration.replace("signers: 1", "signers: 2"), enumeration.replace("Signer #1", "Signer #2"), enumeration + enumeration, enumeration.replace(policy.signerSha256[0], "truncated")]) expect(() => apkCurrentSigners(malformed)).toThrow("Incomplete APK signer enumeration");
+    if (!Bun.which("bundletool")) expect(() => preflightMobileTrust("production", allPolicies.production)).toThrow("tool unavailable: bundletool");
     await expect(stageEasBuild(build, "github", revision, join(root, "rejected"), wrongSigner)).rejects.toThrow("signer differs");
     expect(await Bun.file(join(root, "rejected", "eas-github.json")).exists()).toBe(false);
     const names = ["beans-server-linux-x86_64.tar.gz", "beans-server-linux-aarch64.tar.gz", "beans-server-updater.py", `Beans-${version}.zip`, `Beans-${version}.dmg`, "appcast.xml", `Beans Setup ${version}.exe`, `beans_${version}_amd64.deb`, `beans_${version}_arm64.deb`, "install-linux-amd64.sh", "install-linux-arm64.sh", ...["windows-amd64", "linux-amd64", "linux-arm64"].flatMap(p => [`update-${p}.json`, `beans-${version}-${p}.tar.gz`])];

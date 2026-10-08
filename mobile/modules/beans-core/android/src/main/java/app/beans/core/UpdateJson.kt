@@ -9,7 +9,8 @@ internal object UpdateJson {
   fun parse(bytes: ByteArray): JSONObject {
     val text = bytes.toString(Charsets.UTF_8)
     val token = JSONTokener(text)
-    fun parse(t: JSONTokener): Any? {
+    fun parse(t: JSONTokener, depth: Int): Any? {
+      require(depth <= 32) { "Update JSON nesting exceeds limit" }
       return when (val c = t.nextClean()) {
         '{' -> {
           val obj = JSONObject(); val keys = mutableSetOf<String>()
@@ -18,7 +19,7 @@ internal object UpdateJson {
             while (true) {
               require(t.nextClean() == '"'); t.back()
               val key = t.nextValue() as String; require(keys.add(key)) { "Duplicate JSON key" }
-              require(t.nextClean() == ':'); obj.put(key, parse(t))
+              require(t.nextClean() == ':'); obj.put(key, parse(t, depth + 1))
               val end = t.nextClean(); if (end == '}') break
               require(end == ',')
             }; obj
@@ -28,13 +29,13 @@ internal object UpdateJson {
           val arr = JSONArray()
           if (t.nextClean() == ']') arr else {
             t.back()
-            while (true) { arr.put(parse(t)); val end = t.nextClean(); if (end == ']') break; require(end == ',') }; arr
+            while (true) { arr.put(parse(t, depth + 1)); val end = t.nextClean(); if (end == ']') break; require(end == ',') }; arr
           }
         }
         else -> { t.back(); t.nextValue() }
       }
     }
-    val result = parse(token) as JSONObject
+    val result = parse(token, 0) as JSONObject
     require(token.nextClean() == '\u0000') { "Trailing JSON bytes" }
     return result
   }

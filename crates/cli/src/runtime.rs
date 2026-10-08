@@ -37,18 +37,15 @@ pub fn send_user_message(
     chat_id: &str,
     text: &str,
     message_id: Option<String>,
-    attachments: Vec<Attachment>,
+    files: Vec<crate::files::OutgoingFile>,
     mentions: Vec<String>,
     reply_to: Option<String>,
 ) -> anyhow::Result<Message> {
     let text = text.trim();
-    if text.is_empty() && attachments.is_empty() {
+    if text.is_empty() && files.is_empty() {
         anyhow::bail!("Empty message");
     }
     let chat = app.chat(chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
-    // Refused before anything is written while an update holds new work back, so no message
-    // waits for a turn that never comes. After the chat lookup, so a bad chat still says so.
-    let admission = app.update.try_admit().ok_or_else(|| anyhow::anyhow!(crate::update_control::UPDATING))?;
     let mentions = resolve_mentions(&app, text, mentions);
     let reply_to = match reply_to.filter(|id| !id.is_empty()) {
         Some(id) => Some(
@@ -59,6 +56,10 @@ pub fn send_user_message(
         ),
         None => None,
     };
+    // Refused before anything is written while an update holds new work back, so no message
+    // waits for a turn that never comes. After the chat lookup, so a bad chat still says so.
+    let admission = app.update.try_admit().ok_or_else(|| anyhow::anyhow!(crate::update_control::UPDATING))?;
+    let attachments = crate::files::store_many(&app, &files)?;
     // The bytes go out ahead of the message that names them.
     for attachment in &attachments {
         if let Err(error) = crate::files::push_blob(&app, Some(chat_id), attachment) {
@@ -787,6 +788,28 @@ mod tests {
         assert!(matches!(dispatch_job(app, job), Dispatch::Deferred));
         assert!(app.store.outbox().unwrap().iter().all(|item| item.kind != "job"));
         assert!(app.running_jobs.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_refusal_preserves_attachment_and_queue() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        app.state.lock().unwrap().chats.push(empty_chat("chat"));
+        let source = app.config.home.join("source.txt");
+        std::fs::write(&source, b"replacement").unwrap();
+        std::fs::create_dir_all(app.config.files_dir()).unwrap();
+        let target = crate::files::local_path(app, "att-existing");
+        std::fs::write(&target, b"original").unwrap();
+        let before = app.store.outbox().unwrap().into_iter().map(|item| (item.id, item.ciphertext)).collect::<Vec<_>>();
+        app.update.prepare(app, std::time::Duration::from_secs(60));
+        let params = serde_json::json!({"chat_id":"chat", "text":"hello", "attachments":[{"path":source, "id":"att-existing"}]});
+        assert_eq!(crate::api::dispatch(app, "chats.send", params).await.unwrap_err(), crate::update_control::UPDATING);
+        assert_eq!(std::fs::read(target).unwrap(), b"original");
+        assert_eq!(app.store.outbox().unwrap().into_iter().map(|item| (item.id, item.ciphertext)).collect::<Vec<_>>(), before);
+        assert!(app.store.page("chat", None, 200).unwrap().0.is_empty());
+        assert!(app.store.sent_jobs().unwrap().is_empty());
+        assert!(app.running_jobs.lock().unwrap().is_empty());
+        app.update.cancel(app);
     }
 
     #[test]

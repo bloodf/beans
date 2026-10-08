@@ -29,7 +29,7 @@ There is no per-connection credential, no per-method authorization and no sandbo
 
 ## Field errors
 
-The required string parameters that `api.rs` reads through its `string` helper (`chat_id`, `bot_id`, `id`, `name`, `runner_id`, `plugin_id`, `kind`, `schedule`, `query`, `phrase`, `nonce`, `pairing_string`, `platform`, `token`, `message_id`, `decision`, `api_key` and `text` of `mcp.parse`) answer the same two errors. Only `chats.send` additionally validates its other fields before it changes anything. Other methods check their fields in their own order and may change state before a later field fails; for example `bots.update` stores a new avatar before it finds an unknown bot. The `mcp.*` runner verbs read `name`, `enabled`, `tool` and `hidden` themselves and answer `missing <field>` for a wrong type; `memory.*` bodies answer the codes listed under Memory methods; `update.*` answers its own sentences.
+The required string parameters that `api.rs` reads through its `string` helper (`chat_id`, `bot_id`, `id`, `name`, `runner_id`, `plugin_id`, `kind`, `schedule`, `query`, `phrase`, `nonce`, `pairing_string`, `platform`, `token`, `message_id`, `decision`, `api_key` and `text` of `mcp.parse`) answer the same two errors. `chats.send` validates fields and admission before storing attachments. `bots.update` checks bot existence before avatar storage. Other methods check fields in their own order. The `mcp.*` runner verbs read `name`, `enabled`, `tool` and `hidden` themselves and answer `missing <field>` for a wrong type; `memory.*` bodies answer the codes listed under Memory methods; `update.*` answers its own sentences.
 
 | Case | Error |
 | --- | --- |
@@ -41,7 +41,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `chats.send`, `attachments` present and not an array of `{ path, id?, name?, mime?, width?, height? }` | `attachments must be an array of files` |
 | `chats.send`, `mentions` present and not an array of strings | `mentions must be an array of strings` |
 
-`chats.send` checks, in order: `chat_id`, that the chat exists (`Unknown chat`), `text`, `message_id`, `reply_to`, every element of `attachments` and `mentions`, and that `reply_to` names a quotable message; only then does it copy attachment files and store the message. A request that fails one of those checks copies no file, writes no message, queues nothing and starts no turn. `null` and an absent key mean "not given" for every `chats.send` field except `chat_id`. An empty or whitespace-only `text` with no attachment answers `Empty message`; an attachment alone is a valid send. Two refusals come after the copy and are not covered: a file that cannot be read (missing, a directory, over 100 MiB) after an earlier file in the same send was copied, and the update-drain refusal (`This Runner is installing an update…`). Both leave copied bytes in `files/`, admit no message and start no turn. This is not a transaction: concurrent changes to the files or the chat between the checks and the copy are not guarded.
+`chats.send` checks `chat_id`, chat existence (`Unknown chat`), optional string types, attachment and mention shapes, and missing text before runtime admission. Runtime checks blank text (`Empty message` without attachments), chat existence, quotable `reply_to` and update drain before file preparation. Attachment-only sends remain valid. Absent and `null` mean "not given" except for `chat_id`. Every source is read into private staging before any attachment id is replaced; a rejected source leaves existing bytes, messages, queued blobs and jobs unchanged. Successful preparation moves staged files into `files/`, queues their blobs, then stores the message. This is not a filesystem transaction: a destination I/O failure during commit can leave earlier files committed; concurrent file or chat changes are not guarded.
 
 ## Methods
 
@@ -112,7 +112,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `plugins.install` | `runner_id`, `plugin_id` or `manifest` | `status` |
 | `plugins.uninstall`, `plugins.detail` | `runner_id`, `plugin_id` | `null` for uninstall; for detail, the plugin, which variables are set (never their values) and each server's state, including a sign-in `code` and `link` while one waits |
 | `plugins.set_variables` | `runner_id`, `plugin_id`, `variables` (secret values) | `status` |
-| `plugins.connect` | `runner_id`, `plugin_id`, `server?`, `redirect_uri?` (a loopback URL, so the sign-in page opens on the requesting Device) | `message`, `url`, `sign_in` |
+| `plugins.connect` | `runner_id`, `plugin_id`, `server?` (the Runner owns its loopback callback) | `message`, `url`, `sign_in` |
 | `plugins.sign_out` | `runner_id`, `plugin_id`, `server?` | plugin detail |
 | `plugins.auth.cancel` | `sign_in?` | `null` |
 | `mcp.parse` | `text` | parsed servers |
@@ -221,7 +221,7 @@ Examples and logs use placeholders only. These methods carry a credential or pla
 - `bots.memory` returns plaintext bot memory; `files.path` returns a path whose decrypted bytes are on disk.
 - `memory.*` replies mask secrets (`has_secret`); `memory.connections.set` and `memory.embeddings.set` take them as `replace` patches, and `memory.lance.export.apply` writes plaintext vectors.
 
-`sync.account`, `providers.connect_*` replies and snapshots carry masked statuses only. Errors from this API's own field checks name a field, never its value. Errors that pass on a provider's or relay's response text (for example a failed `providers.connect_*` or `pair.accept`) are not guaranteed value-free. `provider.auth` and `plugin.auth` events carry OAuth authorization URLs, and every connected local client receives them.
+`sync.account`, `providers.connect_*` replies and snapshots carry masked statuses only. Shared required-string checks and `chats.send` schema checks name fields without echoing values. Other errors are not guaranteed value-free: avatar checks can include supplied paths or names, and provider or relay failures can pass through response text. `provider.auth` and `plugin.auth` events carry OAuth authorization URLs, and every connected local client receives them.
 
 ## Sealed Runner verbs
 

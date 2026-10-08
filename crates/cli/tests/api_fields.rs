@@ -23,6 +23,9 @@ struct Snapshot {
     files: BTreeMap<String, (u64, String)>,
     messages: Vec<String>,
     jobs: BTreeSet<String>,
+    queued: Vec<Vec<String>>,
+    sent: Vec<Vec<String>>,
+    roster: String,
 }
 
 impl Scratch {
@@ -53,7 +56,18 @@ impl Scratch {
         }
         let messages = self.stored().iter().map(|message| serde_json::to_string(message).unwrap()).collect();
         let jobs = self.app.running_jobs.lock().unwrap().keys().cloned().collect();
-        Snapshot { files, messages, jobs }
+        let db = rusqlite::Connection::open_with_flags(self.app.config.database_path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let rows = |sql: &str| {
+            let mut statement = db.prepare(sql).unwrap();
+            let count = statement.column_count();
+            statement.query_map([], |row| {
+                (0..count).map(|i| row.get_ref(i).map(|value| format!("{value:?}"))).collect::<rusqlite::Result<Vec<_>>>()
+            }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        let queued = rows("SELECT * FROM outbox ORDER BY position");
+        let sent = rows("SELECT * FROM sent_jobs ORDER BY id");
+        let roster = serde_json::to_string(&self.app.snapshot()).unwrap();
+        Snapshot { files, messages, jobs, queued, sent, roster }
     }
 
     fn stored(&self) -> Vec<Message> {
@@ -228,4 +242,98 @@ async fn valid_sends_are_stored_exactly() {
     let added: BTreeSet<String> = s.user_ids().difference(&users).cloned().collect();
     assert_eq!(added, ["m-1", "m-2", "m-3"].map(String::from).into_iter().collect());
     assert!(s.app.running_jobs.lock().unwrap().is_empty(), "a paused account starts no turn");
+}
+
+#[tokio::test]
+async fn failed_preparation_preserves_existing_bytes_and_queued_slots() {
+    for paused in [true, false] {
+        let s = Scratch::new(true);
+        let mut file = s.file();
+        file["id"] = json!("att-existing");
+        s.call("chats.send", json!({"chat_id": s.chat, "text": "original", "message_id": "m-existing", "attachments": [file]})).await.unwrap();
+        s.app.store.insert_sent_job(&beans::app::SentJob {
+            id: "waiting-job".into(), chat_id: s.chat.clone(), bot_id: "fixture-bot".into(),
+            routine_id: None, runner_id: "fixture-runner".into(), sent_at: 1.0,
+        }).unwrap();
+        s.app.set_paused(paused);
+        // Both an existing slot and a new id must survive a later missing source unchanged.
+        for id in ["att-existing", "att-new"] {
+            file["id"] = json!(id);
+            std::fs::write(&s.attachment, b"replacement").unwrap();
+            s.send_rejected(json!({"message_id": "m-existing", "attachments": [file, {"path": s.home.join("missing")}]}), "No such file").await;
+        }
+        assert_eq!(std::fs::read(s.app.config.files_dir().join("att-existing")).unwrap(), b"fixture");
+        s.rejected("bots.update", json!({"id": "unknown", "avatar": {"path": s.attachment, "mime": "image/png"}}), "Unknown bot").await;
+    }
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn reference_frames_round_trip_over_ws() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as Frame;
+    let mut s = Scratch::new(true);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    // Reopen the same synthetic, paused home; no sync loop or provider is started.
+    s.app = App::load(Config { home: s.home.clone(), port }).unwrap();
+    let server = tokio::spawn(beans::ws::serve(s.app.clone(), false));
+    let url = format!("ws://127.0.0.1:{port}/ws");
+    let (mut socket, _) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(socket) = tokio_tungstenite::connect_async(&url).await { break socket; }
+            assert!(!server.is_finished(), "server exited before connection");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    async fn exchange(socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, frame: String, id: Value) -> Value {
+        socket.send(Frame::Text(frame.into())).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let frame = socket.next().await.unwrap().unwrap();
+                if let Frame::Text(text) = frame {
+                    let reply: Value = serde_json::from_str(&text).unwrap();
+                    if reply.get("id") == Some(&id) { break reply; }
+                    assert!(reply.get("event").is_some(), "unexpected frame: {reply}");
+                }
+            }
+        }).await.unwrap()
+    }
+    // Exact documented frames, substituting only the chat id.
+    let hello = exchange(&mut socket, r#"{"id":1,"method":"hello","params":{}}"#.into(), json!(1)).await;
+    assert_eq!(hello["result"]["has_identity"], true);
+    let send = r#"{"id":2,"method":"chats.send","params":{"chat_id":"<chat id>","text":"Hello"}}"#.replace("<chat id>", &s.chat);
+    let reply = exchange(&mut socket, send, json!(2)).await;
+    let id = reply["result"]["message"]["id"].as_str().unwrap();
+    let stored = s.app.message(&s.chat, id).unwrap();
+    assert_eq!(stored.author, Author::You);
+    assert!(matches!(stored.body, Body::Text { ref text, .. } if text == "Hello"));
+    for params in [json!({"chat_id": s.chat, "text": 5}), json!({"chat_id": s.chat})] {
+        let before = s.snapshot();
+        let reply = exchange(&mut socket, json!({"id": "field", "method": "chats.send", "params": params}).to_string(), json!("field")).await;
+        assert!(reply["error"]["message"].as_str().unwrap().contains("text"));
+        assert_eq!(s.snapshot(), before);
+    }
+    let reply = exchange(&mut socket, json!({"id": 3, "method": "chats.send", "params": {"chat_id": s.chat, "attachments": [s.file()]}}).to_string(), json!(3)).await;
+    let stored = s.app.message(&s.chat, reply["result"]["message"]["id"].as_str().unwrap()).unwrap();
+    assert!(matches!(stored.body, Body::Text { ref text, ref attachments, .. } if text.is_empty() && attachments[0].size == 7));
+    for frame in [r#"{"id":4,"method":"hello"}"#, r#"{"id":4,"method":"hello","params":null}"#] {
+        assert_eq!(exchange(&mut socket, frame.into(), json!(4)).await["result"], hello["result"]);
+    }
+    assert_eq!(exchange(&mut socket, r#"{"id":5,"method":"unknown"}"#.into(), json!(5)).await, json!({"id":5,"error":{"message":"unknown method unknown"}}));
+    let malformed = exchange(&mut socket, "[]".into(), Value::Null).await;
+    assert!(malformed["error"]["message"].as_str().unwrap().starts_with("bad request: "));
+    assert!(s.app.running_jobs.lock().unwrap().is_empty());
+    assert!(s.app.store.sent_jobs().unwrap().is_empty());
+    #[cfg(feature = "cli")]
+    {
+        let status = std::process::Command::new(env!("CARGO_BIN_EXE_beans")).args(["--home", s.home.to_str().unwrap(), "status"]).output().unwrap();
+        assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+        let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(status, s.app.snapshot());
+    }
+    socket.close(None).await.unwrap();
+    server.abort();
+    let _ = server.await;
 }

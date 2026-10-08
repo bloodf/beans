@@ -300,6 +300,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             // fetch the blob by the time it reads the profile.
             let capabilities = capabilities(&params)?;
             let look = look(&params)?;
+            app.bot(&id).ok_or("Unknown bot")?;
             let avatar = store_avatar(app, avatar_file(&params)?)?;
             let bot = app.update_bot(&id, |bot| {
                 if let Some(v) = opt_string(&params, "name") { bot.name = v; }
@@ -377,15 +378,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             if text.is_none() && files.is_empty() {
                 return Err("missing text".into());
             }
-            // The lookup `send_user_message` repeats, run here before any file is copied.
-            if let Some(id) = reply_to.as_deref().filter(|id| !id.is_empty()) {
-                app.message(&chat_id, id).as_ref().and_then(ReplyTo::quoting).ok_or("The message you replied to is no longer in this chat")?;
-            }
-            let mut attachments = Vec::new();
-            for file in &files {
-                attachments.push(crate::files::store(app, file).map_err(|e| e.to_string())?);
-            }
-            let message = runtime::send_user_message(app.clone(), &chat_id, &text.unwrap_or_default(), message_id, attachments, mentions, reply_to)
+            let message = runtime::send_user_message(app.clone(), &chat_id, &text.unwrap_or_default(), message_id, files, mentions, reply_to)
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "message": message }))
         }

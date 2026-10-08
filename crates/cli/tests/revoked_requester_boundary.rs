@@ -161,4 +161,54 @@ async fn queued_request_from_revoked_device_cannot_write_surviving_runner_memory
     assert_eq!(outbox(&requester), requester_outbox_before, "requester's persisted intent remains exact");
     assert_eq!((after, stored_memory), (before, "retained memory\n".into()),
         "consuming a request queued before revocation must not mutate surviving Runner memory after prune");
+    // Keep the original RED assertion intact. Then exercise unsigned, forged and valid
+    // attribution with a fresh, actually attested Device, through the same real ingress.
+    let current = Machine::generate();
+    let current_id = current.pubkey();
+    runner.relay.attest(&url, &runner_token, &current_id, &current.box_pubkey()).await.unwrap();
+    {
+        let mut state = runner.state.lock().unwrap();
+        state.listed_machines.insert(current_id.clone(), 1);
+        state.devices.push(beans::model::Device { id: current_id.clone(), name: "current requester".into(),
+            box_pubkey: current.box_pubkey(), os: "ios".into(), ..Default::default() });
+    }
+    for mode in ["unsigned", "forged", "valid"] {
+        let mut candidate = beans::model::Request { id: format!("attribution-{mode}"), verb: "memory.write".into(),
+            requested_by: current_id.clone(), created_at: beans::config::now_secs(),
+            body: json!({"bot_id": bot_id, "text": "current signed mutation\n"}) };
+        if mode != "unsigned" {
+            let signing_bytes = serde_json::to_vec(&("beans-request-v1", &candidate.id, &candidate.verb,
+                &candidate.requested_by, runner.this_device_id().unwrap(), candidate.created_at, &candidate.body)).unwrap();
+            let signer = if mode == "forged" { &requester_machine } else { &current };
+            candidate.body = json!({"payload": candidate.body, "signature": signer.sign(&signing_bytes)});
+        }
+        let ciphertext = beans::crypto::seal_json(&runner_machine.box_pubkey(), &candidate).unwrap();
+        let item = OutboxItem { id: candidate.id.clone(), kind: "request".into(), recipient: runner.this_device_id(),
+            ciphertext, slot: None, group: None };
+        let current_token = runner.relay.authenticate(&url, &current).await.unwrap();
+        runner.relay.put_blob(&url, &current_token, item, 0).await.unwrap();
+        let (pending, _) = runner.relay.list_blobs(&url, &runner_token, 0, "request").await.unwrap();
+        assert_eq!(pending.iter().map(|blob| blob.id.as_str()).collect::<Vec<_>>(), vec![candidate.id.as_str()]);
+        beans::sync::apply_blob(&runner, &runner_file, &pending[0]);
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if runner.relay.list_blobs(&url, &runner_token, 0, "request").await.unwrap().0.is_empty() { break; }
+                sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("attribution request did not finish");
+        let memory = std::fs::read_to_string(runner.config.home.join("workspaces").join(&bot_id).join("MEMORY.md")).unwrap();
+        assert_eq!(memory, if mode == "valid" { "current signed mutation\n" } else { "retained memory\n" }, "{mode} attribution effect");
+        let db = rusqlite::Connection::open_with_flags(runner.config.database_path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let replies: Vec<Vec<u8>> = db.prepare("SELECT ciphertext FROM outbox WHERE kind = 'response' AND recipient = ?1 ORDER BY position").unwrap()
+            .query_map([&current_id], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        let response: beans::model::Response = beans::crypto::unseal_json(&current.box_secret, replies.last().unwrap()).unwrap();
+        assert_eq!(response.request_id, candidate.id);
+        match mode {
+            "unsigned" => assert_eq!(response.error.as_deref(), Some("Unsigned request")),
+            "forged" => assert_eq!(response.error.as_deref(), Some("Invalid request signature")),
+            "valid" => assert_eq!(response.body["hash"], beans::requests::memory_read(&runner, &bot_id).unwrap()["index"]["hash"]),
+            _ => unreachable!(),
+        }
+        assert_eq!(response.error.is_none(), mode == "valid");
+    }
 }

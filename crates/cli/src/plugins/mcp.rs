@@ -68,6 +68,13 @@ impl Admission {
     }
 }
 
+fn connection_snapshot(app: &App, id: &str, name: &str, admission: Admission) -> Result<(Installed, BTreeMap<String, String>, Option<Value>), String> {
+    let _guard = admission.enter(app, id)?;
+    let store = app.plugins.lock().unwrap();
+    let plugin = store.get(id).cloned().ok_or_else(|| format!("{id} is not installed on this Runner"))?;
+    Ok((plugin, store.values(id), store.sign_in_secret(id, "oauth", name)))
+}
+
 /// One connected MCP server.
 pub struct Server {
     pub plugin_id: String,
@@ -208,20 +215,14 @@ impl Pool {
         }
         let gate = self.connecting.lock().unwrap().entry(key.clone()).or_default().clone();
         let _guard = gate.lock().await;
-        let (plugin, values) = {
-            let _admission = admission.enter(app, plugin_id)?;
-            if let Some(server) = self.cached_server(&key) { return Ok(server); }
-            let store = app.plugins.lock().unwrap();
-            let plugin = store.get(plugin_id).cloned().ok_or_else(|| format!("{plugin_id} is not installed on this Runner"))?;
-            (plugin, store.values(plugin_id))
-        };
+        let (plugin, values, tokens) = connection_snapshot(app, plugin_id, name, admission)?;
         let values = template_values(&plugin, values).await;
         let spec = plugin.manifest.servers.get(name).cloned().ok_or_else(|| format!("{} has no server {name}", plugin.manifest.name))?;
         {
             let _admission = admission.enter(app, plugin_id)?;
             super::note(app, plugin_id, Some(("connecting", "Connecting…")));
         }
-        let connected = tokio::time::timeout(CONNECT_TIMEOUT, connect(app, &plugin, name, &spec, &values, admission))
+        let connected = tokio::time::timeout(CONNECT_TIMEOUT, connect(app, &plugin, name, &spec, &values, tokens, admission))
             .await
             .unwrap_or_else(|_| Err(format!("{} did not start within {} minutes", plugin.manifest.name, CONNECT_TIMEOUT.as_secs() / 60)));
         let _admission = admission.enter(app, plugin_id)?;
@@ -269,7 +270,8 @@ impl Pool {
     }
 }
 
-async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSpec, values: &BTreeMap<String, String>, admission: Admission) -> Result<Server, String> {
+async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSpec, values: &BTreeMap<String, String>, tokens: Option<Value>, admission: Admission) -> Result<Server, String> {
+    { let _guard = admission.enter(app, &plugin.manifest.id)?; }
     let mut implementation = Implementation::default();
     implementation.name = "Beans".into();
     implementation.version = crate::config::VERSION.into();
@@ -285,6 +287,8 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
             // Windows as files the way a terminal finds them (`npx` is npm's `npx.cmd`).
             let command = expand_home(&fill(command, values));
             let mut cmd = beans_agent::login_shell::command(&command).await;
+            let (transport, stderr) = {
+            let _guard = admission.enter(app, &plugin.manifest.id)?;
             cmd.args(args.iter().map(|a| expand_home(&fill(a, values))));
             // A variable naming an optional key the user left unset is left out.
             for (key, value) in env {
@@ -306,7 +310,8 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
             #[cfg(windows)]
             wrapped.wrap(process_wrap::tokio::JobObject);
             wrapped.wrap(process_wrap::tokio::KillOnDrop);
-            let (transport, stderr) = TokioChildProcess::builder(wrapped).stderr(std::process::Stdio::piped()).spawn().map_err(|_| format!("Cannot start {}", plugin.manifest.name))?;
+            TokioChildProcess::builder(wrapped).stderr(std::process::Stdio::piped()).spawn().map_err(|_| format!("Cannot start {}", plugin.manifest.name))?
+            };
             let said = Stderr::follow(stderr, &plugin.manifest.id);
             match client().serve(transport).await {
                 Ok(service) => service,
@@ -335,7 +340,6 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                 Some(AuthSpec::Oauth { token_variable: Some(variable), .. }) => values.get(variable).cloned(),
                 _ => None,
             };
-            let tokens = app.plugins.lock().unwrap().sign_in_secret(&plugin.manifest.id, "oauth", name);
             match (pasted, auth_spec, tokens) {
                 (Some(token), _, _) => {
                     let config = config.auth_header(token);
@@ -3054,6 +3058,41 @@ mod tests {
         assert!(callback.await.unwrap().is_err(), "old refresh remained admitted after account replacement");
         assert_eq!(app.plugins.lock().unwrap().sign_in_secret("forget-fixture", "oauth", "api").unwrap()["tokens"]["access_token"], "synthetic-B");
         assert!(admission.enter(app, "forget-fixture").is_err());
+    }
+
+    #[tokio::test]
+    async fn suspended_old_connection_never_sends_replacement_origin_credentials() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let old_origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        old_origin.set_nonblocking(true).unwrap();
+        let new_origin = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        new_origin.set_nonblocking(true).unwrap();
+        let manifest = |origin: std::net::SocketAddr| crate::plugins::Manifest::parse(&json!({
+            "id":"same-id", "name":"Fixture",
+            "servers":{"api":{"type":"http","url":format!("http://{origin}/mcp"),"auth":{"type":"oauth"}}}
+        })).unwrap();
+        crate::identity::create(app, Some("Synthetic A".into())).unwrap();
+        crate::plugins::install(app, manifest(old_origin.local_addr().unwrap()), "inline").unwrap();
+        crate::plugins::set_oauth(app, "same-id", "api", Some(json!({"tokens":{"access_token":"synthetic-A"}}))).unwrap();
+        let admission = Admission::capture(app, "same-id").unwrap();
+        let (plugin, values, tokens) = connection_snapshot(app, "same-id", "api", admission).unwrap();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let held = app.clone();
+        let connecting = tokio::spawn(async move {
+            blocked.await.unwrap();
+            let spec = plugin.manifest.servers.get("api").unwrap();
+            connect(&held, &plugin, "api", spec, &values, tokens, admission).await
+        });
+        app.forget_identity().unwrap();
+        crate::identity::create(app, Some("Synthetic B".into())).unwrap();
+        crate::plugins::install(app, manifest(new_origin.local_addr().unwrap()), "inline").unwrap();
+        crate::plugins::set_oauth(app, "same-id", "api", Some(json!({"tokens":{"access_token":"synthetic-B"}}))).unwrap();
+        release.send(()).unwrap();
+        assert!(connecting.await.unwrap().is_err());
+        assert_eq!(old_origin.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock, "stale transport contacted A's origin");
+        assert_eq!(new_origin.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock, "stale transport contacted B's origin");
+        assert_eq!(app.plugins.lock().unwrap().sign_in_secret("same-id", "oauth", "api").unwrap()["tokens"]["access_token"], "synthetic-B");
     }
 
     #[tokio::test]

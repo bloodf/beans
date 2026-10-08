@@ -1,15 +1,14 @@
-# Runs the test suites on every pull request and every push to main: the Rust workspace on Linux,
+# Runs the full test matrix on same-repository release/** pull requests targeting main: the Rust workspace on Linux,
 # where the relay's store suite runs on SQLite and on a Postgres service, and on macOS; the crates
 # a Windows Runner runs, on Windows; the macOS app's XCTest suite over the markdown crate it links;
-# the Windows and Linux app's page and Go side; and the phone app's TypeScript. The end-to-end
-# scripts, which need a live relay, a model, or a simulator, run locally.
+# the Windows and Linux app's page and Go side; and the phone app's TypeScript. Jobs that compile
+# the CLI install a pinned protoc first. The end-to-end scripts, which need a live relay, a model,
+# or a simulator, run locally.
 name: Tests
 
 on:
-  push:
-    branches: [main]
   pull_request:
-
+    branches: [main]
 permissions:
   contents: read
 
@@ -23,15 +22,17 @@ env:
 
 jobs:
   release-source:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
     name: Release source fixtures
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts
+      - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts scripts/release-pr-gates.test.ts
 
   rust-linux:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
     name: Rust (Linux)
     runs-on: ubuntu-latest
     services:
@@ -53,22 +54,33 @@ jobs:
       - run: python3 -I -B scripts/server-updater.test.py -v
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # prost-build, reached through lancedb, runs protoc and does not bundle it.
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: protoc@3.36.2
+          fallback: none
       # Cargo unifies features across the packages of one run, and the phone core takes beans
       # without the runner, so it is tested on its own.
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
 
   rust-macos:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
     name: Rust (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: protoc@3.36.2
+          fallback: none
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
 
   rust-windows:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
     name: Rust (Windows)
     # The crates a Windows Runner runs: the CLI, the agent, the model catalog, and provider
     # sign-in. There paths have drive letters, PATH splits on `;`, and commands run on pipes in
@@ -76,14 +88,23 @@ jobs:
     # the login shell's environment) are #[cfg(unix)]. The release builds x86_64-pc-windows-gnu with zig, and the
     # tests build with the runner's MSVC toolchain.
     runs-on: windows-latest
+    env:
+      # rustc ran out of memory (STATUS_STACK_BUFFER_OVERRUN after a failed allocation) compiling
+      # the CLI's test targets with the Lance dependencies; one job at a time keeps the peak down.
+      CARGO_BUILD_JOBS: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: protoc@3.36.2
+          fallback: none
       # Every suite runs, so one failing on Windows does not hide the others.
       - run: cargo test --locked --no-fail-fast -p beans -p beans-agent -p beans-models -p beans-provider-auth -p beans-tls
 
   macos-app:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
     name: macOS app
     # The app builds against the macOS 26 SDK.
     runs-on: macos-26
@@ -102,6 +123,7 @@ jobs:
       - run: sh macos/Tests/run-settings-layout.sh
 
   desktop:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
     name: Windows and Linux app
     runs-on: ubuntu-latest
     defaults:
@@ -122,6 +144,7 @@ jobs:
       - run: go test ./...
 
   mobile:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
     name: Phone app
     runs-on: ubuntu-latest
     defaults:

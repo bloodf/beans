@@ -20,6 +20,8 @@ Commands:
 - `beans service install` / `uninstall` / `status` — keep `beans serve` running from login on ([Service management](service-updates.md#service-management)).
 - `beans self-update` — reports that CLI self-update is unavailable in Beans, before opening account data or making network requests.
 
+The hidden global `--message-format <value>` option is accepted and ignored for Cargo-wrapper compatibility, including when appended after `serve` arguments. It does not change output formatting; unrelated unknown flags remain errors.
+
 Bind: `127.0.0.1:4874` (Beans) or `127.0.0.1:4875` (Beans Dev), selected by `--port` / `BEANS_PORT`; native builds fix their matching isolated port. Relay: `BEANS_RELAY_URL`. A busy port fails loudly.
 
 The `/ws` upgrade checks `Host` before opening the socket: only `localhost:<serve port>` or `127.0.0.1:<serve port>` is accepted, even though the listener binds to loopback. Native clients (the AppKit app and the Go desktop client) send no `Origin` and connect with either host. Browser clients send an `Origin`; the CLI accepts its own HTTP origin or one explicitly listed in `BEANS_ALLOWED_ORIGINS`, a comma-separated list of exact HTTP(S) origins. Invalid entries, paths, prefixes, wildcards, cross-site origins, and mismatched hosts or ports receive HTTP 403 before upgrade. The allowlist is for browser development, not a production default.

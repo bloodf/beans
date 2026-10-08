@@ -1023,3 +1023,5 @@
 "Diagnostics unavailable. No report was copied or exported. Check the local CLI and try again." = "诊断不可用。未复制或导出任何报告。请检查本地 CLI 后重试。";
 "Report copied to the clipboard." = "报告已复制到剪贴板。";
 "Could not export the report. Choose a writable destination and try again." = "无法导出报告。请选择可写入的位置后重试。";
+"Send input" = "发送输入";
+"Could not send input" = "无法发送输入";

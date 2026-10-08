@@ -22,6 +22,7 @@
     "l10n": "bun run scripts/l10n.ts",
     "check:docs": "bun run scripts/check-docs.ts",
     "check:catalog": "bun run scripts/check-catalog.ts",
+    "check:output-baseline": "bun run scripts/check-output-baseline.ts",
     "web": "bun run --cwd web dev",
     "web:build": "bun run --cwd web build",
     "web:deploy": "bun run --cwd web deploy",

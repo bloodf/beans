@@ -2188,6 +2188,140 @@ mod tests {
 
     #[cfg(feature = "server")]
     #[tokio::test]
+    async fn upgraded_reconnect_reports_persistent_roster_conflict_without_mutation() {
+        use axum::{extract::{Query, State as HttpState, ws::WebSocketUpgrade}, routing::{get, post, put}, Json, Router};
+        use serde_json::{json, Value};
+        use std::sync::atomic::AtomicUsize;
+
+        #[derive(Clone)]
+        struct Relay {
+            roster: Value,
+            upgrades: Arc<AtomicUsize>,
+            writes: Arc<AtomicUsize>,
+        }
+        async fn list(HttpState(relay): HttpState<Relay>, Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            let blobs = if query["kinds"] == "roster" { vec![relay.roster] } else { vec![] };
+            Json(json!({"blobs": blobs, "seq": 8}))
+        }
+        async fn upload(HttpState(relay): HttpState<Relay>) -> axum::http::StatusCode {
+            relay.writes.fetch_add(1, Ordering::Relaxed);
+            axum::http::StatusCode::CONFLICT
+        }
+        async fn upgrade(HttpState(relay): HttpState<Relay>, ws: WebSocketUpgrade) -> axum::response::Response {
+            ws.on_upgrade(move |mut socket| async move {
+                relay.upgrades.fetch_add(1, Ordering::Relaxed);
+                while socket.recv().await.is_some() {}
+            })
+        }
+        fn outbox(app: &App) -> Vec<(String, String, Option<String>, Vec<u8>, Option<Slot>, Option<String>)> {
+            let mut items: Vec<_> = app.store.outbox().unwrap().into_iter()
+                .map(|item| (item.id, item.kind, item.recipient, item.ciphertext, item.slot, item.group)).collect();
+            items.sort_by(|a, b| a.0.cmp(&b.0));
+            items
+        }
+        fn baseline(app: &App) -> Value {
+            serde_json::to_value(app.store.roster_baseline("queued").unwrap()).unwrap()
+        }
+
+        for _ in 0..3 {
+            let scratch = scratch_app();
+            let app = &scratch.0;
+            crate::identity::create(app, Some("Runner".into())).unwrap();
+            let initial = app.store.queued_roster().unwrap().unwrap();
+            app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+            let mut base = roster(bot("bot0"));
+            base.bots.push(bot("bot1"));
+            base.chats.push(ChatMeta { id: "group".into(), kind: "group".into(), title: None,
+                bot_ids: vec!["bot0".into(), "bot1".into()], owner_bot_id: Some("bot0".into()),
+                description: None, is_pinned: false, created_at: 1.0 });
+            apply_roster(app, base.clone());
+            app.state.lock().unwrap().roster_slot_seq = 7;
+            app.store.observe_roster(7, &base).unwrap();
+            let mut local = base.clone();
+            local.chats[0].bot_ids.remove(0);
+            apply_roster(app, local.clone());
+            let dek = app.dek().unwrap();
+            app.push_slot_blob("roster", Slot::latest("roster"), None, crate::crypto::encrypt_json(&dek, "roster", &local).unwrap());
+            app.store.queue_outbox(&OutboxItem { id: "group-file".into(), kind: "file".into(), recipient: None,
+                ciphertext: b"queued attachment ciphertext".to_vec(), slot: None, group: Some(crate::model::relay_name("group")) }).unwrap();
+            let mut remote = base;
+            remote.chats[0].bot_ids.remove(1);
+            let remote_blob = json!({"id": "remote-roster", "kind": "roster", "recipient_machine_pubkey": null,
+                "ciphertext": crate::keys::b64(&crate::crypto::encrypt_json(&dek, "roster", &remote).unwrap()), "seq": 8, "created_at": 1});
+            let relay = Relay { roster: remote_blob.clone(), upgrades: Arc::new(AtomicUsize::new(0)), writes: Arc::new(AtomicUsize::new(0)) };
+            let server = Router::new()
+                .route("/v1/health", get(|| async { Json(json!({"ok": true, "service": "beans-relay", "format": "beans-v2",
+                    "protocol": 5, "min_protocol": 5, "min_roster_protocol": 5, "memory_config_version": 1})) }))
+                .route("/v1/auth/challenge", post(|| async { Json(json!({"nonce": "synthetic-challenge"})) }))
+                .route("/v1/auth/verify", post(|| async { Json(json!({"token": "synthetic-token"})) }))
+                .route("/v1/sync", get(upgrade))
+                .route("/v1/blobs", put(upload).get(list)).with_state(relay.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server_task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+            // Registration is already established; exercise auth, upgrade and the real sync loop.
+            {
+                let mut machine = app.machine.lock().unwrap();
+                let machine = machine.as_mut().unwrap();
+                machine.registered = true;
+            }
+            app.save_machine().unwrap();
+            app.set_relay_url(Some(url.clone())).unwrap();
+            app.save_state_now();
+            let queued = outbox(app);
+            let frozen = baseline(app);
+            assert_eq!(frozen[0], 7);
+            let expected = roster_conflict("group group would have 0 members (allowed 1–6)").message;
+            let mut causes = Vec::new();
+            for restart in [false, true] {
+                let current = if restart { App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap() } else { app.clone() };
+                assert_eq!(outbox(&current), queued);
+                assert_eq!(baseline(&current), frozen);
+                let mut events = current.events.subscribe();
+                let sync_task = tokio::spawn(run(current.clone()));
+                for _ in 0..2 {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            if matches!(events.recv().await.unwrap(), Event::RelayStatus { connected: true, .. }) { break; }
+                        }
+                        loop {
+                            if matches!(events.recv().await.unwrap(), Event::RelayStatus { connected: false, .. }) { break; }
+                        }
+                    }).await.expect("upgrade followed by conflict disconnect");
+                    let cause = tokio::time::timeout(Duration::from_millis(500), async {
+                        loop {
+                            if let Event::RelayStatus { connected: false, error: Some(problem), .. } = events.recv().await.unwrap() {
+                                return problem;
+                            }
+                        }
+                    }).await.ok();
+                    causes.push(cause);
+                    assert_eq!(outbox(&current), queued);
+                    assert_eq!(baseline(&current), frozen);
+                    assert_eq!(current.chat("group").unwrap().meta, local.chats[0]);
+                    let (blobs, seq) = current.relay.list_blobs(&url, "synthetic-token", 0, "roster").await.unwrap();
+                    assert_eq!(seq, 8);
+                    assert_eq!(blobs.len(), 1);
+                    assert_eq!(blobs[0].id, remote_blob["id"].as_str().unwrap());
+                    assert_eq!(blobs[0].kind, "roster");
+                    assert_eq!(blobs[0].recipient_machine_pubkey, None);
+                    assert_eq!(blobs[0].ciphertext, remote_blob["ciphertext"].as_str().unwrap());
+                    assert_eq!(blobs[0].seq, 8);
+                    assert_eq!(blobs[0].created_at, 1);
+                    current.outbox_notify.notify_one();
+                }
+                sync_task.abort();
+                assert!(sync_task.await.unwrap_err().is_cancelled());
+            }
+            server_task.abort();
+            assert!(relay.upgrades.load(Ordering::Relaxed) >= 4);
+            assert_eq!(relay.writes.load(Ordering::Relaxed), 0);
+            assert_eq!(causes, vec![Some(RelayProblem { message: expected, unknown_machine: false }); 4]);
+        }
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
     async fn cas_membership_conflicts_preserve_local_and_remote() {
         use axum::{extract::{Query, State as HttpState}, http::StatusCode, routing::put, Json, Router};
         use serde_json::{json, Value};

@@ -25,7 +25,7 @@ The app speaks to `beans serve` over JSON on `ws://127.0.0.1:<port>/ws`; the CLI
 - `Origin` absent: allowed (AppKit, the Go desktop client, the phone core, the CLI).
 - `Origin` present: exactly one header and an exact origin, with no path, wildcard, userinfo or list. It must equal `http://<Host>` or appear in `BEANS_ALLOWED_ORIGINS`, a comma-separated list of exact origins read on each upgrade; one malformed entry rejects every cross-origin upgrade.
 
-There is no per-connection credential, no per-method authorization and no sandbox. The boundary is the local user account: any local process that connects without an `Origin` can call every method below, including the secret-bearing and destructive ones. Only `update.prepare` and `update.cancel` check a token (the file `BEANS_UPDATE_TOKEN_FILE` names, 32 characters or more, compared by digest); `update.status` needs none. See [Runtime](runtime.md) for the listener and proxy behavior.
+There is no per-connection credential, no per-method authorization and no sandbox. The boundary is the local user account: any local process that connects without an `Origin` can call every method below, including the secret-bearing and destructive ones, and a page served from the CLI's own `http://localhost:<port>` or `http://127.0.0.1:<port>` origin passes the `Origin` check. Only `update.prepare` and `update.cancel` check a token: the contents of the file `BEANS_UPDATE_TOKEN_FILE` names, at least 32 characters, in a regular file of at most 4096 bytes that is not a symlink, is owned by root or the running user, and is not group-writable or readable by others (on Windows, a private owner and DACL); it is compared by digest. `update.status` needs none. See [Runtime](runtime.md) for the listener and proxy behavior.
 
 ## Field errors
 
@@ -85,7 +85,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `bots.memory.write` | `bot_id`, `text`, `expected_hash?` | `hash` |
 | `chats.create` | `bot_ids`, `kind?` (`group` default, or `dm`), `id?`, `title?`, `owner_bot_id?`, `description?` | `chat` |
 | `chats.dm` | `bot_id`, `id?` | `chat` |
-| `chats.send` | `chat_id`, `text`, `message_id?`, `attachments?`, `mentions?`, `reply_to?` | `message` |
+| `chats.send` | `chat_id`, `text?` (required unless `attachments` is not empty), `message_id?`, `attachments?`, `mentions?`, `reply_to?` | `message` |
 | `chats.send_now` | `chat_id`, `message_id` | `sent` |
 | `chats.stop`, `chats.delete`, `chats.mark_read` | `chat_id` | `null` |
 | `chats.compact` [R] | `chat_id`, `bot_id?` | `tokens_before` |
@@ -96,7 +96,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `chats.search` | `query`, `limit?` (1–50, default 20) | `chats`, `messages` |
 | `chats.messages` | `chat_id`, `before?`, `limit?` (1–200) | `messages`, `has_more` |
 | `chats.permission` | `chat_id`, `message_id`, `decision` (`allow`, `always`, `deny`) | `answered` or the plugin sign-in reply |
-| `bash.stdin`, `bash.stop`, `bash.background` | `chat_id`, `message_id`, `text?`, `enter?` | the Runner's reply |
+| `bash.stdin`, `bash.stop`, `bash.background` | `chat_id`, `message_id`; `bash.stdin` also `text?`, `enter?` | the Runner's reply |
 | `files.path` | `attachment` | `path` (the decrypted file on this disk) |
 | `routines.create` | `bot_id`, `name`, `schedule`, `prompt?`, `enabled?` | `routine` |
 | `routines.update` | `id`, `name?`, `schedule?`, `prompt?`, `enabled?` | `routine` |
@@ -110,24 +110,30 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | --- | --- | --- |
 | `marketplace` | `query?` | `plugins`, `bots` |
 | `plugins.install` | `runner_id`, `plugin_id` or `manifest` | `status` |
-| `plugins.uninstall`, `plugins.detail` | `runner_id`, `plugin_id` | plugin detail |
+| `plugins.uninstall`, `plugins.detail` | `runner_id`, `plugin_id` | `null` for uninstall; for detail, the plugin, which variables are set (never their values) and each server's state, including a sign-in `code` and `link` while one waits |
 | `plugins.set_variables` | `runner_id`, `plugin_id`, `variables` (secret values) | `status` |
-| `plugins.connect` | `runner_id`, `plugin_id`, `server?` | `message`, `url`, `sign_in` |
+| `plugins.connect` | `runner_id`, `plugin_id`, `server?`, `redirect_uri?` (a loopback URL, so the sign-in page opens on the requesting Device) | `message`, `url`, `sign_in` |
 | `plugins.sign_out` | `runner_id`, `plugin_id`, `server?` | plugin detail |
 | `plugins.auth.cancel` | `sign_in?` | `null` |
 | `mcp.parse` | `text` | parsed servers |
-| `mcp.list`, `mcp.get`, `mcp.save`, `mcp.remove`, `mcp.set_enabled`, `mcp.hide_tool`, `mcp.reconnect`, `mcp.sign_in`, `mcp.sign_out`, `mcp.reload` | `runner_id?`, `name`, plus the verb's fields | server entries with full `config` (secret); see [MCP servers](mcp-servers.md#managing-it) |
+| `mcp.list`, `mcp.reload` | `runner_id?` | `path`, `error`, `servers` |
+| `mcp.get`, `mcp.remove`, `mcp.sign_out`, `mcp.reconnect` (`fresh?`, default true), `mcp.sign_in` (`wait?`) | `runner_id?`, `name` | `get`, `reconnect`, `sign_out` and a waited `sign_in`: `path`, `server`; `remove`: `null`; `sign_in` otherwise: `message` |
+| `mcp.save` | `runner_id?`, `name`, `config`, `previous_name?` | `path`, `server` |
+| `mcp.set_enabled` | `runner_id?`, `name`, `enabled` | `path`, `server` |
+| `mcp.hide_tool` | `runner_id?`, `name`, `tool`, `hidden` | `path`, `server` |
 | `providers.api_key` | `kind` | `api_key` (secret), `base_url` |
 | `providers.connect_deepseek`, `_anthropic`, `_opencode`, `_opencode_go` [PA] | `api_key` (secret), `base_url?` | `providers` (masked) |
 | `providers.connect_custom` [PA] | `name`, `base_url`, `api_key`, `models`, `api?`, `kind?`, `integration?` | `kind`, `providers` |
 | `providers.connect_chatgpt`, `providers.connect_grok` [PA] | none | `email`, `providers`; `connect_grok` is disabled in production builds |
 | `providers.list_models`, `providers.refresh`, `providers.auth.cancel`, `providers.disconnect` [PA] | `name`, `api`, `base_url`, `api_key`, `integration?` (list); `kind` (disconnect) | `listed`, `models`; `updated`; `null`; `providers` |
 
+Every `mcp.*` result that holds a server carries its full `config`, which is secret-bearing; see [MCP servers](mcp-servers.md#managing-it).
+
 `memory.read` and `memory.write` have no local arm and answer `unknown method`; they are sealed verbs only (`bots.memory` and `bots.memory.write` are the local calls).
 
 ## Memory methods
 
-The methods match [Memory services](memory-services.md) and [Memory UI](memory-ui.md). Every body is a strict object: an unknown key answers `invalid_memory_request`. Failures are codes, not sentences. An `id` is 1–1024 bytes with no control character. A Revision is `{ counter: u64, device_id }`.
+The methods match [Memory services](memory-services.md) and [Memory UI](memory-ui.md). Except `memory.connections.list`, which ignores its params, every body is a strict object: an unknown key, a wrong type or a missing field answers `invalid_memory_request`. A service or operation call reads `bot_id` first, so a missing or non-string `bot_id` there answers `missing_bot_id`. Failures are codes, not sentences. An `id` is 1–1024 bytes with no control character. A Revision is `{ counter: u64, device_id }`.
 
 ### Configuration (this Device)
 
@@ -152,7 +158,7 @@ Shared shapes:
 
 ### Service and operations (the bot's Runner)
 
-Each carries `bot_id`; another Device receives it as a sealed request to the bot's Runner. An unknown bot answers `bot_deleted`, a missing one `missing_bot_id`. Admission rechecks account Pause, assignment, connection revision, consent and deletion epoch (`runner_draining`, `account_paused`, `runner_changed`, `authority_changed`).
+Each carries `bot_id`; another Device receives it as a sealed request to the bot's Runner, which waits 20 s for the answer. A call that times out may still run there: read `memory.operations.status` before a retry. An unknown bot answers `bot_deleted`, a missing or non-string `bot_id` `missing_bot_id`. Admission rechecks account Pause, assignment, connection revision, consent and deletion epoch (`runner_draining`, `account_paused`, `runner_changed`, `authority_changed`).
 
 | Method | Params (beside `bot_id`) | Result |
 | --- | --- | --- |
@@ -215,8 +221,8 @@ Examples and logs use placeholders only. These methods carry a credential or pla
 - `bots.memory` returns plaintext bot memory; `files.path` returns a path whose decrypted bytes are on disk.
 - `memory.*` replies mask secrets (`has_secret`); `memory.connections.set` and `memory.embeddings.set` take them as `replace` patches, and `memory.lance.export.apply` writes plaintext vectors.
 
-`sync.account`, `providers.connect_*` replies and snapshots carry masked statuses only. Error messages name a field, never its value.
+`sync.account`, `providers.connect_*` replies and snapshots carry masked statuses only. Errors from this API's own field checks name a field, never its value. Errors that pass on a provider's or relay's response text (for example a failed `providers.connect_*` or `pair.accept`) are not guaranteed value-free. `provider.auth` and `plugin.auth` events carry OAuth authorization URLs, and every connected local client receives them.
 
 ## Sealed Runner verbs
 
-A Device reaches another Runner through `kind=request` blobs ([Protocols](protocols.md#cli--relay)): the memory setup and `memory.service.*` / `memory.operations.*` verbs above, `memory.read`, `memory.write`, the `mcp.*` verbs except `mcp.parse`, `plugins.install`, `uninstall`, `variables`, `connect`, `sign_in.finish`, `sign_in.cancel`, `sign_out`, `detail`, `permission.answer`, `bash.stdin|stop|background` and `chats.send_now`. Only the memory setup verbs check that the requester is a known Device before acting.
+A Device reaches another Runner through `kind=request` blobs ([Protocols](protocols.md#cli--relay)): the memory setup and `memory.service.*` / `memory.operations.*` verbs above, `memory.read`, `memory.write`, the `mcp.*` verbs except `mcp.parse`, `plugins.install`, `uninstall`, `variables`, `connect`, `sign_in.finish`, `sign_in.cancel`, `sign_out`, `detail`, `permission.answer`, `bash.stdin|stop|background`, `chats.send_now`, and `self_update.install` and `self_update.auto`, which fail closed. A sealed request waits 20 s (75 s for a plugin sign-in start, 150 s for `mcp.reconnect`, 330 s for memory setup). Only the memory setup verbs check that the requester is a known Device before acting; `runner_id` is a local routing field that the dispatcher removes before sealing.

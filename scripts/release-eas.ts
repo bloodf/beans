@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { readVersion, ROOT } from "./app.ts";
 import { tmpdir } from "node:os";
-import { inspectMobileBinary, type MobileReleaseProfile } from "./release-build-inputs.ts";
+import { inspectMobileBinary, type MobileReleaseProfile, type PublicTrustPolicy } from "./release-build-inputs.ts";
 
 const profiles = { github: { platform: "ANDROID", extension: "apk", component: "android" }, production: { platform: "ANDROID", extension: "aab", component: "android-store" }, testflight: { platform: "IOS", extension: "ipa", component: "ios-store" } } as const;
 type Profile = keyof typeof profiles;
@@ -58,20 +58,20 @@ async function eas(args: string[]): Promise<any> {
   if (await child.exited !== 0) throw new Error("EAS command failed; no release readiness is published");
   return JSON.parse(text);
 }
-export async function verifyEasBinary(bytes: Uint8Array, profile: MobileReleaseProfile, version: string, number: string) {
+export async function verifyEasBinary(bytes: Uint8Array, profile: MobileReleaseProfile, version: string, number: string, policy?: PublicTrustPolicy) {
   if (!Object.hasOwn(profiles, profile)) throw new Error("Invalid binary inspection profile");
   const temporary = await mkdtemp(join(tmpdir(), "beans-binary-inspect-"));
   try {
     const path = join(temporary, `candidate.${profiles[profile].extension}`);
     await writeFile(path, bytes, { flag: "wx" });
-    inspectMobileBinary(path, profile, version, number);
+    inspectMobileBinary(path, profile, version, number, policy);
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
-export async function stageEasBuild(build: any, profile: Profile, revision: string, directory: string) {
+export async function stageEasBuild(build: any, profile: Profile, revision: string, directory: string, policy?: PublicTrustPolicy) {
   const project = process.env.BEANS_EXPO_PROJECT_ID ?? "";
   validateEasBuild(build, profile, revision, readVersion(), project);
   const bytes = await downloadArtifact(build.artifacts.buildUrl);
-  await verifyEasBinary(bytes, profile, readVersion(), build.appBuildVersion);
+  await verifyEasBinary(bytes, profile, readVersion(), build.appBuildVersion, policy);
   const name = `Beans-${readVersion()}${profile === "testflight" ? "-store" : ""}.${profiles[profile].extension}`;
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, name), bytes, { flag: "wx" });

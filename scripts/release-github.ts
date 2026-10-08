@@ -6,6 +6,7 @@ import { readVersion, ROOT } from "./app.ts";
 import { extractReleaseNotes } from "./changelog.ts";
 import { releasePrivateKey, signReleaseBytes } from "./release-signing.ts";
 import { verifyEasBinary } from "./release-eas.ts";
+import type { PublicTrustPolicies } from "./release-build-inputs.ts";
 
 export interface ReleaseArtifact {
   name: string;
@@ -103,7 +104,7 @@ function scopedArtifact(name: string, version: string, core: string, scope: Rele
   return artifact;
 }
 
-export async function buildReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server"): Promise<ReleaseManifest> {
+export async function buildReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server", policies: PublicTrustPolicies = {}): Promise<ReleaseManifest> {
   scope = releaseScope(scope);
   const version = releaseVersion(tag);
   if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error("Release revision must be the exact40-character tag commit");
@@ -148,7 +149,7 @@ export async function buildReleaseManifest(tag: string, revision: string, direct
       identities.add(proof.buildId);
       const bytes = new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer());
       if (createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) throw new Error(`EAS binary changed during finalization: ${profile}`);
-      await verifyEasBinary(bytes, profile, version, proof.buildNumber);
+      await verifyEasBinary(bytes, profile, version, proof.buildNumber, policies[profile]);
     }
   }
   return { schema: 1, version, revision, protocol: await releaseProtocol(), artifacts };

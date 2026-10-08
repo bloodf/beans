@@ -1,3 +1,4 @@
+import { X509Certificate } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,21 @@ export function androidNdk(env: Record<string, string | undefined>, platform: st
 }
 
 export type MobileReleaseProfile = "github" | "production" | "testflight";
+
+// Public pins are independently approved inputs, never inferred from candidate bytes.
+// Rotation/lineage and Apple verification are unsupported and fail closed.
+export type PublicTrustPolicy =
+  | { profile: "github"; signerSha256: string[]; rotation: "none" }
+  | { profile: "production"; uploadSignerSha256: string; rotation: "none" }
+  | { profile: "testflight"; teamId: string; certificateSha256: string[] };
+export type PublicTrustPolicies = Partial<{ [P in MobileReleaseProfile]: Extract<PublicTrustPolicy, { profile: P }> }>;
+
+function approveSigners(actual: string[], expected: string[]): void {
+  if (!expected.length || expected.some(pin => !/^[a-f0-9]{64}$/.test(pin)) || new Set(expected).size !== expected.length ||
+      !actual.length || new Set(actual).size !== actual.length || actual.length !== expected.length || actual.some(pin => !expected.includes(pin))) {
+    throw new Error("Binary signer differs from approved public trust policy");
+  }
+}
 
 // ZIP64 is deliberately unsupported: release inspection has explicit finite ceilings.
 export function inspectReleaseArchive(bytes: Uint8Array): string[] {
@@ -62,7 +78,7 @@ function inspect(args: string[], maxBuffer = 1024 * 1024): string {
   return result.stdout.toString();
 }
 
-export function inspectMobileBinary(path: string, profile: MobileReleaseProfile, version: string, number: string): void {
+export function inspectMobileBinary(path: string, profile: MobileReleaseProfile, version: string, number: string, policy?: PublicTrustPolicy): void {
   if (!["github", "production", "testflight"].includes(profile) || !/^\d+\.\d+\.\d+$/.test(version) || !/^[1-9]\d*$/.test(number)) throw new Error("Invalid binary inspection identity");
   const entries = inspectReleaseArchive(readFileSync(path));
   // CRC checks run only after declared and actual decompressed sizes are bounded.
@@ -73,7 +89,11 @@ export function inspectMobileBinary(path: string, profile: MobileReleaseProfile,
     const packages = badging.split("\n").filter(line => line.startsWith("package:"));
     const identity = packages[0]?.match(/^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'(?:\s|$)/);
     if (packages.length !== 1 || !identity || identity[1] !== "ai.amoena.beans" || identity[2] !== number || identity[3] !== version) throw new Error("APK native identity differs from release");
-    inspect(["apksigner", "verify", "--verbose", "--print-certs", path]);
+    const signatures = inspect(["apksigner", "verify", "--verbose", "--print-certs", path]);
+    if (!policy || policy.profile !== profile) throw new Error(`Binary approved public trust policy unavailable for ${profile}`);
+    if (policy.rotation !== "none") throw new Error("APK signer rotation/lineage unsupported");
+    const signers = [...signatures.matchAll(/^Signer #\d+ certificate SHA-256 digest: ([a-fA-F0-9]{64})\r?$/gm)].map(match => match[1].toLowerCase());
+    approveSigners(signers, policy.signerSha256);
   } else if (profile === "production") {
     if (!entries.includes("base/manifest/AndroidManifest.xml")) throw new Error("AAB base module manifest missing");
     // bundletool decodes the actual protobuf base manifest; aapt2 does not inspect AABs.
@@ -82,6 +102,12 @@ export function inspectMobileBinary(path: string, profile: MobileReleaseProfile,
     const signatures = inspect(["jarsigner", "-verify", "-verbose", "-certs", path]);
     // jarsigner can exit zero for unsigned archives. It is not an approved-signer gate.
     if (!signatures.includes("jar verified.") || signatures.includes("unsigned entries")) throw new Error("AAB signature verification failed");
+    if (!policy || policy.profile !== profile) throw new Error(`Binary approved public trust policy unavailable for ${profile}`);
+    if (policy.rotation !== "none") throw new Error("AAB upload signer rotation unsupported");
+    // keytool reads the JAR signer, not an arbitrary unsigned certificate member.
+    // Multiple signers or certificate chains are unsupported rather than guessed.
+    const certificates = inspect(["keytool", "-printcert", "-rfc", "-jarfile", path]).match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+    approveSigners(certificates.map(pem => new X509Certificate(pem).fingerprint256.replaceAll(":", "").toLowerCase()), [policy.uploadSignerSha256]);
   } else {
     const apps = entries.filter(name => /^Payload\/[^/]+\.app\/Info\.plist$/.test(name));
     if (apps.length !== 1) throw new Error("IPA main app manifest missing or ambiguous");
@@ -97,7 +123,5 @@ export function inspectMobileBinary(path: string, profile: MobileReleaseProfile,
       if (value.CFBundleIdentifier !== identifier || value.CFBundleShortVersionString !== version || value.CFBundleVersion !== number) throw new Error("IPA native identity differs from release");
     }
   }
-  // A candidate's certificate cannot bootstrap trust. No approved policy is shipped yet.
-  // Apple additionally needs signed entitlements, chain and provisioning verification.
-  throw new Error(`Binary approved public signer/lineage policy unavailable for ${profile}`);
+  if (profile === "testflight") throw new Error("IPA cryptographic trust verification unsupported; all-platform publication blocked");
 }

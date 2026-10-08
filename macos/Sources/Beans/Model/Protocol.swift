@@ -209,13 +209,14 @@ enum Wire {
         var name: String?
         var api: String?
         var integration: String?
+        var capabilities: CustomCapabilities?
         var models: [StatusModel]?
 
         func toModel() -> ProviderCredential? {
             guard let kind = ProviderCredential.Kind(wireValue: kind) else { return nil }
             return ProviderCredential(
                 kind: kind, isConnected: isConnected, detail: detail, baseURL: baseUrl, name: name,
-                api: api.flatMap(CustomAPI.init(rawValue:)), integration: integration, models: (models ?? []).map { $0.toModel() })
+                api: api.flatMap(CustomAPI.init(rawValue:)), integration: integration, capabilities: capabilities, models: (models ?? []).map { $0.toModel() })
         }
     }
 
@@ -479,11 +480,21 @@ enum Wire {
             var author: Author
             var createdAt: Double
         }
+        struct FileHit: Decodable {
+            var chatId: String
+            var messageId: String
+            var attachmentId: String
+            var name: String
+            var snippet: String
+            var createdAt: Double
+        }
 
         var chats: [ChatHit]
         var messages: [MessageHit]
+        var files: [FileHit]
+        var historyComplete: Bool
 
-        static let empty = SearchResults(chats: [], messages: [])
+        static let empty = SearchResults(chats: [], messages: [], files: [], historyComplete: true)
     }
 
     struct ChatUsage: Decodable {

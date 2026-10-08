@@ -1440,7 +1440,7 @@ export class AppStore {
 
   /** Full-text chat and message matches from the local SQLite index. */
   async searchChats(query: string): Promise<WireSearchResults> {
-    if (this.isMock) return { chats: [], messages: [] };
+    if (this.isMock) return { chats: [], messages: [], files: [], history_complete: true };
     return this.request<WireSearchResults>("chats.search", { query, limit: 24 });
   }
 
@@ -1883,9 +1883,9 @@ export class AppStore {
 
   /** Refreshes saved custom-provider model lists without changing their credentials or bot picks.
    * The CLI sends a roster event for changed catalogs. */
-  async refreshProviderModels(): Promise<number> {
+  async refreshProviderModels(runnerID?: string, kind?: string): Promise<number> {
     if (this.isMock) return 0;
-    const reply = await this.request<{ updated: number }>("providers.refresh");
+    const reply = await this.request<{ updated: number }>("providers.refresh", { runner_id: runnerID, kind });
     return reply.updated;
   }
 
@@ -1893,7 +1893,7 @@ export class AppStore {
    * the sheet to pick from; the base URL is read as the CLI saves it. Null when the server publishes
    * no list. Throws why the server could not be asked: a key it refused, no answer, or an answer
    * that is not an API's. */
-  async listCustomModels(options: { name: string; api: CustomAPI; baseURL: string; apiKey: string; integration?: "durindoor" }): Promise<CustomModel[] | null> {
+  async listCustomModels(options: { name: string; api: CustomAPI; baseURL: string; apiKey: string; integration?: "durindoor"; runnerID?: string; capabilities?: ProviderCredential["capabilities"] }): Promise<CustomModel[] | null> {
     if (this.isMock) {
       await new Promise((resolve) => setTimeout(resolve, 300));
       const { listedModels } = await import("./mock");
@@ -1905,6 +1905,7 @@ export class AppStore {
       base_url: options.baseURL.trim(),
       api_key: options.apiKey,
       integration: options.integration,
+      runner_id: options.runnerID, capabilities: options.capabilities,
     });
     return reply.listed ? reply.models.map(toCustomModel) : null;
   }
@@ -1921,6 +1922,8 @@ export class AppStore {
     baseURL: string;
     apiKey: string;
     models: string[];
+    runnerID?: string;
+    capabilities?: ProviderCredential["capabilities"] | null;
   }): Promise<CustomProviderKind> {
     const name = options.name.trim();
     const baseURL = options.baseURL.trim();
@@ -1935,7 +1938,7 @@ export class AppStore {
       this.emit({ kind: "chatsChanged" });
       return kind;
     }
-    const params: Record<string, unknown> = { name, integration: options.integration, api: options.api, base_url: baseURL, api_key: options.apiKey.trim(), models };
+    const params: Record<string, unknown> = { name, integration: options.integration, api: options.api, base_url: baseURL, api_key: options.apiKey.trim(), models, runner_id: options.runnerID, capabilities: options.capabilities };
     if (options.kind) params.kind = options.kind;
     const saved = await this.request<{ kind: string }>("providers.connect_custom", params);
     return isCustomKind(saved.kind) ? saved.kind : `custom:${saved.kind}`;

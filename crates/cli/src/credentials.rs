@@ -121,6 +121,18 @@ impl CustomIntegration {
     }
 }
 
+/// User declarations apply to every model on this connection, ahead of discovery.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<std::num::NonZeroU64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<bool>,
+}
+
 /// A server the user added that speaks one of the wire protocols Beans has: a gateway, another
 /// vendor's API, or a model server on their own network.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -136,9 +148,20 @@ pub struct CustomProvider {
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration: Option<CustomIntegration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<CustomCapabilities>,
 }
 
 impl CustomProvider {
+    pub fn effective_capabilities(&self, model: Option<&CustomModel>) -> CustomCapabilities {
+        let declared = self.capabilities.unwrap_or_default();
+        CustomCapabilities {
+            context_window: declared.context_window.or_else(|| model.and_then(|m| m.context_window).and_then(std::num::NonZeroU64::new)),
+            images: declared.images.or_else(|| model.and_then(|m| m.images)),
+            tools: declared.tools.or_else(|| model.and_then(|m| m.tools)),
+        }
+    }
+
     /// Thinking controls require an explicit format supported by the selected wire.
     /// Legacy gateway formats retain their declared effort translation.
     pub fn levels(&self, model: &CustomModel) -> Vec<beans_models::ThinkingLevel> {
@@ -380,7 +403,15 @@ impl Credentials {
                 name: Some(provider.name.clone()),
                 api: Some(provider.api),
                 integration: provider.integration,
-                models: provider.models.iter().map(|model| StatusModel { model: model.clone(), levels: provider.levels(model) }).collect(),
+                capabilities: provider.capabilities,
+                models: provider.models.iter().map(|model| {
+                    let capabilities = provider.effective_capabilities(Some(model));
+                    let mut effective = model.clone();
+                    effective.context_window = capabilities.context_window.map(std::num::NonZeroU64::get);
+                    effective.images = capabilities.images;
+                    effective.tools = capabilities.tools;
+                    StatusModel { model: effective, levels: provider.levels(model) }
+                }).collect(),
             }
         });
         built_in.chain(custom).collect()
@@ -481,7 +512,7 @@ mod tests {
 
     fn custom(name: &str, created_at: i64) -> CustomProvider {
         let models = vec![CustomModel { id: "m".into(), name: None, context_window: None, max_output: None, images: None, ..Default::default() }];
-        CustomProvider { name: name.into(), api: CustomApi::ChatCompletions, base_url: "http://lab/v1".into(), api_key: String::new(), models, created_at, integration: None }
+        CustomProvider { name: name.into(), api: CustomApi::ChatCompletions, base_url: "http://lab/v1".into(), api_key: String::new(), models, created_at, integration: None, capabilities: None }
     }
     #[test]
     fn discovered_models_extend_user_order_without_changing_connection() {

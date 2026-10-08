@@ -247,6 +247,7 @@ export interface WireProvider {
   name?: string | null;
   api?: string | null;
   integration?: "durindoor" | null;
+  capabilities?: ProviderCredential["capabilities"] | null;
   models?: WireCustomModel[] | null;
 }
 
@@ -330,6 +331,8 @@ export interface WireMessagePage {
 export interface WireSearchResults {
   chats: { chat_id: string; snippet: string }[];
   messages: { chat_id: string; message_id: string; snippet: string; author: WireAuthor; created_at: number }[];
+  files: { chat_id: string; message_id: string; attachment_id: string; name: string; snippet: string; created_at: number }[];
+  history_complete: boolean;
 }
 
 export interface WireMarketplacePlugin {
@@ -712,6 +715,7 @@ export function toProviders(wire: WireProvider[] | null | undefined): ProviderCr
       credential.name = optional(provider.name);
       credential.api = provider.api && isCustomAPI(provider.api) ? provider.api : undefined;
       credential.integration = optional(provider.integration);
+      credential.capabilities = optional(provider.capabilities);
       credential.models = (provider.models ?? []).map(toCustomModel);
     }
     return [credential];

@@ -6,6 +6,12 @@ import { t } from "../i18n";
 
 export const MAX_GROUP_BOTS = 6;
 
+export interface CustomCapabilities {
+  context_window?: number | null;
+  images?: boolean | null;
+  tools?: boolean | null;
+}
+
 export interface ProviderStatus {
   kind: ProviderKind | string;
   is_connected: boolean;
@@ -15,6 +21,7 @@ export interface ProviderStatus {
   name?: string;
   api?: CustomAPI;
   integration?: "durindoor";
+  capabilities?: CustomCapabilities;
   models?: CustomModel[];
 }
 
@@ -178,6 +185,8 @@ export type Author = { kind: "you" } | { kind: "bot"; bot_id: string } | { kind:
 export interface ChatSearchResults {
   chats: { chat_id: string; snippet: string }[];
   messages: { chat_id: string; message_id: string; snippet: string; author: Author; created_at: number }[];
+  files: { chat_id: string; message_id: string; attachment_id: string; name: string; snippet: string; created_at: number }[];
+  history_complete: boolean;
 }
 
 /// A file sent with a message. Its bytes travel as a `file` blob under this id, encrypted with
@@ -475,6 +484,7 @@ export const CUSTOM_PRESETS: readonly CustomPreset[] = [
   { name: "Gemini", api: "chat-completions", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai", keyPlaceholder: () => t("Key from aistudio.google.com") },
   { name: "Groq", api: "chat-completions", baseURL: "https://api.groq.com/openai/v1", keyPlaceholder: () => t("gsk_… from console.groq.com") },
   { name: "Together AI", api: "chat-completions", baseURL: "https://api.together.xyz/v1", keyPlaceholder: () => t("Key from api.together.ai") },
+  { get name() { return t("Local server"); }, compatible: true, api: "chat-completions", baseURL: "", keyPlaceholder: () => t("Optional API key"), local: true },
   { name: "Ollama", api: "chat-completions", baseURL: "http://localhost:11434/v1", keyPlaceholder: () => t("Optional for a server on your network"), local: true },
   { name: "LM Studio", api: "chat-completions", baseURL: "http://localhost:1234/v1", keyPlaceholder: () => t("Optional for a server on your network"), local: true },
 ];

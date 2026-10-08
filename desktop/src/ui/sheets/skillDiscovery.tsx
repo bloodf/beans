@@ -16,8 +16,12 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
   const [failure, setFailure] = createSignal("");
   const [result, setResult] = createSignal<Awaited<ReturnType<typeof store.discoverSkills>>>();
   let alive = true, revision = 0;
+  let selectedBinding: { id: string; os: string; key: string } | undefined;
   const unsubscribe = store.subscribe((event) => {
-    if (event.kind === "identityChanged" || event.kind === "connectionChanged") {
+    const selected = store.runners.find((device) => device.id === runnerID());
+    const runnerChanged = (event.kind === "rosterChanged" || event.kind === "snapshotReplaced") && selectedBinding !== undefined
+      && (!selected || selected.id !== selectedBinding.id || selected.os !== selectedBinding.os || selected.machineKey !== selectedBinding.key);
+    if (event.kind === "identityChanged" || event.kind === "connectionChanged" || runnerChanged) {
       revision++; setResult(undefined); setBusy(false); setFailure("");
     }
   });
@@ -28,6 +32,8 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
   const scan = async () => {
     if (busy() || !runner() || !root()) return;
     const request = ++revision;
+    const selected = runner()!;
+    selectedBinding = { id: selected.id, os: selected.os, key: selected.machineKey };
     setBusy(true); setResult(undefined); setFailure("");
     try {
       const next = await store.discoverSkills(runnerID(), root());

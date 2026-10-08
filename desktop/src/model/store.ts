@@ -173,6 +173,39 @@ const MEMORY_RPC_METHODS: Readonly<Record<string, true>> = {
   "memory.lance.import.apply": true,
 };
 
+type SkillDiscoveryReply = { version: 1; status: "scanned" | "unsupported"; skills: { path: string; name: string | null; description: string | null; license: string | null }[]; diagnostics: { path: string | null; code: string }[] };
+
+function decodeSkillDiscovery(value: unknown): SkillDiscoveryReply {
+  const invalid = (): never => { throw new RequestError(L("Skill discovery is unavailable.")); };
+  const object = (value: unknown, keys: string[]): Record<string, unknown> => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
+    const row = value as Record<string, unknown>;
+    if (Object.keys(row).length !== keys.length || keys.some((key) => !Object.hasOwn(row, key))) return invalid();
+    return row;
+  };
+  const text = (value: unknown, max: number, nullable: boolean): string | null => {
+    if (nullable && value === null) return null;
+    if (typeof value !== "string" || new TextEncoder().encode(value).length > max || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) return invalid();
+    return value;
+  };
+  const path = (value: unknown, nullable: boolean): string | null => {
+    const label = text(value, 4096, nullable);
+    if (label !== null && (!label || /[\\\\:]/u.test(label) || label.split("/").some((part) => !part || part === "." || part === ".."))) return invalid();
+    return label;
+  };
+  const reply = object(value, ["version", "status", "skills", "diagnostics"]);
+  if (reply.version !== 1 || (reply.status !== "scanned" && reply.status !== "unsupported") || !Array.isArray(reply.skills) || !Array.isArray(reply.diagnostics)) return invalid();
+  if (reply.skills.length > 256 || reply.diagnostics.length > 4096 || (reply.status === "unsupported" && reply.skills.length !== 0)) return invalid();
+  return { version: 1, status: reply.status, skills: reply.skills.map((value) => {
+    const row = object(value, ["path", "name", "description", "license"]);
+    return { path: path(row.path, false)!, name: text(row.name, 256, true), description: text(row.description, 2048, true), license: text(row.license, 256, true) };
+  }), diagnostics: reply.diagnostics.map((value) => {
+    const row = object(value, ["path", "code"]);
+    if (typeof row.code !== "string" || !["secure_discovery_unavailable", "unsupported_metadata", "discovery_limit", "missing_metadata", "path_not_inspected"].includes(row.code)) return invalid();
+    return { path: path(row.path, true), code: row.code };
+  }) };
+}
+
 export class AppStore {
   /** The seeded demo (`BEANS_MOCK=1`), which runs without a CLI. */
   get isMock(): boolean {
@@ -336,17 +369,20 @@ export class AppStore {
   }
 
   /** Read-only discovery remains bound to this account and connection across completion. */
-  async discoverSkills(runnerID: string, root: string): Promise<{ version: 1; status: "scanned" | "unsupported"; skills: { path: string; name: string | null; description: string | null; license: string | null }[]; diagnostics: { path: string | null; code: string }[] }> {
+  async discoverSkills(runnerID: string, root: string): Promise<SkillDiscoveryReply> {
     const generation = this.bootstrapGeneration, identity = this.identityID;
     const runner = this.runners.find((device) => device.id === runnerID);
     if (this.isMock || !this.isConnected || !this.hasIdentity || !identity || !runner) throw new RequestError(L("Skill discovery is unavailable."));
+    const runnerOS = runner.os, runnerKey = runner.machineKey;
     let changed = false;
-    const unsubscribe = this.subscribe((event) => { if (event.kind === "identityChanged" || event.kind === "connectionChanged") changed = true; });
+    const bindingMatches = () => this.runners.some((device) => device.id === runnerID && device.os === runnerOS && device.machineKey === runnerKey);
+    const unsubscribe = this.subscribe((event) => {
+      if (event.kind === "identityChanged" || event.kind === "connectionChanged" || ((event.kind === "rosterChanged" || event.kind === "snapshotReplaced") && !bindingMatches())) changed = true;
+    });
     try {
-      const result = await this.request<Awaited<ReturnType<AppStore["discoverSkills"]>>>("skills.discovery", { version: 1, runner_id: runnerID, root });
-      if (changed || generation !== this.bootstrapGeneration || identity !== this.identityID || !this.isConnected || !this.hasIdentity || !this.runners.some((device) => device.id === runnerID && device.os === runner.os && device.machineKey === runner.machineKey)) throw new RequestError(L("Skill discovery authority changed. Scan again."));
-      if (result.version !== 1 || !["scanned", "unsupported"].includes(result.status) || !Array.isArray(result.skills) || !Array.isArray(result.diagnostics)) throw new RequestError(L("Skill discovery is unavailable."));
-      return result;
+      const result = await this.request<unknown>("skills.discovery", { version: 1, runner_id: runnerID, root });
+      if (changed || generation !== this.bootstrapGeneration || identity !== this.identityID || !this.isConnected || !this.hasIdentity || !bindingMatches()) throw new RequestError(L("Skill discovery authority changed. Scan again."));
+      return decodeSkillDiscovery(result);
     } finally { unsubscribe(); }
   }
 

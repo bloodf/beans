@@ -624,3 +624,51 @@ async fn guided_revocation_during_discovery_prevents_credential_commit() {
     assert!(credentials.custom.is_empty());
     assert_eq!(credentials.changed_at, before);
 }
+
+#[tokio::test]
+async fn guided_create_delete_during_discovery_preserves_tombstone() {
+    use std::io::{Read, Write};
+    let scratch = scratch_app();
+    let app = &scratch.0;
+    crate::identity::create(app, Some("Fixture Runner".into())).unwrap();
+    let kind = "custom:setup-00000000-0000-4000-8000-000000000148";
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let root = format!("http://{}", listener.local_addr().unwrap());
+    let (requested, received) = tokio::sync::oneshot::channel();
+    let (release, proceed) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut request = [0u8; 4096];
+        socket.read(&mut request).unwrap();
+        requested.send(()).unwrap();
+        proceed.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let body = r#"{"data":[{"id":"alias"}]}"#;
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    });
+    let outbox_snapshot = || app.store.outbox().unwrap().into_iter().map(|item| (item.id, item.kind, item.recipient, item.ciphertext, item.slot, item.group)).collect::<Vec<_>>();
+    let mut pending = input("Pending fixture", "chat-completions", &root, &["alias"]);
+    pending.kind = Some(kind.into());
+    let (result, (deleted, state, outbox)) = tokio::join!(connect_custom(app, pending), async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), received).await.unwrap().unwrap();
+        let (other_root, other_server) = serve(vec![("200 OK", json!({"data":[{"id":"alias"}]}).to_string())]);
+        let mut other = input("Concurrent fixture", "chat-completions", &other_root, &["alias"]);
+        other.kind = Some(kind.into());
+        assert_eq!(connect_custom(app, other).await.unwrap(), kind);
+        other_server.join().unwrap();
+        disconnect(app, kind).unwrap();
+        let deleted = serde_json::to_value(&*app.credentials.lock().unwrap()).unwrap();
+        assert!(app.credentials.lock().unwrap().changed_at.contains_key(kind));
+        let state = format!("{:?}", *app.state.lock().unwrap());
+        let outbox = outbox_snapshot();
+        assert!(outbox.iter().any(|item| item.1 == "credentials"));
+        release.send(()).unwrap();
+        (deleted, state, outbox)
+    });
+    server.join().unwrap();
+    assert_eq!(result.unwrap_err(), "The provider changed while connecting. Open it again.");
+    assert!(!app.credentials.lock().unwrap().custom.contains_key(kind));
+    assert_eq!(serde_json::to_value(&*app.credentials.lock().unwrap()).unwrap(), deleted);
+    assert_eq!(serde_json::to_value(Credentials::load(&app.config)).unwrap(), deleted);
+    assert_eq!(format!("{:?}", *app.state.lock().unwrap()), state);
+    assert_eq!(outbox_snapshot(), outbox);
+}

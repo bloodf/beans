@@ -276,7 +276,10 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
 
 async fn connect_custom_as(app: &Arc<App>, input: CustomInput, authority: Option<(&str, &str)>) -> Result<String, String> {
     check_provider_authority(app, authority)?;
-    let snapshot = input.kind.as_ref().and_then(|kind| app.credentials.lock().expect("credentials lock").custom.get(kind).cloned());
+    let (snapshot, revision) = {
+        let credentials = app.credentials.lock().expect("credentials lock");
+        (input.kind.as_ref().and_then(|kind| credentials.custom.get(kind).cloned()), input.kind.as_ref().and_then(|kind| credentials.changed_at.get(kind).copied()))
+    };
     let requested_integration = CustomIntegration::parse(input.integration.as_deref())?;
     let integration = requested_integration.or_else(|| snapshot.as_ref().and_then(|provider| provider.integration));
     let name = input.name.trim().to_string();
@@ -315,7 +318,7 @@ async fn connect_custom_as(app: &Arc<App>, input: CustomInput, authority: Option
             if saved.name == name && saved.api == api && saved.base_url == base_url && saved.api_key == api_key && saved.integration == integration && saved.capabilities == capabilities && (ids.is_empty() || saved.models.iter().map(|model| &model.id).eq(ids.iter())) {
                 return Ok(input.kind.unwrap());
             }
-        } else if app.credentials.lock().unwrap().changed_at.contains_key(input.kind.as_ref().unwrap()) {
+        } else if revision.is_some() {
             return Err("This provider was deleted. Open a new setup draft.".into());
         }
     }
@@ -358,7 +361,7 @@ async fn connect_custom_as(app: &Arc<App>, input: CustomInput, authority: Option
         let mut credentials = app.credentials.lock().expect("credentials lock");
         let kind = input.kind.clone().unwrap_or_else(|| custom_kind(&credentials, &name));
         let created_at = credentials.custom.get(&kind).map(|provider| provider.created_at).unwrap_or_else(config::now_unix);
-        if input.kind.is_some() && credentials.custom.get(&kind) != snapshot.as_ref() {
+        if input.kind.is_some() && (credentials.custom.get(&kind) != snapshot.as_ref() || credentials.changed_at.get(&kind).copied() != revision) {
             return Err("The provider changed while connecting. Open it again.".into());
         }
         let capabilities = input.capabilities.unwrap_or_else(|| snapshot.as_ref().and_then(|provider| provider.capabilities));

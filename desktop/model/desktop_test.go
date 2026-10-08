@@ -9,7 +9,7 @@ import (
 func TestNativeSendAccountFence(t *testing.T) {
 	s := NewNativeStore()
 	s.Connected = true
-	snapshot := json.RawMessage(`{"has_identity":true,"bots":[{"id":"b","name":"Bot","look":{"version":1,"base":{},"future":true}}],"chats":[{"id":"c","bot_ids":["b"],"messages":[]}]}`)
+	snapshot := json.RawMessage(`{"has_identity":true,"identity_id":"account","bots":[{"id":"b","name":"Bot","look":{"version":1,"base":{},"future":true}}],"chats":[{"id":"c","bot_ids":["b"],"messages":[]}]}`)
 	if err := s.Apply("snapshot", snapshot); err != nil {
 		t.Fatal(err)
 	}

@@ -362,6 +362,9 @@ type desktopUpdatePage struct {
 }
 
 func (lease *desktopUpdateLease) guardPages(ctx context.Context) error {
+	if err := nativeQuitAdmission(); err != nil {
+		return err
+	}
 	for _, win := range mygo.Windows() {
 		if win == native.win {
 			return errors.New("Close the native window before quitting to install the update")
@@ -761,6 +764,9 @@ func updaterBeforeQuit(event *mygo.QuitEvent) bool {
 }
 
 func desktopUpdateIdle(ctx context.Context, client *cliClient) (string, error) {
+	if err := nativeQuitAdmission(); err != nil {
+		return "", err
+	}
 	if client == nil || client.currentState() != "connected" {
 		return "", errors.New("Wait for the local CLI to reconnect before installing an update")
 	}

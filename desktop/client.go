@@ -36,6 +36,7 @@ type cliClient struct {
 	nextID         int64
 	reconnectDelay time.Duration
 	reconnectTimer *time.Timer
+	authority      uint64
 
 	onState           func(state string)
 	onEvent           func(name string, frame []byte)
@@ -165,6 +166,9 @@ func (c *cliClient) handle(generation int, frame []byte) {
 		return
 	}
 	if head.Event != "" {
+		if head.Event == "identity.changed" {
+			c.authority++
+		}
 		onEvent := c.onEvent
 		c.mu.Unlock()
 		if onEvent != nil {
@@ -286,10 +290,28 @@ func (c *cliClient) requestReconnect() {
 
 // request sends `{ id, method, params }` and returns the JSON-encoded `result`.
 func (c *cliClient) request(ctx context.Context, method string, params jsontext.Value) (jsontext.Value, error) {
+	return c.requestBound(ctx, method, params, nil)
+}
+
+type cliAuthority struct {
+	generation int
+	account    uint64
+}
+
+func (c *cliClient) captureAuthority() cliAuthority {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return cliAuthority{c.generation, c.authority}
+}
+func (c *cliClient) requestBound(ctx context.Context, method string, params jsontext.Value, authority *cliAuthority) (jsontext.Value, error) {
 	if len(params) == 0 || string(params) == "null" {
 		params = jsontext.Value("{}")
 	}
 	c.mu.Lock()
+	if authority != nil && (authority.generation != c.generation || authority.account != c.authority) {
+		c.mu.Unlock()
+		return nil, errConnectionClosed
+	}
 	conn := c.conn
 	if conn == nil || c.state == "disconnected" {
 		c.mu.Unlock()
@@ -299,7 +321,6 @@ func (c *cliClient) request(ctx context.Context, method string, params jsontext.
 	c.nextID++
 	waiting := make(chan reply, 1)
 	c.pending[id] = waiting
-	c.mu.Unlock()
 
 	frame, err := json.Marshal(struct {
 		ID     int64          `json:"id"`
@@ -309,6 +330,7 @@ func (c *cliClient) request(ctx context.Context, method string, params jsontext.
 	if err == nil {
 		err = conn.Write(ctx, websocket.MessageText, frame)
 	}
+	c.mu.Unlock()
 	if err != nil {
 		c.mu.Lock()
 		delete(c.pending, id)

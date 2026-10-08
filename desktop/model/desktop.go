@@ -10,14 +10,18 @@ import (
 // NativeStore consumes only Session-admitted events. All access belongs to the
 // host's ordered main-thread queue, including asynchronous completions.
 type NativeStore struct {
-	Epoch       uint64
-	Connected   bool
-	HasIdentity bool
-	Selected    string
-	Bots        []NativeBot
-	Chats       []NativeChat
-	Drafts      map[string]*NativeDraft
-	Error       string
+	Epoch          uint64
+	Connected      bool
+	HasIdentity    bool
+	Selected       string
+	Bots           []NativeBot
+	Chats          []NativeChat
+	Drafts         map[string]*NativeDraft
+	Error          string
+	Running        map[string]string
+	LoadingOlder   map[string]bool
+	AccountID      string
+	ArchivedDrafts map[string]map[string]*NativeDraft
 }
 
 type NativeBot struct {
@@ -76,13 +80,18 @@ type NativeDraft struct {
 	Error       string
 }
 
-func NewNativeStore() *NativeStore { return &NativeStore{Drafts: map[string]*NativeDraft{}} }
+func NewNativeStore() *NativeStore {
+	return &NativeStore{Drafts: map[string]*NativeDraft{}, Running: map[string]string{}, LoadingOlder: map[string]bool{}}
+}
 func (s *NativeStore) Fence() {
 	s.Epoch++
+	s.Connected = false
 	for _, d := range s.Drafts {
 		d.Sending = false
 	}
 	s.Error = ""
+	s.Running = map[string]string{}
+	s.LoadingOlder = map[string]bool{}
 }
 func (s *NativeStore) Reset() {
 	s.Fence()
@@ -90,7 +99,14 @@ func (s *NativeStore) Reset() {
 	s.Bots = nil
 	s.Chats = nil
 	s.Selected = ""
+	if s.HasDrafts() && s.AccountID != "" {
+		if s.ArchivedDrafts == nil {
+			s.ArchivedDrafts = map[string]map[string]*NativeDraft{}
+		}
+		s.ArchivedDrafts[s.AccountID] = s.Drafts
+	}
 	s.Drafts = map[string]*NativeDraft{}
+	s.AccountID = ""
 }
 func (s *NativeStore) Chat(id string) *NativeChat {
 	for i := range s.Chats {
@@ -144,11 +160,36 @@ func (s *NativeStore) Apply(name string, data json.RawMessage) error {
 		fallthrough
 	case "roster.changed":
 		var v struct {
-			Bots  []NativeBot  `json:"bots"`
-			Chats []NativeChat `json:"chats"`
+			Bots         []NativeBot  `json:"bots"`
+			Chats        []NativeChat `json:"chats"`
+			RunningTurns []struct {
+				ID     string `json:"job_id"`
+				ChatID string `json:"chat_id"`
+			} `json:"running_turns"`
+			IdentityID string `json:"identity_id"`
 		}
 		if err := json.Unmarshal(data, &v); err != nil {
 			return err
+		}
+		if name == "snapshot" {
+			if v.IdentityID == "" {
+				s.Connected = false
+				return errors.New("CLI account identity evidence is missing")
+			}
+			if s.AccountID != "" && s.AccountID != v.IdentityID {
+				s.Reset()
+			}
+			s.AccountID = v.IdentityID
+			if drafts := s.ArchivedDrafts[v.IdentityID]; drafts != nil {
+				s.Drafts = drafts
+				delete(s.ArchivedDrafts, v.IdentityID)
+			}
+			s.HasIdentity = true
+			s.Connected = true
+			s.Running = map[string]string{}
+			for _, turn := range v.RunningTurns {
+				s.Running[turn.ID] = turn.ChatID
+			}
 		}
 		for i := range v.Chats {
 			if old := s.Chat(v.Chats[i].ID); old != nil {
@@ -170,11 +211,6 @@ func (s *NativeStore) Apply(name string, data json.RawMessage) error {
 			}
 		}
 		s.Bots, s.Chats = v.Bots, v.Chats
-		for id := range s.Drafts {
-			if s.Chat(id) == nil {
-				delete(s.Drafts, id)
-			}
-		}
 		if s.Chat(s.Selected) == nil {
 			s.Selected = ""
 			if len(s.Chats) > 0 {
@@ -209,6 +245,19 @@ func (s *NativeStore) Apply(name string, data json.RawMessage) error {
 		if c := s.Chat(v.ChatID); c != nil {
 			c.Messages = slices.DeleteFunc(c.Messages, func(m NativeMessage) bool { return m.ID == v.ID })
 		}
+	case "job.started", "job.finished":
+		var v struct {
+			ID     string `json:"job_id"`
+			ChatID string `json:"chat_id"`
+		}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		if name == "job.started" {
+			s.Running[v.ID] = v.ChatID
+		} else {
+			delete(s.Running, v.ID)
+		}
 	case "chat.removed":
 		var v struct {
 			ID string `json:"chat_id"`
@@ -217,7 +266,6 @@ func (s *NativeStore) Apply(name string, data json.RawMessage) error {
 			return err
 		}
 		s.Chats = slices.DeleteFunc(s.Chats, func(c NativeChat) bool { return c.ID == v.ID })
-		delete(s.Drafts, v.ID)
 		if s.Selected == v.ID {
 			s.Selected = ""
 		}
@@ -261,3 +309,58 @@ func (s *NativeStore) BeginSend(id, messageID string) (map[string]any, func(erro
 		}
 	}, nil
 }
+
+// BeginOlder admits one page against its original first row and account epoch.
+func (s *NativeStore) BeginOlder(id string) (map[string]string, func(json.RawMessage, error), error) {
+	c := s.Chat(id)
+	if !s.Connected || c == nil || !c.HasMore || len(c.Messages) == 0 || s.LoadingOlder[id] {
+		return nil, nil, errors.New("Older messages are not available")
+	}
+	epoch, first := s.Epoch, c.Messages[0].ID
+	s.LoadingOlder[id] = true
+	return map[string]string{"chat_id": id, "before": first}, func(data json.RawMessage, err error) {
+		if epoch != s.Epoch {
+			return
+		}
+		delete(s.LoadingOlder, id)
+		current := s.Chat(id)
+		if current == nil || len(current.Messages) == 0 || current.Messages[0].ID != first {
+			return
+		}
+		if err != nil {
+			s.Error = err.Error()
+			return
+		}
+		var page struct {
+			Messages []NativeMessage `json:"messages"`
+			HasMore  bool            `json:"has_more"`
+		}
+		if err := json.Unmarshal(data, &page); err != nil {
+			s.Error = err.Error()
+			return
+		}
+		known := make(map[string]bool, len(current.Messages))
+		for _, m := range current.Messages {
+			known[m.ID] = true
+		}
+		older := make([]NativeMessage, 0, len(page.Messages))
+		for _, m := range page.Messages {
+			if !known[m.ID] {
+				older = append(older, m)
+				known[m.ID] = true
+			}
+		}
+		current.Messages = append(older, current.Messages...)
+		current.HasMore = page.HasMore
+	}, nil
+}
+
+func (s *NativeStore) HasDrafts() bool {
+	for _, d := range s.Drafts {
+		if d.Text != "" || len(d.Attachments) != 0 || d.ReplyTo != "" || len(d.Mentions) != 0 || d.Sending {
+			return true
+		}
+	}
+	return false
+}
+func (s *NativeStore) HasOwnedIntent() bool { return s.HasDrafts() || len(s.ArchivedDrafts) != 0 }

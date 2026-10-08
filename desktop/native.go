@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/bloodf/beans/desktop/model"
@@ -16,8 +18,9 @@ import (
 // The native window shares the admitted account and sole CLI transport. The
 // complete web client remains available until native feature parity is proven.
 type nativeDesktop struct {
-	store *model.NativeStore
-	win   *mygo.Window
+	store     *model.NativeStore
+	win       *mygo.Window
+	authority cliAuthority
 }
 
 func nativeEnabled() bool { return os.Getenv("BEANS_NATIVE") == "1" }
@@ -35,10 +38,100 @@ func (n *nativeDesktop) event(name string, data json.RawMessage) {
 func (n *nativeDesktop) show() {
 	if n.win == nil {
 		n.win = mygo.NewWindow(mygo.WindowOptions{Title: "Beans — Native", Width: 1100, Height: 760, MinWidth: 640, MinHeight: 440, Content: ui.View(n.view)})
+		n.win.OnClose(func(e *mygo.CloseEvent) {
+			if n.store.HasOwnedIntent() {
+				e.PreventDefault()
+				n.store.Error = "Send or save native drafts before closing"
+				n.win.Invalidate()
+			}
+		})
 		n.win.OnClosed(func() { n.win = nil })
 	}
 	n.win.Show()
 	n.win.Focus()
+}
+
+// Export writes draft text and attachment references to a user-selected private
+// file. It never silently releases in-memory ownership or bypasses quit guards.
+func (n *nativeDesktop) saveDrafts() {
+	if !n.store.HasOwnedIntent() {
+		return
+	}
+	for _, d := range n.store.Drafts {
+		if d.Sending {
+			n.store.Error = "Wait for the pending send before saving drafts"
+			return
+		}
+	}
+	data, err := json.Marshal(struct {
+		Account  string
+		Drafts   map[string]*model.NativeDraft
+		Archived map[string]map[string]*model.NativeDraft
+	}{n.store.AccountID, n.store.Drafts, n.store.ArchivedDrafts})
+	if err != nil {
+		n.store.Error = err.Error()
+		return
+	}
+	epoch, win := n.store.Epoch, n.win
+	go func() {
+		path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{Parent: win, Title: "Save native drafts", DefaultPath: "beans-drafts.json"})
+		if err == nil && path != "" {
+			err = os.WriteFile(path, data, 0o600)
+		}
+		postMain(func() {
+			if epoch != n.store.Epoch {
+				return
+			}
+			if err != nil {
+				n.store.Error = err.Error()
+				return
+			}
+			if path == "" {
+				return
+			}
+			// Export does not discard drafts: users can continue editing and the
+			// close/quit veto remains until they explicitly discard saved intent.
+			n.store.Error = "Drafts saved to " + path
+			if n.win != nil {
+				n.win.Invalidate()
+			}
+		})
+	}()
+}
+func (n *nativeDesktop) confirmDiscard() {
+	epoch, win := n.store.Epoch, n.win
+	before, _ := json.Marshal(struct {
+		Drafts   map[string]*model.NativeDraft
+		Archived map[string]map[string]*model.NativeDraft
+	}{n.store.Drafts, n.store.ArchivedDrafts})
+	go func() {
+		answer, err := mygo.Dialog.Message(mygo.MessageOptions{Parent: win, Message: "Discard all native drafts?", Detail: "This removes unsent text, attachment selections and replies, including drafts retained for another account. Save drafts first if you want to keep them.", Buttons: []string{"Keep drafts", "Discard drafts"}, CancelButton: 0})
+		postMain(func() {
+			if err != nil || answer.Button != 1 || epoch != n.store.Epoch {
+				return
+			}
+			for _, d := range n.store.Drafts {
+				if d.Sending {
+					n.store.Error = "Wait for the pending send before discarding drafts"
+					return
+				}
+			}
+			after, _ := json.Marshal(struct {
+				Drafts   map[string]*model.NativeDraft
+				Archived map[string]map[string]*model.NativeDraft
+			}{n.store.Drafts, n.store.ArchivedDrafts})
+			if string(before) != string(after) {
+				n.store.Error = "Drafts changed; review them before discarding"
+				return
+			}
+			n.store.Drafts = map[string]*model.NativeDraft{}
+			n.store.ArchivedDrafts = nil
+			n.store.Error = ""
+			if n.win != nil {
+				n.win.Invalidate()
+			}
+		})
+	}()
 }
 func (n *nativeDesktop) send(id string) {
 	var bytes [16]byte
@@ -56,10 +149,11 @@ func (n *nativeDesktop) send(id string) {
 		complete(err)
 		return
 	}
+	authority, client := n.authority, app.cli
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, err := app.cli.request(ctx, "chats.send", payload)
+		_, err := client.requestBound(ctx, "chats.send", payload, &authority)
 		postMain(func() {
 			complete(err)
 			if n.win != nil {
@@ -83,19 +177,105 @@ func (n *nativeDesktop) attach(id string) {
 			if err != nil {
 				draft.Error = err.Error()
 			}
-			for _, f := range files {
-				if !f.IsFile || f.Size > 100*1024*1024 || len(draft.Attachments) >= 10 {
-					draft.Error = "Attach at most 10 regular files, each no larger than 100 MB"
-					continue
-				}
-				var raw [12]byte
-				if _, err := rand.Read(raw[:]); err != nil {
-					draft.Error = err.Error()
-					break
-				}
-				draft.Attachments = append(draft.Attachments, model.NativeAttachment{ID: "att-" + hex.EncodeToString(raw[:]), Path: f.Path, Name: f.Name, Mime: f.Mime, Size: f.Size, Width: f.Width, Height: f.Height})
-				draft.Revision++
+			n.addFiles(draft, files)
+			if n.win != nil {
+				n.win.Invalidate()
 			}
+		})
+	}()
+}
+func (n *nativeDesktop) addFiles(draft *model.NativeDraft, files []FileInfo) {
+	for _, f := range files {
+		if !f.IsFile || f.Size > 100*1024*1024 || len(draft.Attachments) >= 10 {
+			draft.Error = "Attach at most 10 regular files, each no larger than 100 MB"
+			continue
+		}
+		var raw [12]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			draft.Error = err.Error()
+			break
+		}
+		draft.Attachments = append(draft.Attachments, model.NativeAttachment{ID: "att-" + hex.EncodeToString(raw[:]), Path: f.Path, Name: f.Name, Mime: f.Mime, Size: f.Size, Width: f.Width, Height: f.Height})
+		draft.Revision++
+	}
+}
+func (n *nativeDesktop) pasteImage(id string) bool {
+	if mygo.Clipboard.ReadText() != "" {
+		return false
+	}
+	data := mygo.Clipboard.ReadImage()
+	if len(data) == 0 {
+		return false
+	}
+	draft := n.store.Draft(id)
+	if len(data) > 100*1024*1024 {
+		draft.Error = "The pasted image is larger than 100 MB"
+		return true
+	}
+	epoch, win := n.store.Epoch, n.win
+	go func() {
+		file, err := (Files{}).SavePasted("image.png", data)
+		postMain(func() {
+			if epoch != n.store.Epoch || win != n.win || n.store.Drafts[id] != draft {
+				return
+			}
+			if err != nil {
+				draft.Error = err.Error()
+			} else {
+				n.addFiles(draft, []FileInfo{file})
+			}
+			if n.win != nil {
+				n.win.Invalidate()
+			}
+		})
+	}()
+	return true
+}
+func (n *nativeDesktop) stop(id string) {
+	epoch := n.store.Epoch
+	if !n.store.Connected {
+		return
+	}
+	payload, err := json.Marshal(map[string]string{"chat_id": id})
+	if err != nil {
+		return
+	}
+	authority, client := n.authority, app.cli
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := client.requestBound(ctx, "chats.stop", payload, &authority)
+		postMain(func() {
+			if epoch != n.store.Epoch || n.store.Chat(id) == nil {
+				return
+			}
+			if err != nil {
+				n.store.Draft(id).Error = err.Error()
+			}
+			if n.win != nil {
+				n.win.Invalidate()
+			}
+		})
+	}()
+}
+func (n *nativeDesktop) older(id string) {
+	params, complete, err := n.store.BeginOlder(id)
+	if err != nil {
+		n.store.Error = err.Error()
+		return
+	}
+	payload, err := json.Marshal(params)
+	if err != nil {
+		complete(nil, err)
+		return
+	}
+	authority, client := n.authority, app.cli
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		data, err := client.requestBound(ctx, "chats.messages", payload, &authority)
+		postMain(func() {
+			complete(json.RawMessage(data), err)
 			if n.win != nil {
 				n.win.Invalidate()
 			}
@@ -108,6 +288,9 @@ func (n *nativeDesktop) view(c *ui.Context) {
 		ui.Column(c).Width(240).Shrink(0).Padding(16).Gap(10).Background(t.Surface).Children(func() {
 			ui.Text(c, "Beans").Bold().FontSize(20)
 			ui.Scroll(c).Grow(1).Children(func() {
+				if !n.store.Connected {
+					return
+				}
 				for i := range n.store.Chats {
 					chat := &n.store.Chats[i]
 					if ui.Button(c.Key(chat.ID), n.store.Title(chat)).Clicked() {
@@ -120,6 +303,15 @@ func (n *nativeDesktop) view(c *ui.Context) {
 			}
 		})
 		ui.Column(c).Grow(1).MinWidth(0).Padding(16).Gap(12).Children(func() {
+			if n.store.HasOwnedIntent() && ui.Button(c, "Save native drafts").Clicked() {
+				n.saveDrafts()
+			}
+			if n.store.Error != "" {
+				ui.Text(c, n.store.Error)
+			}
+			if n.store.HasOwnedIntent() && ui.Button(c, "Discard native drafts…").Clicked() {
+				n.confirmDiscard()
+			}
 			if !n.store.Connected {
 				ui.Text(c, "The Beans CLI is not running")
 				if ui.Button(c, "Reconnect").Clicked() {
@@ -137,7 +329,13 @@ func (n *nativeDesktop) view(c *ui.Context) {
 				return
 			}
 			ui.Text(c, n.store.Title(chat)).Bold().FontSize(20)
+			if n.store.Error != "" {
+				ui.Text(c, n.store.Error)
+			}
 			ui.Scroll(c.Key(chat.ID + "-transcript")).Grow(1).Gap(12).Children(func() {
+				if chat.HasMore && ui.Button(c, "Load older messages").Disabled(n.store.LoadingOlder[chat.ID]).Clicked() {
+					n.older(chat.ID)
+				}
 				for _, m := range chat.Messages {
 					ui.Column(c.Key(m.ID)).Gap(4).Children(func() {
 						author := m.Author.Kind
@@ -182,6 +380,23 @@ func (n *nativeDesktop) view(c *ui.Context) {
 			if ui.Button(c, "Attach files").Disabled(d.Sending).Clicked() {
 				n.attach(chat.ID)
 			}
+			ui.Row(c).Gap(6).Wrap().Children(func() {
+				for _, b := range n.store.Bots {
+					picked := slices.Contains(d.Mentions, b.ID)
+					label := "@" + b.Name
+					if picked {
+						label = "Remove " + label
+					}
+					if ui.Button(c.Key("mention-"+b.ID), label).Disabled(d.Sending).Clicked() {
+						if picked {
+							d.Mentions = slices.DeleteFunc(d.Mentions, func(id string) bool { return id == b.ID })
+						} else {
+							d.Mentions = append(d.Mentions, b.ID)
+						}
+						d.Revision++
+					}
+				}
+			})
 			input := ui.TextArea(c.Key(chat.ID+"-composer"), &d.Text).Lines(1, 8).Label("Message").Placeholder("Message…").Disabled(d.Sending)
 			composing := input.Composing()
 			input.HandleInput(func(ev ui.InputEvent) bool {
@@ -200,9 +415,24 @@ func (n *nativeDesktop) view(c *ui.Context) {
 			if d.Error != "" {
 				ui.Text(c, d.Error)
 			}
+			for _, id := range n.store.Running {
+				if id == chat.ID {
+					if ui.Button(c, "Stop responding").Clicked() {
+						n.stop(chat.ID)
+					}
+					break
+				}
+			}
 			if ui.Button(c, "Send").Disabled(d.Sending).Clicked() {
 				n.send(chat.ID)
 			}
 		})
 	})
+}
+
+func nativeQuitAdmission() error {
+	if native.store.HasOwnedIntent() {
+		return errors.New("Send or save native drafts before quitting")
+	}
+	return nil
 }

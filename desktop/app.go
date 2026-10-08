@@ -132,14 +132,11 @@ func (a *appDelegate) didFinishLaunching() {
 	} else {
 		a.cli.onState = func(state string) {
 			postMain(func() {
+				generation := a.connectionTransition(state)
 				if state == "connected" {
-					a.sessionGeneration = a.session.Connect()
-					go a.askIdentity(a.sessionGeneration)
-				} else {
-					a.session.Disconnect()
-					native.store.Fence()
+					authority := native.authority
+					go a.askIdentity(generation, authority)
 				}
-				native.store.Connected = state == "connected"
 				if native.win != nil {
 					native.win.Invalidate()
 				}
@@ -199,12 +196,23 @@ func (a *appDelegate) stopWaiting() {
 	}
 }
 
+func (a *appDelegate) connectionTransition(state string) uint64 {
+	native.store.Fence()
+	if state == "connected" {
+		native.authority = a.cli.captureAuthority()
+		a.sessionGeneration = a.session.Connect()
+	} else {
+		a.session.Disconnect()
+	}
+	return a.sessionGeneration
+}
+
 // askIdentity asks a CLI that just answered whether it holds an identity, which decides between
 // onboarding and the main window.
-func (a *appDelegate) askIdentity(generation uint64) {
+func (a *appDelegate) askIdentity(generation uint64, authority cliAuthority) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	result, err := a.cli.request(ctx, "bootstrap", nil)
+	result, err := a.cli.requestBound(ctx, "bootstrap", nil, &authority)
 	postMain(func() {
 		if err == nil {
 			_ = a.session.Bootstrap(generation, stdjson.RawMessage(result))

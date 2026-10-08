@@ -2120,6 +2120,40 @@ mod tests {
         ScratchApp(app, home)
     }
 
+    #[test]
+    fn nonowner_load_preserves_submitted_delivery() {
+        use crate::memory_service::queue::{freeze_document, Delivery};
+        use crate::memory_service::types::{MemoryScope, OperationState, Revision};
+
+        let scratch = scratch_app();
+        let delivery = Delivery {
+            id: "delivery-owner-boundary".into(),
+            bot_id: "bot-owner-boundary".into(),
+            scope: MemoryScope {
+                namespace: "scratch-owner-boundary".into(),
+                connection_id: "scratch-connection".into(),
+                connection_revision: Revision { counter: 1, device_id: "scratch-device".into() },
+                deletion_epoch: 0,
+            },
+            consent_revision: None,
+            document: freeze_document("scratch-owner-boundary", "synthetic content", vec![]).unwrap(),
+            state: OperationState::Submitted,
+            operation_id: None,
+            error_code: None,
+        };
+        scratch.0.store.connection.lock().unwrap().execute(
+            "INSERT INTO memory_deliveries(id,bot_id,state,json) VALUES(?1,?2,'submitted',?3)",
+            rusqlite::params![delivery.id, delivery.bot_id, serde_json::to_string(&delivery).unwrap()],
+        ).unwrap();
+
+        let reader = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let stored: String = reader.store.connection.lock().unwrap().query_row(
+            "SELECT json FROM memory_deliveries WHERE id=?1", [&delivery.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(serde_json::from_str::<Delivery>(&stored).unwrap(), delivery,
+            "loading a non-owner must not recover another process's submitted delivery");
+    }
+
     fn bot(id: &str) -> Bot {
         Bot {
             id: id.into(),

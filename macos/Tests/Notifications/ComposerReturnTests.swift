@@ -41,6 +41,7 @@ final class ComposerReturnTests: XCTestCase {
         composer.configure(placeholder: "Message", bots: bots)
         composer.onSend = { [unowned self] text, files, _, _ in sent.append((text, files.count)) }
         window = NSWindow(contentRect: composer.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false  // ARC owns it; `close()` in tearDown must not release it again
         window.contentView = composer
         // A hosted test process need not be the active app, so the window is not required to be
         // key; `press` sends to this window directly and checks the first responder instead.

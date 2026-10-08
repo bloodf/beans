@@ -30,4 +30,3 @@ test("skip suppresses only exact automatic offer, never explicit manual check", 
   expect(updateIsSkipped(prefs, "1.10.1", false)).toBe(false);
   expect(updateIsSkipped(prefs, "1.10.0", true)).toBe(false);
 });
-

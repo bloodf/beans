@@ -2239,7 +2239,10 @@ mod tests {
             app.store.observe_roster(7, &base).unwrap();
             let mut local = base.clone();
             local.chats[0].bot_ids.remove(0);
+            // Removing the owner selects the remaining member before intent is queued.
+            local.chats[0].owner_bot_id = Some("bot1".into());
             apply_roster(app, local.clone());
+            assert_eq!(app.chat("group").unwrap().meta, local.chats[0]);
             let dek = app.dek().unwrap();
             app.push_slot_blob("roster", Slot::latest("roster"), None, crate::crypto::encrypt_json(&dek, "roster", &local).unwrap());
             app.store.queue_outbox(&OutboxItem { id: "group-file".into(), kind: "file".into(), recipient: None,

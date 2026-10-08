@@ -1,5 +1,13 @@
 # Releases and mobile accounts
 
+## Validation gates
+
+Feature changes run relevant checks locally before integration: the affected Rust, Swift, desktop or phone suites, `bun test scripts/*.test.ts` for release scripts and workflow contracts, `bun run check:docs` for documentation, and `bun run check:catalog` for catalog and marketplace index changes. Feature PRs and pushes to `main` do not allocate runners for the Tests, Docs or Catalog workflows.
+
+The release integration convention is a same-repository head branch named `release/**` targeting `main`, for example `release/1.0.15`. [Tests](../../.github/workflows/test.yml) runs the full platform matrix, [Docs](../../.github/workflows/docs.yml) checks architecture budgets and links, and [Catalog](../../.github/workflows/catalog.yml) checks model catalog and marketplace index update timestamps on these PRs, regardless of changed paths. Every validation job checks both repository identity and the `release/` head prefix before allocating a runner; fork PRs, including fork branches named `release/**`, are skipped. `scripts/release-pr-gates.test.ts` checks trigger scope and positive/negative job-gate cases across all three automatic validation workflows locally.
+
+Release publication and mobile submission remain manual-only. E2E scripts remain manual/local and are not added to these validation workflows.
+
 ## Source and readiness
 
 The all-platform preflight requires nonempty changelog notes matching the root version before builds start; desktop updater packaging consumes those notes.

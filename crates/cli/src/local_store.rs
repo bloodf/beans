@@ -168,6 +168,7 @@ impl LocalStore {
                 None => {
                     let epoch = uuid::Uuid::new_v4().to_string();
                     tx.execute("INSERT INTO task_authority(id,account_epoch,owner_epoch,closed) VALUES(1,?1,?2,0)", params![epoch,owner])?;
+                    tx.execute("INSERT INTO task_safety_version VALUES(1,1)",[])?;
                     Ok(epoch)
                 }
             }

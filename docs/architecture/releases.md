@@ -1,10 +1,20 @@
 # Releases and mobile accounts
 
+## Validation gates
+
+Feature changes run relevant checks locally before integration: the affected Rust, Swift, desktop or phone suites, `bun test scripts/*.test.ts` for release scripts and workflow contracts, `bun run check:docs` for documentation, and `bun run check:catalog` for catalog and marketplace index changes. Feature PRs and pushes to `main` do not allocate runners for the Tests, Docs or Catalog workflows.
+
+The release integration convention is a same-repository head branch named `release/**` targeting `main`, for example `release/1.0.15`. [Tests](../../.github/workflows/test.yml) runs the full platform matrix, [Docs](../../.github/workflows/docs.yml) checks architecture budgets and links, and [Catalog](../../.github/workflows/catalog.yml) checks model catalog and marketplace index update timestamps on these PRs, regardless of changed paths. Every validation job checks both repository identity and the `release/` head prefix before allocating a runner; fork PRs, including fork branches named `release/**`, are skipped. `scripts/release-pr-gates.test.ts` checks trigger scope and positive/negative job-gate cases across all three automatic validation workflows locally.
+
+Release publication and mobile submission remain manual-only. E2E scripts remain manual/local and are not added to these validation workflows.
+
 ## Source and readiness
 
 The all-platform preflight requires nonempty changelog notes matching the root version before builds start; desktop updater packaging consumes those notes.
 
 [Release Beans](../../.github/workflows/release.yml) runs only by manual dispatch. Choose `server` or `all` **before** building against an already published stable `beans-v<root package.json version>` tag. Publishing a tag does not start a server finalizer. The checkout must match GitHub's exact tag commit; finalization rechecks it. Server scope needs only the Ed25519 update signing key and builds Linux x86_64/aarch64 CLI/server bundles. All scope adds CLI installation checks, Windows/Linux desktop installers, notarized arm64 Mac DMG/update ZIP and three completed EAS phone builds. Scope cannot change after readiness exists; use a new version/tag.
+
+Every job that compiles the CLI, in [Tests](../../.github/workflows/test.yml) (Rust on Linux, macOS and Windows) and in this workflow (`core`, `desktop`, `mac`), installs `protoc@3.36.2` before its first compile with `taiki-e/install-action`, pinned to a full commit SHA, and `fallback: none`. The action checks the SHA-256 of the protobuf release archive and exports `PROTOC`. The Runner build needs it because `lancedb` pulls in `prost-build`, which runs `protoc` and does not bundle it; the phone and markdown crates do not reach it. The Windows test job also sets `CARGO_BUILD_JOBS=1`: with the Lance dependencies, parallel rustc processes exhausted memory on the hosted runner. `scripts/protoc-workflows.test.ts` fails if a compiling job lacks the step, installs it after the first compile, uses an unpinned action, pins a different version than the other workflow, or the Windows job loses that limit. Local builds use the `protoc` on `PATH` or `PROTOC`.
 
 Distribution assets upload first, detached signature next, `beans-update.json` last. Schema 1 binds root version, revision, relay protocol and each asset's component, platform, version, SHA-256 and size. Existing assets must have identical bytes; unexpected or changed bytes fail before upload. Readiness cannot be repaired or extended. Retry interrupted uploads using original staged artifacts, not rebuilt desktop binaries. The server updater verifies readiness, upgrades the relay first, then drains Runners; see [Runner update drain](service-updates.md#runner-update-drain) and [CLI release operations](../releasing-cli.md).
 

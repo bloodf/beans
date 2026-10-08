@@ -7,13 +7,14 @@ name: Catalog
 
 on:
   pull_request:
-    paths: ["crates/models/catalog.json", "crates/cli/marketplace/index.json", "scripts/check-catalog.ts", ".github/workflows/catalog.yml"]
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   check:
+    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

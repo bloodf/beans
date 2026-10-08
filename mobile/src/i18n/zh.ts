@@ -1,6 +1,12 @@
 // Simplified Chinese. The key is the English text passed to t(); `bun run l10n` checks this table.
 
 export const zh: Record<string, string> = {
+  "App updates": "应用更新",
+  "Version": "版本",
+  "Build": "构建号",
+  "Beans Dev does not install release updates.": "Beans Dev 不安装正式版本更新。",
+  "Use your store or TestFlight to update Beans.": "请通过应用商店或 TestFlight 更新 Beans。",
+  "Signed Android update verification is unavailable in this build. No APK is downloaded or installed. Use your existing distribution channel.": "此构建不支持 Android 签名更新验证。不会下载或安装 APK。请使用现有分发渠道。",
   "{count} bot": "{count} 个智能体",
   "{count} bots": "{count} 个智能体",
   "{count} files": "{count} 个文件",
@@ -457,4 +463,13 @@ export const zh: Record<string, string> = {
   "Optional API key": "可选 API 密钥",
   "Model listing checks reachability, not inference access. Each Runner must reach this URL.": "模型列表仅验证可达性，不验证推理权限。每个运行端都必须能访问此 URL。",
   "Configured": "已配置",
+  "Check daily": "每天检查",
+  "Downloading update": "正在下载更新",
+  "Check for updates": "检查更新",
+  "Update failed": "更新失败",
+  "Install Update": "安装更新",
+  "Later": "稍后",
+  "Skip this version": "跳过此版本",
+  "Save or send drafts before installing. Android asks for installation confirmation. Release notes are untrusted text.": "安装前请保存或发送草稿。Android 会要求确认安装。发行说明是不受信任的文本。",
+  "Save or send all drafts first. Installing replaces this process. Have you saved your changes?": "请先保存或发送所有草稿。安装会替换此进程。是否已保存更改？"
 };

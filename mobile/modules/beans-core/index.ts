@@ -8,6 +8,12 @@ interface Native {
   wake(): void;
   /// Android only.
   setOpenChat?(chatId: string | null): void;
+  updateCapability?(): "supported" | "development" | "store_managed" | "native_verifier_unavailable";
+  updateResult?(): string | null;
+  checkUpdate?(): Promise<UpdateOffer | null>;
+  installUpdate?(id: string): Promise<void>;
+  cancelUpdate?(): void;
+  addListener(event: "updateProgress", listener: (payload: { downloaded: number; total: number }) => void): EventSubscription;
   addListener(event: "event", listener: (payload: { json: string }) => void): EventSubscription;
 }
 
@@ -53,3 +59,22 @@ export function wake() {
 export function setOpenChat(chatId: string | null) {
   native.setOpenChat?.(chatId);
 }
+
+export interface UpdateOffer { id: string; version: string; notes: string }
+export const androidUpdates = {
+  result: () => native.updateResult?.() ?? null,
+  onProgress: (listener: (payload: { downloaded: number; total: number }) => void) => {
+    const subscription = native.addListener("updateProgress", listener);
+    return () => subscription.remove();
+  },
+  capability: () => native.updateCapability?.() ?? "native_verifier_unavailable",
+  check: async () => {
+    if (!native.checkUpdate) throw new Error("Native update verifier unavailable");
+    return native.checkUpdate();
+  },
+  install: async (id: string) => {
+    if (!native.installUpdate) throw new Error("Native installer unavailable");
+    await native.installUpdate(id);
+  },
+  cancel: () => native.cancelUpdate?.(),
+};

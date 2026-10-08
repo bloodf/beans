@@ -7,7 +7,8 @@ import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { runsInTerminal, type AutoReview, type Bot, type Chat, type ChatMeta, type ChatUsage, type Device, type Message, type ProviderModel, type ProviderStatus, type RelayProblem, type Routine } from "./model";
 import { t } from "../i18n";
-import { savePrefs } from "./prefs";
+import { loadPrefs, savePrefs } from "./prefs";
+import { composerDraftKey, discardComposerDraft, forgetComposerDrafts, reconcileComposerDrafts } from "./updateDrafts";
 
 export interface Running {
   chatId: string;
@@ -126,12 +127,22 @@ export const useStore = create<StoreState>()(() => ({ ...empty(), ready: false, 
 /// Applies a change to the phone's own prefs and saves them.
 export function mutate(update: (s: StoreState) => Partial<StoreState>) {
   useStore.setState((s) => update(s));
-  savePrefs({ dictation_lang: useStore.getState().dictation_lang });
+  savePrefs({ ...loadPrefs(), dictation_lang: useStore.getState().dictation_lang });
 }
 
 /// Back to unpaired: everything the core told us goes; the phone's prefs stay.
 export function resetStore() {
   useStore.setState({ ...empty() });
+  forgetComposerDrafts();
+}
+
+export function setRelayStatus(data: { url?: string | null; connected?: boolean; update_required?: boolean; error?: RelayProblem | null }) {
+  const s = useStore.getState();
+  const relayUrl = data.url === undefined ? s.relayUrl : data.url;
+  const sourceChanged = relayUrl !== s.relayUrl;
+  useStore.setState({ relayConnected: !!data.connected, relayUpdateRequired: !!data.update_required, relayError: data.error ?? null, relayUrl,
+    providers: sourceChanged ? [] : s.providers, models: sourceChanged ? [] : s.models });
+  if (sourceChanged) reconcileComposerDrafts(s.identityId, relayUrl, s.chats);
 }
 
 // MARK: - Lookup
@@ -215,6 +226,7 @@ export function replaceSnapshot(snapshot: {
     thinking: pick(thinking, busy),
     retries: pick(retries, busy),
   });
+  reconcileComposerDrafts(snapshot.has_identity ? snapshot.identity_id : null, snapshot.relay_url, snapshot.chats);
 }
 
 function seenOf(devices: Device[]): Record<string, number> {
@@ -237,6 +249,8 @@ export function applyRoster(roster: { devices: Device[]; bots: Bot[]; chats: (Ch
     });
     return { devices: roster.devices, device_seen: seenOf(roster.devices), bots: roster.bots, chats, paused: roster.paused ?? false, routines: roster.routines ?? s.routines, auto_review: roster.auto_review ?? s.auto_review, providers: roster.providers ?? s.providers, models: roster.models ?? s.models };
   });
+  const { identityId, relayUrl, chats } = useStore.getState();
+  reconcileComposerDrafts(identityId, relayUrl, chats);
   return { removed };
 }
 
@@ -312,6 +326,8 @@ export function removeMessage(chatId: string, messageId: string) {
 }
 
 export function removeChat(chatId: string) {
+  const { identityId, relayUrl } = useStore.getState();
+  discardComposerDraft(composerDraftKey(identityId, relayUrl, chatId));
   useStore.setState((s) => ({
     chats: s.chats.filter((c) => c.id !== chatId),
     statuses: omit(s.statuses, chatId),

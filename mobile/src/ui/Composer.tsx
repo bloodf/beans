@@ -18,10 +18,11 @@ import * as Haptics from "expo-haptics";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ColorValue, type ImageSourcePropType, type StyleProp, type ViewStyle } from "react-native";
 import type { PickedFile } from "../core/engine";
 import { fileSize, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, type Bot } from "../core/model";
+import { composerDraftGeneration, readComposerDraft, subscribeComposerDrafts, writeComposerDraft } from "../core/updateDrafts";
 import { notifyAvatarScroll } from "./avatarVisibility";
 import { BotAvatar } from "./Avatar";
 import { automaticLanguage, languageName, pickDictationLanguage, setDictationLanguage, useDictationLanguage, useSupportedLanguages } from "./dictation";
@@ -97,6 +98,7 @@ function AttachMenu({ sources, tint, label }: { sources: AttachSource[]; tint: C
 }
 
 export function Composer({
+  draftKey,
   members,
   isGroup,
   placeholder,
@@ -104,6 +106,7 @@ export function Composer({
   onCancelReply,
   onSend,
 }: {
+  draftKey: string;
   members: Bot[];
   isGroup: boolean;
   placeholder: string;
@@ -115,21 +118,42 @@ export function Composer({
 }) {
   useLanguage();
   const p = usePalette();
-  const [text, setText] = useState("");
-  const [attachments, setAttachments] = useState<PickedFile[]>([]);
+  const draft = useSyncExternalStore(subscribeComposerDrafts, () => readComposerDraft(draftKey));
+  const generation = useMemo(() => composerDraftGeneration(draftKey), [draftKey]);
+  const { text, attachments, listening } = draft;
+  function setText(value: string | ((current: string) => string)) {
+    writeComposerDraft(draftKey, { text: typeof value === "function" ? value(readComposerDraft(draftKey).text) : value }, generation);
+  }
+  function setAttachments(value: PickedFile[] | ((current: PickedFile[]) => PickedFile[])) {
+    writeComposerDraft(draftKey, { attachments: typeof value === "function" ? value(readComposerDraft(draftKey).attachments) : value }, generation);
+  }
+  const recordingActive = useRef(false);
+  function setListening(value: boolean) {
+    recordingActive.current = value;
+    writeComposerDraft(draftKey, { listening: value }, generation);
+  }
   const [focused, setFocused] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
-  const [listening, setListening] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [levels, setLevels] = useState<number[]>([0, 0, 0, 0, 0]);
   /// The transcript accumulates while the pill shows; it lands in the field when the user
   /// stops or sends, the way Grok Bot commits a recording.
   const transcript = useRef("");
   const pendingSend = useRef(false);
+  useEffect(() => () => {
+    const current = readComposerDraft(draftKey);
+    const words = transcript.current.trim();
+    if (recordingActive.current) {
+      if (current.listening) writeComposerDraft(draftKey, { text: words ? joinDictation(current.text, words) : current.text, listening: false }, generation);
+      recordingActive.current = false;
+      pendingSend.current = false;
+      transcript.current = "";
+      ExpoSpeechRecognitionModule.abort();
+    }
+  }, [draftKey]);
   const inputRef = useRef<TextInput>(null);
   /// The bots picked from the `@` chips since the last send, in order. Two bots can share a name;
   /// the pick says which one the user meant.
-  const pickedMentions = useRef<Bot[]>([]);
   const dictationMenuRef = useRef<MenuComponentRef>(null);
   const { language, setting: dictationSetting } = useDictationLanguage();
   const dictationLanguages = useSupportedLanguages();
@@ -150,19 +174,20 @@ export function Composer({
   }, [text, isGroup, members]);
 
   function insertMention(bot: Bot) {
-    pickedMentions.current.push(bot);
+    writeComposerDraft(draftKey, { mentions: [...draft.mentions, bot] }, generation);
     setText((current) => current.replace(/@(\w*)$/, `@${bot.name} `));
   }
 
   /// The picks whose `@Name` is still in the text, and a clean slate for the next message.
   function takeMentions(value: string): string[] {
     const lowered = value.toLowerCase();
-    const ids = pickedMentions.current.filter((bot) => lowered.includes(`@${bot.name.toLowerCase()}`)).map((bot) => bot.id);
-    pickedMentions.current = [];
+    const ids = draft.mentions.filter((bot) => lowered.includes(`@${bot.name.toLowerCase()}`)).map((bot) => bot.id);
+    writeComposerDraft(draftKey, { mentions: [] }, generation);
     return ids;
   }
 
   function send() {
+    if (composerDraftGeneration(draftKey) !== generation) return;
     if (listening) {
       // The recording ends, its words land in the field, and the message goes.
       pendingSend.current = true;
@@ -267,6 +292,13 @@ export function Composer({
   });
 
   function finishDictation(problem: string | null = null) {
+    // Deletion/forget may invalidate this recording before its native end callback arrives.
+    if (composerDraftGeneration(draftKey) !== generation || !readComposerDraft(draftKey).listening) {
+      recordingActive.current = false;
+      pendingSend.current = false;
+      transcript.current = "";
+      return;
+    }
     setListening(false);
     setLevels([0, 0, 0, 0, 0]);
     const words = transcript.current.trim();
@@ -295,6 +327,7 @@ export function Composer({
       return;
     }
     const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (composerDraftGeneration(draftKey) !== generation) return;
     if (!permission.granted) {
       Alert.alert(t("Dictation needs the microphone"), t("Allow the microphone and speech recognition for Beans in Settings."), [
         { text: t("Settings"), onPress: () => void Linking.openSettings() },

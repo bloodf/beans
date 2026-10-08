@@ -11,6 +11,7 @@ const listeners = new Set<Listener>();
 const event: Listener = (frame) => listeners.forEach((listener) => listener(frame));
 /// Set to keep the next `bootstrap` answer until the test gives it.
 let heldSnapshot: Promise<unknown> | null = null;
+let deletion: Promise<unknown> | null = null;
 let appState: (status: string) => void;
 const reads: string[] = [];
 const cleared: string[] = [];
@@ -39,6 +40,7 @@ mock.module("../../modules/beans-core", () => ({
   start: () => {}, wake: () => {},
   onEvent: (listener: Listener) => { listeners.add(listener); return () => listeners.delete(listener); },
   request: async (method: string, params: Record<string, any> = {}) => {
+    if (method === "chats.delete") return deletion;
     if (method === "chats.mark_read") reads.push(params.chat_id!);
     if (method === "providers.connect_custom") {
       // The core answers with the kind it gave or kept, and every status.
@@ -63,6 +65,7 @@ function snapshot(chats: Chat[]) {
 const { engine } = await import("./engine");
 const { ERROR_DISPLAY_MS, resetStore, runningTasks, TASK_DELAY_MS, useStore } = await import("./store");
 const { workingActivity } = await import("../ui/format");
+const { composerDraftKey, hasUpdateDrafts, readComposerDraft, writeComposerDraft } = await import("./updateDrafts");
 await engine.start();
 
 beforeEach(async () => {
@@ -81,6 +84,110 @@ async function flush() {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+test("engine deletion and forgotten identity reconcile drafts through store callbacks", async () => {
+  const open = composerDraftKey("account", null, "open");
+  const other = composerDraftKey("account", null, "other");
+  writeComposerDraft(open, { text: "deleted" });
+  writeComposerDraft(other, { text: "private" });
+  await engine.deleteChat("open");
+  expect(readComposerDraft(open).text).toBe("");
+  expect(readComposerDraft(other).text).toBe("private");
+  await engine.unpair();
+  expect(useStore.getState().identityId).toBeNull();
+  expect(readComposerDraft(other).text).toBe("");
+  expect(hasUpdateDrafts()).toBe(false);
+});
+
+test("native removal and identity events discard unreachable drafts", () => {
+  const open = composerDraftKey("account", null, "open");
+  const other = composerDraftKey("account", null, "other");
+  writeComposerDraft(open, { text: "deleted" });
+  writeComposerDraft(other, { text: "private" });
+  event({ event: "chat.removed", data: { chat_id: "open" } });
+  expect(readComposerDraft(open).text).toBe("");
+  expect(readComposerDraft(other).text).toBe("private");
+  event({ event: "identity.changed", data: { has_identity: false } });
+  expect(readComposerDraft(other).text).toBe("");
+  expect(hasUpdateDrafts()).toBe(false);
+});
+
+test("relay round-trip retains source-keyed drafts and blocker", () => {
+  const open = composerDraftKey("account", null, "open");
+  writeComposerDraft(open, { text: "unfinished" });
+  event({ event: "relay.status", data: { connected: false, url: "next-relay" } });
+  event({ event: "relay.status", data: { connected: true, url: null } });
+  expect(readComposerDraft(open).text).toBe("unfinished");
+  expect(hasUpdateDrafts()).toBe(true);
+});
+
+
+test("rejected deferred deletion retains files and newer edits after snapshot restoration", async () => {
+  const key = composerDraftKey("account", null, "open");
+  const files = [{ uri: "file:///picked", name: "picked", mime: "text/plain" }];
+  writeComposerDraft(key, { text: "before", attachments: files });
+  let reject!: (error: Error) => void;
+  deletion = new Promise((_, fail) => { reject = fail; });
+  const pending = engine.deleteChat("open");
+  const rejected = pending.catch(error => error);
+  expect(useStore.getState().chats.some(c => c.id === "open")).toBe(true);
+  writeComposerDraft(key, { text: "newer" });
+  reject(new Error("delete refused"));
+  expect((await rejected).message).toBe("delete refused");
+  deletion = null;
+  event({ event: "snapshot", data: snapshot([chat("open"), chat("other")]) });
+  expect(readComposerDraft(key).text).toBe("newer");
+  expect(readComposerDraft(key).attachments).toEqual(files);
+  expect(hasUpdateDrafts()).toBe(true);
+});
+
+test("successful deferred deletion discards only after acknowledgement", async () => {
+  const key = composerDraftKey("account", null, "open");
+  writeComposerDraft(key, { text: "before" });
+  let resolve!: () => void;
+  deletion = new Promise<void>(done => { resolve = done; });
+  const pending = engine.deleteChat("open");
+  expect(readComposerDraft(key).text).toBe("before");
+  writeComposerDraft(key, { text: "newer" });
+  resolve();
+  await pending;
+  deletion = null;
+  expect(readComposerDraft(key).text).toBe("");
+});
+
+test("stale bootstrap null relay followed by held source event retains text and files", async () => {
+  event({ event: "relay.status", data: { connected: true, url: "relay" } });
+  const key = composerDraftKey("account", "relay", "open");
+  const files = [{ uri: "file:///picked", name: "picked", mime: "text/plain" }];
+  writeComposerDraft(key, { text: "unfinished", attachments: files });
+  let answer!: (value: unknown) => void;
+  heldSnapshot = new Promise(resolve => { answer = resolve; });
+  const refresh = engine.refreshCustomModels();
+  await flush();
+  event({ event: "relay.status", data: { connected: true, url: "relay" } });
+  answer(snapshot([chat("open"), chat("other")]));
+  await refresh;
+  heldSnapshot = null;
+  expect(useStore.getState().relayUrl).toBe("relay");
+  expect(readComposerDraft(key).text).toBe("unfinished");
+  expect(readComposerDraft(key).attachments).toEqual(files);
+  expect(hasUpdateDrafts()).toBe(true);
+});
+
+test("old deletion acknowledgement cannot discard same-key reappearance", async () => {
+  const key = composerDraftKey("account", null, "open");
+  writeComposerDraft(key, { text: "old" });
+  let resolve!: () => void;
+  deletion = new Promise<void>(done => { resolve = done; });
+  const pending = engine.deleteChat("open");
+  event({ event: "chat.removed", data: { chat_id: "open" } });
+  event({ event: "snapshot", data: snapshot([chat("open"), chat("other")]) });
+  writeComposerDraft(key, { text: "new ownership" });
+  resolve();
+  await pending;
+  deletion = null;
+  expect(readComposerDraft(key).text).toBe("new ownership");
+  expect(useStore.getState().chats.some(c => c.id === "open")).toBe(true);
+});
 function reply(id: string, kind: "reply" | "permission" | "failure" = "reply") {
   const message: Message = { id: "reply", chat_id: id, author: { kind: "bot", bot_id: "bot" },
     body: { kind: "text", text: "Done" }, state: { kind: "complete" }, created_at: 1 };

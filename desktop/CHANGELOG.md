@@ -6,6 +6,7 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- The desktop host orders account bootstrap and live events on the main thread, handles identity loss without waiting for bootstrap, and rejects websocket frames from previous connections.
 - Fresh Beans v2 accounts use isolated `.beans-v2` / `.beans-dev-v2` homes, ports 4874 / 4875, versioned backup phrases and pairing links, and independent client preferences. Configure the relay explicitly.
 - Group member rows offer Make Owner from their context menu, with the current owner identified in the inspector.
 - Lossless PNG optimizations reduce bundled image sizes without changing their decoded pixels.

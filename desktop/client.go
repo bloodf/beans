@@ -141,7 +141,7 @@ func (c *cliClient) read(generation int, conn *websocket.Conn) {
 			c.dropped(generation)
 			return
 		}
-		c.handle(data)
+		c.handle(generation, data)
 	}
 }
 
@@ -149,7 +149,7 @@ type frameError struct {
 	Message string `json:"message"`
 }
 
-func (c *cliClient) handle(frame []byte) {
+func (c *cliClient) handle(generation int, frame []byte) {
 	var head struct {
 		Event  string         `json:"event"`
 		ID     *int64         `json:"id"`
@@ -159,16 +159,23 @@ func (c *cliClient) handle(frame []byte) {
 	if json.Unmarshal(frame, &head) != nil {
 		return
 	}
+	c.mu.Lock()
+	if generation != c.generation {
+		c.mu.Unlock()
+		return
+	}
 	if head.Event != "" {
-		if c.onEvent != nil {
-			c.onEvent(head.Event, frame)
+		onEvent := c.onEvent
+		c.mu.Unlock()
+		if onEvent != nil {
+			onEvent(head.Event, frame)
 		}
 		return
 	}
 	if head.ID == nil {
+		c.mu.Unlock()
 		return
 	}
-	c.mu.Lock()
 	waiting, ok := c.pending[*head.ID]
 	delete(c.pending, *head.ID)
 	c.mu.Unlock()

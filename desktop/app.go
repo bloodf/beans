@@ -4,12 +4,13 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"net/url"
 	"runtime"
 	"sync"
 	"time"
 
+	stdjson "encoding/json"
+	"github.com/bloodf/beans/desktop/model"
 	"github.com/egoist/mygo"
 )
 
@@ -65,9 +66,11 @@ var (
 // windows, the CLI's launcher and connection, notifications, and the tray icon that keeps the
 // app reachable while its windows are closed.
 type appDelegate struct {
-	mu       sync.Mutex
-	cli      *cliClient
-	launcher *launcher
+	mu                sync.Mutex
+	cli               *cliClient
+	launcher          *launcher
+	session           *model.Session
+	sessionGeneration uint64
 
 	main       *mygo.Window
 	onboarding *mygo.Window
@@ -112,16 +115,30 @@ func (a *appDelegate) didFinishLaunching() {
 	startupTrace("did finish launching")
 	a.cli = newCLIClient()
 	a.launcher = newLauncher()
+	a.session = model.NewSession(a.identityChanged, func(name string, data stdjson.RawMessage) {
+		frame, err := stdjson.Marshal(struct {
+			Event string             `json:"event"`
+			Data  stdjson.RawMessage `json:"data"`
+		}{name, data})
+		if err == nil {
+			CLIEvents.Broadcast(jsontext.Value(frame))
+		}
+	})
 	if isMock() {
 		yes := true
 		a.hasIdentity = &yes
 		a.starting = false
 	} else {
 		a.cli.onState = func(state string) {
-			if state == "connected" {
-				go a.askIdentity()
-			}
-			a.publishState()
+			postMain(func() {
+				if state == "connected" {
+					a.sessionGeneration = a.session.Connect()
+					go a.askIdentity(a.sessionGeneration)
+				} else {
+					a.session.Disconnect()
+				}
+				a.publishState()
+			})
 		}
 		a.cli.onEvent = a.cliEvent
 		a.cli.onReconnectNeeded = a.launcher.ensureRunning
@@ -175,34 +192,26 @@ func (a *appDelegate) stopWaiting() {
 
 // askIdentity asks a CLI that just answered whether it holds an identity, which decides between
 // onboarding and the main window.
-func (a *appDelegate) askIdentity() {
+func (a *appDelegate) askIdentity(generation uint64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	result, err := a.cli.request(ctx, "hello", nil)
-	if err == nil {
-		var hello struct {
-			HasIdentity bool `json:"has_identity"`
+	result, err := a.cli.request(ctx, "bootstrap", nil)
+	postMain(func() {
+		if err == nil {
+			_ = a.session.Bootstrap(generation, stdjson.RawMessage(result))
 		}
-		if json.Unmarshal(result, &hello) == nil {
-			a.identityChanged(hello.HasIdentity)
-		}
-	}
-	a.finishStartup()
+		a.finishStartup()
+	})
 }
 
 func (a *appDelegate) cliEvent(name string, frame []byte) {
-	CLIEvents.Broadcast(jsontext.Value(frame))
-	if name != "identity.changed" && name != "snapshot" {
+	var payload struct {
+		Data stdjson.RawMessage `json:"data"`
+	}
+	if stdjson.Unmarshal(frame, &payload) != nil {
 		return
 	}
-	var payload struct {
-		Data struct {
-			HasIdentity *bool `json:"has_identity"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(frame, &payload) == nil && payload.Data.HasIdentity != nil {
-		a.identityChanged(*payload.Data.HasIdentity)
-	}
+	postMain(func() { a.session.Event(a.sessionGeneration, name, payload.Data) })
 }
 
 // identityChanged opens the window the identity calls for. Onboarding closes itself when it

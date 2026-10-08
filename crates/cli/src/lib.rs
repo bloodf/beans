@@ -10,6 +10,7 @@ pub mod catalog;
 pub mod config;
 pub mod credentials;
 pub mod crypto;
+pub mod diagnostics;
 pub mod embeddings;
 pub mod events;
 pub mod files;

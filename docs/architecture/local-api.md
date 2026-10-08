@@ -52,6 +52,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | Method | Params | Result |
 | --- | --- | --- |
 | `hello` | none | `version`, `has_identity`, `is_identity_device`, `device_id`, `relay_url`, `relay_connected`, `relay_update_required`, `relay_error` |
+| `diagnostics.report` | none | schema-1 privacy-safe setup report (see [Diagnostics report](runtime.md#diagnostics-report)); probes public relay health only |
 | `bootstrap` | none | snapshot (see `snapshot`); starts the hourly catalog and marketplace checks |
 | `identity.create` | `device_name?` | `phrase` (secret), `device_id` |
 | `identity.restore` | `phrase` (secret), `device_name?` | `device_id` |

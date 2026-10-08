@@ -88,7 +88,11 @@ enum Command {
     /// Show identity, Devices, bots, and relay state.
     Status,
     /// Check the local setup.
-    Doctor,
+    Doctor {
+        /// Export a privacy-safe report; includes the selected relay host and port.
+        #[usage(long)]
+        json: bool,
+    },
     /// Local update control of the running `beans serve`, for an operator's updater. Prepare and
     /// cancel read the token from the file BEANS_UPDATE_TOKEN_FILE names.
     Update {
@@ -300,7 +304,14 @@ async fn main() -> anyhow::Result<()> {
         Command::SelfUpdate => anyhow::bail!("{}", beans::update::UNAVAILABLE),
         command => command,
     };
-    let app = App::load(config)?;
+    let app = if matches!(command, Command::Doctor { .. }) {
+        // Account admission stays fail-closed. Neither startup logs nor the error chain
+        // may escape into a shareable doctor transcript with private paths or values.
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || App::load(config))
+            .map_err(|_| anyhow::anyhow!("Doctor could not load local account data; no report was produced. Check storage access and account format locally; private details are omitted."))?
+    } else {
+        App::load(config)?
+    };
 
     match command {
         Command::Serve { parent_pid, ready_stdout } => {
@@ -407,8 +418,8 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
             Ok(())
         }
-        Command::Doctor => {
-            doctor(&app).await;
+        Command::Doctor { json } => {
+            doctor(&app, json).await;
             Ok(())
         }
         Command::Update { .. } => unreachable!("handled before the data folder opens"),
@@ -1128,30 +1139,23 @@ async fn flush_outbox_once(app: &std::sync::Arc<App>) {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(8), sync).await;
 }
 
-async fn doctor(app: &std::sync::Arc<App>) {
+async fn doctor(app: &std::sync::Arc<App>, json: bool) {
+    let report = beans::diagnostics::report(app).await;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report).expect("diagnostics JSON"));
+        return;
+    }
     let ok = |label: &str, good: bool, detail: String| println!("{} {label}: {detail}", if good { "✔" } else { "✘" });
-    ok("home", app.config.home.is_dir(), app.config.home.display().to_string());
-    ok("identity", app.has_identity(), if app.has_identity() { "present".into() } else { "run `beans identity new`".into() });
-    let port_free = std::net::TcpListener::bind(("127.0.0.1", app.config.port)).is_ok();
-    ok("port", port_free, if port_free { format!("{} free", app.config.port) } else { format!("{} busy (beans serve running?)", app.config.port) });
-    match app.relay_url() {
-        Some(url) => {
-            let reachable = app.relay.health(&url).await.is_ok();
-            ok("relay", reachable, if reachable { url } else { format!("{url} unreachable") });
-        }
-        None => ok("relay", false, "not configured (BEANS_RELAY_URL); single-Device mode".into()),
-    }
-    let credentials = app.credentials.lock().unwrap().connected_kinds();
-    ok("providers", !credentials.is_empty(), if credentials.is_empty() { "none connected".into() } else { credentials.join(", ") });
-    let (servers, problems, error) = {
-        let store = app.plugins.lock().unwrap();
-        let problems: Vec<String> = store.mcp.servers.iter().filter_map(|server| server.problem().map(|problem| format!("{}: {problem}", server.name))).collect();
-        (store.mcp.servers.len(), problems, store.mcp.error.clone())
-    };
-    let path = app.config.mcp_path().display().to_string();
-    match error {
-        Some(error) => ok("mcp.json", false, error),
-        None if problems.is_empty() => ok("mcp.json", true, format!("{servers} server{} in {path}", if servers == 1 { "" } else { "s" })),
-        None => ok("mcp.json", false, problems.join("; ")),
-    }
+    ok("home", report["home"]["exists"] == true, "directory present (path omitted)".into());
+    ok("identity", report["this_device"]["has_identity"] == true, if app.has_identity() { "present".into() } else { "run `beans identity new`".into() });
+    println!("• port: {}", if report["port"]["free"] == true { "free" } else { "busy (beans serve running?)" });
+    let relay = &report["relay"];
+    ok("relay", relay["reason"] == "none", format!("{}: {}{}", relay["host"].as_str().unwrap_or("host omitted"), relay["reason"].as_str().unwrap(), relay["http_status"].as_u64().map(|s| format!(" (HTTP {s})")).unwrap_or_default()));
+    println!("• providers: configured credentials only; health not checked\n{}", report["providers"]);
+    println!("• plugins: cached setup state, not a live probe\n{}", report["plugins"]);
+    let mcp = &report["mcp_json"];
+    ok("mcp.json", mcp["file_error"] == false && mcp["problems"] == 0, format!("{} servers, {} configuration problems, file error: {}", mcp["servers"], mcp["problems"], mcp["file_error"]));
+    println!("• versions: {}", report["versions"]);
+    println!("• Runners: presence only, not admission readiness\n{}", report["runners"]);
+    println!("Review before sharing; report discloses relay host/port. Nothing is uploaded.");
 }

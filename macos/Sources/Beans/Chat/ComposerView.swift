@@ -10,9 +10,38 @@ final class ComposerTextView: NSTextView {
         didSet { needsDisplay = true }
     }
 
+    enum ReturnIntent { case send, passThrough }
+
+    /// The key event being routed, so a command sees its modifiers without `NSApp.currentEvent`.
+    private var keyEvent: NSEvent?
+
+    override func keyDown(with event: NSEvent) {
+        keyEvent = event
+        defer { keyEvent = nil }
+        super.keyDown(with: event)
+    }
+
     override func doCommand(by selector: Selector) {
         if onKeyCommand?(selector) == true { return }
         super.doCommand(by: selector)
+    }
+
+    /// Whether a Return-family command sends. AppKit routes Return and Shift-Return to
+    /// `insertNewline:` but ⌘Return to `noop:`, so the key event's modifiers decide, not the
+    /// selector alone. Shift always breaks the line, ⌘Return sends only with no other modifier,
+    /// and composition in progress (an IME's marked text) never sends.
+    func returnIntent(for selector: Selector, sendOnReturn: Bool) -> ReturnIntent {
+        guard !hasMarkedText() else { return .passThrough }
+        let event = keyEvent ?? NSApp.currentEvent
+        let flags = (event?.modifierFlags ?? []).intersection([.command, .shift, .option, .control])
+        let isReturnKey = event?.type == .keyDown && (event?.keyCode == 36 || event?.keyCode == 76)
+        if flags == .command, isReturnKey,
+            selector == #selector(NSResponder.insertNewline(_:)) || selector == Selector(("noop:"))
+        {
+            return .send
+        }
+        if sendOnReturn, flags.isEmpty, selector == #selector(NSResponder.insertNewline(_:)) { return .send }
+        return .passThrough
     }
 
     override func paste(_ sender: Any?) {
@@ -691,7 +720,11 @@ final class ComposerView: NSView {
                 mentions.dismiss()
                 return true
             default:
-                break
+                if textView.returnIntent(for: selector, sendOnReturn: Preferences.sendOnReturn) == .send {
+                    // ⌘Return arrives as `noop:`; with the picker open it picks, never sends.
+                    mentions.commitSelection()
+                    return true
+                }
             }
         }
 
@@ -705,22 +738,9 @@ final class ComposerView: NSView {
             return true
         }
 
-        guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
-
-        // Shift-Return always breaks the line; plain Return sends unless the
-        // preference reserves sending for ⌘Return.
-        let shift = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
-        if Preferences.sendOnReturn {
-            if shift { return false }
-            send()
-            return true
-        }
-        let command = NSApp.currentEvent?.modifierFlags.contains(.command) ?? false
-        if command {
-            send()
-            return true
-        }
-        return false
+        guard textView.returnIntent(for: selector, sendOnReturn: Preferences.sendOnReturn) == .send else { return false }
+        send()
+        return true
     }
 
     // MARK: - Layout

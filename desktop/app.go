@@ -198,6 +198,12 @@ func (a *appDelegate) stopWaiting() {
 
 func (a *appDelegate) connectionTransition(state string) uint64 {
 	native.store.Fence()
+	if native.avatars != nil {
+		native.avatars.reset(native.store.Epoch)
+	}
+	if native.memory != nil {
+		_ = native.memory.reset(native.store.Epoch)
+	}
 	if state == "connected" {
 		native.authority = a.cli.captureAuthority()
 		a.sessionGeneration = a.session.Connect()

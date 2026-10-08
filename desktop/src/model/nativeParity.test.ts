@@ -5,7 +5,7 @@ import { MemoryPreferencesDraft, readMemoryConnections, MemoryServiceViewState }
 test("native geometry input keeps stable identity and sparse state inheritance", () => {
   const look = { version: 1 as const, base: { palette: { head: "#ABCDEF" } }, states: { working: { palette: { eye: "#123456" } } } };
   const geometry = botAvatarGeometry("bot-native", look, "working");
-  const frame = avatarFrame(geometry, geometry, 1, 0, 0);
+  const frame = avatarFrame(geometry, 0, 0);
   expect(frame.head).toBe("#ABCDEF");
   expect(frame.eye).toBe("#123456");
   expect(botAvatarGeometry("bot-native", look, "idle").palette.head).toBe("#ABCDEF");

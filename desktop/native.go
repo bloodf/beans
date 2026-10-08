@@ -18,9 +18,12 @@ import (
 // The native window shares the admitted account and sole CLI transport. The
 // complete web client remains available until native feature parity is proven.
 type nativeDesktop struct {
-	store     *model.NativeStore
-	win       *mygo.Window
-	authority cliAuthority
+	store       *model.NativeStore
+	win         *mygo.Window
+	authority   cliAuthority
+	avatars     *nativeAvatars
+	memory      *nativeMemory
+	memoryPanel nativeMemoryPanel
 }
 
 func nativeEnabled() bool { return os.Getenv("BEANS_NATIVE") == "1" }
@@ -31,11 +34,24 @@ func (n *nativeDesktop) event(name string, data json.RawMessage) {
 	if err := n.store.Apply(name, data); err != nil {
 		n.store.Error = err.Error()
 	}
+	if n.memory != nil && n.memory.epoch != n.store.Epoch {
+		_ = n.memory.reset(n.store.Epoch)
+		n.memoryPanel = nativeMemoryPanel{}
+	}
 	if n.win != nil {
 		n.win.Invalidate()
 	}
 }
 func (n *nativeDesktop) show() {
+	if n.avatars == nil {
+		r, err := newSharedRuntime()
+		if err != nil {
+			n.store.Error = err.Error()
+			return
+		}
+		n.avatars = newNativeAvatars(r)
+		n.memory = &nativeMemory{runtime: r}
+	}
 	if n.win == nil {
 		n.win = mygo.NewWindow(mygo.WindowOptions{Title: "Beans — Native", Width: 1100, Height: 760, MinWidth: 640, MinHeight: 440, Content: ui.View(n.view)})
 		n.win.OnClose(func(e *mygo.CloseEvent) {
@@ -293,6 +309,18 @@ func (n *nativeDesktop) view(c *ui.Context) {
 				}
 				for i := range n.store.Chats {
 					chat := &n.store.Chats[i]
+					if n.avatars != nil {
+						for _, id := range chat.BotIDs {
+							for _, b := range n.store.Bots {
+								if b.ID == id {
+									n.avatars.view(c, b, "idle", 32)
+									n.fetchAvatar(b)
+									break
+								}
+							}
+							break
+						}
+					}
 					if ui.Button(c.Key(chat.ID), n.store.Title(chat)).Clicked() {
 						n.store.Selected = chat.ID
 					}
@@ -317,6 +345,13 @@ func (n *nativeDesktop) view(c *ui.Context) {
 				if ui.Button(c, "Reconnect").Clicked() {
 					app.cli.reconnect()
 				}
+				return
+			}
+			if n.memory != nil && ui.Button(c, "Memory connections").Clicked() {
+				n.loadMemory()
+			}
+			if n.memoryPanel.Open {
+				n.memoryView(c)
 				return
 			}
 			if !n.store.HasIdentity {

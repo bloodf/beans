@@ -8,6 +8,7 @@ and the update window shows it.
 
 - `BEANS_NATIVE=1` opens a native sidebar, transcript and multiline composer alongside the full client. Awaited text/file/reply sends and file selection are account-fenced; updater installation requires closing the native window. The full client and website preview remain available.
 - Native reconnect waits for authoritative account admission before showing account data or accepting sends. Outgoing native RPCs bind to the captured socket/account authority. Unsent native drafts veto close, quit and install even without a window; changed-account drafts remain recoverable with explicit save/discard controls.
+- The native sidebar renders saved Blobatar geometry from the shared generator, with exact uploaded-photo precedence. Native memory uses the existing service/setup contract bundle for consent, masking, deletion fences and one-use approvals; a native connections panel shows masked configuration. The full client remains default while editing and animated parity are completed.
 - The desktop host orders account bootstrap and live events on the main thread, handles identity loss without waiting for bootstrap, and rejects websocket frames from previous connections.
 - Fresh Beans v2 accounts use isolated `.beans-v2` / `.beans-dev-v2` homes, ports 4874 / 4875, versioned backup phrases and pairing links, and independent client preferences. Configure the relay explicitly.
 - Group member rows offer Make Owner from their context menu, with the current owner identified in the inspector.

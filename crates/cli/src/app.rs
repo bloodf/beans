@@ -2235,10 +2235,10 @@ mod tests {
         assert_eq!(app.store.load_state().unwrap().applied_blob_ids, receipt);
 
         let db = rusqlite::Connection::open(app.config.database_path()).unwrap();
-        for table in ["metadata", "outbox"] {
+        for (table, operation) in [("metadata", "INSERT"), ("outbox", "UPDATE")] {
             app.state.lock().unwrap().chats[0].unread_count = 3;
             app.store.save_state(&app.state.lock().unwrap()).unwrap();
-            db.execute_batch(&format!("CREATE TRIGGER fail_read BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT, 'synthetic read failure'); END;")).unwrap();
+            db.execute_batch(&format!("CREATE TRIGGER fail_read BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, 'synthetic read failure'); END;")).unwrap();
             let mut events = app.events.subscribe();
             assert!(crate::api::dispatch(app, "chats.mark_read", params.clone()).await.is_err(), "{table} failure must reject API success");
             assert_eq!(app.chat("read").unwrap().unread_count, 3);

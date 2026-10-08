@@ -1604,24 +1604,41 @@ impl App {
 
     /// Clears a chat's unread count. Read on this Device (`upload`), it clears on every other
     /// one through a `ClearUnread` blob.
-    pub fn mark_read(&self, chat_id: &str, upload: bool) {
-        let changed = {
-            let mut state = self.state.lock().unwrap();
-            match state.chats.iter_mut().find(|c| c.meta.id == chat_id) {
-                Some(chat) if chat.unread_count > 0 => {
-                    chat.unread_count = 0;
-                    true
-                }
-                _ => false,
-            }
+    pub fn mark_read(&self, chat_id: &str, upload: bool) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let Some(index) = state.chats.iter().position(|chat| chat.meta.id == chat_id && chat.unread_count > 0) else {
+            return Ok(());
         };
-        if changed {
-            self.save_state();
+        if !upload {
+            // Incoming reads retain the existing mutation and bulk-page save semantics.
+            // Their receipt/cursor replay durability is not established by this boundary.
+            state.chats[index].unread_count = 0;
+            drop(state);
+            let saved = if self.bulk_sync.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                let snapshot = self.state.lock().unwrap().clone();
+                self.store.save_state(&snapshot)
+            };
             self.emit(self.roster_summary());
-            if upload {
-                self.push_chat_op(&ChatBlob::ClearUnread { chat_id: chat_id.to_string() });
-            }
+            return saved;
         }
+        let dek = self.dek().ok_or_else(|| anyhow::anyhow!("Account key unavailable"))?;
+        let op = ChatBlob::ClearUnread { chat_id: chat_id.to_string() };
+        let item = OutboxItem {
+            id: uuid::Uuid::new_v4().to_string(), kind: "chat".into(), recipient: None,
+            ciphertext: crate::crypto::encrypt_json(&dek, "chat", &op)?,
+            slot: Some(op.slot()), group: Some(op.group()),
+        };
+        let mut snapshot = state.clone();
+        snapshot.chats[index].unread_count = 0;
+        remember_applied(&mut snapshot, &item.id);
+        self.store.queue_outbox_with_state(&item, &snapshot)?;
+        *state = snapshot;
+        drop(state);
+        self.outbox_notify.notify_waiters();
+        self.emit(self.roster_summary());
+        Ok(())
     }
 
     // MARK: - Messages

@@ -133,3 +133,52 @@ fn doctor_exports_json_and_preserves_plain_invocation() {
         }
     }
 }
+
+#[cfg(feature = "cli")]
+#[test]
+fn doctor_startup_failures_keep_both_output_channels_private() {
+    for failure in ["malformed", "unmarked", "unreadable"] {
+        let home = tempfile::Builder::new().prefix("PRIVATE_MARKER").tempdir().unwrap();
+        let marker = home.path().join("format.json");
+        let private_file = home.path().join("PRIVATE_MARKER.json");
+        match failure {
+            "malformed" => {
+                std::fs::write(&marker, r#"{"format":"beans-v2"}"#).unwrap();
+                std::fs::write(home.path().join("settings.json"), "PRIVATE_MARKER{").unwrap();
+            }
+            "unmarked" => std::fs::write(&private_file, "PRIVATE_MARKER").unwrap(),
+            // A directory in place of a record is deterministically unreadable as a
+            // file, including under privileged test users where chmod is ineffective.
+            "unreadable" => std::fs::create_dir(&marker).unwrap(),
+            _ => unreachable!(),
+        }
+        for json_output in [false, true] {
+            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_beans"));
+            command.env_clear().env("RUST_LOG", "trace").env("BEANS_RELAY_URL", "PRIVATE_MARKER");
+            if let Some(root) = std::env::var_os("SystemRoot") { command.env("SystemRoot", root); }
+            command.arg("--home").arg(home.path()).arg("doctor");
+            if json_output { command.arg("--json"); }
+            let output = command.output().unwrap();
+            assert!(!output.status.success(), "{failure}, JSON={json_output}");
+            assert!(output.stdout.is_empty(), "startup failure must not emit a report");
+            for bytes in [&output.stdout, &output.stderr] {
+                let text = String::from_utf8_lossy(bytes);
+                assert!(!text.contains("PRIVATE_MARKER"), "{failure}, JSON={json_output}: {text}");
+                assert!(!text.contains(home.path().to_str().unwrap()), "{failure}, JSON={json_output}: {text}");
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("Doctor could not load local account data"));
+            assert!(stderr.contains("no report was produced"));
+            match failure {
+                "malformed" => assert_eq!(std::fs::read(home.path().join("settings.json")).unwrap(), b"PRIVATE_MARKER{"),
+                "unmarked" => {
+                    assert!(!marker.exists());
+                    assert_eq!(std::fs::read(&private_file).unwrap(), b"PRIVATE_MARKER");
+                }
+                "unreadable" => assert!(marker.is_dir()),
+                _ => unreachable!(),
+            }
+            assert!(!home.path().join("beans.sqlite3").exists());
+        }
+    }
+}

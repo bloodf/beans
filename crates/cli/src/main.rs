@@ -304,7 +304,14 @@ async fn main() -> anyhow::Result<()> {
         Command::SelfUpdate => anyhow::bail!("{}", beans::update::UNAVAILABLE),
         command => command,
     };
-    let app = App::load(config)?;
+    let app = if matches!(command, Command::Doctor { .. }) {
+        // Account admission stays fail-closed. Neither startup logs nor the error chain
+        // may escape into a shareable doctor transcript with private paths or values.
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || App::load(config))
+            .map_err(|_| anyhow::anyhow!("Doctor could not load local account data; no report was produced. Check storage access and account format locally; private details are omitted."))?
+    } else {
+        App::load(config)?
+    };
 
     match command {
         Command::Serve { parent_pid, ready_stdout } => {

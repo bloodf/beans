@@ -55,7 +55,7 @@ irm https://usebeans.app/install-cli.ps1 | iex
 | `beans self-update` | 提示 Beans 不支持 CLI 自更新；请使用 Beans 的签名更新机制。 |
 | `beans service install` | 让 `beans serve` 在后台运行：现在启动，每次登录时启动，停止后会再次启动。`beans service uninstall` 停止它；`beans service status` 告诉你它是否在运行、日志在哪里。 |
 | `beans status` | 以 JSON 打印这台设备的状态：设备、智能体、聊天、服务商。 |
-| `beans doctor [--json]` | 输出保护隐私的设置诊断：版本、中继健康、已配置凭据、缓存的插件设置状态和 Runner 在线状态。`--json` 导出同一报告。报告包含中继主机和端口，不包含密钥、名称、路径或消息。分享前请检查；不会上传任何内容。不会验证服务商健康。 |
+| `beans doctor [--json]` | 输出保护隐私的设置诊断：版本、中继健康、已配置凭据、缓存的插件设置状态和 Runner 在线状态。`--json` 导出同一报告。报告包含中继主机和端口，不包含密钥、名称、路径或消息。如果账户加载失败，命令以非零状态退出，不输出报告，只在标准错误中返回固定提示，省略启动日志和私密错误详情；请在本机检查存储访问权限和账户格式。分享前请检查；不会上传任何内容。不会验证服务商健康。 |
 
 ## MCP 服务器
 

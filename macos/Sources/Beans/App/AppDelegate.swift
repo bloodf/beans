@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// refuse to run there, so closing it is Cancel: the main window it hid comes back as it was.
     private var onboardingOverIdentity = false
     private var settingsWindowController: SettingsWindowController?
+    private var diagnosticsWindowController: DiagnosticsWindowController?
     private var servicesStarted = false
     private var terminationPending = false
 
@@ -224,6 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func languageChanged() {
         NSApp.mainMenu = MainMenu.build()
         mainWindowController?.languageChanged()
+        diagnosticsWindowController?.languageChanged()
         if let old = settingsWindowController {
             let frame = old.window?.frame
             old.close()
@@ -266,6 +268,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     // MARK: - Actions
+
+    @objc func showDiagnostics(_ sender: Any?) {
+        if diagnosticsWindowController == nil {
+            diagnosticsWindowController = DiagnosticsWindowController(client: store.client)
+        }
+        diagnosticsWindowController?.showWindow(nil)
+        diagnosticsWindowController?.window?.makeKeyAndOrderFront(nil)
+        activate()
+    }
 
     /// Settings is a mode of the main window. While onboarding is up there is no main window,
     /// so the relay URL and the CLI port get a small window of their own.

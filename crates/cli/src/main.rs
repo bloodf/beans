@@ -19,6 +19,11 @@ struct Cli {
     #[usage(long, env = "BEANS_PORT", global)]
     port: Option<u16>,
 
+    /// Cargo wrappers can forward --message-format to Beans after the application arguments.
+    /// Accept and ignore it; Beans has no message-format option.
+    #[usage(long, global, hide)]
+    message_format: Option<String>,
+
     #[usage(subcommand)]
     command: Option<Command>,
 }

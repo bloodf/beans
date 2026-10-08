@@ -3,9 +3,10 @@ import XCTest
 @testable import Beans
 
 /// Real `ComposerView`, `MentionPanel` and key routing: events go through `NSApp.sendEvent`
-/// into the composer's own text view, and the only observable outputs are `onSend` and the
-/// field text. Reads `AppStore.shared` only through the picker's runner lookup. Writes only
-/// `beans-v2.sendOnReturn`, which each test restores exactly, absent key included.
+/// into the composer's own text view, and the observable outputs are `onSend`, the field text
+/// and attachments. Reads `AppStore.shared` only through the picker's runner lookup. Writes only
+/// `beans-v2.sendOnReturn` (`Preferences.Key` is private), which each test restores exactly,
+/// absent key included.
 @MainActor
 final class ComposerReturnTests: XCTestCase {
     private var window: NSWindow!
@@ -24,6 +25,7 @@ final class ComposerReturnTests: XCTestCase {
     override func setUp() async throws {
         _ = NSApplication.shared
         savedSendOnReturn = UserDefaults.standard.object(forKey: Self.sendOnReturnKey)
+        sent = []
         composer = ComposerView()
         composer.frame = NSRect(x: 0, y: 0, width: 600, height: 160)
         composer.configure(placeholder: "Message", bots: bots)
@@ -37,12 +39,23 @@ final class ComposerReturnTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        // Empty text dismisses the picker; then drop any child panel and the window itself.
+        composer.clearDraft()
+        for child in window.childWindows ?? [] {
+            window.removeChildWindow(child)
+            child.orderOut(nil)
+        }
+        window.contentView = nil
+        window.orderOut(nil)
+        window.close()
+        textView = nil
+        composer = nil
+        window = nil
         if let saved = savedSendOnReturn {
             UserDefaults.standard.set(saved, forKey: Self.sendOnReturnKey)
         } else {
             UserDefaults.standard.removeObject(forKey: Self.sendOnReturnKey)
         }
-        window.orderOut(nil)
     }
 
     private func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
@@ -53,16 +66,31 @@ final class ComposerReturnTests: XCTestCase {
     }
 
     /// Dispatches as the app does, so `NSApp.currentEvent` and `keyDown` both see the event.
-    private func press(_ flags: NSEvent.ModifierFlags = [], keyCode: UInt16 = 36) {
+    /// A local monitor records what `sendEvent` delivered, so a press that was dropped, or that
+    /// dequeued some other event, fails here instead of passing a "sent 0" assertion.
+    private func press(_ flags: NSEvent.ModifierFlags = [], keyCode: UInt16 = 36) throws {
+        XCTAssertTrue(window.isKeyWindow, "composer window is not key")
+        XCTAssertTrue(window.firstResponder === textView, "text view is not first responder")
         let character = keyCode == 48 ? "\t" : keyCode == 76 ? "\u{3}" : "\r"
-        let event = NSEvent.keyEvent(
-            with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: window.windowNumber,
-            context: nil, characters: character, charactersIgnoringModifiers: character, isARepeat: false,
-            keyCode: keyCode)!
+        let event = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, characters: character,
+                charactersIgnoringModifiers: character, isARepeat: false, keyCode: keyCode))
+        var delivered: [NSEvent] = []
+        let monitor = try XCTUnwrap(
+            NSEvent.addLocalMonitorForEvents(matching: .keyDown) { delivered.append($0); return $0 })
+        defer { NSEvent.removeMonitor(monitor) }
         NSApp.postEvent(event, atStart: true)
-        if let next = NSApp.nextEvent(matching: .any, until: Date(timeIntervalSinceNow: 0.5), inMode: .default, dequeue: true) {
-            NSApp.sendEvent(next)
-        }
+        let next = try XCTUnwrap(
+            NSApp.nextEvent(matching: .keyDown, until: Date(timeIntervalSinceNow: 1), inMode: .default, dequeue: true),
+            "posted key event was not dequeued")
+        XCTAssertEqual(next.keyCode, keyCode)
+        XCTAssertEqual(next.modifierFlags.intersection(.deviceIndependentFlagsMask), flags)
+        XCTAssertEqual(next.windowNumber, window.windowNumber)
+        NSApp.sendEvent(next)
+        XCTAssertEqual(delivered.count, 1, "key event did not reach sendEvent exactly once")
+        XCTAssertEqual(delivered.first?.keyCode, keyCode)
     }
 
     private func type(_ text: String) {
@@ -70,69 +98,81 @@ final class ComposerReturnTests: XCTestCase {
         textView.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
     }
 
-    func testSendOnReturnOffSendsOnlyOnCommandReturn() {
+    func testSendOnReturnOffSendsOnlyOnCommandReturn() throws {
         Preferences.sendOnReturn = false
         type("hello")
-        press()
+        try press()
         XCTAssertEqual(sent.count, 0)
         XCTAssertEqual(composer.text, "hello\n")
-        press(.shift)
+        try press(.shift)
         XCTAssertEqual(sent.count, 0)
-        press([.command, .shift])
+        XCTAssertEqual(composer.text, "hello\n\n")
+        // Delivery of each of these is asserted by `press`; their text effect is AppKit's.
+        try press([.command, .shift])
+        try press(.option)
+        try press(.control)
         XCTAssertEqual(sent.count, 0)
-        press(.option)
-        press(.control)
-        XCTAssertEqual(sent.count, 0)
-        press(.command)
-        XCTAssertEqual(sent.map(\.text), ["hello"])
+        let beforeSend = composer.text
+        XCTAssertTrue(beforeSend.hasPrefix("hello\n\n"))
+        try press(.command)
+        XCTAssertEqual(sent.map(\.text), [beforeSend.trimmingCharacters(in: .whitespacesAndNewlines)])
         XCTAssertEqual(composer.text, "")
     }
 
-    func testCommandEnterOnKeypadSendsOnce() {
+    func testCommandEnterOnKeypadSendsOnce() throws {
         Preferences.sendOnReturn = false
         type("hi")
-        press(.command, keyCode: 76)
+        try press(.command, keyCode: 76)
         XCTAssertEqual(sent.map(\.text), ["hi"])
+        XCTAssertEqual(composer.text, "")
     }
 
-    func testSendOnReturnOnSendsReturnAndBreaksOnShift() {
+    func testSendOnReturnOnSendsReturnAndBreaksOnShift() throws {
         Preferences.sendOnReturn = true
         type("hello")
-        press(.shift)
+        try press(.shift)
         XCTAssertEqual(sent.count, 0)
         XCTAssertEqual(composer.text, "hello\n")
-        press([.command, .shift])
+        try press([.command, .shift])
         XCTAssertEqual(sent.count, 0)
-        press()
+        try press()
         XCTAssertEqual(sent.map(\.text), ["hello"])
+        XCTAssertEqual(composer.text, "")
         type("again")
-        press(.command)
+        try press(.command)
         XCTAssertEqual(sent.map(\.text), ["hello", "again"])
     }
 
-    func testMarkedTextNeverSends() {
+    func testMarkedTextNeverSends() throws {
         for on in [false, true] {
             Preferences.sendOnReturn = on
-            type("")
-            textView.setMarkedText(
-                "に", selectedRange: NSRange(location: 1, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
-            press()
-            press(.command)
-            XCTAssertEqual(sent.count, 0, "sendOnReturn=\(on)")
-            XCTAssertTrue(textView.hasMarkedText(), "sendOnReturn=\(on)")
-            textView.unmarkText()
+            for flags: NSEvent.ModifierFlags in [[], .command] {
+                composer.text = ""
+                textView.setMarkedText(
+                    "に", selectedRange: NSRange(location: 1, length: 0),
+                    replacementRange: NSRange(location: NSNotFound, length: 0))
+                XCTAssertTrue(textView.hasMarkedText(), "setup on=\(on) flags=\(flags.rawValue)")
+                try press(flags)
+                // Pass-through may commit or keep the composition; either way no send and the
+                // composed character is still in the draft.
+                XCTAssertEqual(sent.count, 0, "on=\(on) flags=\(flags.rawValue)")
+                XCTAssertTrue(composer.text.contains("に"), "on=\(on) flags=\(flags.rawValue) text=\(composer.text)")
+                textView.unmarkText()
+            }
         }
     }
 
-    func testMentionPickerKeepsSelectionPriority() {
+    func testMentionPickerKeepsSelectionPriority() throws {
         for (on, flags, keyCode): (Bool, NSEvent.ModifierFlags, UInt16) in [
             (true, [], 36), (false, [], 36), (false, .command, 36), (true, .command, 36), (true, [], 48),
         ] {
             Preferences.sendOnReturn = on
             type("hey @A")
-            press(flags, keyCode: keyCode)
+            XCTAssertEqual(window.childWindows?.count, 1, "picker not showing: on=\(on) key=\(keyCode)")
+            try press(flags, keyCode: keyCode)
             XCTAssertEqual(sent.count, 0, "on=\(on) flags=\(flags.rawValue) key=\(keyCode)")
             XCTAssertEqual(composer.text, "hey @Ada ", "on=\(on) flags=\(flags.rawValue) key=\(keyCode)")
+            XCTAssertTrue(window.childWindows?.isEmpty ?? true, "picker still showing after pick")
         }
     }
 
@@ -143,11 +183,13 @@ final class ComposerReturnTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: file) }
         XCTAssertTrue(composer.addFiles([file]))
         type("with file")
-        press()
-        press(.shift)
+        try press()
+        XCTAssertEqual(composer.text, "with file\n")
+        try press(.shift)
+        XCTAssertEqual(composer.text, "with file\n\n")
         XCTAssertEqual(composer.attachments.count, 1)
         XCTAssertEqual(sent.count, 0)
-        press(.command)
+        try press(.command)
         XCTAssertEqual(sent.map(\.files), [1])
         XCTAssertTrue(composer.attachments.isEmpty)
     }

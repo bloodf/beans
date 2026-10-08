@@ -211,6 +211,11 @@ pub async fn guided_request(app: &Arc<App>, verb: &str, body: Value) -> Result<V
 
 /// Credential bytes return through encrypted credential sync, never status replies.
 pub async fn serve_guided(app: &Arc<App>, verb: &str, body: &Value) -> Result<Value, String> {
+    serve_guided_as(app, verb, body, None).await
+}
+
+pub async fn serve_guided_as(app: &Arc<App>, verb: &str, body: &Value, authority: Option<(&str, &str)>) -> Result<Value, String> {
+    check_provider_authority(app, authority)?;
     let this = app.this_device_id().ok_or("Pair a Runner first")?;
     if body["runner_id"].as_str() != Some(this.as_str()) || !app.device(&this).is_some_and(|device| device.is_runner()) { return Err("Provider check must execute on the selected Runner".into()); }
     let capabilities = capability_input(body)?;
@@ -221,21 +226,28 @@ pub async fn serve_guided(app: &Arc<App>, verb: &str, body: &Value) -> Result<Va
             Ok(serde_json::json!({ "listed": listed.is_some(), "models": listed.unwrap_or_default() }))
         }
         "providers.custom.save" => {
-            let kind = connect_custom(app, CustomInput {
+            let kind = connect_custom_as(app, CustomInput {
                 kind: body["kind"].as_str().map(str::to_string), integration: body["integration"].as_str().map(str::to_string), name: text("name"), api: text("api"), base_url: text("base_url"), api_key: text("api_key"),
                 models: body["models"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(), capabilities,
-            }).await?;
+            }, authority).await?;
             let stamps = std::collections::BTreeMap::from([(kind.clone(), app.credentials.lock().unwrap().changed_at[&kind])]);
             Ok(serde_json::json!({ "kind": kind, "stamps": stamps }))
         }
         "providers.custom.refresh" => {
-            let updated = refresh_custom_models_for(app, body["kind"].as_str()).await?;
+            let updated = refresh_custom_models_for(app, body["kind"].as_str(), authority).await?;
             let credentials = app.credentials.lock().unwrap();
             let stamps: std::collections::BTreeMap<_, _> = credentials.changed_at.iter().filter(|(kind, _)| credentials.custom.contains_key(*kind) && body["kind"].as_str().is_none_or(|selected| selected == kind.as_str())).collect();
             Ok(serde_json::json!({ "updated": updated, "stamps": stamps }))
         }
         _ => Err("Unknown custom-provider request".into()),
     }
+}
+
+fn check_provider_authority(app: &App, authority: Option<(&str, &str)>) -> Result<(), String> {
+    if let Some((id, box_key)) = authority {
+        if !app.device(id).is_some_and(|device| device.box_pubkey == box_key) { return Err("Provider requester was revoked or changed".into()); }
+    }
+    Ok(())
 }
 
 /// What the user typed for a custom provider.
@@ -259,6 +271,11 @@ pub struct CustomInput {
 /// output cap, and whether it sees images; a server without one still works with the model ids
 /// the user gave.
 pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String, String> {
+    connect_custom_as(app, input, None).await
+}
+
+async fn connect_custom_as(app: &Arc<App>, input: CustomInput, authority: Option<(&str, &str)>) -> Result<String, String> {
+    check_provider_authority(app, authority)?;
     let snapshot = input.kind.as_ref().and_then(|kind| app.credentials.lock().expect("credentials lock").custom.get(kind).cloned());
     let requested_integration = CustomIntegration::parse(input.integration.as_deref())?;
     let integration = requested_integration.or_else(|| snapshot.as_ref().and_then(|provider| provider.integration));
@@ -288,6 +305,18 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
         let taken = PROVIDER_KINDS.iter().any(|kind| credentials.label(kind).eq_ignore_ascii_case(&name));
         if taken {
             return Err(format!("A provider named {name} exists already"));
+        }
+    }
+    // A guided add uses a client-stable UUID kind. Exact replay returns the committed
+    // provider without another HTTP check; a changed intent edits that same identity.
+    if input.kind.as_ref().is_some_and(|kind| kind.starts_with("custom:setup-")) {
+        if let Some(saved) = &snapshot {
+            let capabilities = input.capabilities.unwrap_or(saved.capabilities);
+            if saved.name == name && saved.api == api && saved.base_url == base_url && saved.api_key == api_key && saved.integration == integration && saved.capabilities == capabilities && (ids.is_empty() || saved.models.iter().map(|model| &model.id).eq(ids.iter())) {
+                return Ok(input.kind.unwrap());
+            }
+        } else if app.credentials.lock().unwrap().changed_at.contains_key(input.kind.as_ref().unwrap()) {
+            return Err("This provider was deleted. Open a new setup draft.".into());
         }
     }
 
@@ -320,6 +349,11 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
         }).collect()
     };
 
+    check_provider_authority(app, authority)?;
+    let authority_guard = authority.map(|_| app.state.lock().unwrap());
+    if let (Some((id, box_key)), Some(state)) = (authority, authority_guard.as_ref()) {
+        if !state.devices.iter().any(|device| device.id == id && device.box_pubkey == box_key) { return Err("Provider requester was revoked or changed".into()); }
+    }
     let kind = {
         let mut credentials = app.credentials.lock().expect("credentials lock");
         let kind = input.kind.clone().unwrap_or_else(|| custom_kind(&credentials, &name));
@@ -336,6 +370,7 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
         *credentials = next;
         kind
     };
+    drop(authority_guard);
     app.push_credentials();
     app.emit(app.roster_summary());
     Ok(kind)
@@ -357,10 +392,10 @@ pub async fn list_custom_models(_app: &Arc<App>, name: &str, api: &str, base_url
 /// that provider has not changed meanwhile; no response is allowed to restore a deleted or
 /// edited provider. Only actual model changes are stamped, saved and synced.
 pub async fn refresh_custom_models(app: &Arc<App>) -> Result<usize, String> {
-    refresh_custom_models_for(app, None).await
+    refresh_custom_models_for(app, None, None).await
 }
 
-async fn refresh_custom_models_for(app: &Arc<App>, selected: Option<&str>) -> Result<usize, String> {
+async fn refresh_custom_models_for(app: &Arc<App>, selected: Option<&str>, authority: Option<(&str, &str)>) -> Result<usize, String> {
     let providers: Vec<(String, CustomProvider, Option<f64>)> = {
         let credentials = app.credentials.lock().unwrap();
         credentials.custom.iter().filter(|(kind, _)| selected.is_none_or(|selected| selected == kind.as_str())).map(|(kind, provider)| (kind.clone(), provider.clone(), credentials.changed_at.get(kind).copied())).collect()
@@ -368,6 +403,7 @@ async fn refresh_custom_models_for(app: &Arc<App>, selected: Option<&str>) -> Re
     let mut changed = 0;
     let mut failed = None;
     for (kind, snapshot, stamp) in providers {
+        check_provider_authority(app, authority)?;
         let discovery = match integration_root(snapshot.api, &snapshot.base_url, snapshot.integration) {
             Ok(root) => list_models(&snapshot.name, snapshot.api, &root, &snapshot.api_key).await,
             Err(error) => Err(error),
@@ -381,6 +417,11 @@ async fn refresh_custom_models_for(app: &Arc<App>, selected: Option<&str>) -> Re
             }
         };
         let models = listed.into_iter().filter(|(not_chat, _)| !not_chat).map(|(_, model)| model).collect();
+        check_provider_authority(app, authority)?;
+        let authority_guard = authority.map(|_| app.state.lock().unwrap());
+        if let (Some((id, box_key)), Some(state)) = (authority, authority_guard.as_ref()) {
+            if !state.devices.iter().any(|device| device.id == id && device.box_pubkey == box_key) { return Err("Provider requester was revoked or changed".into()); }
+        }
         let mut credentials = app.credentials.lock().unwrap();
         if credentials.changed_at.get(&kind).copied() != stamp {
             continue;
@@ -402,6 +443,7 @@ async fn refresh_custom_models_for(app: &Arc<App>, selected: Option<&str>) -> Re
                 return Err("Could not save refreshed models".into());
             }
             drop(credentials);
+            drop(authority_guard);
             app.push_credentials();
             app.emit(app.roster_summary());
             changed += 1;

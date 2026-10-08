@@ -99,6 +99,7 @@ function CustomProviderSheet(props: {
   let autoSelect = !existing;
   /** The provider being edited; none adds one. */
   const kind = existing && isCustomKind(existing.kind) ? existing.kind : undefined;
+  const saveKind: CustomProviderKind = kind ?? `custom:setup-${crypto.randomUUID().toLowerCase()}`;
   const initialName = existing?.name ?? preset?.name ?? "";
   const initialBaseURL = existing?.baseURL ?? preset?.baseURL ?? "";
   const [name, setName] = createSignal(initialName);
@@ -241,7 +242,7 @@ function CustomProviderSheet(props: {
     const saved = savedName();
     begin(L("Checking %@…", saved));
     try {
-      const savedKind = await store.saveCustomProvider({ kind, integration, name: saved, api: api(), baseURL: baseURL(), apiKey: key(), models: orderedModelIDs(checklist()), runnerID: runnerID(), capabilities: capabilities() });
+      const savedKind = await store.saveCustomProvider({ kind: saveKind, integration, name: saved, api: api(), baseURL: baseURL(), apiKey: key(), models: orderedModelIDs(checklist()), runnerID: runnerID(), capabilities: capabilities() });
       if (closed) return;
       setSpinning(false);
       setStatus({ text: L("%@ configured.", saved), color: "var(--green)" });
@@ -351,8 +352,23 @@ function CustomProviderSheet(props: {
       <Button disabled={busy() || !runnerReady() || !validWindow() || !isUsableBaseURL(baseURL())} onClick={() => loadModels(0, true)}>{L("Check Connection")}</Button>
       <div class="field-note">{runner() ? L("Requests run on %@. Listing verifies connectivity/catalog only, not inference.", runner()!.name) : L("Pair an online desktop Runner before checking.")}</div>
       <Show when={kind}><Button disabled={busy() || !runnerReady()} onClick={async () => {
+        clearTimeout(timer);
+        ++generation;
+        const source = { api: api(), baseURL: baseURL().trim(), key: key() };
         begin(L("Loading models…"));
-        try { const updated = await store.refreshProviderModels(runnerID(), kind); if (!closed) { setBusy(false); setSpinning(false); setStatus({ text: updated ? L("Models updated") : L("Models unchanged"), color: "var(--label-2)" }); } }
+        try {
+          const updated = await store.refreshProviderModels(runnerID(), kind);
+          if (!closed) {
+            const refreshed = kind ? store.credential(kind) : undefined;
+            if (refreshed?.api === source.api && refreshed.baseURL === source.baseURL && source.key === props.apiKey) {
+              const current = checklist();
+              const known = new Set(current.models.map((model) => model.id));
+              const merged = takeListing(current, refreshed.models ?? [], false);
+              setChecklist({ ...merged, selected: new Set([...current.selected, ...(refreshed.models ?? []).filter((model) => !known.has(model.id)).map((model) => model.id)]) });
+            }
+            setBusy(false); setSpinning(false); setStatus({ text: updated ? L("Models updated") : L("Models unchanged"), color: "var(--label-2)" });
+          }
+        }
         catch (error) { if (!closed) fail(error); }
       }}>{L("Refresh Models")}</Button></Show>
       <Show when={simpleSetup}><Button onClick={() => setCustomize(!customize())}>{L("Advanced")}</Button></Show>

@@ -36,13 +36,18 @@ pub async fn ask_within(app: &Arc<App>, runner_id: &str, verb: &str, body: Value
     if !app.device_is_online(runner_id) {
         return Err(format!("{} is offline.", runner.name));
     }
-    let request = Request {
+    let mut request = Request {
         id: format!("req-{}", uuid::Uuid::new_v4()),
         verb: verb.to_string(),
         requested_by: app.this_device_id().unwrap_or_default(),
         body,
         created_at: now_secs(),
     };
+    if matches!(verb, "providers.custom.preview" | "providers.custom.save" | "providers.custom.refresh") {
+        let machine = app.machine_file().ok_or("Pair this Device first")?.machine().map_err(|_| "Device signing key unavailable")?;
+        let payload = provider_request_bytes(&request, runner_id)?;
+        request.body = json!({"payload": request.body, "signature": machine.sign(&payload)});
+    }
     let ciphertext = crate::crypto::seal_json(&runner.box_pubkey, &request).map_err(|e| e.to_string())?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.pending_responses.lock().unwrap().insert(request.id.clone(), tx);
@@ -94,13 +99,25 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String, running: crate::u
 /// card a bot here is waiting on; the bash verbs type into, stop, or background a command here;
 /// Send now has a turn here read a message it holds. The separate self_update verbs
 /// remain fail-closed in Beans; update.status/prepare/cancel belong to local drain control.
+fn provider_request_bytes(request: &Request, target: &str) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&("beans-provider-request-v1", &request.id, &request.verb, &request.requested_by, target, request.created_at, &request.body)).map_err(|_| "Invalid provider request".into())
+}
+
 async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     let body = &request.body;
     match request.verb.as_str() {
         #[cfg(feature = "provider-auth")]
         "providers.custom.preview" | "providers.custom.save" | "providers.custom.refresh" => {
-            if app.device(&request.requested_by).filter(|device| !device.box_pubkey.is_empty()).is_none() { return Err("Provider request requires a paired Device".into()); }
-            crate::provider_auth::serve_guided(app, &request.verb, body).await
+            let requester = app.device(&request.requested_by).filter(|device| !device.box_pubkey.is_empty()).ok_or("Provider request requires a paired Device")?;
+            let target = app.this_device_id().ok_or("Pair a Runner first")?;
+            let payload = body.get("payload").ok_or("Unsigned provider request")?;
+            let signature = body["signature"].as_str().ok_or("Unsigned provider request")?;
+            let unsigned = Request { body: payload.clone(), ..request.clone() };
+            let key = crate::keys::verifying_key(&requester.id).map_err(|_| "Invalid requester signing key")?;
+            let bytes = crate::keys::unb64(signature).map_err(|_| "Invalid provider signature")?;
+            let signature = ed25519_dalek::Signature::from_slice(&bytes).map_err(|_| "Invalid provider signature")?;
+            key.verify_strict(&provider_request_bytes(&unsigned, &target)?, &signature).map_err(|_| "Invalid provider signature")?;
+            crate::provider_auth::serve_guided_as(app, &request.verb, payload, Some((&requester.id, &requester.box_pubkey))).await
         }
         verb if crate::memory_service::api::is_setup_method(verb) => {
             if app.device(&request.requested_by).is_none() { return Err("requester_unknown".into()); }
@@ -168,7 +185,9 @@ mod custom_provider_tests {
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Fixture Runner".into())).unwrap();
         let runner = app.this_device_id().unwrap();
-        app.state.lock().unwrap().devices.push(crate::model::Device { id: "fixture-phone".into(), name: "Fixture phone".into(), os: "ios".into(), box_pubkey: "synthetic-known-key".into(), ..Default::default() });
+        let phone = crate::keys::Machine::generate();
+        let unrelated = crate::keys::Machine::generate();
+        app.state.lock().unwrap().devices.push(crate::model::Device { id: phone.pubkey(), name: "Fixture phone".into(), os: "ios".into(), box_pubkey: phone.box_pubkey(), ..Default::default() });
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let root = format!("http://{}/v1", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
@@ -183,10 +202,19 @@ mod custom_provider_tests {
         });
         let mut request = Request { id: "fixture-preview".into(), verb: "providers.custom.preview".into(), requested_by: "foreign".into(), body: json!({"runner_id":runner,"api":"chat-completions","base_url":root}), created_at: now_secs() };
         assert!(answer(&app, &request).await.unwrap_err().contains("paired Device"));
-        request.requested_by = "fixture-phone".into();
-        request.body["runner_id"] = json!("fixture-phone");
-        assert!(answer(&app, &request).await.unwrap_err().contains("selected Runner"));
-        request.body["runner_id"] = json!(runner);
+        request.requested_by = phone.pubkey();
+        let unsigned = request.clone();
+        request.body = json!({"payload": unsigned.body, "signature": unrelated.sign(&provider_request_bytes(&unsigned, &runner).unwrap())});
+        let runner_keys = app.machine_file().unwrap().machine().unwrap();
+        let forged = crate::crypto::seal_json(&runner_keys.box_pubkey(), &request).unwrap();
+        let decoded: Request = crate::crypto::unseal_json(&runner_keys.box_secret, &forged).unwrap();
+        assert!(answer(&app, &decoded).await.unwrap_err().contains("Invalid provider signature"));
+        assert!(answer(&app, &request).await.unwrap_err().contains("Invalid provider signature"));
+        request.body = json!({"payload": unsigned.body, "signature": phone.sign(&provider_request_bytes(&unsigned, &runner).unwrap())});
+        app.state.lock().unwrap().devices.retain(|device| device.id != phone.pubkey());
+        assert!(answer(&app, &request).await.unwrap_err().contains("paired Device"));
+        assert!(app.credentials.lock().unwrap().custom.is_empty());
+        app.state.lock().unwrap().devices.push(crate::model::Device { id: phone.pubkey(), name: "Fixture phone".into(), os: "ios".into(), box_pubkey: phone.box_pubkey(), ..Default::default() });
         let result = answer(&app, &request).await.unwrap();
         assert_eq!(result["models"][0]["id"], "runner-local-alias");
         assert!(server.join().unwrap().starts_with("GET /v1/models "));

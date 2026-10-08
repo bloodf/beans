@@ -529,7 +529,7 @@ async fn guided_runner_save_refresh_preserves_declarations_and_origin() {
     crate::identity::create(&scratch.0, Some("Selected fixture Runner".into())).unwrap();
     let runner = scratch.0.this_device_id().unwrap();
     let sparse = json!({"data":[{"id":"fixture-alias"}]}).to_string();
-    let conflict = json!({"data":[{"id":"fixture-alias","context_window":1024,"images":false,"tools":true}]}).to_string();
+    let conflict = json!({"data":[{"id":"fixture-alias","context_window":1024,"capabilities":{"vision":false,"tools":true}}]}).to_string();
     let (root, server) = serve(vec![("200 OK", sparse.clone()), ("200 OK", sparse), ("200 OK", conflict)]);
     let mut body = json!({"runner_id":runner,"name":"Fixture local","api":"chat-completions","base_url":format!("{root}/v1"),"api_key":"","models":[],"capabilities":{"context_window":8192,"images":true,"tools":false}});
     let preview = guided_request(&scratch.0, "providers.custom.preview", body.clone()).await.unwrap();
@@ -544,6 +544,8 @@ async fn guided_runner_save_refresh_preserves_declarations_and_origin() {
     let credentials = Credentials::load(&scratch.0.config);
     let provider = &credentials.custom[kind];
     assert_eq!(provider.models[0].images, Some(false));
+    assert_eq!(provider.models[0].context_window, Some(1024));
+    assert_eq!(provider.models[0].tools, Some(true));
     let effective = provider.effective_capabilities(provider.models.first());
     assert_eq!(effective.context_window.unwrap().get(), 8192);
     assert_eq!(effective.images, Some(true));
@@ -554,6 +556,8 @@ async fn guided_runner_save_refresh_preserves_declarations_and_origin() {
     let mut cleared = provider.clone();
     cleared.capabilities = None;
     assert_eq!(cleared.effective_capabilities(cleared.models.first()).images, Some(false));
+    assert_eq!(cleared.effective_capabilities(cleared.models.first()).context_window.unwrap().get(), 1024);
+    assert_eq!(cleared.effective_capabilities(cleared.models.first()).tools, Some(true));
 }
 
 #[tokio::test]
@@ -568,4 +572,55 @@ async fn guided_invalid_runner_and_capabilities_fail_before_http() {
     assert_eq!(scratch.0.credentials.lock().unwrap().changed_at, before);
     assert_eq!(capability_input(&json!({})).unwrap(), None);
     assert_eq!(capability_input(&json!({"capabilities":null})).unwrap(), Some(None));
+}
+
+#[tokio::test]
+async fn guided_committed_add_retry_reuses_identity_without_http() {
+    let scratch = scratch_app();
+    let list = json!({"data":[{"id":"alias"}]}).to_string();
+    let (root, server) = serve(vec![("200 OK", list)]);
+    let kind = "custom:setup-00000000-0000-4000-8000-000000000147";
+    let mut first = input("Fixture retry", "chat-completions", &root, &["alias"]);
+    first.kind = Some(kind.into());
+    assert_eq!(connect_custom(&scratch.0, first).await.unwrap(), kind);
+    assert_eq!(server.join().unwrap().len(), 1);
+    let stamp = scratch.0.credentials.lock().unwrap().changed_at[kind];
+    let mut retry = input("Fixture retry", "chat-completions", &root, &["alias"]);
+    retry.kind = Some(kind.into());
+    assert_eq!(connect_custom(&scratch.0, retry).await.unwrap(), kind);
+    let credentials = scratch.0.credentials.lock().unwrap();
+    assert_eq!(credentials.custom.len(), 1);
+    assert_eq!(credentials.changed_at[kind], stamp);
+    assert_eq!(credentials.custom[kind].models[0].id, "alias");
+}
+
+#[tokio::test]
+async fn guided_revocation_during_discovery_prevents_credential_commit() {
+    use std::io::{Read, Write};
+    let scratch = scratch_app();
+    crate::identity::create(&scratch.0, Some("Fixture Runner".into())).unwrap();
+    let runner = scratch.0.this_device_id().unwrap();
+    let requester = crate::keys::Machine::generate();
+    let id = requester.pubkey();
+    let box_key = requester.box_pubkey();
+    scratch.0.state.lock().unwrap().devices.push(crate::model::Device { id: id.clone(), box_pubkey: box_key.clone(), os: "ios".into(), ..Default::default() });
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let root = format!("http://{}", listener.local_addr().unwrap());
+    let app = scratch.0.clone();
+    let revoked = id.clone();
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        let mut bytes = [0; 4096];
+        socket.read(&mut bytes).unwrap();
+        app.state.lock().unwrap().devices.retain(|device| device.id != revoked);
+        let body = r#"{"data":[{"id":"alias"}]}"#;
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    });
+    let before = scratch.0.credentials.lock().unwrap().changed_at.clone();
+    let error = serve_guided_as(&scratch.0, "providers.custom.save", &json!({"runner_id":runner,"name":"Revoked fixture","api":"chat-completions","base_url":root,"models":[]}), Some((&id, &box_key))).await.unwrap_err();
+    server.join().unwrap();
+    assert!(error.contains("revoked"));
+    let credentials = scratch.0.credentials.lock().unwrap();
+    assert!(credentials.custom.is_empty());
+    assert_eq!(credentials.changed_at, before);
 }

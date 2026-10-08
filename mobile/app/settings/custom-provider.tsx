@@ -8,6 +8,7 @@
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from "react-native";
+import { randomUUID } from "expo-crypto";
 import { engine } from "../../src/core/engine";
 import {
   CUSTOM_APIS,
@@ -54,6 +55,7 @@ export default function CustomProviderScreen() {
   // The provider as it stood when the form opened. The fields start from it, and the form stays
   // as it is while a delete started here takes the provider out of the store.
   const [saved] = useState(status);
+  const [saveKind] = useState(() => kind ?? `custom:setup-${randomUUID().toLowerCase()}`);
   const adding = kind ? undefined : customPreset(param(params.preset));
   const integration = saved?.integration;
   const simpleSetup = !saved && adding?.compatible === true;
@@ -173,7 +175,7 @@ export default function CustomProviderScreen() {
     setWorking(true);
     setError(null);
     try {
-      await engine.saveCustomProvider({ kind, integration, name: providerName, api, baseURL, apiKey, models: selectedModelIds(rows, chosenDefault), runnerID, capabilities });
+      await engine.saveCustomProvider({ kind: saveKind, integration, name: providerName, api, baseURL, apiKey, models: selectedModelIds(rows, chosenDefault), runnerID, capabilities });
       router.back();
     } catch (cause) {
       setError(messageOf(cause));

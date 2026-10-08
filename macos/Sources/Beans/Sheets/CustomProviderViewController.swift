@@ -22,7 +22,9 @@ final class CustomProviderViewController: SheetViewController {
     private let store = AppStore.shared
     /// The provider being edited; nil adds one.
     private let kind: ProviderCredential.Kind?
+    private let saveKind: ProviderCredential.Kind
     private let integration: String?
+    private let savedAPIKey: String
     private let simpleSetup: Bool
     private var autoSelect: Bool
     private weak var providerForm: NSGridView?
@@ -102,7 +104,9 @@ final class CustomProviderViewController: SheetViewController {
 
     private init(existing: ProviderCredential?, preset: CustomProviderPreset?, apiKey: String, onSave: @escaping (ProviderCredential.Kind) -> Void) {
         kind = existing?.kind
+        saveKind = existing?.kind ?? .custom("custom:setup-" + UUID().uuidString.lowercased())
         integration = existing?.integration
+        savedAPIKey = apiKey
         simpleSetup = existing == nil && preset?.compatible == true
         autoSelect = existing == nil
         self.onSave = onSave
@@ -483,12 +487,23 @@ final class CustomProviderViewController: SheetViewController {
     @objc private func checkConnection() { loadModels(after: 0, explicit: true) }
     @objc private func refreshModels() {
         guard !isBusy, let runnerID, let kind else { return }
+        fetch?.cancel()
+        fetchGeneration += 1
+        let sourceAPI = api
+        let sourceURL = baseURL
+        let sourceKey = keyField.stringValue
         beginOperation(L("Loading models…"))
         task = Task { [weak self] in
             guard let self else { return }
             do {
                 let updated = try await store.refreshCustomModels(runnerID: runnerID, kind: kind.wireValue)
                 try Task.checkCancellation()
+                if let refreshed = store.credential(for: kind), refreshed.api == sourceAPI, refreshed.baseURL == sourceURL, sourceKey == savedAPIKey {
+                    let currentIDs = Set(models.map(\.id))
+                    models = ModelChecklist.merge(models, keeping: { selected.contains($0) || added.contains($0) }, with: refreshed.models)
+                    selected.formUnion(refreshed.models.map(\.id).filter { !currentIDs.contains($0) })
+                    reloadEntries()
+                }
                 isBusy = false
                 spinner.stopAnimation(nil)
                 status.stringValue = updated > 0 ? L("Models updated") : L("Models unchanged")
@@ -529,7 +544,7 @@ final class CustomProviderViewController: SheetViewController {
             guard let self else { return }
             do {
                 let saved = try await self.store.saveCustomProvider(
-                    kind: self.kind, name: name, api: api, baseURL: baseURL, apiKey: apiKey, models: ids, integration: self.integration, runnerID: self.runnerID, capabilities: self.capabilities)
+                    kind: self.saveKind, name: name, api: api, baseURL: baseURL, apiKey: apiKey, models: ids, integration: self.integration, runnerID: self.runnerID, capabilities: self.capabilities)
                 try Task.checkCancellation()
                 self.spinner.stopAnimation(nil)
                 self.status.textColor = .systemGreen

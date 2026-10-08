@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,8 +25,7 @@ type Preferences struct {
 	SendOnReturn   bool   `json:"sendOnReturn"`
 	ShowTimestamps bool   `json:"showTimestamps"`
 	RelayURL       string `json:"relayURL"`
-	// CLIPort is the port the app looks for the CLI on. `BEANS_PORT` wins, so a second app
-	// instance can run against its own CLI.
+	// CLIPort must match this build's isolated port, including any explicit BEANS_PORT.
 	CLIPort int `json:"cliPort"`
 	// AppLanguage is the language the app's own words are in ("en", "zh-Hans"); empty follows
 	// the system.
@@ -69,14 +69,18 @@ var prefs = &prefsStore{}
 func (s *prefsStore) load() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.value = Preferences{ShowsInspector: true, SendOnReturn: true, ShowTimestamps: true}
+	s.value = Preferences{ShowsInspector: true, SendOnReturn: true, ShowTimestamps: true, CLIPort: defaultCLIPort()}
 	dir, err := mygo.App.Path(mygo.PathUserData)
 	if err != nil {
 		return
 	}
 	s.path = filepath.Join(dir, "preferences-v2.json")
 	if data, err := os.ReadFile(s.path); err == nil {
-		_ = json.Unmarshal(data, &s.value)
+		if err := json.Unmarshal(data, &s.value); err != nil {
+			s.value.CLIPort = 0
+		}
+	} else if !os.IsNotExist(err) {
+		s.value.CLIPort = 0
 	}
 }
 
@@ -88,25 +92,43 @@ func (s *prefsStore) get() Preferences {
 	return value
 }
 
-// cliPort is the port in force: `BEANS_PORT`, else the saved one, else this build's default.
-func (s *prefsStore) cliPort() int {
-	return s.get().CLIPort
+// Invalid explicit configuration has no usable endpoint; it never selects a fallback.
+func (s *prefsStore) cliPort() (int, error) {
+	port := s.get().CLIPort
+	expected := defaultCLIPort()
+	if port != expected {
+		return 0, fmt.Errorf("This build connects only to its isolated Beans CLI port %d. Restore that port in Settings › Advanced and check BEANS_PORT.", expected)
+	}
+	return port, nil
 }
 
 func cliPortLocked(value Preferences) int {
-	if raw := os.Getenv("BEANS_PORT"); raw != "" {
-		if port, err := strconv.Atoi(raw); err == nil && port > 0 {
-			return port
+	expected := defaultCLIPort()
+	if value.CLIPort != expected {
+		return 0
+	}
+	if raw, set := os.LookupEnv("BEANS_PORT"); set {
+		port, err := strconv.Atoi(raw)
+		if err != nil || port != expected {
+			return 0
 		}
 	}
-	if value.CLIPort > 0 {
-		return value.CLIPort
-	}
-	return defaultCLIPort()
+	return expected
 }
 
-func (s *prefsStore) update(patch PreferencesPatch) Preferences {
+func (s *prefsStore) update(patch PreferencesPatch) (Preferences, error) {
+	if patch.CLIPort != nil && *patch.CLIPort != defaultCLIPort() {
+		return s.get(), fmt.Errorf("This build connects only to its isolated Beans CLI port %d", defaultCLIPort())
+	}
 	s.mu.Lock()
+	candidate := s.value
+	if patch.CLIPort != nil {
+		candidate.CLIPort = *patch.CLIPort
+	}
+	if cliPortLocked(candidate) == 0 {
+		s.mu.Unlock()
+		return s.get(), fmt.Errorf("Restore the isolated Beans CLI port %d and check BEANS_PORT before changing preferences", defaultCLIPort())
+	}
 	v := &s.value
 	if patch.HadIdentity != nil {
 		v.HadIdentity = *patch.HadIdentity
@@ -155,7 +177,7 @@ func (s *prefsStore) update(patch PreferencesPatch) Preferences {
 			}
 		}
 	}
-	return s.get()
+	return s.get(), nil
 }
 
 // Prefs is this computer's settings, for the pages.
@@ -164,11 +186,13 @@ type Prefs struct{}
 // All returns the preferences as they are now.
 func (Prefs) All() Preferences { return prefs.get() }
 
-// Set changes the preferences the patch names and tells every window. A new CLI port makes the
-// app look for the CLI there; a new appearance applies to every window.
-func (Prefs) Set(patch PreferencesPatch) Preferences {
+// Set rejects incompatible ports before any preference write or reconnect.
+func (Prefs) Set(patch PreferencesPatch) (Preferences, error) {
 	before := prefs.get()
-	after := prefs.update(patch)
+	after, err := prefs.update(patch)
+	if err != nil {
+		return before, err
+	}
 	if after.Appearance != before.Appearance {
 		applyAppearance(after.Appearance)
 	}
@@ -176,7 +200,7 @@ func (Prefs) Set(patch PreferencesPatch) Preferences {
 	if after.CLIPort != before.CLIPort {
 		go app.cli.reconnect()
 	}
-	return after
+	return after, nil
 }
 
 // applyAppearance forces light or dark for the windows and pages, or follows the system.

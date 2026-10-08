@@ -5,6 +5,7 @@ final class FreshFormatTests: XCTestCase {
     private let compatible: [String: Any] = [
         "ok": true, "service": "beans-relay", "format": "beans-v2",
         "protocol": 5, "min_protocol": 5, "min_roster_protocol": 5,
+        "memory_config_version": 1,
     ]
 
     private func health(_ fields: [String: Any]) throws -> Wire.RelayHealth {
@@ -18,6 +19,7 @@ final class FreshFormatTests: XCTestCase {
             ("format", "beans-v1" as Any), ("protocol", 4 as Any),
             ("min_protocol", 4 as Any), ("min_protocol", 6 as Any),
             ("min_roster_protocol", 4 as Any), ("min_roster_protocol", 6 as Any),
+            ("memory_config_version", 2 as Any),
         ] {
             var fields = compatible
             fields[key] = value
@@ -32,14 +34,14 @@ final class FreshFormatTests: XCTestCase {
     }
 
     func testMissingOrMalformedCompatibilityEvidenceFailsClosed() throws {
-        for key in ["format", "protocol", "min_protocol", "min_roster_protocol"] {
+        for key in ["format", "protocol", "min_protocol", "min_roster_protocol", "memory_config_version"] {
             var fields = compatible
             fields.removeValue(forKey: key)
             XCTAssertThrowsError(try health(fields), "Missing \(key) must not select legacy defaults")
             fields[key] = NSNull()
             XCTAssertThrowsError(try health(fields), "Null \(key) must not select legacy defaults")
         }
-        for key in ["protocol", "min_protocol", "min_roster_protocol"] {
+        for key in ["protocol", "min_protocol", "min_roster_protocol", "memory_config_version"] {
             var fields = compatible
             fields[key] = "5"
             XCTAssertThrowsError(try health(fields), "A string is not integer compatibility evidence")

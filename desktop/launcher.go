@@ -92,10 +92,16 @@ func (l *launcher) setStatus(generation int, status LauncherStatus) {
 // ensureRunning looks for the CLI on the port in force and starts one when none answers. A new
 // port stops the child of the old one.
 func (l *launcher) ensureRunning() {
-	port := prefs.cliPort()
+	port, portErr := prefs.cliPort()
 	l.mu.Lock()
 	if l.stopped {
 		l.mu.Unlock()
+		return
+	}
+	if portErr != nil {
+		generation := l.generation
+		l.mu.Unlock()
+		l.setStatus(generation, LauncherStatus{Kind: "failed", Failure: &LaunchFailure{Kind: "configuration", Reason: portErr.Error()}})
 		return
 	}
 	if l.restart != nil {
@@ -162,9 +168,8 @@ func (l *launcher) environment() []string {
 	set("RUST_LOG", "beans=info")
 	set("BEANS_HOME", defaultCLIHome())
 	if !isDevelopment() && mygo.Updater.Enabled() {
-		if token, err := ensureDesktopUpdateToken(); err == nil {
-			set("BEANS_UPDATE_TOKEN_FILE", token)
-		}
+		// Pass the eventual path; only the ready core establishes its account home.
+		set("BEANS_UPDATE_TOKEN_FILE", desktopUpdateTokenPath())
 	}
 	if !isDevelopment() {
 		set("BEANS_DEFAULT_RELAY_URL", productionRelayURL)
@@ -241,11 +246,22 @@ func (l *launcher) readOutput(generation, port int, command *exec.Cmd, stdout io
 					Event string `json:"event"`
 					Port  int    `json:"port"`
 				}
-				if json.Unmarshal(line, &record) == nil && record.Event == "ready" && record.Port == port {
+				if json.Unmarshal(line, &record) == nil && record.Event == "ready" && record.Port == port && port == defaultCLIPort() {
 					ready = true
 					l.mu.Lock()
-					current := l.process == command
+					current := !l.stopped && generation == l.generation && l.process == command
 					if current {
+						// Provision only the control path actually passed to this child.
+						// Eligibility was decided before spawn; READY follows core admission.
+						control := "BEANS_UPDATE_TOKEN_FILE=" + desktopUpdateTokenPath()
+						for _, entry := range command.Env {
+							if entry == control {
+								if _, err := ensureDesktopUpdateToken(); err != nil {
+									log.Printf("Desktop update control unavailable: %v", err)
+								}
+								break
+							}
+						}
 						l.ready = true
 						l.restartDelay = time.Second
 					}

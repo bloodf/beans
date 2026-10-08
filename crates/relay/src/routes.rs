@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::path::Path as FsPath;
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::handler::Handler;
@@ -9,6 +9,8 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::StreamExt;
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -24,6 +26,9 @@ mod tests;
 const MAX_BLOB_BYTES: usize = 4 * 1024 * 1024;
 /// A 100 MiB attachment plus its 24-byte nonce and 16-byte authentication tag.
 const MAX_FILE_BLOB_BYTES: usize = 100 * 1024 * 1024 + 40;
+/// Bounded transport cleanup after overflow, without retaining rejected ciphertext.
+const FILE_OVERFLOW_DRAIN_BYTES: usize = 1024 * 1024;
+const FILE_OVERFLOW_DRAIN_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 /// Room for a non-file blob as base64url inside its JSON body.
 const MAX_BODY_BYTES: usize = 6 * 1024 * 1024;
 const CHALLENGE_TTL: i64 = 120;
@@ -244,7 +249,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/blobs/{id}", get(get_blob).delete(delete_blob))
         .route("/v1/files/{id}", get(get_file).put(
             put_file.layer(axum::middleware::from_fn_with_state(state.clone(), crate::limit::large_uploads))
-        ).layer(DefaultBodyLimit::max(MAX_FILE_BLOB_BYTES)))
+        ).layer(DefaultBodyLimit::disable()))
         .route("/v1/groups/{group}", axum::routing::delete(delete_group))
         .route("/v1/groups/{group}/blobs", get(group_blobs))
         .route("/v1/push", post(send_push))
@@ -500,9 +505,33 @@ struct FileQuery {
     group: Option<String>,
 }
 
+async fn read_file_bytes(mut body: Body, limit: usize) -> ApiResult<Bytes> {
+    match Limited::new(&mut body, limit).collect().await {
+        Ok(collected) => Ok(collected.to_bytes()),
+        Err(error) if error.is::<LengthLimitError>() => {
+            // Keep the original body alive after the limiter rejects it. Dropping it while
+            // a chunked client still writes can reset the socket before its 413 arrives.
+            // Finish a small in-flight tail, but never wait or drain without a bound.
+            let _ = tokio::time::timeout(FILE_OVERFLOW_DRAIN_TIME, async {
+                let mut remaining = FILE_OVERFLOW_DRAIN_BYTES;
+                let mut stream = body.into_data_stream();
+                while remaining > 0 {
+                    match stream.next().await {
+                        Some(Ok(bytes)) if bytes.len() <= remaining => remaining -= bytes.len(),
+                        _ => break,
+                    }
+                }
+            }).await;
+            Err(ApiError::too_large("Attachment ciphertext exceeds the size limit"))
+        }
+        Err(_) => Err(ApiError::bad_request("Failed to read attachment body")),
+    }
+}
+
 /// An attachment's encrypted bytes, with its id in the path and optional chat group in the
 /// query. Names, MIME types, and dimensions stay inside the encrypted message or roster.
-async fn put_file(State(state): State<AppState>, auth: Auth, Path(id): Path<String>, Query(query): Query<FileQuery>, headers: HeaderMap, ciphertext: Bytes) -> ApiResult<Json<Value>> {
+async fn put_file(State(state): State<AppState>, auth: Auth, Path(id): Path<String>, Query(query): Query<FileQuery>, headers: HeaderMap, request: axum::extract::Request) -> ApiResult<Json<Value>> {
+    let ciphertext = read_file_bytes(request.into_body(), MAX_FILE_BLOB_BYTES).await?;
     if !valid_id(&id) || query.group.as_deref().is_some_and(|group| !valid_id(group)) {
         return Err(ApiError::bad_request("File id and group must be 1–64 characters of [A-Za-z0-9._-]"));
     }

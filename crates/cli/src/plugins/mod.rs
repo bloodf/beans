@@ -328,10 +328,31 @@ pub struct Installed {
     pub variables: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 struct InstalledFile {
-    #[serde(default)]
     plugins: Vec<Installed>,
+}
+
+impl<'de> Deserialize<'de> for InstalledFile {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Object;
+        impl<'de> serde::de::Visitor<'de> for Object {
+            type Value = InstalledFile;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an installed-plugin object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Fields {
+                    plugins: Vec<Installed>,
+                }
+                Fields::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(|fields| InstalledFile { plugins: fields.plugins })
+            }
+        }
+        deserializer.deserialize_map(Object)
+    }
 }
 
 /// Secrets by plugin id: variable values, and `oauth:<server>` tokens as JSON.
@@ -362,15 +383,39 @@ pub struct SignInCode {
     pub link: String,
 }
 
+fn read_account_files(config: &config::Config) -> anyhow::Result<(InstalledFile, SecretsFile)> {
+    let dir = config.plugins_dir();
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() =>
+            anyhow::bail!("Beans plugin storage must be a directory, not a symlink; data is untouched"),
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    for name in ["installed.json", "secrets.json"] {
+        match std::fs::symlink_metadata(dir.join(name)) {
+            Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() =>
+                anyhow::bail!("Beans plugin record {name} must be a regular file; data is untouched"),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
+    }
+    Ok((
+        config::read_json_strict(&dir.join("installed.json"))?.unwrap_or_default(),
+        config::read_json_strict(&dir.join("secrets.json"))?.unwrap_or_default(),
+    ))
+}
+
+pub(crate) fn validate_account_files(config: &config::Config) -> anyhow::Result<()> {
+    read_account_files(config).map(|_| ())
+}
+
 impl Store {
-    pub fn load(config: &config::Config) -> Store {
-        let dir = config.plugins_dir();
-        let installed: InstalledFile = config::read_json(&dir.join("installed.json")).unwrap_or_default();
-        let secrets: SecretsFile = config::read_json(&dir.join("secrets.json")).unwrap_or_default();
+    pub fn load(config: &config::Config) -> anyhow::Result<Store> {
+        let (installed, secrets) = read_account_files(config)?;
         let mut store = Store { installed: installed.plugins, secrets, notes: BTreeMap::new(), pending_updates: BTreeMap::new(), codes: BTreeMap::new(), mcp: mcp_json::McpFile::default() };
         store.installed.retain(|plugin| plugin.source != mcp_json::SOURCE);
         store.take_mcp(mcp_json::McpFile::read(&config.mcp_path()));
-        store
+        Ok(store)
     }
 
     fn save(&self, config: &config::Config) -> anyhow::Result<()> {

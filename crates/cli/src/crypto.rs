@@ -83,15 +83,15 @@ mod tests {
         assert!(unseal(&other.box_secret, &sealed).is_err());
     }
 
-    /// Pinned vectors: the keys derived from a fixed machine secret, a signature, an envelope,
-    /// and a sealed box. A change here is a change to every identity's keys.
+    /// Beans v2 vectors derived independently with Node/OpenSSL HKDF and Ed25519, and
+    /// libsodium's seeded ephemeral sealed box. The fixed-DEK AEAD vector is salt-independent.
     #[test]
     fn phone_port_vectors() {
         let machine = crate::keys::Machine::from_secret(crate::keys::unb64_32("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA").unwrap());
-        assert_eq!(machine.pubkey(), "_sAIAgUy5PaCK26dHTqBF8Dc6c8e_uYar99JYvg5AmY");
-        assert_eq!(machine.box_pubkey(), "sVOMlrkZwlTIVzxBw1dMM_8u4M4xe9fc50tRkF-W6VU");
-        assert_eq!(crate::keys::identity_id(&machine.pubkey()), "64531081f468ed8d");
-        let signature = crate::keys::unb64("ciNZNKBXgperVIZQSc3QZjQLsszNvtRctGscInX1fQfvAqa7hD3zpAJ3KyetWceTMhtX31fPbw8noPjA5uY4Cg").unwrap();
+        assert_eq!(machine.pubkey(), "4QTPnIKU4a0DfMaLR3QuoH5BO2CPeooTnC8Rt8DZs7g");
+        assert_eq!(machine.box_pubkey(), "Zed1dhAt53W3DRSHuruaQVe6B0mVAuZNFZ-_KyLOJBE");
+        assert_eq!(crate::keys::identity_id(&machine.pubkey()), "010e6e64f99600d4");
+        let signature = crate::keys::unb64("jd1iIhT158iobXJ1j9YdCpcMcXV8vjgoyZoJuavhQnW3G9fciTLgCFySxfXhF03r6x3jdkskPLaJOlaiUA0FCw").unwrap();
         let signature = ed25519_dalek::Signature::from_slice(&signature).unwrap();
         ed25519_dalek::Verifier::verify(&crate::keys::verifying_key(&machine.pubkey()).unwrap(), b"abc", &signature).unwrap();
 
@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(decrypt(&dek, "chat", &envelope).unwrap(), b"hello from the phone");
         assert!(decrypt(&dek, "roster", &envelope).is_err());
 
-        let sealed = crate::keys::unb64("RGYkCdfjJFQ26M8NEwucIRRhI96qSHwzi7j-MlbpiFIbveqwoBNsXgbXBSFiIXlueAQWyae6UCI5ql7T8zZkzz4G").unwrap();
+        let sealed = crate::keys::unb64("kxqtAwrZPT_4BCaZMk_bIwWFvk2vUAJm6qS490dUP1AAReRybA_JSO5CmBTOMcxwZZlzcYpcdpFXzlWW-NCt_Mm9").unwrap();
         assert_eq!(unseal(&machine.box_secret, &sealed).unwrap(), b"job for the runner");
     }
 }

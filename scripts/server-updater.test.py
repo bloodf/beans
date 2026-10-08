@@ -48,6 +48,25 @@ class RelayFormatTests(unittest.TestCase):
         self.assertTrue(self.accepts(protocol=6))
         self.assertTrue(self.accepts(6, protocol=6, min_protocol=6, min_roster_protocol=6))
 
+    def test_effective_floors_are_ordered_within_the_signed_release(self):
+        for signed, advertised, account_floor, roster_floor, accepted in (
+            (6, 6, 6, 5, False),
+            (6, 7, 6, 6, True),
+            (6, 6, 5, 6, True),
+            (5, 6, 6, 6, False),
+        ):
+            with self.subTest(
+                signed=signed, advertised=advertised,
+                account_floor=account_floor, roster_floor=roster_floor,
+            ):
+                self.assertEqual(
+                    self.accepts(
+                        signed, protocol=advertised,
+                        min_protocol=account_floor, min_roster_protocol=roster_floor,
+                    ),
+                    accepted,
+                )
+
     def test_rejects_older_release_or_unsupported_relay_protocol(self):
         for manifest_protocol, health_protocol in ((3, 5), (4, 5), (5, 4), (6, 5)):
             with self.subTest(manifest_protocol=manifest_protocol, health_protocol=health_protocol):

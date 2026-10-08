@@ -864,6 +864,7 @@ mod tests {
         let work = scratch.join("project");
         let own_workspace = home.join("workspaces/bot");
         std::fs::create_dir_all(&work).unwrap();
+        crate::config::Config { home: home.clone(), port: 0 }.ensure_home().unwrap();
         std::fs::create_dir_all(&own_workspace).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         let bot = Bot {

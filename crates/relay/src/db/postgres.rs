@@ -8,10 +8,10 @@
 //! them the order SQLite's single writer gives: a seq is visible before the next one exists.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
+use deadpool_postgres::{Hook, HookError, Manager, ManagerConfig, Object, Pool, RecyclingMethod};
 use futures::StreamExt;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{AsyncMessage, Row, Transaction};
@@ -152,23 +152,50 @@ async fn migrate(client: &mut Object) -> Result<(), tokio_postgres::Error> {
 /// Admit only an explicitly marked Beans v2 schema or a genuinely empty schema.
 /// This runs under the schema lock before any DDL or account recovery.
 async fn ensure_format(client: &Object) -> anyhow::Result<()> {
-    let marker: Option<String> = client.query_one("SELECT to_regclass('beans_storage_format')::text", &[]).await?.try_get(0)?;
-    if marker.is_some() {
-        let rows = client.query("SELECT format FROM beans_storage_format", &[]).await?;
-        if rows.len() == 1 && rows[0].try_get::<_, String>(0)? == "beans-v2" { return Ok(()); }
-        anyhow::bail!("Beans v2 relay storage marker invalid; existing data is untouched");
-    }
-    let populated: bool = client.query_one(
-        "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = current_schema())", &[],
-    ).await?.try_get(0)?;
-    if populated {
-        anyhow::bail!("Beans v2 relay requires a fresh schema; existing data is untouched");
-    }
-    client.batch_execute(
-        "CREATE TABLE beans_storage_format (format TEXT PRIMARY KEY CHECK (format = 'beans-v2'));
-         INSERT INTO beans_storage_format VALUES ('beans-v2');",
+    let schema = client.query_one(
+        "SELECT oid, nspname FROM pg_catalog.pg_namespace WHERE nspname = pg_catalog.current_schema()", &[],
     ).await?;
+    let namespace: u32 = schema.try_get(0)?;
+    let name: String = schema.try_get(1)?;
+    let marker = client.query_opt(
+        "SELECT relnamespace, relkind::text FROM pg_catalog.pg_class
+         WHERE relnamespace = $1 AND relname = 'beans_storage_format'", &[&namespace],
+    ).await?;
+    let marker = marker.map(|row| Ok::<_, tokio_postgres::Error>((row.try_get::<_, u32>(0)?, row.try_get::<_, String>(1)?))).transpose()?;
+    let table = format!("\"{}\".beans_storage_format", name.replace('"', "\"\""));
+    let formats = if marker.as_ref().is_some_and(|(oid, kind)| *oid == namespace && kind == "r") {
+        client.query(&format!("SELECT format FROM {table}"), &[]).await?
+            .iter().map(|row| row.try_get::<_, String>(0)).collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    // Direct namespace catalogs also cover pinned built-ins, which need not have
+    // dependency rows. pg_depend covers the remaining schema-owned object classes.
+    let populated: bool = client.query_one(
+        "SELECT EXISTS (
+             SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace = $1
+             UNION ALL SELECT 1 FROM pg_catalog.pg_proc WHERE pronamespace = $1
+             UNION ALL SELECT 1 FROM pg_catalog.pg_type WHERE typnamespace = $1
+             UNION ALL SELECT 1 FROM pg_catalog.pg_depend
+                 WHERE refclassid = 'pg_catalog.pg_namespace'::regclass AND refobjid = $1
+         )", &[&namespace],
+    ).await?.try_get(0)?;
+    if fresh_schema(namespace, marker.as_ref().map(|(oid, kind)| (*oid, kind.as_str())), &formats, populated)? {
+        client.batch_execute(&format!(
+            "CREATE TABLE {table} (format TEXT PRIMARY KEY CHECK (format = 'beans-v2'));
+             INSERT INTO {table} VALUES ('beans-v2');",
+        )).await?;
+    }
     Ok(())
+}
+
+fn fresh_schema(namespace: u32, marker: Option<(u32, &str)>, formats: &[String], populated: bool) -> anyhow::Result<bool> {
+    match marker {
+        Some((oid, "r")) if oid == namespace && formats == ["beans-v2"] => Ok(false),
+        Some(_) => anyhow::bail!("Beans v2 relay storage marker invalid; existing data is untouched"),
+        None if populated => anyhow::bail!("Beans v2 relay requires a fresh schema; existing data is untouched"),
+        None => Ok(true),
+    }
 }
 
 impl From<tokio_postgres::Error> for ApiError {
@@ -215,7 +242,25 @@ impl Postgres {
             None => String::new(),
         };
         let manager = Manager::from_config(config.clone(), tls(), ManagerConfig { recycling_method: RecyclingMethod::Fast });
-        let pool = Pool::builder(manager).max_size(16).build()?;
+        // Resolve the configured target once, then pin every pooled session to that one
+        // schema. A marker later in the configured search_path never authorizes its DDL.
+        let schema = Arc::new(OnceLock::<String>::new());
+        let pool = Pool::builder(manager).max_size(16).post_create(Hook::async_fn(move |client, _| {
+            let schema = schema.clone();
+            Box::pin(async move {
+                if schema.get().is_none() {
+                    let name: Option<String> = client.query_one("SELECT pg_catalog.current_schema()", &[]).await
+                        .map_err(HookError::Backend)?.try_get(0).map_err(HookError::Backend)?;
+                    let name = name.ok_or_else(|| HookError::message("Beans relay requires an existing target schema"))?;
+                    let _ = schema.set(name);
+                }
+                client.execute(
+                    "SELECT pg_catalog.set_config('search_path', pg_catalog.quote_ident($1), false)",
+                    &[schema.get().expect("the target schema was resolved")],
+                ).await.map_err(HookError::Backend)?;
+                Ok(())
+            })
+        })).build()?;
 
         let mut client = pool.get().await?;
         client.execute("SELECT pg_advisory_lock($1)", &[&SCHEMA_LOCK]).await?;
@@ -967,5 +1012,23 @@ impl Store for Postgres {
         for identity in identities {
             self.publish(Event::Machines { identity }).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::fresh_schema;
+
+    #[test]
+    fn schema_admission_binds_marker_and_rejects_all_unmarked_objects() {
+        let valid = vec!["beans-v2".to_string()];
+        assert!(fresh_schema(10, None, &[], false).unwrap());
+        assert!(fresh_schema(10, None, &[], true).is_err(), "any schema object blocks initialization");
+        assert!(fresh_schema(10, Some((20, "r")), &valid, true).is_err(), "later-schema marker cannot authorize target");
+        assert!(fresh_schema(10, Some((10, "v")), &valid, true).is_err(), "a view is not a storage marker");
+        assert!(fresh_schema(10, Some((10, "r")), &[], true).is_err());
+        assert!(fresh_schema(10, Some((10, "r")), &["beans-v2".into(), "beans-v2".into()], true).is_err());
+        assert!(fresh_schema(10, Some((10, "r")), &["other".into()], true).is_err());
+        assert!(!fresh_schema(10, Some((10, "r")), &valid, true).unwrap());
     }
 }

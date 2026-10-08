@@ -225,7 +225,7 @@ async fn live_mcp_list_waits_for_a_healthy_server_still_connecting() {
     tasks.spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    std::fs::create_dir_all(&home.0).unwrap();
+    beans::config::Config { home: home.0.clone(), port: 0 }.ensure_home().unwrap();
     let servers = json!({ "held": { "type": "http", "url": format!("{url}/mcp") }, "off": { "type": "http", "url": format!("{url}/off"), "disabled": true } });
     std::fs::write(home.0.join("mcp.json"), json!({ "mcpServers": servers }).to_string()).unwrap();
 
@@ -298,7 +298,7 @@ async fn mcp_add_flags_and_import_skip_existing_without_exposing_secrets() {
 async fn mcp_list_fails_for_enabled_invalid_entries_but_not_disabled_ones() {
     prepare_cli().await;
     let home = Home::new();
-    std::fs::create_dir_all(&home.0).unwrap();
+    beans::config::Config { home: home.0.clone(), port: 0 }.ensure_home().unwrap();
     std::fs::write(home.0.join("mcp.json"), r#"{"mcpServers":{"broken":{"command":""}}}"#).unwrap();
     let output = mcp_command(&home, &["list"]);
     assert!(!output.status.success());

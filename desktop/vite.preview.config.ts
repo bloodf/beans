@@ -48,8 +48,8 @@ function previewHost(): Plugin {
           'appLanguage: query.get("language") === "zh" ? "zh" : "en"',
         );
         replace(
-          'const port = Number(query.get("port"));',
-          'prefs = { ...prefs, appLanguage: query.get("language") === "zh" ? "zh" : "en" }; const port = Number(query.get("port"));',
+          '// Validate saved and explicit query ports independently.',
+          'prefs = { ...prefs, appLanguage: query.get("language") === "zh" ? "zh" : "en" }; // Validate saved and explicit query ports independently.',
         );
         replace(
           'visible: document.visibilityState === "visible"',

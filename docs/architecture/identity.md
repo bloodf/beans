@@ -27,6 +27,8 @@ Backups begin with the separate first token `beans-v2`, followed by the base32 s
 
 Desktop homes are `~/.beans-v2` and `~/.beans-dev-v2`, using ports 4874 and 4875. Phone roots are `beans-v2/core` and `beans-dev-v2/core` within the existing build sandboxes. The home marker is `format.json` with `{"format":"beans-v2"}`. Validation precedes mkdir, chmod, deletion, SQLite setup and recovery; a missing marker with any existing content rejects with migration required without modifying bytes. Malformed account JSON is an error, not missing state. Direct `LocalStore::open` and mobile `push_open` enforce the same boundary. Existing local databases require SQLite `application_id` `0x424E5332` (`BNS2`), checked from the file header without opening SQLite; fresh databases write it before WAL/schema setup.
 
+A retained identity requires its machine record; read-only admission rejects an identity-only partial account before permissions, database setup or key creation. A marked empty home and a paired Device holding only its machine record remain valid.
+
 This is an incompatible fresh format, not an upgrade of existing accounts. No reset, migration, old-home reuse or mixed-format pairing/sync occurs. Existing installed apps, accounts and services remain separate; a production cutover needs its own explicit authorization.
 
 

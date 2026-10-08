@@ -458,6 +458,45 @@ async fn binary_file_limit_includes_the_encryption_envelope_and_caps_chunked_bod
     assert!(!relay.home.join("files/identity/att-overflow").exists());
 }
 
+#[tokio::test]
+async fn file_overflow_finishes_small_tails_but_caps_unfinished_senders() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let body = Body::from_stream(futures::stream::iter([
+        Ok::<_, std::io::Error>(Bytes::from_static(b"1234")),
+        Ok(Bytes::from_static(b"5")),
+        Ok(Bytes::from_static(b"tail")),
+    ]).inspect(move |_| { count.fetch_add(1, Ordering::SeqCst); }));
+    assert_eq!(read_file_bytes(body, 4).await.unwrap_err().status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(received.load(Ordering::SeqCst), 3, "the rejected request reaches EOF before response");
+
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    const CHUNK: [u8; 1024] = [0; 1024];
+    let body = Body::from_stream(futures::stream::repeat_with(|| Ok::<_, std::io::Error>(Bytes::from_static(&CHUNK)))
+        .inspect(move |_| { count.fetch_add(1, Ordering::SeqCst); }));
+    assert_eq!(read_file_bytes(body, 4).await.unwrap_err().status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(received.load(Ordering::SeqCst) <= 1 + FILE_OVERFLOW_DRAIN_BYTES / 1024, "an endless sender has a byte budget");
+
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    let body = Body::from_stream(futures::stream::iter([
+        Ok::<_, std::io::Error>(Bytes::from_static(b"overflow")),
+        Ok(Bytes::from(vec![0; FILE_OVERFLOW_DRAIN_BYTES + 1])),
+        Ok(Bytes::from_static(b"must remain unread")),
+    ]).inspect(move |_| { count.fetch_add(1, Ordering::SeqCst); }));
+    assert_eq!(read_file_bytes(body, 4).await.unwrap_err().status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(received.load(Ordering::SeqCst), 2, "a frame exceeding the cleanup budget ends draining immediately");
+
+    let body = Body::from_stream(futures::stream::once(async {
+        Ok::<_, std::io::Error>(Bytes::from_static(b"overflow"))
+    }).chain(futures::stream::pending()));
+    let result = tokio::time::timeout(FILE_OVERFLOW_DRAIN_TIME + std::time::Duration::from_secs(1), read_file_bytes(body, 4)).await;
+    assert_eq!(result.expect("a stalled sender has a time budget").unwrap_err().status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
 /// A relay told to stop still hands APNs the pushes it answered `queued` for, and stops waiting
 /// for one APNs never takes once the grace is up.
 #[tokio::test]

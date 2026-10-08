@@ -1644,9 +1644,10 @@ mod tests {
     #[test]
     fn a_tool_is_hidden_and_shown_in_the_entrys_tool_exposure() {
         let home = std::env::temp_dir().join(format!("beans-mcp-hide-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&home).unwrap();
+        let config = crate::config::Config { home: home.clone(), port: 0 };
+        config.ensure_home().unwrap();
         std::fs::write(home.join("mcp.json"), r#"{"mcpServers": {"docs": {"command": "x", "toolExposure": {"delete_*": "hidden"}}}}"#).unwrap();
-        let app = crate::app::App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        let app = crate::app::App::load(config).unwrap();
         let exposure = || McpFile::read(&home.join("mcp.json")).server("docs").unwrap().entry.get("toolExposure").map(Value::from).unwrap_or_default();
         hide_tool(&app, "docs", "search", true).unwrap();
         assert_eq!(exposure(), serde_json::json!({ "delete_*": "hidden", "search": "hidden" }));

@@ -783,7 +783,7 @@ def answers_as(target, version, required_protocol, old_pid=0):
                 and type(health.get("min_protocol")) is int
                 and MIN_PROTOCOL <= health["min_protocol"] <= required_protocol
                 and type(health.get("min_roster_protocol")) is int
-                and MIN_PROTOCOL <= health["min_roster_protocol"] <= required_protocol)
+                and health["min_protocol"] <= health["min_roster_protocol"] <= required_protocol)
     status = runner_control(target, ["status"], check=False)
     return (isinstance(status, dict) and status.get("version") == version
             and type(status.get("pid")) is int and status["pid"] == pid

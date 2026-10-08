@@ -16,10 +16,12 @@ enum Wire {
         var `protocol`: Int
         var minProtocol: Int
         var minRosterProtocol: Int
+        var memoryConfigVersion: Int
 
         func supports(requiredProtocol: Int) -> Bool {
             let required = max(AppInfo.protocolVersion, requiredProtocol)
             return ok && service == "beans-relay" && format == AppInfo.format
+                && memoryConfigVersion == 1
                 && `protocol` >= required
                 && minProtocol >= AppInfo.protocolVersion && minProtocol <= required
                 && minRosterProtocol >= minProtocol && minRosterProtocol <= required

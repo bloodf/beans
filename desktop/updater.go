@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -73,11 +72,62 @@ func desktopUpdateTokenPath() string {
 	if path, set := os.LookupEnv("BEANS_UPDATE_TOKEN_FILE"); set {
 		return path
 	}
-	home := os.Getenv("BEANS_HOME")
-	if home == "" {
+	home, set := os.LookupEnv("BEANS_HOME")
+	if !set {
 		home = defaultCLIHome()
 	}
 	return filepath.Join(home, "update-token")
+}
+
+// Open only an existing, private, marked core home. Root keeps subsequent file
+// operations bound to this directory even if its pathname changes.
+func openDesktopTokenDirectory() (*os.Root, error) {
+	home := filepath.Dir(desktopUpdateTokenPath())
+	info, err := os.Lstat(home)
+	if err != nil || !info.IsDir() || !desktopControlOwner(info) ||
+		(runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0) {
+		return nil, errors.New("Desktop update control requires an existing private Beans v2 home")
+	}
+	root, err := os.OpenRoot(home)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := root.Stat(".")
+	if err != nil || !os.SameFile(info, opened) || !desktopControlOwner(opened) ||
+		(runtime.GOOS != "windows" && opened.Mode().Perm()&0o022 != 0) {
+		root.Close()
+		return nil, errors.New("The Beans home changed before update-control admission")
+	}
+	data, err := readDesktopControlFile(root, "format.json", false)
+	var marker struct { Format string `json:"format"` }
+	if err != nil || json.Unmarshal(data, &marker) != nil || marker.Format != "beans-v2" {
+		root.Close()
+		return nil, errors.New("Desktop update control requires an established Beans v2 format marker")
+	}
+	return root, nil
+}
+
+func readDesktopControlFile(root *os.Root, name string, private bool) ([]byte, error) {
+	info, err := root.Lstat(name)
+	if err != nil || !info.Mode().IsRegular() || !desktopControlOwner(info) || info.Size() > 4096 ||
+		(private && runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
+		return nil, errors.New("Cannot read the private Beans update-control record")
+	}
+	file, err := openDesktopControlFile(root, name, os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() || !desktopControlOwner(opened) || opened.Size() > 4096 ||
+		(private && runtime.GOOS != "windows" && opened.Mode().Perm()&0o077 != 0) {
+		return nil, errors.New("The Beans update-control record changed while opening")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 4097))
+	if err != nil || len(data) > 4096 {
+		return nil, errors.New("Cannot read the private Beans update-control record")
+	}
+	return data, nil
 }
 
 // Provision only the token for a CLI the launcher starts, never replace operator configuration.
@@ -86,43 +136,28 @@ func ensureDesktopUpdateToken() (string, error) {
 	if _, set := os.LookupEnv("BEANS_UPDATE_TOKEN_FILE"); set {
 		return path, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	root, err := openDesktopTokenDirectory()
+	if err != nil {
 		return "", err
 	}
-	var secret [32]byte
-	if _, err := rand.Read(secret[:]); err != nil {
-		return "", err
-	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	defer root.Close()
+	file, err := openDesktopControlFile(root, "update-token", os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if errors.Is(err, os.ErrExist) {
+		data, readErr := readDesktopControlFile(root, "update-token", true)
+		if readErr != nil || len(strings.TrimSpace(string(data))) < 32 {
+			return "", errors.New("The existing update-control token is invalid; it is not replaced")
+		}
 		return path, nil
 	}
 	if err != nil {
 		return "", err
 	}
-	// Windows ignores Unix mode bits: remove inherited access before writing
-	// any secret. Imported operator files are never rewritten or re-ACL'd.
-	if runtime.GOOS == "windows" {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		command := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", `
-			$ErrorActionPreference = 'Stop'
-			$path = [Environment]::GetEnvironmentVariable('BEANS_UPDATE_TOKEN_PATH')
-			$acl = [System.Security.AccessControl.FileSecurity]::new()
-			$acl.SetAccessRuleProtection($true, $false)
-			$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-			$rule = [System.Security.AccessControl.FileSystemAccessRule]::new($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)
-			$acl.AddAccessRule($rule)
-			Set-Acl -LiteralPath $path -AclObject $acl
-		`)
-		for _, entry := range os.Environ() {
-			if !strings.HasPrefix(strings.ToUpper(entry), "BEANS_UPDATE_TOKEN_PATH=") {
-				command.Env = append(command.Env, entry)
-			}
-		}
-		command.Env = append(command.Env, "BEANS_UPDATE_TOKEN_PATH="+path)
-		configureChild(command)
-		err = command.Run()
-		cancel()
+	// Secure only the new inode, before writing a secret; existing/operator ACLs
+	// and Unix permissions are never changed.
+	err = secureDesktopControlFile(file)
+	var secret [32]byte
+	if err == nil {
+		_, err = rand.Read(secret[:])
 	}
 	if err == nil {
 		_, err = file.WriteString(base64.RawURLEncoding.EncodeToString(secret[:]) + "\n")
@@ -130,38 +165,37 @@ func ensureDesktopUpdateToken() (string, error) {
 	if err == nil {
 		err = file.Sync()
 	}
+	created, _ := file.Stat()
 	closeErr := file.Close()
 	if err == nil {
 		err = closeErr
 	}
 	if err != nil {
-		_ = os.Remove(path)
+		if current, statErr := root.Lstat("update-token"); statErr == nil && created != nil && os.SameFile(created, current) {
+			_ = root.Remove("update-token")
+		}
 		return "", err
 	}
 	return path, nil
 }
 
 func desktopUpdateToken() (string, error) {
-	path := desktopUpdateTokenPath()
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 4096 || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
-		return "", errors.New("The local CLI needs its private update-control token before automatic installation")
+	if configured, set := os.LookupEnv("BEANS_UPDATE_TOKEN_FILE"); set {
+		if configured == "" {
+			return "", errors.New("Desktop update installation is disabled by BEANS_UPDATE_TOKEN_FILE")
+		}
+		return "", errors.New("Desktop update installation requires app-owned control; the configured operator token is not read")
 	}
-	file, err := os.Open(path)
+	root, err := openDesktopTokenDirectory()
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() ||
-		opened.Size() > 4096 || (runtime.GOOS != "windows" && opened.Mode().Perm()&0o077 != 0) {
-		return "", errors.New("Cannot read the private update-control token")
+	defer root.Close()
+	data, err := readDesktopControlFile(root, "update-token", true)
+	if err != nil {
+		return "", err
 	}
-	bytes, err := io.ReadAll(io.LimitReader(file, 4097))
-	if err != nil || len(bytes) > 4096 {
-		return "", errors.New("Cannot read the private update-control token")
-	}
-	token := strings.TrimSpace(string(bytes))
+	token := strings.TrimSpace(string(data))
 	if len(token) < 32 {
 		return "", errors.New("The update-control token is invalid")
 	}
@@ -187,13 +221,17 @@ func newDesktopUpdateLease(ctx context.Context) (*desktopUpdateLease, error) {
 	if app.launcher == nil || app.cli == nil {
 		return nil, errors.New("Wait for the local CLI before installing the update")
 	}
+	selectedPort, err := prefs.cliPort()
+	if err != nil {
+		return nil, err
+	}
 	token, err := desktopUpdateToken()
 	if err != nil {
 		return nil, err
 	}
 	l := app.launcher
 	l.mu.Lock()
-	if l.stopped || !l.ready || l.process == nil || l.process.Process == nil || l.processDone == nil {
+	if l.stopped || !l.ready || l.port != selectedPort || l.process == nil || l.process.Process == nil || l.processDone == nil {
 		l.mu.Unlock()
 		return nil, errors.New("Installation needs the app's own drain-capable CLI; quit the external CLI and reopen the app")
 	}
@@ -223,7 +261,8 @@ func newDesktopUpdateLease(ctx context.Context) (*desktopUpdateLease, error) {
 }
 
 func (lease *desktopUpdateLease) current() error {
-	if prefs.cliPort() != lease.port {
+	port, err := prefs.cliPort()
+	if err != nil || port != lease.port {
 		return errors.New("The selected CLI changed; quit again to check the update")
 	}
 	l := app.launcher

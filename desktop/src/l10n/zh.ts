@@ -766,6 +766,8 @@ export const zh: Record<string, string> = {
   "The Beans CLI is not running": "Beans CLI 未运行",
   "The Beans CLI is not running. Start it with `beans serve` and try again.": "Beans CLI 未在运行。请用 `beans serve` 启动它，然后重试。",
   "The Beans CLI isn't answering": "Beans CLI 没有响应",
+  "This build connects only to its isolated Beans CLI port %@.": "此版本仅连接其独立的 Beans CLI 端口 %@。",
+  "Wait for the app configuration before connecting to the CLI.": "请等待应用配置加载完成后再连接 CLI。",
   "The marketplace isn't available right now.": "市场暂时不可用。",
   "the other Device": "另一台设备",
   "The relay deletes everything it holds for the account, and every paired Device, this one included, forgets its keys and chats. This can’t be undone.": "中继会删除它为此账户保存的全部内容，每台已配对设备（包括这一台）都会清除密钥和聊天。此操作无法撤销。",

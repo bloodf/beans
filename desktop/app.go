@@ -216,7 +216,7 @@ func (a *appDelegate) identityChanged(has bool) {
 	if same {
 		return
 	}
-	prefs.update(PreferencesPatch{HadIdentity: &has})
+	_, _ = prefs.update(PreferencesPatch{HadIdentity: &has})
 	mygo.RunOnMain(func() {
 		if has {
 			if a.onboarding == nil && a.main == nil {

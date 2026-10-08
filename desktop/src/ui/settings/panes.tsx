@@ -5,6 +5,7 @@
 import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { files, host, hostInfo, onUpdaterChanged, preferences, setPreferences, type UpdaterState } from "../../host";
+import { parseCLIPort } from "../../host/cliPort";
 import { chosenLanguage, L, supportedLanguages } from "../../l10n";
 import * as Format from "../../model/format";
 import { isMcpServer, mcpAddress, mcpState, mcpSymbol, type McpFile, type McpServer } from "../../model/mcp";
@@ -245,17 +246,14 @@ export function AdvancedPane() {
     void setPreferences({ relayURL: value });
     store.setRelayURL(value);
   };
-  const commitPort = (value: string) => {
-    const number = Number(value);
-    if (!Number.isInteger(number) || number <= 0 || number >= 65536) {
-      // The row shows the port in force again.
+  const commitPort = async (value: string) => {
+    try {
+      const number = parseCLIPort(value, hostInfo().defaultCLIPort);
+      setPrefs(await setPreferences({ cliPort: number }));
+    } catch (error) {
       setPrefs({ ...preferences() });
-      return;
+      void alert({ message: L("CLI port"), informative: errorText(error) }).catch((failure) => console.error("CLI port dialog failed:", failure));
     }
-    if (number === prefs().cliPort) return;
-    setPrefs({ ...prefs(), cliPort: number });
-    // The app reconnects to the CLI on the new port.
-    void setPreferences({ cliPort: number });
   };
   const confirmDeleteAccount = async () => {
     const answer = await alert({

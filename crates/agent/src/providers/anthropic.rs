@@ -1117,8 +1117,8 @@ mod tests {
             ("content_block_delta", json!({ "index": 0, "delta": { "type": "signature_delta", "signature": "msg-1" } })),
             ("content_block_stop", json!({ "index": 0 })),
             ("content_block_start", json!({ "index": 1, "content_block": { "type": "server_tool_use", "id": "call_00", "name": "web_search", "input": {} } })),
-            ("content_block_delta", json!({ "index": 1, "delta": { "type": "input_json_delta", "partial_json": "{\"query\": \"lor" } })),
-            ("content_block_delta", json!({ "index": 1, "delta": { "type": "input_json_delta", "partial_json": "ca relay\"}" } })),
+            ("content_block_delta", json!({ "index": 1, "delta": { "type": "input_json_delta", "partial_json": "{\"query\": \"bea" } })),
+            ("content_block_delta", json!({ "index": 1, "delta": { "type": "input_json_delta", "partial_json": "ns relay\"}" } })),
             ("content_block_stop", json!({ "index": 1 })),
             ("content_block_start", json!({ "index": 2, "content_block": { "type": "web_search_tool_result", "tool_use_id": "call_00", "content": [
                 { "type": "web_search_result", "title": "Beans", "url": "https://example.com", "encrypted_content": "xx", "page_age": null }

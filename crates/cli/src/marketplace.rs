@@ -478,6 +478,7 @@ mod tests {
     fn cache_is_bound_to_feed_and_only_newer_indexes_win() {
         let home = std::env::temp_dir().join(format!("beans-marketplace-cache-{}", uuid::Uuid::new_v4()));
         let config = Config { home: home.clone(), port: 0 };
+        config.ensure_home().unwrap();
         let mut cached: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
         cached["updated"] = Value::from("2999-01-01T00:00:00Z");
         cached["plugins"].as_array_mut().unwrap().iter_mut().find(|plugin| plugin["id"] == "github").unwrap()["description"] = Value::from("Selected feed GitHub");

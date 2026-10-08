@@ -121,10 +121,15 @@ impl Config {
                 validate_database(&path)?;
             }
         }
-        if let Some(identity) = read_json_strict::<crate::keys::IdentityFile>(&self.identity_path())? {
+        let identity = read_json_strict::<crate::keys::IdentityFile>(&self.identity_path())?;
+        let machine = read_json_strict::<crate::keys::MachineFile>(&self.machine_path())?;
+        if identity.is_some() && machine.is_none() {
+            anyhow::bail!("Beans identity is missing its machine record; existing data is untouched");
+        }
+        if let Some(identity) = identity {
             identity.identity()?;
         }
-        if let Some(machine) = read_json_strict::<crate::keys::MachineFile>(&self.machine_path())? {
+        if let Some(machine) = machine {
             machine.machine()?;
             machine.dek()?;
             crate::keys::unb64_32(&machine.identity_pubkey)?;
@@ -132,6 +137,7 @@ impl Config {
         }
         read_json_strict::<crate::credentials::Credentials>(&self.credentials_path())?;
         read_json_strict::<Settings>(&self.settings_path())?;
+        crate::plugins::validate_account_files(self)?;
         Ok(true)
     }
 
@@ -353,5 +359,75 @@ mod format_tests {
         assert!(crate::app::App::load(config.clone()).is_err());
         assert_eq!(std::fs::read(config.identity_path()).unwrap(), b"{invalid-account");
         assert!(!database.exists());
+    }
+
+    #[test]
+    fn partial_identity_is_rejected_before_mutation_but_machine_only_is_valid() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config { home: home.path().into(), port: 0 };
+        config.ensure_home().unwrap();
+        let identity = crate::keys::IdentityFile::new(&crate::keys::Identity::from_master([17; 32]));
+        write_json_private(&config.identity_path(), &identity).unwrap();
+        let bytes = std::fs::read(config.identity_path()).unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let permissions = std::fs::metadata(home.path()).unwrap().permissions();
+        let error = crate::app::App::load(config.clone()).err().expect("partial identity must fail admission");
+        assert!(error.to_string().contains("missing its machine record"));
+        assert_eq!(std::fs::read(config.identity_path()).unwrap(), bytes);
+        assert!(!config.database_path().exists());
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(home.path()).unwrap().permissions().mode(), permissions.mode());
+        }
+        std::fs::remove_file(config.identity_path()).unwrap();
+        let app = crate::app::App::load(config.clone()).unwrap();
+        crate::identity::create(&app, None).unwrap();
+        let machine = std::fs::read(config.machine_path()).unwrap();
+        std::fs::remove_file(config.identity_path()).unwrap();
+        let paired = crate::app::App::load(config.clone()).unwrap();
+        assert!(paired.has_identity());
+        assert!(!paired.is_identity_device());
+        assert_eq!(std::fs::read(config.machine_path()).unwrap(), machine);
+    }
+
+    #[test]
+    fn plugin_corruption_is_rejected_before_permissions_or_database_writes() {
+        for name in ["installed.json", "secrets.json"] {
+            let cases: &[&[u8]] = if name == "installed.json" {
+                &[b"{broken", b"[]", b"{}", b"{\"future\":[]}", b"{\"plugins\":null}", b"{\"plugins\":[],\"future\":{\"KEEP\":\"retained\"}}"]
+            } else {
+                &[b"{broken", b"[]", b"{\"plugin\":null}"]
+            };
+            for &bytes in cases {
+                let home = tempfile::tempdir().unwrap();
+                let config = Config { home: home.path().into(), port: 0 };
+                config.ensure_home().unwrap();
+                std::fs::create_dir(config.plugins_dir()).unwrap();
+                let path = config.plugins_dir().join(name);
+                std::fs::write(&path, bytes).unwrap();
+                #[cfg(unix)] {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+                }
+                let permissions = std::fs::metadata(home.path()).unwrap().permissions();
+                assert!(crate::plugins::Store::load(&config).is_err());
+                assert!(crate::app::App::load(config.clone()).is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert!(!config.database_path().exists());
+                #[cfg(unix)] {
+                    use std::os::unix::fs::PermissionsExt;
+                    assert_eq!(std::fs::metadata(home.path()).unwrap().permissions().mode(), permissions.mode());
+                }
+            }
+            let home = tempfile::tempdir().unwrap();
+            let config = Config { home: home.path().into(), port: 0 };
+            config.ensure_home().unwrap();
+            std::fs::create_dir_all(config.plugins_dir().join(name)).unwrap();
+            assert!(config.ensure_home().is_err(), "unreadable record must not default");
+            assert!(config.plugins_dir().join(name).is_dir());
+        }
     }
 }

@@ -19,6 +19,9 @@ const UNIT: &str = "beans.service";
 /// A log larger than this starts over when `beans serve` starts under the service.
 const LOG_LIMIT: u64 = 20 << 20;
 
+#[cfg(any(windows, test))]
+mod supervisor;
+
 /// Whether `beans service` started this process.
 pub fn supervised() -> bool {
     std::env::var("BEANS_SERVICE").is_ok_and(|value| value == "1")
@@ -241,20 +244,22 @@ fn log_path(config: &Config) -> PathBuf {
 
 #[cfg(windows)]
 pub fn install(config: &Config) -> anyhow::Result<Status> {
+    stop(config)?;
+    config.ensure_home()?;
     let exe = exe()?;
     // The Run key holds a command line. The supervisor names the home and port it serves, since
     // a sign-in starts it without the installing shell's variables.
     let mut line = format!("\"{}\" service run", exe.display());
-    for (name, value) in passed_on(config) {
+    let environment = supervisor_environment(config, &passed_on(config).into_iter().map(|(name, value)| (name.to_string(), value)).collect::<Vec<_>>())?;
+    for (name, value) in &environment {
         // A backslash before the closing quote would escape it.
         line.push_str(&format!(" --env \"{name}={}\"", value.replace('"', "").trim_end_matches('\\')));
     }
     run(Command::new("reg").args(["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &line, "/f"]))?;
-    stop(config);
     use std::os::windows::process::CommandExt;
     let mut command = Command::new(&exe);
     command.args(["service", "run"]).creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
-    for (name, value) in passed_on(config) {
+    for (name, value) in &environment {
         command.args(["--env", &format!("{name}={value}")]);
     }
     command.spawn()?;
@@ -270,27 +275,31 @@ pub fn install(config: &Config) -> anyhow::Result<Status> {
 
 #[cfg(windows)]
 pub fn uninstall(config: &Config) -> anyhow::Result<bool> {
+    stop(config)?;
     let installed = Command::new("reg").args(["query", RUN_KEY, "/v", RUN_VALUE]).output().is_ok_and(|o| o.status.success());
     if installed {
         run(Command::new("reg").args(["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]))?;
     }
-    stop(config);
     Ok(installed)
 }
 
 /// Stops the supervisor and the `beans serve` it started.
 #[cfg(windows)]
-fn stop(config: &Config) {
-    if let Some(pid) = supervisor_pid(config) {
-        let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
+fn stop(config: &Config) -> anyhow::Result<()> {
+    if let Some((record, handle)) = supervisor::bound(config)? {
+        // The held process handle cannot turn into a reused PID. Closing this supervisor's
+        // job handle on exit stops only its own child tree.
+        handle.terminate()?;
+        if supervisor::read_record(config)?.as_ref() == Some(&record) {
+            std::fs::remove_file(pid_path(config))?;
+        }
     }
-    let _ = std::fs::remove_file(pid_path(config));
+    Ok(())
 }
 
 #[cfg(windows)]
 fn supervisor_pid(config: &Config) -> Option<u32> {
-    let pid: u32 = std::fs::read_to_string(pid_path(config)).ok()?.trim().parse().ok()?;
-    process_alive(pid).then_some(pid)
+    supervisor::bound(config).ok().flatten().map(|(record, _)| record.pid)
 }
 
 #[cfg(windows)]
@@ -300,18 +309,13 @@ pub fn status(config: &Config) -> Status {
 }
 
 #[cfg(windows)]
-fn process_alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
-    unsafe {
-        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
-        if handle.is_null() {
-            return false;
-        }
-        let running = WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
-        CloseHandle(handle);
-        running
-    }
+fn supervisor_environment(config: &Config, environment: &[(String, String)]) -> anyhow::Result<Vec<(String, String)>> {
+    let mut environment: Vec<_> = environment.iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("BEANS_HOME") && !name.eq_ignore_ascii_case("BEANS_PORT"))
+        .cloned().collect();
+    environment.push(("BEANS_HOME".into(), std::fs::canonicalize(&config.home)?.to_string_lossy().into_owned()));
+    environment.push(("BEANS_PORT".into(), config.port.to_string()));
+    Ok(environment)
 }
 
 /// `beans service run`, the supervisor on Windows: leaves the console a sign-in opened for it,
@@ -322,13 +326,30 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(windows)]
 pub fn supervise(config: &Config, env: &[(String, String)]) -> anyhow::Result<()> {
     use std::os::windows::process::CommandExt;
-    unsafe { windows_sys::Win32::System::Console::FreeConsole() };
     if supervisor_pid(config).is_some_and(|pid| pid != std::process::id()) {
         return Ok(());
     }
+    // Admission also precedes console detachment, PID replacement and log creation.
+    config.validate_home()?;
+    supervisor::bound(config)?;
     config.ensure_home()?;
-    std::fs::write(pid_path(config), std::process::id().to_string())?;
     let exe = exe()?;
+    let home = std::fs::canonicalize(&config.home)?;
+    let env = supervisor_environment(config, env)?;
+    let process = supervisor::Handle::open(std::process::id())?.ok_or_else(|| anyhow::anyhow!("Supervisor is not running"))?;
+    let record = supervisor::Record { format: crate::config::Format::BeansV2, pid: std::process::id(), created_at: process.created_at()?, home };
+    if !supervisor::matches(&record, record.created_at, &exe, &exe, &record.home, &std::env::args().collect::<Vec<_>>()) {
+        // Manual invocation is normalized to the same explicit home-bound command as the
+        // Run key. Never rely on an inherited environment to identify another process.
+        let mut command = Command::new(&exe);
+        command.args(["service", "run"]).creation_flags(CREATE_NO_WINDOW);
+        for (name, value) in &env { command.args(["--env", &format!("{name}={value}")]); }
+        run(&mut command)?;
+        return Ok(());
+    }
+    unsafe { windows_sys::Win32::System::Console::FreeConsole() };
+    let _job = supervisor::own_process_tree()?;
+    crate::config::write_json_private(&pid_path(config), &record)?;
     let mut pause = std::time::Duration::from_secs(2);
     loop {
         let log = log_path(config);
@@ -339,7 +360,7 @@ pub fn supervise(config: &Config, env: &[(String, String)]) -> anyhow::Result<()
         let started = std::time::Instant::now();
         let mut command = Command::new(&exe);
         command.arg("serve").env("BEANS_SERVICE", "1").stdin(std::process::Stdio::null()).stdout(output.try_clone()?).stderr(output).creation_flags(CREATE_NO_WINDOW);
-        for (name, value) in env {
+        for (name, value) in &env {
             command.env(name, value);
         }
         let code = match command.spawn().and_then(|mut child| child.wait()) {

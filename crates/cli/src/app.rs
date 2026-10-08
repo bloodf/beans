@@ -254,7 +254,7 @@ impl App {
         let identity: Option<IdentityFile> = config::read_json_strict(&config.identity_path())?;
         let machine: Option<MachineFile> = config::read_json_strict(&config.machine_path())?;
         let credentials = Credentials::load(&config);
-        let plugins = crate::plugins::Store::load(&config);
+        let plugins = crate::plugins::Store::load(&config)?;
         let marketplace = crate::marketplace::Updates::load(&config);
         let store = LocalStore::open(&config.database_path())?;
         let memory_config = crate::memory_service::load(&store, machine.as_ref().and_then(|m| m.dek().ok()))?;
@@ -2177,19 +2177,18 @@ mod tests {
     }
 
     #[test]
-    fn superseded_local_stores_are_discarded() {
-        let home = std::env::temp_dir().join(format!("beans-old-store-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&home).unwrap();
+    fn old_local_stores_are_rejected_untouched() {
+        let home = tempfile::tempdir().unwrap();
         for name in ["state.json", "transcript.sqlite3", "transcript.sqlite3-wal", "transcript.sqlite3-shm"] {
-            std::fs::write(home.join(name), b"obsolete").unwrap();
+            std::fs::write(home.path().join(name), b"retained-account").unwrap();
         }
-
-        let scratch = ScratchApp(App::load(Config { home: home.clone(), port: 0 }).unwrap(), home.clone());
-
+        let config = Config { home: home.path().into(), port: 0 };
+        assert!(App::load(config.clone()).is_err());
         for name in ["state.json", "transcript.sqlite3", "transcript.sqlite3-wal", "transcript.sqlite3-shm"] {
-            assert!(!home.join(name).exists());
+            assert_eq!(std::fs::read(home.path().join(name)).unwrap(), b"retained-account");
         }
-        assert!(scratch.0.config.database_path().is_file());
+        assert!(!config.database_path().exists());
+        assert!(!home.path().join("format.json").exists());
     }
 
     #[test]

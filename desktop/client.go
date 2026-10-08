@@ -53,6 +53,10 @@ func (c *cliClient) currentState() string {
 }
 
 func (c *cliClient) connect() {
+	if _, err := prefs.cliPort(); err != nil {
+		c.disconnect()
+		return
+	}
 	c.mu.Lock()
 	c.wants = true
 	if c.reconnectTimer != nil {
@@ -76,6 +80,10 @@ func (c *cliClient) disconnect() {
 
 // reconnect drops the socket and dials again, for a port change or a manual retry.
 func (c *cliClient) reconnect() {
+	if _, err := prefs.cliPort(); err != nil {
+		c.disconnect()
+		return
+	}
 	c.mu.Lock()
 	c.wants = true
 	c.reconnectDelay = 400 * time.Millisecond
@@ -85,11 +93,16 @@ func (c *cliClient) reconnect() {
 }
 
 func (c *cliClient) open() {
+	port, err := prefs.cliPort()
+	if err != nil {
+		c.disconnect()
+		return
+	}
 	c.mu.Lock()
 	c.generation++
 	generation := c.generation
 	c.state = "connecting"
-	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", prefs.cliPort())
+	url := fmt.Sprintf("ws://127.0.0.1:%d/ws", port)
 	c.mu.Unlock()
 
 	go func() {

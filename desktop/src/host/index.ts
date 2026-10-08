@@ -4,6 +4,7 @@
 
 import { isMyGo, onFileDrop, type FileDrop } from "mygo-runtime";
 import { L } from "../l10n";
+import { browserCLIPort, requireCLIPort } from "./cliPort";
 import {
   CLI,
   events,
@@ -63,7 +64,7 @@ const defaultPrefs: Preferences = {
   sendOnReturn: true,
   showTimestamps: true,
   relayURL: "",
-  cliPort: Number(query.get("port")) || 4875,
+  cliPort: 4875,
   appLanguage: "",
   appearance: "",
   sidebarWidth: 0,
@@ -72,10 +73,14 @@ const defaultPrefs: Preferences = {
 };
 
 let prefs: Preferences = defaultPrefs;
+let portFailure: Error | null = null;
+let hostLoaded = false;
 const prefsListeners = new Set<(prefs: Preferences) => void>();
 
 /** Loads what the page needs before it renders: the build and the preferences. */
 export async function loadHost(): Promise<void> {
+  hostLoaded = false;
+  portFailure = null;
   if (inApp) {
     [info, prefs] = await Promise.all([Host.info(), Prefs.all()]);
     events.prefsChanged.on((next) => {
@@ -85,13 +90,20 @@ export async function loadHost(): Promise<void> {
   } else {
     try {
       prefs = { ...defaultPrefs, ...JSON.parse(localStorage.getItem("beans-v2.prefs") ?? "{}") };
-    } catch {
+    } catch (error) {
+      portFailure = error instanceof Error ? error : new Error(String(error));
       prefs = defaultPrefs;
     }
-    // `?port=` wins, as `BEANS_PORT` does in the app.
-    const port = Number(query.get("port"));
-    if (port) prefs = { ...prefs, cliPort: port };
   }
+  // Validate saved and explicit query ports independently.
+  try {
+    if (inApp) requireCLIPort(prefs.cliPort, info.defaultCLIPort);
+    else browserCLIPort(prefs.cliPort, query, info.defaultCLIPort);
+  } catch (error) {
+    portFailure = error instanceof Error ? error : new Error(String(error));
+  }
+  hostLoaded = true;
+  if (!inApp) transport?.reconnect();
 }
 
 export function hostInfo(): HostInfo {
@@ -119,14 +131,26 @@ export function preferences(): Preferences {
 }
 
 export async function setPreferences(patch: PreferencesPatch): Promise<Preferences> {
+  if (patch.cliPort !== undefined) {
+    requireCLIPort(patch.cliPort, info.defaultCLIPort);
+    if (!inApp) browserCLIPort(patch.cliPort, query, info.defaultCLIPort);
+  } else if (portFailure) {
+    throw portFailure;
+  }
   if (inApp) {
-    prefs = await Prefs.set(patch);
+    const next = await Prefs.set(patch);
+    requireCLIPort(next.cliPort, info.defaultCLIPort);
+    prefs = next;
   } else {
     prefs = { ...prefs, ...patch };
     try {
       localStorage.setItem("beans-v2.prefs", JSON.stringify(prefs));
     } catch {}
     for (const listener of prefsListeners) listener(prefs);
+  }
+  if (patch.cliPort !== undefined) {
+    portFailure = null;
+    if (!inApp) transport?.reconnect();
   }
   return prefs;
 }
@@ -156,7 +180,12 @@ class AppTransport implements Transport {
     return CLI.request(method, params);
   }
   reconnect() {
-    void CLI.reconnect();
+    try {
+      requireCLIPort(prefs.cliPort, info.defaultCLIPort);
+      void CLI.reconnect().catch((error) => console.error("CLI reconnect failed:", error));
+    } catch (error) {
+      console.error("CLI port rejected:", error);
+    }
   }
   onEvent(listener: (name: string, data: unknown) => void) {
     return events.cliEvent.on((frame) => {
@@ -177,6 +206,7 @@ class SocketTransport implements Transport {
   private nextID = 1;
   private delay = 400;
   private connection: CLIState["connection"] = "disconnected";
+  private failure: Error | null = null;
   private eventListeners = new Set<(name: string, data: unknown) => void>();
   private stateListeners = new Set<(state: CLIState) => void>();
 
@@ -187,7 +217,9 @@ class SocketTransport implements Transport {
   private current(): CLIState {
     return {
       connection: this.connection,
-      launcher: this.connection === "connected" ? { kind: "running", external: true } : { kind: "probing" },
+      launcher: this.failure
+        ? { kind: "failed", failure: { kind: "configuration", reason: this.failure.message } }
+        : this.connection === "connected" ? { kind: "running", external: true } : { kind: "probing" },
       starting: false,
     };
   }
@@ -198,8 +230,20 @@ class SocketTransport implements Transport {
   }
 
   private open() {
+    let port: number;
+    try {
+      if (!hostLoaded) throw new Error(L("Wait for the app configuration before connecting to the CLI."));
+      if (portFailure) throw portFailure;
+      port = browserCLIPort(prefs.cliPort, query, info.defaultCLIPort);
+    } catch (error) {
+      this.failure = error instanceof Error ? error : new Error(String(error));
+      this.connection = "disconnected";
+      this.publish();
+      return;
+    }
+    this.failure = null;
     this.connection = "connecting";
-    const socket = new WebSocket(`ws://127.0.0.1:${prefs.cliPort}/ws`);
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
     this.socket = socket;
     socket.onopen = () => {
       this.delay = 400;
@@ -247,7 +291,8 @@ class SocketTransport implements Transport {
   }
 
   reconnect() {
-    this.socket?.close();
+    if (this.failure && !this.socket) this.open();
+    else this.socket?.close();
   }
 
   onEvent(listener: (name: string, data: unknown) => void) {

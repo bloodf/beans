@@ -1,3 +1,12 @@
+export function canShareDiagnosticsReport<T extends readonly unknown[]>(
+  review: { generation: number; authority: T } | undefined,
+  current: { generation: number; authority: T; pending: boolean; focused: boolean; active: boolean },
+): boolean {
+  return !!review && !current.pending && current.focused && current.active
+    && review.generation === current.generation
+    && review.authority.every((value, index) => value === current.authority[index]);
+}
+
 // Decode into a new recursive allowlist; never share the native response object.
 export class DiagnosticsReportError extends Error {
   constructor(readonly code: 'unsupported_schema' | 'invalid_report') { super(code); }

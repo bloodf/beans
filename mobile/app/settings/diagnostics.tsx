@@ -3,7 +3,7 @@ import { Stack, useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { AppState, Button, ScrollView, Share, Text, View } from 'react-native';
 import { request } from '../../modules/beans-core';
-import { decodeDiagnosticsReport, DiagnosticsReportError } from '../../src/core/diagnosticsReport';
+import { canShareDiagnosticsReport, decodeDiagnosticsReport, DiagnosticsReportError } from '../../src/core/diagnosticsReport';
 import { useStore } from '../../src/core/store';
 import { t, useLanguage } from '../../src/i18n';
 import { Section } from '../../src/ui/forms';
@@ -16,7 +16,7 @@ function authority() {
 function sameAuthority(a: ReturnType<typeof authority>, b: ReturnType<typeof authority>) {
   return a.every((value, index) => value === b[index]);
 }
-type Review = { json: string; host: string | null; authority: ReturnType<typeof authority> };
+type Review = { json: string; host: string | null; authority: ReturnType<typeof authority>; generation: number };
 
 export default function DiagnosticsScreen() {
   useLanguage();
@@ -58,7 +58,7 @@ export default function DiagnosticsScreen() {
     try {
       const report = decodeDiagnosticsReport(await request('diagnostics.report', {}));
       if (!valid(token, captured)) return;
-      setReview({ json: JSON.stringify(report, null, 2), host: report.relay.host, authority: captured });
+      setReview({ json: JSON.stringify(report, null, 2), host: report.relay.host, authority: captured, generation: token });
       setStatus('Review this report before sharing.');
     } catch (error) {
       if (valid(token, captured)) setStatus(error instanceof DiagnosticsReportError
@@ -69,8 +69,9 @@ export default function DiagnosticsScreen() {
     }
   }
   async function share(copy: boolean) {
-    if (!review || pending.current || !valid(generation.current, review.authority)) return;
-    const token = generation.current, captured = review.authority, json = review.json;
+    if (!canShareDiagnosticsReport(review, { generation: generation.current, authority: authority(), pending: pending.current,
+      focused: focused.current, active: AppState.currentState === 'active' }) || !review) return;
+    const token = review.generation, captured = review.authority, json = review.json;
     pending.current = true; setBusy(true);
     try {
       // Both actions use exactly the bytes displayed, admitted under captured account authority.

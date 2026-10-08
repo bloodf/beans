@@ -62,3 +62,27 @@ test('production diagnostics decoder preserves schema payload and rejects privat
   ]) reject(change);
   expect(() => decodeDiagnosticsReport({ error: { message: secret } })).toThrow(DiagnosticsReportError);
 });
+
+test('review admission rejects account and lifecycle ABA before clearing render commits', async () => {
+  const { canShareDiagnosticsReport } = await import('./diagnosticsReport');
+  const a = [true, true, 'synthetic-A', 'phone', 'relay', true, false] as const;
+  const review = { generation: 4, authority: a };
+  const current = { generation: 4, authority: a as readonly unknown[], pending: false, focused: true, active: true };
+  // Retain the rendered review closure while observable revocation advances independently.
+  const staleRenderedAdmission = () => canShareDiagnosticsReport(review, current);
+  expect(staleRenderedAdmission()).toBe(true);
+  current.authority = [true, true, 'synthetic-B', 'phone', 'relay', true, false];
+  current.generation++;
+  expect(staleRenderedAdmission()).toBe(false);
+  current.authority = a;
+  current.generation++;
+  expect(staleRenderedAdmission()).toBe(false);
+  const fresh = { generation: current.generation, authority: a };
+  expect(canShareDiagnosticsReport(fresh, current)).toBe(true);
+  current.active = false;
+  current.generation++;
+  expect(canShareDiagnosticsReport(fresh, current)).toBe(false);
+  current.active = true;
+  expect(canShareDiagnosticsReport(fresh, current)).toBe(false);
+  expect(canShareDiagnosticsReport({ generation: current.generation, authority: a }, current)).toBe(true);
+});

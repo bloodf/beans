@@ -16,6 +16,9 @@
 "Requests run on %@. Listing verifies connectivity/catalog only, not inference." = "请求在 %@ 上执行。模型列表只验证连接和目录，不验证推理。";
 "Loopback belongs to the selected Runner. For another host, use its reachable address and check bind address, firewall and proxy bypass. Do not expose an unauthenticated server publicly." = "回环地址属于所选 Runner。其他主机请使用可访问的地址，并检查绑定地址、防火墙和代理绕过配置。不要将无身份验证的服务器暴露到公网。";
 "Unknown images stay text-only. Unknown tools are unverified. Tools No cannot run Beans tool-bearing bot turns; tool-free inference remains available." = "图像支持未知时仅发送文本。工具支持未知时尚未验证。工具选择否时无法执行 Beans 带工具的智能体轮次；仍可执行无工具推理。";
+"Files" = "文件";
+"Search covers downloaded history only" = "搜索仅涵盖已下载的历史记录";
+"Search actions, chats, messages, files, and settings" = "搜索操作、聊天、消息、文件和设置";
 " · @ to mention" = " · 输入 @ 可提及智能体";
 " · jobs wait on the relay" = " · 任务在中继上等待";
 ", " = "、";

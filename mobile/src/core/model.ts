@@ -185,6 +185,8 @@ export type Author = { kind: "you" } | { kind: "bot"; bot_id: string } | { kind:
 export interface ChatSearchResults {
   chats: { chat_id: string; snippet: string }[];
   messages: { chat_id: string; message_id: string; snippet: string; author: Author; created_at: number }[];
+  files: { chat_id: string; message_id: string; attachment_id: string; name: string; snippet: string; created_at: number }[];
+  history_complete: boolean;
 }
 
 /// A file sent with a message. Its bytes travel as a `file` blob under this id, encrypted with

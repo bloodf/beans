@@ -261,7 +261,7 @@ class Engine {
 
   async searchChats(query: string): Promise<ChatSearchResults> {
     const value = query.trim();
-    if (!value) return { chats: [], messages: [] };
+    if (!value) return { chats: [], messages: [], files: [], history_complete: true };
     return core.request<ChatSearchResults>("chats.search", { query: value, limit: 24 });
   }
 

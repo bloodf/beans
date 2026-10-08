@@ -46,12 +46,12 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
   const bots = useBotMap();
   const workingBots = useWorkingBotIds();
   const [query, setQuery] = useState("");
-  const [matches, setMatches] = useState<ChatSearchResults>({ chats: [], messages: [] });
+  const [matches, setMatches] = useState<ChatSearchResults>({ chats: [], messages: [], files: [], history_complete: true });
   const [searching, setSearching] = useState(false);
 
   function updateQuery(value: string) {
     setQuery(value);
-    setMatches({ chats: [], messages: [] });
+    setMatches({ chats: [], messages: [], files: [], history_complete: true });
     setSearching(!!value.trim());
   }
 
@@ -63,13 +63,14 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
     }
     let active = true;
     setSearching(true);
+    setMatches({ chats: [], messages: [], files: [], history_complete: true });
     const timer = setTimeout(() => {
       void engine
         .searchChats(value)
         .then((results) => {
           if (active) setMatches(results);
         })
-        .catch((error) => console.warn("searching chats", error instanceof Error ? error.message : error))
+        .catch(() => { if (active) setMatches({ chats: [], messages: [], files: [], history_complete: false }); })
         .finally(() => {
           if (active) setSearching(false);
         });
@@ -78,7 +79,7 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
       active = false;
       clearTimeout(timer);
     };
-  }, [query]);
+  }, [query, chats, bots]);
 
   const items = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -93,10 +94,6 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
     const byId = new Map(chats.map((chat) => [chat.id, chat]));
     const seen = new Set<string>();
     const rows: SearchRow[] = [];
-    for (const chat of items) {
-      seen.add(chat.id);
-      rows.push({ key: `chat:${chat.id}`, kind: "chat", chat, snippet: preview(chat, bots) });
-    }
     for (const hit of matches.chats) {
       const chat = byId.get(hit.chat_id);
       if (!chat || seen.has(chat.id)) continue;
@@ -107,6 +104,11 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
       const chat = byId.get(hit.chat_id);
       if (!chat) continue;
       rows.push({ key: `message:${hit.message_id}`, kind: "message", chat, snippet: hit.snippet, createdAt: hit.created_at });
+    }
+    for (const hit of matches.files) {
+      const chat = byId.get(hit.chat_id);
+      if (!chat) continue;
+      rows.push({ key: `file:${hit.message_id}:${hit.attachment_id}`, kind: "file", chat, snippet: hit.name, createdAt: hit.created_at });
     }
     return rows;
   }, [chats, bots, items, matches, query, language]);
@@ -145,6 +147,7 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
 
   return (
     <>
+      {query.trim() && !matches.history_complete ? <Text accessibilityRole="text" style={{ color: p.secondaryLabel }}>{t("Search covers downloaded history only")}</Text> : null}
             {floatingSearch ? null : (
         <Stack.SearchBar
           placeholder={t("Search")}
@@ -364,7 +367,7 @@ function MenuChatRow({ chat, bots, title, working, responding, selected, width: 
 
 type SearchRow = {
   key: string;
-  kind: "chat" | "message";
+  kind: "chat" | "message" | "file";
   chat: Chat;
   snippet: string;
   createdAt?: number;
@@ -376,7 +379,7 @@ function SearchResultRow({ item, bots, query, onPress }: { item: SearchRow; bots
   const members = item.chat.bot_ids.map((id) => bots.get(id)).filter((bot): bot is Bot => !!bot);
   const at = item.createdAt ?? lastActivity(item.chat);
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.searchRow, { backgroundColor: pressed ? p.fill : "transparent" }]}>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${t(item.kind === "file" ? "Files" : item.kind === "message" ? "Messages" : "Chats")}, ${chatTitle(item.chat)}, ${item.snippet}`} onPress={onPress} style={({ pressed }) => [styles.searchRow, { backgroundColor: pressed ? p.fill : "transparent" }]}>
       <AvatarCluster bots={members} chatId={item.chat.id} size={44} />
       <View style={styles.searchText}>
         <View style={styles.searchTitleLine}>
@@ -385,7 +388,7 @@ function SearchResultRow({ item, bots, query, onPress }: { item: SearchRow; bots
         </View>
         <HighlightedText text={item.snippet} query={query} style={[styles.searchSnippet, { color: p.secondaryLabel }]} numberOfLines={2} />
       </View>
-      {item.kind === "message" ? <Symbol name="text.bubble" size={13} color={p.tertiaryLabel} /> : null}
+      {item.kind !== "chat" ? <Text style={{ color: p.tertiaryLabel }}>{t(item.kind === "file" ? "Files" : "Messages")}</Text> : null}
     </Pressable>
   );
 }

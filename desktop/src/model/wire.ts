@@ -331,6 +331,8 @@ export interface WireMessagePage {
 export interface WireSearchResults {
   chats: { chat_id: string; snippet: string }[];
   messages: { chat_id: string; message_id: string; snippet: string; author: WireAuthor; created_at: number }[];
+  files: { chat_id: string; message_id: string; attachment_id: string; name: string; snippet: string; created_at: number }[];
+  history_complete: boolean;
 }
 
 export interface WireMarketplacePlugin {

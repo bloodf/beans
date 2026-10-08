@@ -1440,7 +1440,7 @@ export class AppStore {
 
   /** Full-text chat and message matches from the local SQLite index. */
   async searchChats(query: string): Promise<WireSearchResults> {
-    if (this.isMock) return { chats: [], messages: [] };
+    if (this.isMock) return { chats: [], messages: [], files: [], history_complete: true };
     return this.request<WireSearchResults>("chats.search", { query, limit: 24 });
   }
 

@@ -154,6 +154,9 @@ pub struct SentJob {
 }
 
 pub struct App {
+    /// Exclusive OS lock retained until every callback drops this App.
+    execution_owner: Option<std::fs::File>,
+    execution_epoch: String,
     pub config: Config,
     pub settings: Mutex<Settings>,
     pub identity: Mutex<Option<IdentityFile>>,
@@ -250,7 +253,112 @@ pub struct App {
 }
 
 impl App {
+    /// Loads a non-executing Device view. Recovery belongs exclusively to load_owner.
     pub fn load(config: Config) -> anyhow::Result<Arc<App>> {
+        Self::load_inner(config, None)
+    }
+
+    pub fn load_owner(config: Config) -> anyhow::Result<Arc<App>> {
+        config.validate_home()?;
+        config.ensure_home()?;
+        let path = config.home.join("execution.lock");
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(&path)?;
+        anyhow::ensure!(file.metadata()?.is_file(), "Execution lock must be a regular file");
+        file.try_lock().map_err(|_| anyhow::anyhow!("Execution ownership is busy or unsupported"))?;
+        config::set_private(&path)?;
+        Self::load_inner(config, Some(file))
+    }
+
+    pub fn is_execution_owner(&self) -> bool { self.execution_owner.is_some() }
+
+    pub fn task_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(), "Only the execution owner reads an active lease");
+        self.store.active_task_lease(&self.execution_epoch,task_id,lifecycle.get().0)
+    }
+
+    pub fn freeze_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(!self.is_paused(), "Account paused");
+        self.store.insert_invocation(lease,binding)
+    }
+
+    pub fn decide_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, decision: crate::local_store::AuthorizationDecision, kind: crate::local_store::AuthorizationKind, card: Option<&str>, device: Option<&str>, at: i64) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        self.store.decide_invocation(lease,binding,decision,kind,card,device,at)
+    }
+
+    /// The protected recheck MUST validate effective capabilities, installation, target,
+    /// workspace and binding without awaiting. #111 supplies it after preparation.
+    pub fn admit_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, recheck: impl FnOnce(&Self) -> anyhow::Result<()>) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Execution unavailable");
+        recheck(self)?;
+        self.store.admit_invocation(lease,binding)
+    }
+
+    pub fn finish_task_receipt(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, outcome: crate::local_store::ReceiptOutcome) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        self.store.finish_receipt(lease,binding,outcome)
+    }
+    pub fn resolve_task_history(&self, lease: &crate::local_store::TaskLease, at: i64) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        self.store.resolve_task(lease,at)
+    }
+    /// Captures the existing account incarnation under the same reset boundary as plugins.
+    pub(crate) fn task_lease(&self, job: &Job) -> anyhow::Result<crate::local_store::TaskLease> {
+        anyhow::ensure!(self.is_execution_owner(), "Only the execution owner admits local tasks");
+        let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        let epoch = self.store.task_account_epoch(&self.execution_epoch)?;
+        Ok(crate::local_store::TaskLease {
+            account_epoch: epoch, owner_epoch: self.execution_epoch.clone(), task_id: job.id.clone(),
+            execution_id: uuid::Uuid::new_v4().to_string(), incarnation: lifecycle.get().0,
+        })
+    }
+
+    pub(crate) fn queue_local_task(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(!self.is_paused() && self.chat(&job.chat_id).is_some(), "Task account or chat is unavailable");
+        let bot = self.bot(&job.bot_id).ok_or_else(|| anyhow::anyhow!("Task bot is unavailable"))?;
+        anyhow::ensure!(self.this_device_id().as_deref() == Some(bot.runner_id.as_str()), "Task belongs to another Runner");
+        let lease = self.task_lease(job)?;
+        if let Some(id) = &job.routine_id {
+            anyhow::ensure!(!self.store.routine_needs_review(&lease.account_epoch,id)?, "Routine has unresolved work requiring review");
+        }
+        Ok(self.store.queue_task(&lease, job)?.then_some(lease))
+    }
+
+    pub(crate) fn start_local_task(&self, lease: &crate::local_store::TaskLease) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Task execution is unavailable");
+        self.store.start_task(lease)
+    }
+
+    pub(crate) fn finish_local_task(&self, lease: &crate::local_store::TaskLease, interrupted: bool) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        self.store.finish_task(lease, interrupted)
+    }
+
+    fn persist_task_cancel(&self, task: Option<&str>, chat: Option<&str>, bot: Option<&str>) -> anyhow::Result<()> {
+        let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        if let Some(epoch) = self.store.current_task_account_epoch()? {
+            self.store.cancel_tasks(&epoch,task,chat,bot)?;
+        }
+        Ok(())
+    }
+    fn load_inner(config: Config, execution_owner: Option<std::fs::File>) -> anyhow::Result<Arc<App>> {
         if config.home.join("forget-in-progress.json").try_exists()? {
             anyhow::bail!("Account forget is incomplete; finish local cleanup before reopening this home");
         }
@@ -263,7 +371,11 @@ impl App {
         let marketplace = crate::marketplace::Updates::load(&config);
         let store = LocalStore::open(&config.database_path())?;
         let memory_config = crate::memory_service::load(&store, machine.as_ref().and_then(|m| m.dek().ok()))?;
-        store.recover_memory_queue()?;
+        let execution_epoch = uuid::Uuid::new_v4().to_string();
+        if execution_owner.is_some() {
+            store.recover_task_owner(&execution_epoch)?;
+            store.recover_memory_queue()?;
+        }
         let mut state = store.load_state()?;
         for bot in &mut state.bots {
             bot.normalize_description();
@@ -277,6 +389,8 @@ impl App {
         let http = beans_tls::client_builder().timeout(std::time::Duration::from_secs(60)).build()?;
 
         let app = Arc::new(App {
+            execution_owner,
+            execution_epoch,
             config,
             settings: Mutex::new(settings),
             identity: Mutex::new(identity),
@@ -342,6 +456,7 @@ impl App {
     /// Reconcile again after each pull: a newer remote card can replace startup's dismissal.
     #[cfg(feature = "runner")]
     pub fn close_orphan_proposals(&self) -> anyhow::Result<()> {
+        if !self.is_execution_owner() { return Ok(()); }
         let Some(runner_id) = self.this_device_id() else { return Ok(()); };
         let own_bots: std::collections::HashSet<String> = self.state.lock().unwrap().bots.iter()
             .filter(|bot| bot.runner_id == runner_id).map(|bot| bot.id.clone()).collect();
@@ -591,6 +706,7 @@ impl App {
         let lifecycle = self.plugin_lifecycle.lock();
         let (incarnation, _) = lifecycle.get();
         lifecycle.set((incarnation.checked_add(1).expect("plugin incarnation exhausted"), true));
+        self.store.close_task_account()?;
         let marker = self.config.home.join("forget-in-progress.json");
         config::write_json_private(&marker, &serde_json::json!({ "forget_in_progress": true }))?;
         #[cfg(feature = "runner")]
@@ -1129,6 +1245,10 @@ impl App {
     }
 
     pub fn stop_for_pause(&self) {
+        if let Err(error) = self.persist_task_cancel(None,None,None) {
+            self.plugin_lifecycle.lock().set((self.plugin_lifecycle.lock().get().0, true));
+            tracing::error!(%error, "Task cancellation persistence failed; account admission closed");
+        }
         #[cfg(feature = "runner")]
         self.memory_runtime.cancel_all();
         for job in self.running_jobs.lock().unwrap().values() { job.cancel.cancel(); }
@@ -1305,6 +1425,7 @@ impl App {
     pub fn delete_bot(&self, id: &str) -> anyhow::Result<()> {
         let _edit = self.roster_edit.lock().unwrap();
         if self.bot(id).is_none() { anyhow::bail!("Unknown bot"); }
+        self.persist_task_cancel(None,None,Some(id))?;
         self.invalidate_bot_memory(id)?;
         let (removed_chat_ids, policy) = {
             let mut state = self.state.lock().unwrap();
@@ -1805,6 +1926,11 @@ impl App {
     /// Device runs, with that Device, so the caller can forward the cancellation there too:
     /// jobs this Device sent to another Runner, and turns the other Devices list for the chat.
     pub fn cancel_chat(&self, chat_id: &str) -> Vec<(String, String)> {
+        if let Err(error) = self.persist_task_cancel(None,Some(chat_id),None) {
+            let lifecycle = self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0, true));
+            tracing::error!(%error, "Task cancellation persistence failed; admission closed");
+        }
         let mut remote = Vec::new();
         for (id, job) in self.running_jobs.lock().unwrap().iter() {
             if job.chat_id == chat_id {
@@ -1828,6 +1954,11 @@ impl App {
     /// Cancels one job on this Runner. A cancellation envelope can arrive while the job is
     /// waiting for the chat lock because jobs register before they begin.
     pub fn cancel_job(&self, job_id: &str) {
+        if let Err(error) = self.persist_task_cancel(Some(job_id),None,None) {
+            let lifecycle = self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0, true));
+            tracing::error!(%error, "Task cancellation persistence failed; admission closed");
+        }
         if let Some(job) = self.running_jobs.lock().unwrap().get(job_id) {
             job.cancel.cancel();
         }
@@ -2118,6 +2249,29 @@ mod tests {
         let home = std::env::temp_dir().join(format!("beans-app-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    #[test]
+    fn task_owner_process_probe() {
+        let Some(home) = std::env::var_os("BEANS_TEST_OWNER_HOME") else { return; };
+        assert!(App::load_owner(Config { home: home.into(), port: 0 }).is_err(), "a competing process must not acquire ownership");
+    }
+
+    #[test]
+    fn task_owner_excludes_process_and_recovers_only_after_release() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config { home: home.path().into(), port: 0 };
+        let owner = App::load_owner(config.clone()).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","app::tests::task_owner_process_probe","--nocapture"])
+            .env("BEANS_TEST_OWNER_HOME",home.path()).status().unwrap();
+        assert!(status.success());
+        let reader = App::load(config.clone()).unwrap();
+        assert!(!reader.is_execution_owner());
+        assert!(App::load_owner(config.clone()).is_err());
+        drop(owner);
+        let replacement = App::load_owner(config).unwrap();
+        assert!(replacement.is_execution_owner());
     }
 
     #[test]

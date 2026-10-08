@@ -111,6 +111,14 @@ pub fn cancel_chat(app: &Arc<App>, chat_id: &str) {
 /// Includes queued local jobs and remote turns advertised by their Runner.
 pub fn cancel_removed_bots(app: &Arc<App>, removed_bot_ids: &[String]) {
     if removed_bot_ids.is_empty() { return; }
+    for id in removed_bot_ids {
+        if let Some(epoch) = app.store.current_task_account_epoch().ok().flatten() {
+            if let Err(error) = app.store.cancel_tasks(&epoch,None,None,Some(id)) {
+                tracing::error!(%error,"Deleted bot cancellation persistence failed");
+                return;
+            }
+        }
+    }
     let mut remote = Vec::new();
     for (id, job) in app.running_jobs.lock().unwrap().iter() {
         if removed_bot_ids.contains(&job.bot_id) {
@@ -614,6 +622,14 @@ pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
 /// before taking the lock, so hard Stop also cancels jobs waiting behind another turn.
 /// `admission` counts the job as running here until it ends.
 pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, admission: Admission) {
+    match app.queue_local_task(&job) {
+        Ok(Some(lease)) => spawn_admitted_local_job(app, job, remote_blob_id, admission, lease),
+        Ok(None) => {},
+        Err(error) => tracing::error!(%error, "Local task admission refused"),
+    }
+}
+
+pub(crate) fn spawn_admitted_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, admission: Admission, lease: crate::local_store::TaskLease) {
     if app.is_paused() {
         app.notice(&job.chat_id, "Account paused. Resume to run bots.");
         if let Some(id) = remote_blob_id {
@@ -641,7 +657,7 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, 
         let _admission = admission;
         let lock = app.chat_lock(&job.chat_id);
         let _guard = lock.lock().await;
-        let outcome = run_job_started(&app, job.clone(), cancel).await;
+        let outcome = run_job_started(&app, job.clone(), cancel, lease).await;
         if let Some(id) = &job.routine_id {
             crate::routines::finished(&app, id, outcome);
         }
@@ -656,6 +672,11 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, 
 
 /// Runs a member job inside an active room. The room already holds the chat lock.
 async fn run_job_here(app: &Arc<App>, job: Job, cancel: CancellationToken) -> TurnOutcome {
+    let lease = match app.queue_local_task(&job) {
+        Ok(Some(lease)) => lease,
+        Ok(None) => return TurnOutcome::Skipped,
+        Err(error) => { tracing::error!(%error, "Room member task admission refused"); return TurnOutcome::Skipped; }
+    };
     begin_job(
         app,
         &job.id,
@@ -665,11 +686,16 @@ async fn run_job_here(app: &Arc<App>, job: Job, cancel: CancellationToken) -> Tu
         None,
         cancel.clone(),
     );
-    run_job_started(app, job, cancel).await
+    run_job_started(app, job, cancel, lease).await
 }
 
 /// Runs a job with its working record already installed.
-async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken) -> TurnOutcome {
+async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken, lease: crate::local_store::TaskLease) -> TurnOutcome {
+    match app.start_local_task(&lease) {
+        Ok(true) => {},
+        Ok(false) => { finish_job(app, &job.id); return TurnOutcome::Skipped; },
+        Err(error) => { tracing::error!(%error, "Task start refused"); finish_job(app, &job.id); return TurnOutcome::Skipped; },
+    }
     #[cfg(feature = "runner")]
     let outcome = if cancel.is_cancelled()
         || (job.kind == "turn"
@@ -688,6 +714,11 @@ async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken) ->
         let _ = cancel;
         app.notice(&job.chat_id, "This Device does not run bots; assign the bot to a Runner.");
         TurnOutcome::Skipped
+    };
+    let outcome = match app.finish_local_task(&lease, outcome == TurnOutcome::Skipped) {
+        Ok(true) => outcome,
+        Ok(false) => TurnOutcome::Skipped,
+        Err(error) => { tracing::error!(%error, "Task outcome persistence failed"); TurnOutcome::Skipped },
     };
     finish_job(app, &job.id);
     outcome
@@ -732,7 +763,7 @@ mod tests {
 
     fn scratch_app() -> ScratchApp {
         let home = std::env::temp_dir().join(format!("beans-runtime-{}", uuid::Uuid::new_v4()));
-        let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
+        let app = App::load_owner(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
     }
 

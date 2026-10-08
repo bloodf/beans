@@ -28,7 +28,298 @@ pub struct MessageSearchHit {
     pub created_at: f64,
 }
 
+/// Captured authority for one execution. Fields are host-issued, never model metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskLease {
+    pub(crate) account_epoch: String,
+    pub(crate) owner_epoch: String,
+    pub(crate) task_id: String,
+    pub(crate) execution_id: String,
+    pub(crate) incarnation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskState { Queued, Running, Finished, Interrupted, NeedsReview }
+
+impl TaskState {
+    fn parse(value: &str) -> anyhow::Result<Self> {
+        Ok(match value {
+            "queued" => Self::Queued, "running" => Self::Running, "finished" => Self::Finished,
+            "interrupted" => Self::Interrupted, "needs_review" => Self::NeedsReview,
+            _ => anyhow::bail!("Invalid persisted task state"),
+        })
+    }
+}
+
+/// Immutable effective invocation binding. Digest construction belongs to the execution host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvocationBinding {
+    pub invocation_id: String,
+    pub parent_invocation_id: Option<String>,
+    pub ordinal: u64,
+    pub attempt_id: String,
+    pub receipt_id: String,
+    pub revision: u64,
+    pub digest: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthorizationDecision { Authorized, Denied, Dismissed, Expired }
+
+impl AuthorizationDecision {
+    fn as_str(self) -> &'static str {
+        match self { Self::Authorized => "authorized", Self::Denied => "denied", Self::Dismissed => "dismissed", Self::Expired => "expired" }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthorizationKind { UserOnce, UserAlways, Rule, ReviewAllow, NotReviewed }
+
+impl AuthorizationKind {
+    fn as_str(self) -> &'static str {
+        match self { Self::UserOnce => "user_once", Self::UserAlways => "user_always", Self::Rule => "rule", Self::ReviewAllow => "review_allow", Self::NotReviewed => "not_reviewed" }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiptOutcome { Finished, DefinitelyNotSent, Unknown }
+
+impl ReceiptOutcome {
+    fn as_str(self) -> &'static str {
+        match self { Self::Finished => "finished", Self::DefinitelyNotSent => "failed", Self::Unknown => "unknown" }
+    }
+}
+
+fn structural_id(id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')), "Invalid structural identity");
+    Ok(())
+}
+
+fn validate_binding(binding: &InvocationBinding) -> anyhow::Result<()> {
+    for id in [&binding.invocation_id, &binding.attempt_id, &binding.receipt_id] { structural_id(id)?; }
+    if let Some(id) = &binding.parent_invocation_id { structural_id(id)?; }
+    anyhow::ensure!(binding.ordinal <= i64::MAX as u64 && binding.revision <= i64::MAX as u64, "Invocation identity overflow");
+    Ok(())
+}
+
+fn check_authority_tx(tx: &Transaction<'_>, lease: &TaskLease) -> anyhow::Result<()> {
+    let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM task_authority WHERE id=1 AND account_epoch=?1 AND owner_epoch=?2 AND closed=0)", params![lease.account_epoch,lease.owner_epoch], |r| r.get(0))?;
+    anyhow::ensure!(valid, "Stale execution authority");
+    Ok(())
+}
+
+fn check_running_tx(tx: &Transaction<'_>, lease: &TaskLease) -> anyhow::Result<()> {
+    check_authority_tx(tx, lease)?;
+    let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM local_tasks WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND state='running' AND cancel_requested=0)", params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id], |r| r.get(0))?;
+    anyhow::ensure!(valid, "Task is not admitted for effects");
+    Ok(())
+}
+
+fn queue_task_tx(tx: &Transaction<'_>, lease: &TaskLease, job: &crate::model::Job) -> anyhow::Result<bool> {
+    check_authority_tx(tx, lease)?;
+    for id in [&lease.task_id,&lease.execution_id,&job.chat_id,&job.bot_id] { structural_id(id)?; }
+    anyhow::ensure!(lease.task_id == job.id, "Task identity differs from Job.id");
+    if let Some(id) = &job.routine_id { structural_id(id)?; }
+    let fresh = tx.execute("INSERT INTO task_fences VALUES(?1,?2) ON CONFLICT DO NOTHING", params![lease.account_epoch,lease.task_id])? == 1;
+    if !fresh { return Ok(false); }
+    tx.execute("INSERT INTO local_tasks(account_epoch,task_id,owner_epoch,execution_id,chat_id,bot_id,routine_id,state) VALUES(?1,?2,?3,?4,?5,?6,?7,'queued')", params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,job.chat_id,job.bot_id,job.routine_id])?;
+    Ok(true)
+}
+
 impl LocalStore {
+    pub(crate) fn active_task_lease(&self, owner: &str, task: &str, incarnation: u64) -> anyhow::Result<Option<TaskLease>> {
+        Ok(self.connection.lock().unwrap().query_row("SELECT account_epoch,execution_id FROM local_tasks WHERE owner_epoch=?1 AND task_id=?2 AND state='running' AND account_epoch=(SELECT account_epoch FROM task_authority WHERE id=1 AND owner_epoch=?1 AND closed=0)",params![owner,task],|r| Ok(TaskLease { account_epoch:r.get(0)?,execution_id:r.get(1)?,owner_epoch:owner.into(),task_id:task.into(),incarnation })).optional()?)
+    }
+    pub(crate) fn commit_routine_check(&self, lease: &TaskLease, job: Option<&crate::model::Job>, routine: &str, chat: &str, bot: &str, at: i64, set: &std::collections::BTreeMap<String,serde_json::Value>, delete: &[String]) -> anyhow::Result<bool> {
+        self.safety(|tx| {
+            check_authority_tx(tx,lease)?;
+            if let Some(job) = job {
+                anyhow::ensure!(queue_task_tx(tx,lease,job)?, "Routine task already exists");
+                tx.execute("UPDATE local_tasks SET check_report=?3 WHERE account_epoch=?1 AND task_id=?2",params![lease.account_epoch,lease.task_id,serde_json::to_string(&job.check)?])?;
+            }
+            for key in delete { tx.execute("DELETE FROM codemode_store WHERE chat_id=?1 AND bot_id=?2 AND key=?3",params![chat,bot,key])?; }
+            for (key,value) in set { tx.execute("INSERT INTO codemode_store VALUES(?1,?2,?3,?4) ON CONFLICT(chat_id,bot_id,key) DO UPDATE SET json=excluded.json",params![chat,bot,key,serde_json::to_string(value)?])?; }
+            tx.execute("INSERT INTO routine_check_commits VALUES(?1,?2,?3) ON CONFLICT(account_epoch,routine_id) DO UPDATE SET checked_at=excluded.checked_at",params![lease.account_epoch,routine,at])?;
+            Ok(true)
+        })
+    }
+
+    pub(crate) fn routine_checked_at(&self, routine: &str) -> anyhow::Result<Option<i64>> {
+        Ok(self.connection.lock().unwrap().query_row("SELECT checked_at FROM routine_check_commits WHERE routine_id=?1 AND account_epoch=(SELECT account_epoch FROM task_authority WHERE id=1 AND closed=0)",[routine],|r|r.get(0)).optional()?)
+    }
+    pub(crate) fn current_task_account_epoch(&self) -> anyhow::Result<Option<String>> {
+        Ok(self.connection.lock().unwrap().query_row("SELECT account_epoch FROM task_authority WHERE id=1 AND closed=0", [], |r| r.get(0)).optional()?)
+    }
+
+    pub(crate) fn task_account_epoch(&self, owner: &str) -> anyhow::Result<String> {
+        self.safety(|tx| {
+            let authority: Option<(String,String,bool)> = tx.query_row("SELECT account_epoch,owner_epoch,closed FROM task_authority WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            match authority {
+                Some((epoch,current,false)) if current == owner => Ok(epoch),
+                Some(_) => anyhow::bail!("Stale task owner"),
+                None => {
+                    let epoch = uuid::Uuid::new_v4().to_string();
+                    tx.execute("INSERT INTO task_authority VALUES(1,?1,?2,0)", params![epoch,owner])?;
+                    Ok(epoch)
+                }
+            }
+        })
+    }
+    /// All safety mutations use this boundary. Keep FULL for the connection lifetime so
+    /// unrelated state/policy writes cannot weaken a committed execution fence.
+    fn safety<T>(&self, write: impl FnOnce(&Transaction<'_>) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        let mut connection = self.connection.lock().unwrap();
+        let synchronous: i64 = connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+        let fullfsync: i64 = connection.pragma_query_value(None, "fullfsync", |row| row.get(0))?;
+        anyhow::ensure!(synchronous == 2 && fullfsync == 1, "Task durability is unavailable");
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let value = write(&tx)?;
+        tx.commit()?;
+        Ok(value)
+    }
+
+    /// Caller already holds the exclusive home lock. Missing fences in an existing
+    /// populated store require reviewed migration, never reconstruction from messages.
+    pub(crate) fn recover_task_owner(&self, owner: &str) -> anyhow::Result<String> {
+        structural_id(owner)?;
+        self.safety(|tx| {
+            let authority: Option<(String, bool)> = tx.query_row(
+                "SELECT account_epoch,closed FROM task_authority WHERE id=1", [], |r| Ok((r.get(0)?, r.get(1)?)),
+            ).optional()?;
+            let epoch = match authority {
+                Some((epoch, false)) => epoch,
+                Some((_, true)) => anyhow::bail!("Task account is closed"),
+                None => {
+                    let populated: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM bots UNION ALL SELECT 1 FROM messages UNION ALL SELECT 1 FROM sent_jobs)", [], |r| r.get(0))?;
+                    anyhow::ensure!(!populated, "Existing task safety fences are missing; reviewed migration is required");
+                    let epoch = uuid::Uuid::new_v4().to_string();
+                    tx.execute("INSERT INTO task_authority VALUES(1,?1,?2,0)", params![epoch, owner])?;
+                    epoch
+                }
+            };
+            tx.execute("UPDATE task_effect_receipts SET state='unknown' WHERE account_epoch=?1 AND state='started'", [&epoch])?;
+            tx.execute("UPDATE task_invocations SET state='dismissed' WHERE account_epoch=?1 AND state IN ('pending','authorized')", [&epoch])?;
+            tx.execute("UPDATE local_tasks SET state=CASE WHEN EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=local_tasks.account_epoch AND r.task_id=local_tasks.task_id) THEN 'needs_review' ELSE 'interrupted' END WHERE account_epoch=?1 AND state IN ('queued','running')", [&epoch])?;
+            tx.execute("UPDATE task_authority SET owner_epoch=?1 WHERE id=1 AND account_epoch=?2 AND closed=0", params![owner, epoch])?;
+            Ok(epoch)
+        })
+    }
+
+    pub(crate) fn queue_task(&self, lease: &TaskLease, job: &crate::model::Job) -> anyhow::Result<bool> {
+        self.safety(|tx| queue_task_tx(tx, lease, job))
+    }
+
+    pub(crate) fn start_task(&self, lease: &TaskLease) -> anyhow::Result<bool> {
+        self.safety(|tx| {
+            check_authority_tx(tx, lease)?;
+            Ok(tx.execute("UPDATE local_tasks SET state='running' WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND state='queued' AND cancel_requested=0",
+                params![lease.account_epoch, lease.task_id, lease.owner_epoch, lease.execution_id])? == 1)
+        })
+    }
+
+    pub(crate) fn finish_task(&self, lease: &TaskLease, interrupted: bool) -> anyhow::Result<bool> {
+        self.safety(|tx| {
+            check_authority_tx(tx, lease)?;
+            Ok(tx.execute("UPDATE local_tasks SET state=CASE WHEN EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=local_tasks.account_epoch AND r.task_id=local_tasks.task_id AND r.state IN ('started','unknown')) THEN 'needs_review' WHEN cancel_requested=1 OR ?5 THEN 'interrupted' ELSE 'finished' END WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND state='running'",
+                params![lease.account_epoch, lease.task_id, lease.owner_epoch, lease.execution_id, interrupted])? == 1)
+        })
+    }
+
+    pub fn task_state(&self, lease: &TaskLease) -> anyhow::Result<Option<TaskState>> {
+        let value: Option<String> = self.connection.lock().unwrap().query_row(
+            "SELECT state FROM local_tasks WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4",
+            params![lease.account_epoch, lease.task_id, lease.owner_epoch, lease.execution_id], |r| r.get(0),
+        ).optional()?;
+        value.as_deref().map(TaskState::parse).transpose()
+    }
+
+    pub(crate) fn cancel_tasks(&self, epoch: &str, task: Option<&str>, chat: Option<&str>, bot: Option<&str>) -> anyhow::Result<()> {
+        self.safety(|tx| {
+            if let Some(id) = task {
+                structural_id(id)?;
+                tx.execute("INSERT OR IGNORE INTO task_fences(account_epoch,task_id) SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM task_authority WHERE account_epoch=?1 AND closed=0)", params![epoch,id])?;
+            }
+            tx.execute("UPDATE local_tasks SET cancel_requested=1 WHERE account_epoch=?1 AND (?2 IS NULL OR task_id=?2) AND (?3 IS NULL OR chat_id=?3) AND (?4 IS NULL OR bot_id=?4)", params![epoch,task,chat,bot])?;
+            tx.execute("UPDATE task_invocations SET state='dismissed' WHERE account_epoch=?1 AND state IN ('pending','authorized') AND EXISTS(SELECT 1 FROM local_tasks t WHERE t.account_epoch=task_invocations.account_epoch AND t.task_id=task_invocations.task_id AND t.cancel_requested=1)", [epoch])?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn close_task_account(&self) -> anyhow::Result<()> {
+        self.safety(|tx| {
+            tx.execute("UPDATE task_authority SET closed=1 WHERE id=1", [])?;
+            tx.execute("UPDATE local_tasks SET cancel_requested=1", [])?;
+            tx.execute("UPDATE task_invocations SET state='dismissed' WHERE state IN ('pending','authorized')", [])?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn routine_needs_review(&self, epoch: &str, routine: &str) -> anyhow::Result<bool> {
+        Ok(self.connection.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM local_tasks WHERE account_epoch=?1 AND routine_id=?2 AND state IN ('interrupted','needs_review'))", params![epoch,routine], |r| r.get(0))?)
+    }
+
+    /// Freeze once; changing a binding is a different invocation, not an UPDATE.
+    pub(crate) fn insert_invocation(&self, lease: &TaskLease, binding: &InvocationBinding) -> anyhow::Result<bool> {
+        validate_binding(binding)?;
+        self.safety(|tx| {
+            check_running_tx(tx, lease)?;
+            Ok(tx.execute("INSERT INTO task_invocations(account_epoch,task_id,owner_epoch,execution_id,invocation_id,parent_id,ordinal,attempt_id,receipt_id,revision,digest,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending') ON CONFLICT DO NOTHING",
+                params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.invocation_id,binding.parent_invocation_id,binding.ordinal,binding.attempt_id,binding.receipt_id,binding.revision,binding.digest.as_slice()])? == 1)
+        })
+    }
+
+    pub(crate) fn decide_invocation(&self, lease: &TaskLease, binding: &InvocationBinding, decision: AuthorizationDecision, kind: AuthorizationKind, card: Option<&str>, device: Option<&str>, at: i64) -> anyhow::Result<bool> {
+        validate_binding(binding)?;
+        if let Some(id) = card { structural_id(id)?; }
+        if let Some(id) = device { structural_id(id)?; }
+        self.safety(|tx| {
+            check_running_tx(tx, lease)?;
+            Ok(tx.execute("UPDATE task_invocations SET state=?12,kind=?13,card_id=?14,answering_device=?15,answered_at=?16 WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND invocation_id=?5 AND parent_id IS ?6 AND ordinal=?7 AND attempt_id=?8 AND receipt_id=?9 AND revision=?10 AND digest=?11 AND state='pending'",
+                params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.invocation_id,binding.parent_invocation_id,binding.ordinal,binding.attempt_id,binding.receipt_id,binding.revision,binding.digest.as_slice(),decision.as_str(),kind.as_str(),card,device,at])? == 1)
+        })
+    }
+
+    /// Called only after the host's protected policy recheck; successful commit is the
+    /// single dispatch permission. Any error, including ambiguous acknowledgment, forbids I/O.
+    pub(crate) fn admit_invocation(&self, lease: &TaskLease, binding: &InvocationBinding) -> anyhow::Result<bool> {
+        validate_binding(binding)?;
+        self.safety(|tx| {
+            check_running_tx(tx, lease)?;
+            let changed = tx.execute("UPDATE task_invocations SET state='admitted' WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND invocation_id=?5 AND parent_id IS ?6 AND ordinal=?7 AND attempt_id=?8 AND receipt_id=?9 AND revision=?10 AND digest=?11 AND state='authorized'",
+                params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.invocation_id,binding.parent_invocation_id,binding.ordinal,binding.attempt_id,binding.receipt_id,binding.revision,binding.digest.as_slice()])?;
+            if changed == 0 { return Ok(false); }
+            tx.execute("INSERT INTO task_effect_receipts VALUES(?1,?2,?3,?4,?5,?6,'started')",
+                params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.attempt_id,binding.receipt_id])?;
+            Ok(true)
+        })
+    }
+
+    pub(crate) fn finish_receipt(&self, lease: &TaskLease, binding: &InvocationBinding, outcome: ReceiptOutcome) -> anyhow::Result<bool> {
+        validate_binding(binding)?;
+        self.safety(|tx| {
+            check_authority_tx(tx, lease)?;
+            Ok(tx.execute("UPDATE task_effect_receipts SET state=?7 WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND attempt_id=?5 AND receipt_id=?6 AND state='started' AND EXISTS(SELECT 1 FROM task_invocations i WHERE i.account_epoch=?1 AND i.task_id=?2 AND i.owner_epoch=?3 AND i.execution_id=?4 AND i.attempt_id=?5 AND i.receipt_id=?6 AND i.invocation_id=?8 AND i.revision=?9 AND i.digest=?10 AND i.state='admitted')",
+                params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.attempt_id,binding.receipt_id,outcome.as_str(),binding.invocation_id,binding.revision,binding.digest.as_slice()])? == 1)
+        })
+    }
+
+    pub(crate) fn resolve_task(&self, lease: &TaskLease, at: i64) -> anyhow::Result<bool> {
+        self.safety(|tx| {
+            check_authority_tx(tx, lease)?;
+            Ok(tx.execute("UPDATE local_tasks SET resolved_at=?5 WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND state IN ('finished','interrupted','needs_review') AND NOT EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=?1 AND r.task_id=?2 AND r.state='started')",
+                params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,at])? == 1)
+        })
+    }
+
+    pub(crate) fn prune_tasks(&self, now: i64) -> anyhow::Result<()> {
+        self.safety(|tx| {
+            let cutoff = now.saturating_sub(30 * 24 * 60 * 60);
+            tx.execute("DELETE FROM task_effect_receipts WHERE EXISTS(SELECT 1 FROM local_tasks t WHERE t.account_epoch=task_effect_receipts.account_epoch AND t.task_id=task_effect_receipts.task_id AND t.resolved_at<=?1)", [cutoff])?;
+            tx.execute("DELETE FROM task_invocations WHERE EXISTS(SELECT 1 FROM local_tasks t WHERE t.account_epoch=task_invocations.account_epoch AND t.task_id=task_invocations.task_id AND t.resolved_at<=?1)", [cutoff])?;
+            tx.execute("DELETE FROM local_tasks WHERE resolved_at<=?1", [cutoff])?;
+            Ok(())
+        })
+    }
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
         let config = crate::config::Config { home: parent.into(), port: 0 };
@@ -42,7 +333,9 @@ impl LocalStore {
         connection.pragma_update(None, "application_id", crate::config::SQLITE_APPLICATION_ID)?;
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
+             PRAGMA synchronous = FULL;
+             PRAGMA fullfsync = ON;
+             PRAGMA checkpoint_fullfsync = ON;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;
              PRAGMA journal_size_limit = 16777216;
@@ -173,6 +466,33 @@ impl LocalStore {
              CREATE TABLE IF NOT EXISTS memory_turn_admissions (
                  job_id TEXT PRIMARY KEY NOT NULL, json TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS task_authority (
+                 id INTEGER PRIMARY KEY CHECK(id=1), account_epoch TEXT NOT NULL,
+                 owner_epoch TEXT NOT NULL, closed INTEGER NOT NULL CHECK(closed IN (0,1)));
+             CREATE TABLE IF NOT EXISTS task_fences (
+                 account_epoch TEXT NOT NULL, task_id TEXT NOT NULL, PRIMARY KEY(account_epoch,task_id));
+             CREATE TABLE IF NOT EXISTS local_tasks (
+                 account_epoch TEXT NOT NULL, task_id TEXT NOT NULL, owner_epoch TEXT NOT NULL,
+                 execution_id TEXT NOT NULL, chat_id TEXT NOT NULL, bot_id TEXT NOT NULL, routine_id TEXT,
+                 state TEXT NOT NULL CHECK(state IN ('queued','running','finished','interrupted','needs_review')),
+                 cancel_requested INTEGER NOT NULL DEFAULT 0, resolved_at INTEGER, check_report TEXT, PRIMARY KEY(account_epoch,task_id));
+             CREATE TABLE IF NOT EXISTS task_invocations (
+                 account_epoch TEXT NOT NULL, task_id TEXT NOT NULL, owner_epoch TEXT NOT NULL,
+                 execution_id TEXT NOT NULL, invocation_id TEXT NOT NULL, parent_id TEXT,
+                 ordinal INTEGER NOT NULL, attempt_id TEXT NOT NULL, receipt_id TEXT NOT NULL,
+                 revision INTEGER NOT NULL, digest BLOB NOT NULL CHECK(length(digest)=32),
+                 state TEXT NOT NULL CHECK(state IN ('pending','authorized','denied','dismissed','expired','admitted')),
+                 kind TEXT, card_id TEXT, answering_device TEXT, answered_at INTEGER,
+                 PRIMARY KEY(account_epoch,task_id,attempt_id), UNIQUE(account_epoch,receipt_id),
+                 UNIQUE(account_epoch,task_id,execution_id,invocation_id));
+             CREATE UNIQUE INDEX IF NOT EXISTS task_invocation_ordinal ON task_invocations(account_epoch,task_id,execution_id,COALESCE(parent_id,''),ordinal);
+             CREATE TABLE IF NOT EXISTS task_effect_receipts (
+                 account_epoch TEXT NOT NULL, task_id TEXT NOT NULL, owner_epoch TEXT NOT NULL,
+                 execution_id TEXT NOT NULL, attempt_id TEXT NOT NULL, receipt_id TEXT NOT NULL,
+                 state TEXT NOT NULL CHECK(state IN ('started','finished','failed','unknown')), PRIMARY KEY(account_epoch,receipt_id));
+             CREATE TABLE IF NOT EXISTS routine_check_commits (
+                 account_epoch TEXT NOT NULL, routine_id TEXT NOT NULL, checked_at INTEGER NOT NULL,
+                 PRIMARY KEY(account_epoch,routine_id));
              PRAGMA user_version = 1;",
         )?;
         if !connection.prepare("SELECT paused FROM metadata").is_ok() {
@@ -310,6 +630,10 @@ impl LocalStore {
         let tx = connection.transaction()?;
         save_state_tx(&tx, state)?;
         for chat_id in chat_ids {
+            // Fences were inserted at original admission and survive removal of detail.
+            tx.execute("DELETE FROM task_effect_receipts WHERE EXISTS(SELECT 1 FROM local_tasks t WHERE t.account_epoch=task_effect_receipts.account_epoch AND t.task_id=task_effect_receipts.task_id AND t.chat_id=?1)", [chat_id])?;
+            tx.execute("DELETE FROM task_invocations WHERE EXISTS(SELECT 1 FROM local_tasks t WHERE t.account_epoch=task_invocations.account_epoch AND t.task_id=task_invocations.task_id AND t.chat_id=?1)", [chat_id])?;
+            tx.execute("DELETE FROM local_tasks WHERE chat_id=?1", [chat_id])?;
             tx.execute("DELETE FROM messages WHERE chat_id = ?1", [chat_id])?;
             tx.execute("DELETE FROM chat_history WHERE chat_id = ?1", [chat_id])?;
             tx.execute("DELETE FROM codemode_store WHERE chat_id = ?1", [chat_id])?;
@@ -1232,6 +1556,12 @@ impl LocalStore {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
         for table in [
+            "task_authority",
+            "task_fences",
+            "task_effect_receipts",
+            "task_invocations",
+            "local_tasks",
+            "routine_check_commits",
             "memory_config",
             "memory_deliveries",
             "memory_fences",
@@ -1652,6 +1982,72 @@ mod tests {
         let home = std::env::temp_dir().join(format!("beans-transcript-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         Scratch(LocalStore::open(&home.join("beans.sqlite3")).unwrap(), home)
+    }
+
+    fn task_fixture(store: &LocalStore, id: &str) -> (TaskLease,crate::model::Job) {
+        let owner = "owner-test";
+        let epoch = store.current_task_account_epoch().unwrap().unwrap_or_else(||store.recover_task_owner(owner).unwrap());
+        let lease = TaskLease { account_epoch:epoch,owner_epoch:owner.into(),task_id:id.into(),execution_id:uuid::Uuid::new_v4().to_string(),incarnation:0 };
+        let job = crate::model::Job { id:id.into(),chat_id:"chat-test".into(),bot_id:"bot-test".into(),kind:"turn".into(),trigger_message_id:String::new(),routine_id:None,check:None,requested_by:"device-test".into(),from_bot_id:None,hops:0,round:0,is_winding_down:false,setup:None,created_at:0.0 };
+        (lease,job)
+    }
+
+    fn invocation() -> InvocationBinding {
+        InvocationBinding { invocation_id:"invocation-test".into(),parent_invocation_id:None,ordinal:0,attempt_id:"attempt-test".into(),receipt_id:"receipt-test".into(),revision:1,digest:[42;32] }
+    }
+
+    #[test]
+    fn task_duplicate_cancel_and_prune_keep_replay_denial() {
+        let scratch = scratch(); let store = &scratch.0;
+        let (lease,job) = task_fixture(store,"job-test");
+        assert!(store.queue_task(&lease,&job).unwrap());
+        assert!(!store.queue_task(&lease,&job).unwrap());
+        store.cancel_tasks(&lease.account_epoch,Some(&job.id),None,None).unwrap();
+        assert!(!store.start_task(&lease).unwrap());
+        store.recover_task_owner("owner-test").unwrap();
+        assert_eq!(store.task_state(&lease).unwrap(),Some(TaskState::Interrupted));
+        assert!(store.resolve_task(&lease,0).unwrap());
+        store.prune_tasks(30*24*60*60+1).unwrap();
+        assert_eq!(store.task_state(&lease).unwrap(),None);
+        assert!(!store.queue_task(&lease,&job).unwrap());
+        let (cancelled,new_job) = task_fixture(store,"job-cancel-first");
+        store.cancel_tasks(&cancelled.account_epoch,Some(&new_job.id),None,None).unwrap();
+        assert!(!store.queue_task(&cancelled,&new_job).unwrap());
+    }
+
+    #[test]
+    fn task_recovery_unknown_is_immutable_and_old_owner_is_stale() {
+        let scratch = scratch(); let store = &scratch.0;
+        let (lease,job) = task_fixture(store,"job-test"); let binding=invocation();
+        assert!(store.queue_task(&lease,&job).unwrap()); assert!(store.start_task(&lease).unwrap());
+        assert!(store.insert_invocation(&lease,&binding).unwrap());
+        assert!(store.decide_invocation(&lease,&binding,AuthorizationDecision::Authorized,AuthorizationKind::Rule,None,None,0).unwrap());
+        assert!(store.admit_invocation(&lease,&binding).unwrap());
+        assert!(!store.admit_invocation(&lease,&binding).unwrap());
+        assert!(store.finish_receipt(&lease,&binding,ReceiptOutcome::Unknown).unwrap());
+        assert!(!store.finish_receipt(&lease,&binding,ReceiptOutcome::Finished).unwrap());
+        store.recover_task_owner("owner-replacement").unwrap();
+        assert_eq!(store.task_state(&lease).unwrap(),Some(TaskState::NeedsReview));
+        assert!(store.finish_receipt(&lease,&binding,ReceiptOutcome::Finished).is_err());
+        store.close_task_account().unwrap(); store.clear().unwrap();
+        assert!(store.finish_receipt(&lease,&binding,ReceiptOutcome::Finished).is_err());
+        let count:i64=store.connection.lock().unwrap().query_row("SELECT count(*) FROM task_effect_receipts",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,0);
+    }
+
+    #[test]
+    fn routine_check_and_task_insert_roll_back_together() {
+        let scratch = scratch(); let store=&scratch.0;
+        let (lease,mut job)=task_fixture(store,"job-check"); job.routine_id=Some("routine-test".into());
+        let set=std::collections::BTreeMap::from([("seen".into(),serde_json::json!(true))]);
+        store.connection.lock().unwrap().execute_batch("CREATE TRIGGER refuse_check BEFORE INSERT ON routine_check_commits BEGIN SELECT RAISE(ABORT,'synthetic rejection'); END;").unwrap();
+        assert!(store.commit_routine_check(&lease,Some(&job),"routine-test",&job.chat_id,&job.bot_id,1,&set,&[]).is_err());
+        assert_eq!(store.task_state(&lease).unwrap(),None);
+        assert!(!store.codemode_values(&job.chat_id,&job.bot_id).unwrap().contains_key("seen"));
+        store.connection.lock().unwrap().execute_batch("DROP TRIGGER refuse_check;").unwrap();
+        assert!(store.commit_routine_check(&lease,Some(&job),"routine-test",&job.chat_id,&job.bot_id,1,&set,&[]).unwrap());
+        assert_eq!(store.task_state(&lease).unwrap(),Some(TaskState::Queued));
+        assert_eq!(store.codemode_values(&job.chat_id,&job.bot_id).unwrap().get("seen"),Some(&serde_json::json!(true)));
     }
 
     fn message(id: &str, at: f64) -> Message {

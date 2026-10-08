@@ -895,6 +895,15 @@ fn local_relay_error(error: anyhow::Error) -> RelayError {
 
 fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn,
     remember: bool) -> Result<(), RelayError> {
+    if blob.kind == "job" {
+        let machine = machine_file.machine().map_err(local_relay_error)?;
+        let job: Job = crate::crypto::unseal_json(&machine.box_secret, &unb64(&blob.ciphertext).map_err(local_relay_error)?).map_err(local_relay_error)?;
+        if let Some(lease) = app.queue_local_task(&job).map_err(local_relay_error)? {
+            crate::runtime::spawn_admitted_local_job(app.clone(), job, Some(blob.id.clone()), app.update.hold(), lease);
+        }
+        if remember { remember_applied(&mut app.state.lock().unwrap(), &blob.id); }
+        return Ok(());
+    }
     if blob.kind == "memory_config" {
         let _edit = app.roster_edit.lock().unwrap();
         if remember && app.state.lock().unwrap().applied_blob_ids.contains(&blob.id) { return Ok(()); }
@@ -984,7 +993,7 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
 }
 
 pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
-    if matches!(blob.kind.as_str(), "roster" | "memory_config") {
+    if matches!(blob.kind.as_str(), "roster" | "memory_config" | "job") {
         if let Err(error) = apply_incoming_blob(app, machine_file, blob, true) {
             tracing::warn!(%error, "applying roster blob");
         }
@@ -1053,13 +1062,8 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Err(error) => tracing::warn!(%error, "credentials blob"),
         },
         "job" => {
-            let Ok(machine) = machine_file.machine() else { return };
-            match crate::crypto::unseal_json::<Job>(&machine.box_secret, &ciphertext) {
-                Ok(job) => {
-                    // The pull that applies this holds its admission (`starts_work`).
-                    crate::runtime::spawn_local_job(app.clone(), job, Some(blob.id.clone()), app.update.hold());
-                }
-                Err(error) => tracing::warn!(%error, "job envelope"),
+            if let Err(error) = apply_incoming_blob(app,machine_file,blob,false) {
+                tracing::error!(%error, "Task envelope admission refused");
             }
         }
         "job_cancel" => {

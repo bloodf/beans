@@ -245,7 +245,7 @@ pub async fn run(app: Arc<App>) {
 /// away, in which case the due ones are paused with a notice instead.
 #[cfg(feature = "runner")]
 pub fn tick(app: &Arc<App>) {
-    if app.is_paused() { return; }
+    if !app.is_execution_owner() || app.is_paused() { return; }
     let Some(this) = app.this_device_id() else { return };
     let now = now_unix();
     let enabled: Vec<Routine> = app.state.lock().unwrap().routines.iter().filter(|r| r.is_enabled).cloned().collect();
@@ -360,7 +360,7 @@ fn checked(app: &App, id: &str) {
 /// check here, which counts as a run whether or not it started one.
 #[cfg(feature = "runner")]
 fn due_at(app: &App, routine: &Routine) -> Option<i64> {
-    match app.routine_checks.last_at(&routine.id) {
+    match app.store.routine_checked_at(&routine.id).ok().flatten().or_else(|| app.routine_checks.last_at(&routine.id)) {
         Some(at) => routine.next_run_after(at),
         None => routine.next_run_at(),
     }
@@ -394,24 +394,31 @@ pub fn next_run_shown(app: &App, routine: &Routine) -> Option<i64> {
 /// at a time.
 #[cfg(feature = "runner")]
 fn check_then_run(app: &Arc<App>, routine: Routine, admission: crate::update_control::Admission) {
+    if !app.is_execution_owner() { return; }
     let cancel = CancellationToken::new();
     if !app.routine_checks.start(&routine.id, &cancel) { return; }
     let app = app.clone();
     tokio::spawn(async move {
-        // The check and the run it calls for count as running here throughout.
         let _admission = admission;
-        let found = run_check(&app, &routine, &cancel).await;
-        checked(&app, &routine.id);
-        // A routine paused, deleted, or given another check meanwhile does not run on this one.
-        let Some(current) = app.routine(&routine.id).filter(|current| !cancel.is_cancelled() && !app.is_paused() && current.is_enabled && current.check == routine.check) else { return };
-        let Some(report) = found.report() else { return };
-        started(&app, &current.id);
-        match job_for(&app, &current) {
-            Ok(mut job) => {
-                job.check = Some(report);
-                runtime::spawn_local_job(app.clone(), job, None, app.update.hold());
-            }
-            Err(error) => tracing::warn!(%error, routine = %current.name, "starting a routine its check called for"),
+        let mut job = match job_for(&app,&routine) { Ok(job) => job, Err(_) => { checked(&app,&routine.id); return; } };
+        let lease = match app.task_lease(&job) { Ok(lease) => lease, Err(_) => { checked(&app,&routine.id); return; } };
+        let (found,writes) = run_check_staged(&app,&routine,&cancel).await;
+        let committed = (|| -> anyhow::Result<bool> {
+            let _policy = app.roster_edit.lock().unwrap();
+            let _lifecycle = app.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(!cancel.is_cancelled() && !app.is_paused(), "Routine check was cancelled");
+            let current = app.routine(&routine.id).ok_or_else(|| anyhow::anyhow!("Routine was deleted"))?;
+            anyhow::ensure!(current.is_enabled && current.check == routine.check && app.bot(&current.bot_id).is_some(), "Routine changed during check");
+            anyhow::ensure!(!app.store.routine_needs_review(&lease.account_epoch,&routine.id)?, "Routine requires review");
+            job.check = found.report();
+            app.store.commit_routine_check(&lease,job.check.as_ref().map(|_| &job),&routine.id,&job.chat_id,&job.bot_id,now_unix(),&writes.set,&writes.delete)?;
+            Ok(job.check.is_some())
+        })();
+        checked(&app,&routine.id);
+        match committed {
+            Ok(true) => runtime::spawn_admitted_local_job(app.clone(),job,None,app.update.hold(),lease),
+            Ok(false) => {},
+            Err(error) => tracing::error!(%error,"Routine check transaction refused"),
         }
     });
 }
@@ -440,14 +447,21 @@ impl CheckRun {
 /// the routine already running, and counted like a due one, so the schedule counts from it.
 #[cfg(feature = "runner")]
 pub async fn check_now(app: &Arc<App>, routine: &Routine, cancel: &CancellationToken) -> CheckRun {
-    if app.is_paused() { return CheckRun { found: None, error: Some("Account paused.".into()), result: "Account paused.".into() }; }
-    if !app.routine_checks.start_when_free(&routine.id, cancel).await {
-        let stopped = "Stopped before the check ran.".to_string();
-        return CheckRun { found: None, error: Some(stopped.clone()), result: stopped };
-    }
-    let found = run_check(app, routine, cancel).await;
-    checked(app, &routine.id);
-    found
+    let failed = || CheckRun { found: None, error: Some("Check admission or storage failed.".into()), result: "Check admission or storage failed.".into() };
+    if !app.is_execution_owner() || app.is_paused() { return failed(); }
+    if !app.routine_checks.start_when_free(&routine.id,cancel).await { return failed(); }
+    let job = match job_for(app,routine) { Ok(job) => job, Err(_) => { checked(app,&routine.id); return failed(); } };
+    let lease = match app.task_lease(&job) { Ok(lease) => lease, Err(_) => { checked(app,&routine.id); return failed(); } };
+    let (found,writes) = run_check_staged(app,routine,cancel).await;
+    let committed = (|| -> anyhow::Result<()> {
+        let _policy = app.roster_edit.lock().unwrap();
+        let _lifecycle = app.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(!cancel.is_cancelled() && !app.is_paused() && app.routine(&routine.id).is_some_and(|r|r.check==routine.check), "Check changed");
+        app.store.commit_routine_check(&lease,None,&routine.id,&job.chat_id,&job.bot_id,now_unix(),&writes.set,&writes.delete)?;
+        Ok(())
+    })();
+    checked(app,&routine.id);
+    if committed.is_err() { failed() } else { found }
 }
 
 /// Runs a routine's check: its script in a codemode sandbox of its own, with the bot's file
@@ -456,9 +470,15 @@ pub async fn check_now(app: &Arc<App>, routine: &Routine, cancel: &CancellationT
 /// asked anything: a call that could change something ends the check.
 #[cfg(feature = "runner")]
 pub async fn run_check(app: &Arc<App>, routine: &Routine, cancel: &CancellationToken) -> CheckRun {
-    let failed = |error: String| CheckRun { found: None, error: Some(error.clone()), result: error };
-    if app.is_paused() || cancel.is_cancelled() { return failed("Account paused.".into()); }
-    let Some(code) = routine.check.as_deref() else { return CheckRun { found: None, error: None, result: String::new() } };
+    let (result,_) = run_check_staged(app,routine,cancel).await;
+    result
+}
+
+#[cfg(feature = "runner")]
+async fn run_check_staged(app: &Arc<App>, routine: &Routine, cancel: &CancellationToken) -> (CheckRun, beans_agent::codemode::StoreWrites) {
+    let failed = |error: String| (CheckRun { found: None, error: Some(error.clone()), result: error }, beans_agent::codemode::StoreWrites::default());
+    if !app.is_execution_owner() || app.is_paused() || cancel.is_cancelled() { return failed("Routine execution is unavailable.".into()); }
+    let Some(code) = routine.check.as_deref() else { return (CheckRun { found: None, error: None, result: String::new() }, Default::default()) };
     let Some(bot) = app.bot(&routine.bot_id) else { return failed("The routine's bot is gone.".into()) };
     let dm = match app.dm_with(&bot.id, None) {
         Ok(dm) => dm,
@@ -467,20 +487,21 @@ pub async fn run_check(app: &Arc<App>, routine: &Routine, cancel: &CancellationT
     let files: Vec<Arc<dyn Tool>> =
         beans_agent::tools::coding_tools(bot.working_directory(&app.config.home)).into_iter().filter(|tool| CHECK_FILE_TOOLS.contains(&tool.name())).collect();
     let catalog = crate::plugins::mcp::turn_catalog_for_bot(app, files, &bot.id);
-    let store = Arc::new(crate::scripts::ScriptStore { app: app.clone(), chat_id: dm.meta.id.clone(), bot_id: bot.id.clone() });
+    let values = match app.store.codemode_values(&dm.meta.id,&bot.id) { Ok(values) => values, Err(_) => return failed("Check storage is unavailable.".into()) };
+    let store = Arc::new(crate::scripts::CheckStore::new(values));
     let functions: Vec<Arc<dyn HostFunction>> =
         crate::scripts::ModelsAsk::new(app, &dm.meta.id, &bot.provider).map(|ask| Arc::new(ask) as Arc<dyn HostFunction>).into_iter().collect();
     let options = CodemodeOptions { mcp_types: !crate::plugins::mcp::plugin_briefs(app, Some(&bot.id)).is_empty(), timeout: CHECK_TIMEOUT, ..CodemodeOptions::default() };
-    let codemode = CodemodeTool::new(catalog.clone(), options).with_store(store).with_functions(functions);
+    let codemode = CodemodeTool::new(catalog.clone(), options).with_store(store.clone()).with_functions(functions);
     let runner = CheckRunner { app: app.clone(), catalog };
     match codemode.run_script(&format!("check-{}", routine.id), code, cancel.clone(), &runner).await {
         Err(error) => failed(error.0),
         Ok(run) => {
             let result = run.result.text_content();
             if run.result.is_error {
-                CheckRun { found: None, error: Some(clipped(&result, MAX_FOUND_CHARS)), result }
+                (CheckRun { found: None, error: Some(clipped(&result, MAX_FOUND_CHARS)), result }, Default::default())
             } else {
-                CheckRun { found: run.returned.as_ref().and_then(found_text), error: None, result }
+                (CheckRun { found: run.returned.as_ref().and_then(found_text), error: None, result }, store.writes())
             }
         }
     }
@@ -586,7 +607,7 @@ mod tests {
     /// `b1` (Chef) assigned to it.
     fn scratch_app() -> ScratchApp {
         let home = std::env::temp_dir().join(format!("beans-routines-{}", uuid::Uuid::new_v4()));
-        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        let app = App::load_owner(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Workbench".into())).unwrap();
         let runner_id = app.this_device_id().unwrap();
         {

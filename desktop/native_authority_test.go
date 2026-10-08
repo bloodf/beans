@@ -106,6 +106,9 @@ func TestNativeDelayedDispatchCannotWriteReplacementSocket(t *testing.T) {
 }
 
 func TestNativeClosedWindowDraftsBlockQuitAndInstall(t *testing.T) {
+	previousExecutor := executeMain
+	executeMain = func(fn func()) { fn() }
+	defer func() { executeMain = previousExecutor }()
 	old := native
 	defer func() { native = old }()
 	for _, draft := range []*model.NativeDraft{{Text: "private"}, {Attachments: []model.NativeAttachment{{Path: "/private"}}}, {ReplyTo: "m"}, {Sending: true}} {

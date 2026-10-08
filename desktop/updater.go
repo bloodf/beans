@@ -362,7 +362,7 @@ type desktopUpdatePage struct {
 }
 
 func (lease *desktopUpdateLease) guardPages(ctx context.Context) error {
-	if err := nativeQuitAdmission(); err != nil {
+	if err := nativeQuitAdmissionAsync(ctx); err != nil {
 		return err
 	}
 	for _, win := range mygo.Windows() {
@@ -660,7 +660,7 @@ func updaterBeforeQuit(event *mygo.QuitEvent) bool {
 		err := errors.New("Update installation was canceled")
 		if pending != nil && lease != nil {
 			var selected string
-			selected, err = desktopUpdateIdle(ctx, lease.client)
+			selected, err = desktopUpdateIdleMain(ctx, lease.client)
 			if err == nil && selected != relay {
 				err = errors.New("The selected relay changed before quit")
 			}
@@ -721,6 +721,9 @@ func updaterBeforeQuit(event *mygo.QuitEvent) bool {
 			err = lease.verify(ctx)
 		}
 		mygo.RunOnMain(func() {
+			if err == nil {
+				err = nativeQuitAdmission()
+			}
 			u.mu.Lock()
 			if err == nil && (u.pending != pending || u.pendingRelease != selected) {
 				err = errors.New("Update installation was canceled")
@@ -764,9 +767,20 @@ func updaterBeforeQuit(event *mygo.QuitEvent) bool {
 }
 
 func desktopUpdateIdle(ctx context.Context, client *cliClient) (string, error) {
+	if err := nativeQuitAdmissionAsync(ctx); err != nil {
+		return "", err
+	}
+	return desktopUpdateIdleChecked(ctx, client)
+}
+
+func desktopUpdateIdleMain(ctx context.Context, client *cliClient) (string, error) {
 	if err := nativeQuitAdmission(); err != nil {
 		return "", err
 	}
+	return desktopUpdateIdleChecked(ctx, client)
+}
+
+func desktopUpdateIdleChecked(ctx context.Context, client *cliClient) (string, error) {
 	if client == nil || client.currentState() != "connected" {
 		return "", errors.New("Wait for the local CLI to reconnect before installing an update")
 	}

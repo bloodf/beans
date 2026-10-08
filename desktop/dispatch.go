@@ -12,6 +12,8 @@ var mainPosts struct {
 	running bool
 }
 
+var executeMain = mygo.RunOnMain
+
 func postMain(fn func()) {
 	mainPosts.Lock()
 	mainPosts.queue = append(mainPosts.queue, fn)
@@ -32,7 +34,7 @@ func postMain(fn func()) {
 				return
 			}
 			mainPosts.Unlock()
-			mygo.RunOnMain(func() {
+			executeMain(func() {
 				for _, fn := range batch {
 					fn()
 				}

@@ -277,6 +277,7 @@ impl App {
     }
 
     pub fn is_execution_owner(&self) -> bool { self.execution_owner.is_some() }
+    pub fn legacy_execution_closed(&self) -> anyhow::Result<bool> { self.store.legacy_execution_closed() }
 
     pub fn task_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;

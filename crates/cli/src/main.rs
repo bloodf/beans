@@ -315,6 +315,9 @@ async fn main() -> anyhow::Result<()> {
 
     match command {
         Command::Serve { parent_pid, ready_stdout } => {
+            if app.legacy_execution_closed()? {
+                tracing::warn!("Legacy home remains available for serving and sync; local task execution is closed until trustworthy fresh-intent admission is established");
+            }
             app.close_orphan_proposals()?;
             beans::service::trim_log();
             beans::update::start(&app);

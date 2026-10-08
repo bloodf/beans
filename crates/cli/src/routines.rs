@@ -245,7 +245,7 @@ pub async fn run(app: Arc<App>) {
 /// away, in which case the due ones are paused with a notice instead.
 #[cfg(feature = "runner")]
 pub fn tick(app: &Arc<App>) {
-    if !app.is_execution_owner() || app.is_paused() { return; }
+    if !app.is_execution_owner() || app.is_paused() || app.legacy_execution_closed().unwrap_or(true) { return; }
     let Some(this) = app.this_device_id() else { return };
     let now = now_unix();
     let enabled: Vec<Routine> = app.state.lock().unwrap().routines.iter().filter(|r| r.is_enabled).cloned().collect();

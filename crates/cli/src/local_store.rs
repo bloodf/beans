@@ -120,8 +120,10 @@ fn queue_task_tx(tx: &Transaction<'_>, lease: &TaskLease, job: &crate::model::Jo
     for id in [&lease.task_id,&lease.execution_id,&job.chat_id,&job.bot_id] { structural_id(id)?; }
     anyhow::ensure!(lease.task_id == job.id, "Task identity differs from Job.id");
     if let Some(id) = &job.routine_id { structural_id(id)?; }
-    let floor: Option<f64> = tx.query_row("SELECT admission_floor FROM task_authority WHERE id=1",[],|r|r.get(0))?;
-    if floor.is_some_and(|floor| !job.created_at.is_finite() || job.created_at <= floor) {
+    // A migrated home lacks a complete historical Job inventory. Sender timestamps
+    // cannot establish new intent: all ambiguous admissions stay closed.
+    let legacy_closed: bool = tx.query_row("SELECT admission_floor IS NOT NULL FROM task_authority WHERE id=1",[],|r|r.get(0))?;
+    if legacy_closed {
         tx.execute("INSERT OR IGNORE INTO task_fences VALUES(?1,?2)",params![lease.account_epoch,lease.task_id])?;
         return Ok(false);
     }
@@ -132,6 +134,9 @@ fn queue_task_tx(tx: &Transaction<'_>, lease: &TaskLease, job: &crate::model::Jo
 }
 
 impl LocalStore {
+    pub(crate) fn legacy_execution_closed(&self) -> anyhow::Result<bool> {
+        Ok(self.connection.lock().unwrap().query_row("SELECT admission_floor IS NOT NULL FROM task_authority WHERE id=1",[],|r|r.get(0)).optional()?.unwrap_or(false))
+    }
     pub(crate) fn history_task_lease(&self, owner: &str, task: &str, incarnation: u64) -> anyhow::Result<Option<TaskLease>> {
         Ok(self.connection.lock().unwrap().query_row("SELECT account_epoch,owner_epoch,execution_id FROM local_tasks WHERE task_id=?1 AND state IN ('finished','interrupted','needs_review') AND account_epoch=(SELECT account_epoch FROM task_authority WHERE id=1 AND owner_epoch=?2 AND closed=0)",params![task,owner],|r|Ok(TaskLease {account_epoch:r.get(0)?,owner_epoch:r.get(1)?,execution_id:r.get(2)?,task_id:task.into(),incarnation})).optional()?)
     }
@@ -205,7 +210,7 @@ impl LocalStore {
                     anyhow::ensure!(!migrated, "Migrated task authority is missing; automatic reconstruction is forbidden");
                     let epoch = uuid::Uuid::new_v4().to_string();
                     let legacy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM bots UNION ALL SELECT 1 FROM messages UNION ALL SELECT 1 FROM sent_jobs UNION ALL SELECT 1 FROM memory_turn_admissions)",[],|r|r.get(0))?;
-                    let floor = legacy.then(crate::config::now_secs);
+                    let floor = legacy.then_some(1.0);
                     tx.execute("INSERT INTO task_authority(id,account_epoch,owner_epoch,closed,admission_floor) VALUES(1,?1,?2,0,?3)", params![epoch, owner,floor])?;
                     tx.execute("INSERT INTO task_safety_version VALUES(1,1)",[])?;
                     // Available legacy Job identities are denial evidence only. Sent jobs
@@ -358,6 +363,22 @@ impl LocalStore {
         config.ensure_home()?;
         let connection =
             Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+        // Classify before CREATE IF NOT EXISTS can conceal a partial current schema.
+        let version:i64=connection.pragma_query_value(None,"user_version",|r|r.get(0))?;
+        let tables:std::collections::HashSet<String>=connection.prepare("SELECT name FROM sqlite_master WHERE type='table'")?
+            .query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        let current=["task_authority","task_fences","local_tasks","task_invocations","task_effect_receipts","routine_check_commits","task_safety_version"];
+        let task_count=current.iter().filter(|name|tables.contains(**name)).count();
+        if version==2 {
+            anyhow::ensure!(task_count==current.len(),"Current task schema is incomplete; restoring missing safety tables is forbidden");
+        } else if !tables.is_empty() && task_count==0 {
+            anyhow::ensure!(version==1,"Unsupported predecessor schema version");
+            for table in ["metadata","bots","chats","messages","outbox","sent_jobs","device_turns","codemode_store","memory_turn_admissions","memory_deliveries"] {
+                anyhow::ensure!(tables.contains(table),"Unsupported partial predecessor schema");
+            }
+        } else if task_count>0 {
+            anyhow::ensure!(task_count==current.len(),"Partial task safety schema");
+        }
         connection.pragma_update(None, "application_id", crate::config::SQLITE_APPLICATION_ID)?;
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -522,7 +543,7 @@ impl LocalStore {
              CREATE TABLE IF NOT EXISTS routine_check_commits (
                  account_epoch TEXT NOT NULL, routine_id TEXT NOT NULL, checked_at INTEGER NOT NULL,
                  PRIMARY KEY(account_epoch,routine_id));
-             PRAGMA user_version = 1;",
+             PRAGMA user_version = 2;",
         )?;
         if !connection.prepare("SELECT paused FROM metadata").is_ok() {
             connection.execute("ALTER TABLE metadata ADD COLUMN paused INTEGER NOT NULL DEFAULT 0", [])?;
@@ -2110,9 +2131,54 @@ mod tests {
         job.created_at=crate::config::now_secs()+1.0;
         assert!(!store.queue_task(&lease,&job).unwrap(),"denied legacy envelope has a lifetime fence");
         lease.task_id="job-explicit-new".into(); job.id=lease.task_id.clone();
-        assert!(store.queue_task(&lease,&job).unwrap());
-        assert_eq!(store.task_state(&lease).unwrap(),Some(TaskState::Queued));
+        assert!(!store.queue_task(&lease,&job).unwrap(),"legacy-unseen execution stays closed without new-intent proof");
+        assert_eq!(store.task_state(&lease).unwrap(),None);
     }
+    #[test]
+    fn legacy_unseen_future_timestamp_replay_is_denied_across_reopen() {
+        let home=tempfile::tempdir().unwrap(); let path=home.path().join("beans.sqlite3");
+        let store=LocalStore::open(&path).unwrap();
+        store.upsert(&message("legacy-transcript",1.0)).unwrap();
+        let epoch=store.recover_task_owner("owner-test").unwrap();
+        let (lease,mut job)=task_fixture(&store,"job-previously-executed-unseen");
+        job.created_at=4_000_000_000.0;
+        assert!(!store.queue_task(&lease,&job).unwrap());
+        assert_eq!(store.task_state(&lease).unwrap(),None);
+        drop(store);
+        let reopened=LocalStore::open(&path).unwrap();
+        assert_eq!(reopened.recover_task_owner("owner-test").unwrap(),epoch);
+        assert!(!reopened.queue_task(&lease,&job).unwrap());
+        assert_eq!(reopened.task_state(&lease).unwrap(),None);
+    }
+
+    #[test]
+    fn current_schema_missing_all_safety_tables_is_not_a_predecessor() {
+        let home=tempfile::tempdir().unwrap(); let path=home.path().join("beans.sqlite3");
+        let store=LocalStore::open(&path).unwrap();
+        store.recover_task_owner("owner-test").unwrap();
+        store.connection.lock().unwrap().execute_batch("DROP TABLE task_authority; DROP TABLE task_fences; DROP TABLE local_tasks; DROP TABLE task_invocations; DROP TABLE task_effect_receipts; DROP TABLE routine_check_commits; DROP TABLE task_safety_version;").unwrap();
+        drop(store);
+        assert!(LocalStore::open(&path).is_err());
+    }
+
+    #[test]
+    fn supported_predecessor_keeps_serving_data_without_execution() {
+        let home=tempfile::tempdir().unwrap(); let path=home.path().join("beans.sqlite3");
+        let store=LocalStore::open(&path).unwrap();
+        store.upsert(&message("legacy-transcript",1.0)).unwrap();
+        store.connection.lock().unwrap().execute_batch("DROP TABLE task_authority; DROP TABLE task_fences; DROP TABLE local_tasks; DROP TABLE task_invocations; DROP TABLE task_effect_receipts; DROP TABLE routine_check_commits; DROP TABLE task_safety_version; PRAGMA user_version=1;").unwrap();
+        drop(store);
+        let reopened=LocalStore::open(&path).unwrap();
+        reopened.recover_task_owner("owner-test").unwrap();
+        assert!(reopened.message("chat","legacy-transcript").unwrap().is_some());
+        let (lease,mut job)=task_fixture(&reopened,"job-unseen"); job.created_at=4_000_000_000.0;
+        assert!(!reopened.queue_task(&lease,&job).unwrap());
+        reopened.close_task_account().unwrap(); reopened.clear().unwrap();
+        reopened.task_account_epoch("owner-test").unwrap();
+        let marked:bool=reopened.connection.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM task_safety_version)",[],|r|r.get(0)).unwrap();
+        assert!(marked);
+    }
+
 
     #[test]
     fn legacy_migration_failure_leaves_authority_and_journals_unchanged() {

@@ -54,6 +54,10 @@ func (n *nativeDesktop) loadMemory() {
 	}()
 }
 func (n *nativeDesktop) memoryView(c *ui.Context) {
+	if n.memoryPanel.Forms.Note != nil {
+		n.memoryNoteView(c)
+		return
+	}
 	if n.memoryPanel.Forms.Embedding != nil {
 		n.embeddingFormView(c)
 		return
@@ -134,6 +138,9 @@ func (n *nativeDesktop) memoryView(c *ui.Context) {
 	for _, bot := range n.store.Bots {
 		if ui.Button(c.Key("memory-"+bot.ID), "Memory for "+bot.Name).Clicked() {
 			n.openBotMemory(bot.ID)
+		}
+		if ui.Button(c.Key("note-"+bot.ID), "MEMORY.md for "+bot.Name).Clicked() {
+			n.openMemoryNote(bot.ID)
 		}
 	}
 	if ui.Button(c, "Reload memory connections").Clicked() {

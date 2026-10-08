@@ -6,13 +6,17 @@ import "github.com/egoist/mygo"
 // admitted account ID; never retain RPC results, consent handles or approvals.
 func (n *nativeDesktop) suspendMemoryForms() {
 	f := n.memoryPanel.Forms
-	if (f.Connection != nil || f.Bot != nil || f.Embedding != nil) && n.store.AccountID != "" {
+	if (f.Connection != nil || f.Bot != nil || f.Embedding != nil || f.Note != nil) && n.store.AccountID != "" {
 		if n.memoryRecovery == nil {
 			n.memoryRecovery = map[string]memoryForms{}
 		}
 		f.Pending = false
 		f.serial++
 		f.Error = "Connection changed. Review recovered edits and renew approvals before saving."
+		if f.Note != nil {
+			f.Note.ConfirmReload = false
+			f.Note.ConfirmOverwrite = false
+		}
 		if b := f.Bot; b != nil {
 			b.Draft = 0
 			b.View = 0
@@ -47,7 +51,7 @@ func (n *nativeDesktop) recoverMemoryForms() {
 }
 func (n *nativeDesktop) hasMemoryIntent() bool {
 	f := n.memoryPanel.Forms
-	return f.Pending || f.Connection != nil || f.Bot != nil || f.Embedding != nil || len(n.memoryRecovery) != 0
+	return f.Pending || f.Connection != nil || f.Bot != nil || f.Embedding != nil || f.Note != nil || len(n.memoryRecovery) != 0
 }
 
 func (n *nativeDesktop) confirmDiscardMemoryRecovery() {

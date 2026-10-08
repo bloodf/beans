@@ -53,7 +53,7 @@ Bot setup uses the action-specific preview method, five-minute expiry and a one-
 
 ## Local editor and verification
 
-The service boundary is independent of local MEMORY.md. `macos/Sources/Beans/Sheets/MemoryViewController.swift` continues to use its existing hash-based conflict protection; the desktop local editor is unchanged.
+The service boundary is independent of local MEMORY.md. The AppKit and full desktop editors use hash-based conflict protection. The opt-in native panel opens `native_memory_note.go` through existing `bots.memory` / `bots.memory.write`; core routes other Runners through its sealed verbs. No capability flag exists: successful validated load admits editing; unavailable requests show an error without API substitution. Explicit Save sends the opened hash and bounds the file to 256 KiB, separately displaying the per-turn loading budget. Conflicts retain the draft and offer confirmed discard/reload or confirmed overwrite without expected_hash. Pending operations disable editing/cancel; failure and reconnect retain account-keyed intent. Ordered account/socket/form-generation fences reject stale completions. Open notes participate in close/quit ownership; saving calls no provider or asset installer.
 
 `bun test desktop/src/model/memoryService.test.ts desktop/src/model/memorySetup.test.ts` exercises consent transitions, secret/options patches, bounded requests, masked status and exact setup approvals with fixture transports. `macos/Tests/MemoryServiceDraft.swift` and `macos/Tests/MemorySetupDraft.swift` are isolated Foundation executables compiled with their memory model sources, without a full application build. Fixture verification performs no remote retain, reflect, asset acquisition or DDL.
 

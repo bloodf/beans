@@ -34,6 +34,9 @@ Installation, standalone services and Runner admission drain are described in [C
 
 `beans serve` loads an execution owner with an exclusive `execution.lock` held for the App lifetime before opening SQLite or recovering work. Other `App::load` callers do not recover submitted memory deliveries. Task admission and interrupted-work fences are described in [Local task authority](tasks.md). Supported populated legacy stores remain available for serving, reading and sync. Explicit local user submissions mint individually fenced new task identities; ambiguous sealed or automatic legacy work stays closed. Sender timestamps never grant admission. Opening a Device view does not grant execution authority.
 
+Local user submissions commit transcript, encrypted outbox and exact first-turn task admission together before publishing or steering. Attachments use private staging and rollback backups; filesystem finalization and SQLite commit are separate failure boundaries, described in [Local task authority](tasks.md#admission-and-recovery).
+
+
 ## Diagnostics report
 
 `diagnostics.report` and `beans doctor --json` use the same builder. The report contains `schema_version: 1`, `versions {core, relay_protocol}`, `this_device {os, is_runner, has_identity}`, `home {exists}`, `port {free}`, `relay`, `providers`, `plugins`, `mcp_json` and `runners`. It uploads nothing; consumers must let the user review before sharing.

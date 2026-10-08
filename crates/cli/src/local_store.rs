@@ -115,6 +115,21 @@ fn check_running_tx(tx: &Transaction<'_>, lease: &TaskLease) -> anyhow::Result<(
     Ok(())
 }
 
+fn upsert_message_tx(tx: &Transaction<'_>, message: &Message) -> anyhow::Result<Upsert> {
+    let json = serde_json::to_string(message)?;
+    let existing: Option<(String, String, i64)> = tx.query_row("SELECT message_json, chat_id, position FROM messages WHERE id=?1", [&message.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    let previous = existing.as_ref().map(|(stored,_,_)|serde_json::from_str(stored)).transpose()?;
+    if existing.as_ref().is_some_and(|(stored,_,_)|stored==&json) { return Ok(Upsert { previous, changed:false }); }
+    let position = match existing.as_ref() {
+        Some((_,chat,position)) if chat==&message.chat_id => *position,
+        _ => tx.query_row("SELECT COALESCE(MAX(position),0)+1 FROM messages WHERE chat_id=?1",[&message.chat_id],|r|r.get(0))?,
+    };
+    let (author_kind,author_bot_id)=author_columns(&message.author);
+    tx.execute("INSERT INTO messages(id,chat_id,position,sort_at,created_at,author_kind,author_bot_id,body_kind,is_complete,text_nonempty,message_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(id) DO UPDATE SET chat_id=excluded.chat_id,position=excluded.position,sort_at=excluded.sort_at,created_at=excluded.created_at,author_kind=excluded.author_kind,author_bot_id=excluded.author_bot_id,body_kind=excluded.body_kind,is_complete=excluded.is_complete,text_nonempty=excluded.text_nonempty,message_json=excluded.message_json",
+        params![message.id,message.chat_id,position,message.promoted_at.unwrap_or(message.created_at),message.created_at,author_kind,author_bot_id,body_kind(&message.body),message.is_complete(),matches!(&message.body,Body::Text{text,..} if !text.trim().is_empty()),json])?;
+    Ok(Upsert {previous,changed:true})
+}
+
 fn queue_task_tx(tx: &Transaction<'_>, lease: &TaskLease, job: &crate::model::Job, local_intent: bool) -> anyhow::Result<bool> {
     check_authority_tx(tx, lease)?;
     for id in [&lease.task_id,&lease.execution_id,&job.chat_id,&job.bot_id] { structural_id(id)?; }
@@ -134,6 +149,15 @@ fn queue_task_tx(tx: &Transaction<'_>, lease: &TaskLease, job: &crate::model::Jo
 }
 
 impl LocalStore {
+    pub(crate) fn commit_submission(&self, message: &Message, tasks: &[(crate::model::Job, TaskLease)], outbox: &[OutboxItem], finalize: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<Upsert> {
+        self.safety(|tx| {
+            for (job,lease) in tasks { anyhow::ensure!(queue_task_tx(tx,lease,job,true)?, "Submission task already fenced"); }
+            let result=upsert_message_tx(tx,message)?;
+            for item in outbox { queue_outbox_tx(tx,item)?; }
+            finalize()?;
+            Ok(result)
+        })
+    }
     pub(crate) fn legacy_execution_closed(&self) -> anyhow::Result<bool> {
         Ok(self.connection.lock().unwrap().query_row("SELECT admission_floor IS NOT NULL FROM task_authority WHERE id=1",[],|r|r.get(0)).optional()?.unwrap_or(false))
     }
@@ -705,79 +729,11 @@ impl LocalStore {
     }
 
     pub fn upsert(&self, message: &Message) -> anyhow::Result<Upsert> {
-        let json = serde_json::to_string(message)?;
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
-        let existing: Option<(String, String, i64)> = tx
-            .query_row(
-                "SELECT message_json, chat_id, position FROM messages WHERE id = ?1",
-                [&message.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        let previous = existing
-            .as_ref()
-            .map(|(stored, _, _)| serde_json::from_str(stored))
-            .transpose()
-            .context("decoding stored message")?;
-        if existing
-            .as_ref()
-            .is_some_and(|(stored, _, _)| stored == &json)
-        {
-            tx.commit()?;
-            return Ok(Upsert {
-                previous,
-                changed: false,
-            });
-        }
-
-        let position = match existing.as_ref() {
-            Some((_, old_chat_id, position)) if old_chat_id == &message.chat_id => *position,
-            _ => tx.query_row(
-                "SELECT COALESCE(MAX(position), 0) + 1 FROM messages WHERE chat_id = ?1",
-                [&message.chat_id],
-                |row| row.get(0),
-            )?,
-        };
-        let (author_kind, author_bot_id) = author_columns(&message.author);
-        let body_kind = body_kind(&message.body);
-        let text_nonempty =
-            matches!(&message.body, Body::Text { text, .. } if !text.trim().is_empty());
-        tx.execute(
-            "INSERT INTO messages (
-                 id, chat_id, position, sort_at, created_at, author_kind, author_bot_id,
-                 body_kind, is_complete, text_nonempty, message_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(id) DO UPDATE SET
-                 chat_id = excluded.chat_id,
-                 position = excluded.position,
-                 sort_at = excluded.sort_at,
-                 created_at = excluded.created_at,
-                 author_kind = excluded.author_kind,
-                 author_bot_id = excluded.author_bot_id,
-                 body_kind = excluded.body_kind,
-                 is_complete = excluded.is_complete,
-                 text_nonempty = excluded.text_nonempty,
-                 message_json = excluded.message_json",
-            params![
-                message.id,
-                message.chat_id,
-                position,
-                message.promoted_at.unwrap_or(message.created_at),
-                message.created_at,
-                author_kind,
-                author_bot_id,
-                body_kind,
-                message.is_complete(),
-                text_nonempty,
-                json,
-            ],
-        )?;
+        let result = upsert_message_tx(&tx, message)?;
         tx.commit()?;
-        Ok(Upsert {
-            previous,
-            changed: true,
-        })
+        Ok(result)
     }
 
     /// Where this Device's copy of the chat begins in the relay's log, when the relay has

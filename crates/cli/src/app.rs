@@ -176,7 +176,7 @@ pub struct App {
     pub sync_wakes: AtomicU64,
     /// Held from a message's local write to its outbox enqueue, so a chat's `position` order
     /// and the order its messages reach the relay log are the same on every Device.
-    message_order: Mutex<()>,
+    pub(crate) message_order: Mutex<()>,
     pub relay_connected: AtomicBool,
     /// The relay answered `426`: it no longer serves the protocol this build speaks.
     pub relay_update_required: AtomicBool,
@@ -1798,6 +1798,10 @@ impl App {
                 return;
             }
         };
+        self.publish_committed_message(message, stored_upsert, upload);
+    }
+
+    pub(crate) fn publish_committed_message(&self, message: Message, stored_upsert: crate::local_store::Upsert, upload: bool) {
         if !stored_upsert.changed {
             return;
         }

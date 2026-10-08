@@ -59,44 +59,67 @@ pub fn send_user_message(
     // Refused before anything is written while an update holds new work back, so no message
     // waits for a turn that never comes. After the chat lookup, so a bad chat still says so.
     let admission = app.update.try_admit().ok_or_else(|| anyhow::anyhow!(crate::update_control::UPDATING))?;
-    let attachments = crate::files::store_many(&app, &files)?;
-    // The bytes go out ahead of the message that names them.
-    for attachment in &attachments {
-        if let Err(error) = crate::files::push_blob(&app, Some(chat_id), attachment) {
-            tracing::warn!(%error, name = %attachment.name, "uploading an attachment");
-        }
-    }
-    let replied_bot = match &reply_to {
-        Some(ReplyTo { author: Author::Bot { bot_id }, .. }) => Some(bot_id.clone()),
-        _ => None,
-    };
-    let mut message = Message::new(chat_id, Author::You, Body::Text { text: text.to_string(), attachments, mentions: mentions.clone(), reply_to });
-    if let Some(id) = message_id.filter(|id| !id.is_empty()) {
-        message.id = id;
-    }
-    app.upsert_message(message.clone(), true);
-    #[cfg(feature = "runner")]
-    crate::turns::hear_user_message(&app, &message);
-
-    if chat.meta.is_group() {
-        let members = turn_order(&chat.meta, &app, &mentions, replied_bot.as_deref());
-        start_room(app.clone(), chat_id.to_string(), message.id.clone(), members, admission);
-    } else if let Some(bot) = chat.meta.bot_ids.first().and_then(|id| app.bot(id)) {
-        start_user_turn(&app, user_turn_job(&app, chat_id, &bot.id, &message.id), admission)?;
-    }
-    Ok(message)
+    submit_user_message(&app, chat_id, text, message_id, &files, mentions, reply_to, None, admission)
 }
 
 /// The user's first message to a bot just added from a marketplace template, and the turn that
 /// answers it: the bot sets itself up from `setup` first (`turns::setup_cue`), then says hello.
-pub fn greet_new_bot(app: &Arc<App>, chat_id: &str, bot_id: &str, text: &str, setup: TemplateSetup, admission: Admission) {
-    let message = Message::new(chat_id, Author::You, Body::text(text.trim()));
-    let mut job = user_turn_job(app, chat_id, bot_id, &message.id);
-    job.setup = Some(setup);
-    app.upsert_message(message, true);
-    if let Err(error) = start_user_turn(app, job, admission) {
-        tracing::error!(%error, "Local greeting admission refused");
+pub fn greet_new_bot(app: &Arc<App>, chat_id: &str, bot_id: &str, text: &str, setup: TemplateSetup, admission: Admission) -> anyhow::Result<Message> {
+    submit_user_message(app, chat_id, text.trim(), None, &[], Vec::new(), None, Some((bot_id,setup)), admission)
+}
+
+fn submit_user_message(app: &Arc<App>, chat_id: &str, text: &str, message_id: Option<String>, files: &[crate::files::OutgoingFile], mentions: Vec<String>, reply_to: Option<ReplyTo>, setup: Option<(&str,TemplateSetup)>, admission: Admission) -> anyhow::Result<Message> {
+    let policy=app.roster_edit.lock().unwrap();
+    let lifecycle=app.plugin_admission(None).map_err(anyhow::Error::msg)?;
+    let incarnation=lifecycle.get().0;
+    anyhow::ensure!(!app.is_paused(), "Account paused. Resume to run bots.");
+    let chat=app.chat(chat_id).ok_or_else(||anyhow::anyhow!("Unknown chat"))?;
+    let replied_bot=reply_to.as_ref().and_then(|r|match &r.author {Author::Bot{bot_id}=>Some(bot_id.as_str()),_=>None});
+    let members=if chat.meta.is_group() {turn_order(&chat.meta,app,&mentions,replied_bot)} else {chat.meta.bot_ids.first().and_then(|id|app.bot(id)).into_iter().collect()};
+    let mut message=Message::new(chat_id,Author::You,Body::Text{text:text.into(),attachments:Vec::new(),mentions,reply_to});
+    if let Some(id)=message_id.filter(|id|!id.is_empty()) {message.id=id;}
+    let mut tasks=Vec::new();
+    for bot in &members {
+        if app.this_device_id().as_deref()==Some(bot.runner_id.as_str()) {
+            let mut job=user_turn_job(app,chat_id,&bot.id,&message.id);
+            if chat.meta.is_group() {job.kind="room_turn".into();job.round=1;}
+            if let Some((id,setup))=&setup {if *id==bot.id {job.setup=Some(setup.clone());}}
+            app.check_local_job(&job)?;
+            let lease=app.task_lease(&job)?;
+            tasks.push((job,lease));
+        }
     }
+    let order=app.message_order.lock().unwrap();
+    let mut staged=crate::files::prepare_many(app,files)?;
+    if let Body::Text{attachments,..}=&mut message.body {*attachments=staged.attachments.clone();}
+    let mut outbox=staged.outbox(app,chat_id)?;
+    if let Some(dek)=app.dek() {
+        let op=ChatBlob::Upsert{message:message.clone()};
+        outbox.push(crate::app::OutboxItem{id:uuid::Uuid::new_v4().to_string(),kind:"chat".into(),recipient:None,ciphertext:crate::crypto::encrypt_json(&dek,"chat",&op)?,slot:Some(op.slot()),group:Some(op.group())});
+    }
+    let result=app.store.commit_submission(&message,&tasks,&outbox,|| {
+        staged.finalize(app)?;
+        // A subsequent SQLite commit error may be ambiguous. Retain finalized bytes,
+        // never dispatch; owner recovery interrupts any possibly committed tasks.
+        staged.accept();
+        Ok(())
+    })?;
+    app.publish_committed_message(message.clone(),result,false);
+    app.outbox_notify.notify_waiters();
+    drop(order);
+    #[cfg(feature="runner")]
+    crate::turns::hear_user_message(app,&message);
+    drop(lifecycle); drop(policy);
+    if chat.meta.is_group() {
+        start_room(app.clone(),chat_id.into(),message.id.clone(),members,admission,tasks,incarnation);
+    } else if let Some((job,lease))=tasks.pop() {
+        spawn_admitted_local_job(app.clone(),job,None,admission,lease);
+    } else if let Some(bot)=members.first() {
+        let mut job=user_turn_job(app,chat_id,&bot.id,&message.id);
+        if let Some((_,setup))=setup {job.setup=Some(setup);}
+        start_turn(app,job,admission);
+    }
+    Ok(message)
 }
 
 /// Stops work in a chat on this Device and forwards job-specific cancellations to every other
@@ -173,16 +196,6 @@ fn user_turn_job(app: &Arc<App>, chat_id: &str, bot_id: &str, trigger_message_id
     }
 }
 
-// Called only for local user submissions, never for sync, dispatch or wake jobs.
-fn start_user_turn(app: &Arc<App>, job: Job, admission: Admission) -> anyhow::Result<()> {
-    if app.bot(&job.bot_id).is_some_and(|bot| app.this_device_id().as_deref() == Some(bot.runner_id.as_str())) {
-        let (job, lease) = app.mint_local_intent(job, None)?;
-        spawn_admitted_local_job(app.clone(), job, None, admission, lease);
-    } else {
-        start_turn(app, job, admission);
-    }
-    Ok(())
-}
 
 /// The turn in which a bot hears that a command it left running ended (`shell::wake_job`):
 /// `trigger_message_id` is the command's card.
@@ -329,20 +342,16 @@ fn finish_job(app: &App, job_id: &str) {
 /// Registers a room before it waits for the chat lock. A later message is admitted behind it
 /// and takes over at the next member boundary. `admission` counts the room as running here
 /// until it ends.
-fn start_room(app: Arc<App>, chat_id: String, trigger: String, members: Vec<Bot>, admission: Admission) {
+fn start_room(app: Arc<App>, chat_id: String, trigger: String, members: Vec<Bot>, admission: Admission, tasks: Vec<(Job,crate::local_store::TaskLease)>, incarnation:u64) {
     if members.is_empty() {
         return;
     }
-    let incarnation = match app.plugin_admission(None) {
-        Ok(lifecycle) => lifecycle.get().0,
-        Err(error) => { tracing::error!(%error, "Local room intent admission refused"); return; }
-    };
     let room_id = format!("room-{}", uuid::Uuid::new_v4());
     let cancel = CancellationToken::new();
     begin_job(&app, &room_id, &chat_id, "", None, None, cancel.clone());
     tokio::spawn(async move {
         let _admission = admission;
-        run_room(app, chat_id, trigger, members, room_id, cancel, incarnation).await;
+        run_room(app, chat_id, trigger, members, room_id, cancel, incarnation, tasks).await;
     });
 }
 
@@ -370,6 +379,7 @@ async fn run_room(
     room_id: String,
     cancel: CancellationToken,
     incarnation: u64,
+    mut tasks: Vec<(Job,crate::local_store::TaskLease)>,
 ) {
     let lock = app.chat_lock(&chat_id);
     let _guard = lock.lock().await;
@@ -410,7 +420,12 @@ async fn run_room(
                 setup: None,
                 created_at: now_secs(),
             };
-            let outcome = run_member_turn(&app, job, &cancel, incarnation).await;
+            let outcome = if round==1 && app.this_device_id().as_deref()==Some(bot.runner_id.as_str()) {
+                match tasks.iter().position(|(job,_)|job.bot_id==bot.id) {
+                    Some(index) => {let (job,lease)=tasks.remove(index);run_admitted_job_here(&app,job,cancel.child_token(),lease).await},
+                    None => TurnOutcome::Skipped,
+                }
+            } else {run_member_turn(&app, job, &cancel, incarnation).await};
             if has_newer_user_message(&app, &chat_id, &trigger) {
                 break 'rounds;
             }
@@ -929,6 +944,65 @@ mod tests {
         let group = Chat { meta: ChatMeta { kind: "group".into(), bot_ids: vec!["b2".into(), "gone".into()], ..empty_chat("g").meta }, ..empty_chat("g") };
         assert_eq!(chat_source(&one.0, &group), "group \"Scout, gone\"", "a bot off the roster is named by its id");
         assert_eq!(chat_source(&two.0, &group), "group \"Critic, gone\"");
+    }
+
+    #[tokio::test]
+    async fn local_submission_refusals_preserve_files_transcript_outbox_and_steering() {
+        let scratch=scratch_app(); let app=&scratch.0;
+        crate::identity::create(app,Some("Synthetic Runner".into())).unwrap();
+        let mut runner=bot("bot","Synthetic Bot"); runner.runner_id=app.this_device_id().unwrap();
+        app.state.lock().unwrap().bots.push(runner);
+        let mut chat=empty_chat("chat");chat.meta.bot_ids.push("bot".into());
+        app.state.lock().unwrap().chats.push(chat);
+        let source=app.config.home.join("source");std::fs::write(&source,b"new").unwrap();
+        let destination=crate::files::local_path(app,"att-existing");
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();std::fs::write(&destination,b"old").unwrap();
+        let file=crate::files::OutgoingFile{path:source.to_string_lossy().into(),id:Some("att-existing".into()),name:None,mime:None,width:None,height:None};
+        #[cfg(feature="runner")]
+        let queue=beans_agent::AgentMessageQueue::new(beans_agent::QueueMode::All);
+        #[cfg(feature="runner")]
+        app.register_steering_queue("chat","active",queue.clone());
+        app.set_paused(true);
+        let before=app.store.outbox().unwrap();
+        assert!(send_user_message(app.clone(),"chat","rejected paused",None,vec![file.clone()],Vec::new(),None).is_err());
+        assert!(app.messages("chat").is_empty());
+        assert_eq!(std::fs::read(&destination).unwrap(),b"old");
+        assert_eq!(app.store.outbox().unwrap().iter().map(|i|(&i.id,&i.ciphertext)).collect::<Vec<_>>(),before.iter().map(|i|(&i.id,&i.ciphertext)).collect::<Vec<_>>());
+        #[cfg(feature="runner")]
+        assert!(queue.drain().is_empty());
+        app.state.lock().unwrap().chats[0].meta.kind="group".into();
+        assert!(send_user_message(app.clone(),"chat","rejected paused group",None,vec![file.clone()],Vec::new(),None).is_err());
+        app.state.lock().unwrap().chats[0].meta.kind="dm".into();
+        assert!(greet_new_bot(app,"chat","bot","rejected paused greeting",TemplateSetup::default(),app.update.try_admit().unwrap()).is_err());
+        assert!(app.messages("chat").is_empty());
+        assert_eq!(std::fs::read(&destination).unwrap(),b"old");
+        #[cfg(feature="runner")]
+        assert!(queue.drain().is_empty());
+        app.set_paused(false);
+        app.store.connection.lock().unwrap().execute_batch("CREATE TEMP TRIGGER reject_submission BEFORE INSERT ON local_tasks BEGIN SELECT RAISE(ABORT,'injected task insert failure'); END;").unwrap();
+        for group in [false,true] {
+            app.state.lock().unwrap().chats[0].meta.kind=if group {"group"} else {"dm"}.into();
+            let before=app.store.outbox().unwrap();
+            assert!(send_user_message(app.clone(),"chat","rejected storage",None,vec![file.clone()],Vec::new(),None).is_err());
+            assert!(app.messages("chat").is_empty());
+            assert_eq!(std::fs::read(&destination).unwrap(),b"old");
+            assert_eq!(app.store.outbox().unwrap().iter().map(|i|(&i.id,&i.ciphertext)).collect::<Vec<_>>(),before.iter().map(|i|(&i.id,&i.ciphertext)).collect::<Vec<_>>());
+            #[cfg(feature="runner")]
+            assert!(queue.drain().is_empty());
+        }
+        app.state.lock().unwrap().chats[0].meta.kind="dm".into();
+        let setup=TemplateSetup{template:"Synthetic".into(),..TemplateSetup::default()};
+        assert!(greet_new_bot(app,"chat","bot","rejected greeting",setup,app.update.try_admit().unwrap()).is_err());
+        assert!(app.messages("chat").is_empty());
+        #[cfg(feature="runner")]
+        assert!(queue.drain().is_empty());
+        app.store.connection.lock().unwrap().execute_batch("DROP TRIGGER reject_submission;").unwrap();
+        let broken=crate::files::local_path(app,"att-blocked");
+        std::fs::create_dir_all(&broken).unwrap();std::fs::write(broken.join("child"),b"keep").unwrap();
+        let file=crate::files::OutgoingFile{id:Some("att-blocked".into()),..file};
+        assert!(send_user_message(app.clone(),"chat","rejected finalization",None,vec![file],Vec::new(),None).is_err());
+        assert!(app.messages("chat").is_empty());
+        assert_eq!(std::fs::read(broken.join("child")).unwrap(),b"keep");
     }
 
     #[test]

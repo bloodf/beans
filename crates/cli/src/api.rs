@@ -285,13 +285,16 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let (bot, chat) = app.create_bot_with_dm_prepared(bot, opt_string(&params, "chat_id"), |bot| {
                 // The profile, Runner and ids validate before admission; a refusal stores no avatar.
                 if template.is_some() {
+                    anyhow::ensure!(!app.is_paused(), "Account paused. Resume before creating a template bot.");
+                    anyhow::ensure!(app.this_device_id().as_deref()!=Some(bot.runner_id.as_str()) || app.is_execution_owner(), "Local template greeting requires execution ownership");
                     admission = Some(app.update.try_admit().ok_or_else(|| anyhow::anyhow!(crate::update_control::UPDATING))?);
                 }
                 bot.avatar = store_avatar(app, avatar).map_err(anyhow::Error::msg)?.flatten();
                 Ok(())
             }).map_err(|e| e.to_string())?;
             if let (Some((template, plugins)), Some(admission)) = (template, admission) {
-                crate::marketplace::welcome(app, &bot, &chat.meta.id, &template, plugins, opt_string(&params, "greeting"), admission);
+                crate::marketplace::welcome(app, &bot, &chat.meta.id, &template, plugins, opt_string(&params, "greeting"), admission)
+                    .map_err(|error| format!("Bot {} and chat {} were created, but its greeting was not accepted: {error}. Send a new message in that chat; do not retry bot creation.", bot.id, chat.meta.id))?;
             }
             Ok(json!({ "bot": bot, "chat_id": chat.meta.id }))
         }

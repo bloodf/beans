@@ -43,11 +43,9 @@ pub async fn ask_within(app: &Arc<App>, runner_id: &str, verb: &str, body: Value
         body,
         created_at: now_secs(),
     };
-    if matches!(verb, "providers.custom.preview" | "providers.custom.save" | "providers.custom.refresh") {
-        let machine = app.machine_file().ok_or("Pair this Device first")?.machine().map_err(|_| "Device signing key unavailable")?;
-        let payload = provider_request_bytes(&request, runner_id)?;
-        request.body = json!({"payload": request.body, "signature": machine.sign(&payload)});
-    }
+    let machine = app.machine_file().ok_or("Pair this Device first")?.machine().map_err(|_| "Device signing key unavailable")?;
+    let payload = request_bytes(&request, runner_id, &request.body)?;
+    request.body = json!({"payload": request.body, "signature": machine.sign(&payload)});
     let ciphertext = crate::crypto::seal_json(&runner.box_pubkey, &request).map_err(|e| e.to_string())?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.pending_responses.lock().unwrap().insert(request.id.clone(), tx);
@@ -99,28 +97,35 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String, running: crate::u
 /// card a bot here is waiting on; the bash verbs type into, stop, or background a command here;
 /// Send now has a turn here read a message it holds. The separate self_update verbs
 /// remain fail-closed in Beans; update.status/prepare/cancel belong to local drain control.
-fn provider_request_bytes(request: &Request, target: &str) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(&("beans-provider-request-v1", &request.id, &request.verb, &request.requested_by, target, request.created_at, &request.body)).map_err(|_| "Invalid provider request".into())
+fn request_bytes(request: &Request, target: &str, body: &Value) -> Result<Vec<u8>, String> {
+    // Keep the existing provider wire contract; other verbs use a separate domain.
+    let domain = if matches!(request.verb.as_str(), "providers.custom.preview" | "providers.custom.save" | "providers.custom.refresh") {
+        "beans-provider-request-v1"
+    } else {
+        "beans-request-v1"
+    };
+    serde_json::to_vec(&(domain, &request.id, &request.verb, &request.requested_by, target, request.created_at, body)).map_err(|_| "Invalid signed request".into())
 }
 
 async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
-    let body = &request.body;
+    // Sealed boxes hide the payload but do not authenticate its claimed sender.
+    // Check current membership and signing authority before dispatching any verb.
+    let paired = app.state.lock().unwrap().listed_machines.contains_key(&request.requested_by);
+    if !paired { return Err("Request requires a paired Device".into()); }
+    let target = app.this_device_id().ok_or("Pair a Runner first")?;
+    let body = request.body.get("payload").ok_or("Unsigned request")?;
+    let signature = request.body["signature"].as_str().ok_or("Unsigned request")?;
+    let key = crate::keys::verifying_key(&request.requested_by).map_err(|_| "Invalid requester signing key")?;
+    let bytes = crate::keys::unb64(signature).map_err(|_| "Invalid request signature")?;
+    let signature = ed25519_dalek::Signature::from_slice(&bytes).map_err(|_| "Invalid request signature")?;
+    key.verify_strict(&request_bytes(request, &target, body)?, &signature).map_err(|_| "Invalid request signature")?;
     match request.verb.as_str() {
         #[cfg(feature = "provider-auth")]
         "providers.custom.preview" | "providers.custom.save" | "providers.custom.refresh" => {
             let requester = app.device(&request.requested_by).filter(|device| !device.box_pubkey.is_empty()).ok_or("Provider request requires a paired Device")?;
-            let target = app.this_device_id().ok_or("Pair a Runner first")?;
-            let payload = body.get("payload").ok_or("Unsigned provider request")?;
-            let signature = body["signature"].as_str().ok_or("Unsigned provider request")?;
-            let unsigned = Request { body: payload.clone(), ..request.clone() };
-            let key = crate::keys::verifying_key(&requester.id).map_err(|_| "Invalid requester signing key")?;
-            let bytes = crate::keys::unb64(signature).map_err(|_| "Invalid provider signature")?;
-            let signature = ed25519_dalek::Signature::from_slice(&bytes).map_err(|_| "Invalid provider signature")?;
-            key.verify_strict(&provider_request_bytes(&unsigned, &target)?, &signature).map_err(|_| "Invalid provider signature")?;
-            crate::provider_auth::serve_guided_as(app, &request.verb, payload, Some((&requester.id, &requester.box_pubkey))).await
+            crate::provider_auth::serve_guided_as(app, &request.verb, body, Some((&requester.id, &requester.box_pubkey))).await
         }
         verb if crate::memory_service::api::is_setup_method(verb) => {
-            if app.device(&request.requested_by).is_none() { return Err("requester_unknown".into()); }
             crate::memory_service::api::serve_as(app,verb,body.clone(),&request.requested_by).await
         },
         verb if verb.starts_with("memory.service.") || verb.starts_with("memory.operations.") =>
@@ -188,6 +193,7 @@ mod custom_provider_tests {
         let phone = crate::keys::Machine::generate();
         let unrelated = crate::keys::Machine::generate();
         app.state.lock().unwrap().devices.push(crate::model::Device { id: phone.pubkey(), name: "Fixture phone".into(), os: "ios".into(), box_pubkey: phone.box_pubkey(), ..Default::default() });
+        app.state.lock().unwrap().listed_machines.insert(phone.pubkey(), 1);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let root = format!("http://{}/v1", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
@@ -204,17 +210,21 @@ mod custom_provider_tests {
         assert!(answer(&app, &request).await.unwrap_err().contains("paired Device"));
         request.requested_by = phone.pubkey();
         let unsigned = request.clone();
-        request.body = json!({"payload": unsigned.body, "signature": unrelated.sign(&provider_request_bytes(&unsigned, &runner).unwrap())});
+        let signature = unrelated.sign(&request_bytes(&unsigned, &runner, &unsigned.body).unwrap());
+        request.body = json!({"payload": unsigned.body, "signature": signature});
         let runner_keys = app.machine_file().unwrap().machine().unwrap();
         let forged = crate::crypto::seal_json(&runner_keys.box_pubkey(), &request).unwrap();
         let decoded: Request = crate::crypto::unseal_json(&runner_keys.box_secret, &forged).unwrap();
-        assert!(answer(&app, &decoded).await.unwrap_err().contains("Invalid provider signature"));
-        assert!(answer(&app, &request).await.unwrap_err().contains("Invalid provider signature"));
-        request.body = json!({"payload": unsigned.body, "signature": phone.sign(&provider_request_bytes(&unsigned, &runner).unwrap())});
+        assert!(answer(&app, &decoded).await.unwrap_err().contains("Invalid request signature"));
+        assert!(answer(&app, &request).await.unwrap_err().contains("Invalid request signature"));
+        let signature = phone.sign(&request_bytes(&unsigned, &runner, &unsigned.body).unwrap());
+        request.body = json!({"payload": unsigned.body, "signature": signature});
         app.state.lock().unwrap().devices.retain(|device| device.id != phone.pubkey());
+        app.state.lock().unwrap().listed_machines.remove(&phone.pubkey());
         assert!(answer(&app, &request).await.unwrap_err().contains("paired Device"));
         assert!(app.credentials.lock().unwrap().custom.is_empty());
         app.state.lock().unwrap().devices.push(crate::model::Device { id: phone.pubkey(), name: "Fixture phone".into(), os: "ios".into(), box_pubkey: phone.box_pubkey(), ..Default::default() });
+        app.state.lock().unwrap().listed_machines.insert(phone.pubkey(), 1);
         let result = answer(&app, &request).await.unwrap();
         assert_eq!(result["models"][0]["id"], "runner-local-alias");
         assert!(server.join().unwrap().starts_with("GET /v1/models "));

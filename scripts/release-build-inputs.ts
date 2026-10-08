@@ -1,6 +1,6 @@
 import { X509Certificate } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 
@@ -180,6 +180,17 @@ export function inspectMobileBinary(path: string, profile: MobileReleaseProfile,
       const value = JSON.parse(decoded.stdout.toString());
       if (value.CFBundleIdentifier !== identifier || value.CFBundleShortVersionString !== version || value.CFBundleVersion !== number) throw new Error("IPA native identity differs from release");
     }
+    // Integrity is necessary, not Apple distribution authorization. Keep the
+    // publication gate closed until authoritative provisioning is supported.
+    if (process.platform !== "darwin") throw new Error("IPA signature integrity inspection requires macOS");
+    const temporary = mkdtempSync(join(tmpdir(), "beans-ipa-integrity-"));
+    try {
+      // The archive has already passed bounded path/type/CRC inspection.
+      inspect(["unzip", "-qq", path, "-d", temporary]);
+      for (const member of [extensions[0], apps[0]]) {
+        inspect(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", "--deep", join(temporary, member.slice(0, -"/Info.plist".length))]);
+      }
+    } finally { rmSync(temporary, { recursive: true, force: true }); }
   }
   if (profile === "testflight") throw new Error("IPA cryptographic trust verification unsupported; all-platform publication blocked");
 }

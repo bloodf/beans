@@ -97,6 +97,11 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String, running: crate::u
 async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     let body = &request.body;
     match request.verb.as_str() {
+        #[cfg(feature = "provider-auth")]
+        "providers.custom.preview" | "providers.custom.save" | "providers.custom.refresh" => {
+            if app.device(&request.requested_by).filter(|device| !device.box_pubkey.is_empty()).is_none() { return Err("Provider request requires a paired Device".into()); }
+            crate::provider_auth::serve_guided(app, &request.verb, body).await
+        }
         verb if crate::memory_service::api::is_setup_method(verb) => {
             if app.device(&request.requested_by).is_none() { return Err("requester_unknown".into()); }
             crate::memory_service::api::serve_as(app,verb,body.clone(),&request.requested_by).await
@@ -150,4 +155,43 @@ fn local_bot(app: &Arc<App>, bot_id: &str) -> Result<crate::model::Bot, String> 
         return Err(format!("{} runs on {runner}, not here.", bot.name));
     }
     Ok(bot)
+}
+
+#[cfg(all(test, feature = "provider-auth"))]
+mod custom_provider_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn phone_request_executes_catalog_http_only_on_selected_runner() {
+        use std::io::{Read, Write};
+        let home = std::env::temp_dir().join(format!("beans-guided-origin-{}", uuid::Uuid::new_v4()));
+        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        crate::identity::create(&app, Some("Fixture Runner".into())).unwrap();
+        let runner = app.this_device_id().unwrap();
+        app.state.lock().unwrap().devices.push(crate::model::Device { id: "fixture-phone".into(), name: "Fixture phone".into(), os: "ios".into(), box_pubkey: "synthetic-known-key".into(), ..Default::default() });
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let root = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut socket, peer) = listener.accept().unwrap();
+            assert!(peer.ip().is_loopback());
+            let mut bytes = [0; 4096];
+            let size = socket.read(&mut bytes).unwrap();
+            let request = String::from_utf8_lossy(&bytes[..size]).into_owned();
+            let body = r#"{"data":[{"id":"runner-local-alias"}]}"#;
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            request
+        });
+        let mut request = Request { id: "fixture-preview".into(), verb: "providers.custom.preview".into(), requested_by: "foreign".into(), body: json!({"runner_id":runner,"api":"chat-completions","base_url":root}), created_at: now_secs() };
+        assert!(answer(&app, &request).await.unwrap_err().contains("paired Device"));
+        request.requested_by = "fixture-phone".into();
+        request.body["runner_id"] = json!("fixture-phone");
+        assert!(answer(&app, &request).await.unwrap_err().contains("selected Runner"));
+        request.body["runner_id"] = json!(runner);
+        let result = answer(&app, &request).await.unwrap();
+        assert_eq!(result["models"][0]["id"], "runner-local-alias");
+        assert!(server.join().unwrap().starts_with("GET /v1/models "));
+        assert!(app.credentials.lock().unwrap().custom.is_empty());
+        drop(app);
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }

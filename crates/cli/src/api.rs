@@ -828,11 +828,14 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         // The chat models a custom provider's server lists, for the model picker.
         #[cfg(feature = "provider-auth")]
         "providers.refresh" => {
+            if params.get("runner_id").is_some() { return provider_auth::guided_request(app, "providers.custom.refresh", params).await; }
             let updated = provider_auth::refresh_custom_models(app).await?;
             Ok(json!({ "updated": updated }))
         }
         #[cfg(feature = "provider-auth")]
         "providers.list_models" => {
+            if params.get("runner_id").is_some() { return provider_auth::guided_request(app, "providers.custom.preview", params).await; }
+            provider_auth::capability_input(&params)?;
             let str_param = |key: &str| params[key].as_str().unwrap_or_default().to_string();
             let listed = provider_auth::list_custom_models(app, &str_param("name"), &str_param("api"), &str_param("base_url"), &str_param("api_key"), opt_string(&params, "integration").as_deref()).await?;
             Ok(json!({ "listed": listed.is_some(), "models": listed.unwrap_or_default() }))
@@ -840,6 +843,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         // Adds a custom provider, or saves one with `kind`, once its server answers.
         #[cfg(feature = "provider-auth")]
         "providers.connect_custom" => {
+            if params.get("runner_id").is_some() { return provider_auth::guided_request(app, "providers.custom.save", params).await; }
             let input = provider_auth::CustomInput {
                 kind: opt_string(&params, "kind"),
                 integration: opt_string(&params, "integration"),
@@ -848,6 +852,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 base_url: params["base_url"].as_str().unwrap_or_default().to_string(),
                 api_key: params["api_key"].as_str().unwrap_or_default().to_string(),
                 models: params["models"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(),
+                capabilities: provider_auth::capability_input(&params)?,
             };
             let kind = provider_auth::connect_custom(app, input).await?;
             Ok(json!({ "kind": kind, "providers": app.credentials.lock().unwrap().statuses() }))

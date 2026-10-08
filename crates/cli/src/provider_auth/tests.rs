@@ -49,7 +49,7 @@ fn kinds_are_slugs_of_the_name() {
     assert_eq!(custom_kind(&credentials, "OpenRouter"), "custom:openrouter");
     assert_eq!(custom_kind(&credentials, "  My Mac Studio (LM Studio) "), "custom:my-mac-studio-lm-studio");
     assert_eq!(custom_kind(&credentials, "本地模型"), "custom:provider");
-    let provider = CustomProvider { name: "OpenRouter".into(), api: CustomApi::ChatCompletions, base_url: String::new(), api_key: String::new(), models: Vec::new(), created_at: 0, integration: None };
+    let provider = CustomProvider { name: "OpenRouter".into(), api: CustomApi::ChatCompletions, base_url: String::new(), api_key: String::new(), models: Vec::new(), created_at: 0, integration: None, capabilities: None };
     credentials.custom.insert("custom:openrouter".into(), provider);
     assert_eq!(custom_kind(&credentials, "openrouter!"), "custom:openrouter-2");
 }
@@ -521,4 +521,51 @@ async fn compatible_discovery_bounds_total_bytes_across_pages() {
     let (root,server) = serve(vec![("200 OK",first),("200 OK",second)]);
     assert!(list_custom_models(&scratch.0,"Compatible","messages",&root,"",None).await.unwrap_err().contains("too large"));
     server.join().unwrap();
+}
+
+#[tokio::test]
+async fn guided_runner_save_refresh_preserves_declarations_and_origin() {
+    let scratch = scratch_app();
+    crate::identity::create(&scratch.0, Some("Selected fixture Runner".into())).unwrap();
+    let runner = scratch.0.this_device_id().unwrap();
+    let sparse = json!({"data":[{"id":"fixture-alias"}]}).to_string();
+    let conflict = json!({"data":[{"id":"fixture-alias","context_window":1024,"images":false,"tools":true}]}).to_string();
+    let (root, server) = serve(vec![("200 OK", sparse.clone()), ("200 OK", sparse), ("200 OK", conflict)]);
+    let mut body = json!({"runner_id":runner,"name":"Fixture local","api":"chat-completions","base_url":format!("{root}/v1"),"api_key":"","models":[],"capabilities":{"context_window":8192,"images":true,"tools":false}});
+    let preview = guided_request(&scratch.0, "providers.custom.preview", body.clone()).await.unwrap();
+    assert_eq!(preview["models"][0]["id"], "fixture-alias");
+    let saved = guided_request(&scratch.0, "providers.custom.save", body.clone()).await.unwrap();
+    let kind = saved["kind"].as_str().unwrap();
+    body["kind"] = json!(kind);
+    guided_request(&scratch.0, "providers.custom.refresh", body).await.unwrap();
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests.iter().all(|request| request.starts_with("GET /v1/models ") && !request.to_ascii_lowercase().contains("authorization:")));
+    let credentials = Credentials::load(&scratch.0.config);
+    let provider = &credentials.custom[kind];
+    assert_eq!(provider.models[0].images, Some(false));
+    let effective = provider.effective_capabilities(provider.models.first());
+    assert_eq!(effective.context_window.unwrap().get(), 8192);
+    assert_eq!(effective.images, Some(true));
+    assert_eq!(effective.tools, Some(false));
+    let mut paired = Credentials::default();
+    paired.merge(&credentials);
+    assert_eq!(paired.custom[kind], *provider);
+    let mut cleared = provider.clone();
+    cleared.capabilities = None;
+    assert_eq!(cleared.effective_capabilities(cleared.models.first()).images, Some(false));
+}
+
+#[tokio::test]
+async fn guided_invalid_runner_and_capabilities_fail_before_http() {
+    let scratch = scratch_app();
+    let before = scratch.0.credentials.lock().unwrap().changed_at.clone();
+    for capabilities in [json!({"context_window":0}), json!({"context_window":1.5}), json!({"images":"yes"}), json!({"tools":1})] {
+        let error = guided_request(&scratch.0, "providers.custom.preview", json!({"runner_id":"foreign","base_url":"http://127.0.0.1:9/v1","capabilities":capabilities})).await.unwrap_err();
+        assert!(error.contains("Capabilities"));
+    }
+    assert!(guided_request(&scratch.0, "providers.custom.preview", json!({"runner_id":"foreign","base_url":"http://127.0.0.1:9/v1"})).await.unwrap_err().contains("paired Runner"));
+    assert_eq!(scratch.0.credentials.lock().unwrap().changed_at, before);
+    assert_eq!(capability_input(&json!({})).unwrap(), None);
+    assert_eq!(capability_input(&json!({"capabilities":null})).unwrap(), Some(None));
 }

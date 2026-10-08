@@ -4,7 +4,7 @@
 // use, adding any the server does not list. The CLI checks the server again before saving, and the
 // provider reaches every paired Device encrypted with the account key.
 
-import { createSignal, flush, For, onCleanup, onSettled, Show } from "solid-js";
+import { createSignal, flush, For, onCleanup, Show } from "solid-js";
 import { L } from "../../l10n";
 import * as Format from "../../model/format";
 import {
@@ -105,10 +105,18 @@ function CustomProviderSheet(props: {
   const [api, setAPI] = createSignal<CustomAPI>(existing?.api ?? preset?.api ?? "chat-completions");
   const [baseURL, setBaseURL] = createSignal(initialBaseURL);
   const [key, setKey] = createSignal(props.apiKey);
+  const [runnerID, setRunnerID] = createSignal(store.thisDevice?.id ?? store.runners.find((runner) => runner.status === "online")?.id ?? "");
+  const [window, setWindow] = createSignal(existing?.capabilities?.context_window?.toString() ?? "");
+  const [images, setImages] = createSignal(existing?.capabilities?.images == null ? "unknown" : String(existing.capabilities.images));
+  const [tools, setTools] = createSignal(existing?.capabilities?.tools == null ? "unknown" : String(existing.capabilities.tools));
+  const capabilities = () => ({ context_window: window().trim() ? Number(window()) : null, images: images() === "unknown" ? null : images() === "true", tools: tools() === "unknown" ? null : tools() === "true" });
+  const validWindow = () => !window().trim() || (/^[0-9]+$/.test(window()) && Number.isSafeInteger(Number(window())) && Number(window()) > 0);
+  const runner = () => store.runners.find((device) => device.id === runnerID());
+  const runnerReady = () => !!runner() && (runner()!.isThisDevice || runner()!.status === "online");
   // A provider being edited starts with its saved models, picked, the first the default.
   const [checklist, setChecklist] = createSignal(savedChecklist(existing?.models));
   const [search, setSearch] = createSignal("");
-  const [listing, setListing] = createSignal<Listing>(isUsableBaseURL(initialBaseURL) ? { kind: "loading" } : { kind: "needsURL" });
+  const [listing, setListing] = createSignal<Listing>({ kind: "needsURL" });
   const [busy, setBusy] = createSignal(false);
   const [spinning, setSpinning] = createSignal(false);
   const [status, setStatus] = createSignal<{ text: string; color: string } | null>(null);
@@ -122,7 +130,7 @@ function CustomProviderSheet(props: {
   const adding = () => addCandidate(search(), checklist().models);
   const rows = () => filterModels(checklist().models, search());
   const isEmpty = () => adding() === undefined && rows().length === 0;
-  const canConfirm = () => !busy() && savedName() !== "" && isUsableBaseURL(baseURL()) && checklist().selected.size > 0;
+  const canConfirm = () => !busy() && runnerReady() && validWindow() && ["listed", "unlisted"].includes(listing().kind) && savedName() !== "" && isUsableBaseURL(baseURL()) && checklist().selected.size > 0;
 
   // MARK: The server's models
 
@@ -131,18 +139,20 @@ function CustomProviderSheet(props: {
 
   /** Asks the server for its models once the fields stop changing; a newer request replaces an
    * older one's answer. */
-  const loadModels = (delay: number) => {
+  const loadModels = (delay: number, explicit = false) => {
     // The field that changed was just set, and reads its new value once the update lands.
     flush();
     clearTimeout(timer);
     const current = ++generation;
+    if (!explicit) { setListing({ kind: "needsURL" }); return; }
+    if (!runnerReady() || !validWindow()) return;
     const root = baseURL().trim();
     if (!isUsableBaseURL(root)) {
       setListing({ kind: "needsURL" });
       return;
     }
     setListing({ kind: "loading" });
-    const request = { integration, name: savedName(), api: api(), baseURL: root, apiKey: key() };
+    const request = { integration, name: savedName(), api: api(), baseURL: root, apiKey: key(), runnerID: runnerID(), capabilities: capabilities() };
     timer = setTimeout(async () => {
       try {
         const listed = await store.listCustomModels(request);
@@ -163,10 +173,6 @@ function CustomProviderSheet(props: {
     }, delay);
   };
 
-  // A preset's or a saved provider's server is asked as the sheet opens.
-  onSettled(() => {
-    if (isUsableBaseURL(initialBaseURL)) queueMicrotask(() => loadModels(0));
-  });
   onCleanup(() => {
     closed = true;
     clearTimeout(timer);
@@ -178,7 +184,7 @@ function CustomProviderSheet(props: {
     const state = listing();
     switch (state.kind) {
       case "needsURL":
-        return L("Enter the base URL to load the server’s models.");
+        return L("Enter the exact base URL, choose a Runner, then Check Connection.");
       case "loading":
         return L("Loading models…");
       case "listed":
@@ -235,7 +241,7 @@ function CustomProviderSheet(props: {
     const saved = savedName();
     begin(L("Checking %@…", saved));
     try {
-      const savedKind = await store.saveCustomProvider({ kind, integration, name: saved, api: api(), baseURL: baseURL(), apiKey: key(), models: orderedModelIDs(checklist()) });
+      const savedKind = await store.saveCustomProvider({ kind, integration, name: saved, api: api(), baseURL: baseURL(), apiKey: key(), models: orderedModelIDs(checklist()), runnerID: runnerID(), capabilities: capabilities() });
       if (closed) return;
       setSpinning(false);
       setStatus({ text: L("%@ configured.", saved), color: "var(--green)" });
@@ -283,6 +289,13 @@ function CustomProviderSheet(props: {
       }
     >
       <div class="custom-provider-form">
+        <span class="custom-form-label">{L("Check from Runner")}</span>
+        <PopUpButton label={L("Check from Runner")} options={store.runners.map((device) => ({ value: device.id, label: device.name }))} value={runnerID()} disabled={busy()} onChange={(value) => { setRunnerID(value); loadModels(0); }} />
+        <span /> <div class="field-note">{L("Loopback belongs to the selected Runner. For another host, use its reachable address and check bind address, firewall and proxy bypass. Do not expose an unauthenticated server publicly.")}</div>
+        <span class="custom-form-label">{L("Context window (tokens)")}</span>
+        <TextField label={L("Context window (tokens)")} value={window()} disabled={busy()} onInput={(value) => { setWindow(value); loadModels(0); }} />
+        <For each={[{ label: L("Image support"), value: images, set: setImages }, { label: L("Tool support"), value: tools, set: setTools }]}>{(choice) => <><span class="custom-form-label">{choice.label}</span><PopUpButton label={choice.label} value={choice.value()} disabled={busy()} options={[{ value: "unknown", label: L("Unknown — use discovery") }, { value: "true", label: L("Yes") }, { value: "false", label: L("No") }]} onChange={(value) => { choice.set(value); loadModels(0); }} /></>}</For>
+        <span /> <div class="field-note">{L("Unknown images stay text-only. Unknown tools are unverified. Tools No cannot run Beans tool-bearing bot turns; tool-free inference remains available.")}</div>
         <Show when={customize()}>
         <span class="custom-form-label">{L("Name")}</span>
         <div class="form-control">
@@ -317,6 +330,7 @@ function CustomProviderSheet(props: {
             }}
           />
         </div>
+        <span /> <div class="field-note">{L("Port suggestions only: 11434 or 1234. Enter your server’s exact URL; Beans never scans ports.")}</div>
         <span />
         <div class="field-note custom-endpoint-note">{customEndpointNote(api(), baseURL())}<br />{L("Model listing checks reachability, not inference access. Each Runner must reach this URL.")}</div>
         <span class="custom-form-label">{L("API key")}</span>
@@ -334,6 +348,13 @@ function CustomProviderSheet(props: {
           />
         </div>
       </div>
+      <Button disabled={busy() || !runnerReady() || !validWindow() || !isUsableBaseURL(baseURL())} onClick={() => loadModels(0, true)}>{L("Check Connection")}</Button>
+      <div class="field-note">{runner() ? L("Requests run on %@. Listing verifies connectivity/catalog only, not inference.", runner()!.name) : L("Pair an online desktop Runner before checking.")}</div>
+      <Show when={kind}><Button disabled={busy() || !runnerReady()} onClick={async () => {
+        begin(L("Loading models…"));
+        try { const updated = await store.refreshProviderModels(runnerID(), kind); if (!closed) { setBusy(false); setSpinning(false); setStatus({ text: updated ? L("Models updated") : L("Models unchanged"), color: "var(--label-2)" }); } }
+        catch (error) { if (!closed) fail(error); }
+      }}>{L("Refresh Models")}</Button></Show>
       <Show when={simpleSetup}><Button onClick={() => setCustomize(!customize())}>{L("Advanced")}</Button></Show>
       <Show when={customize()}>
       <div class="custom-models">

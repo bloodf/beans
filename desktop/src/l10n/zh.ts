@@ -1,6 +1,22 @@
 // Simplified Chinese. The key is the English text passed to L(); `bun run l10n` checks this table.
 
 export const zh: Record<string, string> = {
+  "Models updated": "模型已更新",
+  "Models unchanged": "模型未变化",
+  "Refresh Models": "刷新模型",
+  "Local server": "本地服务器",
+  "Check from Runner": "执行检查的 Runner",
+  "Check Connection": "检查连接",
+  "Context window (tokens)": "上下文窗口（词元）",
+  "Image support": "图像支持",
+  "Tool support": "工具支持",
+  "Unknown — use discovery": "未知 — 使用发现结果",
+  "Enter the exact base URL, choose a Runner, then Check Connection.": "输入准确的基础 URL，选择 Runner，然后检查连接。",
+  "Port suggestions only: 11434 or 1234. Enter your server’s exact URL; Beans never scans ports.": "端口仅供参考：11434 或 1234。请输入服务器的准确 URL；Beans 不会扫描端口。",
+  "Pair an online desktop Runner before checking.": "检查前请配对一台在线的桌面 Runner。",
+  "Requests run on %@. Listing verifies connectivity/catalog only, not inference.": "请求在 %@ 上执行。模型列表只验证连接和目录，不验证推理。",
+  "Loopback belongs to the selected Runner. For another host, use its reachable address and check bind address, firewall and proxy bypass. Do not expose an unauthenticated server publicly.": "回环地址属于所选 Runner。其他主机请使用可访问的地址，并检查绑定地址、防火墙和代理绕过配置。不要将无身份验证的服务器暴露到公网。",
+  "Unknown images stay text-only. Unknown tools are unverified. Tools No cannot run Beans tool-bearing bot turns; tool-free inference remains available.": "图像支持未知时仅发送文本。工具支持未知时尚未验证。工具选择否时无法执行 Beans 带工具的智能体轮次；仍可执行无工具推理。",
   " · @ to mention": " · 输入 @ 可提及智能体",
   " · jobs wait on the relay": " · 任务在中继上等待",
   ", ": "、",

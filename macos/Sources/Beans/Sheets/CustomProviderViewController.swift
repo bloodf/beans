@@ -34,6 +34,17 @@ final class CustomProviderViewController: SheetViewController {
     private let baseURLField = NSTextField()
     private let endpointNote = Build.label("", font: Theme.Font.caption, color: .tertiaryLabelColor, lines: 0)
     private let keyField = APIKeyField()
+    private let runnerPopup = NSPopUpButton()
+    private let contextField = NSTextField()
+    private let imagesPopup = NSPopUpButton()
+    private let toolsPopup = NSPopUpButton()
+    private let checkButton = NSButton()
+    private var runners: [Device] = []
+    private var runnerID: String? { runners.indices.contains(runnerPopup.indexOfSelectedItem) ? runners[runnerPopup.indexOfSelectedItem].id : nil }
+    private var capabilities: CustomCapabilities {
+        CustomCapabilities(contextWindow: UInt64(contextField.stringValue), images: imagesPopup.indexOfSelectedItem == 0 ? nil : imagesPopup.indexOfSelectedItem == 1, tools: toolsPopup.indexOfSelectedItem == 0 ? nil : toolsPopup.indexOfSelectedItem == 1)
+    }
+    private var validWindow: Bool { contextField.stringValue.isEmpty || (UInt64(contextField.stringValue).map { $0 > 0 } ?? false) }
 
     private let searchField = NSSearchField()
     private let table = NSTableView()
@@ -109,6 +120,10 @@ final class CustomProviderViewController: SheetViewController {
         apiPopup.selectItem(at: CustomAPI.allCases.firstIndex(of: api) ?? 0)
         keyField.stringValue = apiKey
         keyField.placeholderString = preset?.keyPlaceholder ?? L("Optional for a server on your network")
+        contextField.stringValue = existing?.capabilities?.contextWindow.map(String.init) ?? ""
+        for popup in [imagesPopup, toolsPopup] { popup.addItems(withTitles: [L("Unknown — use discovery"), L("Yes"), L("No")]) }
+        imagesPopup.selectItem(at: existing?.capabilities?.images.map { $0 ? 1 : 2 } ?? 0)
+        toolsPopup.selectItem(at: existing?.capabilities?.tools.map { $0 ? 1 : 2 } ?? 0)
     }
 
     @available(*, unavailable)
@@ -178,6 +193,23 @@ final class CustomProviderViewController: SheetViewController {
         form.column(at: 0).width = ceil(labels.map(\.intrinsicContentSize.width).max() ?? 0)
         form.column(at: 1).xPlacement = .fill
         contentStack.addArrangedSubview(form)
+        runners = store.runners
+        runnerPopup.addItems(withTitles: runners.map(\.name))
+        runnerPopup.selectItem(at: runners.firstIndex(where: \.isThisDevice) ?? runners.firstIndex(where: { $0.status == .online }) ?? -1)
+        for popup in [runnerPopup, imagesPopup, toolsPopup] { popup.target = self; popup.action = #selector(setupChanged) }
+        contextField.delegate = self
+        for (label, control) in [(L("Check from Runner"), runnerPopup as NSView), (L("Context window (tokens)"), contextField), (L("Image support"), imagesPopup), (L("Tool support"), toolsPopup)] {
+            form.addRow(with: [formLabel(label), control])
+            control.setAccessibilityLabel(label)
+        }
+        checkButton.title = L("Check Connection")
+        checkButton.target = self
+        checkButton.action = #selector(checkConnection)
+        contentStack.addArrangedSubview(checkButton)
+        if kind != nil { contentStack.addArrangedSubview(NSButton(title: L("Refresh Models"), target: self, action: #selector(refreshModels))) }
+        contentStack.addArrangedSubview(Build.label(L("Port suggestions only: 11434 or 1234. Enter your server’s exact URL; Beans never scans ports."), font: Theme.Font.caption, color: .secondaryLabelColor, lines: 0))
+        contentStack.addArrangedSubview(Build.label(L("Loopback belongs to the selected Runner. For another host, use its reachable address and check bind address, firewall and proxy bypass. Do not expose an unauthenticated server publicly."), font: Theme.Font.caption, color: .secondaryLabelColor, lines: 0))
+        contentStack.addArrangedSubview(Build.label(L("Unknown images stay text-only. Unknown tools are unverified. Tools No cannot run Beans tool-bearing bot turns; tool-free inference remains available."), font: Theme.Font.caption, color: .secondaryLabelColor, lines: 0))
         form.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
 
         let models = modelsSection()
@@ -303,10 +335,13 @@ final class CustomProviderViewController: SheetViewController {
 
     /// Asks the server for its models once the fields stop changing; a newer request replaces
     /// an older one's answer.
-    private func loadModels(after delay: Double) {
+    private func loadModels(after delay: Double, explicit: Bool = false) {
         fetch?.cancel()
         fetchGeneration += 1
         let generation = fetchGeneration
+        guard explicit else { show(.needsURL); updateControls(); return }
+        guard let runnerID, validWindow else { return }
+        let capabilities = capabilities
         let root = baseURL
         guard root.hasPrefix("http://") || root.hasPrefix("https://"), URL(string: root)?.host?.isEmpty == false else {
             show(.needsURL)
@@ -318,7 +353,7 @@ final class CustomProviderViewController: SheetViewController {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             do {
-                let listed = try await AppStore.shared.listCustomModels(name: name, api: api, baseURL: root, apiKey: key, integration: self?.integration)
+                let listed = try await AppStore.shared.listCustomModels(name: name, api: api, baseURL: root, apiKey: key, integration: self?.integration, runnerID: runnerID, capabilities: capabilities)
                 guard let self, generation == self.fetchGeneration else { return }
                 self.take(listed)
             } catch {
@@ -351,6 +386,7 @@ final class CustomProviderViewController: SheetViewController {
         listing = state
         if state == .loading { listingSpinner.startAnimation(nil) } else { listingSpinner.stopAnimation(nil) }
         updateOverlay()
+        updateControls()
     }
 
     private func reloadEntries() {
@@ -443,6 +479,25 @@ final class CustomProviderViewController: SheetViewController {
     }
 
     // MARK: - Fields
+    @objc private func setupChanged() { loadModels(after: 0); updateEndpoint() }
+    @objc private func checkConnection() { loadModels(after: 0, explicit: true) }
+    @objc private func refreshModels() {
+        guard !isBusy, let runnerID, let kind else { return }
+        beginOperation(L("Loading models…"))
+        task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let updated = try await store.refreshCustomModels(runnerID: runnerID, kind: kind.wireValue)
+                try Task.checkCancellation()
+                isBusy = false
+                spinner.stopAnimation(nil)
+                status.stringValue = updated > 0 ? L("Models updated") : L("Models unchanged")
+                updateControls()
+            } catch { if !Task.isCancelled { showError(error) } }
+        }
+    }
+
+
 
     @objc private func apiChanged() {
         updateEndpoint()
@@ -454,6 +509,7 @@ final class CustomProviderViewController: SheetViewController {
     private func updateEndpoint() {
         baseURLField.placeholderString = api.baseURLPlaceholder
         endpointNote.stringValue = (baseURL.isEmpty ? L("Beans adds %@ to it.", api.path) : L("Requests go to %@.", api.endpoint(for: baseURL))) + "\n" + L("Model listing checks reachability, not inference access. Each Runner must reach this URL.")
+        endpointNote.stringValue += "\n" + (runnerID.flatMap { id in runners.first(where: { $0.id == id }) }.map { L("Requests run on %@. Listing verifies connectivity/catalog only, not inference.", $0.name) } ?? L("Pair an online desktop Runner before checking."))
         nameField.placeholderString = suggestedName ?? "OpenRouter"
         if kind == nil, keyField.stringValue.isEmpty {
             keyField.placeholderString = simpleSetup ? L("Optional API key") : CustomProviderPreset.matching(baseURL)?.keyPlaceholder ?? L("Optional for a server on your network")
@@ -473,7 +529,7 @@ final class CustomProviderViewController: SheetViewController {
             guard let self else { return }
             do {
                 let saved = try await self.store.saveCustomProvider(
-                    kind: self.kind, name: name, api: api, baseURL: baseURL, apiKey: apiKey, models: ids, integration: self.integration)
+                    kind: self.kind, name: name, api: api, baseURL: baseURL, apiKey: apiKey, models: ids, integration: self.integration, runnerID: self.runnerID, capabilities: self.capabilities)
                 try Task.checkCancellation()
                 self.spinner.stopAnimation(nil)
                 self.status.textColor = .systemGreen
@@ -491,6 +547,7 @@ final class CustomProviderViewController: SheetViewController {
     override func dismissSheet() {
         task?.cancel()
         fetch?.cancel()
+        fetchGeneration += 1
         super.dismissSheet()
     }
 
@@ -498,6 +555,7 @@ final class CustomProviderViewController: SheetViewController {
         super.viewDidDisappear()
         task?.cancel()
         fetch?.cancel()
+        fetchGeneration += 1
         keyField.clear()
     }
 
@@ -538,12 +596,14 @@ final class CustomProviderViewController: SheetViewController {
     }
 
     private func updateControls() {
-        for control in [nameField, apiPopup, baseURLField, searchField, deleteButton] as [NSControl] { control.isEnabled = !isBusy }
+        for control in [nameField, apiPopup, baseURLField, searchField, deleteButton, runnerPopup, contextField, imagesPopup, toolsPopup] as [NSControl] { control.isEnabled = !isBusy }
         apiPopup.isEnabled = !isBusy && integration == nil
         keyField.isEnabled = !isBusy
         table.isEnabled = !isBusy
         defaultPopup.isEnabled = !isBusy
-        confirmButton.isEnabled = !isBusy && !name.isEmpty && !baseURL.isEmpty && !selected.isEmpty
+        let runnerReady = runners.indices.contains(runnerPopup.indexOfSelectedItem) && (runners[runnerPopup.indexOfSelectedItem].isThisDevice || runners[runnerPopup.indexOfSelectedItem].status == .online)
+        checkButton.isEnabled = !isBusy && runnerReady && validWindow && !baseURL.isEmpty
+        confirmButton.isEnabled = !isBusy && runnerReady && validWindow && (listing == .listed || listing == .unlisted) && !name.isEmpty && !baseURL.isEmpty && !selected.isEmpty
     }
 }
 
@@ -554,6 +614,8 @@ extension CustomProviderViewController: NSTextFieldDelegate, NSSearchFieldDelega
         } else if obj.object as? NSTextField === baseURLField {
             updateEndpoint()
             loadModels(after: 0.5)
+        } else if obj.object as? NSTextField === contextField {
+            loadModels(after: 0)
         }
         updateControls()
     }

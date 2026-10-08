@@ -175,6 +175,12 @@ export function withCustomModels(models: ProviderModel[], providers: readonly Pr
 }
 
 /** One of the account's provider credentials, as statuses: never a key. */
+export interface CustomCapabilities {
+  context_window?: number | null;
+  images?: boolean | null;
+  tools?: boolean | null;
+}
+
 export interface ProviderCredential {
   kind: ProviderKind;
   isConnected: boolean;
@@ -186,6 +192,7 @@ export interface ProviderCredential {
   name?: string;
   api?: CustomAPI;
   integration?: "durindoor";
+  capabilities?: CustomCapabilities;
   models?: CustomModel[];
 }
 
@@ -308,6 +315,7 @@ export const customPresets: CustomPreset[] = [
   },
   { name: "Groq", api: "chat-completions", baseURL: "https://api.groq.com/openai/v1", local: false, keyPlaceholder: () => L("gsk_… from console.groq.com") },
   { name: "Together AI", api: "chat-completions", baseURL: "https://api.together.xyz/v1", local: false, keyPlaceholder: () => L("Key from api.together.ai") },
+  { get name() { return L("Local server"); }, compatible: true, api: "chat-completions", baseURL: "", local: true, keyPlaceholder: () => L("Optional API key") },
   { name: "Ollama", api: "chat-completions", baseURL: "http://localhost:11434/v1", local: true, keyPlaceholder: () => L("Optional for a server on your network") },
   { name: "LM Studio", api: "chat-completions", baseURL: "http://localhost:1234/v1", local: true, keyPlaceholder: () => L("Optional for a server on your network") },
 ];

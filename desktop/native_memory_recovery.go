@@ -6,13 +6,17 @@ import "github.com/egoist/mygo"
 // admitted account ID; never retain RPC results, consent handles or approvals.
 func (n *nativeDesktop) suspendMemoryForms() {
 	f := n.memoryPanel.Forms
-	if (f.Connection != nil || f.Bot != nil || f.Embedding != nil) && n.store.AccountID != "" {
+	if (f.Connection != nil || f.Bot != nil || f.Embedding != nil || f.Note != nil) && n.store.AccountID != "" {
 		if n.memoryRecovery == nil {
 			n.memoryRecovery = map[string]memoryForms{}
 		}
 		f.Pending = false
 		f.serial++
 		f.Error = "Connection changed. Review recovered edits and renew approvals before saving."
+		if f.Note != nil {
+			f.Note.ConfirmReload = false
+			f.Note.ConfirmOverwrite = false
+		}
 		if b := f.Bot; b != nil {
 			b.Draft = 0
 			b.View = 0
@@ -47,15 +51,18 @@ func (n *nativeDesktop) recoverMemoryForms() {
 }
 func (n *nativeDesktop) hasMemoryIntent() bool {
 	f := n.memoryPanel.Forms
-	return f.Pending || f.Connection != nil || f.Bot != nil || f.Embedding != nil || len(n.memoryRecovery) != 0
+	return f.Pending || f.Connection != nil || f.Bot != nil || f.Embedding != nil || f.Note != nil || len(n.memoryRecovery) != 0
 }
 
 func (n *nativeDesktop) confirmDiscardMemoryRecovery() {
 	before := jsonBytes(n.memoryRecovery)
 	epoch := n.store.Epoch
 	parent := n.win
+	message := nativeL("Discard retained memory edits?")
+	detail := nativeL("This removes unsaved connection secrets, consent choices and note edits retained for disconnected accounts.")
+	buttons := []string{nativeL("Keep edits"), nativeL("Discard edits")}
 	go func() {
-		answer, err := mygo.Dialog.Message(mygo.MessageOptions{Parent: parent, Message: "Discard retained memory edits?", Detail: "This removes unsaved connection secrets and consent choices retained for disconnected accounts.", Buttons: []string{"Keep edits", "Discard edits"}, CancelButton: 0})
+		answer, err := mygo.Dialog.Message(mygo.MessageOptions{Parent: parent, Message: message, Detail: detail, Buttons: buttons, CancelButton: 0})
 		postMain(func() {
 			if err != nil || answer.Button != 1 || epoch != n.store.Epoch || string(before) != string(jsonBytes(n.memoryRecovery)) {
 				return

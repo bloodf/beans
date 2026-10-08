@@ -116,6 +116,7 @@ func (a *appDelegate) didFinishLaunching() {
 	a.cli = newCLIClient()
 	a.launcher = newLauncher()
 	a.session = model.NewSession(a.identityChanged, func(name string, data stdjson.RawMessage) {
+		native.event(name, data)
 		frame, err := stdjson.Marshal(struct {
 			Event string             `json:"event"`
 			Data  stdjson.RawMessage `json:"data"`
@@ -136,6 +137,11 @@ func (a *appDelegate) didFinishLaunching() {
 					go a.askIdentity(a.sessionGeneration)
 				} else {
 					a.session.Disconnect()
+					native.store.Fence()
+				}
+				native.store.Connected = state == "connected"
+				if native.win != nil {
+					native.win.Invalidate()
 				}
 				a.publishState()
 			})
@@ -165,6 +171,9 @@ func (a *appDelegate) didFinishLaunching() {
 	if a.mainWindowIsDue() {
 		a.showMainWindow()
 		startupTrace("window shown")
+	}
+	if nativeEnabled() {
+		native.show()
 	}
 }
 
@@ -292,15 +301,15 @@ func (a *appDelegate) newWindow(options mygo.WindowOptions) *mygo.Window {
 	win.OnRestore(report)
 	win.OnEnterFullScreen(report)
 	win.OnLeaveFullScreen(report)
-	win.OnDOMReady(report)
+	win.Page().OnDOMReady(report)
 	// The app's pages stay in the window; a link goes to the browser.
-	win.OnWillNavigate(func(e *mygo.NavigateEvent) {
+	win.Page().OnWillNavigate(func(e *mygo.NavigateEvent) {
 		if external(e.URL) {
 			e.PreventDefault()
 			go mygo.Shell.OpenExternal(e.URL)
 		}
 	})
-	win.SetWindowOpenHandler(func(req mygo.WindowOpenRequest) *mygo.WindowOptions {
+	win.Page().SetWindowOpenHandler(func(req mygo.WindowOpenRequest) *mygo.WindowOptions {
 		if external(req.URL) {
 			go mygo.Shell.OpenExternal(req.URL)
 		}

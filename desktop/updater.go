@@ -103,7 +103,9 @@ func openDesktopTokenDirectory() (*os.Root, error) {
 		return nil, errors.New("The Beans home changed before update-control admission")
 	}
 	data, err := readDesktopControlFile(root, "format.json", false)
-	var marker struct { Format string `json:"format"` }
+	var marker struct {
+		Format string `json:"format"`
+	}
 	if err != nil || json.Unmarshal(data, &marker) != nil || marker.Format != "beans-v2" {
 		root.Close()
 		return nil, errors.New("Desktop update control requires an established Beans v2 format marker")
@@ -361,7 +363,10 @@ type desktopUpdatePage struct {
 
 func (lease *desktopUpdateLease) guardPages(ctx context.Context) error {
 	for _, win := range mygo.Windows() {
-		value, err := win.EvalContext(ctx, `(() => {
+		if win == native.win {
+			return errors.New("Close the native window before quitting to install the update")
+		}
+		value, err := win.Page().EvalContext(ctx, `(() => {
 			if (typeof window.beansUpdateHasDraft !== "function" || window.beansUpdateHasDraft() || document.querySelector(".sheet-frame")) return null;
 			const inert = document.documentElement.inert;
 			document.documentElement.inert = true;
@@ -382,7 +387,10 @@ func (lease *desktopUpdateLease) restorePages() {
 	for _, page := range lease.pages {
 		for _, win := range mygo.Windows() {
 			if win == page.window {
-				_, _ = win.EvalContext(ctx, `document.documentElement.inert = `+strconv.FormatBool(page.inert))
+				if win == native.win {
+					continue
+				}
+				_, _ = win.Page().EvalContext(ctx, `document.documentElement.inert = `+strconv.FormatBool(page.inert))
 			}
 		}
 	}
@@ -429,7 +437,10 @@ func desktopUpdateWord(key string, args ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	for _, win := range mygo.Windows() {
-		value, err := win.EvalContext(ctx, `typeof window.beansUpdateWord === "function" ? window.beansUpdateWord(`+string(params)+`) : null`)
+		if win == native.win {
+			continue
+		}
+		value, err := win.Page().EvalContext(ctx, `typeof window.beansUpdateWord === "function" ? window.beansUpdateWord(`+string(params)+`) : null`)
 		if text, ok := value.(string); err == nil && ok {
 			return text
 		}
@@ -790,7 +801,7 @@ func desktopUpdateIdle(ctx context.Context, client *cliClient) (string, error) {
 		if win != app.main {
 			return "", errors.New("Close settings and onboarding windows before installing the update")
 		}
-		value, err := win.EvalContext(ctx, `typeof window.beansUpdateHasDraft === "function" && !window.beansUpdateHasDraft() && !document.querySelector(".sheet-frame")`)
+		value, err := win.Page().EvalContext(ctx, `typeof window.beansUpdateHasDraft === "function" && !window.beansUpdateHasDraft() && !document.querySelector(".sheet-frame")`)
 		if err != nil || value != true {
 			return "", errors.New("Save or send drafts and close editing sheets before quitting to install the update")
 		}

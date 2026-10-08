@@ -52,3 +52,8 @@ test("test.yml and release.yml pin the same protoc", async () => {
   }
   expect([...versions]).toHaveLength(1);
 });
+
+test("test.yml limits the Windows Rust job to one compiler process", async () => {
+  const all = (await Bun.YAML.parse(await Bun.file(join(ROOT, ".github/workflows/test.yml")).text())).jobs;
+  expect(all["rust-windows"].env?.CARGO_BUILD_JOBS).toBe("1");
+});

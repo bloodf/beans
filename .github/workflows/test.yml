@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts
+      - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts
 
   rust-linux:
     name: Rust (Linux)

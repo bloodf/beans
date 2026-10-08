@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 
-for (const file of ["test.yml", "docs.yml"]) {
+for (const file of ["test.yml", "docs.yml", "catalog.yml"]) {
   test(`${file}: only same-repository release PRs targeting main allocate runners`, async () => {
     const workflow = Bun.YAML.parse(await Bun.file(join(ROOT, ".github/workflows", file)).text());
     expect(workflow.on).toEqual({ pull_request: { branches: ["main"] } });

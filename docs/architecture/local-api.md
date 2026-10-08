@@ -29,19 +29,19 @@ There is no per-connection credential, no per-method authorization and no sandbo
 
 ## Field errors
 
-Every `params` field is checked before the method changes anything or dispatches work.
+The required string parameters that `api.rs` reads through its `string` helper (`chat_id`, `bot_id`, `id`, `name`, `runner_id`, `plugin_id`, `kind`, `schedule`, `query`, `phrase`, `nonce`, `pairing_string`, `platform`, `token`, `message_id`, `decision`, `api_key` and `text` of `mcp.parse`) answer the same two errors. Only `chats.send` additionally validates its other fields before it changes anything. Other methods check their fields in their own order and may change state before a later field fails; for example `bots.update` stores a new avatar before it finds an unknown bot. The `mcp.*` runner verbs read `name`, `enabled`, `tool` and `hidden` themselves and answer `missing <field>` for a wrong type; `memory.*` bodies answer the codes listed under Memory methods; `update.*` answers its own sentences.
 
 | Case | Error |
 | --- | --- |
 | Required string absent, `null` or `""` | `missing <field>` |
 | Required string of another JSON type | `<field> must be a string` |
-| Optional string field (`opt_string`) of another type or `""` | read as absent; unchanged by this reference, except the fields below |
-| `chats.send`, `text` of another type | `text must be a string` |
-| `chats.send`, no `text` key and no `attachments` | `missing text` |
-| `chats.send`, `attachments` not an array of `{ path, id?, name?, mime?, width?, height? }` | `attachments must be an array of files` |
-| `chats.send`, `mentions` not an array of strings | `mentions must be an array of strings` |
+| Optional string read as `opt_string` (most optional fields) of another type or `""` | read as absent |
+| `chats.send`, `text`, `message_id` or `reply_to` present and not a string or `null` | `<field> must be a string` |
+| `chats.send`, no `text` (absent or `null`) and no `attachments` | `missing text` |
+| `chats.send`, `attachments` present and not an array of `{ path, id?, name?, mime?, width?, height? }` | `attachments must be an array of files` |
+| `chats.send`, `mentions` present and not an array of strings | `mentions must be an array of strings` |
 
-`chats.send` checks, in order: `chat_id`, that the chat exists (`Unknown chat`), `text`, every element of `attachments` and `mentions`, and a `reply_to` that names a quotable message, and only then copies attachment files and stores the message. A request that fails one of those checks copies no file, writes no message, queues nothing and starts no turn. An empty or whitespace-only `text` with no attachment answers `Empty message`; an attachment alone is a valid send. Two refusals come after the copy and are not covered: a file that cannot be read (missing, a directory, over 100 MiB) after an earlier file in the same send was copied, and the update-drain refusal (`This Runner is installing an update…`). Both leave copied bytes in `files/`, admit no message and start no turn.
+`chats.send` checks, in order: `chat_id`, that the chat exists (`Unknown chat`), `text`, `message_id`, `reply_to`, every element of `attachments` and `mentions`, and that `reply_to` names a quotable message; only then does it copy attachment files and store the message. A request that fails one of those checks copies no file, writes no message, queues nothing and starts no turn. `null` and an absent key mean "not given" for every `chats.send` field except `chat_id`. An empty or whitespace-only `text` with no attachment answers `Empty message`; an attachment alone is a valid send. Two refusals come after the copy and are not covered: a file that cannot be read (missing, a directory, over 100 MiB) after an earlier file in the same send was copied, and the update-drain refusal (`This Runner is installing an update…`). Both leave copied bytes in `files/`, admit no message and start no turn. This is not a transaction: concurrent changes to the files or the chat between the checks and the copy are not guarded.
 
 ## Methods
 

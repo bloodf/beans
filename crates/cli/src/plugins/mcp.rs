@@ -215,6 +215,10 @@ impl Pool {
         }
         let gate = self.connecting.lock().unwrap().entry(key.clone()).or_default().clone();
         let _guard = gate.lock().await;
+        {
+            let _admission = admission.enter(app, plugin_id)?;
+            if let Some(server) = self.cached_server(&key) { return Ok(server); }
+        }
         let (plugin, values, tokens) = connection_snapshot(app, plugin_id, name, admission)?;
         let values = template_values(&plugin, values).await;
         let spec = plugin.manifest.servers.get(name).cloned().ok_or_else(|| format!("{} has no server {name}", plugin.manifest.name))?;
@@ -2994,6 +2998,45 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[tokio::test]
+    async fn concurrent_pool_waiters_reuse_connection_published_under_gate() {
+        use std::future::Future;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let key = "gate-fixture/api".to_string();
+        let gate = app.mcp.connecting.lock().unwrap().entry(key.clone()).or_default().clone();
+        let owner = gate.lock().await;
+        let first = app.mcp.server(app, "gate-fixture", "api");
+        let second = app.mcp.server(app, "gate-fixture", "api");
+        tokio::pin!(first, second);
+        // Poll both actual callers into the held gate before publishing the owner's connection.
+        std::future::poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        }).await;
+        let admission = Admission::capture(app, "gate-fixture").unwrap();
+        let (io, fixture) = tokio::io::duplex(64 * 1024);
+        let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        paging_server(fixture, |_| None, pages.clone());
+        let service = Client {
+            info: ClientConfig::default(), app: Arc::downgrade(app),
+            plugin_id: "gate-fixture".into(), server: "api".into(), admission,
+        }.serve(io).await.unwrap();
+        let tools = all_tools(service.peer()).await.unwrap();
+        let published = Arc::new(Server {
+            plugin_id: "gate-fixture".into(), name: "api".into(), service,
+            tools: parking_lot::RwLock::new(tools), instructions: None,
+            resources: false, auth: None, bearer_expires_at: None, admission,
+        });
+        app.mcp.servers.lock().unwrap().insert(key, published.clone());
+        drop(owner);
+        let (first, second) = tokio::join!(first, second);
+        assert!(Arc::ptr_eq(&first.unwrap(), &published));
+        assert!(Arc::ptr_eq(&second.unwrap(), &published));
+        assert_eq!(pages.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

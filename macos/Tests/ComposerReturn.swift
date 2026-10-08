@@ -9,19 +9,9 @@ enum Theme { enum Font { static let message = NSFont.systemFont(ofSize: 13) } }
     if !ok { failures += 1; print("FAIL: \(message)") }
 }
 
-#if BASELINE
-    // The routing ComposerView.handle had before the fix, from git HEAD (reads NSApp.currentEvent).
-    @MainActor func shouldSend(_ view: ComposerTextView, _ selector: Selector, sendOnReturn: Bool) -> Bool {
-        guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
-        let shift = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
-        if sendOnReturn { return !shift }
-        return NSApp.currentEvent?.modifierFlags.contains(.command) ?? false
-    }
-#else
-    @MainActor func shouldSend(_ view: ComposerTextView, _ selector: Selector, sendOnReturn: Bool) -> Bool {
-        view.returnIntent(for: selector, sendOnReturn: sendOnReturn) == .send
-    }
-#endif
+@MainActor func shouldSend(_ view: ComposerTextView, _ selector: Selector, sendOnReturn: Bool) -> Bool {
+    view.returnIntent(for: selector, sendOnReturn: sendOnReturn) == .send
+}
 
 @MainActor func press(
     _ flags: NSEvent.ModifierFlags, sendOnReturn: Bool, keyCode: UInt16 = 36, marked: Bool = false

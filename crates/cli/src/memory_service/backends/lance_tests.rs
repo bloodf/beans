@@ -524,3 +524,122 @@ async fn fingerprint_collision_never_acknowledges_skipped_import() {
         assert_eq!(backend.inspect(&bound, "doc", CancellationToken::new()).await.unwrap().document, Some(requested), "acknowledged import must actually store the requested A-space document");
     }
 }
+
+#[tokio::test]
+async fn vector_outer_deadline_preserves_read_write_uncertainty() {
+    for (write, code) in [(false, "memory_timeout"), (true, "delivery_unknown")] {
+        // Work cannot finish, so the controlled zero deadline has no work/timer race.
+        let error = bounded(
+            CancellationToken::new(),
+            0,
+            write,
+            std::future::pending::<Result<(), MemoryError>>(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, code);
+    }
+}
+
+#[tokio::test]
+async fn vector_precancellation_does_not_poll_work() {
+    for write in [false, true] {
+        let token = CancellationToken::new();
+        token.cancel();
+        let polls = AtomicUsize::new(0);
+        let work = std::future::poll_fn(|_| {
+            polls.fetch_add(1, Ordering::SeqCst);
+            std::task::Poll::Ready(Ok::<(), MemoryError>(()))
+        });
+        let error = bounded(token, 5000, write, work).await.unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn vector_inflight_cancellation_wins_over_ready_work() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Wake, Waker};
+    struct Noop;
+    impl Wake for Noop {
+        fn wake(self: Arc<Self>) {}
+    }
+    for (write, code) in [(false, "cancelled"), (true, "delivery_unknown")] {
+        let token = CancellationToken::new();
+        let (started_tx, mut started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let work = async move {
+            started_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            Ok::<(), MemoryError>(())
+        };
+        let mut boundary = Box::pin(bounded(token.clone(), 5000, write, work));
+        let waker = Waker::from(Arc::new(Noop));
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(boundary.as_mut().poll(&mut cx), Poll::Pending));
+        assert_eq!(started_rx.try_recv(), Ok(()));
+        // Polling reached work; make completion and cancellation ready together.
+        release_tx.send(()).unwrap();
+        token.cancel();
+        let error = match boundary.as_mut().poll(&mut cx) {
+            Poll::Ready(Err(error)) => error,
+            _ => panic!("biased cancellation must win"),
+        };
+        assert_eq!(error.code, code);
+    }
+}
+
+#[tokio::test]
+async fn vector_ready_error_is_not_reclassified_as_outer_timeout() {
+    for write in [false, true] {
+        let error = bounded(
+            CancellationToken::new(),
+            5000,
+            write,
+            std::future::ready(Err::<(), _>(MemoryError::new("lance_query_failed"))),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "lance_query_failed");
+    }
+}
+
+#[tokio::test]
+async fn vector_returned_sdk_failure_is_sanitized_and_success_is_preserved() {
+    struct SecretSdkFailure;
+    impl std::fmt::Display for SecretSdkFailure {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("raw SDK error must never be formatted");
+        }
+    }
+    impl std::fmt::Debug for SecretSdkFailure {
+        fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            panic!("raw SDK error must never be debug-formatted");
+        }
+    }
+    let error = bounded(
+        CancellationToken::new(),
+        5000,
+        true,
+        std::future::ready(merge_result(Err::<(), _>(SecretSdkFailure))),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "delivery_unknown");
+    let private_detail = "synthetic-sdk-secret: /private/fixture/request-text";
+    let private_error = merge_result(Err::<(), _>(private_detail)).unwrap_err();
+    assert_eq!(private_error.code, "delivery_unknown");
+    assert!(!private_error.message.contains("synthetic-sdk-secret"));
+    assert!(!private_error.message.contains("/private/fixture"));
+    assert!(!private_error.message.contains("request-text"));
+    let value = bounded(
+        CancellationToken::new(),
+        5000,
+        true,
+        std::future::ready(merge_result::<_, SecretSdkFailure>(Ok(42))),
+    )
+    .await
+    .unwrap();
+    assert_eq!(value, 42);
+}

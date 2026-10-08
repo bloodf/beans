@@ -197,10 +197,7 @@ impl LanceBackend {
             .timeout(Duration::from_secs(5));
         let schema = batch.schema();
         let reader = arrow_array::RecordBatchIterator::new(std::iter::once(Ok(batch)), schema);
-        merge
-            .execute(Box::new(reader))
-            .await
-            .map_err(|_| MemoryError::new("delivery_unknown"))?;
+        merge_result(merge.execute(Box::new(reader)).await)?;
         Ok(())
     }
     pub async fn recall_vector(
@@ -586,6 +583,10 @@ fn decode(
     }
     Ok(rows)
 }
+fn merge_result<T, E>(result: Result<T, E>) -> Result<T, MemoryError> {
+    result.map_err(|_| MemoryError::new("delivery_unknown"))
+}
+
 #[cfg(test)]
 #[path = "lance_tests.rs"]
 mod tests;

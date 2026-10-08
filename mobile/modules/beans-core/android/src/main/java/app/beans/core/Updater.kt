@@ -12,7 +12,6 @@ import android.net.Uri
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
-import org.json.JSONTokener
 import java.io.File
 import java.net.URI
 import java.net.HttpURLConnection
@@ -37,6 +36,7 @@ internal class Updater(private val context: Context, private val progress: (Long
   private fun code(info: android.content.pm.PackageInfo) = info.longVersionCode
   fun capability(): String {
     if (context.packageName != "ai.amoena.beans") return "development"
+    if (Build.VERSION.SDK_INT < 28) return "native_verifier_unavailable"
     if (pm.getApplicationInfo(context.packageName, PackageManager.GET_META_DATA).metaData?.getBoolean("app.beans.GITHUB_UPDATES", false) != true) return "store_managed"
     val source = if (Build.VERSION.SDK_INT >= 30) pm.getInstallSourceInfo(context.packageName).installingPackageName else pm.getInstallerPackageName(context.packageName)
     return if (source == "com.android.vending") "store_managed" else "supported"
@@ -104,39 +104,8 @@ internal class Updater(private val context: Context, private val progress: (Long
     return output.toByteArray()
   }
   private fun asset(v: String, name: String) = "https://github.com/bloodf/beans/releases/download/beans-v$v/$name"
-  // Reject duplicate JSON object keys, including nested inventory/provenance objects.
-  private fun json(bytes: ByteArray): JSONObject {
-    val text = bytes.toString(Charsets.UTF_8)
-    val token = JSONTokener(text)
-    fun parse(t: JSONTokener): Any? {
-      return when (val c = t.nextClean()) {
-        '{' -> {
-          val obj = JSONObject(); val keys = mutableSetOf<String>()
-          if (t.nextClean() == '}') obj else {
-            t.back()
-            while (true) {
-              require(t.nextClean() == '"'); t.back()
-              val key = t.nextValue() as String; require(keys.add(key)) { "Duplicate JSON key" }
-              require(t.nextClean() == ':'); obj.put(key, parse(t))
-              val end = t.nextClean(); if (end == '}') break
-              require(end == ',')
-            }; obj
-          }
-        }
-        '[' -> {
-          val arr = JSONArray()
-          if (t.nextClean() == ']') arr else {
-            t.back()
-            while (true) { arr.put(parse(t)); val end = t.nextClean(); if (end == ']') break; require(end == ',') }; arr
-          }
-        }
-        else -> { t.back(); t.nextValue() }
-      }
-    }
-    val result = parse(token) as JSONObject
-    require(token.nextClean() == '\u0000') { "Trailing JSON bytes" }
-    return result
-  }
+  private fun json(bytes: ByteArray) = UpdateJson.parse(bytes)
+  private fun integer(obj: JSONObject, key: String) = UpdateJson.integer(obj, key)
   private fun verified(v: String, notes: String): Offer? {
     val raw = bytes(asset(v, "beans-update.json"), 262144)
     val sigText = bytes(asset(v, "beans-update.json.sig"), 256).toString(Charsets.US_ASCII).trim()
@@ -144,13 +113,13 @@ internal class Updater(private val context: Context, private val progress: (Long
     val key = context.assets.open("public-key.txt").use { Base64.decode(it.readBytes().toString(Charsets.US_ASCII).trim(), Base64.NO_WRAP) }
     require(UpdateTrust.verify(raw, Base64.decode(sigText, Base64.NO_WRAP), key)) { "Invalid Beans release signature" }
     val manifest = json(raw)
-    require(manifest.getInt("schema") == 1 && manifest.getString("version") == v && Regex("[a-f0-9]{40}").matches(manifest.getString("revision")) && manifest.getInt("protocol") == 5) { "Unsupported release readiness" }
+    require(integer(manifest, "schema") == 1L && manifest.getString("version") == v && Regex("[a-f0-9]{40}").matches(manifest.getString("revision")) && integer(manifest, "protocol") == 5L) { "Unsupported release readiness" }
     val entries = manifest.getJSONArray("artifacts"); require(entries.length() in 1..128)
     val inventory = mutableMapOf<String, JSONObject>()
     for (i in 0 until entries.length()) {
       val entry = entries.getJSONObject(i); val name = entry.getString("name")
       require(Regex("[A-Za-z0-9 ._-]{1,160}").matches(name) && inventory.put(name, entry) == null) { "Invalid or duplicate inventory" }
-      require(entry.getLong("size") > 0 && Regex("[a-f0-9]{64}").matches(entry.getString("sha256")))
+      require(integer(entry, "size") > 0 && Regex("[a-f0-9]{64}").matches(entry.getString("sha256")))
     }
     val apk = inventory["Beans-$v.apk"] ?: return null
     val proofEntry = inventory["eas-github.json"] ?: error("Missing signed APK provenance")
@@ -159,7 +128,7 @@ internal class Updater(private val context: Context, private val progress: (Long
     val proofRaw = bytes(asset(v, "eas-github.json"), proofEntry.getLong("size"))
     require(proofRaw.size.toLong() == proofEntry.getLong("size") && digest(proofRaw) == proofEntry.getString("sha256"))
     val proof = json(proofRaw)
-    require(proof.getInt("schema") == 1 && proof.getString("revision") == manifest.getString("revision") && proof.getString("version") == v && proof.getString("profile") == "github" && proof.getString("platform") == "ANDROID" && proof.getString("artifact") == "Beans-$v.apk" && proof.getLong("size") == apk.getLong("size") && proof.getString("sha256") == apk.getString("sha256"))
+    require(integer(proof, "schema") == 1L && proof.getString("revision") == manifest.getString("revision") && proof.getString("version") == v && proof.getString("profile") == "github" && proof.getString("platform") == "ANDROID" && proof.getString("artifact") == "Beans-$v.apk" && integer(proof, "size") == apk.getLong("size") && proof.getString("sha256") == apk.getString("sha256"))
     UUID.fromString(proof.getString("project")); UUID.fromString(proof.getString("buildId"))
     val build = proof.getString("buildNumber"); require(Regex("[1-9][0-9]*").matches(build))
     val number = build.toLong(); require(number <= 2100000000 && number > code(installed())) { "APK build is not newer" }

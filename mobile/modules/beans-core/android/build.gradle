@@ -18,6 +18,7 @@ android {
 dependencies {
   implementation "org.bouncycastle:bcprov-jdk18on:1.80"
   testImplementation "junit:junit:4.13.2"
+  testImplementation "org.json:json:20240303"
   // The UniFFI Kotlin bindings load libbeans_mobile.so through JNA.
   // JNA 5.17+ is required by Android devices and emulators with 16 KiB pages.
   implementation "net.java.dev.jna:jna:5.19.1@aar"

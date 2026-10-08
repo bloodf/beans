@@ -7,6 +7,7 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 ## [Unreleased]
 
 - Production GitHub Android builds include bounded signed Beans release discovery, consent-bound APK verification and a system-confirmed installer. Play/iOS/Dev stay excluded; installed package signing identity supplies compatibility evidence. Settings provides daily checks, Later and exact-version Skip; unsent composer drafts block installation. Native installed-upgrade acceptance remains separate.
+- Android signed-update parsing rejects duplicate JSON keys and coerced numeric authority fields; consent binds exact readiness bytes as well as APK identity and digest. Android below API 28 remains ineligible.
 
 - Fresh Beans accounts use `beans-v2`, isolated v2 homes and ports 4874/4875, mandatory protocol-5/format capability, versioned backup phrases and pairing links; incompatible old storage and phrases are rejected without migration or reset.
 - New releases use Beans-only asset/package names and retain the existing Ed25519 anchor and immutable historical manifests. Update eligibility requires fresh-format relay health and supported protocol floors before Runner replacement.

@@ -8,7 +8,7 @@ interface Native {
   wake(): void;
   /// Android only.
   setOpenChat?(chatId: string | null): void;
-  updateCapability?(): "supported" | "development" | "store_managed";
+  updateCapability?(): "supported" | "development" | "store_managed" | "native_verifier_unavailable";
   updateResult?(): string | null;
   checkUpdate?(): Promise<UpdateOffer | null>;
   installUpdate?(id: string): Promise<void>;

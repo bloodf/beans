@@ -510,6 +510,16 @@ impl App {
         Ok(guard)
     }
 
+    /// The closure must not acquire `state`: membership remains locked through publication.
+    pub(crate) fn with_plugin_actor<T>(&self, expected: Option<u64>, actors: &[Option<&str>], publish: impl FnOnce(u64) -> Result<T, String>) -> Result<T, String> {
+        let lifecycle = self.plugin_admission(expected)?;
+        let state = self.state.lock().unwrap();
+        if actors.iter().flatten().any(|id| !state.listed_machines.contains_key(*id)) {
+            return Err("Request requires a paired Device".into());
+        }
+        publish(lifecycle.get().0)
+    }
+
     // MARK: - Keys
 
     pub fn has_identity(&self) -> bool {

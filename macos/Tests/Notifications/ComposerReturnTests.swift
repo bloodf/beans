@@ -4,9 +4,10 @@ import XCTest
 
 /// Real `ComposerView`, `MentionPanel` and key routing: events go through `NSApp.sendEvent`
 /// into the composer's own text view, and the observable outputs are `onSend`, the field text
-/// and attachments. Reads `AppStore.shared` only through the picker's runner lookup. Writes only
-/// `beans-v2.sendOnReturn` (`Preferences.Key` is private), which each test restores exactly,
-/// absent key included.
+/// and attachments. Reads `AppStore.shared` only through the picker's runner lookup. The
+/// send-on-Return preference is overridden in `UserDefaults.argumentDomain`, a volatile domain
+/// that outranks the stored value and never reaches disk, so nothing persistent is written
+/// even if the test process dies. `Preferences.Key` is private, hence the literal key.
 @MainActor
 final class ComposerReturnTests: XCTestCase {
     private var window: NSWindow!
@@ -14,8 +15,8 @@ final class ComposerReturnTests: XCTestCase {
     private var textView: ComposerTextView!
     private var sent: [(text: String, files: Int)] = []
     private static let sendOnReturnKey = "beans-v2.sendOnReturn"
-    /// The raw stored object, nil when the key is absent (the getter would answer `true`).
-    private var savedSendOnReturn: Any?
+    /// The whole argument domain as it was, restored in `tearDown`.
+    private var savedArguments: [String: Any] = [:]
     private let bots = ["Ada", "Bea"].map {
         Bot(
             id: "composer-test-\($0)", name: $0, description: "", symbolName: "sparkles", accent: .indigo,
@@ -24,7 +25,7 @@ final class ComposerReturnTests: XCTestCase {
 
     override func setUp() async throws {
         _ = NSApplication.shared
-        savedSendOnReturn = UserDefaults.standard.object(forKey: Self.sendOnReturnKey)
+        savedArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
         sent = []
         composer = ComposerView()
         composer.frame = NSRect(x: 0, y: 0, width: 600, height: 160)
@@ -51,11 +52,14 @@ final class ComposerReturnTests: XCTestCase {
         textView = nil
         composer = nil
         window = nil
-        if let saved = savedSendOnReturn {
-            UserDefaults.standard.set(saved, forKey: Self.sendOnReturnKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: Self.sendOnReturnKey)
-        }
+        UserDefaults.standard.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+    }
+
+    private func setSendOnReturn(_ value: Bool) {
+        var arguments = savedArguments
+        arguments[Self.sendOnReturnKey] = value
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        XCTAssertEqual(Preferences.sendOnReturn, value, "argument-domain override not visible to Preferences")
     }
 
     private func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
@@ -99,7 +103,7 @@ final class ComposerReturnTests: XCTestCase {
     }
 
     func testSendOnReturnOffSendsOnlyOnCommandReturn() throws {
-        Preferences.sendOnReturn = false
+        setSendOnReturn(false)
         type("hello")
         try press()
         XCTAssertEqual(sent.count, 0)
@@ -120,7 +124,7 @@ final class ComposerReturnTests: XCTestCase {
     }
 
     func testCommandEnterOnKeypadSendsOnce() throws {
-        Preferences.sendOnReturn = false
+        setSendOnReturn(false)
         type("hi")
         try press(.command, keyCode: 76)
         XCTAssertEqual(sent.map(\.text), ["hi"])
@@ -128,7 +132,7 @@ final class ComposerReturnTests: XCTestCase {
     }
 
     func testSendOnReturnOnSendsReturnAndBreaksOnShift() throws {
-        Preferences.sendOnReturn = true
+        setSendOnReturn(true)
         type("hello")
         try press(.shift)
         XCTAssertEqual(sent.count, 0)
@@ -145,7 +149,7 @@ final class ComposerReturnTests: XCTestCase {
 
     func testMarkedTextNeverSends() throws {
         for on in [false, true] {
-            Preferences.sendOnReturn = on
+            setSendOnReturn(on)
             for flags: NSEvent.ModifierFlags in [[], .command] {
                 composer.text = ""
                 textView.setMarkedText(
@@ -166,7 +170,7 @@ final class ComposerReturnTests: XCTestCase {
         for (on, flags, keyCode): (Bool, NSEvent.ModifierFlags, UInt16) in [
             (true, [], 36), (false, [], 36), (false, .command, 36), (true, .command, 36), (true, [], 48),
         ] {
-            Preferences.sendOnReturn = on
+            setSendOnReturn(on)
             type("hey @A")
             XCTAssertEqual(window.childWindows?.count, 1, "picker not showing: on=\(on) key=\(keyCode)")
             try press(flags, keyCode: keyCode)
@@ -177,7 +181,7 @@ final class ComposerReturnTests: XCTestCase {
     }
 
     func testNewlineKeysKeepAttachmentsAndSendConsumesThem() throws {
-        Preferences.sendOnReturn = false
+        setSendOnReturn(false)
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("composer-return-\(UUID().uuidString).txt")
         try Data("x".utf8).write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }

@@ -38,6 +38,8 @@ type nativeAvatars struct {
 	photos  map[string]*ui.Bitmap
 	pending map[string]bool
 	epoch   uint64
+	motion  map[string]*nativeAvatarMotion
+	visible bool
 }
 
 func newNativeAvatars(r *sharedRuntime) *nativeAvatars {
@@ -120,11 +122,38 @@ func (a *nativeAvatars) view(c *ui.Context, bot model.NativeBot, state string, s
 		ui.Text(c, fmt.Sprintf("Avatar: %v", err))
 		return
 	}
-	ui.Box(c).Size(size, size).Shrink(0).Role(ui.RoleImage).Label(bot.Name).Draw(func(p *ui.Painter, r ui.Rect) { paintAvatar(p, r, f) })
+	if a.motion == nil {
+		a.motion = map[string]*nativeAvatarMotion{}
+	}
+	controller := a.motion[bot.ID]
+	if controller == nil {
+		controller = newNativeAvatarMotion(a.runtime)
+		a.motion[bot.ID] = controller
+	}
+	if err := controller.SetTarget(bot.ID, bot.Look, state); err != nil {
+		ui.Text(c, err.Error())
+		return
+	}
+	reduce := c.Preferences().ReduceMotion
+	ui.Box(c).Size(size, size).Shrink(0).Role(ui.RoleImage).Label(bot.Name).Draw(func(p *ui.Painter, r ui.Rect) {
+		frame, moving, err := controller.Frame(float64(p.Now().UnixMilli()), a.visible, reduce)
+		if err != nil {
+			paintAvatar(p, r, f)
+			return
+		}
+		paintAvatar(p, r, &frame)
+		if moving {
+			p.AnimationFrame()
+		}
+	})
 }
 
 func (a *nativeAvatars) reset(epoch uint64) {
 	a.photos = map[string]*ui.Bitmap{}
 	a.pending = map[string]bool{}
 	a.epoch = epoch
+	for _, controller := range a.motion {
+		controller.Reset()
+	}
+	a.motion = nil
 }

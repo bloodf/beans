@@ -24,6 +24,7 @@ type nativeDesktop struct {
 	avatars     *nativeAvatars
 	memory      *nativeMemory
 	memoryPanel nativeMemoryPanel
+	look        *nativeLookEditor
 }
 
 func nativeEnabled() bool { return os.Getenv("BEANS_NATIVE") == "1" }
@@ -36,6 +37,7 @@ func (n *nativeDesktop) event(name string, data json.RawMessage) {
 	}
 	if n.avatars != nil && n.avatars.epoch != n.store.Epoch {
 		n.avatars.reset(n.store.Epoch)
+		n.look = nil
 	}
 	if n.memory != nil && n.memory.epoch != n.store.Epoch {
 		_ = n.memory.reset(n.store.Epoch)
@@ -57,8 +59,18 @@ func (n *nativeDesktop) show() {
 	}
 	if n.win == nil {
 		n.win = mygo.NewWindow(mygo.WindowOptions{Title: "Beans — Native", Width: 1100, Height: 760, MinWidth: 640, MinHeight: 440, Content: ui.View(n.view)})
+		visibility := func() {
+			if n.avatars != nil {
+				n.avatars.visible = n.win.IsVisible() && !n.win.IsMinimized()
+				n.win.Invalidate()
+			}
+		}
+		n.win.OnShow(visibility)
+		n.win.OnHide(visibility)
+		n.win.OnMinimize(visibility)
+		n.win.OnRestore(visibility)
 		n.win.OnClose(func(e *mygo.CloseEvent) {
-			if n.store.HasOwnedIntent() {
+			if n.store.HasOwnedIntent() || n.memoryPanel.Forms.Pending || n.memoryPanel.Forms.Connection != nil || n.memoryPanel.Forms.Bot != nil || (n.look != nil && n.look.HasIntent()) {
 				e.PreventDefault()
 				n.store.Error = "Send or save native drafts before closing"
 				n.win.Invalidate()
@@ -334,6 +346,13 @@ func (n *nativeDesktop) view(c *ui.Context) {
 			}
 		})
 		ui.Column(c).Grow(1).MinWidth(0).Padding(16).Gap(12).Children(func() {
+			if n.look != nil {
+				n.look.View(c)
+				if n.look.Done() && n.look.CanDismiss() {
+					n.look = nil
+				}
+				return
+			}
 			if n.store.HasOwnedIntent() && ui.Button(c, "Save native drafts").Clicked() {
 				n.saveDrafts()
 			}
@@ -388,6 +407,9 @@ func (n *nativeDesktop) view(c *ui.Context) {
 								if bot.ID == m.Author.BotID {
 									n.avatars.view(c, bot, "idle", 28)
 									n.fetchAvatar(bot)
+									if ui.Button(c, "Edit bot Look").Clicked() {
+										n.openLook(bot)
+									}
 									break
 								}
 							}
@@ -478,7 +500,7 @@ func (n *nativeDesktop) view(c *ui.Context) {
 }
 
 func nativeQuitAdmission() error {
-	if native.store.HasOwnedIntent() {
+	if native.store.HasOwnedIntent() || native.memoryPanel.Forms.Pending || native.memoryPanel.Forms.Connection != nil || native.memoryPanel.Forms.Bot != nil || (native.look != nil && native.look.HasIntent()) {
 		return errors.New("Send or save native drafts before quitting")
 	}
 	return nil

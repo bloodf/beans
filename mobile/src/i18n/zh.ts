@@ -463,4 +463,13 @@ export const zh: Record<string, string> = {
   "Optional API key": "可选 API 密钥",
   "Model listing checks reachability, not inference access. Each Runner must reach this URL.": "模型列表仅验证可达性，不验证推理权限。每个运行端都必须能访问此 URL。",
   "Configured": "已配置",
+  "Check daily": "每天检查",
+  "Downloading update": "正在下载更新",
+  "Check for updates": "检查更新",
+  "Update failed": "更新失败",
+  "Install Update": "安装更新",
+  "Later": "稍后",
+  "Skip this version": "跳过此版本",
+  "Save or send drafts before installing. Android asks for installation confirmation. Release notes are untrusted text.": "安装前请保存或发送草稿。Android 会要求确认安装。发行说明是不受信任的文本。",
+  "Save or send all drafts first. Installing replaces this process. Have you saved your changes?": "请先保存或发送所有草稿。安装会替换此进程。是否已保存更改？"
 };

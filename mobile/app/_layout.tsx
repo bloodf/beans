@@ -20,7 +20,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     void engine.start();
-    initializeUpdates(Platform.OS, Application.applicationId);
+    return initializeUpdates(Platform.OS, Application.applicationId);
   }, []);
 
   const navigationTheme = useMemo(() => {

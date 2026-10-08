@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { initializeUpdates, updateCandidates, updateCheckDue, updateIsSkipped, useUpdates } from "./updates";
+import { updateCandidates, updateCheckDue, updateIsSkipped } from "./updatePolicy";
 
 const release = (version: string) => ({ tag_name: `beans-v${version}`, draft: false, prerelease: false });
 
@@ -31,13 +31,3 @@ test("skip suppresses only exact automatic offer, never explicit manual check", 
   expect(updateIsSkipped(prefs, "1.10.0", true)).toBe(false);
 });
 
-test("production id cannot authorize installation without native verifier or channel evidence", () => {
-  initializeUpdates("android", "ai.amoena.beans");
-  expect(useUpdates.getState()).toEqual({ status: "blocked", reason: "native_verifier_unavailable" });
-  initializeUpdates("android", null);
-  expect(useUpdates.getState().reason).toBe("native_verifier_unavailable");
-  initializeUpdates("android", "ai.amoena.beans.dev");
-  expect(useUpdates.getState().reason).toBe("development");
-  initializeUpdates("ios", "ai.amoena.beans");
-  expect(useUpdates.getState().reason).toBe("store_managed");
-});

@@ -22,6 +22,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ColorValue, type ImageSourcePropType, type StyleProp, type ViewStyle } from "react-native";
 import type { PickedFile } from "../core/engine";
 import { fileSize, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, type Bot } from "../core/model";
+import { markUpdateDraft } from "../core/updateDrafts";
 import { notifyAvatarScroll } from "./avatarVisibility";
 import { BotAvatar } from "./Avatar";
 import { automaticLanguage, languageName, pickDictationLanguage, setDictationLanguage, useDictationLanguage, useSupportedLanguages } from "./dictation";
@@ -126,6 +127,10 @@ export function Composer({
   /// stops or sends, the way Grok Bot commits a recording.
   const transcript = useRef("");
   const pendingSend = useRef(false);
+  const updateDraftOwner = useRef({});
+  useEffect(() => {
+    markUpdateDraft(updateDraftOwner.current, !!text.trim() || attachments.length > 0 || listening);
+  }, [text, attachments, listening]);
   const inputRef = useRef<TextInput>(null);
   /// The bots picked from the `@` chips since the last send, in order. Two bots can share a name;
   /// the pick says which one the user meant.

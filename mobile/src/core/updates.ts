@@ -1,73 +1,71 @@
 // App-global update policy. GitHub release metadata identifies candidates, never install authority.
 import { create } from "zustand";
+import { AppState } from "react-native";
+import { androidUpdates } from "../../modules/beans-core";
+import { loadPrefs, savePrefs } from "./prefs";
+import { UpdateController, type UpdateOffer } from "./updateController";
+export { updateCandidates, updateCheckDue, updateIsSkipped, type UpdatePreferences } from "./updatePolicy";
+import { updateCheckDue, updateIsSkipped } from "./updatePolicy";
+import { hasUpdateDrafts } from "./updateDrafts";
 
-const DAY = 24 * 60 * 60 * 1000;
-export const UPDATE_REPOSITORY = "bloodf/beans";
-
-export interface UpdatePreferences {
-  update_checks?: boolean;
-  update_checked_at?: number;
-  update_skipped_version?: string;
-}
-
-export interface ReleaseCandidate {
-  tag_name: string;
-  draft: boolean;
-  prerelease: boolean;
-}
-
-function versionParts(version: string): number[] | null {
-  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) return null;
-  const parts = version.split(".").map(Number);
-  return parts.every(Number.isSafeInteger) ? parts : null;
-}
-
-function compare(a: number[], b: number[]): number {
-  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! > b[i]! ? 1 : -1;
-  return 0;
-}
-
-// Return every newer stable candidate in numeric order. A newer server-only release must
-// not hide an older Android-ready release. Native signed readiness must authorize each one.
-export function updateCandidates(releases: readonly ReleaseCandidate[], installed: string): string[] {
-  const current = versionParts(installed);
-  if (!current) throw new Error("Invalid installed Beans version");
-  const versions = new Map<string, number[]>();
-  for (const release of releases) {
-    if (release.draft !== false || release.prerelease !== false || !release.tag_name.startsWith("beans-v")) continue;
-    const version = release.tag_name.slice(7);
-    const parts = versionParts(version);
-    if (parts && compare(parts, current) > 0) versions.set(version, parts);
-  }
-  return [...versions.keys()].sort((a, b) => compare(versions.get(b)!, versions.get(a)!));
-}
-
-export function updateCheckDue(prefs: UpdatePreferences, now: number): boolean {
-  if (prefs.update_checks === false || !Number.isSafeInteger(now) || now < 0) return false;
-  const last = prefs.update_checked_at;
-  return last === undefined || !Number.isSafeInteger(last) || last < 0 || last > now || now - last >= DAY;
-}
-
-export function updateIsSkipped(prefs: UpdatePreferences, version: string, manual: boolean): boolean {
-  return !manual && prefs.update_skipped_version === version;
-}
 
 export type UpdateBlock = "store_managed" | "development" | "native_verifier_unavailable";
 
-export function updateBlock(platform: string, applicationId: string | null): UpdateBlock {
+export function updateBlock(platform: string, applicationId: string | null): UpdateBlock | null {
   if (applicationId === "ai.amoena.beans.dev") return "development";
   if (platform !== "android") return "store_managed";
-  // Current Android bridge exposes neither pinned readiness verification nor distribution
-  // evidence. Production package identity alone cannot authorize GitHub APK installation.
-  return "native_verifier_unavailable";
+  const capability = androidUpdates.capability();
+  return capability === "supported" ? null : capability;
 }
 
-// No network, download, consent token or install state exists while native trust is absent.
-export const useUpdates = create<{ status: "blocked"; reason: UpdateBlock }>()(() => ({
-  status: "blocked",
-  reason: "native_verifier_unavailable",
-}));
+const controller = new UpdateController(androidUpdates);
+export const useUpdates = create<{
+  status: "blocked" | "idle" | "checking" | "offered" | "installing" | "confirmation" | "error";
+  reason: UpdateBlock | null; offer: UpdateOffer | null; error: string | null; checks: boolean; progress: number;
+}>()(() => ({ status: "blocked", reason: "native_verifier_unavailable", offer: null, error: null, checks: true, progress: 0 }));
 
-export function initializeUpdates(platform: string, applicationId: string | null): void {
-  useUpdates.setState({ status: "blocked", reason: updateBlock(platform, applicationId) });
+export async function checkUpdates(manual = true): Promise<void> {
+  if (useUpdates.getState().reason || controller.busy || AppState.currentState !== "active") return;
+  const prefs = loadPrefs();
+  if (!manual && !updateCheckDue(prefs, Date.now())) return;
+  useUpdates.setState({ status: "checking", offer: null, error: null });
+  savePrefs({ ...prefs, update_checked_at: Date.now() });
+  try {
+    await controller.check();
+    if (controller.offer && updateIsSkipped(loadPrefs(), controller.offer.version, manual)) controller.dismiss();
+    useUpdates.setState({ status: controller.offer ? "offered" : "idle", offer: controller.offer });
+  } catch (error) { useUpdates.setState({ status: "error", error: error instanceof Error ? error.message : String(error) }); }
+}
+export function dismissUpdate(skip = false): void {
+  if (skip && controller.offer) savePrefs({ ...loadPrefs(), update_skipped_version: controller.offer.version });
+  controller.dismiss(); useUpdates.setState({ status: "idle", offer: null });
+}
+export function setUpdateChecks(checks: boolean): void {
+  savePrefs({ ...loadPrefs(), update_checks: checks }); useUpdates.setState({ checks });
+}
+export async function installUpdate(id: string, draftsSaved: boolean): Promise<void> {
+  if (AppState.currentState !== "active" || useUpdates.getState().reason) return;
+  useUpdates.setState({ status: "installing", error: null });
+  try {
+    await controller.install(id, !draftsSaved || hasUpdateDrafts());
+    useUpdates.setState({ status: "confirmation", offer: null });
+  } catch (error) { useUpdates.setState({ status: "error", offer: controller.offer, error: error instanceof Error ? error.message : String(error) }); }
+}
+export function initializeUpdates(platform: string, applicationId: string | null): () => void {
+  const reason = updateBlock(platform, applicationId);
+  useUpdates.setState({ status: reason ? "blocked" : "idle", reason, checks: loadPrefs().update_checks !== false });
+  if (reason) return () => {};
+  const removeProgress = androidUpdates.onProgress(({ downloaded, total }) => {
+    useUpdates.setState({ progress: total > 0 ? Math.floor(downloaded * 100 / total) : 0 });
+  });
+  void checkUpdates(false);
+  const subscription = AppState.addEventListener("change", state => {
+    if (state === "active") {
+      const result = androidUpdates.result();
+      if (result && result !== "installed") useUpdates.setState({ status: "error", error: result });
+      else void checkUpdates(false);
+    }
+    else dismissUpdate();
+  });
+  return () => { subscription.remove(); removeProgress(); controller.dismiss(); };
 }

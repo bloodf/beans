@@ -82,7 +82,7 @@ pub fn send_user_message(
         let members = turn_order(&chat.meta, &app, &mentions, replied_bot.as_deref());
         start_room(app.clone(), chat_id.to_string(), message.id.clone(), members, admission);
     } else if let Some(bot) = chat.meta.bot_ids.first().and_then(|id| app.bot(id)) {
-        start_turn(&app, user_turn_job(&app, chat_id, &bot.id, &message.id), admission);
+        start_user_turn(&app, user_turn_job(&app, chat_id, &bot.id, &message.id), admission)?;
     }
     Ok(message)
 }
@@ -94,7 +94,9 @@ pub fn greet_new_bot(app: &Arc<App>, chat_id: &str, bot_id: &str, text: &str, se
     let mut job = user_turn_job(app, chat_id, bot_id, &message.id);
     job.setup = Some(setup);
     app.upsert_message(message, true);
-    start_turn(app, job, admission);
+    if let Err(error) = start_user_turn(app, job, admission) {
+        tracing::error!(%error, "Local greeting admission refused");
+    }
 }
 
 /// Stops work in a chat on this Device and forwards job-specific cancellations to every other
@@ -169,6 +171,17 @@ fn user_turn_job(app: &Arc<App>, chat_id: &str, bot_id: &str, trigger_message_id
         setup: None,
         created_at: now_secs(),
     }
+}
+
+// Called only for local user submissions, never for sync, dispatch or wake jobs.
+fn start_user_turn(app: &Arc<App>, job: Job, admission: Admission) -> anyhow::Result<()> {
+    if app.bot(&job.bot_id).is_some_and(|bot| app.this_device_id().as_deref() == Some(bot.runner_id.as_str())) {
+        let (job, lease) = app.mint_local_intent(job, None)?;
+        spawn_admitted_local_job(app.clone(), job, None, admission, lease);
+    } else {
+        start_turn(app, job, admission);
+    }
+    Ok(())
 }
 
 /// The turn in which a bot hears that a command it left running ended (`shell::wake_job`):
@@ -320,12 +333,16 @@ fn start_room(app: Arc<App>, chat_id: String, trigger: String, members: Vec<Bot>
     if members.is_empty() {
         return;
     }
+    let incarnation = match app.plugin_admission(None) {
+        Ok(lifecycle) => lifecycle.get().0,
+        Err(error) => { tracing::error!(%error, "Local room intent admission refused"); return; }
+    };
     let room_id = format!("room-{}", uuid::Uuid::new_v4());
     let cancel = CancellationToken::new();
     begin_job(&app, &room_id, &chat_id, "", None, None, cancel.clone());
     tokio::spawn(async move {
         let _admission = admission;
-        run_room(app, chat_id, trigger, members, room_id, cancel).await;
+        run_room(app, chat_id, trigger, members, room_id, cancel, incarnation).await;
     });
 }
 
@@ -352,6 +369,7 @@ async fn run_room(
     members: Vec<Bot>,
     room_id: String,
     cancel: CancellationToken,
+    incarnation: u64,
 ) {
     let lock = app.chat_lock(&chat_id);
     let _guard = lock.lock().await;
@@ -392,7 +410,7 @@ async fn run_room(
                 setup: None,
                 created_at: now_secs(),
             };
-            let outcome = run_member_turn(&app, job, &cancel).await;
+            let outcome = run_member_turn(&app, job, &cancel, incarnation).await;
             if has_newer_user_message(&app, &chat_id, &trigger) {
                 break 'rounds;
             }
@@ -417,11 +435,15 @@ fn heard_count(app: &App, chat_id: &str, bot_id: &str) -> usize {
 }
 
 /// Runs one member's turn here or on its Runner and waits for the outcome.
-async fn run_member_turn(app: &Arc<App>, job: Job, room_cancel: &CancellationToken) -> TurnOutcome {
+async fn run_member_turn(app: &Arc<App>, job: Job, room_cancel: &CancellationToken, incarnation: u64) -> TurnOutcome {
     if app.is_paused() { return TurnOutcome::Skipped; }
     let Some(bot) = app.bot(&job.bot_id) else { return TurnOutcome::Skipped };
     if app.this_device_id().as_deref() == Some(bot.runner_id.as_str()) {
-        return run_job_here(app, job, room_cancel.child_token()).await;
+        let (job, lease) = match app.mint_local_intent(job, Some(incarnation)) {
+            Ok(admitted) => admitted,
+            Err(error) => { tracing::error!(%error, "Local room intent admission refused"); return TurnOutcome::Skipped; }
+        };
+        return run_admitted_job_here(app, job, room_cancel.child_token(), lease).await;
     }
     remote_turn(app, job, bot.runner_id, room_cancel.child_token()).await
 }
@@ -671,12 +693,7 @@ pub(crate) fn spawn_admitted_local_job(app: Arc<App>, job: Job, remote_blob_id: 
 }
 
 /// Runs a member job inside an active room. The room already holds the chat lock.
-async fn run_job_here(app: &Arc<App>, job: Job, cancel: CancellationToken) -> TurnOutcome {
-    let lease = match app.queue_local_task(&job) {
-        Ok(Some(lease)) => lease,
-        Ok(None) => return TurnOutcome::Skipped,
-        Err(error) => { tracing::error!(%error, "Room member task admission refused"); return TurnOutcome::Skipped; }
-    };
+async fn run_admitted_job_here(app: &Arc<App>, job: Job, cancel: CancellationToken, lease: crate::local_store::TaskLease) -> TurnOutcome {
     begin_job(
         app,
         &job.id,
@@ -1163,6 +1180,55 @@ mod tests {
         let heard: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok()).collect();
         assert!(!heard.iter().any(|event| matches!(event, Event::RosterChanged { .. })));
         assert!(heard.iter().any(|event| matches!(event, Event::JobStarted { job_id, .. } if job_id == "mac-job")));
+    }
+
+    #[tokio::test]
+    async fn legacy_local_intent_is_usable_without_reopening_replays() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config { home: home.path().into(), port: 0 };
+        let reader = App::load(config.clone()).unwrap();
+        crate::identity::create(&reader, Some("Synthetic Runner".into())).unwrap();
+        let mut runner_bot = bot("bot", "Synthetic Bot");
+        runner_bot.runner_id = reader.this_device_id().unwrap();
+        let mut chat = empty_chat("chat"); chat.meta.bot_ids.push("bot".into());
+        reader.state.lock().unwrap().bots.push(runner_bot);
+        reader.state.lock().unwrap().chats.push(chat);
+        reader.save_state_now();
+        drop(reader);
+        let owner = App::load_owner(config.clone()).unwrap();
+        assert!(owner.legacy_execution_closed().unwrap());
+        let mut old = user_turn_job(&owner, "chat", "bot", "old-trigger");
+        old.id = "previously-executed-no-journal".into(); old.created_at = 4_000_000_000.0;
+        assert!(owner.queue_local_task(&old).unwrap().is_none());
+        let (fresh, lease) = owner.mint_local_intent(old.clone(), None).unwrap();
+        assert_ne!(fresh.id, old.id);
+        assert!(owner.start_local_task(&lease).unwrap());
+        owner.finish_local_task(&lease, false).unwrap();
+        drop(owner);
+        let reopened = App::load_owner(config.clone()).unwrap();
+        assert!(reopened.queue_local_task(&old).unwrap().is_none());
+        assert!(reopened.queue_local_task(&fresh).unwrap().is_none());
+        let (next, lease) = reopened.mint_local_intent(user_turn_job(&reopened, "chat", "bot", "new-trigger"), None).unwrap();
+        assert_ne!(next.id, fresh.id);
+        assert!(reopened.start_local_task(&lease).unwrap());
+        assert!(reopened.legacy_execution_closed().unwrap());
+        let lock = reopened.chat_lock("chat");
+        let guard = lock.lock().await;
+        send_user_message(reopened.clone(), "chat", "Explicit new local instruction", None, Vec::new(), Vec::new(), None).unwrap();
+        let submitted = reopened.running_jobs.lock().unwrap().keys().next().unwrap().clone();
+        cancel_chat(&reopened, "chat");
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while reopened.running_jobs.lock().unwrap().contains_key(&submitted) { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let previous = Arc::downgrade(&reopened);
+        drop(reopened);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while previous.strong_count() != 0 { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let recovered = App::load_owner(config).unwrap();
+        let history = recovered.task_history_execution(&submitted).unwrap().unwrap();
+        assert_eq!(recovered.store.task_state(&history).unwrap(), Some(crate::local_store::TaskState::Interrupted));
     }
 
     #[tokio::test]

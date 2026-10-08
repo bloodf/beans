@@ -115,7 +115,7 @@ fn check_running_tx(tx: &Transaction<'_>, lease: &TaskLease) -> anyhow::Result<(
     Ok(())
 }
 
-fn queue_task_tx(tx: &Transaction<'_>, lease: &TaskLease, job: &crate::model::Job) -> anyhow::Result<bool> {
+fn queue_task_tx(tx: &Transaction<'_>, lease: &TaskLease, job: &crate::model::Job, local_intent: bool) -> anyhow::Result<bool> {
     check_authority_tx(tx, lease)?;
     for id in [&lease.task_id,&lease.execution_id,&job.chat_id,&job.bot_id] { structural_id(id)?; }
     anyhow::ensure!(lease.task_id == job.id, "Task identity differs from Job.id");
@@ -123,7 +123,7 @@ fn queue_task_tx(tx: &Transaction<'_>, lease: &TaskLease, job: &crate::model::Jo
     // A migrated home lacks a complete historical Job inventory. Sender timestamps
     // cannot establish new intent: all ambiguous admissions stay closed.
     let legacy_closed: bool = tx.query_row("SELECT admission_floor IS NOT NULL FROM task_authority WHERE id=1",[],|r|r.get(0))?;
-    if legacy_closed {
+    if legacy_closed && !local_intent {
         tx.execute("INSERT OR IGNORE INTO task_fences VALUES(?1,?2)",params![lease.account_epoch,lease.task_id])?;
         return Ok(false);
     }
@@ -147,7 +147,7 @@ impl LocalStore {
         self.safety(|tx| {
             check_authority_tx(tx,lease)?;
             if let Some(job) = job {
-                anyhow::ensure!(queue_task_tx(tx,lease,job)?, "Routine task already exists");
+                anyhow::ensure!(queue_task_tx(tx,lease,job,false)?, "Routine task already exists");
                 tx.execute("UPDATE local_tasks SET check_report=?3 WHERE account_epoch=?1 AND task_id=?2",params![lease.account_epoch,lease.task_id,serde_json::to_string(&job.check)?])?;
             }
             for key in delete { tx.execute("DELETE FROM codemode_store WHERE chat_id=?1 AND bot_id=?2 AND key=?3",params![chat,bot,key])?; }
@@ -238,7 +238,12 @@ impl LocalStore {
     }
 
     pub(crate) fn queue_task(&self, lease: &TaskLease, job: &crate::model::Job) -> anyhow::Result<bool> {
-        self.safety(|tx| queue_task_tx(tx, lease, job))
+        self.safety(|tx| queue_task_tx(tx, lease, job, false))
+    }
+
+    /// Only the local submission boundary calls this with a newly server-minted Job id.
+    pub(crate) fn queue_local_intent(&self, lease: &TaskLease, job: &crate::model::Job) -> anyhow::Result<bool> {
+        self.safety(|tx| queue_task_tx(tx, lease, job, true))
     }
 
     pub(crate) fn start_task(&self, lease: &TaskLease) -> anyhow::Result<bool> {

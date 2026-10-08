@@ -355,6 +355,18 @@ impl App {
         Ok(self.store.queue_task(&lease, job)?.then_some(lease))
     }
 
+    /// A local user submission creates a new identity, never authorizes a supplied Job id.
+    pub(crate) fn mint_local_intent(&self, mut job: Job, incarnation: Option<u64>) -> anyhow::Result<(Job, crate::local_store::TaskLease)> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
+        self.check_local_job(&job)?;
+        anyhow::ensure!(job.routine_id.is_none(), "Local user intent cannot reopen a routine");
+        job.id = format!("job-{}", uuid::Uuid::new_v4());
+        let lease = self.task_lease(&job)?;
+        anyhow::ensure!(self.store.queue_local_intent(&lease, &job)?, "New local intent identity already fenced");
+        Ok((job, lease))
+    }
+
     pub(crate) fn start_local_task(&self, lease: &crate::local_store::TaskLease) -> anyhow::Result<bool> {
         let _policy = self.roster_edit.lock().unwrap();
         let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;

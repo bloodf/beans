@@ -120,6 +120,7 @@ async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     let signature = ed25519_dalek::Signature::from_slice(&bytes).map_err(|_| "Invalid request signature")?;
     key.verify_strict(&request_bytes(request, &target, body)?, &signature).map_err(|_| "Invalid request signature")?;
     match request.verb.as_str() {
+        "skills.discovery" => crate::skill_discovery::serve_as(app, body.clone(), &request.requested_by).await,
         #[cfg(feature = "provider-auth")]
         "providers.custom.preview" | "providers.custom.save" | "providers.custom.refresh" => {
             let requester = app.device(&request.requested_by).filter(|device| !device.box_pubkey.is_empty()).ok_or("Provider request requires a paired Device")?;
@@ -156,6 +157,10 @@ async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
         other => Err(format!("Unknown request {other}")),
     }
 }
+
+#[cfg(all(test, feature = "runner", target_os = "linux"))]
+#[path = "skill_discovery_test.rs"]
+mod skill_discovery_tests;
 
 /// A bot's memory as this Runner has it: the index with its budget and the other files by name.
 pub fn memory_read(app: &Arc<App>, bot_id: &str) -> Result<Value, String> {

@@ -335,6 +335,21 @@ export class AppStore {
     return this.request<unknown>(method, params);
   }
 
+  /** Read-only discovery remains bound to this account and connection across completion. */
+  async discoverSkills(runnerID: string, root: string): Promise<{ version: 1; status: "scanned" | "unsupported"; skills: { path: string; name: string | null; description: string | null; license: string | null }[]; diagnostics: { path: string | null; code: string }[] }> {
+    const generation = this.bootstrapGeneration, identity = this.identityID;
+    const runner = this.runners.find((device) => device.id === runnerID);
+    if (this.isMock || !this.isConnected || !this.hasIdentity || !identity || !runner) throw new RequestError(L("Skill discovery is unavailable."));
+    let changed = false;
+    const unsubscribe = this.subscribe((event) => { if (event.kind === "identityChanged" || event.kind === "connectionChanged") changed = true; });
+    try {
+      const result = await this.request<Awaited<ReturnType<AppStore["discoverSkills"]>>>("skills.discovery", { version: 1, runner_id: runnerID, root });
+      if (changed || generation !== this.bootstrapGeneration || identity !== this.identityID || !this.isConnected || !this.hasIdentity || !this.runners.some((device) => device.id === runnerID && device.os === runner.os && device.machineKey === runner.machineKey)) throw new RequestError(L("Skill discovery authority changed. Scan again."));
+      if (result.version !== 1 || !["scanned", "unsupported"].includes(result.status) || !Array.isArray(result.skills) || !Array.isArray(result.diagnostics)) throw new RequestError(L("Skill discovery is unavailable."));
+      return result;
+    } finally { unsubscribe(); }
+  }
+
   private async bootstrap(generation: number): Promise<void> {
     try {
       // The snapshot includes identity and connection state as well as messages. Publish them

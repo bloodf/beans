@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"github.com/egoist/mygo/ui"
 	"strings"
 )
@@ -98,57 +97,57 @@ func (n *nativeDesktop) saveMemoryNote(overwrite bool) {
 func (n *nativeDesktop) memoryNoteView(c *ui.Context) {
 	f := &n.memoryPanel.Forms
 	d := f.Note
-	ui.Text(c, "MEMORY.md").Bold()
+	ui.Text(c, nativeL("MEMORY.md")).Bold()
 	if f.Error != "" {
-		ui.Text(c, f.Error)
+		ui.Text(c, nativeL(f.Error))
 	}
 	if d.Loaded {
-		ui.Text(c, fmt.Sprintf("Each turn loads the first %d lines or %d bytes. File limit: 256 KiB.", d.MaxLines, d.MaxBytes))
-		ui.TextArea(c, &d.Text).Lines(8, 24).Label("Memory note").Disabled(f.Pending)
+		ui.Text(c, nativeL("Each turn loads the first %d lines or %d bytes. File limit: 256 KiB.", d.MaxLines, d.MaxBytes))
+		ui.TextArea(c, &d.Text).Lines(8, 24).Label(nativeL("Memory note")).Disabled(f.Pending)
 		lines := 0
 		if d.Text != "" {
 			lines = strings.Count(d.Text, "\n") + 1
 		}
-		ui.Text(c, fmt.Sprintf("Draft: %d lines · %d bytes", lines, len(d.Text)))
+		ui.Text(c, nativeL("Draft: %d lines · %d bytes", lines, len(d.Text)))
 	}
 	if f.Pending {
-		ui.Text(c, "Working…")
+		ui.Text(c, nativeL("Working…"))
 	}
 	ui.Row(c).Gap(8).Children(func() {
-		if ui.Button(c, "Save memory note").Disabled(f.Pending || !d.Loaded).Clicked() {
+		if ui.Button(c, nativeL("Save memory note")).Disabled(f.Pending || !d.Loaded).Clicked() {
 			n.saveMemoryNote(false)
 		}
-		if ui.Button(c, "Reload memory note…").Disabled(f.Pending).Clicked() {
+		if ui.Button(c, nativeL("Reload memory note…")).Disabled(f.Pending).Clicked() {
 			if d.Loaded {
 				d.ConfirmReload = true
 			} else {
 				n.reloadMemoryNote()
 			}
 		}
-		if ui.Button(c, "Cancel note").Disabled(f.Pending).Clicked() {
+		if ui.Button(c, nativeL("Cancel note")).Disabled(f.Pending).Clicked() {
 			f.Note = nil
 			f.serial++
 		}
 	})
 	if d.Conflict {
-		ui.Text(c, "MEMORY.md changed while you were editing. Reload discards your draft; overwrite replaces the current file.")
-		if ui.Button(c, "Overwrite with mine…").Disabled(f.Pending).Clicked() {
+		ui.Text(c, nativeL("MEMORY.md changed while you were editing. Reload discards your draft; overwrite replaces the current file."))
+		if ui.Button(c, nativeL("Overwrite with mine…")).Disabled(f.Pending).Clicked() {
 			d.ConfirmOverwrite = true
 		}
 	}
 	if d.ConfirmReload {
-		if ui.Button(c, "Confirm discard and reload").Disabled(f.Pending).Clicked() {
+		if ui.Button(c, nativeL("Confirm discard and reload")).Disabled(f.Pending).Clicked() {
 			n.reloadMemoryNote()
 		}
-		if ui.Button(c, "Keep note draft").Clicked() {
+		if ui.Button(c, nativeL("Keep note draft")).Clicked() {
 			d.ConfirmReload = false
 		}
 	}
 	if d.ConfirmOverwrite {
-		if ui.Button(c, "Confirm overwrite memory note").Disabled(f.Pending).Clicked() {
+		if ui.Button(c, nativeL("Confirm overwrite memory note")).Disabled(f.Pending).Clicked() {
 			n.saveMemoryNote(true)
 		}
-		if ui.Button(c, "Keep current file").Clicked() {
+		if ui.Button(c, nativeL("Keep current file")).Clicked() {
 			d.ConfirmOverwrite = false
 		}
 	}

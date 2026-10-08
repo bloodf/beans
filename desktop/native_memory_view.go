@@ -139,7 +139,7 @@ func (n *nativeDesktop) memoryView(c *ui.Context) {
 		if ui.Button(c.Key("memory-"+bot.ID), "Memory for "+bot.Name).Clicked() {
 			n.openBotMemory(bot.ID)
 		}
-		if ui.Button(c.Key("note-"+bot.ID), "MEMORY.md for "+bot.Name).Clicked() {
+		if ui.Button(c.Key("note-"+bot.ID), nativeL("MEMORY.md for %s", bot.Name)).Clicked() {
 			n.openMemoryNote(bot.ID)
 		}
 	}

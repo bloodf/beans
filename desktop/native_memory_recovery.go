@@ -58,8 +58,11 @@ func (n *nativeDesktop) confirmDiscardMemoryRecovery() {
 	before := jsonBytes(n.memoryRecovery)
 	epoch := n.store.Epoch
 	parent := n.win
+	message := nativeL("Discard retained memory edits?")
+	detail := nativeL("This removes unsaved connection secrets, consent choices and note edits retained for disconnected accounts.")
+	buttons := []string{nativeL("Keep edits"), nativeL("Discard edits")}
 	go func() {
-		answer, err := mygo.Dialog.Message(mygo.MessageOptions{Parent: parent, Message: "Discard retained memory edits?", Detail: "This removes unsaved connection secrets and consent choices retained for disconnected accounts.", Buttons: []string{"Keep edits", "Discard edits"}, CancelButton: 0})
+		answer, err := mygo.Dialog.Message(mygo.MessageOptions{Parent: parent, Message: message, Detail: detail, Buttons: buttons, CancelButton: 0})
 		postMain(func() {
 			if err != nil || answer.Button != 1 || epoch != n.store.Epoch || string(before) != string(jsonBytes(n.memoryRecovery)) {
 				return

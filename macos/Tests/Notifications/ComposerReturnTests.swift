@@ -45,8 +45,8 @@ final class ComposerReturnTests: XCTestCase {
         // A hosted test process need not be the active app, so the window is not required to be
         // key; `press` sends to this window directly and checks the first responder instead.
         window.orderFront(nil)
-        XCTAssertTrue(window.makeFirstResponder(textView), "text view refused first responder")
         textView = try XCTUnwrap(find(ComposerTextView.self, in: composer))
+        XCTAssertTrue(window.makeFirstResponder(textView), "text view refused first responder")
         XCTAssertTrue(window.firstResponder === textView)
     }
 
@@ -120,10 +120,10 @@ final class ComposerReturnTests: XCTestCase {
         try press(.shift)
         XCTAssertEqual(sent.count, 0)
         XCTAssertEqual(composer.text, "hello\n\n")
-        // Delivery of each of these is asserted by `press`; their text effect is AppKit's.
-        try press([.command, .shift])
-        try press(.option)
-        try press(.control)
+        // `press` returns the commands the text view produced, which proves each key reached it.
+        XCTAssertFalse(try press([.command, .shift]).isEmpty, "⌘⇧Return produced no command")
+        XCTAssertFalse(try press(.option).isEmpty, "⌥Return produced no command")
+        XCTAssertFalse(try press(.control).isEmpty, "⌃Return produced no command")
         XCTAssertEqual(sent.count, 0)
         let beforeSend = composer.text
         XCTAssertTrue(beforeSend.hasPrefix("hello\n\n"))
@@ -146,7 +146,7 @@ final class ComposerReturnTests: XCTestCase {
         try press(.shift)
         XCTAssertEqual(sent.count, 0)
         XCTAssertEqual(composer.text, "hello\n")
-        try press([.command, .shift])
+        XCTAssertFalse(try press([.command, .shift]).isEmpty, "⌘⇧Return produced no command")
         XCTAssertEqual(sent.count, 0)
         try press()
         XCTAssertEqual(sent.map(\.text), ["hello"])

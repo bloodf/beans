@@ -199,10 +199,9 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
             }
             return Err(conflict);
         }
-        if queued_roster.is_some() {
-            if let Some(current) = app.store.queued_roster().map_err(|error| RelayError { status: None, message: error.to_string() })? {
-                rebase_queued_roster(app, &machine_file, current)?;
-            }
+        // The pull can itself queue a policy projection before receiving the full roster.
+        if let Some(current) = app.store.queued_roster().map_err(|error| RelayError { status: None, message: error.to_string() })? {
+            rebase_queued_roster(app, &machine_file, current)?;
         }
         #[cfg(feature = "runner")]
         app.close_orphan_proposals().map_err(|error| RelayError { status: None, message: error.to_string() })?;
@@ -1553,6 +1552,92 @@ mod tests {
         let home = std::env::temp_dir().join(format!("beans-sync-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn first_sync_policy_projection_preserves_remote_bots_when_uploaded() {
+        use axum::{extract::{Query, State as HttpState, WebSocketUpgrade}, routing::{get, post}, Json, Router};
+        use serde_json::{json, Value};
+        use tokio::sync::Notify;
+
+        struct RelayFixture {
+            blobs: Vec<Value>,
+            published: std::sync::Mutex<Option<Value>>,
+            uploaded: Notify,
+        }
+        async fn list(HttpState(fixture): HttpState<Arc<RelayFixture>>,
+            Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            let since: i64 = query["since"].parse().unwrap();
+            let kinds: Vec<&str> = query["kinds"].split(',').collect();
+            Json(json!({"blobs": fixture.blobs.iter().filter(|blob|
+                blob["seq"].as_i64().unwrap() > since
+                    && kinds.contains(&blob["kind"].as_str().unwrap())).collect::<Vec<_>>(), "seq": 2}))
+        }
+        async fn upload(HttpState(fixture): HttpState<Arc<RelayFixture>>, Json(body): Json<Value>) -> Json<Value> {
+            if body["kind"] == "roster" {
+                *fixture.published.lock().unwrap() = Some(body);
+                fixture.uploaded.notify_one();
+            }
+            Json(json!({"seq": 3}))
+        }
+        async fn socket(upgrade: WebSocketUpgrade) -> axum::response::Response {
+            upgrade.on_upgrade(|mut socket| async move {
+                while socket.recv().await.is_some() {}
+            })
+        }
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Joining Device".into())).unwrap();
+        app.machine.lock().unwrap().as_mut().unwrap().registered = true;
+        app.store.clear().unwrap();
+        *app.state.lock().unwrap() = Default::default();
+        app.save_state();
+        assert!(app.store.queued_roster().unwrap().is_none());
+
+        let mut remote = roster(bot("remote-bot"));
+        let capabilities = crate::model::Capabilities { shell: false, write: false, plugins: Some(Vec::new()) };
+        let version = crate::model::PolicyVersion { counter: 1, device_id: "remote-device".into() };
+        remote.bots[0].capabilities = capabilities.clone();
+        remote.capability_versions.insert("remote-bot".into(), version.clone());
+        remote.policy_capabilities.insert("remote-bot".into(), capabilities.clone());
+        remote.policy_clock = 1;
+        remote.chats.push(ChatMeta { id: "remote-chat".into(), kind: "dm".into(), title: None,
+            bot_ids: vec!["remote-bot".into()], owner_bot_id: Some("remote-bot".into()),
+            description: None, is_pinned: false, created_at: 1.0 });
+        let policy = PolicyBlob { paused: None, bot_id: Some("remote-bot".into()),
+            capabilities: Some(capabilities), removed: false, version };
+        let dek = app.dek().unwrap();
+        let fixture = Arc::new(RelayFixture {
+            blobs: vec![
+                json!({"id":"policy-before-roster","kind":"policy","recipient_machine_pubkey":null,
+                    "ciphertext":crate::keys::b64(&crate::crypto::encrypt_json(&dek,"policy",&policy).unwrap()),"seq":1,"created_at":1}),
+                json!({"id":"remote-roster","kind":"roster","recipient_machine_pubkey":null,
+                    "ciphertext":crate::keys::b64(&crate::crypto::encrypt_json(&dek,"roster",&remote).unwrap()),"seq":2,"created_at":2}),
+            ], published: std::sync::Mutex::new(None), uploaded: Notify::new(),
+        });
+        let server = Router::new()
+            .route("/v1/health", get(|| async { Json(json!({"ok":true,"service":"beans-relay","format":"beans-v2","protocol":crate::relay::PROTOCOL,"min_protocol":crate::relay::PROTOCOL,"min_roster_protocol":crate::relay::PROTOCOL,"memory_config_version":1})) }))
+            .route("/v1/auth/challenge", post(|| async { Json(json!({"nonce":"test-nonce"})) }))
+            .route("/v1/auth/verify", post(|| async { Json(json!({"token":"test-token"})) }))
+            .route("/v1/sync", get(socket))
+            .route("/v1/blobs", get(list).put(upload))
+            .route("/v1/groups/{group}/blobs", get(|| async { Json(json!({"slots":[],"has_more":false})) }))
+            .with_state(fixture.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        app.set_relay_url(Some(format!("http://{}", listener.local_addr().unwrap()))).unwrap();
+        let server_task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let syncing = tokio::spawn({ let app = app.clone(); async move { session(&app, &mut 0).await } });
+        let arrived = tokio::time::timeout(Duration::from_secs(10), fixture.uploaded.notified()).await;
+        syncing.abort();
+        server_task.abort();
+        arrived.expect("first sync never published its policy projection");
+        let published = fixture.published.lock().unwrap().clone().unwrap();
+        let projected: RosterBlob = crate::crypto::decrypt_json(&dek, "roster",
+            &crate::keys::unb64(published["ciphertext"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(projected.bots.iter().any(|bot| bot.id == "remote-bot"), "first join erased the remote bot");
+        assert!(projected.chats.iter().any(|chat| chat.id == "remote-chat"), "first join erased the remote chat");
+        assert_eq!(published["expected_slot_seq"], 2);
     }
 
     #[tokio::test]

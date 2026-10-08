@@ -4,12 +4,13 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json/jsontext"
-	"encoding/json/v2"
 	"net/url"
 	"runtime"
 	"sync"
 	"time"
 
+	stdjson "encoding/json"
+	"github.com/bloodf/beans/desktop/model"
 	"github.com/egoist/mygo"
 )
 
@@ -65,9 +66,11 @@ var (
 // windows, the CLI's launcher and connection, notifications, and the tray icon that keeps the
 // app reachable while its windows are closed.
 type appDelegate struct {
-	mu       sync.Mutex
-	cli      *cliClient
-	launcher *launcher
+	mu                sync.Mutex
+	cli               *cliClient
+	launcher          *launcher
+	session           *model.Session
+	sessionGeneration uint64
 
 	main       *mygo.Window
 	onboarding *mygo.Window
@@ -112,16 +115,33 @@ func (a *appDelegate) didFinishLaunching() {
 	startupTrace("did finish launching")
 	a.cli = newCLIClient()
 	a.launcher = newLauncher()
+	a.session = model.NewSession(a.identityChanged, func(name string, data stdjson.RawMessage) {
+		native.event(name, data)
+		frame, err := stdjson.Marshal(struct {
+			Event string             `json:"event"`
+			Data  stdjson.RawMessage `json:"data"`
+		}{name, data})
+		if err == nil {
+			CLIEvents.Broadcast(jsontext.Value(frame))
+		}
+	})
 	if isMock() {
 		yes := true
 		a.hasIdentity = &yes
 		a.starting = false
 	} else {
 		a.cli.onState = func(state string) {
-			if state == "connected" {
-				go a.askIdentity()
-			}
-			a.publishState()
+			postMain(func() {
+				generation := a.connectionTransition(state)
+				if state == "connected" {
+					authority := native.authority
+					go a.askIdentity(generation, authority)
+				}
+				if native.win != nil {
+					native.win.Invalidate()
+				}
+				a.publishState()
+			})
 		}
 		a.cli.onEvent = a.cliEvent
 		a.cli.onReconnectNeeded = a.launcher.ensureRunning
@@ -149,6 +169,9 @@ func (a *appDelegate) didFinishLaunching() {
 		a.showMainWindow()
 		startupTrace("window shown")
 	}
+	if nativeEnabled() {
+		native.show()
+	}
 }
 
 func (a *appDelegate) finishStartup() {
@@ -173,36 +196,46 @@ func (a *appDelegate) stopWaiting() {
 	}
 }
 
+func (a *appDelegate) connectionTransition(state string) uint64 {
+	native.store.Fence()
+	native.suspendMemoryForms()
+	if native.avatars != nil {
+		native.avatars.reset(native.store.Epoch)
+	}
+	if native.memory != nil {
+		_ = native.memory.reset(native.store.Epoch)
+	}
+	if state == "connected" {
+		native.authority = a.cli.captureAuthority()
+		a.sessionGeneration = a.session.Connect()
+	} else {
+		a.session.Disconnect()
+	}
+	return a.sessionGeneration
+}
+
 // askIdentity asks a CLI that just answered whether it holds an identity, which decides between
 // onboarding and the main window.
-func (a *appDelegate) askIdentity() {
+func (a *appDelegate) askIdentity(generation uint64, authority cliAuthority) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	result, err := a.cli.request(ctx, "hello", nil)
-	if err == nil {
-		var hello struct {
-			HasIdentity bool `json:"has_identity"`
+	result, err := a.cli.requestBound(ctx, "bootstrap", nil, &authority)
+	postMain(func() {
+		if err == nil {
+			_ = a.session.Bootstrap(generation, stdjson.RawMessage(result))
 		}
-		if json.Unmarshal(result, &hello) == nil {
-			a.identityChanged(hello.HasIdentity)
-		}
-	}
-	a.finishStartup()
+		a.finishStartup()
+	})
 }
 
 func (a *appDelegate) cliEvent(name string, frame []byte) {
-	CLIEvents.Broadcast(jsontext.Value(frame))
-	if name != "identity.changed" && name != "snapshot" {
+	var payload struct {
+		Data stdjson.RawMessage `json:"data"`
+	}
+	if stdjson.Unmarshal(frame, &payload) != nil {
 		return
 	}
-	var payload struct {
-		Data struct {
-			HasIdentity *bool `json:"has_identity"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(frame, &payload) == nil && payload.Data.HasIdentity != nil {
-		a.identityChanged(*payload.Data.HasIdentity)
-	}
+	postMain(func() { a.session.Event(a.sessionGeneration, name, payload.Data) })
 }
 
 // identityChanged opens the window the identity calls for. Onboarding closes itself when it
@@ -283,15 +316,15 @@ func (a *appDelegate) newWindow(options mygo.WindowOptions) *mygo.Window {
 	win.OnRestore(report)
 	win.OnEnterFullScreen(report)
 	win.OnLeaveFullScreen(report)
-	win.OnDOMReady(report)
+	win.Page().OnDOMReady(report)
 	// The app's pages stay in the window; a link goes to the browser.
-	win.OnWillNavigate(func(e *mygo.NavigateEvent) {
+	win.Page().OnWillNavigate(func(e *mygo.NavigateEvent) {
 		if external(e.URL) {
 			e.PreventDefault()
 			go mygo.Shell.OpenExternal(e.URL)
 		}
 	})
-	win.SetWindowOpenHandler(func(req mygo.WindowOpenRequest) *mygo.WindowOptions {
+	win.Page().SetWindowOpenHandler(func(req mygo.WindowOpenRequest) *mygo.WindowOptions {
 		if external(req.URL) {
 			go mygo.Shell.OpenExternal(req.URL)
 		}

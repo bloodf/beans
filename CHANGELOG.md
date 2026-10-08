@@ -6,6 +6,8 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Phone Settings shows installed version/build and fails closed for unavailable Android signed-update verification. Stable release candidate ordering and device-local daily-check/skip policy are defined without enabling network checks or installation; dictation changes preserve other local preferences.
+
 - Fresh Beans accounts use `beans-v2`, isolated v2 homes and ports 4874/4875, mandatory protocol-5/format capability, versioned backup phrases and pairing links; incompatible old storage and phrases are rejected without migration or reset.
 - New releases use Beans-only asset/package names and retain the existing Ed25519 anchor and immutable historical manifests. Update eligibility requires fresh-format relay health and supported protocol floors before Runner replacement.
 - Production Grok OAuth is disabled before callback/network access pending a verified Beans contract; existing provider, avatar and memory mechanisms remain unchanged.

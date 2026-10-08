@@ -7,7 +7,7 @@ import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { runsInTerminal, type AutoReview, type Bot, type Chat, type ChatMeta, type ChatUsage, type Device, type Message, type ProviderModel, type ProviderStatus, type RelayProblem, type Routine } from "./model";
 import { t } from "../i18n";
-import { savePrefs } from "./prefs";
+import { loadPrefs, savePrefs } from "./prefs";
 
 export interface Running {
   chatId: string;
@@ -126,7 +126,7 @@ export const useStore = create<StoreState>()(() => ({ ...empty(), ready: false, 
 /// Applies a change to the phone's own prefs and saves them.
 export function mutate(update: (s: StoreState) => Partial<StoreState>) {
   useStore.setState((s) => update(s));
-  savePrefs({ dictation_lang: useStore.getState().dictation_lang });
+  savePrefs({ ...loadPrefs(), dictation_lang: useStore.getState().dictation_lang });
 }
 
 /// Back to unpaired: everything the core told us goes; the phone's prefs stay.

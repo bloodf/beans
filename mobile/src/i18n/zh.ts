@@ -1,6 +1,12 @@
 // Simplified Chinese. The key is the English text passed to t(); `bun run l10n` checks this table.
 
 export const zh: Record<string, string> = {
+  "App updates": "应用更新",
+  "Version": "版本",
+  "Build": "构建号",
+  "Beans Dev does not install release updates.": "Beans Dev 不安装正式版本更新。",
+  "Use your store or TestFlight to update Beans.": "请通过应用商店或 TestFlight 更新 Beans。",
+  "Signed Android update verification is unavailable in this build. No APK is downloaded or installed. Use your existing distribution channel.": "此构建不支持 Android 签名更新验证。不会下载或安装 APK。请使用现有分发渠道。",
   "{count} bot": "{count} 个智能体",
   "{count} bots": "{count} 个智能体",
   "{count} files": "{count} 个文件",

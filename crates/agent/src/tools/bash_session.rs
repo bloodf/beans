@@ -404,15 +404,32 @@ impl BashSession {
         #[cfg(unix)]
         {
             let fd = self.master.lock().unwrap().clone().ok_or("The command has ended")?;
-            self.state.lock().unwrap().last_input = Instant::now();
+            {
+                let mut state = self.state.lock().unwrap();
+                if state.end.is_some() || self.closed.is_cancelled() {
+                    return Err("The command has ended".into());
+                }
+                state.last_input = Instant::now();
+            }
             // Whoever follows the session sees the question answered.
             self.changed.send_modify(|version| *version += 1);
             let mut written = 0;
             let result = tokio::time::timeout(WRITE_TIMEOUT, async {
                 while written < text.len() {
-                    let mut guard = fd.writable().await.map_err(|e| e.to_string())?;
+                    let mut guard = tokio::select! {
+                        biased;
+                        _ = self.closed.cancelled() => return Err("The command has ended".to_string()),
+                        guard = fd.writable() => guard.map_err(|e| e.to_string())?,
+                    };
                     match guard.try_io(|inner| {
                         use std::os::fd::AsRawFd;
+                        // Stop records its end under this same lock. Hold it through the
+                        // nonblocking syscall, never through an await: each accepted chunk
+                        // precedes Stop's fence, even when this writer cloned the fd earlier.
+                        let state = self.state.lock().unwrap();
+                        if state.end.is_some() || self.closed.is_cancelled() {
+                            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "The command has ended"));
+                        }
                         let rest = &text[written..];
                         let n = unsafe { libc::write(inner.as_raw_fd(), rest.as_ptr().cast(), rest.len()) };
                         if n < 0 {
@@ -531,9 +548,11 @@ impl BashSession {
     }
 
     fn close(&self) {
+        // Natural exit closes input under the same fence as Stop and each write syscall.
+        let _state = self.state.lock().unwrap();
+        self.closed.cancel();
         #[cfg(unix)]
         self.master.lock().unwrap().take();
-        self.closed.cancel();
     }
 
     fn push_output(&self, bytes: &[u8]) {

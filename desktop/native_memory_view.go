@@ -13,6 +13,7 @@ type nativeMemoryPanel struct {
 	Loading     bool
 	Connections json.RawMessage
 	Error       string
+	Forms       memoryForms
 }
 
 func (n *nativeDesktop) loadMemory() {
@@ -25,11 +26,11 @@ func (n *nativeDesktop) loadMemory() {
 	}
 	n.memoryPanel.Open = true
 	n.memoryPanel.Loading = true
-	epoch, authority, client := n.store.Epoch, n.authority, app.cli
+	epoch, authority := n.store.Epoch, n.authority
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		data, err := client.requestBound(ctx, "memory.connections.list", nil, &authority)
+		data, err := n.memoryRequest(ctx, "memory.connections.list", nil, authority)
 		var masked json.RawMessage
 		if err == nil {
 			masked, err = n.memory.masked("connections", json.RawMessage(data))
@@ -52,6 +53,10 @@ func (n *nativeDesktop) loadMemory() {
 	}()
 }
 func (n *nativeDesktop) memoryView(c *ui.Context) {
+	if n.memoryPanel.Forms.Connection != nil || n.memoryPanel.Forms.Bot != nil {
+		n.memoryFormView(c)
+		return
+	}
 	ui.Text(c, "Memory connections").Bold().FontSize(20)
 	if ui.Button(c, "Back to chat").Clicked() {
 		n.memoryPanel.Open = false
@@ -87,9 +92,28 @@ func (n *nativeDesktop) memoryView(c *ui.Context) {
 				if connection.Availability == "blocked" && connection.Reason != nil {
 					ui.Text(c, *connection.Reason)
 				}
+				var row memoryConnectionRow
+				for _, candidate := range n.memoryRows() {
+					if candidate.ID == connection.ID {
+						row = candidate
+						break
+					}
+				}
+				if ui.Button(c, "Edit connection").Clicked() {
+					n.editMemoryConnection(&row)
+				}
+				if ui.Button(c,"Disconnect connection…").Disabled(n.memoryPanel.Forms.Pending).Clicked(){n.confirmMemoryDisconnect(row)}
 			})
 		}
 	})
+	if ui.Button(c, "Add memory connection").Clicked() {
+		n.editMemoryConnection(nil)
+	}
+	for _, bot := range n.store.Bots {
+		if ui.Button(c.Key("memory-"+bot.ID), "Memory for "+bot.Name).Clicked() {
+			n.openBotMemory(bot.ID)
+		}
+	}
 	if ui.Button(c, "Reload memory connections").Clicked() {
 		n.loadMemory()
 	}

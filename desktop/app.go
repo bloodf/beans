@@ -198,6 +198,7 @@ func (a *appDelegate) stopWaiting() {
 
 func (a *appDelegate) connectionTransition(state string) uint64 {
 	native.store.Fence()
+	native.memoryPanel = nativeMemoryPanel{}
 	if native.avatars != nil {
 		native.avatars.reset(native.store.Epoch)
 	}

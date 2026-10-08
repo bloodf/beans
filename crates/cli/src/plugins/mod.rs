@@ -410,6 +410,18 @@ pub(crate) fn validate_account_files(config: &config::Config) -> anyhow::Result<
 }
 
 impl Store {
+    pub(crate) fn reset_account(&mut self, config: &config::Config) -> anyhow::Result<()> {
+        *self = Self::default();
+        let dir = config.plugins_dir();
+        match std::fs::symlink_metadata(&dir) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => std::fs::remove_dir_all(&dir)?,
+            Ok(_) => anyhow::bail!("Plugin storage must be a regular directory during forget"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+        mcp_json::reset_account(config)
+    }
+
     pub fn load(config: &config::Config) -> anyhow::Result<Store> {
         let (installed, secrets) = read_account_files(config)?;
         let mut store = Store { installed: installed.plugins, secrets, notes: BTreeMap::new(), pending_updates: BTreeMap::new(), codes: BTreeMap::new(), mcp: mcp_json::McpFile::default() };
@@ -555,6 +567,7 @@ impl Store {
 
 /// Installs or updates a plugin on this Runner and writes its skills to its folder.
 pub fn install(app: &Arc<App>, manifest: Manifest, source: &str) -> Result<PluginStatus, String> {
+    let _admission = app.plugin_admission(None)?;
     manifest.check()?;
     if source == mcp_json::SOURCE || app.plugins.lock().unwrap().get(&manifest.id).is_some_and(|plugin| plugin.source == mcp_json::SOURCE) {
         return Err("That plugin is managed in mcp.json.".into());
@@ -592,6 +605,7 @@ pub fn install(app: &Arc<App>, manifest: Manifest, source: &str) -> Result<Plugi
 /// Removes a plugin, its secrets, and its folder; every bot on this Runner loses it. A server
 /// from `mcp.json` leaves that file.
 pub fn uninstall(app: &Arc<App>, id: &str) -> Result<(), String> {
+    let _admission = app.plugin_admission(None)?;
     if app.plugins.lock().unwrap().get(id).is_some_and(|plugin| plugin.source == mcp_json::SOURCE) {
         return Err("That plugin is managed in mcp.json.".into());
     }
@@ -626,6 +640,7 @@ pub fn uninstall(app: &Arc<App>, id: &str) -> Result<(), String> {
 /// Sets variables on an installed plugin. Secret ones go to the secrets file; an empty value
 /// clears the variable.
 pub fn set_variables(app: &Arc<App>, id: &str, variables: &BTreeMap<String, String>) -> Result<PluginStatus, String> {
+    let _admission = app.plugin_admission(None)?;
     let status = {
         let mut store = app.plugins.lock().unwrap();
         let manifest = store.get(id).map(|p| p.manifest.clone()).ok_or("Unknown plugin")?;
@@ -663,6 +678,7 @@ pub fn set_variables(app: &Arc<App>, id: &str, variables: &BTreeMap<String, Stri
 /// forgotten all the same. Nothing is revoked at the server, which honors a token until it
 /// expires; the next use asks for a sign-in again.
 pub fn sign_out(app: &Arc<App>, id: &str, server: Option<&str>) -> Result<Option<PluginStatus>, String> {
+    let _admission = app.plugin_admission(None)?;
     let status = {
         let mut store = app.plugins.lock().unwrap();
         let servers: Vec<String> = match store.get(id) {
@@ -692,6 +708,7 @@ pub fn sign_out(app: &Arc<App>, id: &str, server: Option<&str>) -> Result<Option
 
 /// Keeps OAuth tokens for a server, or drops them.
 pub fn set_oauth(app: &Arc<App>, id: &str, server: &str, tokens: Option<Value>) -> Result<(), String> {
+    let _admission = app.plugin_admission(None)?;
     let mut store = app.plugins.lock().unwrap();
     if store.get(id).is_none() {
         return Err("Unknown plugin".into());
@@ -713,6 +730,7 @@ pub fn set_oauth(app: &Arc<App>, id: &str, server: &str, tokens: Option<Value>) 
 /// Notes a connection state on a plugin (`connecting`, or `error` with the reason), cleared
 /// by the next install, variable change, or successful connection.
 pub fn note(app: &Arc<App>, id: &str, state: Option<(&str, &str)>) {
+    let Ok(_admission) = app.plugin_admission(None) else { return };
     {
         let mut store = app.plugins.lock().unwrap();
         match state {
@@ -789,6 +807,7 @@ pub fn detail(app: &Arc<App>, id: &str) -> Result<Value, String> {
 /// Refreshes text-only marketplace entries. Execution, setup, skills, and permission
 /// changes stay pinned to the installed manifest until explicit reinstall from the index.
 pub fn refresh_installed(app: &Arc<App>, manifests: &[Manifest]) -> Vec<String> {
+    let Ok(_admission) = app.plugin_admission(None) else { return Vec::new() };
     let mut updated = Vec::new();
     let mut pending = BTreeMap::new();
     {
@@ -1014,6 +1033,22 @@ mod tests {
         assert_clean(app);
         let reopened = App::load(app.config.clone()).unwrap();
         assert_clean(&reopened);
+    }
+
+    #[test]
+    fn failed_forget_blocks_new_identity_and_reopen_until_retry() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Synthetic A".into())).unwrap();
+        std::fs::create_dir(app.config.mcp_path()).unwrap();
+        assert!(app.forget_identity().is_err(), "non-regular MCP config must fail closed");
+        assert!(crate::identity::create(app, Some("Synthetic B".into())).is_err());
+        assert!(App::load(app.config.clone()).is_err(), "interrupted cleanup must block restart");
+        assert!(app.plugin_admission(None).is_err());
+        std::fs::remove_dir(app.config.mcp_path()).unwrap();
+        app.forget_identity().unwrap();
+        crate::identity::create(app, Some("Synthetic B".into())).unwrap();
+        assert!(App::load(app.config.clone()).is_ok());
     }
 
     #[test]

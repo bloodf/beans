@@ -21,6 +21,17 @@ use crate::app::App;
 
 use super::{AuthSpec, Installed, Manifest, ServerSpec, Store, ToolHints};
 
+pub(crate) fn reset_account(config: &crate::config::Config) -> anyhow::Result<()> {
+    let path = config.mcp_path();
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => std::fs::remove_file(&path)?,
+        Ok(_) => anyhow::bail!("MCP configuration must be a regular file during forget"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
 /// `Installed::source` of a plugin made from an `mcp.json` entry.
 pub const SOURCE: &str = "mcp.json";
 /// The one server of such a plugin, whatever its entry is called, so a rename keeps its sign-in.
@@ -1131,6 +1142,7 @@ mod runner {
     /// Adds the server `name`, or saves the one `previous` names under `name`. `config` is its
     /// entry, in any app's spelling; the CLI checks it and writes it back canonical.
     pub fn save(app: &Arc<App>, name: &str, previous: Option<&str>, config: &Value) -> Result<String, String> {
+        let _admission = app.plugin_admission(None)?;
         let name = name.trim();
         if name.is_empty() {
             return Err("Give the server a name.".into());
@@ -1175,6 +1187,7 @@ mod runner {
 
     /// Removes a server from the file, with its sign-in, its folder, and its always-allowed tools.
     pub fn remove(app: &Arc<App>, name: &str) -> Result<(), String> {
+        let _admission = app.plugin_admission(None)?;
         let file = current(app)?;
         let server = file.server(name).ok_or_else(|| format!("No server named {name} in mcp.json."))?.clone();
         let changes = write(app, &without_entry(&file.doc, name))?;
@@ -1186,6 +1199,7 @@ mod runner {
     /// Turns a server on or off. Off, no bot sees it and it never starts; its entry, sign-in, and
     /// tools stay.
     pub fn set_enabled(app: &Arc<App>, name: &str, enabled: bool) -> Result<(), String> {
+        let _admission = app.plugin_admission(None)?;
         let file = current(app)?;
         let server = file.server(name).ok_or_else(|| format!("No server named {name} in mcp.json."))?;
         let mut entry = server.entry.clone();
@@ -1208,6 +1222,7 @@ mod runner {
     /// writes it: hiding names the tool `hidden`; showing drops that, and names it `codemode` when
     /// a pattern would still hide it. The tool list stays as it is, so nothing reconnects.
     pub fn hide_tool(app: &Arc<App>, name: &str, tool: &str, hidden: bool) -> Result<(), String> {
+        let _admission = app.plugin_admission(None)?;
         let file = current(app)?;
         let server = file.server(name).ok_or_else(|| format!("No server named {name} in mcp.json."))?;
         let mut entry = server.entry.clone();
@@ -1408,6 +1423,7 @@ mod runner {
 
     /// Reads the file again and takes what changed.
     pub fn reload(app: &Arc<App>) {
+        let Ok(_admission) = app.plugin_admission(None) else { return };
         let file = McpFile::read(&path(app));
         let changes = app.plugins.lock().unwrap().take_mcp(file);
         if changes.any {
@@ -1419,6 +1435,7 @@ mod runner {
     /// At `beans serve`'s start: a server added while Beans was not running connects once to list
     /// its tools. An edit to the file made outside Beans waits for `mcp.reload`.
     pub fn start(app: &Arc<App>) {
+        let Ok(_admission) = app.plugin_admission(None) else { return };
         SERVING.store(true, Ordering::Relaxed);
         let ids: Vec<String> = app.plugins.lock().unwrap().installed().iter().filter(|p| p.source == SOURCE).map(|p| p.manifest.id.clone()).collect();
         for id in ids {

@@ -52,6 +52,22 @@ const MAX_NAMESPACE_INSTRUCTIONS_BYTES: usize = 1024;
 
 // MARK: - Pool
 
+#[derive(Clone, Copy)]
+struct Admission { incarnation: u64, generation: u64 }
+
+impl Admission {
+    fn capture(app: &App, id: &str) -> Result<Self, String> {
+        let guard = app.plugin_admission(None)?;
+        Ok(Self { incarnation: guard.get().0, generation: app.mcp.generation(id) })
+    }
+
+    fn enter<'a>(&self, app: &'a App, id: &str) -> Result<parking_lot::ReentrantMutexGuard<'a, std::cell::Cell<(u64, bool)>>, String> {
+        let guard = app.plugin_admission(Some(self.incarnation))?;
+        if app.mcp.generation(id) != self.generation { return Err("Plugin settings changed; start again.".into()); }
+        Ok(guard)
+    }
+}
+
 /// One connected MCP server.
 pub struct Server {
     pub plugin_id: String,
@@ -66,6 +82,7 @@ pub struct Server {
     /// Device-flow tokens are plain bearers. Drop this pooled server before its bearer expires;
     /// the next connection refreshes and persists the rotating token pair itself.
     bearer_expires_at: Option<f64>,
+    admission: Admission,
 }
 
 impl Server {
@@ -78,7 +95,7 @@ pub struct Client {
     app: std::sync::Weak<App>,
     plugin_id: String,
     server: String,
-    generation: u64,
+    admission: Admission,
 }
 
 impl rmcp::ClientHandler for Client {
@@ -86,10 +103,10 @@ impl rmcp::ClientHandler for Client {
 
     async fn on_tool_list_changed(&self, context: rmcp::service::NotificationContext<RoleClient>) {
         let Some(app) = self.app.upgrade() else { return };
-        let (id, server, generation) = (self.plugin_id.clone(), self.server.clone(), self.generation);
+        let (id, server, admission) = (self.plugin_id.clone(), self.server.clone(), self.admission);
         tokio::spawn(async move {
-            if app.mcp.generation(&id) != generation { return; }
             let Ok(tools) = all_tools(&context.peer).await else { return };
+            let Ok(_guard) = admission.enter(&app, &id) else { return };
             if let Some(pooled) = app.mcp.cached_server(&format!("{id}/{server}")) {
                 *pooled.tools.write() = tools.clone();
                 save_catalog(&app, &ServerCatalog { plugin_id: &id, name: &server, tools: &tools, instructions: pooled.instructions.as_deref(), resources: pooled.resources });
@@ -150,6 +167,12 @@ impl Pool {
         Pool { servers: Mutex::new(HashMap::new()), generations: Mutex::new(HashMap::new()), connecting: Mutex::new(HashMap::new()), http, sign_ins: Mutex::new(HashMap::new()) }
     }
 
+    pub(crate) fn reset(&self) {
+        self.servers.lock().unwrap().clear();
+        self.sign_ins.lock().unwrap().clear();
+        // Keep connecting gates and generation history so old waiters cannot alias a new gate.
+    }
+
     /// Drops every connection of a plugin, so the next use reconnects with fresh settings.
     pub fn forget(&self, plugin_id: &str) {
         *self.generations.lock().unwrap().entry(plugin_id.to_string()).or_default() += 1;
@@ -173,33 +196,36 @@ impl Pool {
 
     /// The connected server, connecting it first when needed.
     pub async fn server(&self, app: &Arc<App>, plugin_id: &str, name: &str) -> Result<Arc<Server>, String> {
+        let admission = Admission::capture(app, plugin_id)?;
+        self.server_admitted(app, plugin_id, name, admission).await
+    }
+
+    async fn server_admitted(&self, app: &Arc<App>, plugin_id: &str, name: &str, admission: Admission) -> Result<Arc<Server>, String> {
         let key = format!("{plugin_id}/{name}");
-        if let Some(server) = self.cached_server(&key) {
-            return Ok(server);
+        {
+            let _admission = admission.enter(app, plugin_id)?;
+            if let Some(server) = self.cached_server(&key) { return Ok(server); }
         }
         let gate = self.connecting.lock().unwrap().entry(key.clone()).or_default().clone();
         let _guard = gate.lock().await;
-        if let Some(server) = self.cached_server(&key) {
-            return Ok(server);
-        }
         let (plugin, values) = {
+            let _admission = admission.enter(app, plugin_id)?;
+            if let Some(server) = self.cached_server(&key) { return Ok(server); }
             let store = app.plugins.lock().unwrap();
             let plugin = store.get(plugin_id).cloned().ok_or_else(|| format!("{plugin_id} is not installed on this Runner"))?;
             (plugin, store.values(plugin_id))
         };
         let values = template_values(&plugin, values).await;
         let spec = plugin.manifest.servers.get(name).cloned().ok_or_else(|| format!("{} has no server {name}", plugin.manifest.name))?;
-        let generation = self.generation(plugin_id);
-        super::note(app, plugin_id, Some(("connecting", "Connecting…")));
-        let connected = tokio::time::timeout(CONNECT_TIMEOUT, connect(app, &plugin, name, &spec, &values))
+        {
+            let _admission = admission.enter(app, plugin_id)?;
+            super::note(app, plugin_id, Some(("connecting", "Connecting…")));
+        }
+        let connected = tokio::time::timeout(CONNECT_TIMEOUT, connect(app, &plugin, name, &spec, &values, admission))
             .await
             .unwrap_or_else(|_| Err(format!("{} did not start within {} minutes", plugin.manifest.name, CONNECT_TIMEOUT.as_secs() / 60)));
+        let _admission = admission.enter(app, plugin_id)?;
         match connected {
-            // The plugin changed (new settings, a sign-in, an uninstall) while it connected.
-            Ok(_) if self.generation(plugin_id) != generation => {
-                super::note(app, plugin_id, None);
-                Err(format!("{}'s settings changed while it connected. Try again.", plugin.manifest.name))
-            }
             Ok(server) => {
                 let tools = server.tools();
                 save_catalog(app, &ServerCatalog { plugin_id, name, tools: &tools, instructions: server.instructions.as_deref(), resources: server.resources });
@@ -222,10 +248,15 @@ impl Pool {
 
     /// Every server of a plugin, connected; a server that fails is left out with a warning.
     pub async fn servers_of(&self, app: &Arc<App>, plugin_id: &str) -> Vec<Arc<Server>> {
+        let Ok(admission) = Admission::capture(app, plugin_id) else { return Vec::new() };
+        self.servers_admitted(app, plugin_id, admission).await
+    }
+
+    async fn servers_admitted(&self, app: &Arc<App>, plugin_id: &str, admission: Admission) -> Vec<Arc<Server>> {
         let names: Vec<String> = app.plugins.lock().unwrap().get(plugin_id).map(|p| p.manifest.servers.keys().cloned().collect()).unwrap_or_default();
         let mut servers = Vec::new();
         for name in names {
-            match self.server(app, plugin_id, &name).await {
+            match self.server_admitted(app, plugin_id, &name, admission).await {
                 Ok(server) => servers.push(server),
                 // A server that asked for a sign-in did what it should.
                 Err(error) if app.plugins.lock().unwrap().status(plugin_id).is_some_and(|status| status.state == "needs_auth") => {
@@ -238,15 +269,14 @@ impl Pool {
     }
 }
 
-async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSpec, values: &BTreeMap<String, String>) -> Result<Server, String> {
+async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSpec, values: &BTreeMap<String, String>, admission: Admission) -> Result<Server, String> {
     let mut implementation = Implementation::default();
     implementation.name = "Beans".into();
     implementation.version = crate::config::VERSION.into();
     let mut info = ClientConfig::default();
     info.client_info = implementation;
-    let generation = app.mcp.generation(&plugin.manifest.id);
     // A client per try, since a handshake takes the one it is given.
-    let client = || Client { info: info.clone(), app: Arc::downgrade(app), plugin_id: plugin.manifest.id.clone(), server: name.to_string(), generation };
+    let client = || Client { info: info.clone(), app: Arc::downgrade(app), plugin_id: plugin.manifest.id.clone(), server: name.to_string(), admission };
     let mut auth = None;
     let mut bearer_expires_at = None;
     let service = match spec {
@@ -319,7 +349,7 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                             AuthSpec::Oauth { token_endpoint: Some(endpoint), .. } => endpoint,
                             _ => return Err(format!("{}'s saved sign-in cannot be refreshed. Sign in again.", plugin.manifest.name)),
                         };
-                        let bearer = device_bearer(app, &plugin.manifest.id, name, &plugin.manifest.name, token_endpoint, &stored).await?;
+                        let bearer = device_bearer(app, &plugin.manifest.id, name, &plugin.manifest.name, token_endpoint, &stored, admission).await?;
                         bearer_expires_at = bearer.expires_at;
                         let config = config.auth_header(bearer.access_token);
                         serve_retrying(&client, || StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.clone())).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
@@ -348,11 +378,13 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                 (None, Some(AuthSpec::Oauth { optional: true, .. }), None) => {
                     match serve_retrying(&client, || StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.clone())).await {
                         Ok(service) => {
+                            let _admission = admission.enter(app, &plugin.manifest.id)?;
                             app.plugins.lock().unwrap().forget_challenge(&app.config, &plugin.manifest.id, name);
                             service
                         }
                         Err(error) => match auth_challenge(&error) {
                             Some(challenge) => {
+                                let _admission = admission.enter(app, &plugin.manifest.id)?;
                                 app.plugins.lock().unwrap().note_challenge(&app.config, &plugin.manifest.id, name, &challenge);
                                 return Err(format!("{} needs a sign-in.", plugin.manifest.name));
                             }
@@ -371,13 +403,13 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
     if let Some(manager) = &auth {
         // The handshake itself may have refreshed and rotated the pair. Save it before the
         // next request can fail, the connection can sit unused, or the process can exit.
-        persist_refreshed(app, &plugin.manifest.id, name, manager).await;
+        persist_refreshed(app, &plugin.manifest.id, name, manager, admission).await;
     }
     let instructions = service.peer_info().and_then(|i| i.instructions.clone());
     let resources = service.peer_info().is_some_and(|info| info.capabilities.resources.is_some());
     let tools = all_tools(&service.peer()).await.map_err(|_| format!("{} could not list its tools", plugin.manifest.name))?;
     tracing::info!(plugin = %plugin.manifest.id, server = name, tools = tools.len(), "connected an MCP server");
-    Ok(Server { plugin_id: plugin.manifest.id.clone(), name: name.to_string(), service, tools: parking_lot::RwLock::new(tools), instructions, resources, auth, bearer_expires_at })
+    Ok(Server { plugin_id: plugin.manifest.id.clone(), name: name.to_string(), service, tools: parking_lot::RwLock::new(tools), instructions, resources, auth, bearer_expires_at, admission })
 }
 
 struct Stderr {
@@ -650,8 +682,9 @@ async fn refresh_device_bearer(http: &reqwest::Client, token_endpoint: &str, nam
     Ok((bearer, Some(saved)))
 }
 
-async fn device_bearer(app: &Arc<App>, plugin_id: &str, server: &str, name: &str, token_endpoint: &str, stored: &Value) -> Result<DeviceBearer, String> {
+async fn device_bearer(app: &Arc<App>, plugin_id: &str, server: &str, name: &str, token_endpoint: &str, stored: &Value, admission: Admission) -> Result<DeviceBearer, String> {
     let (bearer, refreshed) = refresh_device_bearer(&app.http, token_endpoint, name, stored).await?;
+    let _admission = admission.enter(app, plugin_id)?;
     if let Some(refreshed) = refreshed {
         super::set_oauth(app, plugin_id, server, Some(refreshed))?;
     }
@@ -692,6 +725,7 @@ struct Pending {
     server: String,
     name: String,
     card: Option<(String, String)>,
+    admission: Admission,
 }
 
 /// The OAuth server of a plugin, when it has one.
@@ -786,7 +820,9 @@ fn set_card(app: &Arc<App>, chat_id: &str, message_id: &str, decision: &str, sum
 
 /// `connect_oauth` with a chat card (chat id, message id) to update as the sign-in goes.
 pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &str, card: Option<(String, String)>, elsewhere: Option<Elsewhere>) -> Result<SignInStart, String> {
+    let admission = Admission::capture(app, plugin_id)?;
     let (plugin, spec) = {
+        let _guard = admission.enter(app, plugin_id)?;
         let store = app.plugins.lock().unwrap();
         let plugin = store.get(plugin_id).cloned().ok_or("Unknown plugin")?;
         let spec = plugin.manifest.servers.get(server).cloned().ok_or_else(|| format!("{} has no server {server}", plugin.manifest.name))?;
@@ -832,6 +868,8 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
         (None, Some(elsewhere)) => Some(elsewhere.device.clone()),
         (None, None) => Some(this_runner(app)),
     };
+    {
+        let _guard = admission.enter(app, plugin_id)?;
     match &opens_on {
         Some(device) => super::note(app, plugin_id, Some(("connecting", &format!("Finish signing in in the browser on {device}")))),
         None => super::note(app, plugin_id, Some(("connecting", "Getting a sign-in code…"))),
@@ -840,13 +878,16 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
         let summary = opens_on.as_ref().map(|device| format!("Finish signing in in the browser on {device}.")).unwrap_or_else(|| "Getting a code…".into());
         set_card(app, chat_id, message_id, "allowed", Some(summary), None, None);
     }
+    }
     if let (Some(elsewhere), None) = (elsewhere, &device) {
         return match begin_sign_in(app, &url, &scopes, &name, &client, elsewhere.redirect_uri).await {
             Ok((state, page)) => {
-                let id = hold_sign_in(app, plugin_id, Pending { state, server: server.to_string(), name: name.clone(), card });
+                let _guard = admission.enter(app, plugin_id)?;
+                let id = hold_sign_in(app, plugin_id, Pending { state, server: server.to_string(), name: name.clone(), card, admission });
                 Ok(SignInStart { message: format!("Open the {name} sign-in page on {}.", elsewhere.device), url: Some(page), id: Some(id), done: None })
             }
             Err(error) => {
+                let _guard = admission.enter(app, plugin_id)?;
                 end_sign_in(app, plugin_id, server, &name, card, Err(error.clone()));
                 Err(error)
             }
@@ -857,11 +898,15 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
     let (ended, done) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let flow = match &device {
-            Some((device_endpoint, token_endpoint)) => device_sign_in(&app, &plugin_id, &server, device_endpoint, token_endpoint, &scopes, &name, client.id.as_deref().unwrap_or(""), card.as_ref()).await,
+            _ if admission.enter(&app, &plugin_id).is_err() => Err("The plugin account changed; start again.".into()),
+            Some((device_endpoint, token_endpoint)) => device_sign_in(&app, &plugin_id, &server, device_endpoint, token_endpoint, &scopes, &name, client.id.as_deref().unwrap_or(""), card.as_ref(), admission).await,
             None => sign_in(&app, &url, &scopes, &name, &client).await,
         };
         let outcome = flow.as_ref().map(|_| ()).map_err(Clone::clone);
-        end_sign_in(&app, &plugin_id, &server, &name, card, flow);
+        if let Ok(_guard) = admission.enter(&app, &plugin_id) {
+            end_sign_in(&app, &plugin_id, &server, &name, card, flow);
+        }
+        let outcome = app.plugin_admission(Some(admission.incarnation)).map(|_| ()).and(outcome);
         let _ = ended.send(outcome);
     });
     Ok(SignInStart { message, url: None, id: None, done: Some(done) })
@@ -876,6 +921,7 @@ fn this_runner(app: &App) -> String {
 /// Answers with its id.
 fn hold_sign_in(app: &Arc<App>, plugin_id: &str, pending: Pending) -> String {
     let id = uuid::Uuid::new_v4().to_string();
+    let Ok(_guard) = pending.admission.enter(app, plugin_id) else { return id };
     let replaced = app.mcp.sign_ins.lock().unwrap().insert(plugin_id.to_string(), (id.clone(), pending));
     if let Some((_, Pending { name, card: Some((chat_id, message_id)), .. })) = replaced {
         set_card_while(app, &chat_id, &message_id, "allowed", "pending", format!("Sign in to {name} on {}.", this_runner(app)));
@@ -884,6 +930,7 @@ fn hold_sign_in(app: &Arc<App>, plugin_id: &str, pending: Pending) -> String {
     tokio::spawn(async move {
         tokio::time::sleep(super::sign_in::TIMEOUT).await;
         if let Some(pending) = take_sign_in(&app, &plugin_id, &held) {
+            let Ok(_guard) = pending.admission.enter(&app, &plugin_id) else { return };
             end_sign_in(&app, &plugin_id, &pending.server, &pending.name, pending.card, Err("Timed out waiting for the browser".into()));
         }
     });
@@ -901,6 +948,7 @@ fn take_sign_in(app: &App, plugin_id: &str, id: &str) -> Option<Pending> {
 pub async fn finish_sign_in(app: &Arc<App>, plugin_id: &str, id: &str, callback: &str) -> Result<Value, String> {
     let pending = take_sign_in(app, plugin_id, id).ok_or("That sign-in is over. Start it again.")?;
     let flow = complete_sign_in(pending.state, callback, &pending.name).await;
+    let _guard = pending.admission.enter(app, plugin_id)?;
     let finished = flow.as_ref().map(|_| ()).map_err(String::clone);
     end_sign_in(app, plugin_id, &pending.server, &pending.name, pending.card, flow);
     finished.map(|()| json!({ "signed_in": true }))
@@ -910,6 +958,7 @@ pub async fn finish_sign_in(app: &Arc<App>, plugin_id: &str, id: &str, callback:
 /// card offers Sign in again.
 pub fn cancel_sign_in(app: &Arc<App>, plugin_id: &str, id: &str) -> Result<Value, String> {
     let Some(pending) = take_sign_in(app, plugin_id, id) else { return Ok(Value::Null) };
+    let _guard = pending.admission.enter(app, plugin_id)?;
     super::note(app, plugin_id, None);
     if let Some((chat_id, message_id)) = pending.card {
         let summary = format!("Sign in to {} on {}.", pending.name, this_runner(app));
@@ -982,7 +1031,7 @@ const DEVICE_FLOW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// link on the card and in the plugin's detail, poll the token endpoint until the user has
 /// entered it. Answers with the tokens in the shape the browser flow saves.
 #[allow(clippy::too_many_arguments)]
-async fn device_sign_in(app: &Arc<App>, plugin_id: &str, server: &str, device_endpoint: &str, token_endpoint: &str, scopes: &[String], name: &str, client_id: &str, card: Option<&(String, String)>) -> Result<Value, String> {
+async fn device_sign_in(app: &Arc<App>, plugin_id: &str, server: &str, device_endpoint: &str, token_endpoint: &str, scopes: &[String], name: &str, client_id: &str, card: Option<&(String, String)>, admission: Admission) -> Result<Value, String> {
     // The App's client: plain form posts, no MCP transport involved.
     let http = app.http.clone();
     let scope = scopes.join(" ");
@@ -1001,6 +1050,8 @@ async fn device_sign_in(app: &Arc<App>, plugin_id: &str, server: &str, device_en
     let link = started["verification_uri_complete"].as_str().or(started["verification_uri"].as_str()).unwrap_or("").to_string();
     let shown = started["verification_uri"].as_str().unwrap_or(&link).to_string();
     let interval = started["interval"].as_u64().unwrap_or(5).max(1);
+    {
+        let _guard = admission.enter(app, plugin_id)?;
     if let Some((chat_id, message_id)) = card {
         set_card(app, chat_id, message_id, "allowed", Some(format!("Enter the code {user_code} at {shown}.")), Some(link.clone()), Some(user_code.clone()));
     }
@@ -1009,7 +1060,9 @@ async fn device_sign_in(app: &Arc<App>, plugin_id: &str, server: &str, device_en
     let host = reqwest::Url::parse(&shown).ok().and_then(|url| url.host_str().map(str::to_string)).unwrap_or_else(|| shown.clone());
     app.plugins.lock().unwrap().codes.insert(plugin_id.to_string(), super::SignInCode { server: server.to_string(), code: user_code.clone(), link: link.clone() });
     super::note(app, plugin_id, Some(("connecting", &format!("Enter the code at {host}"))));
+    }
     let polled = poll_device_token(app, token_endpoint, name, client_id, &device_code, interval, started["expires_in"].as_u64()).await;
+    let _guard = admission.enter(app, plugin_id)?;
     // Spent either way; a newer flow's code stays.
     let mut store = app.plugins.lock().unwrap();
     if store.codes.get(plugin_id).is_some_and(|waiting| waiting.code == user_code) {
@@ -1290,13 +1343,15 @@ fn save_catalog(app: &App, server: &ServerCatalog<'_>) {
 /// next turn lists its tools: after an install, a setup, or a sign-in.
 pub fn prefetch_tools(app: &Arc<App>, plugin_id: &str) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+    let Ok(admission) = Admission::capture(app, plugin_id) else { return };
     let ready = app.plugins.lock().unwrap().status(plugin_id).is_some_and(|status| status.state == "ready");
     if !ready || catalog_path(app, plugin_id).exists() {
         return;
     }
     let (app, plugin_id) = (app.clone(), plugin_id.to_string());
     runtime.spawn(async move {
-        app.mcp.servers_of(&app, &plugin_id).await;
+        if admission.enter(&app, &plugin_id).is_err() { return; }
+        app.mcp.servers_admitted(&app, &plugin_id, admission).await;
     });
 }
 
@@ -1330,6 +1385,7 @@ pub struct PluginTool {
     kind: ToolKind,
     /// How long a call may go without an answer or progress: its server's `timeout`, or ten minutes.
     timeout: std::time::Duration,
+    incarnation: u64,
 }
 
 /// What calling a plugin tool asks its server: one of its own tools, or its resources.
@@ -1407,15 +1463,17 @@ pub struct PluginCatalog {
     local: Vec<Arc<dyn Tool>>,
     groups: Vec<PluginGroup>,
     state: Mutex<CatalogState>,
+    incarnation: u64,
 }
 
 impl PluginCatalog {
     fn new(app: Arc<App>, local: Vec<Arc<dyn Tool>>, bot_id: Option<String>) -> Self {
+        let incarnation = app.plugin_lifecycle.lock().get().0;
         let policy = bot_id.as_deref().map(|id| app.bot(id).map(|bot| bot.capabilities));
         let installed: Vec<Installed> = app.plugins.lock().unwrap().installed().iter()
             .filter(|plugin| policy.as_ref().is_none_or(|bot| bot.as_ref().is_some_and(|caps| caps.permits("", Some(&plugin.manifest.id)))))
             .cloned().collect();
-        let mut catalog = PluginCatalog { app, local, bot_id, groups: Vec::new(), state: Mutex::new(CatalogState::default()) };
+        let mut catalog = PluginCatalog { app, local, bot_id, groups: Vec::new(), state: Mutex::new(CatalogState::default()), incarnation };
         for plugin in &installed {
             let saved = saved_servers(&catalog.app, plugin);
             catalog.groups.push(plugin_group(&catalog.app, plugin, &saved));
@@ -1432,6 +1490,7 @@ impl PluginCatalog {
 
 
     fn add_tools(&self, plugin: &Installed, server_name: &str, instructions: Option<&str>, tools: &[rmcp::model::Tool], resources: bool) {
+        let Ok(_guard) = self.app.plugin_admission(Some(self.incarnation)) else { return };
         let mut state = self.state.lock().unwrap();
         let key = (plugin.manifest.id.clone(), server_name.to_string());
         match instructions.map(str::trim).filter(|text| !text.is_empty()) {
@@ -1469,6 +1528,7 @@ impl PluginCatalog {
                 read_only,
                 kind,
                 timeout: plugin.manifest.servers.get(server_name).map(ServerSpec::call_timeout).unwrap_or(super::CALL_TIMEOUT),
+                incarnation: self.incarnation,
             });
             let raw_search_schema = serde_json::to_string(&Value::Object((*tool.input_schema).clone())).unwrap_or_default();
             state.tools.insert(
@@ -1491,6 +1551,7 @@ impl PluginCatalog {
     /// Connects a plugin's servers and takes their live tool lists. The problems are why a
     /// server could not connect.
     async fn connect_plugin(&self, plugin: &Installed, cancel: &CancellationToken) -> Vec<String> {
+        if self.app.plugin_admission(Some(self.incarnation)).is_err() { return vec!["The plugin account changed; start again.".into()]; }
         if !self.permits_plugin(&plugin.manifest.id) { return Vec::new(); }
         if self.state.lock().unwrap().connected.contains(&plugin.manifest.id) {
             return Vec::new();
@@ -1513,6 +1574,7 @@ impl PluginCatalog {
                 }
             }
         }
+        let Ok(_guard) = self.app.plugin_admission(Some(self.incarnation)) else { return vec!["The plugin account changed; start again.".into()] };
         if problems.is_empty() {
             self.state.lock().unwrap().connected.insert(plugin.manifest.id.clone());
         }
@@ -1724,6 +1786,7 @@ enum Access {
 /// the bot can write that file; a server that cannot be reached says nothing, and the tool may
 /// change things.
 async fn access(app: &Arc<App>, tool: &PluginTool, cancel: &CancellationToken) -> Access {
+    if app.plugin_admission(Some(tool.incarnation)).is_err() { return Access::Stopped; }
     if tool.kind != ToolKind::Call { return Access::ReadOnly; }
     let name = tool.tool.name.to_string();
     let manifest_read_only =
@@ -1736,6 +1799,7 @@ async fn access(app: &Arc<App>, tool: &PluginTool, cancel: &CancellationToken) -
         _ = cancel.cancelled() => return Access::Stopped,
         server = app.mcp.server(app, &tool.plugin_id, &tool.server_name) => server.ok(),
     };
+    let Ok(_guard) = app.plugin_admission(Some(tool.incarnation)) else { return Access::Stopped };
     let live_tool = live.as_ref().and_then(|server| server.tools().into_iter().find(|candidate| candidate.name == tool.tool.name));
     if live_tool.as_ref().and_then(|live| live.annotations.as_ref()).and_then(|annotations| annotations.read_only_hint) == Some(true) {
         return Access::ReadOnly;
@@ -1981,6 +2045,10 @@ impl Tool for PluginTool {
         (!self.read_only).then_some(ToolExecutionMode::Sequential)
     }
     async fn execute(&self, _id: &str, args: Value, cancel: CancellationToken, _on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+        let admitted = {
+            let _guard = self.app.plugin_admission(Some(self.incarnation)).map_err(ToolError)?;
+            Admission::capture(&self.app, &self.plugin_id).map_err(ToolError)?
+        };
         if self.app.is_paused() || self.bot_id.as_deref().is_some_and(|id| !self.app.bot(id).is_some_and(|bot| bot.capabilities.permits(&self.name, Some(&self.plugin_id))))
             || !self.app.plugins.lock().unwrap().get(&self.plugin_id).is_some_and(|plugin| !plugin.manifest.tools.hides(&self.tool.name)) {
             return Err(ToolError("Account paused or plugin access removed.".into()));
@@ -1990,6 +2058,7 @@ impl Tool for PluginTool {
             server = self.app.mcp.server(&self.app, &self.plugin_id, &self.server_name) => server.map_err(ToolError)?,
             _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
         };
+        { let _guard = admitted.enter(&self.app, &self.plugin_id).map_err(ToolError)?; }
         if self.app.is_paused() || self.bot_id.as_deref().is_some_and(|id| !self.app.bot(id).is_some_and(|bot| bot.capabilities.permits(&self.name, Some(&self.plugin_id))))
             || !self.app.plugins.lock().unwrap().get(&self.plugin_id).is_some_and(|plugin| !plugin.manifest.tools.hides(&self.tool.name)) {
             return Err(ToolError("Account paused or plugin access removed.".into()));
@@ -2016,8 +2085,10 @@ impl Tool for PluginTool {
                 return Err(ToolError("Stopped".into()));
             }
         };
-        if let Some(auth) = &server.auth { persist_refreshed(&self.app, &self.plugin_id, &server.name, auth).await; }
-        let result = match response {
+        if let Some(auth) = &server.auth { persist_refreshed(&self.app, &self.plugin_id, &server.name, auth, server.admission).await; }
+        let result = {
+        let _admission = server.admission.enter(&self.app, &self.plugin_id).map_err(ToolError)?;
+        match response {
             Ok(rmcp::model::ServerResult::CallToolResult(result)) => result,
             Ok(_) => return Err(ToolError(format!("{tool} answered with something other than a result"))),
             Err(rmcp::ServiceError::Timeout { .. }) => return Err(ToolError(format!("{tool} took too long"))),
@@ -2028,6 +2099,7 @@ impl Tool for PluginTool {
                 }
                 return Err(ToolError(format!("{tool} failed: {error}")));
             },
+        }
         };
         let is_error = result.is_error.unwrap_or(false);
         let mut structured = bounded_value(&result)?;
@@ -2036,6 +2108,7 @@ impl Tool for PluginTool {
             fields.remove("resultType");
         }
         let mut content = tokio::task::spawn_blocking(move || model_content(&result)).await.map_err(|_| ToolError("MCP result could not be prepared".into()))?;
+        let _admission = server.admission.enter(&self.app, &self.plugin_id).map_err(ToolError)?;
         if is_error && content.iter().all(|part| part.as_text().is_none_or(|text| text.trim().is_empty())) {
             content = vec![ContentPart::text(format!("{} {tool} reported an error", self.plugin_name))];
         }
@@ -2064,8 +2137,13 @@ impl PluginTool {
             _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
         };
         let (content, structured) = if self.kind == ToolKind::ReadResource {
-            tokio::task::spawn_blocking(move || read_contents(structured)).await.map_err(|_| ToolError("resource could not be prepared".into()))?
+            let (app, id, admission) = (self.app.clone(), self.plugin_id.clone(), server.admission);
+            tokio::task::spawn_blocking(move || {
+                let _guard = admission.enter(&app, &id).map_err(ToolError)?;
+                Ok::<_, ToolError>(read_contents(structured))
+            }).await.map_err(|_| ToolError("resource could not be prepared".into()))??
         } else { (vec![ContentPart::text(serde_json::to_string_pretty(&structured).unwrap_or_default())], structured) };
+        let _guard = server.admission.enter(&self.app, &self.plugin_id).map_err(ToolError)?;
         let blocks: Vec<Value> = content.iter().map(|part| match part {
             ContentPart::Image { data, mime_type } => json!({"type":"image","data":data,"mimeType":mime_type}),
             other => json!({"type":"text","text":other.as_text().unwrap_or_default()}),
@@ -2258,8 +2336,9 @@ fn needs_more_access(app: &Arc<App>, plugin_id: &str, server: &str, required: &s
 
 /// Saves tokens the transport refreshed, so the next connection does not start from a stale
 /// refresh token.
-async fn persist_refreshed(app: &Arc<App>, plugin_id: &str, server: &str, auth: &Arc<tokio::sync::Mutex<AuthorizationManager>>) {
+async fn persist_refreshed(app: &Arc<App>, plugin_id: &str, server: &str, auth: &Arc<tokio::sync::Mutex<AuthorizationManager>>, admission: Admission) {
     let credentials = auth.lock().await.get_credentials().await;
+    let Ok(_admission) = admission.enter(app, plugin_id) else { return };
     if let Ok((client_id, Some(tokens))) = credentials {
         let saved = app.plugins.lock().unwrap().sign_in_secret(plugin_id, "oauth", server);
         let fresh = json!({ "client_id": client_id, "tokens": tokens, "signed_in_at": now_secs() });
@@ -2785,6 +2864,7 @@ mod tests {
                 read_only: true,
                 kind: ToolKind::Call,
                 timeout: crate::plugins::CALL_TIMEOUT,
+                incarnation: app.plugin_lifecycle.lock().get().0,
             }),
         })
     }
@@ -2917,30 +2997,63 @@ mod tests {
         let scratch = scratch_app();
         let app = &scratch.0;
         crate::identity::create(app, Some("Synthetic A".into())).unwrap();
+        let admission = Admission::capture(app, "forget-fixture").unwrap();
         let (io, fixture) = tokio::io::duplex(64 * 1024);
         paging_server(fixture, |_| None, Arc::new(std::sync::atomic::AtomicUsize::new(0)));
         let client = Client {
             info: ClientConfig::default(), app: Arc::downgrade(app),
-            plugin_id: "forget-fixture".into(), server: "api".into(), generation: 0,
+            plugin_id: "forget-fixture".into(), server: "api".into(), admission,
         };
         let service = client.serve(io).await.unwrap();
         let tools = all_tools(service.peer()).await.unwrap();
         let server = Arc::new(Server {
             plugin_id: "forget-fixture".into(), name: "api".into(), service,
             tools: parking_lot::RwLock::new(tools), instructions: None,
-            resources: false, auth: None, bearer_expires_at: None,
+            resources: false, auth: None, bearer_expires_at: None, admission,
         });
         app.mcp.servers.lock().unwrap().insert("forget-fixture/api".into(), server);
         let manager = AuthorizationManager::new("http://127.0.0.1:1/mcp").await.unwrap();
         let sign_in = hold_sign_in(app, "forget-fixture", Pending {
             state: OAuthState::Unauthorized(manager), server: "api".into(),
-            name: "Synthetic fixture".into(), card: None,
+            name: "Synthetic fixture".into(), card: None, admission,
         });
         assert!(app.mcp.cached_server("forget-fixture/api").is_some());
         app.forget_identity().unwrap();
         crate::identity::create(app, Some("Synthetic B".into())).unwrap();
         assert!(app.mcp.cached_server("forget-fixture/api").is_none(), "B inherited A's live MCP connection");
         assert!(take_sign_in(app, "forget-fixture", &sign_in).is_none(), "B can finish A's pending sign-in");
+    }
+
+    #[tokio::test]
+    async fn old_account_refresh_cannot_overwrite_reinstalled_plugin() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Synthetic A".into())).unwrap();
+        let manifest = crate::plugins::Manifest::parse(&json!({
+            "id": "forget-fixture", "name": "Fixture",
+            "servers": { "api": { "type": "http", "url": "http://127.0.0.1:1/mcp", "auth": { "type": "oauth" } } }
+        })).unwrap();
+        crate::plugins::install(app, manifest.clone(), "inline").unwrap();
+        let admission = Admission::capture(app, "forget-fixture").unwrap();
+        let (release, blocked) = tokio::sync::oneshot::channel();
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let held_app = app.clone();
+        let callback = tokio::spawn(async move {
+            started.send(()).unwrap();
+            blocked.await.unwrap();
+            device_bearer(&held_app, "forget-fixture", "api", "Fixture", "unused", &json!({
+                "tokens": { "access_token": "synthetic-A" }, "signed_in_at": now_secs()
+            }), admission).await
+        });
+        waiting.await.unwrap();
+        app.forget_identity().unwrap();
+        crate::identity::create(app, Some("Synthetic B".into())).unwrap();
+        crate::plugins::install(app, manifest, "inline").unwrap();
+        crate::plugins::set_oauth(app, "forget-fixture", "api", Some(json!({ "tokens": { "access_token": "synthetic-B" } }))).unwrap();
+        release.send(()).unwrap();
+        assert!(callback.await.unwrap().is_err(), "old refresh remained admitted after account replacement");
+        assert_eq!(app.plugins.lock().unwrap().sign_in_secret("forget-fixture", "oauth", "api").unwrap()["tokens"]["access_token"], "synthetic-B");
+        assert!(admission.enter(app, "forget-fixture").is_err());
     }
 
     #[tokio::test]

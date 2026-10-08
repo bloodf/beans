@@ -228,6 +228,8 @@ pub struct App {
     pub shell_sessions: crate::shell::Sessions,
     /// What this Runner has installed, with the secrets kept apart.
     pub plugins: Mutex<crate::plugins::Store>,
+    /// Serializes local plugin admission/publication with account reset, including callbacks.
+    pub(crate) plugin_lifecycle: parking_lot::ReentrantMutex<std::cell::Cell<(u64, bool)>>,
     /// Public marketplace index from the selected relay, with bundled offline fallback.
     pub marketplace: crate::marketplace::Updates,
     /// Public built-in model catalog checks from the selected relay.
@@ -249,6 +251,9 @@ pub struct App {
 
 impl App {
     pub fn load(config: Config) -> anyhow::Result<Arc<App>> {
+        if config.home.join("forget-in-progress.json").try_exists()? {
+            anyhow::bail!("Account forget is incomplete; finish local cleanup before reopening this home");
+        }
         config.ensure_home()?;
         let settings = Settings::load(&config);
         let identity: Option<IdentityFile> = config::read_json_strict(&config.identity_path())?;
@@ -299,6 +304,7 @@ impl App {
             #[cfg(feature = "provider-auth")]
             provider_auth: Mutex::new(CancellationToken::new()),
             plugin_sign_in: Mutex::new(None),
+            plugin_lifecycle: parking_lot::ReentrantMutex::new(std::cell::Cell::new((0, false))),
             running_jobs: Mutex::new(HashMap::new()),
             announced_turns: Mutex::new(std::collections::BTreeMap::new()),
             #[cfg(feature = "runner")]
@@ -495,9 +501,19 @@ impl App {
         let _ = self.events.send(event);
     }
 
+    pub(crate) fn plugin_admission(&self, expected: Option<u64>) -> Result<parking_lot::ReentrantMutexGuard<'_, std::cell::Cell<(u64, bool)>>, String> {
+        let guard = self.plugin_lifecycle.lock();
+        let (incarnation, closed) = guard.get();
+        if closed || expected.is_some_and(|expected| expected != incarnation) {
+            return Err("The plugin account changed; start again.".into());
+        }
+        Ok(guard)
+    }
+
     // MARK: - Keys
 
     pub fn has_identity(&self) -> bool {
+        if self.plugin_lifecycle.lock().get().1 { return true; }
         self.machine.lock().unwrap().is_some()
     }
 
@@ -572,6 +588,14 @@ impl App {
     /// Forgets the identity on this Device: keys, credentials, and everything synced. The
     /// relay keeps the account; another Device or the backup phrase brings it back.
     pub fn forget_identity(&self) -> anyhow::Result<()> {
+        let lifecycle = self.plugin_lifecycle.lock();
+        let (incarnation, _) = lifecycle.get();
+        lifecycle.set((incarnation.checked_add(1).expect("plugin incarnation exhausted"), true));
+        let marker = self.config.home.join("forget-in-progress.json");
+        config::write_json_private(&marker, &serde_json::json!({ "forget_in_progress": true }))?;
+        #[cfg(feature = "runner")]
+        self.mcp.reset();
+        self.plugins.lock().unwrap().reset_account(&self.config)?;
         for job in self.running_jobs.lock().unwrap().values() {
             job.cancel.cancel();
         }
@@ -604,6 +628,8 @@ impl App {
         if files.is_dir() {
             std::fs::remove_dir_all(&files)?;
         }
+        std::fs::remove_file(&marker)?;
+        lifecycle.set((lifecycle.get().0, false));
         // The other Devices' turns went with the account.
         self.turns_changed();
         self.emit(Event::IdentityChanged { has_identity: false });

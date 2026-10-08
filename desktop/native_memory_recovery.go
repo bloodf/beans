@@ -6,7 +6,7 @@ import "github.com/egoist/mygo"
 // admitted account ID; never retain RPC results, consent handles or approvals.
 func (n *nativeDesktop) suspendMemoryForms() {
 	f := n.memoryPanel.Forms
-	if (f.Connection != nil || f.Bot != nil) && n.store.AccountID != "" {
+	if (f.Connection != nil || f.Bot != nil || f.Embedding != nil) && n.store.AccountID != "" {
 		if n.memoryRecovery == nil {
 			n.memoryRecovery = map[string]memoryForms{}
 		}
@@ -47,7 +47,7 @@ func (n *nativeDesktop) recoverMemoryForms() {
 }
 func (n *nativeDesktop) hasMemoryIntent() bool {
 	f := n.memoryPanel.Forms
-	return f.Pending || f.Connection != nil || f.Bot != nil || len(n.memoryRecovery) != 0
+	return f.Pending || f.Connection != nil || f.Bot != nil || f.Embedding != nil || len(n.memoryRecovery) != 0
 }
 
 func (n *nativeDesktop) confirmDiscardMemoryRecovery() {

@@ -54,6 +54,7 @@ type memoryBotForm struct {
 type memoryForms struct {
 	Connection *memoryConnectionForm
 	Bot        *memoryBotForm
+	Embedding  *memoryEmbeddingForm
 	Pending    bool
 	Error      string
 	serial     uint64

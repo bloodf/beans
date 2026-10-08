@@ -1246,7 +1246,8 @@ impl App {
 
     pub fn stop_for_pause(&self) {
         if let Err(error) = self.persist_task_cancel(None,None,None) {
-            self.plugin_lifecycle.lock().set((self.plugin_lifecycle.lock().get().0, true));
+            let lifecycle = self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0, true));
             tracing::error!(%error, "Task cancellation persistence failed; account admission closed");
         }
         #[cfg(feature = "runner")]
@@ -2306,6 +2307,14 @@ mod tests {
         ).unwrap();
         assert_eq!(serde_json::from_str::<Delivery>(&stored).unwrap(), delivery,
             "loading a non-owner must not recover another process's submitted delivery");
+        drop(reader);
+        let owner = App::load_owner(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let recovered: String = owner.store.connection.lock().unwrap().query_row(
+            "SELECT json FROM memory_deliveries WHERE id=?1", [&delivery.id], |row| row.get(0),
+        ).unwrap();
+        let recovered: Delivery = serde_json::from_str(&recovered).unwrap();
+        assert_eq!(recovered.state,OperationState::DeliveryUnknown);
+        assert_eq!(recovered.error_code.as_deref(),Some("response_lost"));
     }
 
     fn bot(id: &str) -> Bot {

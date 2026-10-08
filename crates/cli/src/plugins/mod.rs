@@ -974,6 +974,48 @@ mod tests {
         ScratchApp(app, home)
     }
 
+    #[cfg(feature = "runner")]
+    #[test]
+    fn forgotten_account_does_not_retain_plugin_secrets_or_mcp_config() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Synthetic A".into())).unwrap();
+        let account_a = app.this_device_id().unwrap();
+        let manifest = Manifest::parse(&json!({
+            "id": "forget-fixture", "name": "Synthetic fixture",
+            "servers": { "api": { "type": "http", "url": "http://127.0.0.1:1/mcp", "auth": { "type": "oauth" } } },
+            "variables": [{ "name": "KEY", "secret": true }, { "name": "REGION" }]
+        })).unwrap();
+        install(app, manifest, "inline").unwrap();
+        set_variables(app, "forget-fixture", &BTreeMap::from([
+            ("KEY".into(), "synthetic-A-secret".into()),
+            ("REGION".into(), "synthetic-A-plain".into()),
+        ])).unwrap();
+        set_oauth(app, "forget-fixture", "api", Some(json!({ "tokens": { "access_token": "synthetic-A-oauth" } }))).unwrap();
+        mcp_json::save(app, "synthetic", None, &json!({
+            "type": "http", "url": "http://127.0.0.1:1/mcp",
+            "headers": { "Authorization": "Bearer synthetic-A-header" }, "disabled": true
+        })).unwrap();
+        assert_eq!(app.plugins.lock().unwrap().values("forget-fixture")["KEY"], "synthetic-A-secret");
+        app.forget_identity().unwrap();
+        crate::identity::create(app, Some("Synthetic B".into())).unwrap();
+        assert_ne!(app.this_device_id().unwrap(), account_a);
+        let assert_clean = |app: &App| {
+            let store = app.plugins.lock().unwrap();
+            assert!(store.values("forget-fixture").is_empty(), "new account inherited A's plugin variables");
+            assert!(store.sign_in_secret("forget-fixture", "oauth", "api").is_none(), "new account inherited A's OAuth");
+            assert!(store.installed().is_empty(), "new account advertises A's installs");
+            assert!(store.mcp.servers.is_empty(), "new account inherited secret-bearing mcp.json");
+            drop(store);
+            assert!(app.local_device().unwrap().plugins.is_empty());
+        };
+        assert_clean(app);
+        mcp_json::reload(app);
+        assert_clean(app);
+        let reopened = App::load(app.config.clone()).unwrap();
+        assert_clean(&reopened);
+    }
+
     #[test]
     fn install_variables_and_status_round_trip() {
         let scratch = scratch_app();

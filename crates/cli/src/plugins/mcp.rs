@@ -2913,6 +2913,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forgotten_account_drops_connected_pool_and_pending_sign_in() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Synthetic A".into())).unwrap();
+        let (io, fixture) = tokio::io::duplex(64 * 1024);
+        paging_server(fixture, |_| None, Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let client = Client {
+            info: ClientConfig::default(), app: Arc::downgrade(app),
+            plugin_id: "forget-fixture".into(), server: "api".into(), generation: 0,
+        };
+        let service = client.serve(io).await.unwrap();
+        let tools = all_tools(service.peer()).await.unwrap();
+        let server = Arc::new(Server {
+            plugin_id: "forget-fixture".into(), name: "api".into(), service,
+            tools: parking_lot::RwLock::new(tools), instructions: None,
+            resources: false, auth: None, bearer_expires_at: None,
+        });
+        app.mcp.servers.lock().unwrap().insert("forget-fixture/api".into(), server);
+        let manager = AuthorizationManager::new("http://127.0.0.1:1/mcp").await.unwrap();
+        let sign_in = hold_sign_in(app, "forget-fixture", Pending {
+            state: OAuthState::Unauthorized(manager), server: "api".into(),
+            name: "Synthetic fixture".into(), card: None,
+        });
+        assert!(app.mcp.cached_server("forget-fixture/api").is_some());
+        app.forget_identity().unwrap();
+        crate::identity::create(app, Some("Synthetic B".into())).unwrap();
+        assert!(app.mcp.cached_server("forget-fixture/api").is_none(), "B inherited A's live MCP connection");
+        assert!(take_sign_in(app, "forget-fixture", &sign_in).is_none(), "B can finish A's pending sign-in");
+    }
+
+    #[tokio::test]
     async fn a_tool_list_ends_where_its_server_stops_paging() {
         use rmcp::ServiceExt;
         async fn list(next: fn(Option<&str>) -> Option<String>) -> (usize, usize) {

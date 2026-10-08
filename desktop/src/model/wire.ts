@@ -247,6 +247,7 @@ export interface WireProvider {
   name?: string | null;
   api?: string | null;
   integration?: "durindoor" | null;
+  capabilities?: ProviderCredential["capabilities"] | null;
   models?: WireCustomModel[] | null;
 }
 
@@ -714,6 +715,7 @@ export function toProviders(wire: WireProvider[] | null | undefined): ProviderCr
       credential.name = optional(provider.name);
       credential.api = provider.api && isCustomAPI(provider.api) ? provider.api : undefined;
       credential.integration = optional(provider.integration);
+      credential.capabilities = optional(provider.capabilities);
       credential.models = (provider.models ?? []).map(toCustomModel);
     }
     return [credential];

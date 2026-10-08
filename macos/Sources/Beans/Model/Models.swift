@@ -154,7 +154,22 @@ struct ProviderCredential: Hashable, Identifiable {
     var name: String? = nil
     var api: CustomAPI? = nil
     var integration: String? = nil
+    var capabilities: CustomCapabilities? = nil
     var models: [CustomModel] = []
+}
+
+struct CustomCapabilities: Codable, Hashable {
+    var contextWindow: UInt64? = nil
+    var images: Bool? = nil
+    var tools: Bool? = nil
+
+    var params: [String: Any] {
+        var value: [String: Any] = [:]
+        if let contextWindow { value["context_window"] = contextWindow }
+        if let images { value["images"] = images }
+        if let tools { value["tools"] = tools }
+        return value
+    }
 }
 
 /// The wire protocol a custom provider's server speaks.
@@ -278,6 +293,8 @@ struct CustomProviderPreset: Hashable {
     /// Model servers that run on the user's own computers.
     static var local: [CustomProviderPreset] {
         [
+            CustomProviderPreset(name: L("Local server"), api: .chatCompletions, baseURL: "",
+                keyPlaceholder: L("Optional API key"), compatible: true),
             CustomProviderPreset(
                 name: "Ollama", api: .chatCompletions, baseURL: "http://localhost:11434/v1",
                 keyPlaceholder: L("Optional for a server on your network")),

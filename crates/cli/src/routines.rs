@@ -403,17 +403,7 @@ fn check_then_run(app: &Arc<App>, routine: Routine, admission: crate::update_con
         let mut job = match job_for(&app,&routine) { Ok(job) => job, Err(_) => { checked(&app,&routine.id); return; } };
         let lease = match app.task_lease(&job) { Ok(lease) => lease, Err(_) => { checked(&app,&routine.id); return; } };
         let (found,writes) = run_check_staged(&app,&routine,&cancel).await;
-        let committed = (|| -> anyhow::Result<bool> {
-            let _policy = app.roster_edit.lock().unwrap();
-            let _lifecycle = app.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
-            anyhow::ensure!(!cancel.is_cancelled() && !app.is_paused(), "Routine check was cancelled");
-            let current = app.routine(&routine.id).ok_or_else(|| anyhow::anyhow!("Routine was deleted"))?;
-            anyhow::ensure!(current.is_enabled && current.check == routine.check && app.bot(&current.bot_id).is_some(), "Routine changed during check");
-            anyhow::ensure!(!app.store.routine_needs_review(&lease.account_epoch,&routine.id)?, "Routine requires review");
-            job.check = found.report();
-            app.store.commit_routine_check(&lease,job.check.as_ref().map(|_| &job),&routine.id,&job.chat_id,&job.bot_id,now_unix(),&writes.set,&writes.delete)?;
-            Ok(job.check.is_some())
-        })();
+        let committed = commit_scheduled_check(&app,&routine,&mut job,&lease,&found,&writes,&cancel);
         checked(&app,&routine.id);
         match committed {
             Ok(true) => runtime::spawn_admitted_local_job(app.clone(),job,None,app.update.hold(),lease),
@@ -421,6 +411,20 @@ fn check_then_run(app: &Arc<App>, routine: Routine, admission: crate::update_con
             Err(error) => tracing::error!(%error,"Routine check transaction refused"),
         }
     });
+}
+
+#[cfg(feature = "runner")]
+fn commit_scheduled_check(app: &App, routine: &Routine, job: &mut Job, lease: &crate::local_store::TaskLease, found: &CheckRun, writes: &beans_agent::codemode::StoreWrites, cancel: &CancellationToken) -> anyhow::Result<bool> {
+    let _policy = app.roster_edit.lock().unwrap();
+    let _lifecycle = app.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(!cancel.is_cancelled() && !app.is_paused(), "Routine check was cancelled");
+    let current = app.routine(&routine.id).ok_or_else(|| anyhow::anyhow!("Routine was deleted"))?;
+    anyhow::ensure!(current.is_enabled && current.check == routine.check && current.bot_id==routine.bot_id, "Routine changed during check");
+    app.check_local_job(job)?;
+    anyhow::ensure!(!app.store.routine_needs_review(&lease.account_epoch,&routine.id)?, "Routine requires review");
+    job.check = found.report();
+    app.store.commit_routine_check(lease,job.check.as_ref().map(|_| &*job),&routine.id,&job.chat_id,&job.bot_id,now_unix(),&writes.set,&writes.delete)?;
+    Ok(job.check.is_some())
 }
 
 /// How a check went.
@@ -633,6 +637,30 @@ mod tests {
             });
         }
         ScratchApp(app, home)
+    }
+
+    #[cfg(feature="runner")]
+    #[tokio::test]
+    async fn scheduled_check_reassignment_wins_before_atomic_commit() {
+        let scratch=scratch_app(); let app=&scratch.0;
+        let routine=create(app,"b1","Watch","every 10m","Report changes",Some("store('seen',true); return 'new';"),true).unwrap();
+        let mut job=job_for(app,&routine).unwrap(); let lease=app.task_lease(&job).unwrap();
+        let writes=beans_agent::codemode::StoreWrites { set:std::collections::BTreeMap::from([("seen".into(),serde_json::json!(true))]),delete:vec![] };
+        let found=CheckRun { found:Some("new".into()),error:None,result:"new".into() };
+        let (ready_tx,ready_rx)=tokio::sync::oneshot::channel();
+        let (release_tx,release_rx)=tokio::sync::oneshot::channel();
+        let worker=app.clone(); let task_id=job.id.clone(); let chat_id=job.chat_id.clone();
+        let pending=tokio::spawn(async move {
+            ready_tx.send(()).unwrap(); release_rx.await.unwrap();
+            commit_scheduled_check(&worker,&routine,&mut job,&lease,&found,&writes,&CancellationToken::new())
+        });
+        ready_rx.await.unwrap();
+        app.update_bot("b1",|bot|bot.runner_id="other-runner".into()).unwrap();
+        release_tx.send(()).unwrap();
+        assert!(pending.await.unwrap().is_err());
+        assert!(!app.store.codemode_values(&chat_id,"b1").unwrap().contains_key("seen"));
+        let count:i64=app.store.connection.lock().unwrap().query_row("SELECT count(*) FROM local_tasks WHERE task_id=?1",[task_id],|r|r.get(0)).unwrap();
+        assert_eq!(count,0);
     }
 
     #[test]

@@ -311,8 +311,14 @@ impl App {
         let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
         self.store.finish_receipt(lease,binding,outcome)
     }
+    pub fn task_history_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let lifecycle=self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(),"History resolution requires execution ownership");
+        self.store.history_task_lease(&self.execution_epoch,task_id,lifecycle.get().0)
+    }
     pub fn resolve_task_history(&self, lease: &crate::local_store::TaskLease, at: i64) -> anyhow::Result<bool> {
         let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(),"History resolution requires execution ownership");
         self.store.resolve_task(lease,at)
     }
     /// Captures the existing account incarnation under the same reset boundary as plugins.
@@ -326,12 +332,21 @@ impl App {
         })
     }
 
+    /// Caller holds roster_edit; shared ordinary/scheduled admission eligibility.
+    pub(crate) fn check_local_job(&self, job: &Job) -> anyhow::Result<()> {
+        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Execution unavailable");
+        let chat=self.chat(&job.chat_id).ok_or_else(||anyhow::anyhow!("Task chat is unavailable"))?;
+        let bot=self.bot(&job.bot_id).ok_or_else(||anyhow::anyhow!("Task bot is unavailable"))?;
+        anyhow::ensure!(self.this_device_id().as_deref()==Some(bot.runner_id.as_str()) && chat.meta.bot_ids.contains(&job.bot_id), "Task Runner or chat membership changed");
+        if let Some(id)=&job.routine_id {
+            anyhow::ensure!(self.routine(id).is_some_and(|r|r.bot_id==job.bot_id), "Routine bot binding changed");
+        }
+        Ok(())
+    }
     pub(crate) fn queue_local_task(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         let _policy = self.roster_edit.lock().unwrap();
         let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(!self.is_paused() && self.chat(&job.chat_id).is_some(), "Task account or chat is unavailable");
-        let bot = self.bot(&job.bot_id).ok_or_else(|| anyhow::anyhow!("Task bot is unavailable"))?;
-        anyhow::ensure!(self.this_device_id().as_deref() == Some(bot.runner_id.as_str()), "Task belongs to another Runner");
+        self.check_local_job(job)?;
         let lease = self.task_lease(job)?;
         if let Some(id) = &job.routine_id {
             anyhow::ensure!(!self.store.routine_needs_review(&lease.account_epoch,id)?, "Routine has unresolved work requiring review");

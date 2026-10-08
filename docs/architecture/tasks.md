@@ -12,7 +12,7 @@ Task leases capture account epoch, owner epoch, execution id and the App's exist
 
 Owner recovery changes started effect receipts to unknown and closes pending or authorized process-local invocations as dismissed. Queued or running tasks with any receipt become needs_review; receipt-free tasks become interrupted. Neither resumes automatically. Interrupted or needs_review routine work blocks later scheduled admission rather than disguising recovery as a new run.
 
-Existing populated stores missing task safety authority reject owner startup. No production migration, restored-home reconstruction or live rollout is performed by this source mechanism.
+Owner startup transactionally initializes task authority for a valid legacy store. Existing messages, roster, outbox, memory journals and remote-result waits stay intact. Known legacy Job ids from sent jobs, memory admissions and Device turn journals become permanent denial fences, never queued tasks. A persisted admission floor rejects pre-cutover envelopes and gives every encountered rejected id a lifetime fence; it is a conservative compatibility barrier, not evidence of legacy effect outcomes. Clock-skewed fresh requests can be refused and require explicit new intent. Missing authority alongside existing task safety rows fails closed rather than reconstructing lost fences. No production migration or live rollout is executed by this source change.
 
 ## Invocation API
 
@@ -23,6 +23,8 @@ Existing populated stores missing task safety authority reject owner startup. No
 `finish_task_receipt` updates only an existing exact started receipt. Finished means observed end; DefinitelyNotSent requires typed definitive no-dispatch evidence; uncertain outcomes are unknown. Unknown is immutable. No callback upserts, refines recovered unknown, or creates deleted history. Finishing a task retains needs_review when any receipt is started or unknown.
 
 ## Routine checks and retention
+
+`task_history_execution` acquires an exact terminal or recovered lease under current execution ownership without changing the original owner/execution identity. Explicit resolution retains immutable unknown receipts and replay denial, and removes the routine's unresolved-review gate. Resolution does not authorize rerunning the old Job.
 
 Scheduled routine checks use a staging CodemodeStore. Check writes, check timestamp, queued task and check report commit together. A rejected transaction leaves no consumed store values or queued job. The scheduler starts only the already-admitted job after commit. Explicit check execution commits staged values and timestamp without manufacturing a scheduled task.
 

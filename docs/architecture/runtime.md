@@ -32,7 +32,7 @@ Over HTTPS, those requests, public catalog requests, and the relay's sync socket
 
 Installation, standalone services and Runner admission drain are described in [CLI service and updates](service-updates.md).
 
-`beans serve` loads an execution owner with an exclusive `execution.lock` held for the App lifetime before opening SQLite or recovering work. Other `App::load` callers do not recover submitted memory deliveries. Task admission and interrupted-work fences are described in [Local task authority](tasks.md). Existing populated stores without task authority reject owner startup pending reviewed migration; opening a Device view does not grant execution authority.
+`beans serve` loads an execution owner with an exclusive `execution.lock` held for the App lifetime before opening SQLite or recovering work. Other `App::load` callers do not recover submitted memory deliveries. Task admission and interrupted-work fences are described in [Local task authority](tasks.md). Valid populated legacy stores initialize authority transactionally without queueing old work; known old Job identities remain denied. Opening a Device view does not grant execution authority.
 
 ## Diagnostics report
 

@@ -1169,7 +1169,13 @@ mod tests {
     async fn a_replacement_job_exits_after_its_message_was_steered() {
         let scratch = scratch_app();
         let app = &scratch.0;
-        let chat = empty_chat("chat");
+        crate::identity::create(app,Some("Synthetic Runner".into())).unwrap();
+        let mut runner_bot=bot("bot","Synthetic Bot");
+        runner_bot.runner_id=app.this_device_id().unwrap();
+        app.state.lock().unwrap().bots.push(runner_bot);
+        let mut chat = empty_chat("chat");
+        chat.meta.bot_ids.push("bot".into());
+        chat.meta.owner_bot_id=Some("bot".into());
         let mut message = Message::new("chat", Author::You, Body::text("steer"));
         message.id = "message".into();
         app.state.lock().unwrap().chats.push(chat);
@@ -1192,7 +1198,8 @@ mod tests {
             created_at: 1.0,
         };
 
-        let outcome = run_job_started(app, job, CancellationToken::new()).await;
+        let lease=app.queue_local_task(&job).unwrap().expect("replacement task must durably admit");
+        let outcome = run_job_started(app, job, CancellationToken::new(),lease).await;
 
         assert_eq!(outcome, TurnOutcome::Skipped);
         assert!(app.take_steering_message("chat", "message"));

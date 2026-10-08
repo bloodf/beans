@@ -120,6 +120,11 @@ fn queue_task_tx(tx: &Transaction<'_>, lease: &TaskLease, job: &crate::model::Jo
     for id in [&lease.task_id,&lease.execution_id,&job.chat_id,&job.bot_id] { structural_id(id)?; }
     anyhow::ensure!(lease.task_id == job.id, "Task identity differs from Job.id");
     if let Some(id) = &job.routine_id { structural_id(id)?; }
+    let floor: Option<f64> = tx.query_row("SELECT admission_floor FROM task_authority WHERE id=1",[],|r|r.get(0))?;
+    if floor.is_some_and(|floor| !job.created_at.is_finite() || job.created_at <= floor) {
+        tx.execute("INSERT OR IGNORE INTO task_fences VALUES(?1,?2)",params![lease.account_epoch,lease.task_id])?;
+        return Ok(false);
+    }
     let fresh = tx.execute("INSERT INTO task_fences VALUES(?1,?2) ON CONFLICT DO NOTHING", params![lease.account_epoch,lease.task_id])? == 1;
     if !fresh { return Ok(false); }
     tx.execute("INSERT INTO local_tasks(account_epoch,task_id,owner_epoch,execution_id,chat_id,bot_id,routine_id,state) VALUES(?1,?2,?3,?4,?5,?6,?7,'queued')", params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,job.chat_id,job.bot_id,job.routine_id])?;
@@ -127,6 +132,9 @@ fn queue_task_tx(tx: &Transaction<'_>, lease: &TaskLease, job: &crate::model::Jo
 }
 
 impl LocalStore {
+    pub(crate) fn history_task_lease(&self, owner: &str, task: &str, incarnation: u64) -> anyhow::Result<Option<TaskLease>> {
+        Ok(self.connection.lock().unwrap().query_row("SELECT account_epoch,owner_epoch,execution_id FROM local_tasks WHERE task_id=?1 AND state IN ('finished','interrupted','needs_review') AND account_epoch=(SELECT account_epoch FROM task_authority WHERE id=1 AND owner_epoch=?2 AND closed=0)",params![task,owner],|r|Ok(TaskLease {account_epoch:r.get(0)?,owner_epoch:r.get(1)?,execution_id:r.get(2)?,task_id:task.into(),incarnation})).optional()?)
+    }
     pub(crate) fn active_task_lease(&self, owner: &str, task: &str, incarnation: u64) -> anyhow::Result<Option<TaskLease>> {
         Ok(self.connection.lock().unwrap().query_row("SELECT account_epoch,execution_id FROM local_tasks WHERE owner_epoch=?1 AND task_id=?2 AND state='running' AND account_epoch=(SELECT account_epoch FROM task_authority WHERE id=1 AND owner_epoch=?1 AND closed=0)",params![owner,task],|r| Ok(TaskLease { account_epoch:r.get(0)?,execution_id:r.get(1)?,owner_epoch:owner.into(),task_id:task.into(),incarnation })).optional()?)
     }
@@ -159,7 +167,7 @@ impl LocalStore {
                 Some(_) => anyhow::bail!("Stale task owner"),
                 None => {
                     let epoch = uuid::Uuid::new_v4().to_string();
-                    tx.execute("INSERT INTO task_authority VALUES(1,?1,?2,0)", params![epoch,owner])?;
+                    tx.execute("INSERT INTO task_authority(id,account_epoch,owner_epoch,closed) VALUES(1,?1,?2,0)", params![epoch,owner])?;
                     Ok(epoch)
                 }
             }
@@ -178,8 +186,8 @@ impl LocalStore {
         Ok(value)
     }
 
-    /// Caller already holds the exclusive home lock. Missing fences in an existing
-    /// populated store require reviewed migration, never reconstruction from messages.
+    /// Caller holds the exclusive home lock. Legacy journals become replay-denial
+    /// evidence, never executable tasks; existing account data stays byte-for-byte intact.
     pub(crate) fn recover_task_owner(&self, owner: &str) -> anyhow::Result<String> {
         structural_id(owner)?;
         self.safety(|tx| {
@@ -190,10 +198,28 @@ impl LocalStore {
                 Some((epoch, false)) => epoch,
                 Some((_, true)) => anyhow::bail!("Task account is closed"),
                 None => {
-                    let populated: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM bots UNION ALL SELECT 1 FROM messages UNION ALL SELECT 1 FROM sent_jobs)", [], |r| r.get(0))?;
-                    anyhow::ensure!(!populated, "Existing task safety fences are missing; reviewed migration is required");
+                    let orphaned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM local_tasks UNION ALL SELECT 1 FROM task_fences UNION ALL SELECT 1 FROM task_invocations UNION ALL SELECT 1 FROM task_effect_receipts)", [], |r| r.get(0))?;
+                    anyhow::ensure!(!orphaned, "Task authority is missing from a store containing safety records");
+                    let migrated: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM task_safety_version)",[],|r|r.get(0))?;
+                    anyhow::ensure!(!migrated, "Migrated task authority is missing; automatic reconstruction is forbidden");
                     let epoch = uuid::Uuid::new_v4().to_string();
-                    tx.execute("INSERT INTO task_authority VALUES(1,?1,?2,0)", params![epoch, owner])?;
+                    let legacy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM bots UNION ALL SELECT 1 FROM messages UNION ALL SELECT 1 FROM sent_jobs UNION ALL SELECT 1 FROM memory_turn_admissions)",[],|r|r.get(0))?;
+                    let floor = legacy.then(crate::config::now_secs);
+                    tx.execute("INSERT INTO task_authority(id,account_epoch,owner_epoch,closed,admission_floor) VALUES(1,?1,?2,0,?3)", params![epoch, owner,floor])?;
+                    tx.execute("INSERT INTO task_safety_version VALUES(1,1)",[])?;
+                    // Available legacy Job identities are denial evidence only. Sent jobs
+                    // remain pending remote-result waits; migration never dispatches them.
+                    tx.execute("INSERT OR IGNORE INTO task_fences SELECT ?1,id FROM sent_jobs", [&epoch])?;
+                    tx.execute("INSERT OR IGNORE INTO task_fences SELECT ?1,job_id FROM memory_turn_admissions", [&epoch])?;
+                    let turns: Vec<String> = tx.prepare("SELECT json FROM device_turns")?
+                        .query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+                    for json in turns {
+                        let turns: Vec<LiveTurn> = serde_json::from_str(&json).context("Invalid legacy turn journal")?;
+                        for turn in turns {
+                            structural_id(&turn.job_id)?;
+                            tx.execute("INSERT OR IGNORE INTO task_fences VALUES(?1,?2)",params![epoch,turn.job_id])?;
+                        }
+                    }
                     epoch
                 }
             };
@@ -255,7 +281,7 @@ impl LocalStore {
     }
 
     pub(crate) fn routine_needs_review(&self, epoch: &str, routine: &str) -> anyhow::Result<bool> {
-        Ok(self.connection.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM local_tasks WHERE account_epoch=?1 AND routine_id=?2 AND state IN ('interrupted','needs_review'))", params![epoch,routine], |r| r.get(0))?)
+        Ok(self.connection.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM local_tasks WHERE account_epoch=?1 AND routine_id=?2 AND state IN ('interrupted','needs_review') AND resolved_at IS NULL)", params![epoch,routine], |r| r.get(0))?)
     }
 
     /// Freeze once; changing a binding is a different invocation, not an UPDATE.
@@ -305,7 +331,8 @@ impl LocalStore {
 
     pub(crate) fn resolve_task(&self, lease: &TaskLease, at: i64) -> anyhow::Result<bool> {
         self.safety(|tx| {
-            check_authority_tx(tx, lease)?;
+            let current:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM task_authority WHERE account_epoch=?1 AND closed=0)",[&lease.account_epoch],|r|r.get(0))?;
+            anyhow::ensure!(current,"Stale task account");
             Ok(tx.execute("UPDATE local_tasks SET resolved_at=?5 WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND state IN ('finished','interrupted','needs_review') AND NOT EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=?1 AND r.task_id=?2 AND r.state='started')",
                 params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,at])? == 1)
         })
@@ -468,7 +495,8 @@ impl LocalStore {
              );
              CREATE TABLE IF NOT EXISTS task_authority (
                  id INTEGER PRIMARY KEY CHECK(id=1), account_epoch TEXT NOT NULL,
-                 owner_epoch TEXT NOT NULL, closed INTEGER NOT NULL CHECK(closed IN (0,1)));
+                 owner_epoch TEXT NOT NULL, closed INTEGER NOT NULL CHECK(closed IN (0,1)), admission_floor REAL);
+             CREATE TABLE IF NOT EXISTS task_safety_version(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL CHECK(version=1));
              CREATE TABLE IF NOT EXISTS task_fences (
                  account_epoch TEXT NOT NULL, task_id TEXT NOT NULL, PRIMARY KEY(account_epoch,task_id));
              CREATE TABLE IF NOT EXISTS local_tasks (
@@ -506,6 +534,9 @@ impl LocalStore {
         }
         if connection.prepare("SELECT original_json FROM pending_chat_creates").is_err() {
             connection.execute("ALTER TABLE pending_chat_creates ADD COLUMN original_json TEXT", [])?;
+        }
+        if connection.prepare("SELECT admission_floor FROM task_authority").is_err() {
+            connection.execute("ALTER TABLE task_authority ADD COLUMN admission_floor REAL", [])?;
         }
         crate::config::set_private(path)?;
         Ok(Self {
@@ -1557,6 +1588,7 @@ impl LocalStore {
         let tx = connection.transaction()?;
         for table in [
             "task_authority",
+            "task_safety_version",
             "task_fences",
             "task_effect_receipts",
             "task_invocations",
@@ -2048,6 +2080,68 @@ mod tests {
         assert!(store.commit_routine_check(&lease,Some(&job),"routine-test",&job.chat_id,&job.bot_id,1,&set,&[]).unwrap());
         assert_eq!(store.task_state(&lease).unwrap(),Some(TaskState::Queued));
         assert_eq!(store.codemode_values(&job.chat_id,&job.bot_id).unwrap().get("seen"),Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn legacy_owner_migration_preserves_data_and_denies_prior_work() {
+        let scratch=scratch(); let store=&scratch.0;
+        store.upsert(&message("legacy-message",1.0)).unwrap();
+        let item=OutboxItem { id:"legacy-outbox".into(),kind:"job".into(),recipient:Some("remote-runner".into()),ciphertext:vec![1,2,3],slot:None,group:None };
+        store.queue_outbox_with_state(&item,&State::default()).unwrap();
+        let before_state=store.load_state().unwrap();
+        let before_outbox=store.last_outbox().unwrap().unwrap();
+        let sent=SentJob { id:"job-legacy".into(),chat_id:"chat-test".into(),bot_id:"bot-test".into(),routine_id:None,runner_id:"runner-test".into(),sent_at:1.0 };
+        store.insert_sent_job(&sent).unwrap();
+        store.connection.lock().unwrap().execute("INSERT INTO memory_turn_admissions VALUES('job-memory','{}')",[]).unwrap();
+        let before=store.message("chat","legacy-message").unwrap();
+        let epoch=store.recover_task_owner("owner-test").unwrap();
+        assert_eq!(store.message("chat","legacy-message").unwrap(),before);
+        assert_eq!(store.load_state().unwrap().last_seq,before_state.last_seq);
+        let after_outbox=store.last_outbox().unwrap().unwrap();
+        assert_eq!(after_outbox.id,before_outbox.id);
+        assert_eq!(after_outbox.ciphertext,before_outbox.ciphertext);
+        assert_eq!(store.sent_jobs().unwrap(),vec![sent]);
+        let (mut lease,mut job)=task_fixture(store,"job-legacy"); lease.account_epoch=epoch;
+        job.created_at=crate::config::now_secs()+1.0;
+        assert!(!store.queue_task(&lease,&job).unwrap(),"known legacy identity stays denied even with a new timestamp");
+        lease.task_id="job-unseen-old".into(); job.id=lease.task_id.clone(); job.created_at=1.0;
+        assert!(!store.queue_task(&lease,&job).unwrap());
+        job.created_at=crate::config::now_secs()+1.0;
+        assert!(!store.queue_task(&lease,&job).unwrap(),"denied legacy envelope has a lifetime fence");
+        lease.task_id="job-explicit-new".into(); job.id=lease.task_id.clone();
+        assert!(store.queue_task(&lease,&job).unwrap());
+        assert_eq!(store.task_state(&lease).unwrap(),Some(TaskState::Queued));
+    }
+
+    #[test]
+    fn legacy_migration_failure_leaves_authority_and_journals_unchanged() {
+        let scratch=scratch(); let store=&scratch.0;
+        store.connection.lock().unwrap().execute("INSERT INTO device_turns VALUES('legacy-device','invalid-json')",[]).unwrap();
+        assert!(store.recover_task_owner("owner-test").is_err());
+        assert_eq!(store.current_task_account_epoch().unwrap(),None);
+        let json:String=store.connection.lock().unwrap().query_row("SELECT json FROM device_turns WHERE id='legacy-device'",[],|r|r.get(0)).unwrap();
+        assert_eq!(json,"invalid-json");
+        let count:i64=store.connection.lock().unwrap().query_row("SELECT count(*) FROM task_fences",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,0);
+    }
+
+    #[test]
+    fn recovered_routine_resolution_keeps_unknown_and_replay_fence() {
+        let scratch=scratch(); let store=&scratch.0;
+        let (lease,mut job)=task_fixture(store,"job-resolve"); job.routine_id=Some("routine-test".into());
+        assert!(store.queue_task(&lease,&job).unwrap()); assert!(store.start_task(&lease).unwrap());
+        let binding=invocation();
+        assert!(store.insert_invocation(&lease,&binding).unwrap());
+        assert!(store.decide_invocation(&lease,&binding,AuthorizationDecision::Authorized,AuthorizationKind::Rule,None,None,1).unwrap());
+        assert!(store.admit_invocation(&lease,&binding).unwrap());
+        store.recover_task_owner("owner-new").unwrap();
+        assert!(store.routine_needs_review(&lease.account_epoch,"routine-test").unwrap());
+        let history=store.history_task_lease("owner-new",&job.id,0).unwrap().unwrap();
+        assert!(store.resolve_task(&history,2).unwrap());
+        assert!(!store.routine_needs_review(&lease.account_epoch,"routine-test").unwrap());
+        assert!(store.finish_receipt(&lease,&binding,ReceiptOutcome::Finished).is_err());
+        let state:String=store.connection.lock().unwrap().query_row("SELECT state FROM task_effect_receipts WHERE receipt_id=?1",[&binding.receipt_id],|r|r.get(0)).unwrap();
+        assert_eq!(state,"unknown");
     }
 
     fn message(id: &str, at: f64) -> Message {

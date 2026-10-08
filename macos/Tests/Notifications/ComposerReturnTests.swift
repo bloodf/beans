@@ -4,14 +4,17 @@ import XCTest
 
 /// Real `ComposerView`, `MentionPanel` and key routing: events go through `NSApp.sendEvent`
 /// into the composer's own text view, and the only observable outputs are `onSend` and the
-/// field text. Reads `AppStore.shared` only through the picker's runner lookup; sets nothing.
+/// field text. Reads `AppStore.shared` only through the picker's runner lookup. Writes only
+/// `beans-v2.sendOnReturn`, which each test restores exactly, absent key included.
 @MainActor
 final class ComposerReturnTests: XCTestCase {
     private var window: NSWindow!
     private var composer: ComposerView!
     private var textView: ComposerTextView!
     private var sent: [(text: String, files: Int)] = []
-    private var savedSendOnReturn: Bool!
+    private static let sendOnReturnKey = "beans-v2.sendOnReturn"
+    /// The raw stored object, nil when the key is absent (the getter would answer `true`).
+    private var savedSendOnReturn: Any?
     private let bots = ["Ada", "Bea"].map {
         Bot(
             id: "composer-test-\($0)", name: $0, description: "", symbolName: "sparkles", accent: .indigo,
@@ -20,7 +23,7 @@ final class ComposerReturnTests: XCTestCase {
 
     override func setUp() async throws {
         _ = NSApplication.shared
-        savedSendOnReturn = Preferences.sendOnReturn
+        savedSendOnReturn = UserDefaults.standard.object(forKey: Self.sendOnReturnKey)
         composer = ComposerView()
         composer.frame = NSRect(x: 0, y: 0, width: 600, height: 160)
         composer.configure(placeholder: "Message", bots: bots)
@@ -34,7 +37,11 @@ final class ComposerReturnTests: XCTestCase {
     }
 
     override func tearDown() async throws {
-        Preferences.sendOnReturn = savedSendOnReturn
+        if let saved = savedSendOnReturn {
+            UserDefaults.standard.set(saved, forKey: Self.sendOnReturnKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.sendOnReturnKey)
+        }
         window.orderOut(nil)
     }
 

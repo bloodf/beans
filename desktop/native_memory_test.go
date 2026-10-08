@@ -75,3 +75,21 @@ func TestNativeDeletionRefreshDoesNotUnlockStaleEpoch(t *testing.T) {
 		t.Fatalf("deletion lock: %s %v", locked, err)
 	}
 }
+
+func TestNativeMemoryAdvancedRequiresExactNegotiatedVerb(t *testing.T) {
+	r, err := newSharedRuntime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &nativeMemory{runtime: r}
+	for _, caps := range []json.RawMessage{json.RawMessage(`{}`), json.RawMessage(`{"advanced":["memory_edit"]}`), json.RawMessage(`{"advanced":["memory_edit"],"advanced_actions":{"memory_edit":["get"]}}`)} {
+		ok, err := m.supportsAdvanced(caps, "memory_edit", "edit")
+		if err != nil || ok {
+			t.Fatalf("unnegotiated edit admitted: %v %v", ok, err)
+		}
+	}
+	ok, err := m.supportsAdvanced(json.RawMessage(`{"advanced":["memory_edit"],"advanced_actions":{"memory_edit":["edit"]}}`), "memory_edit", "edit")
+	if err != nil || !ok {
+		t.Fatal("negotiated edit unavailable")
+	}
+}

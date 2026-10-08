@@ -109,3 +109,14 @@ func (m *nativeMemory) deletion(id uint64, action string, value any) (json.RawMe
 	err := m.runtime.eval(`const v=globalThis.nativeMemoryViews?.[input.id];if(!v)throw new Error("stale_memory_view");`+code, map[string]any{"id": id, "value": value}, &out)
 	return out, err
 }
+
+func (m *nativeMemory) supportsAdvanced(capabilities json.RawMessage, feature, action string) (bool, error) {
+	var out bool
+	err := m.runtime.eval(`return BeansMemory.supportsMemoryAdvancedAction(input.capabilities,input.feature,input.action);`, map[string]any{"capabilities": capabilities, "feature": feature, "action": action}, &out)
+	return out, err
+}
+func (m *nativeMemory) vectorEdit(documentID, text string) (json.RawMessage, error) {
+	var out json.RawMessage
+	err := m.runtime.eval(`return BeansMemory.memoryVectorEditBody(input.id,input.text);`, map[string]string{"id": documentID, "text": text}, &out)
+	return out, err
+}

@@ -19,6 +19,10 @@ func (n *nativeDesktop) loadMemory() {
 	if n.memory == nil || !n.store.Connected {
 		return
 	}
+	if isMock() {
+		n.memoryPanel.Error = "Memory services are unavailable in demo mode."
+		return
+	}
 	n.memoryPanel.Open = true
 	n.memoryPanel.Loading = true
 	epoch, authority, client := n.store.Epoch, n.authority, app.cli

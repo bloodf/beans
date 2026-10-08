@@ -5,5 +5,6 @@ for (const [entry, output] of [
 ] as const) {
   const result = await Bun.build({ entrypoints: [new URL(entry, import.meta.url).pathname], target: "browser", format: "iife" });
   if (!result.success) throw new AggregateError(result.logs, `Native contract bundle: ${entry}`);
-  await Bun.write(new URL(output, import.meta.url), await result.outputs[0]!.text());
+  const license = output === "assets/blobatar.js" ? `/*\n${await Bun.file(new URL("../packages/beans-blobatar/LICENSE", import.meta.url)).text()}\n*/\n` : "";
+  await Bun.write(new URL(output, import.meta.url), license + await result.outputs[0]!.text());
 }

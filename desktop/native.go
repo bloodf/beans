@@ -34,6 +34,9 @@ func (n *nativeDesktop) event(name string, data json.RawMessage) {
 	if err := n.store.Apply(name, data); err != nil {
 		n.store.Error = err.Error()
 	}
+	if n.avatars != nil && n.avatars.epoch != n.store.Epoch {
+		n.avatars.reset(n.store.Epoch)
+	}
 	if n.memory != nil && n.memory.epoch != n.store.Epoch {
 		_ = n.memory.reset(n.store.Epoch)
 		n.memoryPanel = nativeMemoryPanel{}
@@ -378,6 +381,15 @@ func (n *nativeDesktop) view(c *ui.Context) {
 							if b.ID == m.Author.BotID {
 								author = b.Name
 								break
+							}
+						}
+						if n.avatars != nil && m.Author.Kind == "bot" {
+							for _, bot := range n.store.Bots {
+								if bot.ID == m.Author.BotID {
+									n.avatars.view(c, bot, "idle", 28)
+									n.fetchAvatar(bot)
+									break
+								}
 							}
 						}
 						ui.Text(c, author).Bold()

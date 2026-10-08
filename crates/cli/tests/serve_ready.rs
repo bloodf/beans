@@ -79,9 +79,18 @@ impl Drop for Home {
 
 #[tokio::test]
 async fn readiness_is_flushed_with_logs_disabled_and_the_websocket_is_ready() {
+    assert_serve_ready(&[]).await;
+}
+
+#[tokio::test]
+async fn a_build_wrappers_message_format_is_ignored() {
+    assert_serve_ready(&["--message-format=json,json-diagnostic-rendered-ansi"]).await;
+}
+
+async fn assert_serve_ready(args: &[&str]) {
     prepare_cli().await;
     let home = Home::new();
-    let mut child = home.serve(0).spawn().unwrap();
+    let mut child = home.serve(0).args(args).spawn().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     timeout(Duration::from_secs(5), stdout.read_line(&mut line))

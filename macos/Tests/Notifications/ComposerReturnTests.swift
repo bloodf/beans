@@ -74,6 +74,26 @@ final class ComposerReturnTests: XCTestCase {
         XCTAssertEqual(Preferences.sendOnReturn, value, "argument-domain override not visible to Preferences")
     }
 
+    /// The text a plain `NSTextView` ends with after the same Return event hits marked "に".
+    private func markedTextOutcome(flags: NSEvent.ModifierFlags) -> String {
+        let control = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        let controlWindow = NSWindow(contentRect: control.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        controlWindow.isReleasedWhenClosed = false
+        defer { controlWindow.close() }
+        controlWindow.contentView = control
+        controlWindow.orderFront(nil)
+        XCTAssertTrue(controlWindow.makeFirstResponder(control))
+        control.setMarkedText(
+            "に", selectedRange: NSRange(location: 1, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0))
+        let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: controlWindow.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+            isARepeat: false, keyCode: 36)!
+        controlWindow.sendEvent(event)
+        return control.string
+    }
+
     private func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
         if let match = view as? T { return match }
         for sub in view.subviews { if let match = find(type, in: sub) { return match } }
@@ -166,11 +186,15 @@ final class ComposerReturnTests: XCTestCase {
                     "に", selectedRange: NSRange(location: 1, length: 0),
                     replacementRange: NSRange(location: NSNotFound, length: 0))
                 XCTAssertTrue(textView.hasMarkedText(), "setup on=\(on) flags=\(flags.rawValue)")
-                try press(flags)
-                // Pass-through may commit or keep the composition; either way no send and the
-                // composed character is still in the draft.
+                // Control: a plain NSTextView given the same marked text and the same event. The
+                // synthetic composition bypasses the input context, so AppKit itself decides what
+                // Return does to it (plain Return replaces it with a newline, ⌘Return is a no-op);
+                // the composer must do exactly that and, unlike the control, never send.
+                let expected = markedTextOutcome(flags: flags)
+                let commands = try press(flags)
+                XCTAssertFalse(commands.isEmpty, "key produced no command on=\(on) flags=\(flags.rawValue)")
                 XCTAssertEqual(sent.count, 0, "on=\(on) flags=\(flags.rawValue)")
-                XCTAssertTrue(composer.text.contains("に"), "on=\(on) flags=\(flags.rawValue) text=\(composer.text)")
+                XCTAssertEqual(composer.text, expected, "on=\(on) flags=\(flags.rawValue) commands=\(commands)")
                 textView.unmarkText()
             }
         }

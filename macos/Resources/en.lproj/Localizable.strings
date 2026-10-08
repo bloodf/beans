@@ -1,1 +1,18 @@
-/* English is the key of every string, so this table is empty. It marks the bundle as holding English. */
+/* English is the key of every string. Diagnostics entries are explicit for paired locale checks. */
+"Diagnostics" = "Diagnostics";
+"Diagnostics…" = "Diagnostics…";
+"Not available" = "Not available";
+"Relay host/port disclosed in this report: %@" = "Relay host/port disclosed in this report: %@";
+"This report discloses the selected relay host and explicit port. Review before sharing. Nothing uploads automatically." = "This report discloses the selected relay host and explicit port. Review before sharing. Nothing uploads automatically.";
+"Providers: configured-only, authentication not checked. Plugins: cache-only anonymous setup slots. Runners: presence-only, not admission readiness. A busy local port is a note, not proof of failure." = "Providers: configured-only, authentication not checked. Plugins: cache-only anonymous setup slots. Runners: presence-only, not admission readiness. A busy local port is a note, not proof of failure.";
+"Refresh" = "Refresh";
+"Copy Report" = "Copy Report";
+"Export Report…" = "Export Report…";
+"Diagnostics report JSON" = "Diagnostics report JSON";
+"Open diagnostics to request a local report." = "Open diagnostics to request a local report.";
+"Loading diagnostics…" = "Loading diagnostics…";
+"Review the report below before copying or exporting it." = "Review the report below before copying or exporting it.";
+"Unsupported diagnostics schema. Update Beans before sharing a report." = "Unsupported diagnostics schema. Update Beans before sharing a report.";
+"Diagnostics unavailable. No report was copied or exported. Check the local CLI and try again." = "Diagnostics unavailable. No report was copied or exported. Check the local CLI and try again.";
+"Report copied to the clipboard." = "Report copied to the clipboard.";
+"Could not export the report. Choose a writable destination and try again." = "Could not export the report. Choose a writable destination and try again.";

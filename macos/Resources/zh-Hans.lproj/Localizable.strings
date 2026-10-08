@@ -1004,3 +1004,22 @@
 "This can change service data or invoke paid downstream models. No background schedule is authorized. Deletes do not prove backup/history erasure." = "这可能更改服务数据或调用付费下游模型。未授权后台定时任务。删除不能证明备份和历史记录已擦除。";
 "Refresh preferences and connection" = "刷新偏好设置和连接";
 "This build connects only to its isolated Beans CLI port %d. Restore that port in Settings › Advanced." = "此构建仅连接其隔离的 Beans CLI 端口 %d。请在“设置 › 高级”中恢复该端口。";
+
+/* Local diagnostics review and explicit sharing. */
+"Diagnostics" = "诊断";
+"Diagnostics…" = "诊断…";
+"Not available" = "不可用";
+"Relay host/port disclosed in this report: %@" = "此报告披露的中继主机及端口：%@";
+"This report discloses the selected relay host and explicit port. Review before sharing. Nothing uploads automatically." = "此报告披露所选中继的主机及显式指定的端口。分享前请先检查。不会自动上传任何内容。";
+"Providers: configured-only, authentication not checked. Plugins: cache-only anonymous setup slots. Runners: presence-only, not admission readiness. A busy local port is a note, not proof of failure." = "模型服务商：仅反映配置情况，未检查身份验证。插件：仅反映缓存中的匿名配置状态。运行设备：仅反映在线状态，不代表已准备好接收任务。本地端口被占用仅作为提示，并不能证明服务故障。";
+"Refresh" = "刷新";
+"Copy Report" = "复制报告";
+"Export Report…" = "导出报告…";
+"Diagnostics report JSON" = "诊断报告 JSON";
+"Open diagnostics to request a local report." = "打开诊断以请求本地报告。";
+"Loading diagnostics…" = "正在加载诊断报告…";
+"Review the report below before copying or exporting it." = "复制或导出前，请先检查下方报告。";
+"Unsupported diagnostics schema. Update Beans before sharing a report." = "不支持此诊断报告格式版本。分享报告前请先更新 Beans。";
+"Diagnostics unavailable. No report was copied or exported. Check the local CLI and try again." = "诊断不可用。未复制或导出任何报告。请检查本地 CLI 后重试。";
+"Report copied to the clipboard." = "报告已复制到剪贴板。";
+"Could not export the report. Choose a writable destination and try again." = "无法导出报告。请选择可写入的位置后重试。";

@@ -479,11 +479,21 @@ enum Wire {
             var author: Author
             var createdAt: Double
         }
+        struct FileHit: Decodable {
+            var chatId: String
+            var messageId: String
+            var attachmentId: String
+            var name: String
+            var snippet: String
+            var createdAt: Double
+        }
 
         var chats: [ChatHit]
         var messages: [MessageHit]
+        var files: [FileHit]
+        var historyComplete: Bool
 
-        static let empty = SearchResults(chats: [], messages: [])
+        static let empty = SearchResults(chats: [], messages: [], files: [], historyComplete: true)
     }
 
     struct ChatUsage: Decodable {

@@ -131,6 +131,11 @@ function searchSections(results: WireSearchResults): PaletteSection[] {
   return [
     { title: L("Chats"), items: hits(results.chats) },
     { title: L("Messages"), items: hits(results.messages) },
+    { title: L("Files"), items: results.files.flatMap((hit) => {
+      const chat = store.chat(hit.chat_id);
+      if (!chat) return [];
+      return [item({ icon: { kind: "symbol", name: "doc" }, title: hit.name, subtitle: store.title(chat), isSearchOnly: true, chatID: chat.id, run: () => open(chat.id) })];
+    }) },
   ].filter((section) => section.items.length > 0);
 }
 
@@ -283,7 +288,7 @@ function Palette() {
     { title: L("Settings"), items: settings() },
   ];
   const [query, setQuery] = createSignal("");
-  const [results, setResults] = createSignal<WireSearchResults>({ chats: [], messages: [] });
+  const [results, setResults] = createSignal<WireSearchResults>({ chats: [], messages: [], files: [], history_complete: true });
   const [searching, setSearching] = createSignal(false);
   /** The row the arrows or the pointer picked; none follows the list's first item. */
   const [picked, setPicked] = createSignal<number | null>(null);
@@ -297,7 +302,7 @@ function Palette() {
   let lastPointer = { x: -1, y: -1 };
 
   const rows = createMemo((): Row[] => {
-    let matched = filter(sections, query());
+    let matched = filter(query().trim() ? sections.filter((section) => section.title !== L("Chats")) : sections, query());
     if (query().trim() !== "") matched = merge(searchSections(results()), matched);
     return matched.flatMap((section): Row[] => [{ kind: "header", title: section.title }, ...section.items.map((entry): Row => ({ kind: "item", item: entry }))]);
   });
@@ -334,7 +339,7 @@ function Palette() {
         },
         () => {
           if (generation !== searchGeneration) return;
-          setResults({ chats: [], messages: [] });
+          setResults({ chats: [], messages: [], files: [], history_complete: false });
           setSearching(false);
         },
       );
@@ -369,10 +374,19 @@ function Palette() {
 
   onSettled(() => {
     field?.focus();
+    const unsubscribe = store.subscribe((event) => {
+      if (["snapshotReplaced", "chatsChanged", "chatChanged", "messageAdded", "messageChanged", "messageRemoved", "olderMessagesLoaded", "rosterChanged", "identityChanged"].includes(event.kind) && query().trim()) {
+        setResults({ chats: [], messages: [], files: [], history_complete: true });
+        setSearching(true);
+        searchMessages(query());
+      }
+    });
     const onBlur = () => close();
     window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("blur", onBlur);
+      unsubscribe();
+      searchGeneration++;
       clearTimeout(searchTimer);
     };
   });
@@ -387,13 +401,18 @@ function Palette() {
           <input
             ref={(element) => (field = element)}
             value={query()}
-            placeholder={L("Search actions, chats, messages, and settings")}
+            placeholder={L("Search actions, chats, messages, files, and settings")}
+            aria-label={L("Search")}
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="palette-search-list"
+            aria-activedescendant={selected() >= 0 ? `palette-search-row-${selected()}` : undefined}
             spellcheck="false"
             autocomplete="off"
             onInput={(event) => {
               const text = event.currentTarget.value;
               setQuery(text);
-              setResults({ chats: [], messages: [] });
+              setResults({ chats: [], messages: [], files: [], history_complete: true });
               setSearching(text.trim() !== "");
               listChanged();
               searchMessages(text);
@@ -419,6 +438,9 @@ function Palette() {
           />
         </div>
         <div class="palette-separator" />
+        <Show when={!results().history_complete}>
+          <div role="status" class="palette-header">{L("Search covers downloaded history only")}</div>
+        </Show>
         <Show
           when={rows().length > 0}
           fallback={
@@ -431,6 +453,8 @@ function Palette() {
             ref={(element) => (list = element)}
             class="palette-list"
             role="listbox"
+            id="palette-search-list"
+            aria-label={L("Search results")}
             style={{ "max-height": `${metric.maxListHeight}px` }}
             onMouseMove={(event) => {
               lastPointer = { x: event.clientX, y: event.clientY };
@@ -452,6 +476,8 @@ function Palette() {
                     class={["palette-row", { selected: selected() === index() }]}
                     role="option"
                     aria-selected={selected() === index() ? "true" : "false"}
+                    id={`palette-search-row-${index()}`}
+                    aria-label={`${row.item.title}, ${row.item.subtitle}`}
                     data-row={index()}
                     style={{ height: `${metric.rowHeight}px` }}
                     onMouseDown={(event) => event.preventDefault()}

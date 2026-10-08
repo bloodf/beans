@@ -260,7 +260,10 @@ async fn failed_preparation_preserves_existing_bytes_and_queued_slots() {
         for id in ["att-existing", "att-new"] {
             file["id"] = json!(id);
             std::fs::write(&s.attachment, b"replacement").unwrap();
-            s.send_rejected(json!({"message_id": "m-existing", "attachments": [file, {"path": s.home.join("missing")}]}), "No such file").await;
+            let before = s.snapshot();
+            let error = s.call("chats.send", json!({"chat_id": s.chat, "text": "hi", "message_id": "m-existing", "attachments": [file, {"path": s.home.join("missing")}]})).await.expect_err("request must be rejected");
+            assert!(!error.is_empty(), "missing source rejection must include an error");
+            assert_eq!(s.snapshot(), before, "chats.send changed state before failing: {error}");
         }
         assert_eq!(std::fs::read(s.app.config.files_dir().join("att-existing")).unwrap(), b"fixture");
         s.rejected("bots.update", json!({"id": "unknown", "avatar": {"path": s.attachment, "mime": "image/png"}}), "Unknown bot").await;

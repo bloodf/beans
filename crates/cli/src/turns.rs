@@ -4533,6 +4533,7 @@ mod tests {
             name: "Router".into(), api: CustomApi::Messages, base_url: "http://router".into(), api_key: String::new(),
             models: vec![CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus".into()), context_window: None, max_output: None, images: None,
                 reasoning: Some(true), thinking_format: Some("claude-adaptive".into()), thinking_can_disable: Some(true), ..Default::default() }], created_at: 1, integration: None,
+            capabilities: None,
         });
         run(json!({ "provider": "custom:router", "model": "claude-opus-5", "thinking": "max" })).await.unwrap();
         let scout = app.bot("b2").unwrap();
@@ -4656,7 +4657,7 @@ mod tests {
             CustomModel { id: "anthropic/claude-opus-5".into(), reasoning: Some(true), thinking_format: Some("claude-adaptive".into()), thinking_can_disable: Some(true), ..Default::default() },
             CustomModel { id: "qwen3:8b".into(), ..Default::default() },
         ];
-        let router = CustomProvider { name: "Router".into(), api: CustomApi::Messages, base_url: "http://router".into(), api_key: String::new(), models, created_at: 1, integration: None };
+        let router = CustomProvider { name: "Router".into(), api: CustomApi::Messages, base_url: "http://router".into(), api_key: String::new(), models, created_at: 1, integration: None, capabilities: None };
         app.credentials.lock().unwrap().custom.insert("custom:router".into(), router);
         edit(json!({ "provider": "custom:router", "model": "claude-opus-5", "thinking": "max" })).await.unwrap();
         assert_eq!(runs(), ("custom:router".into(), Some("anthropic/claude-opus-5".into()), Some("max".into())));

@@ -325,13 +325,40 @@ export function setChatUsage(chatId: string, usage: ChatUsage) {
   useStore.setState((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? { ...c, usage } : c)) }));
 }
 
-/// The chat is read here; the core clears it everywhere.
+// In-flight entries are generation tokens: any account or foreground transition revokes them,
+// including a change away and back before the native request completes.
+const pendingReads = new Map<string, object>();
+useStore.subscribe((s, previous) => {
+  if (s.paired !== previous.paired || s.identityId !== previous.identityId
+    || s.deviceId !== previous.deviceId || s.relayUrl !== previous.relayUrl
+    || s.appActive !== previous.appActive || s.activeSince !== previous.activeSince) pendingReads.clear();
+});
+
+/// Clear locally only after persistence succeeds; failures leave the unread count available.
 export function markRead(chatId: string) {
-  if (!useStore.getState().appActive) return;
+  const s = useStore.getState();
+  if (!s.appActive || !s.paired || !s.identityId || !s.deviceId) return;
   const chat = chatById(chatId);
-  if (!chat || chat.unread_count === 0) return;
-  useStore.setState((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? { ...c, unread_count: 0 } : c)) }));
-  void import("../../modules/beans-core").then(({ request }) => request("chats.mark_read", { chat_id: chatId }).catch(() => {}));
+  if (!chat || chat.unread_count === 0 || pendingReads.has(chatId)) return;
+  const token = {};
+  pendingReads.set(chatId, token);
+  void (async () => {
+    try {
+      // Literal require uses the bundled bridge, without requesting a production Metro chunk.
+      const { request } = require("../../modules/beans-core") as typeof import("../../modules/beans-core");
+      await request("chats.mark_read", { chat_id: chatId });
+      if (pendingReads.get(chatId) !== token) return;
+      pendingReads.delete(chatId);
+      useStore.setState((current) => ({
+        // A newer roster or message owns its unread state; an old completion cannot clear it.
+        chats: current.chats.map((c) => (c === chat ? { ...c, unread_count: 0 } : c)),
+      }));
+    } catch {
+      // No optimistic clear or store update: a failed write stays unread without retry recursion.
+    } finally {
+      if (pendingReads.get(chatId) === token) pendingReads.delete(chatId);
+    }
+  })();
 }
 
 export function markFile(id: string, uri: string) {

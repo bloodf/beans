@@ -209,13 +209,14 @@ enum Wire {
         var name: String?
         var api: String?
         var integration: String?
+        var capabilities: CustomCapabilities?
         var models: [StatusModel]?
 
         func toModel() -> ProviderCredential? {
             guard let kind = ProviderCredential.Kind(wireValue: kind) else { return nil }
             return ProviderCredential(
                 kind: kind, isConnected: isConnected, detail: detail, baseURL: baseUrl, name: name,
-                api: api.flatMap(CustomAPI.init(rawValue:)), integration: integration, models: (models ?? []).map { $0.toModel() })
+                api: api.flatMap(CustomAPI.init(rawValue:)), integration: integration, capabilities: capabilities, models: (models ?? []).map { $0.toModel() })
         }
     }
 

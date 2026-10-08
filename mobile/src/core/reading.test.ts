@@ -63,6 +63,7 @@ function snapshot(chats: Chat[]) {
 const { engine } = await import("./engine");
 const { ERROR_DISPLAY_MS, resetStore, runningTasks, TASK_DELAY_MS, useStore } = await import("./store");
 const { workingActivity } = await import("../ui/format");
+const { composerDraftKey, hasUpdateDrafts, readComposerDraft, writeComposerDraft } = await import("./updateDrafts");
 await engine.start();
 
 beforeEach(async () => {
@@ -80,6 +81,45 @@ async function flush() {
   // markRead imports the native bridge asynchronously.
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+test("engine deletion and forgotten identity reconcile drafts through store callbacks", async () => {
+  const open = composerDraftKey("account", null, "open");
+  const other = composerDraftKey("account", null, "other");
+  writeComposerDraft(open, { text: "deleted" });
+  writeComposerDraft(other, { text: "private" });
+  engine.deleteChat("open");
+  expect(readComposerDraft(open).text).toBe("");
+  expect(readComposerDraft(other).text).toBe("private");
+  await engine.unpair();
+  expect(useStore.getState().identityId).toBeNull();
+  expect(readComposerDraft(other).text).toBe("");
+  expect(hasUpdateDrafts()).toBe(false);
+});
+
+test("native removal and identity events discard unreachable drafts", () => {
+  const open = composerDraftKey("account", null, "open");
+  const other = composerDraftKey("account", null, "other");
+  writeComposerDraft(open, { text: "deleted" });
+  writeComposerDraft(other, { text: "private" });
+  event({ event: "chat.removed", data: { chat_id: "open" } });
+  expect(readComposerDraft(open).text).toBe("");
+  expect(readComposerDraft(other).text).toBe("private");
+  event({ event: "identity.changed", data: { has_identity: false } });
+  expect(readComposerDraft(other).text).toBe("");
+  expect(hasUpdateDrafts()).toBe(false);
+});
+
+test("relay reconnect retains drafts but source change discards them", () => {
+  const open = composerDraftKey("account", null, "open");
+  writeComposerDraft(open, { text: "unfinished" });
+  event({ event: "relay.status", data: { connected: false } });
+  event({ event: "relay.status", data: { connected: true, url: null } });
+  expect(readComposerDraft(open).text).toBe("unfinished");
+  event({ event: "relay.status", data: { connected: false, url: "next-relay" } });
+  expect(readComposerDraft(open).text).toBe("");
+  writeComposerDraft(open, { text: "late" });
+  expect(hasUpdateDrafts()).toBe(false);
+});
 
 function reply(id: string, kind: "reply" | "permission" | "failure" = "reply") {
   const message: Message = { id: "reply", chat_id: id, author: { kind: "bot", bot_id: "bot" },

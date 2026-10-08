@@ -26,6 +26,7 @@ import {
   replaceSnapshot,
   resetStore,
   setChatUsage,
+  setRelayStatus,
   setRetry,
   setRunning,
   setStatus,
@@ -181,12 +182,7 @@ class Engine {
         setChatUsage(data.chat_id, data.usage as ChatUsage);
         break;
       case "relay.status":
-        useStore.setState((s) => {
-          const relayUrl = data.url === undefined ? s.relayUrl : data.url;
-          const sourceChanged = relayUrl !== s.relayUrl;
-          return { relayConnected: !!data.connected, relayUpdateRequired: !!data.update_required, relayError: data.error ?? null, relayUrl,
-            providers: sourceChanged ? [] : s.providers, models: sourceChanged ? [] : s.models };
-        });
+        setRelayStatus(data);
         break;
       case "provider.auth":
         void this.openAuthPage(data.url, "provider", () => core.request("providers.auth.cancel"));

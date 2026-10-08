@@ -8,6 +8,7 @@ import { useShallow } from "zustand/react/shallow";
 import { runsInTerminal, type AutoReview, type Bot, type Chat, type ChatMeta, type ChatUsage, type Device, type Message, type ProviderModel, type ProviderStatus, type RelayProblem, type Routine } from "./model";
 import { t } from "../i18n";
 import { loadPrefs, savePrefs } from "./prefs";
+import { reconcileComposerDrafts } from "./updateDrafts";
 
 export interface Running {
   chatId: string;
@@ -132,6 +133,16 @@ export function mutate(update: (s: StoreState) => Partial<StoreState>) {
 /// Back to unpaired: everything the core told us goes; the phone's prefs stay.
 export function resetStore() {
   useStore.setState({ ...empty() });
+  reconcileComposerDrafts(null, null, []);
+}
+
+export function setRelayStatus(data: { url?: string | null; connected?: boolean; update_required?: boolean; error?: RelayProblem | null }) {
+  const s = useStore.getState();
+  const relayUrl = data.url === undefined ? s.relayUrl : data.url;
+  const sourceChanged = relayUrl !== s.relayUrl;
+  useStore.setState({ relayConnected: !!data.connected, relayUpdateRequired: !!data.update_required, relayError: data.error ?? null, relayUrl,
+    providers: sourceChanged ? [] : s.providers, models: sourceChanged ? [] : s.models });
+  if (sourceChanged) reconcileComposerDrafts(s.identityId, relayUrl, s.chats);
 }
 
 // MARK: - Lookup
@@ -215,6 +226,7 @@ export function replaceSnapshot(snapshot: {
     thinking: pick(thinking, busy),
     retries: pick(retries, busy),
   });
+  reconcileComposerDrafts(snapshot.has_identity ? snapshot.identity_id : null, snapshot.relay_url, snapshot.chats);
 }
 
 function seenOf(devices: Device[]): Record<string, number> {
@@ -237,6 +249,8 @@ export function applyRoster(roster: { devices: Device[]; bots: Bot[]; chats: (Ch
     });
     return { devices: roster.devices, device_seen: seenOf(roster.devices), bots: roster.bots, chats, paused: roster.paused ?? false, routines: roster.routines ?? s.routines, auto_review: roster.auto_review ?? s.auto_review, providers: roster.providers ?? s.providers, models: roster.models ?? s.models };
   });
+  const { identityId, relayUrl, chats } = useStore.getState();
+  reconcileComposerDrafts(identityId, relayUrl, chats);
   return { removed };
 }
 
@@ -319,6 +333,8 @@ export function removeChat(chatId: string) {
     retries: omit(s.retries, chatId),
     failures: Object.fromEntries(Object.entries(s.failures).filter(([, f]) => f.chatId !== chatId)),
   }));
+  const { identityId, relayUrl, chats } = useStore.getState();
+  reconcileComposerDrafts(identityId, relayUrl, chats);
 }
 
 export function setChatUsage(chatId: string, usage: ChatUsage) {

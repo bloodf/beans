@@ -126,7 +126,11 @@ export function Composer({
   function setAttachments(value: PickedFile[] | ((current: PickedFile[]) => PickedFile[])) {
     writeComposerDraft(draftKey, { attachments: typeof value === "function" ? value(readComposerDraft(draftKey).attachments) : value });
   }
-  function setListening(value: boolean) { writeComposerDraft(draftKey, { listening: value }); }
+  const recordingActive = useRef(false);
+  function setListening(value: boolean) {
+    recordingActive.current = value;
+    writeComposerDraft(draftKey, { listening: value });
+  }
   const [focused, setFocused] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -138,8 +142,9 @@ export function Composer({
   useEffect(() => () => {
     const current = readComposerDraft(draftKey);
     const words = transcript.current.trim();
-    if (current.listening) {
-      writeComposerDraft(draftKey, { text: words ? joinDictation(current.text, words) : current.text, listening: false });
+    if (recordingActive.current) {
+      if (current.listening) writeComposerDraft(draftKey, { text: words ? joinDictation(current.text, words) : current.text, listening: false });
+      recordingActive.current = false;
       pendingSend.current = false;
       transcript.current = "";
       ExpoSpeechRecognitionModule.abort();
@@ -285,6 +290,13 @@ export function Composer({
   });
 
   function finishDictation(problem: string | null = null) {
+    // Deletion/forget may invalidate this recording before its native end callback arrives.
+    if (!readComposerDraft(draftKey).listening) {
+      recordingActive.current = false;
+      pendingSend.current = false;
+      transcript.current = "";
+      return;
+    }
     setListening(false);
     setLevels([0, 0, 0, 0, 0]);
     const words = transcript.current.trim();

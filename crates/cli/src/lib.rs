@@ -34,6 +34,7 @@ pub mod requests;
 pub mod routines;
 pub mod runtime;
 pub mod schedule;
+mod search;
 #[cfg(feature = "runner")]
 pub mod scripts;
 pub mod served;

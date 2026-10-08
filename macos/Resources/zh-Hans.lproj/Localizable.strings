@@ -1,5 +1,8 @@
 /* Simplified Chinese. The key is the English text passed to L(); `bun run l10n` checks this table. */
 
+"Files" = "文件";
+"Search covers downloaded history only" = "搜索仅涵盖已下载的历史记录";
+"Search actions, chats, messages, files, and settings" = "搜索操作、聊天、消息、文件和设置";
 " · @ to mention" = " · 输入 @ 可提及智能体";
 " · jobs wait on the relay" = " · 任务在中继上等待";
 ", " = "、";

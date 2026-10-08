@@ -1,6 +1,9 @@
 // Simplified Chinese. The key is the English text passed to t(); `bun run l10n` checks this table.
 
 export const zh: Record<string, string> = {
+  "Files": "文件",
+  "Messages": "消息",
+  "Search covers downloaded history only": "搜索仅涵盖已下载的历史记录",
   "{count} bot": "{count} 个智能体",
   "{count} bots": "{count} 个智能体",
   "{count} files": "{count} 个文件",

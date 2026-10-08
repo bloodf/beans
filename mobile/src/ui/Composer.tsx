@@ -18,11 +18,11 @@ import * as Haptics from "expo-haptics";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ColorValue, type ImageSourcePropType, type StyleProp, type ViewStyle } from "react-native";
 import type { PickedFile } from "../core/engine";
 import { fileSize, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, type Bot } from "../core/model";
-import { markUpdateDraft } from "../core/updateDrafts";
+import { readComposerDraft, subscribeComposerDrafts, writeComposerDraft } from "../core/updateDrafts";
 import { notifyAvatarScroll } from "./avatarVisibility";
 import { BotAvatar } from "./Avatar";
 import { automaticLanguage, languageName, pickDictationLanguage, setDictationLanguage, useDictationLanguage, useSupportedLanguages } from "./dictation";
@@ -98,6 +98,7 @@ function AttachMenu({ sources, tint, label }: { sources: AttachSource[]; tint: C
 }
 
 export function Composer({
+  draftKey,
   members,
   isGroup,
   placeholder,
@@ -105,6 +106,7 @@ export function Composer({
   onCancelReply,
   onSend,
 }: {
+  draftKey: string;
   members: Bot[];
   isGroup: boolean;
   placeholder: string;
@@ -116,25 +118,36 @@ export function Composer({
 }) {
   useLanguage();
   const p = usePalette();
-  const [text, setText] = useState("");
-  const [attachments, setAttachments] = useState<PickedFile[]>([]);
+  const draft = useSyncExternalStore(subscribeComposerDrafts, () => readComposerDraft(draftKey));
+  const { text, attachments, listening } = draft;
+  function setText(value: string | ((current: string) => string)) {
+    writeComposerDraft(draftKey, { text: typeof value === "function" ? value(readComposerDraft(draftKey).text) : value });
+  }
+  function setAttachments(value: PickedFile[] | ((current: PickedFile[]) => PickedFile[])) {
+    writeComposerDraft(draftKey, { attachments: typeof value === "function" ? value(readComposerDraft(draftKey).attachments) : value });
+  }
+  function setListening(value: boolean) { writeComposerDraft(draftKey, { listening: value }); }
   const [focused, setFocused] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
-  const [listening, setListening] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [levels, setLevels] = useState<number[]>([0, 0, 0, 0, 0]);
   /// The transcript accumulates while the pill shows; it lands in the field when the user
   /// stops or sends, the way Grok Bot commits a recording.
   const transcript = useRef("");
   const pendingSend = useRef(false);
-  const updateDraftOwner = useRef({});
-  useEffect(() => {
-    markUpdateDraft(updateDraftOwner.current, !!text.trim() || attachments.length > 0 || listening);
-  }, [text, attachments, listening]);
+  useEffect(() => () => {
+    const current = readComposerDraft(draftKey);
+    const words = transcript.current.trim();
+    if (current.listening) {
+      writeComposerDraft(draftKey, { text: words ? joinDictation(current.text, words) : current.text, listening: false });
+      pendingSend.current = false;
+      transcript.current = "";
+      ExpoSpeechRecognitionModule.abort();
+    }
+  }, [draftKey]);
   const inputRef = useRef<TextInput>(null);
   /// The bots picked from the `@` chips since the last send, in order. Two bots can share a name;
   /// the pick says which one the user meant.
-  const pickedMentions = useRef<Bot[]>([]);
   const dictationMenuRef = useRef<MenuComponentRef>(null);
   const { language, setting: dictationSetting } = useDictationLanguage();
   const dictationLanguages = useSupportedLanguages();
@@ -155,15 +168,15 @@ export function Composer({
   }, [text, isGroup, members]);
 
   function insertMention(bot: Bot) {
-    pickedMentions.current.push(bot);
+    writeComposerDraft(draftKey, { mentions: [...draft.mentions, bot] });
     setText((current) => current.replace(/@(\w*)$/, `@${bot.name} `));
   }
 
   /// The picks whose `@Name` is still in the text, and a clean slate for the next message.
   function takeMentions(value: string): string[] {
     const lowered = value.toLowerCase();
-    const ids = pickedMentions.current.filter((bot) => lowered.includes(`@${bot.name.toLowerCase()}`)).map((bot) => bot.id);
-    pickedMentions.current = [];
+    const ids = draft.mentions.filter((bot) => lowered.includes(`@${bot.name.toLowerCase()}`)).map((bot) => bot.id);
+    writeComposerDraft(draftKey, { mentions: [] });
     return ids;
   }
 

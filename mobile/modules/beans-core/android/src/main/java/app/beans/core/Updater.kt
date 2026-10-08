@@ -13,8 +13,6 @@ import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.net.URI
-import java.net.HttpURLConnection
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -25,7 +23,7 @@ internal class Updater(private val context: Context, private val progress: (Long
   private var session: Int? = null
   private var committed = false
   private var downloadSize = 0L
-  @Volatile private var cancelled = false
+  private var operation: UpdateOperation? = null
   private val pm get() = context.packageManager
   init {
     pm.packageInstaller.mySessions.forEach { runCatching { pm.packageInstaller.abandonSession(it.sessionId) } }
@@ -58,46 +56,10 @@ internal class Updater(private val context: Context, private val progress: (Long
     return false
   }
   private fun digest(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-  private fun fetch(url: String, limit: Long, output: java.io.OutputStream): Long {
-    var uri = URI(url)
-    val seen = mutableSetOf<String>()
-    repeat(6) {
-      require(uri.scheme == "https" && uri.userInfo == null && uri.fragment == null && (uri.port == -1 || uri.port == 443)) { "Invalid update transport" }
-      require((uri.host == "api.github.com" && uri.path == "/repos/bloodf/beans/releases") ||
-        (uri.host == "github.com" && uri.path.startsWith("/bloodf/beans/releases/download/beans-v")) ||
-        (uri.host == "release-assets.githubusercontent.com" && uri.path.startsWith("/github-production-release-asset/"))) { "Untrusted update host or path" }
-      require(seen.add(uri.toString())) { "Redirect loop" }
-      val connection = uri.toURL().openConnection() as HttpURLConnection
-      connection.instanceFollowRedirects = false
-      connection.connectTimeout = 15000; connection.readTimeout = 30000
-      connection.setRequestProperty("Accept", "application/octet-stream")
-      connection.setRequestProperty("User-Agent", "Beans-Android-Updater")
-      try {
-        val status = connection.responseCode
-        if (status in listOf(301, 302, 303, 307, 308)) {
-          uri = uri.resolve(connection.getHeaderField("Location") ?: error("Missing redirect"))
-        } else {
-          check(status == 200) { "Update request failed ($status)" }
-          require(connection.contentLengthLong <= limit) { "Update exceeds size limit" }
-          var count = 0L
-          connection.inputStream.use { input ->
-            val buffer = ByteArray(65536)
-            while (true) {
-              val n = input.read(buffer); if (n < 0) break
-              count += n; require(count <= limit) { "Update exceeds size limit" }
-              output.write(buffer, 0, n)
-              if (downloadSize > 0) {
-                check(!cancelled) { "Download cancelled; consent again" }
-                progress(count, downloadSize)
-              }
-            }
-          }
-          return count
-        }
-      } finally { connection.disconnect() }
+  private fun fetch(url: String, limit: Long, output: java.io.OutputStream): Long =
+    (operation ?: error("No active update")).fetch(url, limit, output) { count ->
+      if (downloadSize > 0) progress(count, downloadSize)
     }
-    error("Too many redirects")
-  }
   private fun bytes(url: String, limit: Long): ByteArray {
     val output = java.io.ByteArrayOutputStream()
     fetch(url, limit, output)
@@ -137,7 +99,7 @@ internal class Updater(private val context: Context, private val progress: (Long
   fun check(): Map<String, Any>? {
     synchronized(this) {
       eligible(); check(!busy && session == null) { "Update already running" }
-      offer = null; cancelled = false; busy = true
+      offer = null; operation = UpdateOperation(120000); busy = true
     }
     try {
     val releases = JSONArray(bytes("https://api.github.com/repos/bloodf/beans/releases?per_page=100&page=1", 1048576).toString(Charsets.UTF_8))
@@ -148,20 +110,23 @@ internal class Updater(private val context: Context, private val progress: (Long
         runCatching { newer(it.getString("tag_name").removePrefix("beans-v"), current) }.getOrDefault(false)
     }.sortedWith { a, b -> val x = a.getString("tag_name").removePrefix("beans-v"); val y = b.getString("tag_name").removePrefix("beans-v"); if (x == y) 0 else if (newer(x, y)) -1 else 1 }
     for (candidate in candidates.take(20)) {
+      operation!!.ensureActive()
       val names = candidate.getJSONArray("assets")
       val available = (0 until names.length()).map { names.getJSONObject(it).getString("name") }.toSet()
       if (!available.containsAll(listOf("beans-update.json", "beans-update.json.sig"))) continue
       val found = verified(candidate.getString("tag_name").removePrefix("beans-v"), candidate.optString("body")) ?: continue
-      check(!cancelled) { "Check cancelled in background" }; offer = found
-      return mapOf("id" to found.id, "version" to found.version, "notes" to found.notes)
+      synchronized(this) {
+        operation!!.ensureActive(); offer = found
+        return mapOf("id" to found.id, "version" to found.version, "notes" to found.notes)
+      }
     }
     return null
-    } finally { synchronized(this) { busy = false } }
+    } finally { synchronized(this) { operation?.close(); operation = null; busy = false } }
   }
   fun cancel() {
-    cancelled = true
     synchronized(this) {
       offer = null
+      operation?.cancel()
       if (!committed) { session?.let { runCatching { pm.packageInstaller.abandonSession(it) } }; session = null }
     }
   }
@@ -175,7 +140,7 @@ internal class Updater(private val context: Context, private val progress: (Long
         activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
         error("Allow this source, then check and consent again")
       }
-      busy = true; cancelled = false; value
+      busy = true; operation = UpdateOperation(600000); value
     }
     val file = File(context.cacheDir, "beans-update.apk")
     try {
@@ -184,7 +149,7 @@ internal class Updater(private val context: Context, private val progress: (Long
       downloadSize = selected.size
       file.outputStream().use { require(fetch(asset(selected.version, "Beans-${selected.version}.apk"), selected.size, it) == selected.size) { "Truncated APK" } }
       val hash = MessageDigest.getInstance("SHA-256")
-      file.inputStream().use { input -> val buffer = ByteArray(65536); while (true) { val n = input.read(buffer); if (n < 0) break; hash.update(buffer, 0, n) } }
+      file.inputStream().use { input -> val buffer = ByteArray(65536); while (true) { operation!!.ensureActive(); val n = input.read(buffer); if (n < 0) break; hash.update(buffer, 0, n) } }
       require(hash.digest().joinToString("") { "%02x".format(it) } == selected.hash) { "APK hash mismatch" }
       val archive = pm.getPackageArchiveInfo(file.path, PackageManager.GET_SIGNING_CERTIFICATES) ?: error("Invalid APK")
       val local = installed()
@@ -192,7 +157,8 @@ internal class Updater(private val context: Context, private val progress: (Long
       fun signers(info: android.content.pm.PackageInfo) = info.signingInfo?.apkContentsSigners?.map { digest(it.toByteArray()) }?.toSet() ?: emptySet()
       val history = archive.signingInfo?.signingCertificateHistory?.map { digest(it.toByteArray()) }?.toSet() ?: emptySet()
       require(UpdateTrust.compatible(signers(local), signers(archive), history)) { "APK signer incompatible with installed Beans" }
-      check(!cancelled && activity.hasWindowFocus()) { "Installation cancelled in background; consent again" }
+      operation!!.ensureActive()
+      check(activity.hasWindowFocus()) { "Installation cancelled in background; consent again" }
       eligible()
       val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
       params.setAppPackageName(context.packageName); params.setSize(selected.size)
@@ -200,18 +166,24 @@ internal class Updater(private val context: Context, private val progress: (Long
       val installer = pm.packageInstaller
       val sessionId = installer.createSession(params); synchronized(this) { session = sessionId }
       context.getSharedPreferences("beans-updates", Context.MODE_PRIVATE).edit().putInt("session", sessionId).apply()
-      check(!cancelled) { "Installation cancelled; consent again" }
+      operation!!.ensureActive()
       installer.openSession(sessionId).use { target ->
-        target.openWrite("base.apk", 0, selected.size).use { output -> file.inputStream().use { it.copyTo(output) }; target.fsync(output) }
+        target.openWrite("base.apk", 0, selected.size).use { output ->
+          file.inputStream().use { input ->
+            val buffer = ByteArray(65536)
+            while (true) { operation!!.ensureActive(); val n = input.read(buffer); if (n < 0) break; output.write(buffer, 0, n) }
+          }
+          target.fsync(output)
+        }
         val intent = Intent(context, UpdateReceiver::class.java).putExtra("session", sessionId)
         val pending = PendingIntent.getBroadcast(context, sessionId, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
         synchronized(this) {
-          check(!cancelled) { "Installation cancelled; consent again" }
+          operation!!.ensureActive()
           target.commit(pending.intentSender)
           committed = true
         }
       }
     } catch (error: Exception) { cancel(); throw error }
-    finally { file.delete(); synchronized(this) { busy = false; downloadSize = 0 } }
+    finally { file.delete(); synchronized(this) { operation?.close(); operation = null; busy = false; downloadSize = 0 } }
   }
 }

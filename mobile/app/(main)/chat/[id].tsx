@@ -51,6 +51,7 @@ import {
 import { t, useLanguage } from "../../../src/i18n";
 import { AvatarCluster } from "../../../src/ui/Avatar";
 import { Composer, Surface } from "../../../src/ui/Composer";
+import { composerDraftKey } from "../../../src/core/updateDrafts";
 import { KeyboardFoot } from "../../../src/ui/KeyboardFoot";
 import { useWide } from "../../../src/ui/layout";
 import { Symbol } from "../../../src/ui/Symbol";
@@ -96,6 +97,9 @@ export default function ChatScreen() {
   const androidHeaderHeight = visibleHeaderHeight + ANDROID_FADE_HEIGHT;
   const androidHeaderStop = visibleHeaderHeight / androidHeaderHeight;
   const chat = useChat(id);
+  const draftIdentity = useStore((s) => s.identityId);
+  const draftRelay = useStore((s) => s.relayUrl);
+  const draftKey = composerDraftKey(draftIdentity, draftRelay, id);
   const bots = useBotMap();
   const workingBotIds = useWorkingBots(id);
   const isWorking = useIsWorking(id);
@@ -970,6 +974,8 @@ export default function ChatScreen() {
           }}
         >
           <Composer
+            key={draftKey}
+            draftKey={draftKey}
             members={members}
             isGroup={isGroup}
             placeholder={placeholder}

@@ -16,6 +16,20 @@ func unsetDesktopTestEnv(t *testing.T, key string) {
 	if err := os.Unsetenv(key); err != nil { t.Fatal(err) }
 }
 
+// Only fresh disposable Windows fixtures receive private ACLs. Production
+// admission never repairs an existing home or record.
+func prepareDesktopTestControlHome(t *testing.T, home string) {
+	t.Helper()
+	if runtime.GOOS != "windows" { return }
+	for _, path := range []string{home, filepath.Join(home, "format.json")} {
+		file, err := os.Open(path)
+		if err != nil { t.Fatal(err) }
+		err = secureDesktopControlFile(file)
+		closeErr := file.Close()
+		if err != nil || closeErr != nil { t.Fatal("private Windows fixture", err, closeErr) }
+	}
+}
+
 func TestDesktopTokenDoesNotInitializeHome(t *testing.T) {
 	unsetDesktopTestEnv(t, "BEANS_UPDATE_TOKEN_FILE")
 	home := filepath.Join(t.TempDir(), "absent")
@@ -63,6 +77,7 @@ func TestDesktopTokenUsesEstablishedHomeAndPreservesExistingToken(t *testing.T) 
 	if err := os.Chmod(home, 0o700); err != nil { t.Fatal(err) }
 	// Fixture represents the core's successful fresh admission, not UI initialization.
 	if err := os.WriteFile(filepath.Join(home, "format.json"), []byte(`{"format":"beans-v2"}`), 0o600); err != nil { t.Fatal(err) }
+	prepareDesktopTestControlHome(t, home)
 	path, err := ensureDesktopUpdateToken()
 	if err != nil { t.Fatal(err) }
 	data, err := os.ReadFile(path)
@@ -113,6 +128,7 @@ func TestDesktopTokenFollowsOwnedReadyAndExistingMarker(t *testing.T) {
 			if err := os.Chmod(home, 0o700); err != nil { t.Fatal(err) }
 			if test.marked {
 				if err := os.WriteFile(filepath.Join(home, "format.json"), []byte(`{"format":"beans-v2"}`), 0o600); err != nil { t.Fatal(err) }
+				prepareDesktopTestControlHome(t, home)
 			}
 			path := filepath.Join(home, "update-token")
 			command := &exec.Cmd{Env: []string{"BEANS_HOME=" + home, "BEANS_UPDATE_TOKEN_FILE=" + path}}

@@ -24,6 +24,9 @@ use sha2::{Digest, Sha256};
 
 use crate::app::App;
 
+#[cfg(any(windows, test))]
+mod privacy;
+
 /// What a refused admission says.
 pub const UPDATING: &str = "This Runner is installing an update. Try again in a few minutes.";
 /// Names the file holding the operator's update control token.
@@ -219,6 +222,11 @@ pub fn read_token(path: &Path) -> Result<String, String> {
         // A symlink is refused, and a FIFO cannot block the open.
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options.open(path).map_err(|_| unreadable())?;
     let metadata = file.metadata().map_err(|_| unreadable())?;
     if !metadata.is_file() || metadata.len() > MAX_TOKEN_FILE_BYTES {
@@ -235,6 +243,8 @@ pub fn read_token(path: &Path) -> Result<String, String> {
             return Err("The update control token file must not be writable by its group or accessible to other users.".into());
         }
     }
+    #[cfg(windows)]
+    let _parent = privacy::validate_token(&file).map_err(|_| "The update control token and its directory must have private Windows owner/DACL access.")?;
     let mut text = String::new();
     file.take(MAX_TOKEN_FILE_BYTES + 1).read_to_string(&mut text).map_err(|_| unreadable())?;
     if text.len() as u64 > MAX_TOKEN_FILE_BYTES {

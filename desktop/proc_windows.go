@@ -16,8 +16,6 @@ func configureChild(command *exec.Cmd) {
 	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 }
 
-// Windows uses ACL-based access checks rather than Unix uid/mode metadata.
-func desktopControlOwner(info os.FileInfo) bool { return true }
 
 func openDesktopControlFile(root *os.Root, name string, flags int) (*os.File, error) {
 	return root.OpenFile(name, flags, 0o600)
@@ -30,6 +28,63 @@ var desktopSetSecurity = desktopControlSecurity.NewProc("SetSecurityInfo")
 var desktopControlKernel = syscall.NewLazyDLL("kernel32.dll")
 var desktopFreeSecurity = desktopControlKernel.NewProc("LocalFree")
 var desktopReopenControl = desktopControlKernel.NewProc("ReOpenFile")
+var desktopGetSecurity = desktopControlSecurity.NewProc("GetSecurityInfo")
+var desktopValidSID = desktopControlSecurity.NewProc("IsValidSid")
+var desktopSIDLength = desktopControlSecurity.NewProc("GetLengthSid")
+var desktopValidACL = desktopControlSecurity.NewProc("IsValidAcl")
+var desktopDescriptorLength = desktopControlSecurity.NewProc("GetSecurityDescriptorLength")
+var desktopValidDescriptor = desktopControlSecurity.NewProc("IsValidSecurityDescriptor")
+
+func desktopSIDBytes(sid uintptr) ([]byte, error) {
+	if sid == 0 { return nil, syscall.EINVAL }
+	valid, _, _ := desktopValidSID.Call(sid)
+	if valid == 0 { return nil, syscall.EINVAL }
+	length, _, _ := desktopSIDLength.Call(sid)
+	if length < 8 || length > 68 { return nil, syscall.EINVAL }
+	return unsafe.Slice((*byte)(unsafe.Pointer(sid)), int(length)), nil
+}
+
+// Query the opened inode, never the replaceable pathname. This is admission,
+// not ACL repair; even an administrator-group grant is not private to this user.
+func validateDesktopControlObject(file *os.File, private bool) error {
+	token, err := syscall.OpenCurrentProcessToken()
+	if err != nil { return err }
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil { return err }
+	userSID, err := desktopSIDBytes(uintptr(unsafe.Pointer(user.User.Sid)))
+	if err != nil { return err }
+	var owner, acl, descriptor uintptr
+	status, _, _ := desktopGetSecurity.Call(file.Fd(), 1, 5,
+		uintptr(unsafe.Pointer(&owner)), 0, uintptr(unsafe.Pointer(&acl)), 0,
+		uintptr(unsafe.Pointer(&descriptor)))
+	runtime.KeepAlive(file)
+	if status != 0 { return syscall.Errno(status) }
+	defer desktopFreeSecurity.Call(descriptor)
+	if descriptor == 0 { return syscall.EINVAL }
+	valid, _, _ := desktopValidDescriptor.Call(descriptor)
+	if valid == 0 { return syscall.EINVAL }
+	descriptorLength, _, _ := desktopDescriptorLength.Call(descriptor)
+	within := func(pointer, length uintptr) bool {
+		return pointer >= descriptor && length <= descriptorLength && pointer-descriptor <= descriptorLength-length
+	}
+	if !within(owner, 8) || !within(acl, 8) { return syscall.EACCES }
+	ownerHeader := unsafe.Slice((*byte)(unsafe.Pointer(owner)), 8)
+	ownerLength := uintptr(8 + 4*int(ownerHeader[1]))
+	if !within(owner, ownerLength) { return syscall.EINVAL }
+	ownerSID, err := desktopSIDBytes(owner)
+	if err != nil { return err }
+	header := unsafe.Slice((*byte)(unsafe.Pointer(acl)), 8)
+	length := int(header[2]) | int(header[3])<<8
+	if length < 8 || !within(acl, uintptr(length)) { return syscall.EINVAL }
+	valid, _, _ = desktopValidACL.Call(acl)
+	if valid == 0 { return syscall.EINVAL }
+	if !desktopControlACLPrivate(ownerSID, userSID, unsafe.Slice((*byte)(unsafe.Pointer(acl)), length), private) {
+		return syscall.EACCES
+	}
+	runtime.KeepAlive(user)
+	return nil
+}
 
 // Apply the private DACL to the newly opened inode, not a replaceable pathname.
 func secureDesktopControlFile(file *os.File) error {
@@ -54,7 +109,7 @@ func secureDesktopControlFile(file *os.File) error {
 	if present == 0 || acl == 0 { return syscall.EINVAL }
 	// Reopen the same inode with WRITE_DAC: ordinary write handles do not
 	// necessarily include permission to change its security descriptor.
-	handle, _, openErr := desktopReopenControl.Call(file.Fd(), 0x00040000, 7, 0)
+	handle, _, openErr := desktopReopenControl.Call(file.Fd(), 0x00040000, 7, 0x02000000)
 	runtime.KeepAlive(file)
 	if handle == ^uintptr(0) { return openErr }
 	defer syscall.CloseHandle(syscall.Handle(handle))

@@ -9,7 +9,7 @@ final class FreshFormatTests: XCTestCase {
     ]
 
     private func health(_ fields: [String: Any]) throws -> Wire.RelayHealth {
-        try Wire.decoder.decode(Wire.RelayHealth.self, from: JSONSerialization.data(withJSONObject: fields))
+        try Wire.RelayHealth.decode(JSONSerialization.data(withJSONObject: fields))
     }
 
     func testInstallationRequiresFreshFormatAndSupportedFloors() throws {
@@ -46,5 +46,26 @@ final class FreshFormatTests: XCTestCase {
             fields[key] = "5"
             XCTAssertThrowsError(try health(fields), "A string is not integer compatibility evidence")
         }
+    }
+
+    func testLiteralDuplicateHealthEvidenceRejectsBothOrders() throws {
+        let fields = [
+            ("format", "\"beans-v2\"", "\"beans-v1\""),
+            ("protocol", "5", "4"),
+            ("min_protocol", "5", "4"),
+            ("min_roster_protocol", "5", "4"),
+            ("memory_config_version", "1", "2"),
+        ]
+        for (key, good, bad) in fields {
+            let other = fields.filter { $0.0 != key }.map { "\"\($0.0)\":\($0.1)" }.joined(separator: ",")
+            for (first, second) in [(good, bad), (bad, good), (good, good)] {
+                let literal = "{\"ok\":true,\"service\":\"beans-relay\",\(other),\"note\":\"}\",\"\(key)\":\(first),\"\(key)\":\(second)}"
+                XCTAssertThrowsError(try Wire.RelayHealth.decode(Data(literal.utf8)), "Duplicate \(key) must reject regardless of order or value")
+            }
+        }
+        let literal = """
+        {"ok":true,"service":"beans-relay","format":"beans-v2","protocol":5,"min_protocol":5,"min_roster_protocol":5,"memory_config_version":1,"extra":{"protocol":4,"memory_config_version":2},"note":"format, protocol: 4"}
+        """
+        XCTAssertTrue(try Wire.RelayHealth.decode(Data(literal.utf8)).supports(requiredProtocol: 5))
     }
 }

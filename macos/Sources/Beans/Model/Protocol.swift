@@ -18,6 +18,71 @@ enum Wire {
         var minRosterProtocol: Int
         var memoryConfigVersion: Int
 
+        private enum CodingKeys: String, CodingKey {
+            case ok, service, format, `protocol`
+            case minProtocol = "min_protocol"
+            case minRosterProtocol = "min_roster_protocol"
+            case memoryConfigVersion = "memory_config_version"
+        }
+
+        /// Foundation collapses duplicate object keys. Scan only this health
+        /// boundary's top-level evidence before its ordinary typed decode.
+        static func decode(_ data: Data) throws -> RelayHealth {
+            let decoder = JSONDecoder()
+            try data.withUnsafeBytes { raw in
+                let bytes = raw.bindMemory(to: UInt8.self)
+                var depth = 0
+                var expectingKey = false
+                var seen: UInt8 = 0
+                var index = 0
+                while index < bytes.count {
+                    switch bytes[index] {
+                    case 0x7B, 0x5B: // object/array
+                        depth += 1
+                        if depth == 1 { expectingKey = true }
+                    case 0x7D, 0x5D:
+                        depth -= 1
+                    case 0x3A:
+                        if depth == 1 { expectingKey = false }
+                    case 0x2C:
+                        if depth == 1 { expectingKey = true }
+                    case 0x22:
+                        let start = index
+                        index += 1
+                        while index < bytes.count {
+                            if bytes[index] == 0x5C { index += 2; continue }
+                            if bytes[index] == 0x22 { break }
+                            index += 1
+                        }
+                        guard index < bytes.count else {
+                            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Unterminated relay health string"))
+                        }
+                        if depth == 1 && expectingKey {
+                            let key = try decoder.decode(String.self, from: Data(bytes[start...index]))
+                            let bit: UInt8
+                            switch CodingKeys(rawValue: key) {
+                            case .ok: bit = 1
+                            case .service: bit = 2
+                            case .format: bit = 4
+                            case .protocol: bit = 8
+                            case .minProtocol: bit = 16
+                            case .minRosterProtocol: bit = 32
+                            case .memoryConfigVersion: bit = 64
+                            case nil: bit = 0
+                            }
+                            guard seen & bit == 0 else {
+                                throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Duplicate relay health evidence"))
+                            }
+                            seen |= bit
+                        }
+                    default: break
+                    }
+                    index += 1
+                }
+            }
+            return try decoder.decode(RelayHealth.self, from: data)
+        }
+
         func supports(requiredProtocol: Int) -> Bool {
             let required = max(AppInfo.protocolVersion, requiredProtocol)
             return ok && service == "beans-relay" && format == AppInfo.format

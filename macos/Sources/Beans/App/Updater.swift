@@ -445,7 +445,7 @@ private struct BeansReadyRelease: Sendable, Equatable {
         else { throw invalid("Select a Beans relay and upgrade it before installing this client") }
         let healthURL = url.appendingPathComponent("v1").appendingPathComponent("health")
         let data = try await download(healthURL, limit: 4096)
-        let health = try Wire.decoder.decode(Wire.RelayHealth.self, from: data)
+        let health = try Wire.RelayHealth.decode(data)
         guard health.supports(requiredProtocol: required) else {
             throw invalid("Upgrade the selected relay to Beans v2 protocol \(max(AppInfo.protocolVersion, required)) before installing this client")
         }

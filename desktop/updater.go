@@ -84,17 +84,21 @@ func desktopUpdateTokenPath() string {
 func openDesktopTokenDirectory() (*os.Root, error) {
 	home := filepath.Dir(desktopUpdateTokenPath())
 	info, err := os.Lstat(home)
-	if err != nil || !info.IsDir() || !desktopControlOwner(info) ||
-		(runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0) {
+	if err != nil || !info.IsDir() {
 		return nil, errors.New("Desktop update control requires an existing private Beans v2 home")
 	}
 	root, err := os.OpenRoot(home)
 	if err != nil {
 		return nil, err
 	}
-	opened, err := root.Stat(".")
-	if err != nil || !os.SameFile(info, opened) || !desktopControlOwner(opened) ||
-		(runtime.GOOS != "windows" && opened.Mode().Perm()&0o022 != 0) {
+	directory, err := root.Open(".")
+	if err != nil {
+		root.Close()
+		return nil, err
+	}
+	defer directory.Close()
+	opened, err := directory.Stat()
+	if err != nil || !os.SameFile(info, opened) || validateDesktopControlObject(directory, false) != nil {
 		root.Close()
 		return nil, errors.New("The Beans home changed before update-control admission")
 	}
@@ -109,8 +113,7 @@ func openDesktopTokenDirectory() (*os.Root, error) {
 
 func readDesktopControlFile(root *os.Root, name string, private bool) ([]byte, error) {
 	info, err := root.Lstat(name)
-	if err != nil || !info.Mode().IsRegular() || !desktopControlOwner(info) || info.Size() > 4096 ||
-		(private && runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
 		return nil, errors.New("Cannot read the private Beans update-control record")
 	}
 	file, err := openDesktopControlFile(root, name, os.O_RDONLY)
@@ -119,8 +122,8 @@ func readDesktopControlFile(root *os.Root, name string, private bool) ([]byte, e
 	}
 	defer file.Close()
 	opened, err := file.Stat()
-	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() || !desktopControlOwner(opened) || opened.Size() > 4096 ||
-		(private && runtime.GOOS != "windows" && opened.Mode().Perm()&0o077 != 0) {
+	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() || opened.Size() > 4096 ||
+		validateDesktopControlObject(file, private) != nil {
 		return nil, errors.New("The Beans update-control record changed while opening")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, 4097))
@@ -155,6 +158,9 @@ func ensureDesktopUpdateToken() (string, error) {
 	// Secure only the new inode, before writing a secret; existing/operator ACLs
 	// and Unix permissions are never changed.
 	err = secureDesktopControlFile(file)
+	if err == nil {
+		err = validateDesktopControlObject(file, true)
+	}
 	var secret [32]byte
 	if err == nil {
 		_, err = rand.Read(secret[:])

@@ -1771,26 +1771,31 @@ final class AppStore {
 
     /// The chat models a custom provider's server lists, asked through the CLI on this
     /// computer; nil when the server publishes no list.
-    func listCustomModels(name: String, api: CustomAPI, baseURL: String, apiKey: String, integration: String? = nil) async throws -> [CustomModel]? {
+    func listCustomModels(name: String, api: CustomAPI, baseURL: String, apiKey: String, integration: String? = nil, runnerID: String? = nil, capabilities: CustomCapabilities? = nil) async throws -> [CustomModel]? {
         if isMock { return MockData.listedModels(baseURL: baseURL) }
         var params: [String: Any] = ["name": name, "api": api.rawValue, "base_url": baseURL, "api_key": apiKey]
         if let integration { params["integration"] = integration }
+        if let runnerID { params["runner_id"] = runnerID }
+        if let capabilities { params["capabilities"] = capabilities.params }
         let listing = try await client.request("providers.list_models", params, as: Wire.ListedModels.self)
         return listing.listed ? listing.models.map { $0.toModel() } : nil
     }
 
     /// Refreshes every saved custom provider's model list; the count is providers changed, not models added.
-    func refreshCustomModels() async throws -> Int {
+    func refreshCustomModels(runnerID: String? = nil, kind: String? = nil) async throws -> Int {
         if isMock { return 0 }
         struct Result: Decodable { let updated: Int }
-        return try await client.request("providers.refresh", as: Result.self).updated
+        var params: [String: Any] = [:]
+        if let runnerID { params["runner_id"] = runnerID }
+        if let kind { params["kind"] = kind }
+        return try await client.request("providers.refresh", params, as: Result.self).updated
     }
 
     /// Adds a custom provider, or saves the one `kind` names, once the CLI has heard from its
     /// server. `models` lists the ids bots can pick, the default first. Answers the provider's kind.
     @discardableResult
     func saveCustomProvider(
-        kind: ProviderCredential.Kind?, name: String, api: CustomAPI, baseURL: String, apiKey: String, models: [String], integration: String? = nil
+        kind: ProviderCredential.Kind?, name: String, api: CustomAPI, baseURL: String, apiKey: String, models: [String], integration: String? = nil, runnerID: String? = nil, capabilities: CustomCapabilities? = nil
     ) async throws -> ProviderCredential.Kind {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let baseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1807,6 +1812,7 @@ final class AppStore {
         var params: [String: Any] = ["name": name, "api": api.rawValue, "base_url": baseURL, "api_key": apiKey, "models": models]
         if let kind { params["kind"] = kind.wireValue }
         if let integration { params["integration"] = integration }
+        if let runnerID { params["runner_id"] = runnerID; params["capabilities"] = capabilities?.params ?? [:] }
         let saved = try await client.request("providers.connect_custom", params, as: Wire.CustomProviderSaved.self)
         return ProviderCredential.Kind(wireValue: saved.kind) ?? .custom(saved.kind)
     }

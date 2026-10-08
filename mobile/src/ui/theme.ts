@@ -2,7 +2,8 @@
 // Material 3 dynamic colors on Android, including the user's wallpaper palette on Android 12+.
 
 import { Color } from "expo-router";
-import { Platform, PlatformColor, useColorScheme, type ColorValue } from "react-native";
+import { useSyncExternalStore } from "react";
+import { AppState, Platform, PlatformColor, useColorScheme, type ColorValue } from "react-native";
 import type { Accent } from "../core/model";
 
 export interface Palette {
@@ -32,9 +33,58 @@ export interface Palette {
 
 const ios = (name: string) => (Platform.OS === "ios" ? PlatformColor(name) : undefined);
 
+// Two appearance slots, shared by all consumers. UIKit colors resolve natively; Android's
+// dynamic values are read again after foreground, including a period with no consumers.
+let lightPalette: Palette | undefined;
+let darkPalette: Palette | undefined;
+let revision = 0;
+let stopListening: (() => void) | undefined;
+const subscribers = new Set<() => void>();
+
+function invalidateAndroidPalette() {
+  lightPalette = darkPalette = undefined;
+  ++revision;
+}
+
+function subscribe(notify: () => void) {
+  if (Platform.OS !== "android") return () => {};
+  subscribers.add(notify);
+  if (!stopListening) {
+    invalidateAndroidPalette();
+    let previous = AppState.currentState;
+    const listener = AppState.addEventListener("change", (state) => {
+      const foreground = state === "active" && previous !== "active";
+      previous = state;
+      if (!foreground) return;
+      invalidateAndroidPalette();
+      for (const subscriber of subscribers) subscriber();
+    });
+    stopListening = () => listener.remove();
+  }
+  return () => {
+    subscribers.delete(notify);
+    if (!subscribers.size) {
+      stopListening?.();
+      stopListening = undefined;
+    }
+  };
+}
+
+const getRevision = () => revision;
+
 export function usePalette(): Palette {
-  const scheme = useColorScheme();
-  const dark = scheme === "dark";
+  const dark = useColorScheme() === "dark";
+  useSyncExternalStore(subscribe, getRevision, getRevision);
+  const cached = dark ? darkPalette : lightPalette;
+  if (cached) return cached;
+  // Publish only a completely constructed palette; a native color error cannot poison a slot.
+  const palette = buildPalette(dark);
+  if (dark) darkPalette = palette;
+  else lightPalette = palette;
+  return palette;
+}
+
+function buildPalette(dark: boolean): Palette {
   if (Platform.OS === "ios") {
     return {
       label: ios("label")!,

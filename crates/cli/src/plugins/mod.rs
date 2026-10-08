@@ -910,12 +910,12 @@ pub async fn serve_request(app: &Arc<App>, verb: &str, body: &Value, requested_b
                         .ok_or_else(|| format!("{} has nothing to sign in to.", plugin.manifest.name))?
                 }
             };
-            let started = mcp::connect_oauth(app, &id, &server, elsewhere()).await?;
+            let started = mcp::connect_oauth_as(app, &id, &server, elsewhere(), requested_by).await?;
             Ok(json!({ "message": started.message, "url": started.url, "sign_in": started.id }))
         }
         "plugins.sign_in.finish" => {
             let id = body["sign_in"].as_str().ok_or("missing sign_in")?;
-            mcp::finish_sign_in(app, &plugin_id()?, id, body["url"].as_str().ok_or("missing url")?).await
+            mcp::finish_sign_in_as(app, &plugin_id()?, id, body["url"].as_str().ok_or("missing url")?, requested_by).await
         }
         "plugins.sign_in.cancel" => mcp::cancel_sign_in(app, &plugin_id()?, body["sign_in"].as_str().ok_or("missing sign_in")?),
         "plugins.sign_out" => {

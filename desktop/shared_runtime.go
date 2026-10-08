@@ -17,6 +17,9 @@ var blobatarSource string
 //go:embed assets/memory.js
 var memorySource string
 
+//go:embed assets/avatar-activity.js
+var avatarActivitySource string
+
 type sharedRuntime struct {
 	mu sync.Mutex
 	vm *goja.Runtime
@@ -51,6 +54,9 @@ func newSharedRuntime() (*sharedRuntime, error) {
 		return nil, err
 	}
 	if _, err = vm.RunString(memorySource); err != nil {
+		return nil, err
+	}
+	if _, err = vm.RunString(avatarActivitySource); err != nil {
 		return nil, err
 	}
 	return &sharedRuntime{vm: vm}, nil

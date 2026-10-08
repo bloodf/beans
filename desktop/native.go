@@ -22,6 +22,7 @@ type nativeDesktop struct {
 	win            *mygo.Window
 	authority      cliAuthority
 	avatars        *nativeAvatars
+	activity       *nativeAvatarActivity
 	memory         *nativeMemory
 	memoryPanel    nativeMemoryPanel
 	look           *nativeLookEditor
@@ -47,6 +48,9 @@ func (n *nativeDesktop) event(name string, data json.RawMessage) {
 	}
 	if n.avatars != nil && n.avatars.epoch != n.store.Epoch {
 		n.avatars.reset(n.store.Epoch)
+		if n.activity != nil {
+			n.activity.reset()
+		}
 		n.look = nil
 	}
 	if n.memory != nil && n.memory.epoch != n.store.Epoch {
@@ -55,6 +59,11 @@ func (n *nativeDesktop) event(name string, data json.RawMessage) {
 	}
 	if name == "snapshot" {
 		n.recoverMemoryForms()
+	}
+	if n.activity != nil && n.store.Connected {
+		if err := n.activity.event(name, data); err != nil {
+			n.store.Error = err.Error()
+		}
 	}
 	if n.win != nil {
 		n.win.Invalidate()
@@ -69,6 +78,11 @@ func (n *nativeDesktop) show() {
 		}
 		n.avatars = newNativeAvatars(r)
 		n.memory = &nativeMemory{runtime: r}
+		n.activity = newNativeAvatarActivity(r, func() {
+			if n.win != nil {
+				n.win.Invalidate()
+			}
+		})
 	}
 	if n.win == nil {
 		n.win = mygo.NewWindow(mygo.WindowOptions{Title: "Beans — Native", Width: 1100, Height: 760, MinWidth: 640, MinHeight: 440, Content: ui.View(n.view)})
@@ -338,16 +352,19 @@ func (n *nativeDesktop) view(c *ui.Context) {
 				for i := range n.store.Chats {
 					chat := &n.store.Chats[i]
 					if n.avatars != nil {
-						for _, id := range chat.BotIDs {
-							for _, b := range n.store.Bots {
-								if b.ID == id {
-									n.avatars.view(c, b, "idle", 32)
-									n.fetchAvatar(b)
-									break
+						ui.Box(c.Key("cluster:"+chat.ID)).Size(32, 32).Shrink(0).Children(func() {
+							for _, slot := range nativeGroupAvatarSlots(chat.BotIDs, 32) {
+								for _, b := range n.store.Bots {
+									if b.ID == slot.BotID {
+										ui.Box(c.Key(chat.ID+":"+b.ID)).Absolute().Left(slot.X).Top(slot.Y).Size(slot.Size, slot.Size).Children(func() {
+											n.avatars.viewSlot(c, b, n.activity.state(b.ID, chat.ID), slot.Size, "sidebar:"+chat.ID+":"+b.ID)
+										})
+										n.fetchAvatar(b)
+										break
+									}
 								}
 							}
-							break
-						}
+						})
 					}
 					if ui.Button(c.Key(chat.ID), n.store.Title(chat)).Clicked() {
 						n.store.Selected = chat.ID
@@ -405,6 +422,21 @@ func (n *nativeDesktop) view(c *ui.Context) {
 				return
 			}
 			ui.Text(c, n.store.Title(chat)).Bold().FontSize(20)
+			if n.avatars != nil && len(chat.BotIDs) > 1 {
+				ui.Box(c.Key("header-cluster:"+chat.ID)).Size(32, 32).Children(func() {
+					for _, slot := range nativeGroupAvatarSlots(chat.BotIDs, 32) {
+						for _, bot := range n.store.Bots {
+							if bot.ID == slot.BotID {
+								ui.Box(c.Key(bot.ID)).Absolute().Left(slot.X).Top(slot.Y).Size(slot.Size, slot.Size).Children(func() {
+									n.avatars.viewSlot(c, bot, n.activity.state(bot.ID, chat.ID), slot.Size, "header:"+chat.ID+":"+bot.ID)
+								})
+								n.fetchAvatar(bot)
+								break
+							}
+						}
+					}
+				})
+			}
 			if n.store.Error != "" {
 				ui.Text(c, n.store.Error)
 			}
@@ -424,7 +456,7 @@ func (n *nativeDesktop) view(c *ui.Context) {
 						if n.avatars != nil && m.Author.Kind == "bot" {
 							for _, bot := range n.store.Bots {
 								if bot.ID == m.Author.BotID {
-									n.avatars.view(c, bot, "idle", 28)
+									n.avatars.viewSlot(c, bot, n.activity.state(bot.ID, chat.ID), 28, "message:"+chat.ID+":"+m.ID)
 									n.fetchAvatar(bot)
 									if ui.Button(c, "Edit bot Look").Clicked() {
 										n.openLook(bot)

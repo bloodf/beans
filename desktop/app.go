@@ -201,6 +201,9 @@ func (a *appDelegate) connectionTransition(state string) uint64 {
 	native.suspendMemoryForms()
 	if native.avatars != nil {
 		native.avatars.reset(native.store.Epoch)
+		if native.activity != nil {
+			native.activity.reset()
+		}
 	}
 	if native.memory != nil {
 		_ = native.memory.reset(native.store.Epoch)

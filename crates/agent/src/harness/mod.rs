@@ -9,6 +9,7 @@ pub mod frontmatter;
 #[allow(clippy::module_inception)]
 pub mod harness;
 pub mod hooks;
+pub mod skill_discovery;
 pub mod skills;
 pub mod system_prompt;
 pub mod templates;

@@ -202,6 +202,7 @@ export default function SettingsScreen() {
             title={t("App Language")}
             menu={{ title: t("App Language"), value: appLanguage.chosen ? languageNames[appLanguage.chosen] : systemLanguage, choices: appLanguageChoices }}
           />
+          <Row title={t("Diagnostics")} chevron onPress={() => router.push("/settings/diagnostics")} />
         </Section>
 
         <Section title={t("Dictation")}>

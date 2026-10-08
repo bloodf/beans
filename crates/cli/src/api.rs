@@ -130,6 +130,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             "relay_update_required": app.relay_update_required.load(std::sync::atomic::Ordering::Relaxed),
             "relay_error": app.relay_problem.lock().unwrap().clone(),
         })),
+        "diagnostics.report" => Ok(crate::diagnostics::report(app).await),
         // An app connecting checks for newer public catalogs, unless checked within the hour.
         "bootstrap" => {
             crate::catalog::check_in_background(app);

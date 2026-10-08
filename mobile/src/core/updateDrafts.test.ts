@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Bot, Chat } from "./model";
-import { composerDraftKey, hasUpdateDrafts, readComposerDraft, writeComposerDraft } from "./updateDrafts";
+import { composerDraftGeneration, composerDraftKey, discardComposerDraft, hasUpdateDrafts, readComposerDraft, retainedComposerDrafts, writeComposerDraft } from "./updateDrafts";
 import { UpdateController } from "./updateController";
 
 mock.module("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
@@ -32,43 +32,47 @@ test("navigation and ordinary reconnect preserve content and installation veto",
   expect(installs).toBe(1);
 });
 
-for (const removal of ["local/event", "roster", "snapshot"] as const) {
-  test(`${removal} removal discards only deleted chat and rejects late callbacks`, () => {
-    writeComposerDraft(key, { text: "deleted", attachments: [file], mentions: [bot], listening: true });
-    writeComposerDraft(other, { text: "keep" });
-    if (removal === "local/event") removeChat("chat");
-    else if (removal === "roster") applyRoster({ devices: [], bots: [], chats: [chat("other")] });
-    else replaceSnapshot(snapshot(["other"]));
-    expect(useStore.getState().chats.map(c => c.id)).toEqual(["other"]);
-    expect(readComposerDraft(key)).toEqual({ text: "", attachments: [], mentions: [], listening: false });
-    writeComposerDraft(key, { text: "late transcript", attachments: [file] });
-    expect(readComposerDraft(key).text).toBe("");
-    expect(readComposerDraft(other).text).toBe("keep");
+test("explicit removal fences old callbacks after same-key reappearance", () => {
+  const generation = composerDraftGeneration(key);
+  writeComposerDraft(key, { text: "deleted", attachments: [file] });
+  writeComposerDraft(other, { text: "keep" });
+  removeChat("chat");
+  replaceSnapshot(snapshot());
+  writeComposerDraft(key, { text: "new" });
+  writeComposerDraft(key, { text: "old callback", attachments: [file] }, generation);
+  expect(readComposerDraft(key).text).toBe("new");
+  expect(readComposerDraft(key).attachments).toEqual([]);
+  expect(readComposerDraft(other).text).toBe("keep");
+});
+
+for (const observation of ["roster", "snapshot", "unpaired snapshot", "account", "null relay"] as const) {
+  test(`${observation} retains source-keyed recovery and blocker until explicit discard`, () => {
+    writeComposerDraft(key, { text: "private", attachments: [file] });
+    if (observation === "roster") applyRoster({ devices: [], bots: [], chats: [] });
+    else if (observation === "snapshot") replaceSnapshot(snapshot([]));
+    else if (observation === "unpaired snapshot") replaceSnapshot({ ...snapshot([]), has_identity: false, identity_id: null });
+    else if (observation === "account") replaceSnapshot(snapshot(undefined, "next"));
+    else setRelayStatus({ url: null, connected: false });
+    expect(readComposerDraft(key).text).toBe("private");
+    expect(readComposerDraft(key).attachments).toEqual([file]);
+    expect(retainedComposerDrafts().map(([key]) => key)).toContain(key);
     expect(hasUpdateDrafts()).toBe(true);
-    removeChat("other");
+    replaceSnapshot(snapshot());
+    expect(readComposerDraft(key).text).toBe("private");
+    discardComposerDraft(key);
     expect(hasUpdateDrafts()).toBe(false);
   });
 }
 
-for (const transition of ["reset", "unpaired snapshot", "account", "relay snapshot", "relay status"] as const) {
-  test(`${transition} discards unreachable ownership without carrying content into next source`, () => {
-    writeComposerDraft(key, { text: "private", attachments: [file], mentions: [bot], listening: true });
-    if (transition === "reset") resetStore();
-    else if (transition === "unpaired snapshot") replaceSnapshot({ ...snapshot([]), has_identity: false, identity_id: null });
-    else if (transition === "account") replaceSnapshot(snapshot(undefined, "next"));
-    else if (transition === "relay snapshot") replaceSnapshot(snapshot(undefined, "account", "next-relay"));
-    else setRelayStatus({ url: "next-relay", connected: false });
-    writeComposerDraft(key, { text: "late" });
-    expect(readComposerDraft(key)).toEqual({ text: "", attachments: [], mentions: [], listening: false });
-    expect(hasUpdateDrafts()).toBe(false);
-    replaceSnapshot(snapshot(undefined, "next"));
-    const next = composerDraftKey("next", "relay", "chat");
-    writeComposerDraft(next, { text: "new account" });
-    writeComposerDraft(key, { text: "old callback" });
-    expect(readComposerDraft(next).text).toBe("new account");
-    expect(readComposerDraft(key).text).toBe("");
-  });
-}
+test("authoritative forget fences callbacks across account restoration", () => {
+  const generation = composerDraftGeneration(key);
+  writeComposerDraft(key, { text: "private", attachments: [file] });
+  resetStore();
+  replaceSnapshot(snapshot());
+  writeComposerDraft(key, { text: "old callback" }, generation);
+  expect(readComposerDraft(key).text).toBe("");
+  expect(hasUpdateDrafts()).toBe(false);
+});
 
 test("manual text clear releases stale mentions but preserves files and other drafts", () => {
   writeComposerDraft(key, { text: "@Bot ", mentions: [bot], attachments: [file] });

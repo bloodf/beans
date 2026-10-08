@@ -22,7 +22,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "reac
 import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ColorValue, type ImageSourcePropType, type StyleProp, type ViewStyle } from "react-native";
 import type { PickedFile } from "../core/engine";
 import { fileSize, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, type Bot } from "../core/model";
-import { readComposerDraft, subscribeComposerDrafts, writeComposerDraft } from "../core/updateDrafts";
+import { composerDraftGeneration, readComposerDraft, subscribeComposerDrafts, writeComposerDraft } from "../core/updateDrafts";
 import { notifyAvatarScroll } from "./avatarVisibility";
 import { BotAvatar } from "./Avatar";
 import { automaticLanguage, languageName, pickDictationLanguage, setDictationLanguage, useDictationLanguage, useSupportedLanguages } from "./dictation";
@@ -119,17 +119,18 @@ export function Composer({
   useLanguage();
   const p = usePalette();
   const draft = useSyncExternalStore(subscribeComposerDrafts, () => readComposerDraft(draftKey));
+  const generation = useMemo(() => composerDraftGeneration(draftKey), [draftKey]);
   const { text, attachments, listening } = draft;
   function setText(value: string | ((current: string) => string)) {
-    writeComposerDraft(draftKey, { text: typeof value === "function" ? value(readComposerDraft(draftKey).text) : value });
+    writeComposerDraft(draftKey, { text: typeof value === "function" ? value(readComposerDraft(draftKey).text) : value }, generation);
   }
   function setAttachments(value: PickedFile[] | ((current: PickedFile[]) => PickedFile[])) {
-    writeComposerDraft(draftKey, { attachments: typeof value === "function" ? value(readComposerDraft(draftKey).attachments) : value });
+    writeComposerDraft(draftKey, { attachments: typeof value === "function" ? value(readComposerDraft(draftKey).attachments) : value }, generation);
   }
   const recordingActive = useRef(false);
   function setListening(value: boolean) {
     recordingActive.current = value;
-    writeComposerDraft(draftKey, { listening: value });
+    writeComposerDraft(draftKey, { listening: value }, generation);
   }
   const [focused, setFocused] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
@@ -143,7 +144,7 @@ export function Composer({
     const current = readComposerDraft(draftKey);
     const words = transcript.current.trim();
     if (recordingActive.current) {
-      if (current.listening) writeComposerDraft(draftKey, { text: words ? joinDictation(current.text, words) : current.text, listening: false });
+      if (current.listening) writeComposerDraft(draftKey, { text: words ? joinDictation(current.text, words) : current.text, listening: false }, generation);
       recordingActive.current = false;
       pendingSend.current = false;
       transcript.current = "";
@@ -173,7 +174,7 @@ export function Composer({
   }, [text, isGroup, members]);
 
   function insertMention(bot: Bot) {
-    writeComposerDraft(draftKey, { mentions: [...draft.mentions, bot] });
+    writeComposerDraft(draftKey, { mentions: [...draft.mentions, bot] }, generation);
     setText((current) => current.replace(/@(\w*)$/, `@${bot.name} `));
   }
 
@@ -181,11 +182,12 @@ export function Composer({
   function takeMentions(value: string): string[] {
     const lowered = value.toLowerCase();
     const ids = draft.mentions.filter((bot) => lowered.includes(`@${bot.name.toLowerCase()}`)).map((bot) => bot.id);
-    writeComposerDraft(draftKey, { mentions: [] });
+    writeComposerDraft(draftKey, { mentions: [] }, generation);
     return ids;
   }
 
   function send() {
+    if (composerDraftGeneration(draftKey) !== generation) return;
     if (listening) {
       // The recording ends, its words land in the field, and the message goes.
       pendingSend.current = true;
@@ -291,7 +293,7 @@ export function Composer({
 
   function finishDictation(problem: string | null = null) {
     // Deletion/forget may invalidate this recording before its native end callback arrives.
-    if (!readComposerDraft(draftKey).listening) {
+    if (composerDraftGeneration(draftKey) !== generation || !readComposerDraft(draftKey).listening) {
       recordingActive.current = false;
       pendingSend.current = false;
       transcript.current = "";
@@ -325,6 +327,7 @@ export function Composer({
       return;
     }
     const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (composerDraftGeneration(draftKey) !== generation) return;
     if (!permission.granted) {
       Alert.alert(t("Dictation needs the microphone"), t("Allow the microphone and speech recognition for Beans in Settings."), [
         { text: t("Settings"), onPress: () => void Linking.openSettings() },

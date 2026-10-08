@@ -12,6 +12,7 @@ import type { BotLook } from "./look";
 import { providerConnectMethod, type Attachment, type AutoReview, type Bot, type BotCapabilities, type Chat, type ChatMeta, type ChatSearchResults, type ChatUsage, type CustomAPI, type CustomModel, type Message, type ProviderKind, type ProviderStatus } from "./model";
 import { coreHome, loadPrefs, pathOf, wipePrefs } from "./prefs";
 import { clearPushes, installPushHandlers, registerForPushes } from "./push";
+import { composerDraftGeneration, composerDraftKey, discardComposerDraft } from "./updateDrafts";
 import {
   applyRoster,
   botById,
@@ -147,11 +148,9 @@ class Engine {
       case "snapshot":
         replaceSnapshot(data as Snapshot);
         break;
-      case "roster.changed": {
-        const { removed } = applyRoster(data);
-        for (const chatId of removed) removeChat(chatId);
+      case "roster.changed":
+        applyRoster(data);
         break;
-      }
       case "message.added":
       case "message.updated": {
         const message = data.message as Message;
@@ -355,9 +354,15 @@ class Engine {
     void core.request("chats.pin", { chat_id: chatId, pinned });
   }
 
-  deleteChat(chatId: string) {
-    removeChat(chatId);
-    void core.request("chats.delete", { chat_id: chatId });
+  async deleteChat(chatId: string) {
+    const { identityId, relayUrl } = useStore.getState();
+    const key = composerDraftKey(identityId, relayUrl, chatId);
+    const generation = composerDraftGeneration(key);
+    await core.request("chats.delete", { chat_id: chatId });
+    if (composerDraftGeneration(key) !== generation) return;
+    discardComposerDraft(key);
+    const current = useStore.getState();
+    if (current.identityId === identityId && current.relayUrl === relayUrl) removeChat(chatId);
   }
 
   addBot(chatId: string, botId: string) {

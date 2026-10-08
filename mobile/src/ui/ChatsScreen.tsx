@@ -18,6 +18,7 @@ import { SidebarSearch, useSidebarSearchInset } from "./SidebarSearch";
 import { Symbol } from "./Symbol";
 import { Font, usePalette } from "./theme";
 import { AndroidIcons } from "./navigation";
+import { discardComposerDraft, retainedComposerDrafts, subscribeComposerDrafts } from "../core/updateDrafts";
 
 // FlashList keeps the first visible row where it is when rows change, which for a list resting at
 // its top means a chat moving to the top pushes the list down by one row: the new first row lands
@@ -37,7 +38,11 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
   const floatingSearch = sidebar || Platform.OS === "android";
   const searchInset = useSidebarSearchInset();
   const chats = useStore((s) => s.chats);
+  const identityId = useStore((s) => s.identityId);
   const running = useStore((s) => s.running);
+  const [draftRevision, setDraftRevision] = useState(0);
+  useEffect(() => subscribeComposerDrafts(() => setDraftRevision(value => value + 1)), []);
+  const retainedDrafts = useMemo(() => retainedComposerDrafts(), [draftRevision]);
   const paused = useStore((s) => s.paused);
   const connecting = useConnecting();
   const updateRequired = useStore((s) => s.relayUpdateRequired);
@@ -134,10 +139,13 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
       {
         text: t("Delete"),
         style: "destructive",
-        onPress: () => {
-          // The pane beside the sidebar goes back to empty with its chat.
-          if (sidebar && chat.id === openChatId) router.dismissTo("/");
-          engine.deleteChat(chat.id);
+        onPress: async () => {
+          try {
+            await engine.deleteChat(chat.id);
+            if (sidebar && chat.id === openChatId) router.dismissTo("/");
+          } catch (error) {
+            Alert.alert(t("Delete"), error instanceof Error ? error.message : String(error));
+          }
         },
       },
     ]);
@@ -145,6 +153,15 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
 
   return (
     <>
+      {retainedDrafts.map(([key, draft]) => {
+        const [identity, relay, chatId] = JSON.parse(key) as [string | null, string | null, string];
+        if (identity === identityId && relay === relayUrl && chats.some(chat => chat.id === chatId)) return null;
+        const preview = [draft.text, ...draft.attachments.map(file => file.name)].filter(Boolean).join("\n");
+        return <Pressable key={key} accessibilityRole="button" accessibilityLabel={`${t("Discard")}: ${preview}`} onPress={() => Alert.alert(t("Discard changes?"), preview, [
+          { text: t("Cancel"), style: "cancel" },
+          { text: t("Discard"), style: "destructive", onPress: () => discardComposerDraft(key) },
+        ])}><Text style={{ color: p.label }}>{t("Draft preview")}: {preview || t("Dictation stopped")}</Text><Text style={{ color: p.secondaryLabel }}>{t("Discard")}</Text></Pressable>;
+      })}
             {floatingSearch ? null : (
         <Stack.SearchBar
           placeholder={t("Search")}

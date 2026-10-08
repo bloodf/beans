@@ -112,9 +112,13 @@ export default function ChatInfoScreen() {
       {
         text: t("Delete"),
         style: "destructive",
-        onPress: () => {
-          engine.deleteChat(chat!.id);
-          router.dismissAll();
+        onPress: async () => {
+          try {
+            await engine.deleteChat(chat!.id);
+            router.dismissAll();
+          } catch (error) {
+            Alert.alert(t("Delete"), error instanceof Error ? error.message : String(error));
+          }
         },
       },
     ]);

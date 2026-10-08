@@ -8,7 +8,7 @@ import { useShallow } from "zustand/react/shallow";
 import { runsInTerminal, type AutoReview, type Bot, type Chat, type ChatMeta, type ChatUsage, type Device, type Message, type ProviderModel, type ProviderStatus, type RelayProblem, type Routine } from "./model";
 import { t } from "../i18n";
 import { loadPrefs, savePrefs } from "./prefs";
-import { reconcileComposerDrafts } from "./updateDrafts";
+import { composerDraftKey, discardComposerDraft, forgetComposerDrafts, reconcileComposerDrafts } from "./updateDrafts";
 
 export interface Running {
   chatId: string;
@@ -133,7 +133,7 @@ export function mutate(update: (s: StoreState) => Partial<StoreState>) {
 /// Back to unpaired: everything the core told us goes; the phone's prefs stay.
 export function resetStore() {
   useStore.setState({ ...empty() });
-  reconcileComposerDrafts(null, null, []);
+  forgetComposerDrafts();
 }
 
 export function setRelayStatus(data: { url?: string | null; connected?: boolean; update_required?: boolean; error?: RelayProblem | null }) {
@@ -326,6 +326,8 @@ export function removeMessage(chatId: string, messageId: string) {
 }
 
 export function removeChat(chatId: string) {
+  const { identityId, relayUrl } = useStore.getState();
+  discardComposerDraft(composerDraftKey(identityId, relayUrl, chatId));
   useStore.setState((s) => ({
     chats: s.chats.filter((c) => c.id !== chatId),
     statuses: omit(s.statuses, chatId),
@@ -333,8 +335,6 @@ export function removeChat(chatId: string) {
     retries: omit(s.retries, chatId),
     failures: Object.fromEntries(Object.entries(s.failures).filter(([, f]) => f.chatId !== chatId)),
   }));
-  const { identityId, relayUrl, chats } = useStore.getState();
-  reconcileComposerDrafts(identityId, relayUrl, chats);
 }
 
 export function setChatUsage(chatId: string, usage: ChatUsage) {

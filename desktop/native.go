@@ -12,20 +12,24 @@ import (
 
 	"github.com/bloodf/beans/desktop/model"
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 )
 
 // The native window shares the admitted account and sole CLI transport. The
 // complete web client remains available until native feature parity is proven.
 type nativeDesktop struct {
-	store          *model.NativeStore
-	win            *mygo.Window
-	authority      cliAuthority
-	avatars        *nativeAvatars
-	memory         *nativeMemory
-	memoryPanel    nativeMemoryPanel
-	look           *nativeLookEditor
-	memoryRecovery map[string]memoryForms
+	store              *model.NativeStore
+	win                *mygo.Window
+	authority          cliAuthority
+	avatars            *nativeAvatars
+	activity           *nativeAvatarActivity
+	memory             *nativeMemory
+	memoryPanel        nativeMemoryPanel
+	look               *nativeLookEditor
+	memoryRecovery     map[string]memoryForms
+	diagnostics        *nativeDiagnostics
+	diagnosticsExports int
 }
 
 func nativeEnabled() bool { return os.Getenv("BEANS_NATIVE") == "1" }
@@ -40,6 +44,7 @@ func (n *nativeDesktop) event(name string, data json.RawMessage) {
 		}
 		if json.Unmarshal(data, &v) == nil && v.Has != nil && (!*v.Has || (name == "snapshot" && n.store.AccountID != "" && v.Account != n.store.AccountID)) {
 			n.suspendMemoryForms()
+			n.resetDiagnostics()
 		}
 	}
 	if err := n.store.Apply(name, data); err != nil {
@@ -47,6 +52,9 @@ func (n *nativeDesktop) event(name string, data json.RawMessage) {
 	}
 	if n.avatars != nil && n.avatars.epoch != n.store.Epoch {
 		n.avatars.reset(n.store.Epoch)
+		if n.activity != nil {
+			n.activity.reset()
+		}
 		n.look = nil
 	}
 	if n.memory != nil && n.memory.epoch != n.store.Epoch {
@@ -55,6 +63,11 @@ func (n *nativeDesktop) event(name string, data json.RawMessage) {
 	}
 	if name == "snapshot" {
 		n.recoverMemoryForms()
+	}
+	if n.activity != nil && n.store.Connected {
+		if err := n.activity.event(name, data); err != nil {
+			n.store.Error = err.Error()
+		}
 	}
 	if n.win != nil {
 		n.win.Invalidate()
@@ -69,6 +82,11 @@ func (n *nativeDesktop) show() {
 		}
 		n.avatars = newNativeAvatars(r)
 		n.memory = &nativeMemory{runtime: r}
+		n.activity = newNativeAvatarActivity(r, func() {
+			if n.win != nil {
+				n.win.Invalidate()
+			}
+		})
 	}
 	if n.win == nil {
 		n.win = mygo.NewWindow(mygo.WindowOptions{Title: "Beans — Native", Width: 1100, Height: 760, MinWidth: 640, MinHeight: 440, Content: ui.View(n.view)})
@@ -83,6 +101,10 @@ func (n *nativeDesktop) show() {
 		n.win.OnMinimize(visibility)
 		n.win.OnRestore(visibility)
 		n.win.OnClose(func(e *mygo.CloseEvent) {
+			if n.diagnosticsExports > 0 {
+				e.PreventDefault()
+				return
+			}
 			if n.store.HasOwnedIntent() || n.hasMemoryIntent() || (n.look != nil && n.look.HasIntent()) {
 				e.PreventDefault()
 				n.store.Error = "Send or save native drafts before closing"
@@ -338,16 +360,19 @@ func (n *nativeDesktop) view(c *ui.Context) {
 				for i := range n.store.Chats {
 					chat := &n.store.Chats[i]
 					if n.avatars != nil {
-						for _, id := range chat.BotIDs {
-							for _, b := range n.store.Bots {
-								if b.ID == id {
-									n.avatars.view(c, b, "idle", 32)
-									n.fetchAvatar(b)
-									break
+						ui.Box(c.Key("cluster:"+chat.ID)).Size(32, 32).Shrink(0).Children(func() {
+							for _, slot := range nativeGroupAvatarSlots(chat.BotIDs, 32) {
+								for _, b := range n.store.Bots {
+									if b.ID == slot.BotID {
+										ui.Box(c.Key(chat.ID+":"+b.ID)).Absolute().Left(slot.X).Top(slot.Y).Size(slot.Size, slot.Size).Children(func() {
+											n.avatars.viewSlot(c, b, n.activity.state(b.ID, chat.ID), slot.Size, "sidebar:"+chat.ID+":"+b.ID)
+										})
+										n.fetchAvatar(b)
+										break
+									}
 								}
 							}
-							break
-						}
+						})
 					}
 					if ui.Button(c.Key(chat.ID), n.store.Title(chat)).Clicked() {
 						n.store.Selected = chat.ID
@@ -388,6 +413,16 @@ func (n *nativeDesktop) view(c *ui.Context) {
 				}
 				return
 			}
+			if ui.Button(c, "Diagnostics…").Clicked() {
+				n.openDiagnostics()
+			}
+			if n.diagnostics != nil {
+				n.diagnostics.View(c)
+				if n.diagnostics.Done() {
+					n.diagnostics = nil
+				}
+				return
+			}
 			if n.memory != nil && ui.Button(c, "Memory connections").Clicked() {
 				n.loadMemory()
 			}
@@ -405,6 +440,21 @@ func (n *nativeDesktop) view(c *ui.Context) {
 				return
 			}
 			ui.Text(c, n.store.Title(chat)).Bold().FontSize(20)
+			if n.avatars != nil && len(chat.BotIDs) > 1 {
+				ui.Box(c.Key("header-cluster:"+chat.ID)).Size(32, 32).Children(func() {
+					for _, slot := range nativeGroupAvatarSlots(chat.BotIDs, 32) {
+						for _, bot := range n.store.Bots {
+							if bot.ID == slot.BotID {
+								ui.Box(c.Key(bot.ID)).Absolute().Left(slot.X).Top(slot.Y).Size(slot.Size, slot.Size).Children(func() {
+									n.avatars.viewSlot(c, bot, n.activity.state(bot.ID, chat.ID), slot.Size, "header:"+chat.ID+":"+bot.ID)
+								})
+								n.fetchAvatar(bot)
+								break
+							}
+						}
+					}
+				})
+			}
 			if n.store.Error != "" {
 				ui.Text(c, n.store.Error)
 			}
@@ -424,7 +474,7 @@ func (n *nativeDesktop) view(c *ui.Context) {
 						if n.avatars != nil && m.Author.Kind == "bot" {
 							for _, bot := range n.store.Bots {
 								if bot.ID == m.Author.BotID {
-									n.avatars.view(c, bot, "idle", 28)
+									n.avatars.viewSlot(c, bot, n.activity.state(bot.ID, chat.ID), 28, "message:"+chat.ID+":"+m.ID)
 									n.fetchAvatar(bot)
 									if ui.Button(c, "Edit bot Look").Clicked() {
 										n.openLook(bot)
@@ -519,8 +569,87 @@ func (n *nativeDesktop) view(c *ui.Context) {
 }
 
 func nativeQuitAdmission() error {
+	if native.diagnosticsExports > 0 {
+		return errors.New("Wait for diagnostics export before quitting")
+	}
 	if native.store.HasOwnedIntent() || native.hasMemoryIntent() || (native.look != nil && native.look.HasIntent()) {
 		return errors.New("Send or save native drafts before quitting")
 	}
 	return nil
+}
+
+func (n *nativeDesktop) resetDiagnostics() {
+	if n.diagnostics != nil {
+		n.diagnostics.Reset()
+		n.diagnostics = nil
+	}
+}
+
+func (n *nativeDesktop) openDiagnostics() {
+	if !n.store.Connected || app == nil || app.cli == nil || n.diagnosticsExports > 0 {
+		return
+	}
+	if n.diagnostics != nil {
+		return
+	}
+	epoch, authority, client := n.store.Epoch, n.authority, app.cli
+	var panel *nativeDiagnostics
+	valid := func() bool { return n.store.Connected && n.store.Epoch == epoch && n.diagnostics == panel }
+	panel = newNativeDiagnostics(func(method string, params json.RawMessage, done func(json.RawMessage, error)) {
+		if !valid() || method != "diagnostics.report" {
+			done(nil, errors.New("diagnostics unavailable"))
+			return
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			data, err := client.requestBound(ctx, method, params, &authority)
+			postMain(func() {
+				if valid() {
+					done(json.RawMessage(data), err)
+				}
+			})
+		}()
+	}, func(report string) error {
+		if !valid() {
+			return errors.New("diagnostics unavailable")
+		}
+		return mygo.Clipboard.Write(transfer.TextData(report))
+	}, func(report string, done func(error)) {
+		if !valid() {
+			done(errors.New("diagnostics unavailable"))
+			return
+		}
+		parent := n.win
+		n.diagnosticsExports++
+		go func() {
+			path, err := mygo.Dialog.Save(mygo.SaveDialogOptions{Parent: parent, Title: "Export diagnostics report", DefaultPath: "beans-diagnostics.json"})
+			postMain(func() {
+				if !valid() || err != nil || path == "" {
+					n.diagnosticsExports--
+					if valid() {
+						done(err)
+					}
+					return
+				}
+				go func() {
+					err := os.WriteFile(path, []byte(report), 0o600)
+					postMain(func() {
+						n.diagnosticsExports--
+						if valid() {
+							done(err)
+						}
+						if n.win != nil {
+							n.win.Invalidate()
+						}
+					})
+				}()
+			})
+		}()
+	}, func() {
+		if n.win != nil {
+			n.win.Invalidate()
+		}
+	})
+	n.diagnostics = panel
 }

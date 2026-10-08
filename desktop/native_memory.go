@@ -15,6 +15,7 @@ type nativeMemory struct {
 }
 
 var memoryMethods = map[string]bool{
+	"bots.memory": true, "bots.memory.write": true,
 	"memory.connections.list": true, "memory.connections.set": true, "memory.connections.disconnect": true,
 	"memory.embeddings.set": true, "memory.embeddings.remove": true, "memory.preferences.get": true, "memory.preferences.set": true,
 	"memory.service.health": true, "memory.service.recall": true, "memory.service.retain": true, "memory.service.inspect": true, "memory.service.reflect": true, "memory.service.advanced": true,

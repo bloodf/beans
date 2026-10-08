@@ -109,6 +109,10 @@ func paintAvatar(p *ui.Painter, r ui.Rect, f *avatarFrame) {
 	}
 }
 func (a *nativeAvatars) view(c *ui.Context, bot model.NativeBot, state string, size float32) {
+	a.viewSlot(c, bot, state, size, bot.ID)
+}
+
+func (a *nativeAvatars) viewSlot(c *ui.Context, bot model.NativeBot, state string, size float32, slot string) {
 	var attachment struct {
 		ID string `json:"id"`
 	}
@@ -125,10 +129,10 @@ func (a *nativeAvatars) view(c *ui.Context, bot model.NativeBot, state string, s
 	if a.motion == nil {
 		a.motion = map[string]*nativeAvatarMotion{}
 	}
-	controller := a.motion[bot.ID]
+	controller := a.motion[slot]
 	if controller == nil {
 		controller = newNativeAvatarMotion(a.runtime)
-		a.motion[bot.ID] = controller
+		a.motion[slot] = controller
 	}
 	if err := controller.SetTarget(bot.ID, bot.Look, state); err != nil {
 		ui.Text(c, err.Error())

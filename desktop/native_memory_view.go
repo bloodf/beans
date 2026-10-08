@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -53,6 +54,14 @@ func (n *nativeDesktop) loadMemory() {
 	}()
 }
 func (n *nativeDesktop) memoryView(c *ui.Context) {
+	if n.memoryPanel.Forms.Note != nil {
+		n.memoryNoteView(c)
+		return
+	}
+	if n.memoryPanel.Forms.Embedding != nil {
+		n.embeddingFormView(c)
+		return
+	}
 	if n.memoryPanel.Forms.Connection != nil || n.memoryPanel.Forms.Bot != nil {
 		n.memoryFormView(c)
 		return
@@ -77,6 +86,7 @@ func (n *nativeDesktop) memoryView(c *ui.Context) {
 			Availability string  `json:"availability"`
 			Reason       *string `json:"reason"`
 		}
+		Embeddings []memoryEmbeddingRow `json:"embeddings"`
 	}
 	if json.Unmarshal(n.memoryPanel.Connections, &data) != nil {
 		return
@@ -102,16 +112,35 @@ func (n *nativeDesktop) memoryView(c *ui.Context) {
 				if ui.Button(c, "Edit connection").Clicked() {
 					n.editMemoryConnection(&row)
 				}
-				if ui.Button(c,"Disconnect connection…").Disabled(n.memoryPanel.Forms.Pending).Clicked(){n.confirmMemoryDisconnect(row)}
+				if ui.Button(c, "Disconnect connection…").Disabled(n.memoryPanel.Forms.Pending).Clicked() {
+					n.confirmMemoryDisconnect(row)
+				}
+			})
+		}
+		for _, profile := range data.Embeddings {
+			ui.Column(c.Key("embedding:" + profile.ID)).Children(func() {
+				ui.Text(c, profile.Model+" · "+profile.Revision+" · "+strconv.Itoa(profile.Dimensions))
+				if profile.HasSecret {
+					ui.Text(c, "Credential saved")
+				}
+				if ui.Button(c, "Edit embedding profile").Clicked() {
+					n.editMemoryEmbedding(&profile)
+				}
 			})
 		}
 	})
 	if ui.Button(c, "Add memory connection").Clicked() {
 		n.editMemoryConnection(nil)
 	}
+	if ui.Button(c, "Add embedding profile").Clicked() {
+		n.editMemoryEmbedding(nil)
+	}
 	for _, bot := range n.store.Bots {
 		if ui.Button(c.Key("memory-"+bot.ID), "Memory for "+bot.Name).Clicked() {
 			n.openBotMemory(bot.ID)
+		}
+		if ui.Button(c.Key("note-"+bot.ID), nativeL("MEMORY.md for %s", bot.Name)).Clicked() {
+			n.openMemoryNote(bot.ID)
 		}
 	}
 	if ui.Button(c, "Reload memory connections").Clicked() {

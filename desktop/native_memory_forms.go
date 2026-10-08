@@ -49,6 +49,7 @@ type memoryBotForm struct {
 	Create, Confirm                        bool
 	Approval                               uint64
 	Preview, Target                        json.RawMessage
+	Recovering                             bool
 }
 type memoryForms struct {
 	Connection *memoryConnectionForm
@@ -189,6 +190,20 @@ func (n *nativeDesktop) refreshBotMemory(rebase bool) {
 			if err != nil {
 				f.Error = err.Error()
 				return
+			}
+		}
+		if b.Recovering && !rebase {
+			b.Draft, err = n.memory.newDraft(b.ID, nil)
+			if err == nil {
+				b.View, err = n.memory.newView(b.ID, data)
+			}
+			if err != nil {
+				f.Error = err.Error()
+				return
+			}
+			b.Recovering = false
+			if err = n.syncMemoryConsent(); err != nil {
+				f.Error = err.Error()
 			}
 		}
 		if rebase || b.Draft == 0 {

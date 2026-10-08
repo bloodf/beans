@@ -86,17 +86,17 @@ func (n *nativeDesktop) botMemoryControls(c *ui.Context, b *memoryBotForm) {
 		for _, operation := range operations.Operations {
 			ui.Row(c.Key(operation.ID)).Gap(6).Children(func() {
 				ui.Text(c, operation.ID+" · "+operation.State)
-				if ui.Button(c, "Operation status").Clicked() {
+				if memoryOperationAllowed(b.Health, "status") && ui.Button(c, "Operation status").Clicked() {
 					n.memoryOperation(operation.ID, "status")
 				}
-				if ui.Button(c, "Cancel operation…").Clicked() {
+				if memoryOperationAllowed(b.Health, "cancel") && ui.Button(c, "Cancel operation…").Clicked() {
 					b.Document = operation.ID
 					b.OperationCancel = true
 				}
 			})
 		}
 	}
-	if b.OperationCancel {
+	if b.OperationCancel && memoryOperationAllowed(b.Health, "cancel") {
 		ui.Text(c, "Cancellation may not prevent late writes; deletion remains pending until verified.")
 		if ui.Button(c, "Keep operation").Clicked() {
 			b.OperationCancel = false
@@ -262,7 +262,12 @@ func (n *nativeDesktop) previewMemorySetup() {
 					f.Error = err.Error()
 					return
 				}
-				b.Preview = data
+				b.Preview, err = n.memory.approvalPreview(b.Approval)
+				if err != nil {
+					f.Error = err.Error()
+					b.Approval = 0
+					return
+				}
 				b.Target = target
 				return
 			}
@@ -290,7 +295,12 @@ func (n *nativeDesktop) previewMemorySetup() {
 			f.Error = err.Error()
 			return
 		}
-		b.Preview = data
+		b.Preview, err = n.memory.approvalPreview(b.Approval)
+		if err != nil {
+			f.Error = err.Error()
+			b.Approval = 0
+			return
+		}
 		b.Target = target
 	})
 }
@@ -375,6 +385,10 @@ func (n *nativeDesktop) deleteMemory(all bool) {
 func (n *nativeDesktop) memoryOperation(id, action string) {
 	f := &n.memoryPanel.Forms
 	b := f.Bot
+	if b == nil || !memoryOperationAllowed(b.Health, action) {
+		f.Error = "Operation capability is unavailable"
+		return
+	}
 	n.memoryCall("memory.operations."+action, jsonBytes(map[string]string{"bot_id": b.ID, "id": id}), func(_ json.RawMessage, err error) {
 		if err != nil {
 			f.Error = err.Error()

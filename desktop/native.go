@@ -18,13 +18,14 @@ import (
 // The native window shares the admitted account and sole CLI transport. The
 // complete web client remains available until native feature parity is proven.
 type nativeDesktop struct {
-	store       *model.NativeStore
-	win         *mygo.Window
-	authority   cliAuthority
-	avatars     *nativeAvatars
-	memory      *nativeMemory
-	memoryPanel nativeMemoryPanel
-	look        *nativeLookEditor
+	store          *model.NativeStore
+	win            *mygo.Window
+	authority      cliAuthority
+	avatars        *nativeAvatars
+	memory         *nativeMemory
+	memoryPanel    nativeMemoryPanel
+	look           *nativeLookEditor
+	memoryRecovery map[string]memoryForms
 }
 
 func nativeEnabled() bool { return os.Getenv("BEANS_NATIVE") == "1" }
@@ -32,6 +33,15 @@ func nativeEnabled() bool { return os.Getenv("BEANS_NATIVE") == "1" }
 var native = &nativeDesktop{store: model.NewNativeStore()}
 
 func (n *nativeDesktop) event(name string, data json.RawMessage) {
+	if name == "identity.changed" || name == "snapshot" {
+		var v struct {
+			Has     *bool  `json:"has_identity"`
+			Account string `json:"identity_id"`
+		}
+		if json.Unmarshal(data, &v) == nil && v.Has != nil && (!*v.Has || (name == "snapshot" && n.store.AccountID != "" && v.Account != n.store.AccountID)) {
+			n.suspendMemoryForms()
+		}
+	}
 	if err := n.store.Apply(name, data); err != nil {
 		n.store.Error = err.Error()
 	}
@@ -41,7 +51,10 @@ func (n *nativeDesktop) event(name string, data json.RawMessage) {
 	}
 	if n.memory != nil && n.memory.epoch != n.store.Epoch {
 		_ = n.memory.reset(n.store.Epoch)
-		n.memoryPanel = nativeMemoryPanel{}
+		n.suspendMemoryForms()
+	}
+	if name == "snapshot" {
+		n.recoverMemoryForms()
 	}
 	if n.win != nil {
 		n.win.Invalidate()
@@ -70,7 +83,7 @@ func (n *nativeDesktop) show() {
 		n.win.OnMinimize(visibility)
 		n.win.OnRestore(visibility)
 		n.win.OnClose(func(e *mygo.CloseEvent) {
-			if n.store.HasOwnedIntent() || n.memoryPanel.Forms.Pending || n.memoryPanel.Forms.Connection != nil || n.memoryPanel.Forms.Bot != nil || (n.look != nil && n.look.HasIntent()) {
+			if n.store.HasOwnedIntent() || n.hasMemoryIntent() || (n.look != nil && n.look.HasIntent()) {
 				e.PreventDefault()
 				n.store.Error = "Send or save native drafts before closing"
 				n.win.Invalidate()
@@ -356,6 +369,12 @@ func (n *nativeDesktop) view(c *ui.Context) {
 			if n.store.HasOwnedIntent() && ui.Button(c, "Save native drafts").Clicked() {
 				n.saveDrafts()
 			}
+			if len(n.memoryRecovery) > 0 {
+				ui.Text(c, "Memory edits are retained for their original account. Reconnect that account to recover them.")
+				if ui.Button(c, "Discard retained memory edits…").Clicked() {
+					n.confirmDiscardMemoryRecovery()
+				}
+			}
 			if n.store.Error != "" {
 				ui.Text(c, n.store.Error)
 			}
@@ -500,7 +519,7 @@ func (n *nativeDesktop) view(c *ui.Context) {
 }
 
 func nativeQuitAdmission() error {
-	if native.store.HasOwnedIntent() || native.memoryPanel.Forms.Pending || native.memoryPanel.Forms.Connection != nil || native.memoryPanel.Forms.Bot != nil || (native.look != nil && native.look.HasIntent()) {
+	if native.store.HasOwnedIntent() || native.hasMemoryIntent() || (native.look != nil && native.look.HasIntent()) {
 		return errors.New("Send or save native drafts before quitting")
 	}
 	return nil

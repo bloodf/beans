@@ -54,10 +54,10 @@ pub async fn run(app: Arc<App>) {
                     #[cfg(feature = "cli")]
                     crate::update::relay_refused(&app);
                 }
-                // A try that never connected says why, until one does. A socket that worked and
-                // then ended says nothing, since the next try usually connects, and neither does
-                // a stale bearer, which the next try replaces.
-                if !dropped && !outdated && !error.is_unauthorized() {
+                // A persistent roster conflict needs reconciliation even if the socket upgraded.
+                // Ordinary socket loss stays quiet after a connection, and a stale bearer stays
+                // quiet while the next try replaces it.
+                if (!dropped || error.message.starts_with("Roster conflict:")) && !outdated && !error.is_unauthorized() {
                     let unknown_machine = error.is_unknown_machine() && !app.is_identity_device();
                     app.relay_failed(RelayProblem { message: error.message.clone(), unknown_machine });
                 }

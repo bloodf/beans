@@ -453,6 +453,10 @@ impl Provider for OpenAiCompatProvider {
                                 let _ = tx.send(AssistantEvent::Error { message, aborted: false }).await;
                                 return;
                             }
+                            if let Some(reason @ ("sensitive" | "network_error" | "model_context_window_exceeded")) = value["choices"][0]["finish_reason"].as_str() {
+                                let _ = tx.send(AssistantEvent::Error { message: format!("Provider stopped with finish_reason: {reason}"), aborted: false }).await;
+                                return;
+                            }
                             state.apply_chunk(&value, &tx).await;
                         }
                         Err(_) => tracing::debug!(data = %event.data, "unparsed sse chunk"),

@@ -437,9 +437,10 @@ impl LocalStore {
     pub(crate) fn prune_tasks(&self, now: i64) -> anyhow::Result<()> {
         self.safety(|tx| {
             let cutoff = now.saturating_sub(30 * 24 * 60 * 60);
-            tx.execute("DELETE FROM task_effect_receipts WHERE EXISTS(SELECT 1 FROM local_tasks t WHERE t.account_epoch=task_effect_receipts.account_epoch AND t.task_id=task_effect_receipts.task_id AND t.resolved_at<=?1)", [cutoff])?;
-            tx.execute("DELETE FROM task_invocations WHERE EXISTS(SELECT 1 FROM local_tasks t WHERE t.account_epoch=task_invocations.account_epoch AND t.task_id=task_invocations.task_id AND t.resolved_at<=?1)", [cutoff])?;
-            tx.execute("DELETE FROM local_tasks WHERE resolved_at<=?1", [cutoff])?;
+            // Routine unknown receipts remain admission evidence even after review resolution.
+            tx.execute("DELETE FROM task_effect_receipts WHERE EXISTS(SELECT 1 FROM local_tasks t WHERE t.account_epoch=task_effect_receipts.account_epoch AND t.task_id=task_effect_receipts.task_id AND t.resolved_at<=?1 AND (t.routine_id IS NULL OR NOT EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=t.account_epoch AND r.task_id=t.task_id AND r.state='unknown')))", [cutoff])?;
+            tx.execute("DELETE FROM task_invocations WHERE EXISTS(SELECT 1 FROM local_tasks t WHERE t.account_epoch=task_invocations.account_epoch AND t.task_id=task_invocations.task_id AND t.resolved_at<=?1 AND (t.routine_id IS NULL OR NOT EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=t.account_epoch AND r.task_id=t.task_id AND r.state='unknown')))", [cutoff])?;
+            tx.execute("DELETE FROM local_tasks WHERE resolved_at<=?1 AND (routine_id IS NULL OR NOT EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=local_tasks.account_epoch AND r.task_id=local_tasks.task_id AND r.state='unknown'))", [cutoff])?;
             Ok(())
         })
     }

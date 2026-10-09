@@ -735,10 +735,22 @@ mod tests {
         assert_eq!(reopened.task_state(&lease).unwrap(),Some(crate::local_store::TaskState::NeedsReview));
         let mut recovered=lease.clone(); recovered.owner_epoch="replacement-owner".into();
         assert!(reopened.reauthorize_schedule(&recovered,&routine.id,&schedule.binding,now+600).is_err(),"recovered intent blocks new authority");
-        assert!(reopened.resolve_task(&recovered,now).unwrap());
+        let history=reopened.history_task_lease("replacement-owner",&job.id,lease.incarnation).unwrap().unwrap();
+        assert_eq!(history.owner_epoch,lease.owner_epoch,"history retains original execution identity");
+        assert!(reopened.resolve_task(&history,now).unwrap());
         assert!(reopened.reauthorize_schedule(&recovered,&routine.id,&schedule.binding,now+600).is_err(),"resolved history does not erase unknown receipt");
         let state:String=reopened.connection.lock().unwrap().query_row("SELECT state FROM task_effect_receipts WHERE receipt_id=?1",[&binding.receipt_id],|r|r.get(0)).unwrap();
         assert_eq!(state,"unknown");
+        reopened.prune_tasks(now+30*24*60*60+1).unwrap();
+        assert!(reopened.reauthorize_schedule(&recovered,&routine.id,&schedule.binding,now+600).is_err(),"retention cannot erase matching unknown denial");
+        let retained:String=reopened.connection.lock().unwrap().query_row("SELECT state FROM task_effect_receipts WHERE receipt_id=?1",[&binding.receipt_id],|r|r.get(0)).unwrap();
+        assert_eq!(retained,"unknown");
+        let next_at:i64=reopened.connection.lock().unwrap().query_row("SELECT next_at FROM routine_schedule_authority WHERE routine_id=?1",[&routine.id],|r|r.get(0)).unwrap();
+        let next=reopened.schedule_lease(&routine.id,&schedule.binding,next_at,next_at+600).unwrap().unwrap();
+        let mut future=job.clone(); future.id=format!("job-{}",uuid::Uuid::new_v4());
+        let mut future_lease=recovered.clone(); future_lease.task_id=future.id.clone(); future_lease.execution_id=uuid::Uuid::new_v4().to_string();
+        assert!(reopened.commit_scheduled_occurrence(&future_lease,Some(&future),&routine.id,&next,next.occurrence+600,&future.chat_id,&future.bot_id,next_at,&writes.set,&[]).is_err(),"unknown blocks a fresh occurrence under the current owner after pruning");
+        assert_eq!(reopened.task_state(&future_lease).unwrap(),None);
         assert!(reopened.commit_scheduled_occurrence(&lease,Some(&job),&routine.id,&schedule,now+600,&job.chat_id,&job.bot_id,now,&writes.set,&[]).is_err());
     }
 

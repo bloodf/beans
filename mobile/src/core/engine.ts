@@ -261,7 +261,7 @@ class Engine {
 
   async searchChats(query: string): Promise<ChatSearchResults> {
     const value = query.trim();
-    if (!value) return { chats: [], messages: [] };
+    if (!value) return { chats: [], messages: [], files: [], history_complete: true };
     return core.request<ChatSearchResults>("chats.search", { query: value, limit: 24 });
   }
 
@@ -404,8 +404,8 @@ class Engine {
   /// with the key. With no model ids the core takes every chat model the server lists. The
   /// provider joins the account's encrypted credentials, shared with every paired Device.
   /// Answers its kind; rejects with what to fix.
-  async saveCustomProvider(input: { kind?: string; integration?: "durindoor"; name: string; api: CustomAPI; baseURL: string; apiKey: string; models: string[] }): Promise<string> {
-    const params = { ...(input.kind ? { kind: input.kind } : {}), name: input.name, integration: input.integration, api: input.api, base_url: input.baseURL, api_key: input.apiKey, models: input.models };
+  async saveCustomProvider(input: { kind?: string; integration?: "durindoor"; name: string; api: CustomAPI; baseURL: string; apiKey: string; models: string[]; runnerID?: string; capabilities?: import("./model").CustomCapabilities | null }): Promise<string> {
+    const params = { ...(input.kind ? { kind: input.kind } : {}), name: input.name, integration: input.integration, api: input.api, base_url: input.baseURL, api_key: input.apiKey, models: input.models, runner_id: input.runnerID, capabilities: input.capabilities };
     const { kind, providers } = await core.request<{ kind: string; providers: ProviderStatus[] }>("providers.connect_custom", params);
     useStore.setState({ providers });
     return kind;
@@ -414,17 +414,17 @@ class Engine {
   /// The chat models a custom provider's server lists, in its order, with what it says of them;
   /// `listed` is false when the server publishes no list. Rejects with what is wrong: a key it
   /// refuses, a server out of reach, an answer that is not an API's. `name` goes in the messages.
-  async listCustomModels(input: { name?: string; integration?: "durindoor"; api: CustomAPI; baseURL: string; apiKey: string }): Promise<{ listed: boolean; models: CustomModel[] }> {
-    const params = { ...(input.name ? { name: input.name } : {}), integration: input.integration, api: input.api, base_url: input.baseURL, api_key: input.apiKey };
+  async listCustomModels(input: { name?: string; integration?: "durindoor"; api: CustomAPI; baseURL: string; apiKey: string; runnerID?: string; capabilities?: import("./model").CustomCapabilities }): Promise<{ listed: boolean; models: CustomModel[] }> {
+    const params = { ...(input.name ? { name: input.name } : {}), integration: input.integration, api: input.api, base_url: input.baseURL, api_key: input.apiKey, runner_id: input.runnerID, capabilities: input.capabilities };
     const { listed, models } = await core.request<{ listed: boolean; models?: CustomModel[] }>("providers.list_models", params);
     return { listed: !!listed, models: models ?? [] };
   }
 
   /// Refreshes saved custom providers through the core, then reads the latest model catalogs
   /// for this Device's pickers. `updated` counts providers whose models changed, not models.
-  async refreshCustomModels(): Promise<{ updated: number }> {
+  async refreshCustomModels(runnerID?: string, kind?: string): Promise<{ updated: number }> {
     try {
-      return await core.request<{ updated: number }>("providers.refresh");
+      return await core.request<{ updated: number }>("providers.refresh", { runner_id: runnerID, kind });
     } finally {
       await this.bootstrap();
     }

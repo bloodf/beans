@@ -255,7 +255,7 @@ mod tests {
         }
         assert!(tokio::time::timeout(Duration::from_millis(150), pushes.recv()).await.is_err(), "pushes must wait for read sync");
         // This is the same operation sync applies for another Device's ClearUnread blob.
-        app.mark_read("read-on-phone", false);
+        app.mark_read("read-on-phone", false).unwrap();
         app.delete_chat("deleted");
         app.set_watched_chat(Some("watching".into()));
         let pushed = tokio::time::timeout(READ_GRACE + Duration::from_secs(2), pushes.recv()).await.unwrap().unwrap();
@@ -301,8 +301,8 @@ mod tests {
                 cards.push(message);
             }
         }
-        app.mark_read("read-card", false);
-        app.mark_read("read-error", false);
+        app.mark_read("read-card", false).unwrap();
+        app.mark_read("read-error", false).unwrap();
         for mut message in cards {
             let decision = match message.chat_id.as_str() {
                 "answered" => "allowed",
@@ -391,7 +391,7 @@ mod tests {
             let (chat_id, status, _) = next(&mut pushes).await;
             if (chat_id.as_str(), status) == ("read-meanwhile", 503) {
                 // Read on another Device before the next try.
-                app.mark_read("read-meanwhile", false);
+                app.mark_read("read-meanwhile", false).unwrap();
             }
             seen.push((chat_id, status));
         }

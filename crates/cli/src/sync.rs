@@ -1523,7 +1523,11 @@ fn apply_chat_op(app: &Arc<App>, op: ChatBlob) {
             }
         }
         ChatBlob::Remove { chat_id, message_id } => app.remove_message(&chat_id, &message_id, false),
-        ChatBlob::ClearUnread { chat_id } => app.mark_read(&chat_id, false),
+        ChatBlob::ClearUnread { chat_id } => {
+            if let Err(error) = app.mark_read(&chat_id, false) {
+                tracing::error!(%error, "saving incoming read state");
+            }
+        }
     }
 }
 

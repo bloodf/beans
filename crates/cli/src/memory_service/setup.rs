@@ -53,6 +53,40 @@ fn decode<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, MemoryError> 
 fn account(app: &App) -> Result<String, MemoryError> {
     app.machine_file().map(|m|m.identity_pubkey).ok_or_else(||MemoryError::new("identity_required"))
 }
+
+// No guard crosses an await. Membership stays locked through local publication;
+// account reset uses the existing lifecycle lock, including same-key restores.
+struct SetupAuthority { actor: String, account: String, incarnation: u64, clock: u64 }
+impl SetupAuthority {
+    fn capture(app: &App, actor: &str) -> Result<Self, MemoryError> {
+        let lifecycle=app.plugin_admission(None).map_err(|_|MemoryError::new("authority_changed"))?;
+        let authority=Self { actor:actor.into(), account:account(app)?, incarnation:lifecycle.get().0,
+            clock:app.memory_config.lock().clock };
+        authority.commit(app,&CancellationToken::new(),||Ok(()))?;
+        Ok(authority)
+    }
+    fn commit<T>(&self, app: &App, cancel: &CancellationToken, publish: impl FnOnce() -> Result<T, MemoryError>) -> Result<T, MemoryError> {
+        let _lifecycle=app.plugin_admission(Some(self.incarnation)).map_err(|_|MemoryError::new("authority_changed"))?;
+        if cancel.is_cancelled() { return Err(MemoryError::new("cancelled")); }
+        if account(app)?!=self.account { return Err(MemoryError::new("authority_changed")); }
+        let local=app.this_device_id();
+        let config=app.memory_config.lock();
+        let state=app.state.lock().unwrap();
+        if local.as_deref()!=Some(self.actor.as_str()) && !state.listed_machines.contains_key(&self.actor) {
+            return Err(MemoryError::new("requester_revoked"));
+        }
+        if state.paused { return Err(MemoryError::new("account_paused")); }
+        if config.clock!=self.clock { return Err(MemoryError::new("authority_changed")); }
+        publish()
+    }
+    fn recheck(&self, app: &App, cancel: &CancellationToken) -> Result<(), MemoryError> {
+        self.commit(app,cancel,||Ok(()))
+    }
+}
+fn publish<T>(app: &App, authority: Option<&SetupAuthority>, cancel: &CancellationToken,
+    action: impl FnOnce() -> Result<T, MemoryError>) -> Result<T, MemoryError> {
+    match authority { Some(authority)=>authority.commit(app,cancel,action), None=>action() }
+}
 fn profile(app: &App, id: &str) -> Result<(Revision, EmbeddingProfile), MemoryError> {
     let config = app.memory_config.lock();
     let record = config.embeddings.get(id).ok_or_else(||MemoryError::new("profile_not_found"))?;
@@ -87,6 +121,9 @@ fn preview(app: &App, actor: &str, bot: Option<&TurnAccess>, profile: Option<(&s
 
 /// Explicit constructor wiring: no factory, fake adapter or automatic schema creation.
 pub async fn initialize(app: &Arc<App>, access: &TurnAccess, cancel: CancellationToken) -> Result<(), MemoryError> {
+    initialize_inner(app,access,cancel,None).await
+}
+async fn initialize_inner(app: &Arc<App>, access: &TurnAccess, cancel: CancellationToken, authority: Option<&SetupAuthority>) -> Result<(), MemoryError> {
     recheck(app,access,false,&cancel)?;
     let connection=app.memory_config.lock().connections.get(&access.scope.connection_id).and_then(|r|r.value.clone())
         .ok_or_else(||MemoryError::new("connection_disconnected"))?;
@@ -96,11 +133,11 @@ pub async fn initialize(app: &Arc<App>, access: &TurnAccess, cancel: Cancellatio
     match connection.backend {
         BackendKind::Hindsight => {
             let backend=super::backends::hindsight::Hindsight::connect(&connection,&access.scope,cancel.clone()).await?;
-            recheck(app,access,false,&cancel)?;app.memory_runtime.register(access.scope.clone(),Arc::new(backend));
+            recheck(app,access,false,&cancel)?;publish(app,authority,&cancel,||{app.memory_runtime.register(access.scope.clone(),Arc::new(backend));Ok(())})?;
         },
         BackendKind::OpenViking => {
             let backend=super::backends::openviking::OpenViking::connect(&connection,&access.scope,cancel.clone()).await?;
-            recheck(app,access,false,&cancel)?;app.memory_runtime.register(access.scope.clone(),Arc::new(backend));
+            recheck(app,access,false,&cancel)?;publish(app,authority,&cancel,||{app.memory_runtime.register(access.scope.clone(),Arc::new(backend));Ok(())})?;
         },
         #[cfg(feature="memory-pgvector")]
         BackendKind::Pgvector => {
@@ -112,8 +149,10 @@ pub async fn initialize(app: &Arc<App>, access: &TurnAccess, cancel: Cancellatio
             if let Some(role)=role { config=config.with_user(role)?; }
             let backend=Arc::new(PgvectorBackend::connect(config,access.scope.clone(),Some(embedding),cancel.clone()).await?);
             recheck(app,access,false,&cancel)?;
-            app.memory_runtime.setup.pgvector.lock().insert(access.scope.namespace.clone(),backend.clone());
-            app.memory_runtime.register(access.scope.clone(),backend);
+            publish(app,authority,&cancel,||{
+                app.memory_runtime.setup.pgvector.lock().insert(access.scope.namespace.clone(),backend.clone());
+                app.memory_runtime.register(access.scope.clone(),backend);Ok(())
+            })?;
         },
         #[cfg(all(feature="memory-pgvector",feature="memory-lance"))]
         BackendKind::LanceDb => {
@@ -129,8 +168,10 @@ pub async fn initialize(app: &Arc<App>, access: &TurnAccess, cancel: Cancellatio
             };
             let backend=Arc::new(LanceBackend::open(binding,access.scope.clone(),space,Some(embedding),false,cancel.clone()).await?);
             recheck(app,access,false,&cancel)?;
-            app.memory_runtime.setup.lance.lock().insert(access.scope.namespace.clone(),backend.clone());
-            app.memory_runtime.register(access.scope.clone(),backend);
+            publish(app,authority,&cancel,||{
+                app.memory_runtime.setup.lance.lock().insert(access.scope.namespace.clone(),backend.clone());
+                app.memory_runtime.register(access.scope.clone(),backend);Ok(())
+            })?;
         },
         #[allow(unreachable_patterns)]
         _=>return Err(MemoryError::new("adapter_not_in_build")),
@@ -157,22 +198,22 @@ async fn vector_space(app:&Arc<App>,connection:&Connection,cancel:CancellationTo
 
 
 pub async fn serve(app:&Arc<App>,actor:&str,method:&str,params:Value)->Result<Value,MemoryError>{
-    let expected_account=account(app)?;
-    let expected_clock=app.memory_config.lock().clock;
+    let authority=SetupAuthority::capture(app,actor)?;
     let cancel=CancellationToken::new();
     let id=uuid::Uuid::new_v4().to_string();
     app.memory_runtime.setup.calls.lock().insert(id.clone(),cancel.clone());
     struct Call<'a>{runtime:&'a SetupRuntime,id:String}
     impl Drop for Call<'_>{fn drop(&mut self){self.runtime.calls.lock().remove(&self.id);}}
     let _call=Call{runtime:&app.memory_runtime.setup,id};
-    let future=serve_inner(app,actor,method,params,cancel.clone());tokio::pin!(future);
+    let future=serve_inner(app,actor,method,params,cancel.clone(),&authority);tokio::pin!(future);
     let mut tick=tokio::time::interval(Duration::from_millis(25));
     loop {tokio::select!{
-        _=tick.tick()=>if app.is_paused()||account(app).ok().as_ref()!=Some(&expected_account)||app.memory_config.lock().clock!=expected_clock {cancel.cancel();},
+        _=tick.tick()=>if authority.recheck(app,&cancel).is_err() {cancel.cancel();},
         result=&mut future=>return result,
     }}
 }
-async fn serve_inner(app:&Arc<App>,actor:&str,method:&str,params:Value,cancel:CancellationToken)->Result<Value,MemoryError>{
+async fn serve_inner(app:&Arc<App>,actor:&str,method:&str,params:Value,cancel:CancellationToken,authority:&SetupAuthority)->Result<Value,MemoryError>{
+    authority.recheck(app,&cancel)?;
     let _admission=app.update.try_admit().ok_or_else(||MemoryError::new("runner_draining"))?;
     if app.is_paused(){return Err(MemoryError::new("account_paused"));}
     if method.ends_with(".apply") {
@@ -202,12 +243,12 @@ async fn serve_inner(app:&Arc<App>,actor:&str,method:&str,params:Value,cancel:Ca
                 let binding=installer.apply(&token,&digest,true,cancel.clone()).await.map_err(|_|MemoryError::new("asset_install_failed"))?;
                 validate_binding(&p,&binding)?;
                 if profile(app,&id)?.0!=revision||account(app)?!=approval.account{return Err(MemoryError::new("approval_stale"));}
-                save_binding(app,"embedding",&id,&SavedLocal{profile_revision:revision.clone(),binding:binding.clone()})?;
+                authority.commit(app,&cancel,||save_binding(app,"embedding",&id,&SavedLocal{profile_revision:revision.clone(),binding:binding.clone()}))?;
                 #[cfg(feature="embedding-local")]
                 {
-                    let embedding=embeddings::local::LocalEmbedding::load(&p,binding,embeddings::EmbeddingLimits::default(),cancel).await.map_err(|_|MemoryError::new("runtime_unavailable"))?;
+                    let embedding=embeddings::local::LocalEmbedding::load(&p,binding,embeddings::EmbeddingLimits::default(),cancel.clone()).await.map_err(|_|MemoryError::new("runtime_unavailable"))?;
                     if profile(app,&id)?.0!=revision{return Err(MemoryError::new("approval_stale"));}
-                    app.memory_runtime.setup.embeddings.lock().insert(id,(revision,Arc::new(embedding)));
+                    authority.commit(app,&cancel,||{app.memory_runtime.setup.embeddings.lock().insert(id,(revision,Arc::new(embedding)));Ok(())})?;
                     return Ok(json!({"installed":true,"status":"ready"}));
                 }
                 #[cfg(not(feature="embedding-local"))]
@@ -222,11 +263,14 @@ async fn serve_inner(app:&Arc<App>,actor:&str,method:&str,params:Value,cancel:Ca
                 let a=access.ok_or_else(||MemoryError::new("approval_stale"))?;
                 let connection=app.memory_config.lock().connections[&a.scope.connection_id].value.clone().ok_or_else(||MemoryError::new("connection_disconnected"))?;
                 let (space,embedding)=vector_space(app,&connection,cancel.clone()).await?;
+                authority.recheck(app,&cancel)?;
                 let runner_id=app.this_device_id().ok_or_else(||MemoryError::new("identity_required"))?;
                 let backend=Arc::new(super::backends::lance::LanceBackend::open(super::backends::lance::LanceBinding::Local{directory:directory.clone(),runner_id:runner_id.clone()},a.scope.clone(),space,Some(embedding),create,cancel.clone()).await?);
                 recheck(app,&a,false,&cancel)?;
-                save_binding(app,"lance",&a.bot_id,&SavedLance{connection_revision:a.scope.connection_revision.clone(),directory,runner_id})?;
-                app.memory_runtime.setup.lance.lock().insert(a.scope.namespace.clone(),backend.clone());app.memory_runtime.register(a.scope,backend);
+                authority.commit(app,&cancel,||{
+                    save_binding(app,"lance",&a.bot_id,&SavedLance{connection_revision:a.scope.connection_revision.clone(),directory,runner_id})?;
+                    app.memory_runtime.setup.lance.lock().insert(a.scope.namespace.clone(),backend.clone());app.memory_runtime.register(a.scope,backend);Ok(())
+                })?;
                 return Ok(json!({"status":"ready"}));
             },
             #[cfg(all(feature="memory-pgvector",feature="memory-lance"))]
@@ -235,6 +279,7 @@ async fn serve_inner(app:&Arc<App>,actor:&str,method:&str,params:Value,cancel:Ca
                 let mut options=tokio::fs::OpenOptions::new();options.write(true).create_new(true);
                 #[cfg(unix)] options.mode(0o600);
                 let mut file=options.open(destination).await.map_err(|_|MemoryError::new("export_target_unavailable"))?;
+                authority.recheck(app,&cancel)?;
                 use tokio::io::AsyncWriteExt;
                 file.write_all(&bytes).await.map_err(|_|MemoryError::new("export_failed"))?;file.sync_all().await.map_err(|_|MemoryError::new("export_failed"))?;
                 return Ok(json!({"exported":true,"bytes":bytes.len()}));
@@ -263,9 +308,9 @@ async fn serve_inner(app:&Arc<App>,actor:&str,method:&str,params:Value,cancel:Ca
             validate_binding(&embedding_profile,&saved.binding)?;
             #[cfg(feature="embedding-local")]
             {
-                let embedding=embeddings::local::LocalEmbedding::load(&embedding_profile,saved.binding,embeddings::EmbeddingLimits::default(),cancel).await.map_err(|_|MemoryError::new("runtime_unavailable"))?;
+                let embedding=embeddings::local::LocalEmbedding::load(&embedding_profile,saved.binding,embeddings::EmbeddingLimits::default(),cancel.clone()).await.map_err(|_|MemoryError::new("runtime_unavailable"))?;
                 if profile(app,&p.profile_id)?.0!=revision { return Err(MemoryError::new("approval_stale")); }
-                app.memory_runtime.setup.embeddings.lock().insert(p.profile_id,(revision,Arc::new(embedding)));
+                authority.commit(app,&cancel,||{app.memory_runtime.setup.embeddings.lock().insert(p.profile_id,(revision,Arc::new(embedding)));Ok(())})?;
                 return Ok(json!({"status":"ready"}));
             }
             #[cfg(not(feature="embedding-local"))]
@@ -300,13 +345,14 @@ async fn serve_inner(app:&Arc<App>,actor:&str,method:&str,params:Value,cancel:Ca
         {return preview(app,actor,Some(&access),None,Action::LanceBind{directory:p.directory.clone(),create:p.create},method,
             json!({"directory":p.directory,"create":p.create,"table":"beans_memory_v1","namespace":access.scope.namespace}),300);}
     }
-    if app.memory_runtime.backend(&access.scope).is_err(){initialize(app,&access,cancel.clone()).await?;}
+    if app.memory_runtime.backend(&access.scope).is_err(){initialize_inner(app,&access,cancel.clone(),Some(authority)).await?;}
     #[cfg(feature="memory-pgvector")]
     if method=="memory.pgvector.initialize.preview"{
         #[derive(Deserialize)] #[serde(deny_unknown_fields)]struct Bot{bot_id:String}
         let p:Bot=decode(params.clone())?;if p.bot_id!=bot_id{return Err(MemoryError::new("invalid_setup_request"));}
         let backend=app.memory_runtime.setup.pgvector.lock().get(&access.scope.namespace).cloned().ok_or_else(||MemoryError::new("backend_mismatch"))?;
         let result=backend.initialize_preview(cancel.clone()).await?;
+        authority.recheck(app,&cancel)?;
         return preview(app,actor,Some(&access),None,Action::Pgvector{backend,token:result.approval_token},method,
             json!({"target":result.target,"schema":result.schema,"sql":result.sql,"readiness":result.readiness}),300);
     }
@@ -322,6 +368,7 @@ async fn serve_inner(app:&Arc<App>,actor:&str,method:&str,params:Value,cancel:Ca
             let bytes=tokio::fs::read(&p.path).await.map_err(|_|MemoryError::new("transfer_unavailable"))?;
             if bytes.len()>8*1024*1024{return Err(MemoryError::new("transfer_too_large"));}
             serde_json::from_slice(&bytes).map_err(|_|MemoryError::new("invalid_transfer"))?};
+        authority.recheck(app,&cancel)?;
         if transfer.namespace!=access.scope.namespace{return Err(MemoryError::new("transfer_scope_mismatch"));}
         let details=json!({"path":p.path,"namespace":transfer.namespace,"space":transfer.space,"documents":transfer.rows.len(),
             "sha256":digest(&serde_json::to_vec(&transfer).map_err(|_|MemoryError::new("invalid_transfer"))?)});
@@ -333,4 +380,55 @@ async fn serve_inner(app:&Arc<App>,actor:&str,method:&str,params:Value,cancel:Ca
 fn validate_binding(profile:&EmbeddingProfile,binding:&LocalBinding)->Result<(),MemoryError>{
     let local=profile.local.as_ref().ok_or_else(||MemoryError::new("invalid_embedding_profile"))?;
     if profile.mode!=EmbeddingMode::LocalCpu||local.model_sha256!=binding.model.sha256||local.tokenizer_sha256!=binding.tokenizer.sha256{return Err(MemoryError::new("asset_mismatch"));}Ok(())
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn revocation_before_publication_and_paired_positive() {
+        let home=std::env::temp_dir().join(format!("beans-setup-authority-{}",uuid::Uuid::new_v4()));
+        let app=App::load(crate::config::Config{home:home.clone(),port:0}).unwrap();
+        crate::identity::create(&app,Some("Fixture Runner".into())).unwrap();
+        let actor=crate::keys::Machine::generate().pubkey();
+        for revoked in [true,false] {
+            app.state.lock().unwrap().listed_machines.insert(actor.clone(),1);
+            let authority=SetupAuthority::capture(&app,&actor).unwrap();
+            let reached=Arc::new(tokio::sync::Barrier::new(2));
+            let resume=Arc::new(tokio::sync::Barrier::new(2));
+            let worker={
+                let app=app.clone();let reached=reached.clone();let resume=resume.clone();
+                tokio::spawn(async move {
+                    // Deterministic await completion before the real local commit fence.
+                    reached.wait().await;resume.wait().await;
+                    authority.commit(&app,&CancellationToken::new(),||{
+                        save_binding(&app,"fixture","profile",&json!({"ready":true}))?;
+                        Ok(())
+                    })
+                })
+            };
+            reached.wait().await;
+            if revoked { app.state.lock().unwrap().listed_machines.remove(&actor); }
+            resume.wait().await;
+            let result=worker.await.unwrap();
+            let binding=app.store.memory_binding(&key(&app,"fixture","profile").unwrap()).unwrap();
+            if revoked {
+                assert_eq!(result.unwrap_err().code,"requester_revoked");
+                assert!(binding.is_none());
+            } else {
+                result.unwrap();
+                assert_eq!(serde_json::from_str::<Value>(&binding.unwrap()).unwrap(),json!({"ready":true}));
+            }
+        }
+        let local=app.this_device_id().unwrap();
+        SetupAuthority::capture(&app,&local).unwrap(); // Local self needs no relay listing.
+        let stale=SetupAuthority::capture(&app,&actor).unwrap();
+        let lifecycle=app.plugin_lifecycle.lock();
+        lifecycle.set((lifecycle.get().0+1,false)); // Same account key, new incarnation.
+        drop(lifecycle);
+        assert_eq!(stale.recheck(&app,&CancellationToken::new()).unwrap_err().code,"authority_changed");
+        drop(app);
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }

@@ -10,6 +10,7 @@ pub mod frontmatter;
 pub mod harness;
 pub mod hooks;
 pub mod skill_discovery;
+pub mod skill_library;
 pub mod skills;
 pub mod system_prompt;
 pub mod templates;

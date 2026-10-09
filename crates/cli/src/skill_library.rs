@@ -94,23 +94,33 @@ fn valid_summary(s: &Summary) -> bool {
         && s.name.as_deref().is_none_or(|s| text(s, 256)) && s.description.as_deref().is_none_or(|s| text(s, 2048))
         && s.license.as_deref().is_none_or(|s| text(s, 256)) && s.findings.len() <= 64 && s.findings.iter().all(|s| text(s, 512))
 }
-fn decode(method: &str, value: Value, runner: &str) -> Result<Value, String> {
+fn summary_record(value: &Value) -> Result<(), String> {
+    let object = value.as_object().ok_or("invalid_skill_library_response")?;
+    let keys = ["name", "description", "license", "findings", "file_count", "total_bytes"];
+    if object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key)) {
+        return Err("invalid_skill_library_response".into());
+    }
+    Ok(())
+}
+fn decode(method: &str, value: Value, runner: &str, requested_removal: Option<&str>) -> Result<Value, String> {
     let invalid = || "invalid_skill_library_response".to_string();
     match method {
         "skills.library.preview" => {
+            summary_record(&value["summary"])?;
             let r: PreviewReply = serde_json::from_value(value).map_err(|_| invalid())?;
             if r.version != 1 || r.runner_id != runner || !opaque(&r.token) || r.expires_in_seconds == 0 || r.expires_in_seconds > 300
                 || r.source.is_empty() || !text(&r.source, 4096) || r.destination.is_empty() || !text(&r.destination, 4096) || !valid_summary(&r.summary) { return Err(invalid()); }
             serde_json::to_value(r).map_err(|_| invalid())
         }
         "skills.library.import" => {
+            summary_record(&value["summary"])?;
             let r: ImportReply = serde_json::from_value(value).map_err(|_| invalid())?;
             if r.version != 1 || r.runner_id != runner || !opaque(&r.managed_id) || !valid_summary(&r.summary) { return Err(invalid()); }
             serde_json::to_value(r).map_err(|_| invalid())
         }
         "skills.library.uninstall" => {
             let r: UninstallReply = serde_json::from_value(value).map_err(|_| invalid())?;
-            if r.version != 1 || r.runner_id != runner || !opaque(&r.managed_id) { return Err(invalid()); }
+            if r.version != 1 || r.runner_id != runner || !opaque(&r.managed_id) || requested_removal != Some(r.managed_id.as_str()) { return Err(invalid()); }
             serde_json::to_value(r).map_err(|_| invalid())
         }
         _ => Err(invalid()),
@@ -124,9 +134,38 @@ pub async fn dispatch(app: &Arc<App>, method: &str, body: Value) -> Result<Value
     let result = if actor == operation.runner() { serve_as(app, method, body, &actor).await? }
         else { crate::requests::ask(app, operation.runner(), method, body).await? };
     let _guards = authority.enter(app, false)?;
-    let result = decode(method, result, operation.runner())?;
+    let requested_removal = match &operation { Operation::Uninstall(s) => Some(s.managed_id.as_str()), _ => None };
+    let result = decode(method, result, operation.runner(), requested_removal)?;
     if let Operation::Preview(s) = operation { if result["source"] != s.root { return Err("invalid_skill_library_response".into()); } }
     Ok(result)
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rejects_missing_nullable_summary_and_wrong_removal_id() {
+        let runner = "synthetic-runner";
+        let id = "a".repeat(32);
+        let summary = json!({"name":null,"description":null,"license":null,"findings":[],"file_count":1,"total_bytes":3});
+        let preview = json!({"version":1,"token":id,"expires_in_seconds":300,"runner_id":runner,"source":"/selected","destination":"/owned/skill-library","summary":summary});
+        let imported = json!({"version":1,"runner_id":runner,"managed_id":id,"summary":summary,"durability_warning":false});
+        for (method, valid) in [("skills.library.preview", preview), ("skills.library.import", imported)] {
+            assert_eq!(decode(method, valid.clone(), runner, None).unwrap(), valid);
+            for key in ["name", "description", "license", "findings", "file_count", "total_bytes"] {
+                let mut missing = valid.clone();
+                missing["summary"].as_object_mut().unwrap().remove(key);
+                assert_eq!(decode(method, missing, runner, None).unwrap_err(), "invalid_skill_library_response", "missing {key} in {method}");
+            }
+        }
+        let removed = json!({"version":1,"runner_id":runner,"managed_id":id,"cleanup_warning":false,"durability_warning":false});
+        assert_eq!(decode("skills.library.uninstall", removed.clone(), runner, Some(&id)).unwrap(), removed);
+        let mut wrong = removed;
+        wrong["managed_id"] = json!("b".repeat(32));
+        assert_eq!(decode("skills.library.uninstall", wrong, runner, Some(&id)).unwrap_err(), "invalid_skill_library_response");
+    }
 }
 
 pub async fn serve_as(app: &Arc<App>, method: &str, body: Value, actor: &str) -> Result<Value, String> {

@@ -29,6 +29,8 @@ Desktop homes are `~/.beans-v2` and `~/.beans-dev-v2`, using ports 4874 and 4875
 
 A retained identity requires its machine record; read-only admission rejects an identity-only partial account before permissions, database setup or key creation. A marked empty home and a paired Device holding only its machine record remain valid.
 
+`Config::validate_home` runs a private read-only membership-root preflight after checking the home directory and before reading the account format marker. Every registry-present root is refused as an account, including a valid registry; membership admission remains disabled. The preflight bounds registry reads and checks the closed registry schema and derived namespaces without creating or changing files. A membership directory or migration journal without a registry also refuses admission. With no membership artifacts, ordinary legacy format admission continues unchanged. This boundary does not enable migration or establish protection against older binaries.
+
 This is an incompatible fresh format, not an upgrade of existing accounts. No reset, migration, old-home reuse or mixed-format pairing/sync occurs. Existing installed apps, accounts and services remain separate; a production cutover needs its own explicit authorization.
 
 

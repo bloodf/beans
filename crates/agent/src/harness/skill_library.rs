@@ -105,6 +105,15 @@ impl SkillLibrary {
         { let _ = selected_source; Err(unsupported()) }
     }
 
+    /// Validates an existing managed copy and recomputes metadata from its current bytes.
+    /// Returned relative inventory labels are not resource-open capabilities.
+    pub fn validated_inventory(&self, managed_id: &str) -> io::Result<SourcePreview> {
+        #[cfg(target_os = "linux")]
+        { linux::validated_inventory(&self.root, managed_id) }
+        #[cfg(not(target_os = "linux"))]
+        { let _ = managed_id; Err(unsupported()) }
+    }
+
     /// Compares actual staged bytes with approval before acquiring publication authority.
     /// The returned guard remains owned here through publication and durability reporting.
     pub fn import_approved<G>(&self, selected_source: &Path, source_host: &str, expected: &SourcePreview,
@@ -444,10 +453,8 @@ mod linux {
         if total > MAX_TOTAL_BYTES || !manifest.files.iter().any(|f| f.path == "SKILL.md") { return Err(invalid("invalid manifest content bounds")); }
         Ok(())
     }
-    pub(super) fn uninstall<G>(root: &File, id: &str, admit_removal: impl FnOnce() -> io::Result<G>) -> io::Result<UninstallOutcome> {
-        if !valid_id(id) { return Err(invalid("not an exact managed bundle ID")); }
-        let _lock = lock(root)?;
-        private(root)?;
+    // Caller retains the root lock through validation and any subsequent publication.
+    fn validated_copy(root: &File, id: &str) -> io::Result<(File, Inventory, Option<(BTreeMap<String, String>, Vec<String>)>)> {
         let bundle = open_at(root, Path::new(id), libc::O_RDONLY | libc::O_DIRECTORY, 0, true)?;
         private(&bundle)?;
         let labels = entries(&bundle, &mut 0)?;
@@ -457,8 +464,23 @@ mod linux {
         validate(&manifest, id)?;
         let content = open_at(&bundle, Path::new("content"), libc::O_RDONLY | libc::O_DIRECTORY, 0, true)?;
         let mut actual = Inventory::default();
-        walk(&content, &content, None, root, "", 0, &mut actual, &mut None)?;
+        let mut metadata = None;
+        walk(&content, &content, None, root, "", 0, &mut actual, &mut metadata)?;
         if actual.files != manifest.files || actual.directories != manifest.directories { return Err(invalid("managed copy differs from manifest; nothing removed")); }
+        Ok((bundle, actual, metadata))
+    }
+    pub(super) fn validated_inventory(root: &File, id: &str) -> io::Result<SourcePreview> {
+        if !valid_id(id) { return Err(invalid("not an exact managed bundle ID")); }
+        let _lock = lock(root)?;
+        private(root)?;
+        let (_, inventory, metadata) = validated_copy(root, id)?;
+        source_preview(inventory, metadata)
+    }
+    pub(super) fn uninstall<G>(root: &File, id: &str, admit_removal: impl FnOnce() -> io::Result<G>) -> io::Result<UninstallOutcome> {
+        if !valid_id(id) { return Err(invalid("not an exact managed bundle ID")); }
+        let _lock = lock(root)?;
+        private(root)?;
+        let (bundle, _, _) = validated_copy(root, id)?;
         let tomb = format!(".removed-{}", uuid::Uuid::new_v4().simple());
         let _authority = admit_removal()?;
         rename(root, id, &tomb)?;
@@ -522,11 +544,45 @@ mod linux {
         assert_eq!(manifest.files.iter().find(|f| f.path == "resources/data").unwrap().sha256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), skill);
         assert_eq!(fs::read(owned.join(&manifest.bundle_id).join("content/resources/data")).unwrap(), b"abc");
+        let validated = library.validated_inventory(&manifest.bundle_id).unwrap();
+        assert_eq!(validated, approved);
+        assert!(library.validated_inventory("../selected").is_err());
+        assert!(library.validated_inventory(&"0".repeat(32)).is_err());
+        let manifest_path = owned.join(&manifest.bundle_id).join("manifest.json");
+        let manifest_bytes = fs::read(&manifest_path).unwrap();
+        let mut forged_metadata = manifest.clone();
+        forged_metadata.metadata.insert("name".into(), "forged name".into());
+        forged_metadata.metadata.insert("description".into(), "forged description".into());
+        forged_metadata.license = Some("forged license".into());
+        forged_metadata.findings = vec!["forged findings".into()];
+        let forged_bytes = serde_json::to_vec(&forged_metadata).unwrap();
+        fs::write(&manifest_path, &forged_bytes).unwrap();
+        assert_eq!(library.validated_inventory(&manifest.bundle_id).unwrap(), approved);
+        assert_eq!(fs::read(&manifest_path).unwrap(), forged_bytes, "validation must not repair or rewrite the manifest");
+        assert_eq!(fs::read(owned.join(&manifest.bundle_id).join("content/SKILL.md")).unwrap(), skill);
+        fs::write(&manifest_path, b"{}").unwrap();
+        assert!(library.validated_inventory(&manifest.bundle_id).is_err());
+        assert_eq!(fs::read(&manifest_path).unwrap(), b"{}");
+        fs::write(&manifest_path, &manifest_bytes).unwrap();
+        let mut wrong_identity = manifest.clone();
+        wrong_identity.bundle_id = "0".repeat(32);
+        fs::write(&manifest_path, serde_json::to_vec(&wrong_identity).unwrap()).unwrap();
+        assert!(library.validated_inventory(&manifest.bundle_id).is_err());
+        fs::write(&manifest_path, &manifest_bytes).unwrap();
+        let skill_path = owned.join(&manifest.bundle_id).join("content/SKILL.md");
+        fs::write(&skill_path, b"---\nname: changed\ndescription: changed\n---\n").unwrap();
+        assert!(library.validated_inventory(&manifest.bundle_id).is_err());
+        fs::write(&skill_path, skill).unwrap();
+        assert_eq!(library.validated_inventory(&manifest.bundle_id).unwrap(), approved);
         assert!(library.uninstall("../selected").is_err());
         fs::write(owned.join(&manifest.bundle_id).join("content/resources/data"), b"changed").unwrap();
+        assert!(library.validated_inventory(&manifest.bundle_id).is_err());
+        assert_eq!(fs::read(owned.join(&manifest.bundle_id).join("content/resources/data")).unwrap(), b"changed");
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest_bytes);
         assert!(library.uninstall(&manifest.bundle_id).is_err());
         assert!(owned.join(&manifest.bundle_id).exists());
         fs::write(owned.join(&manifest.bundle_id).join("content/resources/data"), b"abc").unwrap();
+        assert_eq!(library.validated_inventory(&manifest.bundle_id).unwrap(), approved);
         let removed = library.uninstall(&manifest.bundle_id).unwrap(); assert!(removed.cleanup_warning.is_none());
         assert!(!owned.join(&manifest.bundle_id).exists()); assert_eq!(fs::read(owned.join("unrelated")).unwrap(), b"keep");
         assert_eq!(fs::read(source.join("resources/data")).unwrap(), b"abc");

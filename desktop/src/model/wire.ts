@@ -197,6 +197,7 @@ export interface WireChatUsage {
   output_tokens: number;
   cache_read_tokens: number;
   cost_usd: number;
+  cost_known?: boolean | null;
   turns: number;
   model: string;
 }
@@ -643,6 +644,7 @@ export function toUsage(wire: WireChatUsage): ChatUsage {
     outputTokens: wire.output_tokens,
     cacheReadTokens: wire.cache_read_tokens,
     costUSD: wire.cost_usd,
+    costKnown: wire.cost_known === true,
     turns: wire.turns,
     model: wire.model,
   };

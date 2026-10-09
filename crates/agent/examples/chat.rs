@@ -70,7 +70,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 HarnessEvent::RetryScheduled { attempt, max_attempts, delay_ms, error, .. } => println!("[retry {attempt}/{max_attempts} in {delay_ms} ms: {error}]"),
                 HarnessEvent::CompactionEnd { reason, tokens_before, .. } => println!("[compacted ({reason:?}), {} tokens before]", tokens_before.unwrap_or(0)),
                 HarnessEvent::Usage { usage, totals } => {
-                    eprintln!("[{} in, {} out, ${:.4}; ${:.4} so far]", usage.input + usage.cache_read, usage.output, usage.cost.total, totals.cost.total)
+                    eprint!("[{} in, {} out, ", usage.input + usage.cache_read, usage.output);
+                    if usage.cost.known == Some(true) {
+                        eprint!("${:.4}", usage.cost.total);
+                    } else {
+                        eprint!("${:.4} known subtotal; total unknown", usage.cost.total);
+                    }
+                    if totals.cost.known == Some(true) {
+                        eprintln!("; ${:.4} so far]", totals.cost.total);
+                    } else {
+                        eprintln!("; ${:.4} known subtotal so far; total unknown]", totals.cost.total);
+                    }
                 }
                 _ => {}
             }
@@ -107,7 +117,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }),
                 "stats" => {
                     let stats = harness.stats();
-                    println!("{} · thinking {:?} · context {} of {} tokens · {} messages · ${:.4}", stats.model, stats.thinking_level, stats.context_tokens, stats.context_window, stats.messages, stats.totals.cost.total);
+                    print!("{} · thinking {:?} · context {} of {} tokens · {} messages · ", stats.model, stats.thinking_level, stats.context_tokens, stats.context_window, stats.messages);
+                    if stats.totals.cost.known == Some(true) {
+                        println!("${:.4}", stats.totals.cost.total);
+                    } else {
+                        println!("${:.4} known subtotal · total unknown", stats.totals.cost.total);
+                    }
                     continue;
                 }
                 "tools" => {

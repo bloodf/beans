@@ -384,6 +384,7 @@ export interface ChatUsage {
   output_tokens: number;
   cache_read_tokens: number;
   cost_usd: number;
+  cost_known?: boolean | null;
   turns: number;
   model: string;
   updated_at: number;

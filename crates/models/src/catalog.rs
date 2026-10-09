@@ -149,7 +149,7 @@ fn model(entry: RawModel) -> Option<ModelInfo> {
         max_output: entry.max_output,
         reasoning: entry.reasoning,
         images: entry.images,
-        rates: entry.rates,
+        rates: Some(entry.rates),
         tiers: entry.tiers,
         thinking,
         levels,

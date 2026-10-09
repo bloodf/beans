@@ -659,6 +659,9 @@ pub struct ChatUsage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cost_usd: f64,
+    /// Whether cost_usd is a complete total rather than a known subtotal.
+    #[serde(default)]
+    pub cost_known: Option<bool>,
     pub turns: u64,
     /// The model of the last turn.
     pub model: String,

@@ -103,11 +103,19 @@ export function SheetHost() {
   return (
     <For each={sheets.read()}>
       {(entry, index) => {
+        let frame: HTMLDivElement | undefined;
+        // The dialog is named by its visible title, so a reader announces it on opening.
+        onSettled(() => {
+          const title = frame?.querySelector<HTMLElement>(".sheet-title");
+          if (!frame || !title) return;
+          title.id ||= `sheet-title-${entry.id}`;
+          frame.setAttribute("aria-labelledby", title.id);
+        });
         const covered = () => index() < sheets.read().length - 1;
         return (
           <Portal>
             <div class={["sheet-scrim", { covered: covered() }]} inert={covered()}>
-              <div class="sheet-frame" role="dialog" aria-modal="true" onMouseDown={keepFocus}>
+              <div ref={(el) => (frame = el)} class="sheet-frame" role="dialog" aria-modal="true" onMouseDown={keepFocus}>
                 {entry.render(() => removeSheet(entry.id))}
               </div>
             </div>

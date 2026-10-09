@@ -224,11 +224,27 @@ class Engine {
   /// turns it calls for.
   /// `replyTo` is the message the user answers, which the bot reads quoted.
   async sendMessage(chatId: string, text: string, files: PickedFile[] = [], mentions: string[] = [], replyTo?: string): Promise<Message> {
-    const attachments = files.map((file) => ({ path: pathOf(file.uri), name: file.name, mime: file.mime, width: file.width, height: file.height }));
-    const { message } = await core.request<{ message: Message }>("chats.send", { chat_id: chatId, text, attachments, mentions, ...(replyTo ? { reply_to: replyTo } : {}) });
-    upsertMessage(message);
-    setStatus(chatId, null);
-    return message;
+    const source = useStore.getState();
+    let invalidated = false;
+    const unsubscribe = useStore.subscribe(state => {
+      if (state.identityId !== source.identityId || state.relayUrl !== source.relayUrl
+        || state.deviceId !== source.deviceId || state.paired !== source.paired
+        || (source.chats.some(chat => chat.id === chatId) && !state.chats.some(chat => chat.id === chatId))) invalidated = true;
+    });
+    try {
+      const attachments = files.map((file) => ({ path: pathOf(file.uri), name: file.name, mime: file.mime, width: file.width, height: file.height }));
+      const result = await core.request<{ message: Message }>("chats.send", { chat_id: chatId, text, attachments, mentions, ...(replyTo ? { reply_to: replyTo } : {}) });
+      const message = result?.message;
+      if (!message || typeof message.id !== "string" || !message.id || message.chat_id !== chatId
+        || message.author?.kind !== "you" || message.body?.kind !== "text") throw new Error(t("Could not send"));
+      if (!invalidated) {
+        upsertMessage(message);
+        setStatus(chatId, null);
+      }
+      return message;
+    } finally {
+      unsubscribe();
+    }
   }
 
   /// Has the bot's turn read a message it holds for its next step now: a command it waits on goes

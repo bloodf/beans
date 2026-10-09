@@ -21,6 +21,8 @@ import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-spe
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ColorValue, type ImageSourcePropType, type StyleProp, type ViewStyle } from "react-native";
 import type { PickedFile } from "../core/engine";
+import { composerDraft, editComposerDraft, releaseComposerDraft, submitComposerDraft, type ComposerDraft } from "../core/composerDraft";
+import { useStore } from "../core/store";
 import { fileSize, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, type Bot } from "../core/model";
 import { notifyAvatarScroll } from "./avatarVisibility";
 import { BotAvatar } from "./Avatar";
@@ -97,26 +99,50 @@ function AttachMenu({ sources, tint, label }: { sources: AttachSource[]; tint: C
 }
 
 export function Composer({
+  chatId,
   members,
   isGroup,
   placeholder,
-  reply,
+  reply: incomingReply,
   onCancelReply,
   onSend,
 }: {
+  chatId: string;
   members: Bot[];
   isGroup: boolean;
   placeholder: string;
   /** The message the draft answers, shown above the text until it is sent or dropped. */
-  reply?: { name: string; text: string } | null;
+  reply?: NonNullable<ComposerDraft["reply"]> | null;
   onCancelReply?: () => void;
   /** The text, its files, and the bots its `@Name`s picked from the chips, by id. */
-  onSend: (text: string, attachments: PickedFile[], mentions: string[]) => void;
+  onSend: (text: string, attachments: PickedFile[], mentions: string[], replyTo?: string) => Promise<boolean>;
 }) {
   useLanguage();
   const p = usePalette();
-  const [text, setText] = useState("");
-  const [attachments, setAttachments] = useState<PickedFile[]>([]);
+  const identity = useStore(s => s.identityId);
+  const relay = useStore(s => s.relayUrl);
+  const draft = composerDraft(identity, relay, chatId);
+  const [, refresh] = useState(0);
+  const currentDraft = useRef(draft);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const reply = draft.reply;
+  currentDraft.current = draft;
+  const text = draft.text;
+  const attachments = draft.attachments;
+  const setText = (value: string | ((current: string) => string)) => {
+    if (!mounted.current || currentDraft.current !== draft) return;
+    editComposerDraft(draft, { text: typeof value === "function" ? value(draft.text) : value });
+  };
+  const setAttachments = (value: PickedFile[] | ((current: PickedFile[]) => PickedFile[])) => {
+    if (!mounted.current || currentDraft.current !== draft) return;
+    editComposerDraft(draft, { attachments: typeof value === "function" ? value(draft.attachments) : value });
+  };
+  useEffect(() => {
+    const changed = () => { refresh(value => value + 1); if (draft.reply) inputRef.current?.focus(); };
+    draft.listeners.add(changed);
+    return () => { draft.listeners.delete(changed); releaseComposerDraft(draft); };
+  }, [draft]);
   const [focused, setFocused] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const [listening, setListening] = useState(false);
@@ -126,18 +152,33 @@ export function Composer({
   /// stops or sends, the way Grok Bot commits a recording.
   const transcript = useRef("");
   const pendingSend = useRef(false);
+  const recordingActive = useRef(false);
+  const recordingOwner = useRef<ComposerDraft | null>(null);
+  useEffect(() => () => {
+    if (!recordingActive.current || recordingOwner.current !== draft) return;
+    recordingActive.current = false;
+    draft.recording = null;
+    pendingSend.current = false;
+    const words = transcript.current.trim();
+    if (words) editComposerDraft(draft, { text: joinDictation(draft.text, words) });
+    transcript.current = "";
+    ExpoSpeechRecognitionModule.abort();
+  }, [draft]);
   const inputRef = useRef<TextInput>(null);
   /// The bots picked from the `@` chips since the last send, in order. Two bots can share a name;
   /// the pick says which one the user meant.
-  const pickedMentions = useRef<Bot[]>([]);
+  const pickedMentions = { current: draft.mentions };
   const dictationMenuRef = useRef<MenuComponentRef>(null);
   const { language, setting: dictationSetting } = useDictationLanguage();
   const dictationLanguages = useSupportedLanguages();
   const canSend = text.trim().length > 0 || attachments.length > 0;
   // A swipe on a bubble starts a reply; the keyboard comes up for it.
   useEffect(() => {
-    if (reply) inputRef.current?.focus();
-  }, [reply]);
+    if (incomingReply) {
+      editComposerDraft(draft, { reply: incomingReply as NonNullable<ComposerDraft["reply"]> });
+      inputRef.current?.focus();
+    }
+  }, [incomingReply, draft]);
   const lineHeight = Font.body * 1.3;
 
   const mention = useMemo(() => {
@@ -154,15 +195,15 @@ export function Composer({
     setText((current) => current.replace(/@(\w*)$/, `@${bot.name} `));
   }
 
-  /// The picks whose `@Name` is still in the text, and a clean slate for the next message.
-  function takeMentions(value: string): string[] {
-    const lowered = value.toLowerCase();
-    const ids = pickedMentions.current.filter((bot) => lowered.includes(`@${bot.name.toLowerCase()}`)).map((bot) => bot.id);
-    pickedMentions.current = [];
-    return ids;
+  async function submit() {
+    if (currentDraft.current !== draft || draft.invalidated || draft.pending) return;
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    await submitComposerDraft(draft, onSend);
   }
 
   function send() {
+    if (currentDraft.current !== draft || draft.invalidated || draft.pending || pendingSend.current) return;
+    if (draft.recording && !recordingActive.current) return;
     if (listening) {
       // The recording ends, its words land in the field, and the message goes.
       pendingSend.current = true;
@@ -170,10 +211,7 @@ export function Composer({
       return;
     }
     if (!canSend) return;
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    onSend(text, attachments, takeMentions(text));
-    setText("");
-    setAttachments([]);
+    void submit();
   }
 
   // MARK: - Attachments
@@ -253,9 +291,11 @@ export function Composer({
   }, [listening]);
 
   useSpeechRecognitionEvent("result", (event) => {
+    if (!recordingActive.current || !mounted.current || recordingOwner.current !== currentDraft.current) return;
     transcript.current = event.results[0]?.transcript ?? "";
   });
   useSpeechRecognitionEvent("volumechange", (event) => {
+    if (!recordingActive.current || !mounted.current || recordingOwner.current !== currentDraft.current) return;
     // -2…10 from the recognizer; anything under 0 is silence.
     const level = Math.min(1, Math.max(0, event.value / 8));
     setLevels((current) => [...current.slice(1), level]);
@@ -267,11 +307,14 @@ export function Composer({
   });
 
   function finishDictation(problem: string | null = null) {
+    if (!recordingActive.current || currentDraft.current !== recordingOwner.current) return;
+    recordingActive.current = false;
+    draft.recording = null;
     setListening(false);
     setLevels([0, 0, 0, 0, 0]);
     const words = transcript.current.trim();
     transcript.current = "";
-    const next = words ? joinDictation(text, words) : text;
+    const next = words ? joinDictation(draft.text, words) : draft.text;
     if (words) setText(next);
     if (problem) {
       pendingSend.current = false;
@@ -280,21 +323,19 @@ export function Composer({
     }
     if (pendingSend.current) {
       pendingSend.current = false;
-      if (next.trim() || attachments.length) {
-        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        onSend(next, attachments, takeMentions(next));
-        setText("");
-        setAttachments([]);
-          }
+      if (!draft.uncertain && (next.trim() || draft.attachments.length)) void submit();
     }
   }
 
   async function dictate() {
+    if (draft.pending || draft.invalidated || pendingSend.current) return;
     if (listening) {
       ExpoSpeechRecognitionModule.stop();
       return;
     }
+    if (draft.recording) return;
     const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (!mounted.current || currentDraft.current !== draft || draft.invalidated || draft.pending || draft.recording) return;
     if (!permission.granted) {
       Alert.alert(t("Dictation needs the microphone"), t("Allow the microphone and speech recognition for Beans in Settings."), [
         { text: t("Settings"), onPress: () => void Linking.openSettings() },
@@ -303,6 +344,10 @@ export function Composer({
       return;
     }
     transcript.current = "";
+    recordingActive.current = true;
+    recordingOwner.current = draft;
+    draft.recording = {};
+    draft.uncertain = false;
     pendingSend.current = false;
     setListening(true);
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -452,7 +497,7 @@ export function Composer({
               {"  "}
               {reply.text}
             </Text>
-            <Pressable onPress={onCancelReply} hitSlop={10} accessibilityRole="button" accessibilityLabel={t("Cancel reply")}>
+            <Pressable onPress={() => { editComposerDraft(draft, { reply: null }); onCancelReply?.(); }} hitSlop={10} accessibilityRole="button" accessibilityLabel={t("Cancel reply")}>
               <Symbol name="xmark.circle.fill" size={17} color={p.tertiaryLabel} />
             </Pressable>
           </View>

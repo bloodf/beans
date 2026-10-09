@@ -40,19 +40,23 @@ mock.module("@expo/ui/jetpack-compose", () => ({ Column: "Column", Host: "Compos
 mock.module("@expo/ui/jetpack-compose/modifiers", () => ({ clickable: () => ({}), fillMaxWidth: () => ({}), padding: () => ({}) }));
 mock.module("expo-document-picker", () => ({}));
 mock.module("expo-glass-effect", () => ({ GlassView: "GlassView", isLiquidGlassAvailable: () => glass }));
-mock.module("expo-haptics", () => ({ selectionAsync: () => Promise.resolve() }));
+mock.module("expo-haptics", () => ({ selectionAsync: () => Promise.resolve(), impactAsync: () => Promise.resolve(), ImpactFeedbackStyle: { Light: "light", Medium: "medium" } }));
 mock.module("expo-image", () => ({ Image: "Image" }));
 mock.module("expo-image-picker", () => ({}));
-mock.module("expo-speech-recognition", () => ({ ExpoSpeechRecognitionModule: {}, useSpeechRecognitionEvent: () => {} }));
+const speechEvents = new Map<string, (event: any) => void>();
+mock.module("expo-speech-recognition", () => ({ ExpoSpeechRecognitionModule: { requestPermissionsAsync: async () => ({ granted: true }), start: () => {}, stop: () => {}, abort: () => {} }, useSpeechRecognitionEvent: (name: string, handler: any) => { speechEvents.set(name, handler); } }));
 mock.module("../core/model", () => ({ fileSize: () => "", MAX_ATTACHMENT_BYTES: 100_000_000, MAX_ATTACHMENTS: 10 }));
 mock.module("./avatarVisibility", () => ({ notifyAvatarScroll: () => {} }));
 mock.module("./Avatar", () => ({ BotAvatar: "BotAvatar" }));
 mock.module("./dictation", () => ({ automaticLanguage: () => "en", languageName: (tag: string) => tag, pickDictationLanguage: () => {}, setDictationLanguage: () => {}, useDictationLanguage: () => ({ language: "en" }), useSupportedLanguages: () => [] }));
 mock.module("../i18n", () => ({ t: (text: string) => text, useLanguage: () => {} }));
-mock.module("./format", () => ({ joinDictation: (text: string, words: string) => `${text} ${words}` }));
+mock.module("./format", () => ({ joinDictation: (text: string, words: string) => text ? `${text} ${words}` : words }));
 mock.module("./Symbol", () => ({ Symbol: "Symbol" }));
 mock.module("./theme", () => ({ Font: { body: 16 }, usePalette: () => ({ fill: "fill", label: "label", cell: "cell" }) }));
 mock.module("./navigation", () => ({ AndroidIcons: {} }));
+mock.module("../core/store", () => ({ useStore: (select: any) => select({ identityId: "consumer", relayUrl: "relay" }) }));
+const { composerDraft, clearComposerDrafts, editComposerDraft, invalidateComposerSends, removeComposerDraft } = await import("../core/composerDraft");
+let sendResult: () => Promise<boolean> = async () => true;
 const { Composer } = await import("./Composer");
 
 function mount(node: any, parent?: Node): any {
@@ -68,7 +72,7 @@ function mount(node: any, parent?: Node): any {
 }
 function render() {
   cursor = 0;
-  root = mount(Composer({ members: [], isGroup: false, placeholder: "Message", onSend: () => { sends++; } }));
+  root = mount(Composer({ chatId: "chat", members: [], isGroup: false, placeholder: "Message", onSend: () => { sends++; return sendResult(); } }));
 }
 function find(predicate: (node: Node) => boolean, node: any = root): Node | undefined {
   if (Array.isArray(node)) return node.map(child => find(predicate, child ?? null)).find(Boolean);
@@ -89,6 +93,7 @@ function tap(target: Node): Node {
   return target;
 }
 export function checkComposerTouchOwnership() {
+  clearComposerDrafts();
   slots = []; focusCalls = 0; sends = 0; platform = "ios";
   render();
   const initialPill = pill();
@@ -126,6 +131,58 @@ export function checkComposerTouchOwnership() {
   expect(sends).toBe(0);
   return { menuOwnsTouch: true, pillFocusCalls: focusCalls, draftPreserved: true, androidSheetOpened: true, nativePresentationVerified: false };
 }
+test("production Composer retains pending/refused draft and clears only unchanged acknowledgement", async () => {
+  clearComposerDrafts(); slots = []; sends = 0; platform = "ios";
+  let acknowledge!: (value: boolean) => void;
+  sendResult = () => new Promise(resolve => { acknowledge = resolve; });
+  render();
+  input().props.onChangeText("submitted"); render();
+  const draft = composerDraft("consumer", "relay", "chat");
+  editComposerDraft(draft, { attachments: [{ uri: "file:///a", name: "a", mime: "text/plain" }], reply: { messageID: "r", name: "Bot", text: "quote" } });
+  tap(find(node => node.props.accessibilityLabel === "Send")!);
+  render();
+  expect(input().props.value).toBe("submitted");
+  tap(find(node => node.props.accessibilityLabel === "Send")!);
+  expect(sends).toBe(1);
+  // Replacement hook slots are a remount; retained operation is production ownership.
+  slots = []; render();
+  tap(find(node => node.props.accessibilityLabel === "Send")!);
+  expect(sends).toBe(1);
+  acknowledge(false); await Promise.resolve(); await Promise.resolve();
+  expect(draft.reply?.messageID).toBe("r");
+  expect(draft.attachments[0].name).toBe("a");
+  render(); tap(find(node => node.props.accessibilityLabel === "Send")!);
+  input().props.onChangeText("new edit");
+  acknowledge(true); await Promise.resolve(); await Promise.resolve();
+  render(); expect(input().props.value).toBe("new edit");
+  tap(find(node => node.props.accessibilityLabel === "Send")!);
+  acknowledge(true); await Promise.resolve(); await Promise.resolve();
+  render(); expect(input().props.value).toBe("");
+  expect(draft.reply).toBe(null);
+  expect(draft.attachments).toEqual([]);
+  tap(find(node => node.props.accessibilityLabel === "Dictate")!);
+  await Promise.resolve(); await Promise.resolve(); render();
+  speechEvents.get("result")!({ results: [{ transcript: "dictated" }] });
+  tap(find(node => node.props.accessibilityLabel === "Send")!);
+  speechEvents.get("end")!({});
+  speechEvents.get("end")!({});
+  render(); expect(input().props.value).toBe("dictated");
+  expect(sends).toBe(4);
+  acknowledge(false); await Promise.resolve(); await Promise.resolve();
+  render(); expect(input().props.value).toBe("dictated");
+  render(); tap(find(node => node.props.accessibilityLabel === "Send")!);
+  invalidateComposerSends();
+  acknowledge(true); await Promise.resolve(); await Promise.resolve();
+  const dictatedDraft = composerDraft("consumer", "relay", "chat");
+  expect(dictatedDraft.text).toBe("dictated");
+  expect(composerDraft("other-account", "relay", "chat").text).toBe("");
+  removeComposerDraft("consumer", "relay", "chat");
+  const replacement = composerDraft("consumer", "relay", "chat");
+  editComposerDraft(replacement, { text: "replacement" });
+  editComposerDraft(dictatedDraft, { text: "late callback" });
+  expect(replacement.text).toBe("replacement");
+  sendResult = async () => true; clearComposerDrafts();
+});
 if (process.env.BEANS_COMPOSER_TOUCH_SMOKE === "1") {
   console.log(JSON.stringify(checkComposerTouchOwnership()));
 } else {

@@ -30,6 +30,10 @@ struct Cli {
 
 #[derive(Subcommands, Debug)]
 enum Command {
+    /// Explicit storage-only transition and admission of an empty marked scratch home.
+    StorageUpgrade {
+        scratch_home: PathBuf,
+    },
     /// Run the local API the app connects to.
     Serve {
         /// Exit when this process is gone. The app passes its own pid so a killed app never
@@ -302,6 +306,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Update { command } => return update(config.port, command).await,
         Command::Service { command } => return service(&config, command).await,
         Command::SelfUpdate => anyhow::bail!("{}", beans::update::UNAVAILABLE),
+        Command::StorageUpgrade { scratch_home } => {
+            let _store = Config { home: scratch_home, port: 0 }.preload_staged_storage()?;
+            return Ok(());
+        }
         command => command,
     };
     let app = if matches!(command, Command::Doctor { .. }) {
@@ -423,6 +431,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Update { .. } => unreachable!("handled before the data folder opens"),
+        Command::StorageUpgrade { .. } => unreachable!("handled before App initialization"),
     }
 }
 

@@ -22,6 +22,14 @@ pub enum Format {
 struct FormatMarker {
     format: Format,
 }
+
+/// Storage-only protocol-6 marker; ordinary account admission still uses FormatMarker.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StagedFormatMarker {
+    format: Format,
+    min_core_protocol: u32,
+}
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SELF_UPDATE_UNAVAILABLE: &str = "CLI self-update is unavailable in Beans; use the signed Beans update mechanism.";
 
@@ -149,8 +157,20 @@ impl Config {
     }
 
     pub fn ensure_home(&self) -> anyhow::Result<()> {
+        let _admission = self.ensure_home_admission()?;
+        Ok(())
+    }
+
+    /// Acquire before creation and return exclusion to the caller through its DB effects.
+    pub fn ensure_home_admission(&self) -> anyhow::Result<Option<StorageAdmission>> {
+        #[cfg(unix)]
+        let mut admission = Some(StorageAdmission::acquire_creation(&self.home)?);
+        #[cfg(not(unix))]
+        let admission: Option<StorageAdmission> = None;
         let marked = self.validate_home()?;
         std::fs::create_dir_all(&self.home)?;
+        #[cfg(unix)]
+        if let Some(guard) = admission.as_mut() { guard.attach_created_home()?; }
         set_private(&self.home)?;
         if !marked {
             use std::io::Write;
@@ -164,6 +184,258 @@ impl Config {
             file.write_all(&serde_json::to_vec(&FormatMarker { format: Format::BeansV2 })?)?;
             file.sync_all()?;
         }
+        #[cfg(unix)]
+        if let Some(guard) = admission.as_ref() {
+            guard.directory.sync_all()?;
+            for ancestor in &guard.ancestors { ancestor.sync_all()?; }
+            guard.revalidate_legacy()?;
+        }
+        self.validate_home()?;
+        Ok(admission)
+    }
+
+    /// Explicit transition of an empty marked scratch home, coordinated with store admission.
+    pub fn upgrade_staged_storage(&self) -> anyhow::Result<()> {
+        #[cfg(not(unix))]
+        anyhow::bail!("Staged storage requires Unix descriptor admission");
+        #[cfg(unix)] {
+            use std::io::Write;
+            use std::os::fd::AsRawFd;
+            let admission = StorageAdmission::acquire(&self.home)?;
+            self.membership_preflight()?;
+            let mut marker = admission.marker()?;
+            let original = StorageAdmission::read_marker(&mut marker)?;
+            serde_json::from_slice::<FormatMarker>(&original)?;
+            if !self.validate_home()? {
+                anyhow::bail!("Staged storage requires an existing Beans v2 marker");
+            }
+            for entry in std::fs::read_dir(&self.home)? {
+                if entry?.file_name() != "format.json" {
+                    anyhow::bail!("Staged storage accepts only an empty marked scratch home");
+                }
+            }
+            admission.verify(&marker, &original)?;
+            let temporary = std::ffi::CString::new(format!(".format-{}", uuid::Uuid::new_v4()))?;
+            let mut file = admission.open_child(&temporary, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
+            let result = (|| -> anyhow::Result<()> {
+                file.write_all(br#"{"format":"beans-v2","min_core_protocol":6}"#)?;
+                file.sync_all()?;
+                admission.verify(&marker, &original)?;
+                let target = std::ffi::CString::new("format.json")?;
+                // Both names resolve beneath the locked, retained directory descriptor.
+                if unsafe { libc::renameat(admission.directory.as_raw_fd(), temporary.as_ptr(), admission.directory.as_raw_fd(), target.as_ptr()) } != 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                admission.revalidate_staged()
+            })();
+            if result.is_err() {
+                unsafe { libc::unlinkat(admission.directory.as_raw_fd(), temporary.as_ptr(), 0) };
+            }
+            result
+        }
+    }
+
+    /// The production CLI invokes this before constructing App or loading account state.
+    pub fn preload_staged_storage(&self) -> anyhow::Result<crate::local_store::LocalStore> {
+        self.upgrade_staged_storage()?;
+        crate::local_store::LocalStore::open_staged(&self.database_path())
+    }
+
+    /// Retain this guard through SQLite admission and setup; errors precede database mutation.
+    pub fn staged_storage_admission(&self) -> anyhow::Result<StorageAdmission> {
+        let admission = StorageAdmission::acquire(&self.home)?;
+        admission.revalidate_staged()?;
+        Ok(admission)
+    }
+}
+
+/// A directory-scoped cross-process admission lock, released by closing its descriptor.
+pub struct StorageAdmission {
+    directory: std::fs::File,
+    home: PathBuf,
+    ancestors: Vec<std::fs::File>,
+}
+
+impl StorageAdmission {
+    pub fn acquire(home: &Path) -> anyhow::Result<Self> {
+        #[cfg(not(unix))]
+        anyhow::bail!("Descriptor storage admission is unsupported on this platform");
+        #[cfg(unix)] {
+            Self::acquire_path(home, false)
+        }
+    }
+
+    #[cfg(unix)]
+    fn acquire_creation(home: &Path) -> anyhow::Result<Self> {
+        Self::acquire_path(home, true)
+    }
+
+    #[cfg(unix)]
+    fn acquire_path(home: &Path, allow_missing: bool) -> anyhow::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        let mut directory = Self::open_directory(Path::new(if home.is_absolute() { "/" } else { "." }))?;
+        let mut ancestors = Vec::new();
+        let segments: Vec<_> = home.components().filter_map(|part| match part {
+            std::path::Component::Normal(segment) => Some(Ok(segment)),
+            std::path::Component::RootDir | std::path::Component::CurDir => None,
+            _ => Some(Err(anyhow::anyhow!("Storage admission refuses parent traversal"))),
+        }).collect::<anyhow::Result<_>>()?;
+        for segment in segments {
+            Self::lock(&directory, libc::LOCK_SH)?;
+            let name = std::ffi::CString::new(segment.as_bytes())?;
+            let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            if fd < 0 {
+                let error = std::io::Error::last_os_error();
+                if allow_missing && error.kind() == std::io::ErrorKind::NotFound {
+                    Self::lock(&directory, libc::LOCK_EX)?;
+                    return Ok(Self { directory, home: home.into(), ancestors });
+                }
+                return Err(error.into());
+            }
+            ancestors.push(directory);
+            directory = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        Self::lock(&directory, libc::LOCK_EX)?;
+        Ok(Self { directory, home: home.into(), ancestors })
+    }
+
+    #[cfg(unix)]
+    fn lock(file: &std::fs::File, mode: i32) -> anyhow::Result<()> {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } != 0 {
+            anyhow::bail!("Storage admission is busy or uncertain");
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn attach_created_home(&mut self) -> anyhow::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let directory = Self::open_directory(&self.home)?;
+        if directory.metadata()?.dev() != self.directory.metadata()?.dev()
+            || directory.metadata()?.ino() != self.directory.metadata()?.ino() {
+            Self::lock(&directory, libc::LOCK_EX)?;
+            let ancestor = std::mem::replace(&mut self.directory, directory);
+            self.ancestors.push(ancestor);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn revalidate_legacy(&self) -> anyhow::Result<()> {
+        #[cfg(not(unix))]
+        anyhow::bail!("Descriptor storage admission is unsupported on this platform");
+        #[cfg(unix)] {
+            let mut marker = self.marker()?;
+            let bytes = Self::read_marker(&mut marker)?;
+            serde_json::from_slice::<FormatMarker>(&bytes)?;
+            marker.sync_all()?;
+            self.directory.sync_all()?;
+            self.verify(&marker, &bytes)?;
+            if Self::read_marker(&mut marker)? != bytes { anyhow::bail!("Legacy marker changed after sync"); }
+            Ok(())
+        }
+    }
+
+    /// Bind borrowed admission to the actual requested database parent, not path spelling.
+    pub(crate) fn validate_target(&self, home: &Path) -> anyhow::Result<()> {
+        #[cfg(not(unix))]
+        anyhow::bail!("Descriptor storage admission is unsupported on this platform");
+        #[cfg(unix)] {
+            use std::os::unix::fs::MetadataExt;
+            let target = Self::open_directory(home)?.metadata()?;
+            let retained = self.directory.metadata()?;
+            if target.dev() != retained.dev() || target.ino() != retained.ino() {
+                anyhow::bail!("Storage admission guard belongs to a different home");
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn open_directory(home: &Path) -> anyhow::Result<std::fs::File> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        let mut options = std::fs::OpenOptions::new();
+        use std::os::unix::fs::OpenOptionsExt;
+        options.read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let mut directory = options.open(if home.is_absolute() { "/" } else { "." })?;
+        for part in home.components() {
+            let segment = match part {
+                std::path::Component::Normal(segment) => segment,
+                std::path::Component::RootDir | std::path::Component::CurDir => continue,
+                _ => anyhow::bail!("Storage admission refuses parent traversal"),
+            };
+            let name = std::ffi::CString::new(segment.as_bytes())?;
+            let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            if fd < 0 { return Err(std::io::Error::last_os_error().into()); }
+            directory = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        Ok(directory)
+    }
+
+    #[cfg(unix)]
+    fn open_child(&self, name: &std::ffi::CStr, flags: i32) -> anyhow::Result<std::fs::File> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let fd = unsafe { libc::openat(self.directory.as_raw_fd(), name.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC, 0o600) };
+        if fd < 0 { return Err(std::io::Error::last_os_error().into()); }
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+
+    #[cfg(unix)]
+    fn marker(&self) -> anyhow::Result<std::fs::File> {
+        self.open_child(&std::ffi::CString::new("format.json")?, libc::O_RDONLY)
+    }
+
+    #[cfg(unix)]
+    fn read_marker(file: &mut std::fs::File) -> anyhow::Result<Vec<u8>> {
+        use std::io::{Read, Seek};
+        if !file.metadata()?.is_file() || file.metadata()?.len() > 256 {
+            anyhow::bail!("Storage marker must be a bounded regular file");
+        }
+        file.rewind()?;
+        let mut bytes = Vec::with_capacity(257);
+        file.take(257).read_to_end(&mut bytes)?;
+        if bytes.len() > 256 { anyhow::bail!("Storage marker exceeds its bound"); }
+        Ok(bytes)
+    }
+
+    #[cfg(unix)]
+    fn verify(&self, marker: &std::fs::File, bytes: &[u8]) -> anyhow::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let same = |a: std::fs::Metadata, b: std::fs::Metadata| a.dev() == b.dev() && a.ino() == b.ino();
+        if !same(self.directory.metadata()?, Self::open_directory(&self.home)?.metadata()?) {
+            anyhow::bail!("Storage directory changed during admission");
+        }
+        let mut current = self.marker()?;
+        if !same(marker.metadata()?, current.metadata()?) || Self::read_marker(&mut current)? != bytes {
+            anyhow::bail!("Storage marker changed during admission");
+        }
+        Ok(())
+    }
+
+    pub fn revalidate_staged(&self) -> anyhow::Result<()> {
+        #[cfg(not(unix))]
+        anyhow::bail!("Staged durability admission is unsupported on this platform");
+        #[cfg(unix)] {
+            self.revalidate_with_sync(|file| file.sync_all())
+        }
+    }
+
+    #[cfg(unix)]
+    fn revalidate_with_sync(&self, mut sync: impl FnMut(&std::fs::File) -> std::io::Result<()>) -> anyhow::Result<()> {
+        self.validate_target(&self.home)?;
+        // Every staged consumer, including borrowed Store admission, reaches this under
+        // its retained guard before marker sync or SQLite effects.
+        Config { home: self.home.clone(), port: 0 }.membership_preflight()?;
+        let mut marker = self.marker()?;
+        let bytes = Self::read_marker(&mut marker)?;
+        let parsed: StagedFormatMarker = serde_json::from_slice(&bytes)?;
+        if parsed.min_core_protocol != 6 { anyhow::bail!("Staged storage requires min_core_protocol 6"); }
+        sync(&marker)?;
+        sync(&self.directory)?;
+        self.verify(&marker, &bytes)?;
+        if Self::read_marker(&mut marker)? != bytes { anyhow::bail!("Storage marker content changed after sync"); }
         Ok(())
     }
 }
@@ -332,6 +604,175 @@ pub fn now_unix() -> i64 {
 #[cfg(test)]
 mod format_tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn staged_production_preload_refuses_uncertain_admission() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::tempdir().unwrap();
+        let config = Config { home: home.path().into(), port: 0 };
+        let fresh_home = home.path().join("fresh-parent");
+        let fresh = Config { home: fresh_home, port: 0 };
+        assert!(!fresh.home.exists());
+        let precreation = StorageAdmission::acquire_creation(&fresh.home).unwrap();
+        // Actual App and direct store cannot reach their first mkdir under exclusion.
+        assert!(crate::app::App::load(fresh.clone()).is_err());
+        assert!(crate::local_store::LocalStore::open(&fresh.database_path()).is_err());
+        assert!(!fresh.home.exists());
+        drop(precreation);
+        let admission = fresh.ensure_home_admission().unwrap();
+        let legacy = std::fs::read(fresh.home.join("format.json")).unwrap();
+        assert!(fresh.upgrade_staged_storage().is_err());
+        assert_eq!(std::fs::read(fresh.home.join("format.json")).unwrap(), legacy);
+        let store = crate::local_store::LocalStore::open_with_admission(&fresh.database_path(), admission.as_ref(), false).unwrap();
+        store.recover_memory_queue().unwrap();
+        store.load_state().unwrap();
+        assert!(fresh.upgrade_staged_storage().is_err());
+        drop(store);
+        drop(admission);
+        let app = crate::app::App::load(fresh.clone()).unwrap();
+        assert!(fresh.database_path().exists());
+        assert_eq!(std::fs::read(fresh.home.join("format.json")).unwrap(), legacy);
+        drop(app);
+        std::fs::remove_dir_all(&fresh.home).unwrap();
+        config.ensure_home().unwrap();
+        let target = Config { home: home.path().join("binding-target"), port: 0 };
+        target.ensure_home().unwrap();
+        let target_marker = std::fs::read(target.home.join("format.json")).unwrap();
+        let ordinary_guard = config.ensure_home_admission().unwrap();
+        assert!(crate::local_store::LocalStore::open_with_admission(&target.database_path(), ordinary_guard.as_ref(), false).is_err());
+        assert!(crate::local_store::LocalStore::open_with_admission(&target.database_path(), None, false).is_err());
+        assert_eq!(std::fs::read(target.home.join("format.json")).unwrap(), target_marker);
+        assert!(!target.database_path().exists());
+        drop(ordinary_guard);
+        std::fs::remove_file(target.home.join("format.json")).unwrap();
+        std::fs::remove_dir(&target.home).unwrap();
+        let marker_path = home.path().join("format.json");
+        let original = std::fs::read(&marker_path).unwrap();
+        let registry_path = config.home.join("memberships.json");
+        let registry = br#"{"registry_version":1,"active_membership_id":null,"memberships":[]}"#;
+        write_private(&registry_path, registry).unwrap();
+        assert!(config.upgrade_staged_storage().is_err());
+        assert!(crate::app::App::load(config.clone()).is_err());
+        assert!(crate::local_store::LocalStore::open(&config.database_path()).is_err());
+        assert_eq!(std::fs::read(&marker_path).unwrap(), original);
+        assert_eq!(std::fs::read(&registry_path).unwrap(), registry);
+        assert!(!config.database_path().exists());
+        std::fs::remove_file(&registry_path).unwrap();
+        std::fs::write(home.path().join("account"), b"keep").unwrap();
+        assert!(config.preload_staged_storage().is_err());
+        assert_eq!(std::fs::read(&marker_path).unwrap(), original);
+        assert!(!config.database_path().exists());
+        std::fs::remove_file(home.path().join("account")).unwrap();
+        let lock = StorageAdmission::acquire(home.path()).unwrap();
+        assert!(config.preload_staged_storage().is_err());
+        assert!(!config.database_path().exists());
+        drop(lock);
+        config.upgrade_staged_storage().unwrap();
+        let staged_marker = std::fs::read(&marker_path).unwrap();
+        let borrowed = config.staged_storage_admission().unwrap();
+        write_private(&registry_path, registry).unwrap();
+        assert!(borrowed.revalidate_staged().is_err());
+        assert!(crate::local_store::LocalStore::open_with_admission(&config.database_path(), Some(&borrowed), true).is_err());
+        assert_eq!(std::fs::read(&marker_path).unwrap(), staged_marker);
+        assert_eq!(std::fs::read(&registry_path).unwrap(), registry);
+        assert!(!config.database_path().exists());
+        assert!(!config.home.join("beans.sqlite3-wal").exists());
+        assert!(!config.home.join("beans.sqlite3-shm").exists());
+        std::fs::remove_file(&registry_path).unwrap();
+        for artifact in ["memberships", "membership-migration.json"] {
+            let path = config.home.join(artifact);
+            if artifact == "memberships" { std::fs::create_dir(&path).unwrap(); set_private(&path).unwrap(); }
+            else { write_private(&path, b"{}").unwrap(); }
+            assert!(crate::local_store::LocalStore::open_with_admission(&config.database_path(), Some(&borrowed), true).is_err());
+            assert_eq!(std::fs::read(&marker_path).unwrap(), staged_marker);
+            assert!(!config.database_path().exists());
+            assert!(!config.home.join("beans.sqlite3-wal").exists());
+            assert!(!config.home.join("beans.sqlite3-shm").exists());
+            if artifact == "memberships" { std::fs::remove_dir(&path).unwrap(); } else { std::fs::remove_file(&path).unwrap(); }
+        }
+        drop(borrowed);
+        write_private(&registry_path, registry).unwrap();
+        assert!(config.staged_storage_admission().is_err());
+        assert!(crate::local_store::LocalStore::open_staged(&config.database_path()).is_err());
+        assert_eq!(std::fs::read(&registry_path).unwrap(), registry);
+        assert_eq!(std::fs::read(&marker_path).unwrap(), staged_marker);
+        assert!(!config.database_path().exists());
+        std::fs::remove_file(&registry_path).unwrap();
+        let store = crate::local_store::LocalStore::open_staged(&config.database_path()).unwrap();
+        target.ensure_home().unwrap();
+        let target_marker = std::fs::read(target.home.join("format.json")).unwrap();
+        let target_store = crate::local_store::LocalStore::open(&target.database_path()).unwrap();
+        drop(target_store);
+        let target_database = std::fs::read(target.database_path()).unwrap();
+        let staged_guard = config.staged_storage_admission().unwrap();
+        assert!(crate::local_store::LocalStore::open_with_admission(&target.database_path(), Some(&staged_guard), true).is_err());
+        assert!(crate::local_store::LocalStore::open_with_admission(&target.database_path(), None, false).is_err());
+        assert_eq!(std::fs::read(target.home.join("format.json")).unwrap(), target_marker);
+        assert_eq!(std::fs::read(target.database_path()).unwrap(), target_database);
+        drop(staged_guard);
+        std::fs::remove_dir_all(&target.home).unwrap();
+        let connection = store.connection.into_inner().unwrap();
+        let mode: u32 = connection.pragma_query_value(None, "synchronous", |row| row.get(0)).unwrap();
+        assert_eq!(mode, 2);
+        connection.execute_batch("CREATE TABLE scratch(value TEXT); INSERT INTO scratch VALUES ('keep');").unwrap();
+        drop(connection);
+        let database = std::fs::read(config.database_path()).unwrap();
+        write_private(&registry_path, registry).unwrap();
+        assert!(crate::local_store::LocalStore::open_staged(&config.database_path()).is_err());
+        assert_eq!(std::fs::read(config.database_path()).unwrap(), database);
+        assert_eq!(std::fs::read(&marker_path).unwrap(), staged_marker);
+        assert_eq!(std::fs::read(&registry_path).unwrap(), registry);
+        std::fs::remove_file(&registry_path).unwrap();
+        assert!(crate::local_store::LocalStore::open(&config.database_path()).is_err());
+        let admission = config.staged_storage_admission().unwrap();
+        for fail_at in [1, 2] {
+            let mut calls = 0;
+            assert!(admission.revalidate_with_sync(|file| {
+                calls += 1;
+                if calls == fail_at { return Err(std::io::Error::other("uncertain durability")); }
+                file.sync_all()
+            }).is_err());
+            assert_eq!(std::fs::read(config.database_path()).unwrap(), database);
+        }
+        let mut marker = admission.marker().unwrap();
+        let bytes = StorageAdmission::read_marker(&mut marker).unwrap();
+        let moved = home.path().with_extension("displaced");
+        std::fs::rename(home.path(), &moved).unwrap();
+        std::fs::create_dir(home.path()).unwrap();
+        assert!(admission.verify(&marker, &bytes).is_err());
+        std::fs::remove_dir(home.path()).unwrap();
+        std::fs::rename(&moved, home.path()).unwrap();
+        std::fs::rename(&marker_path, home.path().join("retained-marker")).unwrap();
+        std::fs::write(&marker_path, &bytes).unwrap();
+        assert!(admission.verify(&marker, &bytes).is_err());
+        assert_eq!(std::fs::read(config.database_path()).unwrap(), database);
+        std::fs::remove_file(&marker_path).unwrap();
+        symlink(home.path().join("retained-marker"), &marker_path).unwrap();
+        assert!(admission.revalidate_staged().is_err());
+        drop(admission);
+        assert!(crate::local_store::LocalStore::open_staged(&config.database_path()).is_err());
+        assert_eq!(std::fs::read(config.database_path()).unwrap(), database);
+        std::fs::remove_file(&marker_path).unwrap();
+        std::fs::rename(home.path().join("retained-marker"), &marker_path).unwrap();
+        let admission = config.staged_storage_admission().unwrap();
+        let mut marker = admission.marker().unwrap();
+        let bytes = StorageAdmission::read_marker(&mut marker).unwrap();
+        std::fs::write(&marker_path, br#"{"format":"beans-v2","min_core_protocol":7}"#).unwrap();
+        marker.sync_all().unwrap();
+        admission.directory.sync_all().unwrap();
+        assert!(admission.verify(&marker, &bytes).is_err());
+        drop(admission);
+        for invalid in [vec![b' '; 257], b"{".to_vec(), br#"{"format":"beans-v2"}"#.to_vec()] {
+            std::fs::write(&marker_path, invalid).unwrap();
+            assert!(crate::local_store::LocalStore::open_staged(&config.database_path()).is_err());
+            assert_eq!(std::fs::read(config.database_path()).unwrap(), database);
+        }
+        std::fs::remove_file(&marker_path).unwrap();
+        assert!(crate::local_store::LocalStore::open_staged(&config.database_path()).is_err());
+        assert_eq!(std::fs::read(config.database_path()).unwrap(), database);
+    }
+
 
     #[test]
     fn old_account_is_rejected_without_touching_bytes_or_permissions() {

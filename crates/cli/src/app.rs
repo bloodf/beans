@@ -254,14 +254,14 @@ impl App {
         if config.home.join("forget-in-progress.json").try_exists()? {
             anyhow::bail!("Account forget is incomplete; finish local cleanup before reopening this home");
         }
-        config.ensure_home()?;
+        let admission = config.ensure_home_admission()?;
         let settings = Settings::load(&config);
         let identity: Option<IdentityFile> = config::read_json_strict(&config.identity_path())?;
         let machine: Option<MachineFile> = config::read_json_strict(&config.machine_path())?;
         let credentials = Credentials::load(&config);
         let plugins = crate::plugins::Store::load(&config)?;
         let marketplace = crate::marketplace::Updates::load(&config);
-        let store = LocalStore::open(&config.database_path())?;
+        let store = LocalStore::open_with_admission(&config.database_path(), admission.as_ref(), false)?;
         let memory_config = crate::memory_service::load(&store, machine.as_ref().and_then(|m| m.dek().ok()))?;
         store.recover_memory_queue()?;
         let mut state = store.load_state()?;

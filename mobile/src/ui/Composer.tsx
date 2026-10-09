@@ -121,9 +121,12 @@ export function Composer({
   const p = usePalette();
   const identity = useStore(s => s.identityId);
   const relay = useStore(s => s.relayUrl);
+  const device = useStore(s => s.deviceId);
+  const paired = useStore(s => s.paired);
   const draft = composerDraft(identity, relay, chatId);
   const [, refresh] = useState(0);
   const currentDraft = useRef(draft);
+  if (currentDraft.current !== draft) currentDraft.current.permission = null;
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const reply = draft.reply;
@@ -154,16 +157,25 @@ export function Composer({
   const pendingSend = useRef(false);
   const recordingActive = useRef(false);
   const recordingOwner = useRef<ComposerDraft | null>(null);
-  useEffect(() => () => {
-    if (!recordingActive.current || recordingOwner.current !== draft) return;
-    recordingActive.current = false;
-    draft.recording = null;
+  useEffect(() => {
+    setListening(false);
+    setLevels([0, 0, 0, 0, 0]);
+    setElapsed(0);
     pendingSend.current = false;
-    const words = transcript.current.trim();
-    if (words) editComposerDraft(draft, { text: joinDictation(draft.text, words) });
-    transcript.current = "";
-    ExpoSpeechRecognitionModule.abort();
-  }, [draft]);
+    return () => {
+      draft.permission = null;
+      if (recordingActive.current && recordingOwner.current === draft) {
+        recordingActive.current = false;
+        draft.recording = null;
+        const words = transcript.current.trim();
+        if (words) editComposerDraft(draft, { text: joinDictation(draft.text, words) });
+        transcript.current = "";
+        ExpoSpeechRecognitionModule.abort();
+      }
+      pendingSend.current = false;
+      releaseComposerDraft(draft);
+    };
+  }, [draft, device, paired]);
   const inputRef = useRef<TextInput>(null);
   /// The bots picked from the `@` chips since the last send, in order. Two bots can share a name;
   /// the pick says which one the user meant.
@@ -333,31 +345,55 @@ export function Composer({
       ExpoSpeechRecognitionModule.stop();
       return;
     }
-    if (draft.recording) return;
-    const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-    if (!mounted.current || currentDraft.current !== draft || draft.invalidated || draft.pending || draft.recording) return;
-    if (!permission.granted) {
-      Alert.alert(t("Dictation needs the microphone"), t("Allow the microphone and speech recognition for Beans in Settings."), [
-        { text: t("Settings"), onPress: () => void Linking.openSettings() },
-        { text: t("OK"), style: "cancel" },
-      ]);
-      return;
-    }
-    transcript.current = "";
-    recordingActive.current = true;
-    recordingOwner.current = draft;
-    draft.recording = {};
-    draft.uncertain = false;
-    pendingSend.current = false;
-    setListening(true);
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    ExpoSpeechRecognitionModule.start({
-      lang: language,
-      interimResults: true,
-      continuous: true,
-      addsPunctuation: true,
-      volumeChangeEventOptions: { enabled: true, intervalMillis: 100 },
+    if (draft.recording || draft.permission) return;
+    const attempt = {};
+    draft.permission = attempt;
+    const unsubscribe = useStore.subscribe((state, previous) => {
+      if (state.identityId !== previous.identityId || state.relayUrl !== previous.relayUrl
+        || state.deviceId !== previous.deviceId || state.paired !== previous.paired) {
+        if (draft.permission === attempt) draft.permission = null;
+      }
     });
+    try {
+      const permission = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!mounted.current || currentDraft.current !== draft || draft.invalidated
+        || draft.permission !== attempt || draft.pending || draft.recording) return;
+      if (!permission.granted) {
+        Alert.alert(t("Dictation needs the microphone"), t("Allow the microphone and speech recognition for Beans in Settings."), [
+          { text: t("Settings"), onPress: () => void Linking.openSettings() },
+          { text: t("OK"), style: "cancel" },
+        ]);
+        return;
+      }
+      draft.permission = null;
+      transcript.current = "";
+      recordingActive.current = true;
+      recordingOwner.current = draft;
+      draft.recording = attempt;
+      draft.uncertain = false;
+      pendingSend.current = false;
+      setListening(true);
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      ExpoSpeechRecognitionModule.start({
+        lang: language, interimResults: true, continuous: true, addsPunctuation: true,
+        volumeChangeEventOptions: { enabled: true, intervalMillis: 100 },
+      });
+    } catch {
+      const ownsAttempt = draft.permission === attempt || draft.recording === attempt;
+      if (draft.recording === attempt) {
+        draft.recording = null;
+        recordingActive.current = false;
+        pendingSend.current = false;
+        setListening(false);
+        setLevels([0, 0, 0, 0, 0]);
+        setElapsed(0);
+      }
+      if (ownsAttempt && mounted.current && currentDraft.current === draft) Alert.alert(t("Dictation stopped"));
+    } finally {
+      if (draft.permission === attempt) draft.permission = null;
+      unsubscribe();
+      releaseComposerDraft(draft);
+    }
   }
 
   const primary = listening || canSend ? "send" : "dictate";

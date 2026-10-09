@@ -104,12 +104,18 @@ export default function ChatScreen() {
   const status = useStore((s) => s.statuses[id] ?? null);
   const identityId = useStore(s => s.identityId);
   const relayUrl = useStore(s => s.relayUrl);
+  const deviceId = useStore(s => s.deviceId);
+  const paired = useStore(s => s.paired);
   const sendPresentation = useRef({ active: true, id });
   useEffect(() => {
     const owner = { active: true, id };
     sendPresentation.current = owner;
-    return () => { owner.active = false; };
-  }, [id, identityId, relayUrl]);
+    const unsubscribe = useStore.subscribe((state, previous) => {
+      if (state.identityId !== previous.identityId || state.relayUrl !== previous.relayUrl
+        || state.deviceId !== previous.deviceId || state.paired !== previous.paired) owner.active = false;
+    });
+    return () => { owner.active = false; unsubscribe(); };
+  }, [id, identityId, relayUrl, deviceId, paired]);
   const listRef = useRef<FlashListRef<Row>>(null);
   // The composer floats over the transcript and rides the keyboard (KeyboardFoot). The
   // list is never resized: the chat scroll view keeps a bottom inset for the composer and adds

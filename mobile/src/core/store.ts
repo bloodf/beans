@@ -317,9 +317,11 @@ export function removeMessage(chatId: string, messageId: string) {
   }));
 }
 
-export function removeChat(chatId: string) {
-  const source = useStore.getState();
-  removeComposerDraft(source.identityId, source.relayUrl, chatId);
+export function removeChat(chatId: string, discardDraft = true) {
+  if (discardDraft) {
+    const source = useStore.getState();
+    removeComposerDraft(source.identityId, source.relayUrl, chatId);
+  }
   useStore.setState((s) => ({
     chats: s.chats.filter((c) => c.id !== chatId),
     statuses: omit(s.statuses, chatId),

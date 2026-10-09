@@ -1,6 +1,19 @@
 // Simplified Chinese. The key is the English text passed to L(); `bun run l10n` checks this table.
 
 export const zh: Record<string, string> = {
+  "Skill discovery": "技能发现",
+  "Scan…": "扫描…",
+  "Scan": "扫描",
+  "Select a Runner": "选择 Runner",
+  "Absolute path on this Runner": "此 Runner 上的绝对路径",
+  "Absolute path on remote Runner": "远程 Runner 上的绝对路径",
+  "Read-only metadata. No import, resource loading or skill execution.": "只读元数据。不导入、不加载资源、不执行技能。",
+  "Scan runs on %@ at %@. Only Linux with secure openat2 is supported; no fallback.": "扫描在 %@ 的 %@ 执行。仅支持具有安全 openat2 的 Linux；无回退。",
+  "Secure discovery unavailable on selected Runner or root. No fallback.": "所选 Runner 或根目录不支持安全发现。无回退。",
+  "No skill metadata found within scan bounds.": "在扫描范围内未找到技能元数据。",
+  "Skill discovery failed. Check Runner, path and account, then scan again.": "技能发现失败。请检查 Runner、路径和账户，然后重新扫描。",
+  "Skill discovery is unavailable.": "技能发现不可用。",
+  "Skill discovery authority changed. Scan again.": "技能发现权限已变化。请重新扫描。",
   "Models updated": "模型已更新",
   "Models unchanged": "模型未变化",
   "Refresh Models": "刷新模型",

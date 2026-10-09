@@ -42,6 +42,7 @@ pub mod served;
 pub mod service;
 #[cfg(feature = "runner")]
 pub mod shell;
+pub mod skill_discovery;
 pub mod sync;
 pub mod local_store;
 #[cfg(feature = "runner")]

@@ -510,6 +510,16 @@ impl App {
         Ok(guard)
     }
 
+    /// The closure must not acquire `state`: membership remains locked through publication.
+    pub(crate) fn with_plugin_actor<T>(&self, expected: Option<u64>, actors: &[Option<&str>], publish: impl FnOnce(u64) -> Result<T, String>) -> Result<T, String> {
+        let lifecycle = self.plugin_admission(expected)?;
+        let state = self.state.lock().unwrap();
+        if actors.iter().flatten().any(|id| !state.listed_machines.contains_key(*id)) {
+            return Err("Request requires a paired Device".into());
+        }
+        publish(lifecycle.get().0)
+    }
+
     // MARK: - Keys
 
     pub fn has_identity(&self) -> bool {
@@ -1604,24 +1614,41 @@ impl App {
 
     /// Clears a chat's unread count. Read on this Device (`upload`), it clears on every other
     /// one through a `ClearUnread` blob.
-    pub fn mark_read(&self, chat_id: &str, upload: bool) {
-        let changed = {
-            let mut state = self.state.lock().unwrap();
-            match state.chats.iter_mut().find(|c| c.meta.id == chat_id) {
-                Some(chat) if chat.unread_count > 0 => {
-                    chat.unread_count = 0;
-                    true
-                }
-                _ => false,
-            }
+    pub fn mark_read(&self, chat_id: &str, upload: bool) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let Some(index) = state.chats.iter().position(|chat| chat.meta.id == chat_id && chat.unread_count > 0) else {
+            return Ok(());
         };
-        if changed {
-            self.save_state();
+        if !upload {
+            // Incoming reads retain the existing mutation and bulk-page save semantics.
+            // Their receipt/cursor replay durability is not established by this boundary.
+            state.chats[index].unread_count = 0;
+            drop(state);
+            let saved = if self.bulk_sync.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                let snapshot = self.state.lock().unwrap().clone();
+                self.store.save_state(&snapshot)
+            };
             self.emit(self.roster_summary());
-            if upload {
-                self.push_chat_op(&ChatBlob::ClearUnread { chat_id: chat_id.to_string() });
-            }
+            return saved;
         }
+        let dek = self.dek().ok_or_else(|| anyhow::anyhow!("Account key unavailable"))?;
+        let op = ChatBlob::ClearUnread { chat_id: chat_id.to_string() };
+        let item = OutboxItem {
+            id: uuid::Uuid::new_v4().to_string(), kind: "chat".into(), recipient: None,
+            ciphertext: crate::crypto::encrypt_json(&dek, "chat", &op)?,
+            slot: Some(op.slot()), group: Some(op.group()),
+        };
+        let mut snapshot = state.clone();
+        snapshot.chats[index].unread_count = 0;
+        remember_applied(&mut snapshot, &item.id);
+        self.store.queue_outbox_with_state(&item, &snapshot)?;
+        *state = snapshot;
+        drop(state);
+        self.outbox_notify.notify_waiters();
+        self.emit(self.roster_summary());
+        Ok(())
     }
 
     // MARK: - Messages
@@ -2184,6 +2211,62 @@ mod tests {
             slot: None,
             group: Some(crate::model::relay_name(chat_id)),
         }
+    }
+
+    #[tokio::test]
+    async fn mark_read_commits_unread_and_encrypted_outbox_or_returns_error() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let dek = [31; 32];
+        *app.machine.lock().unwrap() = Some(MachineFile {
+            format: config::Format::BeansV2,
+            machine_secret: keys::b64(&[17; 32]),
+            identity_pubkey: String::new(), content_pubkey: String::new(),
+            account_dek: keys::b64(&dek), name: "synthetic".into(), os: "ios".into(),
+            os_version: String::new(), model: String::new(), registered: false,
+            relay_url: None, created_at: 1,
+        });
+        let mut unread = chat("read", "dm", &[], None);
+        unread.unread_count = 3;
+        app.state.lock().unwrap().chats.push(unread);
+        app.store.save_state(&app.state.lock().unwrap()).unwrap();
+        let params = json!({"chat_id": "read"});
+        assert_eq!(crate::api::dispatch(app, "chats.mark_read", params.clone()).await.unwrap(), Value::Null);
+        assert_eq!(app.store.load_state().unwrap().chats[0].unread_count, 0);
+        let queued = app.store.outbox().unwrap();
+        assert_eq!(queued.len(), 1);
+        assert!(matches!(crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &queued[0].ciphertext).unwrap(),
+            ChatBlob::ClearUnread { chat_id } if chat_id == "read"));
+        assert_eq!(queued[0].slot, Some(ChatBlob::ClearUnread { chat_id: "read".into() }.slot()));
+        let receipt = app.store.load_state().unwrap().applied_blob_ids;
+        assert!(receipt.contains(&queued[0].id));
+        crate::api::dispatch(app, "chats.mark_read", params.clone()).await.unwrap();
+        assert_eq!(app.store.outbox().unwrap()[0].id, queued[0].id);
+        assert_eq!(app.store.load_state().unwrap().applied_blob_ids, receipt);
+
+        let db = rusqlite::Connection::open(app.config.database_path()).unwrap();
+        for (table, operation) in [("metadata", "INSERT"), ("outbox", "UPDATE")] {
+            app.state.lock().unwrap().chats[0].unread_count = 3;
+            app.store.save_state(&app.state.lock().unwrap()).unwrap();
+            db.execute_batch(&format!("CREATE TRIGGER fail_read BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, 'synthetic read failure'); END;")).unwrap();
+            let mut events = app.events.subscribe();
+            assert!(crate::api::dispatch(app, "chats.mark_read", params.clone()).await.is_err(), "{table} failure must reject API success");
+            assert_eq!(app.chat("read").unwrap().unread_count, 3);
+            assert_eq!(app.store.load_state().unwrap().chats[0].unread_count, 3);
+            assert_eq!(app.store.load_state().unwrap().applied_blob_ids, receipt);
+            assert_eq!(app.store.outbox().unwrap()[0].id, queued[0].id);
+            assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+            db.execute_batch("DROP TRIGGER fail_read;").unwrap();
+        }
+        crate::api::dispatch(app, "chats.mark_read", params.clone()).await.unwrap();
+        let committed = app.store.outbox().unwrap();
+        assert_eq!(committed.len(), 1);
+        assert_ne!(committed[0].id, queued[0].id);
+        crate::api::dispatch(app, "chats.mark_read", params).await.unwrap();
+        assert_eq!(app.store.outbox().unwrap()[0].id, committed[0].id);
+        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(reloaded.chat("read").unwrap().unread_count, 0);
+        assert_eq!(reloaded.store.outbox().unwrap()[0].id, committed[0].id);
     }
 
     #[test]

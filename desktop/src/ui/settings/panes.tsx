@@ -39,6 +39,7 @@ import { presentAddProviderMenu, presentCustomProvider } from "../sheets/customP
 import { presentMemoryConnections } from "../sheets/memoryService";
 import { presentMcpServer } from "../sheets/mcpServer";
 import { presentPlugin } from "../sheets/plugin";
+import { presentSkillDiscovery } from "../sheets/skillDiscovery";
 import { Entries } from "./search";
 
 export function SettingsPage(props: { pane: SettingsPane }) {
@@ -543,6 +544,9 @@ function PluginsPane() {
           </Show>
           <ActionRow label={L("Marketplace")} tint="var(--label-2)" actionTitle={L("Add from Plugins…")} onAction={() => presentMarketplace(device()?.id ?? null)} />
         </Placeholder>
+      </Section>
+      <Section title={L("Skill discovery")} style="heading">
+        <ActionRow label={L("Skill discovery")} actionTitle={L("Scan…")} onAction={presentSkillDiscovery} />
       </Section>
       <Footnote text={L("Plugins are installed on a Runner, and the bots assigned to it use them. An action that changes something goes through Auto-review first.")} />
       <Show when={device() && isRunner(device()!)}>

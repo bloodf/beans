@@ -71,7 +71,7 @@ interface AttachSource {
 /// label that is only the glyph would leave an empty disc behind.
 function AttachMenu({ sources, tint, label }: { sources: AttachSource[]; tint: ColorValue; label: ColorValue }) {
   return (
-    <View style={styles.disc}>
+    <View style={styles.disc} onStartShouldSetResponder={() => true}>
       {/* The hosted view would otherwise avoid the keyboard by itself: SwiftUI treats the keys as
           a safe-area inset and pushes the disc up out of its frame while the sticky composer
           already rides above them. */}

@@ -6,6 +6,12 @@ The home also holds private `mcp.json`, source-bound `catalog.json` and `marketp
 
 Storage validates the `beans-v2` marker before creation, permissions, deletion, recovery or SQLite setup. Explicit old/unmarked populated homes reject without modifying bytes, and malformed account records never become an empty identity. Direct database opens and mobile push decryption enforce the same boundary; see [fresh Beans format](identity.md#fresh-beans-format). Existing `.beans` / `.beans-dev` accounts are not migrated or reused.
 
+The compiled `storage-upgrade <scratch-home>` command deliberately invokes the staged scratch preload before `App::load`, without identity, credentials or relay initialization. It requires an existing empty Beans v2 marked scratch home, publishes the staged marker and opens only its staged local store with FULL synchronous commits. The public staged store entry revalidates the bounded marker, syncs file and retained parent handles, and rechecks identity/content under the shared admission lock on every open. Symlinks, replacement, lock contention and durability uncertainty reject before database mutation. Unsupported non-Unix staged admission fails closed; ordinary non-Unix admission retains its existing behavior. Normal commands and global protocol floors remain unchanged; this explicit scratch mechanism is not live-account migration.
+
+Home creation and mutable startup share one admission lifetime on Unix. `ensure_home_admission` returns its precreation guard to `App::load`, which passes it to local store admission without dropping or reacquiring it and releases it on return or error. The read-only home validator keeps its directory-check, preflight and legacy-marker ordering; exclusion lives outside that validator.
+
+Configured absolute macOS `/var/...` homes support only the verified system `/var -> private/var` alias through descriptor-bound trusted-prefix admission. Relative paths retain current-directory semantics and receive no platform alias exception. The platform root namespace must remain privileged and stable; supplied home suffixes still open without following links. Scratch verification uses an explicit `/var` spelling of its owned physical temporary suffix as well as ordinary temporary-home consumers, rather than changing the historical CLI path to bypass admission.
+
 
 Commands:
 

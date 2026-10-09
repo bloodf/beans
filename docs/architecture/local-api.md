@@ -108,6 +108,12 @@ The required string parameters that `api.rs` reads through its `string` helper (
 
 Local-only [schedule authority](tasks.md#routine-checks-and-retention) needs explicit reauthorization.
 
+### Local task history
+
+`tasks.list` accepts null or an object with only `limit?` and `cursor?`. Omitted or null limit defaults to 50; a supplied integer must be 1–100. Cursor is null or a nonempty opaque string of at most 2048 bytes. The CLI uses canonical URL-safe unpadded base64 over its private cursor representation and validates the decoded account epoch and task-id keyset before querying tasks. Decoded ids and returned structural ids are nonempty, at most 256 UTF-8 bytes and contain no control characters. Invalid fields, bounds or cursors reject with fixed text, without echoing input or storage errors. Clients pass cursors back unchanged; encoding provides neither secrecy nor authorization.
+
+Result is `{tasks:[{task_id,chat_id,bot_id,routine_id,state}],next_cursor}`; `routine_id` and `next_cursor` may be null. State is `queued`, `running`, `finished`, `interrupted` or `needs_review`. Pages use ascending task-id keysets within the current nonclosed account epoch. A different or missing epoch rejects a supplied cursor; no epoch with no cursor returns an empty page without creating authority. Cursor is a position, not permission. This method uses the existing local-user trust boundary, reads only this home's history, and has no sealed remote alias, Runner routing or sync projection. See [Local history reads](tasks.md#local-history-reads).
+
 ### Plugins, MCP, providers
 
 | Method | Params | Result |

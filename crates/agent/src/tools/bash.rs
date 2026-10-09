@@ -1,7 +1,7 @@
 //! `bash`: run a shell command in the working directory, with the login shell's environment
 //! ([`crate::login_shell`]). Output is tail-truncated to 2000 lines or 50KB; the full output is
-//! saved to a temp file when truncated. Cancellation kills the whole process group (on Windows,
-//! the process tree).
+//! saved to a temp file when truncated. Cancellation attempts to kill the whole process group
+//! (on Windows, the process tree), with bounded cleanup and partial output.
 //!
 //! Built with [`BashTool::new`], it is pi's bash: pipes, nothing on stdin, and the call lasts
 //! as long as the command. Its results carry structured output for codemode scripts: the output
@@ -24,6 +24,9 @@ use super::truncate::{format_size, truncate_tail, TruncatedBy, TruncationOptions
 use crate::tool::{Tool, ToolError, ToolResult, ToolUpdateFn};
 
 pub(crate) const UPDATE_THROTTLE_MS: u64 = 250;
+
+/// One total budget for pipe-command termination, child reaping, and output-reader drain.
+const CANCEL_CLEANUP: Duration = Duration::from_secs(1);
 
 /// The most of a command's output a script receives in `output`, as pi's bash gives it.
 const SCRIPT_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
@@ -302,6 +305,7 @@ impl Tool for BashTool {
         let mut cmd = crate::login_shell::command(shell).await;
         self.extras.apply(&mut cmd);
         cmd.arg("-c").arg(&command).current_dir(&self.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
         #[cfg(unix)]
         {
             cmd.process_group(0);
@@ -339,33 +343,89 @@ impl Tool for BashTool {
         let mut timed_out = false;
         let mut aborted = false;
 
-        let status = loop {
-            let sleep_until = deadline.unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(3600));
+        let mut pipes_closed = false;
+        let mut status = None;
+        loop {
+            let sleep_until = deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600));
             tokio::select! {
-                chunk = rx.recv() => {
+                biased;
+                _ = cancel.cancelled() => { aborted = true; break; }
+                _ = tokio::time::sleep_until(sleep_until), if deadline.is_some() => { timed_out = true; break; }
+                waited = child.wait(), if status.is_none() => {
+                    status = Some(waited);
+                }
+                chunk = rx.recv(), if !pipes_closed => {
                     match chunk {
                         Some(bytes) => {
                             output.extend_from_slice(&bytes);
-                            if last_update.elapsed() >= std::time::Duration::from_millis(UPDATE_THROTTLE_MS) {
+                            if last_update.elapsed() >= Duration::from_millis(UPDATE_THROTTLE_MS) {
                                 last_update = tokio::time::Instant::now();
                                 let text = if self.script { super::sanitize::terminal_text(&output) } else { String::from_utf8_lossy(&output).into_owned() };
                                 let snapshot = truncate_tail(&text, TruncationOptions::default());
                                 on_update(ToolResult::text(snapshot.content));
                             }
                         }
-                        None => break child.wait().await.ok(),
+                        None => pipes_closed = true,
                     }
                 }
-                _ = cancel.cancelled() => { aborted = true; kill_group(pid); let _ = child.kill().await; break child.wait().await.ok(); }
-                _ = tokio::time::sleep_until(sleep_until), if deadline.is_some() => { timed_out = true; kill_group(pid); let _ = child.kill().await; break child.wait().await.ok(); }
             }
-        };
+            if status.is_some() && pipes_closed {
+                break;
+            }
+        }
+        let mut cleanup_problem = None;
+        if aborted || timed_out {
+            let cleanup_deadline = tokio::time::Instant::now() + CANCEL_CLEANUP;
+            let cleanup = async {
+                #[cfg(unix)]
+                if pid != 0 && unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } == -1 {
+                    cleanup_problem = Some(format!("Process-group termination failed: {}", std::io::Error::last_os_error()));
+                }
+                #[cfg(windows)]
+                {
+                    // Do not call the synchronous terminal helper here: taskkill itself must
+                    // fit inside the same budget as child reaping and pipe drain.
+                    match tokio::process::Command::new("taskkill")
+                        .args(["/F", "/T", "/PID", &pid.to_string()])
+                        .stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true)
+                        .status().await
+                    {
+                        Ok(exit) if exit.success() => {}
+                        Ok(exit) => cleanup_problem = Some(format!("Process-tree termination failed: {exit}")),
+                        Err(error) => cleanup_problem = Some(format!("Process-tree termination failed: {error}")),
+                    }
+                }
+                if status.is_none() {
+                    if let Err(error) = child.start_kill() {
+                        cleanup_problem = Some(format!("Child termination failed: {error}"));
+                    }
+                    status = Some(child.wait().await);
+                }
+                while let Some(bytes) = rx.recv().await {
+                    if tokio::time::Instant::now() >= cleanup_deadline {
+                        cleanup_problem = Some("Cancellation cleanup deadline reached; output drain may be incomplete".into());
+                        break;
+                    }
+                    output.extend_from_slice(&bytes);
+                }
+            };
+            if tokio::time::timeout_at(cleanup_deadline, cleanup).await.is_err() {
+                cleanup_problem = Some("Cancellation cleanup deadline reached; termination or output drain may be incomplete".into());
+            }
+        }
         for reader in readers {
-            let _ = reader.await;
+            reader.abort();
         }
-        while let Ok(bytes) = rx.try_recv() {
-            output.extend_from_slice(&bytes);
-        }
+        // Do not wait for aborted readers or queued bytes past the cleanup deadline.
+        rx.close();
+        let status = match status {
+            Some(Ok(status)) => Some(status),
+            Some(Err(error)) => {
+                cleanup_problem = Some(format!("Child wait failed: {error}"));
+                None
+            }
+            None => None,
+        };
 
         let text = if self.script { super::sanitize::terminal_text(&output) } else { String::from_utf8_lossy(&output).into_owned() };
         let truncation = truncate_tail(&text, TruncationOptions::default());
@@ -378,6 +438,13 @@ impl Tool for BashTool {
         };
         let shown = describe(&truncation.content, &truncation, full_output_path.as_deref());
         let with_status = |status: &str| if shown.is_empty() { status.to_string() } else { format!("{shown}\n\n{status}") };
+        let cancellation_status = |reason: &str| {
+            let mut note = format!("{reason}. Output may be partial; process termination is not guaranteed. Effects already performed are not undone.");
+            if let Some(problem) = &cleanup_problem {
+                note.push_str(&format!("\n{problem}"));
+            }
+            note
+        };
         if self.script {
             let code = status.as_ref().and_then(|status| status.code());
             let (script_text, script_truncated) = script_output(text.as_bytes(), SCRIPT_OUTPUT_MAX_BYTES);
@@ -390,8 +457,8 @@ impl Tool for BashTool {
             if let Some(path) = full_output_path.as_ref().filter(|_| script_truncated) {
                 structured["full_output_path"] = json!(path);
             }
-            let failure = if aborted { Some("Command aborted".to_string()) }
-                else if timed_out { Some(format!("Command timed out after {} seconds", timeout.unwrap_or(0.0))) }
+            let failure = if aborted { Some(cancellation_status("Command aborted")) }
+                else if timed_out { Some(cancellation_status(&format!("Command timed out after {} seconds", timeout.unwrap_or(0.0)))) }
                 else if let Some(code) = code.filter(|code| *code != 0) { Some(format!("Command exited with code {code}")) }
                 else if code.is_none() { Some(ended_without_code(status.as_ref())) }
                 else { None };
@@ -400,10 +467,11 @@ impl Tool for BashTool {
         }
 
         if aborted {
-            return Err(ToolError(with_status("Command aborted")));
+            return Err(ToolError(with_status(&cancellation_status("Command aborted"))));
         }
         if timed_out {
-            return Err(ToolError(with_status(&format!("Command timed out after {} seconds", timeout.unwrap_or(0.0)))));
+            let reason = cancellation_status(&format!("Command timed out after {} seconds", timeout.unwrap_or(0.0)));
+            return Err(ToolError(with_status(&reason)));
         }
         let Some(code) = status.as_ref().and_then(|s| s.code()) else {
             return Err(ToolError(with_status(&ended_without_code(status.as_ref()))));
@@ -437,6 +505,69 @@ impl Tool for BashTool {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipe_cancellation_bounds_cleanup_and_preserves_normal_output() {
+        struct HeldPipe(PathBuf);
+        impl Drop for HeldPipe {
+            fn drop(&mut self) {
+                if let Ok(pid) = std::fs::read_to_string(self.0.join("held.pid")) {
+                    if let Ok(pid) = pid.trim().parse::<i32>() {
+                        if pid > 0 {
+                            unsafe { libc::kill(pid, libc::SIGKILL); }
+                        }
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        for script in [false, true] {
+            let dir = std::env::temp_dir().join(format!("beans-bash-held-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let held = HeldPipe(dir.clone());
+            let mut tool = if script { BashTool::for_script(dir.clone()) } else { BashTool::new(dir.clone()) };
+            tool.shell = Some("/bin/bash".into());
+            let normal = tool.execute("normal", json!({"command": "printf normal; printf error >&2; exit 3"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+            assert!(normal.is_error);
+            let structured = normal.structured.unwrap();
+            assert_eq!(structured["exit_code"], 3);
+            let output = structured["output"].as_str().unwrap();
+            assert!(output.contains("normal") && output.contains("error"), "{output}");
+
+            let cancel = CancellationToken::new();
+            let stop = cancel.clone();
+            let (stopped_at, mut stopped_rx) = tokio::sync::mpsc::unbounded_channel();
+            let update: ToolUpdateFn = Arc::new(move |partial| {
+                if partial.text_content().contains("held") {
+                    let _ = stopped_at.send(std::time::Instant::now());
+                    stop.cancel();
+                }
+            });
+            // Job control moves this real pipe holder outside the shell's process group.
+            let result = tokio::time::timeout(Duration::from_secs(5), tool.execute(
+                "held", json!({"command": "set -m; sleep 30 & echo $! > held.pid; printf held; wait"}), cancel, update,
+            )).await;
+            let elapsed = stopped_rx.try_recv().expect("pipe holder printed before cancellation").elapsed();
+            let pid: i32 = std::fs::read_to_string(dir.join("held.pid")).unwrap().trim().parse().unwrap();
+            let still_holds_pipe = unsafe { libc::kill(pid, 0) } == 0;
+            drop(held);
+            assert!(still_holds_pipe, "negative fixture must outlive process-group termination");
+            assert!(elapsed < Duration::from_millis(2500), "cleanup took {elapsed:?}");
+            let result = result.expect("cancellation must not wait for pipe EOF");
+            let text = if script {
+                let result = result.unwrap();
+                assert!(result.is_error);
+                assert_eq!(result.structured.as_ref().unwrap()["output"], "held");
+                result.text_content()
+            } else {
+                result.unwrap_err().0
+            };
+            assert!(text.contains("held") && text.contains("Command aborted"), "{text}");
+            assert!(text.contains("deadline reached") && text.contains("not undone"), "{text}");
+        }
+    }
+
 
     #[cfg(unix)]
     #[tokio::test]

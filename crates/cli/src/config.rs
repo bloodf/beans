@@ -1,5 +1,7 @@
 //! Where the CLI keeps things and how it is configured.
 
+mod membership_preflight;
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -82,6 +84,10 @@ impl Config {
         self.home.join("mcp.json")
     }
 
+    fn membership_preflight(&self) -> anyhow::Result<()> {
+        membership_preflight::preflight(&self.home)
+    }
+
     /// The CLI's own updates: the last check, a restart into a new release under way, and a
     /// release that went back.
     pub fn update_path(&self) -> PathBuf {
@@ -97,6 +103,7 @@ impl Config {
                 anyhow::bail!("Beans storage must be a private directory, not a symlink"),
             Ok(_) => {}
         }
+        self.membership_preflight()?;
         let marker = self.home.join("format.json");
         if std::fs::symlink_metadata(&marker).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
             anyhow::bail!("Beans v2 format marker must not be a symlink; data is untouched");
@@ -339,6 +346,39 @@ mod format_tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(home.path()).unwrap().permissions().mode(), mode.mode());
         }
+
+        // A marked registry root must not reach account/store initialization.
+        let root = tempfile::tempdir().unwrap();
+        let root_config = Config { home: root.path().into(), port: 0 };
+        root_config.ensure_home().unwrap();
+        let registry = root.path().join("memberships.json");
+        let valid = br#"{"registry_version":1,"active_membership_id":null,"memberships":[]}"#;
+        for bytes in [
+            valid.as_slice(),
+            br#"{"registry_version":1,"registry_version":1,"active_membership_id":null,"memberships":[]}"#.as_slice(),
+            br#"{"registry_version":2,"active_membership_id":null,"memberships":[]}"#.as_slice(),
+            br#"{"registry_version":1,"active_membership_id":"../../escape","memberships":[]}"#.as_slice(),
+            br#"{"registry_version":1,"active_membership_id":null,"memberships":[],"future":true}"#.as_slice(),
+            b"{broken".as_slice(),
+        ] {
+            write_private(&registry, bytes).unwrap();
+            let before = std::fs::read(root.path().join("format.json")).unwrap();
+            assert!(root_config.validate_home().is_err());
+            assert!(crate::app::App::load(root_config.clone()).is_err());
+            assert!(crate::local_store::LocalStore::open(&root_config.database_path()).is_err());
+            assert_eq!(std::fs::read(&registry).unwrap(), bytes);
+            assert_eq!(std::fs::read(root.path().join("format.json")).unwrap(), before);
+            for name in ["beans.sqlite3", "beans.sqlite3-wal", "beans.sqlite3-shm", "identity.json", "machine.json"] {
+                assert!(!root.path().join(name).exists());
+            }
+        }
+        std::fs::remove_file(&registry).unwrap();
+        write_private(&root.path().join("membership-migration.json"), b"{}").unwrap();
+        assert!(root_config.validate_home().is_err());
+        assert!(!root_config.database_path().exists());
+        std::fs::remove_file(root.path().join("membership-migration.json")).unwrap();
+        assert!(root_config.validate_home().unwrap());
+        assert!(!root_config.database_path().exists());
     }
 
     #[test]

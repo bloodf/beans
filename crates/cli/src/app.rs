@@ -334,7 +334,8 @@ impl App {
         crate::marketplace::enable(&app);
         crate::catalog::enable(&app);
         // Normalize and persist the in-memory view before background work begins.
-        app.save_state_now();
+        let snapshot = { app.state.lock().map_err(|_| anyhow::anyhow!("Startup state mutex is poisoned"))?.clone() };
+        app.store.save_state(&snapshot)?;
         Ok(app)
     }
 
@@ -2149,6 +2150,47 @@ mod tests {
         let home = std::env::temp_dir().join(format!("beans-app-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    #[test]
+    fn load_propagates_final_normalization_save_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config { home: home.path().into(), port: 0 };
+        let initial = App::load(config.clone()).unwrap();
+        let mut seeded = initial.store.load_state().unwrap();
+        seeded.machine_blob_hash = Some("retained-startup-hash".into());
+        seeded.last_seq = 73;
+        initial.store.save_state(&seeded).unwrap();
+        drop(initial);
+
+        let db = rusqlite::Connection::open(config.database_path()).unwrap();
+        let metadata = |db: &rusqlite::Connection| {
+            db.query_row(
+                "SELECT auto_review_json, last_seq, roster_slot_seq, machine_blob_hash, credentials_uploaded, paused, policy_json FROM metadata WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?, row.get::<_, bool>(4)?, row.get::<_, bool>(5)?, row.get::<_, String>(6)?)),
+            ).unwrap()
+        };
+        let before = metadata(&db);
+        db.execute_batch(
+            "CREATE TRIGGER fail_final_normalization BEFORE UPDATE ON metadata
+             WHEN OLD.machine_blob_hash = 'retained-startup-hash' AND NEW.machine_blob_hash IS NULL
+             BEGIN SELECT RAISE(ABORT, 'final startup normalization failure'); END;"
+        ).unwrap();
+        // Only the final save writes the hash reset performed after recovery and retention.
+        let error = App::load(config.clone()).err().expect("final startup save must reject load");
+        assert!(format!("{error:#}").contains("final startup normalization failure"));
+        assert_eq!(metadata(&db), before, "failed final save must preserve every durable metadata field and JSON byte");
+
+        db.execute_batch("DROP TRIGGER fail_final_normalization;").unwrap();
+        let loaded = App::load(config).unwrap();
+        let persisted = loaded.store.load_state().unwrap();
+        assert_eq!(persisted.machine_blob_hash, None);
+        assert_eq!(persisted.last_seq, 73);
+        let mut expected = before;
+        expected.3 = None;
+        assert_eq!(metadata(&db), expected, "successful final save changes only the startup hash");
     }
 
     fn bot(id: &str) -> Bot {

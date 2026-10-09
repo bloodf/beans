@@ -17,11 +17,14 @@ struct ImportRequest { version: u8, runner_id: String, token: String, confirmed:
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UninstallRequest { version: u8, runner_id: String, managed_id: String, confirmed: bool }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompareRequest { version: u8, runner_id: String, root: String, managed_id: String }
 
-enum Operation { Preview(PreviewRequest), Import(ImportRequest), Uninstall(UninstallRequest) }
+enum Operation { Preview(PreviewRequest), Import(ImportRequest), Uninstall(UninstallRequest), Compare(CompareRequest) }
 impl Operation {
     fn runner(&self) -> &str {
-        match self { Self::Preview(s) => &s.runner_id, Self::Import(s) => &s.runner_id, Self::Uninstall(s) => &s.runner_id }
+        match self { Self::Preview(s) => &s.runner_id, Self::Import(s) => &s.runner_id, Self::Uninstall(s) => &s.runner_id, Self::Compare(s) => &s.runner_id }
     }
 }
 fn parse(method: &str, body: Value) -> Result<Operation, String> {
@@ -43,6 +46,12 @@ fn parse(method: &str, body: Value) -> Result<Operation, String> {
             if s.version != 1 || !opaque(&s.managed_id) { return Err(INVALID.into()); }
             if !s.confirmed { return Err("skill_library_confirmation_required".into()); }
             Operation::Uninstall(s)
+        }
+        "skills.library.compare" => {
+            let s: CompareRequest = serde_json::from_value(body).map_err(|_| INVALID)?;
+            if s.version != 1 || !opaque(&s.managed_id) || s.root.len() > 4096 || s.root.chars().any(char::is_control) || !Path::new(&s.root).is_absolute()
+                || Path::new(&s.root).components().any(|c| !matches!(c, Component::RootDir | Component::Normal(_))) { return Err(INVALID.into()); }
+            Operation::Compare(s)
         }
         _ => return Err(INVALID.into()),
     };
@@ -88,6 +97,20 @@ struct ImportReply { version: u8, runner_id: String, managed_id: String, summary
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UninstallReply { version: u8, runner_id: String, managed_id: String, cleanup_warning: bool, durability_warning: bool }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompareReply { version: u8, runner_id: String, managed_id: String, added: Vec<String>, removed: Vec<String>, changed: Vec<String> }
+fn resource_path(path: &str) -> bool {
+    !path.is_empty() && text(path, 4096) && !path.contains(['\\', ':'])
+        && path.split('/').count() <= 5 && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
+}
+fn valid_comparison(r: &CompareReply) -> bool {
+    if r.added.len() + r.changed.len() > 256 || r.removed.len() + r.changed.len() > 256 { return false; }
+    let lists = [&r.added, &r.removed, &r.changed];
+    lists.iter().all(|list| list.windows(2).all(|pair| pair[0] < pair[1]) && list.iter().all(|path| resource_path(path)))
+        && r.added.iter().all(|path| r.removed.binary_search(path).is_err() && r.changed.binary_search(path).is_err())
+        && r.removed.iter().all(|path| r.changed.binary_search(path).is_err())
+}
 fn text(value: &str, max: usize) -> bool { value.len() <= max && !value.chars().any(char::is_control) }
 fn valid_summary(s: &Summary) -> bool {
     s.file_count > 0 && s.file_count <= 256 && s.total_bytes <= 16 * 1024 * 1024
@@ -123,6 +146,12 @@ fn decode(method: &str, value: Value, runner: &str, requested_removal: Option<&s
             if r.version != 1 || r.runner_id != runner || !opaque(&r.managed_id) || requested_removal != Some(r.managed_id.as_str()) { return Err(invalid()); }
             serde_json::to_value(r).map_err(|_| invalid())
         }
+        "skills.library.compare" => {
+            let r: CompareReply = serde_json::from_value(value).map_err(|_| invalid())?;
+            if r.version != 1 || r.runner_id != runner || !opaque(&r.managed_id)
+                || requested_removal != Some(r.managed_id.as_str()) || !valid_comparison(&r) { return Err(invalid()); }
+            serde_json::to_value(r).map_err(|_| invalid())
+        }
         _ => Err(invalid()),
     }
 }
@@ -134,7 +163,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, body: Value) -> Result<Value
     let result = if actor == operation.runner() { serve_as(app, method, body, &actor).await? }
         else { crate::requests::ask(app, operation.runner(), method, body).await? };
     let _guards = authority.enter(app, false)?;
-    let requested_removal = match &operation { Operation::Uninstall(s) => Some(s.managed_id.as_str()), _ => None };
+    let requested_removal = match &operation { Operation::Uninstall(s) => Some(s.managed_id.as_str()), Operation::Compare(s) => Some(s.managed_id.as_str()), _ => None };
     let result = decode(method, result, operation.runner(), requested_removal)?;
     if let Operation::Preview(s) = operation { if result["source"] != s.root { return Err("invalid_skill_library_response".into()); } }
     Ok(result)
@@ -252,6 +281,36 @@ mod runner {
                 let _guards = authority.enter(app, true)?;
                 serde_json::to_value(UninstallReply { version: 1, runner_id: s.runner_id, managed_id: s.managed_id,
                     cleanup_warning: outcome.cleanup_warning.is_some(), durability_warning: outcome.durability_warning.is_some() }).map_err(|_| "skill_library_failed".into())
+            }
+            Operation::Compare(s) => {
+                // Compare never creates the library, stages a copy or issues an approval.
+                let library = { let _guards = authority.enter(app, true)?; SkillLibrary::open(&app.config.home.join("skill-library")).map_err(failure)? };
+                let source = library.preview_source(Path::new(&s.root));
+                { let _guards = authority.enter(app, true)?; }
+                let mut source = source.map_err(failure)?;
+                let managed = library.validated_inventory(&s.managed_id);
+                let _guards = authority.enter(app, true)?;
+                let mut managed = managed.map_err(failure)?;
+                source.files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+                managed.files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+                let mut source = source.files.into_iter().peekable();
+                let mut managed = managed.files.into_iter().peekable();
+                let mut reply = CompareReply { version: 1, runner_id: s.runner_id, managed_id: s.managed_id, added: Vec::new(), removed: Vec::new(), changed: Vec::new() };
+                while let (Some(a), Some(b)) = (source.peek(), managed.peek()) {
+                    match a.path.cmp(&b.path) {
+                        std::cmp::Ordering::Less => reply.added.push(source.next().unwrap().path),
+                        std::cmp::Ordering::Greater => reply.removed.push(managed.next().unwrap().path),
+                        std::cmp::Ordering::Equal => {
+                            let a = source.next().unwrap();
+                            let b = managed.next().unwrap();
+                            if a.bytes != b.bytes || a.sha256 != b.sha256 { reply.changed.push(a.path); }
+                        }
+                    }
+                }
+                reply.added.extend(source.map(|file| file.path));
+                reply.removed.extend(managed.map(|file| file.path));
+                if !valid_comparison(&reply) { return Err("invalid_skill_library_response".into()); }
+                serde_json::to_value(reply).map_err(|_| "skill_library_failed".into())
             }
         }
     }

@@ -1671,13 +1671,18 @@ export class AppStore {
     this.emit({ kind: "chatsChanged" });
   }
 
-  /** Sends the message and returns the chat it landed in. `mentions` are the bots picked from the `@`
-   * menu, which the CLI hands the bot by id; `replyTo` is the message the user answers, which the bot
-   * reads quoted. */
-  send(text: string, attachments: OutgoingAttachment[], mentions: string[], chatID: string, replyTo?: string): string {
+  /** Returns admission acknowledgement, not proof that a Runner has finished the turn. */
+  async send(text: string, attachments: OutgoingAttachment[], mentions: string[], chatID: string, replyTo?: string): Promise<{ chatID: string; acknowledged: boolean }> {
     const trimmed = text.trim();
     const chat = this.chat(chatID);
-    if ((trimmed === "" && attachments.length === 0) || !chat) return chatID;
+    if ((trimmed === "" && attachments.length === 0) || !chat) return { chatID, acknowledged: false };
+    const identity = this.identityID;
+    const generation = this.bootstrapGeneration;
+    let invalidated = false;
+    const unsubscribe = this.subscribe((event) => {
+      if (event.kind === "identityChanged" || event.kind === "connectionChanged") invalidated = true;
+    });
+    const ownsCompletion = () => !invalidated && identity === this.identityID && generation === this.bootstrapGeneration;
     const original = replyTo ? chat.messages.find((message) => message.id === replyTo) : undefined;
     const quote = original ? quoteOf(original) : undefined;
 
@@ -1696,42 +1701,62 @@ export class AppStore {
 
     if (this.isMock) {
       this.replyEngine?.respond(trimmed, chat, message.id);
-      return chatID;
+      unsubscribe();
+      return { chatID, acknowledged: true };
     }
 
     // Expect a turn to start; the CLI's job events confirm or clear this. A DM names its bot right
     // away so the working row appears with the send.
+    let pendingJob: RunningJob | undefined;
     if (chat.botIDs.length > 0) {
       const pendingID = `pending:${chatID}`;
       this.clearAvatarErrors(chatID);
-      this.runningJobs.push({ id: pendingID, chatID, botID: isDM(chat) ? chat.botIDs[0]! : "",
-        previousMessages: new Set(this.chat(chatID)?.messages.map((message) => message.id)) });
+      pendingJob = { id: pendingID, chatID, botID: isDM(chat) ? chat.botIDs[0]! : "",
+        previousMessages: new Set(this.chat(chatID)?.messages.map((message) => message.id)) };
+      this.runningJobs.push(pendingJob);
       this.emit({ kind: "respondingChanged", chatID });
       this.emit({ kind: "chatsChanged" });
       setTimeout(() => {
-        if (!this.runningJobs.some((job) => job.id === pendingID)) return;
+        if (!ownsCompletion() || !this.runningJobs.includes(pendingJob!)) return;
         // Nothing started (no Runner answered); stop showing the bot at work.
-        this.runningJobs = this.runningJobs.filter((job) => job.id !== pendingID);
+        this.runningJobs = this.runningJobs.filter((job) => job !== pendingJob);
         this.emit({ kind: "respondingChanged", chatID });
         this.emit({ kind: "chatsChanged" });
       }, 4000);
     }
-    this.perform("chats.send", {
-      chat_id: chatID,
-      text: trimmed,
-      message_id: message.id,
-      mentions,
-      attachments: attachments.map((outgoing) => ({
-        id: outgoing.attachment.id,
-        path: outgoing.path,
-        name: outgoing.attachment.name,
-        mime: outgoing.attachment.mime,
-        width: outgoing.attachment.width ?? null,
-        height: outgoing.attachment.height ?? null,
-      })),
-      ...(quote ? { reply_to: quote.messageID } : {}),
-    });
-    return chatID;
+    try {
+      const result = await this.request<{ message?: { id?: string } } | null>("chats.send", {
+        chat_id: chatID,
+        text: trimmed,
+        message_id: message.id,
+        mentions,
+        attachments: attachments.map((outgoing) => ({
+          id: outgoing.attachment.id,
+          path: outgoing.path,
+          name: outgoing.attachment.name,
+          mime: outgoing.attachment.mime,
+          width: outgoing.attachment.width ?? null,
+          height: outgoing.attachment.height ?? null,
+        })),
+        ...(quote ? { reply_to: quote.messageID } : {}),
+      });
+      if (ownsCompletion() && result?.message?.id === message.id) return { chatID, acknowledged: true };
+    } catch {
+      // The transport does not distinguish API refusal from a lost response. Do not retry
+      // or claim no remote effect. Remove only our local accepted-looking placeholder.
+    } finally {
+      unsubscribe();
+    }
+    if (!ownsCompletion()) return { chatID, acknowledged: false };
+    const current = this.chat(chatID);
+    if (current?.messages.includes(message)) {
+      this.replaceChat({ ...current, messages: current.messages.filter((row) => row !== message) });
+      this.emit({ kind: "messageRemoved", chatID, messageID: message.id });
+    }
+    this.runningJobs = this.runningJobs.filter((job) => job !== pendingJob);
+    this.emit({ kind: "respondingChanged", chatID });
+    this.emit({ kind: "chatsChanged" });
+    return { chatID, acknowledged: false };
   }
 
   // MARK: - Attachments

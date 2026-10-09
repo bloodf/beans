@@ -21,6 +21,17 @@ pub struct LibraryFile {
     pub sha256: String,
 }
 
+/// Exact bounded source inventory. Digests describe bytes, not authenticated provenance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePreview {
+    pub metadata: BTreeMap<String, String>,
+    pub license: Option<String>,
+    pub findings: Vec<String>,
+    pub directories: Vec<String>,
+    pub files: Vec<LibraryFile>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryManifest {
@@ -74,16 +85,43 @@ impl SkillLibrary {
     /// No scanner output is used as authority. No body, hooks or resources are executed.
     pub fn import_authorized(&self, selected_source: &Path, source_host: &str) -> io::Result<ImportOutcome> {
         #[cfg(target_os = "linux")]
-        { linux::import(&self.root, selected_source, source_host) }
+        { linux::import(&self.root, selected_source, source_host, None, || Ok(())) }
         #[cfg(not(target_os = "linux"))]
         { let _ = (selected_source, source_host); Err(unsupported()) }
     }
 
     pub fn uninstall(&self, managed_id: &str) -> io::Result<UninstallOutcome> {
         #[cfg(target_os = "linux")]
-        { linux::uninstall(&self.root, managed_id) }
+        { linux::uninstall(&self.root, managed_id, || Ok(())) }
         #[cfg(not(target_os = "linux"))]
         { let _ = managed_id; Err(unsupported()) }
+    }
+
+    /// Reads bounded resources without creating staging or publishing a managed copy.
+    pub fn preview_source(&self, selected_source: &Path) -> io::Result<SourcePreview> {
+        #[cfg(target_os = "linux")]
+        { linux::preview(&self.root, selected_source) }
+        #[cfg(not(target_os = "linux"))]
+        { let _ = selected_source; Err(unsupported()) }
+    }
+
+    /// Compares actual staged bytes with approval before acquiring publication authority.
+    /// The returned guard remains owned here through publication and durability reporting.
+    pub fn import_approved<G>(&self, selected_source: &Path, source_host: &str, expected: &SourcePreview,
+        admit_publication: impl FnOnce() -> io::Result<G>) -> io::Result<ImportOutcome> {
+        #[cfg(target_os = "linux")]
+        { linux::import(&self.root, selected_source, source_host, Some(expected), admit_publication) }
+        #[cfg(not(target_os = "linux"))]
+        { let _ = (selected_source, source_host, expected, admit_publication); Err(unsupported()) }
+    }
+
+    /// The returned guard remains owned here through validated tomb publication and cleanup.
+    pub fn uninstall_guarded<G>(&self, managed_id: &str,
+        admit_removal: impl FnOnce() -> io::Result<G>) -> io::Result<UninstallOutcome> {
+        #[cfg(target_os = "linux")]
+        { linux::uninstall(&self.root, managed_id, admit_removal) }
+        #[cfg(not(target_os = "linux"))]
+        { let _ = (managed_id, admit_removal); Err(unsupported()) }
     }
 }
 
@@ -338,7 +376,31 @@ mod linux {
             }
         }
     }
-    pub(super) fn import(root: &File, selected: &Path, host: &str) -> io::Result<ImportOutcome> {
+    fn source_preview(inventory: Inventory, metadata: Option<(BTreeMap<String, String>, Vec<String>)>) -> io::Result<SourcePreview> {
+        let (metadata, findings) = metadata.ok_or_else(|| invalid("selected root requires regular SKILL.md"))?;
+        let preview = SourcePreview {
+            license: metadata.get("license").filter(|s| !s.trim().is_empty()).cloned(), metadata, findings,
+            directories: inventory.directories, files: inventory.files,
+        };
+        if serde_json::to_vec(&preview).map_err(io::Error::other)?.len() as u64 > MAX_MANIFEST_BYTES {
+            return Err(invalid("preview byte limit exceeded"));
+        }
+        Ok(preview)
+    }
+
+    pub(super) fn preview(root: &File, selected: &Path) -> io::Result<SourcePreview> {
+        let _lock = lock(root)?;
+        private(root)?;
+        if selected.as_os_str().len() > 4096 { return Err(invalid("source provenance exceeds bounds")); }
+        let source = open_root(selected)?;
+        if has_ancestor(&source, root)? || has_ancestor(root, &source)? { return Err(invalid("source and library roots must be disjoint")); }
+        let mut inventory = Inventory::default(); let mut metadata = None;
+        walk(&source, &source, None, root, "", 0, &mut inventory, &mut metadata)?;
+        source_preview(inventory, metadata)
+    }
+
+    pub(super) fn import<G>(root: &File, selected: &Path, host: &str, expected: Option<&SourcePreview>,
+        admit_publication: impl FnOnce() -> io::Result<G>) -> io::Result<ImportOutcome> {
         let _lock = lock(root)?;
         private(root)?;
         if host.is_empty() || host.len() > 1024 || selected.as_os_str().len() > 4096 { return Err(invalid("source provenance exceeds bounds or host is empty")); }
@@ -350,17 +412,19 @@ mod linux {
         let content = mkdir(&stage.directory, "content")?;
         let mut inventory = Inventory::default(); let mut metadata = None;
         walk(&source, &source, Some(&content), root, "", 0, &mut inventory, &mut metadata)?;
-        let (metadata, findings) = metadata.ok_or_else(|| invalid("selected root requires regular SKILL.md"))?;
+        let actual = source_preview(inventory, metadata)?;
+        if expected.is_some_and(|expected| expected != &actual) { return Err(invalid("selected source changed since approval")); }
         let manifest = LibraryManifest {
             version: 1, bundle_id: id.clone(), source_host: host.into(), source_path: selected.into(),
             imported_unix_seconds: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| invalid("clock predates Unix epoch"))?.as_secs(),
-            license: metadata.get("license").filter(|s| !s.trim().is_empty()).cloned(), metadata, findings,
-            directories: inventory.directories, files: inventory.files,
+            license: actual.license, metadata: actual.metadata, findings: actual.findings,
+            directories: actual.directories, files: actual.files,
         };
         let bytes = serde_json::to_vec(&manifest).map_err(io::Error::other)?;
         if bytes.len() as u64 > MAX_MANIFEST_BYTES { return Err(invalid("manifest byte limit exceeded")); }
         write_new(&stage.directory, "manifest.json", &bytes)?;
         stage.directory.sync_all()?;
+        let _authority = admit_publication()?;
         rename(root, &stage.name, &id)?;
         stage.committed = true;
         Ok(ImportOutcome { manifest, durability_warning: root.sync_all().err().map(|e| e.to_string()) })
@@ -380,7 +444,7 @@ mod linux {
         if total > MAX_TOTAL_BYTES || !manifest.files.iter().any(|f| f.path == "SKILL.md") { return Err(invalid("invalid manifest content bounds")); }
         Ok(())
     }
-    pub(super) fn uninstall(root: &File, id: &str) -> io::Result<UninstallOutcome> {
+    pub(super) fn uninstall<G>(root: &File, id: &str, admit_removal: impl FnOnce() -> io::Result<G>) -> io::Result<UninstallOutcome> {
         if !valid_id(id) { return Err(invalid("not an exact managed bundle ID")); }
         let _lock = lock(root)?;
         private(root)?;
@@ -396,6 +460,7 @@ mod linux {
         walk(&content, &content, None, root, "", 0, &mut actual, &mut None)?;
         if actual.files != manifest.files || actual.directories != manifest.directories { return Err(invalid("managed copy differs from manifest; nothing removed")); }
         let tomb = format!(".removed-{}", uuid::Uuid::new_v4().simple());
+        let _authority = admit_removal()?;
         rename(root, id, &tomb)?;
         let durability_warning = root.sync_all().err().map(|e| e.to_string());
         let cleanup = remove_tree(&bundle, &mut 0, 0).and_then(|()| unlink(root, &tomb, true)).and_then(|()| root.sync_all());
@@ -421,6 +486,33 @@ mod linux {
         fs::write(outside.join("secret"), b"outside sentinel").unwrap();
         fs::write(owned.join("unrelated"), b"keep").unwrap();
         let library = SkillLibrary::open(&owned).unwrap();
+        let approved = library.preview_source(&source).unwrap();
+        assert_eq!(fs::read_dir(&owned).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>(), vec![std::ffi::OsString::from("unrelated")]);
+        fs::write(source.join("resources/data"), b"changed after preview").unwrap();
+        let mut admitted = false;
+        assert!(library.import_approved(&source, "fixture", &approved, || { admitted = true; Ok(()) }).is_err());
+        assert!(!admitted, "changed staged bytes must reject before publication admission");
+        fs::write(source.join("resources/data"), b"abc").unwrap();
+        assert!(library.import_approved::<()>(&source, "fixture", &approved, || Err(invalid("authority revoked"))).is_err());
+        assert_eq!(fs::read_dir(&owned).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>(), vec![std::ffi::OsString::from("unrelated")]);
+        struct Guard { root: PathBuf, removed_id: Option<String> }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                if let Some(id) = &self.removed_id {
+                    assert!(!self.root.join(id).exists(), "removal guard dropped before tomb rename");
+                } else {
+                    assert!(fs::read_dir(&self.root).unwrap().any(|e| valid_id(&e.unwrap().file_name().to_string_lossy())), "import guard dropped before visible rename");
+                }
+            }
+        }
+        let guarded = library.import_approved(&source, "fixture", &approved, || Ok(Guard { root: owned.clone(), removed_id: None })).unwrap();
+        let guarded_id = guarded.manifest.bundle_id;
+        assert_eq!(fs::read(owned.join(&guarded_id).join("content/resources/data")).unwrap(), b"abc");
+        assert!(library.uninstall_guarded::<()>(&guarded_id, || Err(invalid("authority revoked"))).is_err());
+        assert_eq!(fs::read(owned.join(&guarded_id).join("content/resources/data")).unwrap(), b"abc");
+        library.uninstall_guarded(&guarded_id, || Ok(Guard { root: owned.clone(), removed_id: Some(guarded_id.clone()) })).unwrap();
+        assert!(!owned.join(&guarded_id).exists());
+        assert_eq!(fs::read(source.join("resources/data")).unwrap(), b"abc");
         let result = library.import_authorized(&source, "synthetic-host").unwrap();
         let manifest = result.manifest;
         assert!(valid_id(&manifest.bundle_id)); assert_eq!(manifest.version, 1);

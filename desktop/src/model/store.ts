@@ -206,6 +206,44 @@ function decodeSkillDiscovery(value: unknown): SkillDiscoveryReply {
   }) };
 }
 
+export type SkillLibrarySummary = { name: string | null; description: string | null; license: string | null; findings: string[]; file_count: number; total_bytes: number };
+export type SkillLibraryPreview = { version: 1; runner_id: string; token: string; expires_in_seconds: number; source: string; destination: string; summary: SkillLibrarySummary };
+export type SkillLibraryImport = { version: 1; runner_id: string; managed_id: string; summary: SkillLibrarySummary; durability_warning: boolean };
+export type SkillLibraryRemoval = { version: 1; runner_id: string; managed_id: string; cleanup_warning: boolean; durability_warning: boolean };
+
+function decodeSkillLibrary(value: unknown, action: "preview" | "import" | "uninstall", runnerID: string): SkillLibraryPreview | SkillLibraryImport | SkillLibraryRemoval {
+  const invalid = (): never => { throw new RequestError(L("Skill library request failed. Preview again before importing.")); };
+  const object = (value: unknown, keys: string[]): Record<string, unknown> => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
+    const row = value as Record<string, unknown>;
+    if (Object.keys(row).length !== keys.length || keys.some((key) => !Object.hasOwn(row, key))) return invalid();
+    return row;
+  };
+  const text = (value: unknown, max: number): string => {
+    if (typeof value !== "string" || new TextEncoder().encode(value).length > max || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) return invalid();
+    return value;
+  };
+  const id = (value: unknown): string => { const s = text(value, 32); return /^[0-9a-f]{32}$/.test(s) ? s : invalid(); };
+  const summary = (value: unknown): SkillLibrarySummary => {
+    const s = object(value, ["name", "description", "license", "findings", "file_count", "total_bytes"]);
+    if (!Number.isInteger(s.file_count) || (s.file_count as number) < 1 || (s.file_count as number) > 256 || !Number.isInteger(s.total_bytes) || (s.total_bytes as number) < 0 || (s.total_bytes as number) > 16 * 1024 * 1024 || !Array.isArray(s.findings) || s.findings.length > 64) return invalid();
+    return { name: s.name === null ? null : text(s.name, 256), description: s.description === null ? null : text(s.description, 2048), license: s.license === null ? null : text(s.license, 256), findings: s.findings.map((s) => text(s, 512)), file_count: s.file_count as number, total_bytes: s.total_bytes as number };
+  };
+  const keys = action === "preview" ? ["version", "runner_id", "token", "expires_in_seconds", "source", "destination", "summary"] : action === "import" ? ["version", "runner_id", "managed_id", "summary", "durability_warning"] : ["version", "runner_id", "managed_id", "cleanup_warning", "durability_warning"];
+  const r = object(value, keys);
+  if (r.version !== 1 || r.runner_id !== runnerID) return invalid();
+  if (action === "preview") {
+    if (!Number.isInteger(r.expires_in_seconds) || (r.expires_in_seconds as number) < 1 || (r.expires_in_seconds as number) > 300) return invalid();
+    const source = text(r.source, 4096), destination = text(r.destination, 4096);
+    if (!source.startsWith("/") || !destination.startsWith("/")) return invalid();
+    return { version: 1, runner_id: runnerID, token: id(r.token), expires_in_seconds: r.expires_in_seconds as number, source, destination, summary: summary(r.summary) };
+  }
+  if (typeof r.durability_warning !== "boolean") return invalid();
+  if (action === "import") return { version: 1, runner_id: runnerID, managed_id: id(r.managed_id), summary: summary(r.summary), durability_warning: r.durability_warning };
+  if (typeof r.cleanup_warning !== "boolean") return invalid();
+  return { version: 1, runner_id: runnerID, managed_id: id(r.managed_id), cleanup_warning: r.cleanup_warning, durability_warning: r.durability_warning };
+}
+
 export class AppStore {
   /** The seeded demo (`BEANS_MOCK=1`), which runs without a CLI. */
   get isMock(): boolean {
@@ -384,6 +422,39 @@ export class AppStore {
       if (changed || generation !== this.bootstrapGeneration || identity !== this.identityID || !this.isConnected || !this.hasIdentity || !bindingMatches()) throw new RequestError(L("Skill discovery authority changed. Scan again."));
       return decodeSkillDiscovery(result);
     } finally { unsubscribe(); }
+  }
+
+  private async skillLibraryRequest(action: "preview" | "import" | "uninstall", runnerID: string, params: Record<string, unknown>) {
+    const generation = this.bootstrapGeneration, identity = this.identityID;
+    const runner = this.runners.find((device) => device.id === runnerID);
+    if (this.isMock || !this.isConnected || !this.hasIdentity || !identity || !runner) throw new RequestError(L("Skill library request failed. Preview again before importing."));
+    const os = runner.os, key = runner.machineKey;
+    let changed = false;
+    const matches = () => this.runners.some((d) => d.id === runnerID && d.os === os && d.machineKey === key);
+    const unsubscribe = this.subscribe((event) => {
+      if (event.kind === "identityChanged" || event.kind === "connectionChanged" || ((event.kind === "rosterChanged" || event.kind === "snapshotReplaced") && !matches())) changed = true;
+    });
+    try {
+      const result = await this.request<unknown>(`skills.library.${action}`, { version: 1, runner_id: runnerID, ...params });
+      if (changed || generation !== this.bootstrapGeneration || identity !== this.identityID || !this.isConnected || !this.hasIdentity || !matches()) throw new RequestError(L("Skill library authority changed. Preview again."));
+      return decodeSkillLibrary(result, action, runnerID);
+    } finally { unsubscribe(); }
+  }
+
+  async previewSkillLibrary(runnerID: string, root: string): Promise<SkillLibraryPreview> {
+    const reply = await this.skillLibraryRequest("preview", runnerID, { root }) as SkillLibraryPreview;
+    if (reply.source !== root) throw new RequestError(L("Skill library request failed. Preview again before importing."));
+    return reply;
+  }
+
+  async importSkillLibrary(runnerID: string, token: string): Promise<SkillLibraryImport> {
+    return await this.skillLibraryRequest("import", runnerID, { token, confirmed: true }) as SkillLibraryImport;
+  }
+
+  async uninstallSkillLibrary(runnerID: string, managedID: string): Promise<SkillLibraryRemoval> {
+    const reply = await this.skillLibraryRequest("uninstall", runnerID, { managed_id: managedID, confirmed: true }) as SkillLibraryRemoval;
+    if (reply.managed_id !== managedID) throw new RequestError(L("Skill library request failed. Preview again before importing."));
+    return reply;
   }
 
   private async bootstrap(generation: number): Promise<void> {

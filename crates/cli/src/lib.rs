@@ -14,6 +14,7 @@ pub mod diagnostics;
 pub mod embeddings;
 pub mod events;
 pub mod files;
+pub mod artifacts;
 pub mod identity;
 pub mod keys;
 #[cfg(feature = "runner")]

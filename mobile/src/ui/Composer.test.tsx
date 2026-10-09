@@ -187,7 +187,7 @@ test("production Engine and Composer preserve omission and validate exact admitt
   let resolve!: (value: any) => void;
   let reject!: (error: Error) => void;
   request = async method => method === "chats.send" ? new Promise((yes, no) => { resolve = yes; reject = no; }) : null;
-  const message = { id: "msg-admitted", chat_id: "chat", author: { kind: "you" }, body: { kind: "text", text: "submitted", attachments: [], mentions: [] }, state: { kind: "complete" }, created_at: 1 };
+  const message = { id: "msg-admitted", chat_id: "chat", author: { kind: "you" }, body: { kind: "text", text: "submitted", attachments: [], mentions: [] }, state: { kind: "complete" }, created_at: 1791550000.125, promoted_at: 1791550000.875 };
   render(); input().props.onChangeText("\u0085 submitted \u0085"); render();
   tap(find(node => node.props.accessibilityLabel === "Send")!); render();
   const draft = composerDraft("consumer", "relay", "chat");
@@ -199,6 +199,15 @@ test("production Engine and Composer preserve omission and validate exact admitt
   reject(new Error("response lost")); await flush(); expect(draft.text).toBe("\u0085 submitted \u0085");
   tap(find(node => node.props.accessibilityLabel === "Send")!); resolve({ error: { message: "send refused" } }); await flush();
   expect(draft.text).toBe("\u0085 submitted \u0085");
+  for (const field of ["created_at", "promoted_at"] as const) {
+    for (const value of [-0.125, NaN, Infinity, -Infinity, "1791550000.125", null]) {
+      tap(find(node => node.props.accessibilityLabel === "Send")!);
+      // Native JSON converts nonfinite numbers to null; production validator must reject that reply too.
+      resolve({ result: { message: { ...message, [field]: value } } }); await flush();
+      expect(draft.text).toBe("\u0085 submitted \u0085");
+      expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages).toEqual([]);
+    }
+  }
   for (const bad of [undefined, { ...message, state: undefined }, { ...message, created_at: undefined }, { ...message, body: { kind: "text" } }, { ...message, body: { ...message.body, text: "unrelated" } }, { ...message, chat_id: "other" }, { ...message, author: { kind: "bot", bot_id: "b" } }, { ...message, body: { ...message.body, reply_to: { message_id: "unexpected" } } }]) {
     tap(find(node => node.props.accessibilityLabel === "Send")!); resolve({ result: { message: bad } }); await flush();
     expect(draft.text).toBe("\u0085 submitted \u0085");
@@ -207,6 +216,8 @@ test("production Engine and Composer preserve omission and validate exact admitt
   tap(find(node => node.props.accessibilityLabel === "Send")!); resolve({ result: { message } }); await flush();
   expect(input().props.value).toBe("");
   expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages[0].id).toBe("msg-admitted");
+  expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages[0].created_at).toBe(1791550000.125);
+  expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages[0].promoted_at).toBe(1791550000.875);
   editComposerDraft(draft, { text: "submitted" }); render();
   tap(find(node => node.props.accessibilityLabel === "Send")!);
   input().props.onChangeText("newer edit"); resolve({ result: { message } }); await flush();

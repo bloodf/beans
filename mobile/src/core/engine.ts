@@ -240,6 +240,7 @@ class Engine {
       const body = message?.body;
       const validAuthor = (author: any) => author?.kind === "you" || (author?.kind === "bot" && typeof author.bot_id === "string" && !!author.bot_id);
       const unsigned = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+      const timestamp = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0;
       const reply = body?.kind === "text" ? body.reply_to : undefined;
       const acknowledgedFiles = body?.kind === "text" && body.attachments !== undefined ? body.attachments : [];
       const validFiles = Array.isArray(acknowledgedFiles) && acknowledgedFiles.length === files.length
@@ -257,8 +258,8 @@ class Engine {
         : reply === undefined || reply === null;
       if (!message || typeof message.id !== "string" || !message.id || message.chat_id !== chatId
         || message.author?.kind !== "you" || body?.kind !== "text" || body.text !== normalizedText
-        || message.state?.kind !== "complete" || !unsigned(message.created_at)
-        || (message.promoted_at !== undefined && !unsigned(message.promoted_at))
+        || message.state?.kind !== "complete" || !timestamp(message.created_at)
+        || (message.promoted_at !== undefined && !timestamp(message.promoted_at))
         || (message.queued !== undefined && typeof message.queued !== "boolean")
         || (body.mentions !== undefined && (!Array.isArray(body.mentions) || !body.mentions.every(id => typeof id === "string")))
         || !validFiles || !validReply) throw new Error(t("Could not send"));

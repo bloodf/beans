@@ -199,10 +199,9 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
             }
             return Err(conflict);
         }
-        if queued_roster.is_some() {
-            if let Some(current) = app.store.queued_roster().map_err(|error| RelayError { status: None, message: error.to_string() })? {
-                rebase_queued_roster(app, &machine_file, current)?;
-            }
+        // The pull can itself queue a policy projection before receiving the full roster.
+        if let Some(current) = app.store.queued_roster().map_err(|error| RelayError { status: None, message: error.to_string() })? {
+            rebase_queued_roster(app, &machine_file, current)?;
         }
         #[cfg(feature = "runner")]
         app.close_orphan_proposals().map_err(|error| RelayError { status: None, message: error.to_string() })?;
@@ -321,7 +320,7 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
             Err(error) => return Err(error),
         };
         for blob in slots.iter().flat_map(|slot| &slot.blobs) {
-            apply_blob(app, machine_file, blob);
+            apply_incoming_blob(app, machine_file, blob, true)?;
         }
         let before = slots.first().map(|slot| slot.place).filter(|_| has_more);
         if let Err(error) = app.store.set_history_before(&chat_id, before) {
@@ -412,14 +411,25 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
             }
             return Ok(());
         }
-        // A page this long is a backlog (a fresh pair replays the history): apply it quietly
-        // and tell the app once, instead of one event and one state write per message.
+        let held = apply_pull_page(app, machine_file, blobs)?;
+        // Releasing or expiring the lease wakes the session loop, which pulls from here again.
+        if held {
+            return pull_controls(app, url, token, machine_file).await;
+        }
+    }
+}
+
+// Keep page application synchronous: decrypt and commit before advancing past a read mark.
+fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
+    blobs: Vec<BlobIn>) -> Result<bool, RelayError> {
+        // A backlog publishes one snapshot instead of one event per message.
         let bulk = blobs.len() >= BULK_BLOBS;
         app.bulk_sync.store(bulk, Ordering::Relaxed);
         // A backlog's messages reach the app with its snapshot, and a turn's end must come
         // after the messages it ended with, so its results wait for that snapshot.
         let mut results = Vec::new();
         let mut held = false;
+        let applied = (|| -> Result<(), RelayError> {
         for blob in blobs {
             let seq = blob.seq;
             let is_roster = blob.kind == "roster";
@@ -438,7 +448,11 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
             if bulk && blob.kind == "job_result" {
                 results.push(blob);
             } else {
-                apply_incoming_blob(app, machine_file, &blob, true)?;
+                if blob.kind == "chat" {
+                    apply_chat_blob(app, machine_file, &blob, true, true)?;
+                } else {
+                    apply_incoming_blob(app, machine_file, &blob, true)?;
+                }
             }
             drop(admission);
             let mut state = app.state.lock().unwrap();
@@ -447,6 +461,8 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
             }
             state.last_seq = state.last_seq.max(seq);
         }
+        Ok(())
+        })();
         app.bulk_sync.store(false, Ordering::Relaxed);
         app.save_state_now();
         if bulk {
@@ -456,11 +472,8 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
         for blob in results {
             apply_blob(app, machine_file, &blob);
         }
-        // Releasing or expiring the lease wakes the session loop, which pulls from here again.
-        if held {
-            return pull_controls(app, url, token, machine_file).await;
-        }
-    }
+        applied?;
+        Ok(held)
 }
 
 /// While the cursor waits before an envelope an update holds back, running work still hears
@@ -895,6 +908,9 @@ fn local_relay_error(error: anyhow::Error) -> RelayError {
 
 fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn,
     remember: bool) -> Result<(), RelayError> {
+    if blob.kind == "chat" {
+        return apply_chat_blob(app, machine_file, blob, remember, false);
+    }
     if blob.kind == "memory_config" {
         let _edit = app.roster_edit.lock().unwrap();
         if remember && app.state.lock().unwrap().applied_blob_ids.contains(&blob.id) { return Ok(()); }
@@ -984,9 +1000,9 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
 }
 
 pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
-    if matches!(blob.kind.as_str(), "roster" | "memory_config") {
+    if matches!(blob.kind.as_str(), "roster" | "memory_config" | "chat") {
         if let Err(error) = apply_incoming_blob(app, machine_file, blob, true) {
-            tracing::warn!(%error, "applying roster blob");
+            tracing::warn!(%error, "applying incoming blob");
         }
         return;
     }
@@ -1015,9 +1031,10 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Ok(policy) => apply_policy(app, policy),
             Err(error) => tracing::warn!(%error, "policy blob"),
         },
-        "chat" => match crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &ciphertext) {
-            Ok(op) => apply_chat_op(app, op),
-            Err(error) => tracing::warn!(%error, "chat blob"),
+        "chat" => {
+            if let Err(error) = apply_chat_blob(app, machine_file, blob, false, false) {
+                tracing::warn!(%error, "applying chat blob");
+            }
         },
         "machine" => match crate::crypto::decrypt_json::<MachineBlob>(&dek, "machine", &ciphertext) {
             Ok(MachineBlob { device, turns }) => {
@@ -1493,6 +1510,44 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
     app.roster_changed(normalized_descriptions || kept_checks || corrected);
 }
 
+fn apply_chat_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn,
+    remember: bool, advance_cursor: bool) -> Result<(), RelayError> {
+    // Decrypt before taking the state lock or opening the SQLite transaction.
+    let decoded = unb64(&blob.ciphertext).and_then(|ciphertext| {
+        let dek = machine_file.dek()?;
+        crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &ciphertext)
+    });
+    if let Ok(ChatBlob::ClearUnread { chat_id }) = &decoded {
+        let mut state = app.state.lock().unwrap();
+        if remember && state.applied_blob_ids.contains(&blob.id) { return Ok(()); }
+        let mut staged = state.clone();
+        let changed = staged.chats.iter_mut().find(|chat| chat.meta.id == *chat_id)
+            .is_some_and(|chat| {
+                let changed = chat.unread_count > 0;
+                chat.unread_count = 0;
+                changed
+            });
+        if remember { remember_applied(&mut staged, &blob.id); }
+        if advance_cursor { staged.last_seq = staged.last_seq.max(blob.seq); }
+        app.store.save_state(&staged).map_err(local_relay_error)?;
+        *state = staged;
+        drop(state);
+        if changed { app.emit(app.roster_summary()); }
+        return Ok(());
+    }
+    // Other chat operations retain their existing receipt and application semantics.
+    if remember {
+        let mut state = app.state.lock().unwrap();
+        if state.applied_blob_ids.contains(&blob.id) { return Ok(()); }
+        remember_applied(&mut state, &blob.id);
+    }
+    match decoded {
+        Ok(op) => apply_chat_op(app, op),
+        Err(error) => tracing::warn!(%error, "chat blob"),
+    }
+    Ok(())
+}
+
 fn apply_chat_op(app: &Arc<App>, op: ChatBlob) {
     match op {
         ChatBlob::Upsert { message } => {
@@ -1519,11 +1574,7 @@ fn apply_chat_op(app: &Arc<App>, op: ChatBlob) {
             }
         }
         ChatBlob::Remove { chat_id, message_id } => app.remove_message(&chat_id, &message_id, false),
-        ChatBlob::ClearUnread { chat_id } => {
-            if let Err(error) = app.mark_read(&chat_id, false) {
-                tracing::error!(%error, "saving incoming read state");
-            }
-        }
+        ChatBlob::ClearUnread { .. } => unreachable!("read marks commit with their incoming envelope"),
     }
 }
 
@@ -1557,6 +1608,198 @@ mod tests {
         let home = std::env::temp_dir().join(format!("beans-sync-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    #[tokio::test]
+    async fn incoming_read_page_commits_or_retries_without_consuming_receipt() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let dek = [31; 32];
+        let machine = crate::keys::MachineFile {
+            format: crate::config::Format::BeansV2,
+            machine_secret: crate::keys::b64(&[17; 32]),
+            identity_pubkey: String::new(), content_pubkey: String::new(),
+            account_dek: crate::keys::b64(&dek), name: "synthetic".into(), os: "ios".into(),
+            os_version: String::new(), model: String::new(), registered: false,
+            relay_url: None, created_at: 1,
+        };
+        let envelope = |id: String, seq, op: ChatBlob| BlobIn {
+            id, kind: "chat".into(), recipient_machine_pubkey: None,
+            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&dek, "chat", &op).unwrap()),
+            seq, created_at: 1,
+        };
+        {
+            let mut state = app.state.lock().unwrap();
+            state.last_seq = 10;
+            state.chats.push(Chat {
+                meta: ChatMeta { id: "read".into(), kind: "dm".into(), title: None,
+                    bot_ids: vec![], owner_bot_id: None, description: None, is_pinned: false, created_at: 1.0 },
+                unread_count: 3, usage: None, compactions: vec![],
+            });
+            app.store.save_state(&state).unwrap();
+        }
+        // Valid encrypted input succeeds before any failure injection.
+        let positive = envelope("positive-read".into(), 11, ChatBlob::ClearUnread { chat_id: "read".into() });
+        apply_pull_page(app, &machine, vec![positive]).unwrap();
+        let committed = app.store.load_state().unwrap();
+        assert_eq!(committed.chats[0].unread_count, 0);
+        assert_eq!(committed.last_seq, 11);
+        assert!(committed.applied_blob_ids.contains(&"positive-read".into()));
+        let db = rusqlite::Connection::open(app.config.database_path()).unwrap();
+        for (case, table) in [("single", "metadata"), ("bulk-chats", "chats"), ("bulk-receipt", "applied_blobs")] {
+            app.state.lock().unwrap().chats[0].unread_count = 3;
+            app.store.save_state(&app.state.lock().unwrap()).unwrap();
+            let baseline = app.store.load_state().unwrap();
+            let read_seq = baseline.last_seq + 2;
+            let read_id = format!("{case}-read");
+            let page = || {
+                let mut blobs = vec![
+                    envelope(format!("{case}-accepted"), read_seq - 1,
+                        ChatBlob::Remove { chat_id: "read".into(), message_id: "already-absent".into() }),
+                    envelope(read_id.clone(), read_seq, ChatBlob::ClearUnread { chat_id: "read".into() }),
+                ];
+                if case != "single" {
+                    for index in 1..BULK_BLOBS {
+                        blobs.push(envelope(format!("{case}-later-{index}"), read_seq + index as i64,
+                            ChatBlob::Remove { chat_id: "read".into(), message_id: format!("absent-{index}") }));
+                    }
+                }
+                blobs
+            };
+            let condition = match table {
+                "metadata" => format!("NEW.last_seq >= {read_seq}"),
+                "chats" => "json_extract(NEW.json, '$.unread_count') = 0".into(),
+                _ => format!("NEW.id = '{read_id}'"),
+            };
+            db.execute_batch(&format!("CREATE TRIGGER fail_incoming_read BEFORE INSERT ON {table} WHEN {condition} BEGIN SELECT RAISE(ABORT, 'synthetic incoming failure'); END;")).unwrap();
+            let mut events = app.events.subscribe();
+            let error = apply_pull_page(app, &machine, page()).unwrap_err();
+            assert!(error.message.contains("synthetic incoming failure"));
+            assert!(!app.bulk_sync.load(Ordering::Relaxed));
+            assert_eq!(app.chat("read").unwrap().unread_count, 3);
+            let mut accepted_receipts = baseline.applied_blob_ids.clone();
+            accepted_receipts.push(format!("{case}-accepted"));
+            assert_eq!(app.state.lock().unwrap().last_seq, read_seq - 1);
+            assert_eq!(app.state.lock().unwrap().applied_blob_ids, accepted_receipts);
+            let retained = app.store.load_state().unwrap();
+            assert_eq!(retained.chats[0].unread_count, 3);
+            assert_eq!(retained.last_seq, read_seq - 1);
+            assert_eq!(retained.applied_blob_ids, accepted_receipts);
+            let rejected_reload = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+            assert_eq!(rejected_reload.chat("read").unwrap().unread_count, 3);
+            assert_eq!(rejected_reload.state.lock().unwrap().last_seq, read_seq - 1);
+            assert_eq!(rejected_reload.state.lock().unwrap().applied_blob_ids, accepted_receipts);
+            drop(rejected_reload);
+            assert!(!std::iter::from_fn(|| events.try_recv().ok()).any(|event|
+                matches!(event, Event::RosterChanged { .. })));
+            db.execute_batch("DROP TRIGGER fail_incoming_read;").unwrap();
+            apply_pull_page(app, &machine, page()).unwrap();
+            let saved = app.store.load_state().unwrap();
+            assert_eq!(saved.chats[0].unread_count, 0);
+            assert_eq!(saved.last_seq, read_seq + if case != "single" { BULK_BLOBS as i64 - 1 } else { 0 });
+            assert!(saved.applied_blob_ids.contains(&read_id));
+            let cleared_reload = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+            assert_eq!(cleared_reload.chat("read").unwrap().unread_count, 0);
+            assert_eq!(cleared_reload.state.lock().unwrap().last_seq, saved.last_seq);
+            assert_eq!(cleared_reload.state.lock().unwrap().applied_blob_ids, saved.applied_blob_ids);
+            drop(cleared_reload);
+            // A duplicate cannot clear messages that became unread after this receipt.
+            app.state.lock().unwrap().chats[0].unread_count = 2;
+            app.store.save_state(&app.state.lock().unwrap()).unwrap();
+            apply_pull_page(app, &machine, page()).unwrap();
+            assert_eq!(app.chat("read").unwrap().unread_count, 2);
+            let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+            assert_eq!(reloaded.chat("read").unwrap().unread_count, 2);
+            assert_eq!(reloaded.state.lock().unwrap().last_seq, saved.last_seq);
+            assert_eq!(reloaded.state.lock().unwrap().applied_blob_ids, saved.applied_blob_ids);
+        }
+        assert!(app.store.outbox().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn first_sync_policy_projection_preserves_remote_bots_when_uploaded() {
+        use axum::{extract::{Query, State as HttpState, WebSocketUpgrade}, routing::{get, post}, Json, Router};
+        use serde_json::{json, Value};
+        use tokio::sync::Notify;
+
+        struct RelayFixture {
+            blobs: Vec<Value>,
+            published: std::sync::Mutex<Option<Value>>,
+            uploaded: Notify,
+        }
+        async fn list(HttpState(fixture): HttpState<Arc<RelayFixture>>,
+            Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            let since: i64 = query["since"].parse().unwrap();
+            let kinds: Vec<&str> = query["kinds"].split(',').collect();
+            Json(json!({"blobs": fixture.blobs.iter().filter(|blob|
+                blob["seq"].as_i64().unwrap() > since
+                    && kinds.contains(&blob["kind"].as_str().unwrap())).collect::<Vec<_>>(), "seq": 2}))
+        }
+        async fn upload(HttpState(fixture): HttpState<Arc<RelayFixture>>, Json(body): Json<Value>) -> Json<Value> {
+            if body["kind"] == "roster" {
+                *fixture.published.lock().unwrap() = Some(body);
+                fixture.uploaded.notify_one();
+            }
+            Json(json!({"seq": 3}))
+        }
+        async fn socket(upgrade: WebSocketUpgrade) -> axum::response::Response {
+            upgrade.on_upgrade(|mut socket| async move {
+                while socket.recv().await.is_some() {}
+            })
+        }
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Joining Device".into())).unwrap();
+        app.machine.lock().unwrap().as_mut().unwrap().registered = true;
+        app.store.clear().unwrap();
+        *app.state.lock().unwrap() = Default::default();
+        app.save_state();
+        assert!(app.store.queued_roster().unwrap().is_none());
+
+        let mut remote = roster(bot("remote-bot"));
+        let capabilities = crate::model::Capabilities { shell: false, write: false, plugins: Some(Vec::new()) };
+        let version = crate::model::PolicyVersion { counter: 1, device_id: "remote-device".into() };
+        remote.bots[0].capabilities = capabilities.clone();
+        remote.capability_versions.insert("remote-bot".into(), version.clone());
+        remote.policy_capabilities.insert("remote-bot".into(), capabilities.clone());
+        remote.policy_clock = 1;
+        remote.chats.push(ChatMeta { id: "remote-chat".into(), kind: "dm".into(), title: None,
+            bot_ids: vec!["remote-bot".into()], owner_bot_id: Some("remote-bot".into()),
+            description: None, is_pinned: false, created_at: 1.0 });
+        let policy = PolicyBlob { paused: None, bot_id: Some("remote-bot".into()),
+            capabilities: Some(capabilities), removed: false, version };
+        let dek = app.dek().unwrap();
+        let fixture = Arc::new(RelayFixture {
+            blobs: vec![
+                json!({"id":"policy-before-roster","kind":"policy","recipient_machine_pubkey":null,
+                    "ciphertext":crate::keys::b64(&crate::crypto::encrypt_json(&dek,"policy",&policy).unwrap()),"seq":1,"created_at":1}),
+                json!({"id":"remote-roster","kind":"roster","recipient_machine_pubkey":null,
+                    "ciphertext":crate::keys::b64(&crate::crypto::encrypt_json(&dek,"roster",&remote).unwrap()),"seq":2,"created_at":2}),
+            ], published: std::sync::Mutex::new(None), uploaded: Notify::new(),
+        });
+        let server = Router::new()
+            .route("/v1/health", get(|| async { Json(json!({"ok":true,"service":"beans-relay","format":"beans-v2","protocol":crate::relay::PROTOCOL,"min_protocol":crate::relay::PROTOCOL,"min_roster_protocol":crate::relay::PROTOCOL,"memory_config_version":1})) }))
+            .route("/v1/auth/challenge", post(|| async { Json(json!({"nonce":"test-nonce"})) }))
+            .route("/v1/auth/verify", post(|| async { Json(json!({"token":"test-token"})) }))
+            .route("/v1/sync", get(socket))
+            .route("/v1/blobs", get(list).put(upload))
+            .route("/v1/groups/{group}/blobs", get(|| async { Json(json!({"slots":[],"has_more":false})) }))
+            .with_state(fixture.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        app.set_relay_url(Some(format!("http://{}", listener.local_addr().unwrap()))).unwrap();
+        let server_task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let syncing = tokio::spawn({ let app = app.clone(); async move { session(&app, &mut 0).await } });
+        let arrived = tokio::time::timeout(Duration::from_secs(10), fixture.uploaded.notified()).await;
+        syncing.abort();
+        server_task.abort();
+        arrived.expect("first sync never published its policy projection");
+        let published = fixture.published.lock().unwrap().clone().unwrap();
+        let projected: RosterBlob = crate::crypto::decrypt_json(&dek, "roster",
+            &crate::keys::unb64(published["ciphertext"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(projected.bots.iter().any(|bot| bot.id == "remote-bot"), "first join erased the remote bot");
+        assert!(projected.chats.iter().any(|chat| chat.id == "remote-chat"), "first join erased the remote chat");
+        assert_eq!(published["expected_slot_seq"], 2);
     }
 
     #[tokio::test]

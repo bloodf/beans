@@ -18,6 +18,8 @@ A server advertising resources supplies `list_mcp_resources`, `list_mcp_resource
 
 A remote server with an `Authorization` header uses that header; otherwise OAuth is optional until a 401 asks for sign-in. Sign-in tokens and challenge state stay in the Runner's private plugin secrets file, scoped to the remote origin; a changed origin cannot reuse them. `oauth` may specify client id and secret, scopes, registration name, fixed loopback callback port/URL, and authorization metadata URL. A fixed callback opens on the Runner. The regular plugin sign-in flow opens on the requesting Device when possible. Signing out forgets local tokens, without revoking server-side tokens.
 
+The shared plugin OAuth completion boundary retains account incarnation and the actors of `plugins.connect` and `plugins.sign_in.finish`. Current listed membership remains locked through credential persistence; both actors must still be listed. Local MCP sign-in uses local authority and the same incarnation and plugin generation fences. Later status and card callbacks recheck authority outside the membership lock. Revocation before commit prevents credentials from being saved; cancellation does not reverse completed effects.
+
 The relay sees only plugin status in the Runner's encrypted machine blob, not `mcp.json`, its environment, headers, or tokens. Remote settings travel only in sealed Runner requests. Connection status names a URL by origin, not its path or query, which may contain credentials. `mcp.get` deliberately returns full config to paired Devices authorized to manage that Runner; apps must treat it as secret-bearing.
 
 ## Managing it

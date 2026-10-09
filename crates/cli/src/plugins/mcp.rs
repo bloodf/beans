@@ -706,7 +706,12 @@ async fn device_bearer(app: &Arc<App>, plugin_id: &str, server: &str, name: &str
 /// which sends back where it landed (`finish_sign_in`). Runs in the background; the plugin's
 /// state says how it goes and the tokens land in the secrets file.
 pub async fn connect_oauth(app: &Arc<App>, plugin_id: &str, server: &str, elsewhere: Option<Elsewhere>) -> Result<SignInStart, String> {
-    connect_oauth_for_card(app, plugin_id, server, None, elsewhere).await
+    connect_oauth_as(app, plugin_id, server, elsewhere, None).await
+}
+
+pub(super) async fn connect_oauth_as(app: &Arc<App>, plugin_id: &str, server: &str, elsewhere: Option<Elsewhere>, requested_by: Option<&str>) -> Result<SignInStart, String> {
+    let actor = OAuthActor::capture(app, requested_by)?;
+    connect_oauth_authorized(app, plugin_id, server, None, elsewhere, actor).await
 }
 
 /// The Device that asked for a sign-in from elsewhere: its name, and the loopback redirect it
@@ -726,6 +731,20 @@ pub struct SignInStart {
     pub done: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
 }
 
+#[derive(Clone)]
+struct OAuthActor { incarnation: u64, device: Option<String> }
+
+impl OAuthActor {
+    fn capture(app: &App, device: Option<&str>) -> Result<Self, String> {
+        app.with_plugin_actor(None, &[device], |incarnation| Ok(Self { incarnation, device: device.map(str::to_string) }))
+    }
+
+    fn check(&self, app: &App) -> Result<(), String> {
+        app.with_plugin_actor(Some(self.incarnation), &[self.device.as_deref()], |_| Ok(()))
+    }
+
+}
+
 /// A browser sign-in another Device finishes: the authorization this Runner holds until that
 /// Device sends back where the browser landed, and what to update when it ends.
 struct Pending {
@@ -734,6 +753,7 @@ struct Pending {
     name: String,
     card: Option<(String, String)>,
     admission: Admission,
+    actor: OAuthActor,
 }
 
 /// The OAuth server of a plugin, when it has one.
@@ -828,6 +848,11 @@ fn set_card(app: &Arc<App>, chat_id: &str, message_id: &str, decision: &str, sum
 
 /// `connect_oauth` with a chat card (chat id, message id) to update as the sign-in goes.
 pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &str, card: Option<(String, String)>, elsewhere: Option<Elsewhere>) -> Result<SignInStart, String> {
+    let actor = OAuthActor::capture(app, None)?;
+    connect_oauth_authorized(app, plugin_id, server, card, elsewhere, actor).await
+}
+
+async fn connect_oauth_authorized(app: &Arc<App>, plugin_id: &str, server: &str, card: Option<(String, String)>, elsewhere: Option<Elsewhere>, actor: OAuthActor) -> Result<SignInStart, String> {
     let admission = Admission::capture(app, plugin_id)?;
     let (plugin, spec) = {
         let _guard = admission.enter(app, plugin_id)?;
@@ -878,6 +903,7 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
     };
     {
         let _guard = admission.enter(app, plugin_id)?;
+        actor.check(app)?;
     match &opens_on {
         Some(device) => super::note(app, plugin_id, Some(("connecting", &format!("Finish signing in in the browser on {device}")))),
         None => super::note(app, plugin_id, Some(("connecting", "Getting a sign-in code…"))),
@@ -891,12 +917,13 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
         return match begin_sign_in(app, &url, &scopes, &name, &client, elsewhere.redirect_uri).await {
             Ok((state, page)) => {
                 let _guard = admission.enter(app, plugin_id)?;
-                let id = hold_sign_in(app, plugin_id, Pending { state, server: server.to_string(), name: name.clone(), card, admission });
+                actor.check(app)?;
+                let id = hold_sign_in(app, plugin_id, Pending { state, server: server.to_string(), name: name.clone(), card, admission, actor });
                 Ok(SignInStart { message: format!("Open the {name} sign-in page on {}.", elsewhere.device), url: Some(page), id: Some(id), done: None })
             }
             Err(error) => {
                 let _guard = admission.enter(app, plugin_id)?;
-                end_sign_in(app, plugin_id, server, &name, card, Err(error.clone()));
+                end_sign_in(app, plugin_id, server, &name, card, Err(error.clone()), admission, &actor)?;
                 Err(error)
             }
         };
@@ -907,14 +934,10 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
     tokio::spawn(async move {
         let flow = match &device {
             _ if admission.enter(&app, &plugin_id).is_err() => Err("The plugin account changed; start again.".into()),
-            Some((device_endpoint, token_endpoint)) => device_sign_in(&app, &plugin_id, &server, device_endpoint, token_endpoint, &scopes, &name, client.id.as_deref().unwrap_or(""), card.as_ref(), admission).await,
+            Some((device_endpoint, token_endpoint)) => device_sign_in(&app, &plugin_id, &server, device_endpoint, token_endpoint, &scopes, &name, client.id.as_deref().unwrap_or(""), card.as_ref(), admission, &actor).await,
             None => sign_in(&app, &url, &scopes, &name, &client).await,
         };
-        let outcome = flow.as_ref().map(|_| ()).map_err(Clone::clone);
-        if let Ok(_guard) = admission.enter(&app, &plugin_id) {
-            end_sign_in(&app, &plugin_id, &server, &name, card, flow);
-        }
-        let outcome = app.plugin_admission(Some(admission.incarnation)).map(|_| ()).and(outcome);
+        let outcome = end_sign_in(&app, &plugin_id, &server, &name, card, flow, admission, &actor);
         let _ = ended.send(outcome);
     });
     Ok(SignInStart { message, url: None, id: None, done: Some(done) })
@@ -930,8 +953,11 @@ fn this_runner(app: &App) -> String {
 fn hold_sign_in(app: &Arc<App>, plugin_id: &str, pending: Pending) -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let Ok(_guard) = pending.admission.enter(app, plugin_id) else { return id };
+    if pending.actor.check(app).is_err() { return id; }
+    let actor = pending.actor.clone();
     let replaced = app.mcp.sign_ins.lock().unwrap().insert(plugin_id.to_string(), (id.clone(), pending));
     if let Some((_, Pending { name, card: Some((chat_id, message_id)), .. })) = replaced {
+        if actor.check(app).is_err() { return id; }
         set_card_while(app, &chat_id, &message_id, "allowed", "pending", format!("Sign in to {name} on {}.", this_runner(app)));
     }
     let (app, plugin_id, held) = (app.clone(), plugin_id.to_string(), id.clone());
@@ -939,7 +965,7 @@ fn hold_sign_in(app: &Arc<App>, plugin_id: &str, pending: Pending) -> String {
         tokio::time::sleep(super::sign_in::TIMEOUT).await;
         if let Some(pending) = take_sign_in(&app, &plugin_id, &held) {
             let Ok(_guard) = pending.admission.enter(&app, &plugin_id) else { return };
-            end_sign_in(&app, &plugin_id, &pending.server, &pending.name, pending.card, Err("Timed out waiting for the browser".into()));
+            let _ = end_sign_in(&app, &plugin_id, &pending.server, &pending.name, pending.card, Err("Timed out waiting for the browser".into()), pending.admission, &pending.actor);
         }
     });
     id
@@ -954,12 +980,17 @@ fn take_sign_in(app: &App, plugin_id: &str, id: &str) -> Option<Pending> {
 /// The Device that opened the page sent back where the browser landed: its code becomes the
 /// tokens here.
 pub async fn finish_sign_in(app: &Arc<App>, plugin_id: &str, id: &str, callback: &str) -> Result<Value, String> {
+    finish_sign_in_as(app, plugin_id, id, callback, None).await
+}
+
+pub(super) async fn finish_sign_in_as(app: &Arc<App>, plugin_id: &str, id: &str, callback: &str, requested_by: Option<&str>) -> Result<Value, String> {
+    let finisher = OAuthActor::capture(app, requested_by)?;
     let pending = take_sign_in(app, plugin_id, id).ok_or("That sign-in is over. Start it again.")?;
+    pending.actor.check(app)?;
     let flow = complete_sign_in(pending.state, callback, &pending.name).await;
-    let _guard = pending.admission.enter(app, plugin_id)?;
-    let finished = flow.as_ref().map(|_| ()).map_err(String::clone);
-    end_sign_in(app, plugin_id, &pending.server, &pending.name, pending.card, flow);
-    finished.map(|()| json!({ "signed_in": true }))
+    // Both the initiating and finishing Device must retain authority at commit.
+    finish_oauth(app, plugin_id, &pending.server, &pending.name, pending.card, flow, pending.admission, &pending.actor, &finisher)?;
+    Ok(json!({ "signed_in": true }))
 }
 
 /// The page closed before the sign-in finished: the plugin waits for a sign-in again, and its
@@ -978,26 +1009,56 @@ pub fn cancel_sign_in(app: &Arc<App>, plugin_id: &str, id: &str) -> Result<Value
 /// Ends a sign-in: the tokens saved and every card that asks for the plugin's sign-in reads
 /// Signed in, or the plugin and the card say why it failed. A failure leaves alone a plugin
 /// another sign-in got ready, and a card that already says how it went.
-fn end_sign_in(app: &Arc<App>, plugin_id: &str, server: &str, name: &str, card: Option<(String, String)>, flow: Result<Value, String>) {
-    match flow.and_then(|saved| super::set_oauth(app, plugin_id, server, Some(saved))) {
+fn end_sign_in(app: &Arc<App>, plugin_id: &str, server: &str, name: &str, card: Option<(String, String)>, flow: Result<Value, String>, admission: Admission, actor: &OAuthActor) -> Result<(), String> {
+    finish_oauth(app, plugin_id, server, name, card, flow, admission, actor, actor)
+}
+
+fn finish_oauth(app: &Arc<App>, plugin_id: &str, server: &str, name: &str, card: Option<(String, String)>, flow: Result<Value, String>, admission: Admission, actor: &OAuthActor, finisher: &OAuthActor) -> Result<(), String> {
+    let _guard = admission.enter(app, plugin_id)?;
+    actor.check(app)?;
+    finisher.check(app)?;
+    if actor.incarnation != finisher.incarnation { return Err("The plugin account changed; start again.".into()); }
+    let result = flow.and_then(|saved| {
+        // lifecycle -> membership -> plugin Store -> private files. set_oauth re-enters
+        // lifecycle but never state; revocation cannot interleave with credential writes.
+        app.with_plugin_actor(Some(actor.incarnation), &[actor.device.as_deref(), finisher.device.as_deref()], |_| {
+            super::set_oauth(app, plugin_id, server, Some(saved))
+        })
+    });
+    actor.check(app)?;
+    finisher.check(app)?;
+    match &result {
         Ok(()) => {
             app.mcp.forget(plugin_id);
+            actor.check(app)?;
+            finisher.check(app)?;
             super::note(app, plugin_id, None);
             prefetch_tools(app, plugin_id);
+            actor.check(app)?;
+            finisher.check(app)?;
             if let Some((chat_id, message_id)) = card {
+                actor.check(app)?;
+                finisher.check(app)?;
                 set_card(app, &chat_id, &message_id, "connected", Some(format!("Signed in to {name}.")), None, None);
             }
+            actor.check(app)?;
+            finisher.check(app)?;
             settle_sign_in_cards(app, plugin_id, name);
         }
         Err(error) => {
             if !is_ready(app, plugin_id) {
+                actor.check(app)?;
+                finisher.check(app)?;
                 super::note(app, plugin_id, Some(("error", &error)));
             }
             if let Some((chat_id, message_id)) = card {
+                actor.check(app)?;
+                finisher.check(app)?;
                 set_card_while(app, &chat_id, &message_id, "allowed", "failed", format!("Sign-in failed: {error}"));
             }
         }
     }
+    result
 }
 
 fn is_ready(app: &App, plugin_id: &str) -> bool {
@@ -1039,7 +1100,7 @@ const DEVICE_FLOW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// link on the card and in the plugin's detail, poll the token endpoint until the user has
 /// entered it. Answers with the tokens in the shape the browser flow saves.
 #[allow(clippy::too_many_arguments)]
-async fn device_sign_in(app: &Arc<App>, plugin_id: &str, server: &str, device_endpoint: &str, token_endpoint: &str, scopes: &[String], name: &str, client_id: &str, card: Option<&(String, String)>, admission: Admission) -> Result<Value, String> {
+async fn device_sign_in(app: &Arc<App>, plugin_id: &str, server: &str, device_endpoint: &str, token_endpoint: &str, scopes: &[String], name: &str, client_id: &str, card: Option<&(String, String)>, admission: Admission, actor: &OAuthActor) -> Result<Value, String> {
     // The App's client: plain form posts, no MCP transport involved.
     let http = app.http.clone();
     let scope = scopes.join(" ");
@@ -1060,6 +1121,7 @@ async fn device_sign_in(app: &Arc<App>, plugin_id: &str, server: &str, device_en
     let interval = started["interval"].as_u64().unwrap_or(5).max(1);
     {
         let _guard = admission.enter(app, plugin_id)?;
+        actor.check(app)?;
     if let Some((chat_id, message_id)) = card {
         set_card(app, chat_id, message_id, "allowed", Some(format!("Enter the code {user_code} at {shown}.")), Some(link.clone()), Some(user_code.clone()));
     }
@@ -1071,6 +1133,7 @@ async fn device_sign_in(app: &Arc<App>, plugin_id: &str, server: &str, device_en
     }
     let polled = poll_device_token(app, token_endpoint, name, client_id, &device_code, interval, started["expires_in"].as_u64()).await;
     let _guard = admission.enter(app, plugin_id)?;
+    actor.check(app)?;
     // Spent either way; a newer flow's code stays.
     let mut store = app.plugins.lock().unwrap();
     if store.codes.get(plugin_id).is_some_and(|waiting| waiting.code == user_code) {
@@ -3040,6 +3103,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_revoked_actor_before_commit_blocks_publication_and_paired_actor_succeeds() {
+        for revoked in [Some("initiator"), Some("finisher"), None] {
+            let scratch = scratch_app();
+            let app = &scratch.0;
+            crate::identity::create(app, Some("Synthetic OAuth".into())).unwrap();
+            let manifest = crate::plugins::Manifest::parse(&json!({
+                "id": "oauth-fixture", "name": "Fixture",
+                "servers": { "api": { "type": "http", "url": "http://127.0.0.1:1/mcp", "auth": { "type": "oauth" } } }
+            })).unwrap();
+            crate::plugins::install(app, manifest, "inline").unwrap();
+            crate::config::write_json_private(&catalog_path(app, "oauth-fixture"), &json!({ "servers": {} })).unwrap();
+            {
+                let mut state = app.state.lock().unwrap();
+                state.listed_machines.insert("initiator".into(), 1);
+                state.listed_machines.insert("finisher".into(), 1);
+            }
+            let actor = OAuthActor::capture(app, Some("initiator")).unwrap();
+            let finisher = OAuthActor::capture(app, Some("finisher")).unwrap();
+            let admission = Admission::capture(app, "oauth-fixture").unwrap();
+            let before = std::fs::read(app.config.plugins_dir().join("secrets.json")).unwrap();
+            let (ready, waiting) = tokio::sync::oneshot::channel();
+            let (release, blocked) = tokio::sync::oneshot::channel();
+            let held = app.clone();
+            let completion = tokio::spawn(async move {
+                let tokens = json!({ "tokens": { "access_token": "synthetic-completion" } });
+                ready.send(()).unwrap();
+                blocked.await.unwrap();
+                finish_oauth(&held, "oauth-fixture", "api", "Fixture", None, Ok(tokens), admission, &actor, &finisher)
+            });
+            waiting.await.unwrap();
+            if let Some(device) = revoked { app.state.lock().unwrap().listed_machines.remove(device); }
+            release.send(()).unwrap();
+            let outcome = completion.await.unwrap();
+            let saved = app.plugins.lock().unwrap().sign_in_secret("oauth-fixture", "oauth", "api");
+            if revoked.is_some() {
+                assert!(outcome.unwrap_err().contains("paired Device"));
+                assert!(saved.is_none());
+                assert_eq!(std::fs::read(app.config.plugins_dir().join("secrets.json")).unwrap(), before);
+                assert_eq!(app.mcp.generation("oauth-fixture"), admission.generation);
+                assert!(!app.plugins.lock().unwrap().notes.contains_key("oauth-fixture"));
+            } else {
+                outcome.unwrap();
+                assert_eq!(saved.unwrap()["tokens"]["access_token"], "synthetic-completion");
+                let persisted: Value = crate::config::read_json(&app.config.plugins_dir().join("secrets.json")).unwrap();
+                assert_eq!(persisted["oauth-fixture"]["oauth:api"]["tokens"]["access_token"], "synthetic-completion");
+                assert_eq!(app.plugins.lock().unwrap().status("oauth-fixture").unwrap().state, "ready");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn forgotten_account_drops_connected_pool_and_pending_sign_in() {
         let scratch = scratch_app();
         let app = &scratch.0;
@@ -3063,6 +3177,7 @@ mod tests {
         let sign_in = hold_sign_in(app, "forget-fixture", Pending {
             state: OAuthState::Unauthorized(manager), server: "api".into(),
             name: "Synthetic fixture".into(), card: None, admission,
+            actor: OAuthActor::capture(app, None).unwrap(),
         });
         assert!(app.mcp.cached_server("forget-fixture/api").is_some());
         app.forget_identity().unwrap();

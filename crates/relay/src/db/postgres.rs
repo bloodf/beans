@@ -225,6 +225,8 @@ pub struct Postgres {
     /// This process, in `relay_instances` and `relay_sockets`.
     instance: String,
     host: String,
+    /// Retains this process's authenticated replay session alongside its listener.
+    local: Arc<Local>,
 }
 
 /// TLS for `sslmode=require` and `prefer`, with the provider named: the build links both ring
@@ -280,7 +282,7 @@ impl Postgres {
         client.execute("SELECT pg_advisory_unlock($1)", &[&SCHEMA_LOCK]).await?;
         made?;
 
-        let store = Postgres { pool, instance: uuid::Uuid::new_v4().to_string(), host };
+        let store = Postgres { pool, instance: uuid::Uuid::new_v4().to_string(), host, local: local.clone() };
         store.beat(&client).await?;
         drop(client);
         // A `NOTIFY` reaches only the sessions listening when it is sent, so the store opens once

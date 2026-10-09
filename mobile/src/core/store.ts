@@ -8,6 +8,7 @@ import { useShallow } from "zustand/react/shallow";
 import { runsInTerminal, type AutoReview, type Bot, type Chat, type ChatMeta, type ChatUsage, type Device, type Message, type ProviderModel, type ProviderStatus, type RelayProblem, type Routine } from "./model";
 import { t } from "../i18n";
 import { savePrefs } from "./prefs";
+import { clearComposerDrafts, invalidateComposerSends, removeComposerDraft } from "./composerDraft";
 
 export interface Running {
   chatId: string;
@@ -122,6 +123,10 @@ function empty(): Omit<StoreState, "ready" | "dictation_lang" | "appActive" | "a
 }
 
 export const useStore = create<StoreState>()(() => ({ ...empty(), ready: false, appActive: false, activeSince: 0 }));
+useStore.subscribe((state, previous) => {
+  if (state.identityId !== previous.identityId || state.deviceId !== previous.deviceId
+    || state.relayUrl !== previous.relayUrl || state.paired !== previous.paired) invalidateComposerSends();
+});
 
 /// Applies a change to the phone's own prefs and saves them.
 export function mutate(update: (s: StoreState) => Partial<StoreState>) {
@@ -131,6 +136,7 @@ export function mutate(update: (s: StoreState) => Partial<StoreState>) {
 
 /// Back to unpaired: everything the core told us goes; the phone's prefs stay.
 export function resetStore() {
+  clearComposerDrafts();
   useStore.setState({ ...empty() });
 }
 
@@ -311,7 +317,11 @@ export function removeMessage(chatId: string, messageId: string) {
   }));
 }
 
-export function removeChat(chatId: string) {
+export function removeChat(chatId: string, discardDraft = true) {
+  if (discardDraft) {
+    const source = useStore.getState();
+    removeComposerDraft(source.identityId, source.relayUrl, chatId);
+  }
   useStore.setState((s) => ({
     chats: s.chats.filter((c) => c.id !== chatId),
     statuses: omit(s.statuses, chatId),

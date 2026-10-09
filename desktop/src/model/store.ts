@@ -1605,6 +1605,13 @@ export class AppStore {
     const trimmed = text.trim();
     const chat = this.chat(chatID);
     if ((trimmed === "" && attachments.length === 0) || !chat) return { chatID, acknowledged: false };
+    const identity = this.identityID;
+    const generation = this.bootstrapGeneration;
+    let invalidated = false;
+    const unsubscribe = this.subscribe((event) => {
+      if (event.kind === "identityChanged" || event.kind === "connectionChanged") invalidated = true;
+    });
+    const ownsCompletion = () => !invalidated && identity === this.identityID && generation === this.bootstrapGeneration;
     const original = replyTo ? chat.messages.find((message) => message.id === replyTo) : undefined;
     const quote = original ? quoteOf(original) : undefined;
 
@@ -1623,22 +1630,25 @@ export class AppStore {
 
     if (this.isMock) {
       this.replyEngine?.respond(trimmed, chat, message.id);
+      unsubscribe();
       return { chatID, acknowledged: true };
     }
 
     // Expect a turn to start; the CLI's job events confirm or clear this. A DM names its bot right
     // away so the working row appears with the send.
+    let pendingJob: RunningJob | undefined;
     if (chat.botIDs.length > 0) {
       const pendingID = `pending:${chatID}`;
       this.clearAvatarErrors(chatID);
-      this.runningJobs.push({ id: pendingID, chatID, botID: isDM(chat) ? chat.botIDs[0]! : "",
-        previousMessages: new Set(this.chat(chatID)?.messages.map((message) => message.id)) });
+      pendingJob = { id: pendingID, chatID, botID: isDM(chat) ? chat.botIDs[0]! : "",
+        previousMessages: new Set(this.chat(chatID)?.messages.map((message) => message.id)) };
+      this.runningJobs.push(pendingJob);
       this.emit({ kind: "respondingChanged", chatID });
       this.emit({ kind: "chatsChanged" });
       setTimeout(() => {
-        if (!this.runningJobs.some((job) => job.id === pendingID)) return;
+        if (!ownsCompletion() || !this.runningJobs.includes(pendingJob!)) return;
         // Nothing started (no Runner answered); stop showing the bot at work.
-        this.runningJobs = this.runningJobs.filter((job) => job.id !== pendingID);
+        this.runningJobs = this.runningJobs.filter((job) => job !== pendingJob);
         this.emit({ kind: "respondingChanged", chatID });
         this.emit({ kind: "chatsChanged" });
       }, 4000);
@@ -1659,17 +1669,20 @@ export class AppStore {
         })),
         ...(quote ? { reply_to: quote.messageID } : {}),
       });
-      if (result?.message?.id === message.id) return { chatID, acknowledged: true };
+      if (ownsCompletion() && result?.message?.id === message.id) return { chatID, acknowledged: true };
     } catch {
       // The transport does not distinguish API refusal from a lost response. Do not retry
       // or claim no remote effect. Remove only our local accepted-looking placeholder.
+    } finally {
+      unsubscribe();
     }
+    if (!ownsCompletion()) return { chatID, acknowledged: false };
     const current = this.chat(chatID);
     if (current?.messages.includes(message)) {
       this.replaceChat({ ...current, messages: current.messages.filter((row) => row !== message) });
       this.emit({ kind: "messageRemoved", chatID, messageID: message.id });
     }
-    this.runningJobs = this.runningJobs.filter((job) => job.id !== `pending:${chatID}`);
+    this.runningJobs = this.runningJobs.filter((job) => job !== pendingJob);
     this.emit({ kind: "respondingChanged", chatID });
     this.emit({ kind: "chatsChanged" });
     return { chatID, acknowledged: false };

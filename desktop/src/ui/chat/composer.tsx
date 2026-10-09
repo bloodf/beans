@@ -20,13 +20,28 @@ const maxTextHeight = 168;
 const mentionRowHeight = 38;
 const mentionRows = 5;
 
-/** The draft left in the composer when Settings took the window, for the chat it was typed in, as
- * the macOS app's one chat view keeps its composer. Another chat starts empty. */
-let kept: { chatID: string; text: string; attachments: OutgoingAttachment[]; picked: Bot[]; reply: ComposerReply | null } | null = null;
-let currentDraft: (() => boolean) | null = null;
-// Native quit checks this even when the composer has unmounted behind Settings.
+/** Draft ownership outlives the chat view, including Settings and account transitions. */
+interface KeptDraft {
+  text: string; attachments: OutgoingAttachment[]; picked: Bot[]; reply: ComposerReply | null;
+  revision: number; pending: boolean; unknown: boolean; invalidated: boolean;
+  changed?: () => void;
+}
+const kept = new Map<string | null, Map<string, KeptDraft>>();
+function draftFor(chatID: string): KeptDraft {
+  let chats = kept.get(store.identityID);
+  if (!chats) kept.set(store.identityID, chats = new Map());
+  let draft = chats.get(chatID);
+  if (!draft) chats.set(chatID, draft = { text: "", attachments: [], picked: [], reply: null, revision: 0, pending: false, unknown: false, invalidated: false });
+  return draft;
+}
+store.subscribe((event) => {
+  if (event.kind !== "identityChanged" && event.kind !== "connectionChanged") return;
+  for (const chats of kept.values()) for (const draft of chats.values()) {
+    if (draft.pending) { draft.invalidated = true; draft.unknown = true; draft.changed?.(); }
+  }
+});
 Object.defineProperty(window, "beansUpdateHasDraft", {
-  value: () => currentDraft?.() === true || (kept !== null && (kept.text !== "" || kept.attachments.length > 0 || kept.reply !== null)),
+  value: () => [...kept.values()].some((chats) => [...chats.values()].some((draft) => draft.pending || draft.unknown || draft.text !== "" || draft.attachments.length > 0 || draft.reply !== null)),
 });
 
 /** The message a draft answers: its id, who wrote it, and how it opens. */
@@ -85,18 +100,24 @@ export function Composer(props: {
   ref?: (handle: ComposerHandle) => void;
   onHeight?: (height: number) => void;
 }) {
-  const draft = kept?.chatID === props.chatID ? kept : null;
-  kept = null;
-  const [text, setText] = createSignal(draft?.text ?? "");
-  const [attachments, setAttachments] = createSignal<OutgoingAttachment[]>(draft?.attachments ?? []);
-  const [reply, setReply] = createSignal<ComposerReply | null>(draft?.reply ?? null);
+  let draft = draftFor(props.chatID);
+  const [version, setVersion] = createSignal(0);
+  const changed = () => {
+    setVersion((value) => value + 1);
+    queueMicrotask(() => { if (area) { area.value = draft.text; updateLayout(); } });
+  };
+  draft.changed = changed;
+  const text = () => { version(); return draft.text; };
+  const setText = (value: string) => { draft.text = value; changed(); };
+  const attachments = () => { version(); return draft.attachments; };
+  const setAttachments = (value: OutgoingAttachment[]) => { draft.attachments = value; changed(); };
+  const reply = () => { version(); return draft.reply; };
+  const setReply = (value: ComposerReply | null) => { draft.reply = value; changed(); };
+  const pending = () => { version(); return draft.pending; };
+  const sendUnknown = () => { version(); return draft.unknown; };
   const [expanded, setExpanded] = createSignal(false);
   const [mention, setMention] = createSignal<{ start: number; end: number; bots: Bot[]; x: number; top: number; bottom: number } | null>(null);
   const [mentionIndex, setMentionIndex] = createSignal(0);
-  const [pending, setPending] = createSignal(false);
-  const [sendUnknown, setSendUnknown] = createSignal(false);
-  let revision = 0;
-  let picked: Bot[] = draft?.picked ?? [];
   let area: HTMLTextAreaElement | undefined;
   let backdrop: HTMLDivElement | undefined;
   let field: HTMLDivElement | undefined;
@@ -104,14 +125,21 @@ export function Composer(props: {
   let menu: HTMLDivElement | undefined;
 
   const hasContent = () => text().trim() !== "" || attachments().length > 0;
-  const ownsDraft = () => pending() || text() !== "" || attachments().length > 0 || reply() !== null;
-  currentDraft = ownsDraft;
+  const selectDraft = () => {
+    if (draft.changed === changed) draft.changed = undefined;
+    draft = draftFor(props.chatID);
+    draft.changed = changed;
+    changed();
+    setMention(null);
+    if (area) area.value = draft.text;
+    updateLayout();
+  };
 
   const focus = () => area?.focus();
   const replaceText = (value: string) => {
-    revision++;
+    draft.revision++;
     setText(value);
-    picked = [];
+    draft.picked = [];
     if (area) area.value = value;
     queueMicrotask(() => {
       updateLayout();
@@ -119,13 +147,13 @@ export function Composer(props: {
     });
   };
   const startReply = (to: ComposerReply) => {
-    revision++;
+    draft.revision++;
     setReply(to);
     updateLayout();
     focus();
   };
   const cancelReply = () => {
-    revision++;
+    draft.revision++;
     setReply(null);
     updateLayout();
   };
@@ -219,9 +247,9 @@ export function Composer(props: {
     }
     const insertion = `@${bot.name} `;
     area.setRangeText(insertion, range.start, range.end, "end");
-    revision++;
+    draft.revision++;
     setText(area.value);
-    picked.push(bot);
+    draft.picked.push(bot);
     setMention(null);
     updateLayout();
   };
@@ -241,7 +269,7 @@ export function Composer(props: {
       else added.push(outgoing(info));
     }
     if (added.length > 0) {
-      revision++;
+      draft.revision++;
       setAttachments([...attachments(), ...added]);
       updateLayout();
     }
@@ -295,26 +323,19 @@ export function Composer(props: {
     const onResize = () => updateLayout();
     window.addEventListener("resize", onResize);
     updateLayout();
+    const offStore = store.subscribe((event) => {
+      if (event.kind === "identityChanged" || event.kind === "snapshotReplaced") selectDraft();
+    });
     return () => {
       offDrop();
       observer.disconnect();
       window.removeEventListener("resize", onResize);
-      if (ownsDraft()) kept = { chatID: props.chatID, text: text(), attachments: attachments(), picked, reply: reply() };
-      if (currentDraft === ownsDraft) currentDraft = null;
+      offStore();
+      if (draft.changed === changed) draft.changed = undefined;
     };
   });
 
-  // Another chat starts with an empty composer.
-  createEffect(
-    () => props.chatID,
-    () => {
-      setAttachments([]);
-      setMention(null);
-      setReply(null);
-      replaceText("");
-    },
-    { defer: true },
-  );
+  createEffect(() => props.chatID, selectDraft, { defer: true });
 
   // The highlighted bot stays in view in a list longer than the menu.
   createEffect(mentionIndex, (index) => {
@@ -325,29 +346,34 @@ export function Composer(props: {
 
   const send = async () => {
     if (pending() || !hasContent()) return;
-    const submittedRevision = revision;
+    const submitted = draft;
+    const submittedRevision = submitted.revision;
     const value = text().trim();
     // A pick counts while its `@Name` is still in the text.
     const lowered = value.toLowerCase();
-    const mentions = picked.filter((bot) => lowered.includes(`@${bot.name.toLowerCase()}`)).map((bot) => bot.id);
+    const mentions = submitted.picked.filter((bot) => lowered.includes(`@${bot.name.toLowerCase()}`)).map((bot) => bot.id);
     const sending = attachments();
     const answering = reply()?.messageID;
-    setPending(true);
-    setSendUnknown(false);
+    submitted.pending = true;
+    submitted.unknown = false;
+    submitted.invalidated = false;
+    submitted.changed?.();
     try {
       const acknowledged = await props.onSend(value, sending, mentions, answering);
-      if (!acknowledged) {
-        setSendUnknown(true);
-      } else if (revision === submittedRevision) {
-        setAttachments([]);
-        setMention(null);
-        setReply(null);
-        replaceText("");
+      if (!acknowledged || submitted.invalidated) {
+        submitted.unknown = true;
+      } else if (submitted.revision === submittedRevision) {
+        submitted.text = "";
+        submitted.attachments = [];
+        submitted.picked = [];
+        submitted.reply = null;
+        submitted.revision++;
       }
     } catch {
-      setSendUnknown(true);
+      submitted.unknown = true;
     } finally {
-      setPending(false);
+      submitted.pending = false;
+      submitted.changed?.();
     }
   };
 
@@ -483,7 +509,7 @@ export function Composer(props: {
                     title={L("Remove")}
                     aria-label={L("Remove")}
                     onClick={() => {
-                      revision++;
+                      draft.revision++;
                       setAttachments(attachments().filter((other) => other !== item));
                       updateLayout();
                       focus();
@@ -512,7 +538,7 @@ export function Composer(props: {
             aria-label={reply() ? L("Reply…") : props.placeholder}
             spellcheck={true}
             onInput={(event) => {
-              revision++;
+              draft.revision++;
               setText(event.currentTarget.value);
               updateLayout();
               updateMentions();

@@ -452,7 +452,6 @@ export function ChatView(props: { chatID: string; onRedirect: (chatID: string) =
         onSend={async (text, attachments, mentions, replyTo) => {
           pinned = true;
           const result = await store.send(text, attachments, mentions, props.chatID, replyTo);
-          if (result.acknowledged && result.chatID !== props.chatID) props.onRedirect(result.chatID);
           return result.acknowledged;
         }}
       />

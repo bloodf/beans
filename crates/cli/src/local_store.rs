@@ -65,7 +65,8 @@ fn consume_schedule_tx(tx: &Transaction<'_>, lease: &TaskLease, routine: &str, s
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskState { Queued, Running, Finished, Interrupted, NeedsReview }
 
 impl TaskState {
@@ -76,6 +77,28 @@ impl TaskState {
             _ => anyhow::bail!("Invalid persisted task state"),
         })
     }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskHistoryCursor {
+    account_epoch: String,
+    task_id: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct TaskHistoryEntry {
+    pub task_id: String,
+    pub chat_id: String,
+    pub bot_id: String,
+    pub routine_id: Option<String>,
+    pub state: TaskState,
+}
+
+#[derive(serde::Serialize)]
+pub struct TaskHistoryPage {
+    pub tasks: Vec<TaskHistoryEntry>,
+    pub next_cursor: Option<String>,
 }
 
 /// Immutable effective invocation binding. Digest construction belongs to the execution host.
@@ -353,6 +376,46 @@ impl LocalStore {
             params![lease.account_epoch, lease.task_id, lease.owner_epoch, lease.execution_id], |r| r.get(0),
         ).optional()?;
         value.as_deref().map(TaskState::parse).transpose()
+    }
+
+    /// Reads only structural task history, without acquiring or recovering execution authority.
+    pub(crate) fn task_history_page(&self, epoch: Option<&str>, cursor: Option<&str>, limit: usize) -> anyhow::Result<TaskHistoryPage> {
+        let valid_id = |id: &str| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control);
+        anyhow::ensure!((1..=100).contains(&limit), "Invalid task page limit");
+        let cursor = cursor.map(|text| -> anyhow::Result<TaskHistoryCursor> {
+            anyhow::ensure!(!text.is_empty() && text.len() <= 2048, "Invalid task cursor");
+            let bytes = crate::keys::unb64(text)?;
+            anyhow::ensure!(crate::keys::b64(&bytes) == text, "Invalid task cursor");
+            Ok(serde_json::from_slice(&bytes)?)
+        }).transpose()?;
+        if let Some(cursor) = &cursor {
+            anyhow::ensure!(valid_id(&cursor.account_epoch) && valid_id(&cursor.task_id), "Invalid task cursor");
+            anyhow::ensure!(Some(cursor.account_epoch.as_str()) == epoch, "Stale task cursor");
+        }
+        let mut connection = self.connection.lock().map_err(|_| anyhow::anyhow!("Task history store unavailable"))?;
+        let tx = connection.transaction()?;
+        let current: Option<String> = tx.query_row("SELECT account_epoch FROM task_authority WHERE id=1 AND closed=0", [], |r| r.get(0)).optional()?;
+        anyhow::ensure!(current.as_deref() == epoch, "Task account changed");
+        let Some(epoch) = epoch else {
+            return Ok(TaskHistoryPage { tasks: Vec::new(), next_cursor: None });
+        };
+        anyhow::ensure!(valid_id(epoch), "Invalid task account");
+        let mut statement = tx.prepare("SELECT task_id,chat_id,bot_id,routine_id,state FROM local_tasks WHERE account_epoch=?1 AND (?2 IS NULL OR task_id>?2) ORDER BY task_id LIMIT ?3")?;
+        let rows = statement.query_map(params![epoch, cursor.as_ref().map(|c| c.task_id.as_str()), (limit + 1) as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, String>(4)?))
+        })?;
+        let mut tasks = Vec::with_capacity(limit + 1);
+        for row in rows {
+            let (task_id, chat_id, bot_id, routine_id, state) = row?;
+            anyhow::ensure!(valid_id(&task_id) && valid_id(&chat_id) && valid_id(&bot_id) && routine_id.as_deref().is_none_or(valid_id), "Invalid task identity");
+            tasks.push(TaskHistoryEntry { task_id, chat_id, bot_id, routine_id, state: TaskState::parse(&state)? });
+        }
+        let next_cursor = if tasks.len() > limit {
+            tasks.pop();
+            let task = tasks.last().expect("nonempty bounded task page");
+            Some(crate::keys::b64(&serde_json::to_vec(&TaskHistoryCursor { account_epoch: epoch.into(), task_id: task.task_id.clone() })?))
+        } else { None };
+        Ok(TaskHistoryPage { tasks, next_cursor })
     }
 
     pub(crate) fn cancel_tasks(&self, epoch: &str, task: Option<&str>, chat: Option<&str>, bot: Option<&str>) -> anyhow::Result<()> {

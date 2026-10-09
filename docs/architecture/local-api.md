@@ -106,7 +106,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `routines.describe` | `schedule` | `schedule`, `text`, `next_run_at` |
 | `auto_review.set` | `is_enabled?`, `rules?` | `auto_review` |
 
-Local-only [schedule authority](tasks.md#routine-checks-and-retention) needs explicit reauthorization.
+[Task API](tasks.md#local-task-api-reference).
 
 ### Plugins, MCP, providers
 

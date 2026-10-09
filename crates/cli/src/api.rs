@@ -540,6 +540,22 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(Value::Null)
         }
 
+        "tasks.list" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct PageParams {
+                limit: Option<usize>,
+                cursor: Option<String>,
+            }
+            let params: PageParams = serde_json::from_value(if params.is_null() { json!({}) } else { params })
+                .map_err(|_| "Invalid task page parameters".to_string())?;
+            let limit = params.limit.unwrap_or(50);
+            if !(1..=100).contains(&limit) { return Err("Invalid task page limit".into()); }
+            let page = app.task_history_page(params.cursor.as_deref(), limit)
+                .map_err(|_| "Task history unavailable or cursor invalid".to_string())?;
+            serde_json::to_value(page).map_err(|_| "Task history unavailable".to_string())
+        }
+
         // Routines live in the roster; any Device edits them, the bot's Runner runs them. A
         // routine's check is the bot's to write, on its Runner, with the routines tool.
         "routines.create" => {

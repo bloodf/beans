@@ -322,6 +322,11 @@ impl App {
         anyhow::ensure!(self.is_execution_owner(),"History resolution requires execution ownership");
         self.store.resolve_task(lease,at)
     }
+    pub fn task_history_page(&self, cursor: Option<&str>, limit: usize) -> anyhow::Result<crate::local_store::TaskHistoryPage> {
+        let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        let epoch = self.store.current_task_account_epoch()?;
+        self.store.task_history_page(epoch.as_deref(), cursor, limit)
+    }
     /// Captures the existing account incarnation under the same reset boundary as plugins.
     pub(crate) fn task_lease(&self, job: &Job) -> anyhow::Result<crate::local_store::TaskLease> {
         anyhow::ensure!(self.is_execution_owner(), "Only the execution owner admits local tasks");
@@ -2319,6 +2324,90 @@ mod tests {
         let home = std::env::temp_dir().join(format!("beans-app-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    #[tokio::test]
+    async fn task_list_opaque_cursor_preserves_nonowner_safety() {
+        use crate::memory_service::queue::{freeze_document, Delivery};
+        use crate::memory_service::types::{MemoryScope, OperationState, Revision};
+
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        assert_eq!(crate::api::dispatch(app, "tasks.list", Value::Null).await.unwrap(), json!({"tasks":[],"next_cursor":null}));
+        assert_eq!(app.store.current_task_account_epoch().unwrap(), None);
+        let canary = "PRIVATE_TASK_CONTENT_CANARY";
+        let delivery = Delivery {
+            id: "delivery-list".into(), bot_id: "bot-list".into(),
+            scope: MemoryScope { namespace: "list-fixture".into(), connection_id: "connection-list".into(),
+                connection_revision: Revision { counter: 1, device_id: "device-list".into() }, deletion_epoch: 0 },
+            consent_revision: None, document: freeze_document("list-fixture", canary, vec![]).unwrap(),
+            state: OperationState::Submitted, operation_id: None, error_code: None,
+        };
+        let delivery_json = serde_json::to_string(&delivery).unwrap();
+        let states = ["queued", "running", "interrupted", "needs_review", "finished"];
+        {
+            let connection = app.store.connection.lock().expect("fixture store");
+            connection.execute("INSERT INTO task_authority(id,account_epoch,owner_epoch,closed) VALUES(1,'epoch-list','owner-list',0)", []).unwrap();
+            for index in (0..55).rev() {
+                connection.execute("INSERT INTO local_tasks(account_epoch,task_id,owner_epoch,execution_id,chat_id,bot_id,routine_id,state,check_report) VALUES('epoch-list',?1,'owner-list','execution-list','chat-list','bot-list',NULL,?2,?3)",
+                    rusqlite::params![format!("job-{index:03}"), states[index % states.len()], canary]).unwrap();
+            }
+            connection.execute("INSERT INTO memory_deliveries(id,bot_id,state,json) VALUES(?1,?2,'submitted',?3)", rusqlite::params![delivery.id,delivery.bot_id,delivery_json]).unwrap();
+        }
+        let default = crate::api::dispatch(app, "tasks.list", Value::Null).await.unwrap();
+        assert_eq!(default["tasks"].as_array().unwrap().len(), 50);
+        let first = crate::api::dispatch(app, "tasks.list", json!({"limit":2})).await.unwrap();
+        assert_eq!(first["tasks"], json!([
+            {"task_id":"job-000","chat_id":"chat-list","bot_id":"bot-list","routine_id":null,"state":"queued"},
+            {"task_id":"job-001","chat_id":"chat-list","bot_id":"bot-list","routine_id":null,"state":"running"}
+        ]));
+        assert_eq!(first.as_object().unwrap().len(), 2);
+        assert!(first.get("tasks").is_some() && first.get("next_cursor").is_some());
+        let cursor = first["next_cursor"].as_str().unwrap();
+        assert!(!cursor.contains("epoch-list") && !cursor.contains("job-001"));
+        let reader = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert!(!reader.is_execution_owner());
+        let second = crate::api::dispatch(&reader, "tasks.list", json!({"limit":2,"cursor":cursor})).await.unwrap();
+        assert_eq!(second["tasks"][0]["task_id"], "job-002");
+        assert_eq!(second["tasks"][0]["state"], "interrupted");
+        assert_eq!(second["tasks"][1]["task_id"], "job-003");
+        assert_eq!(second["tasks"][1]["state"], "needs_review");
+        let tail = crate::api::dispatch(&reader, "tasks.list", json!({"limit":100,"cursor":second["next_cursor"]})).await.unwrap();
+        let ids: Vec<_> = tail["tasks"].as_array().unwrap().iter().map(|task| task["task_id"].as_str().unwrap()).collect();
+        let expected: Vec<_> = (4..55).map(|index| format!("job-{index:03}")).collect();
+        assert_eq!(ids, expected.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(tail["next_cursor"].is_null());
+        for page in [&default, &first, &second, &tail] { assert!(!page.to_string().contains(canary)); }
+        let encode = |value: Value| crate::keys::b64(&serde_json::to_vec(&value).unwrap());
+        for params in [json!({"limit":0}), json!({"limit":101}), json!({"limit":1.5}), json!({"limit":"2"}),
+            json!({"extra":canary}), json!({"cursor":{"account_epoch":"epoch-list","task_id":"job-001"}}),
+            json!({"cursor":""}), json!({"cursor":"!"}), json!({"cursor":"x".repeat(2049)}),
+            json!({"cursor":format!("{cursor}=")}), json!({"cursor":encode(json!({"account_epoch":"old-epoch","task_id":"job-001"}))}),
+            json!({"cursor":encode(json!({"account_epoch":"epoch-list","task_id":""}))}),
+            json!({"cursor":encode(json!({"account_epoch":"epoch-list","task_id":"x".repeat(257)}))}),
+            json!({"cursor":encode(json!({"account_epoch":"epoch-list","task_id":"job-\n"}))}),
+            json!({"cursor":encode(json!({"account_epoch":"epoch-list","task_id":"job-001","extra":canary}))})] {
+            let error = crate::api::dispatch(&reader, "tasks.list", params).await.unwrap_err();
+            assert!(!error.contains(canary));
+        }
+        {
+            let connection = reader.store.connection.lock().expect("fixture store");
+            let mut statement = connection.prepare("SELECT task_id,state,owner_epoch,execution_id,cancel_requested,resolved_at,check_report FROM local_tasks ORDER BY task_id").unwrap();
+            let rows = statement.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,bool>(4)?,r.get::<_,Option<i64>>(5)?,r.get::<_,String>(6)?))).unwrap();
+            for (index, row) in rows.enumerate() {
+                assert_eq!(row.unwrap(), (format!("job-{index:03}"),states[index % states.len()].into(),"owner-list".into(),"execution-list".into(),false,None,canary.into()));
+            }
+            let stored: (String,String) = connection.query_row("SELECT state,json FROM memory_deliveries WHERE id='delivery-list'", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+            assert_eq!(stored, ("submitted".into(),delivery_json));
+            let authority: (String,String,bool) = connection.query_row("SELECT account_epoch,owner_epoch,closed FROM task_authority WHERE id=1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            assert_eq!(authority, ("epoch-list".into(),"owner-list".into(),false));
+            connection.execute("UPDATE task_authority SET closed=1 WHERE id=1", []).unwrap();
+        }
+        assert!(crate::api::dispatch(&reader, "tasks.list", json!({"cursor":cursor})).await.is_err());
+        assert_eq!(crate::api::dispatch(&reader, "tasks.list", Value::Null).await.unwrap(), json!({"tasks":[],"next_cursor":null}));
+        reader.store.connection.lock().expect("fixture store").execute("UPDATE task_authority SET account_epoch='epoch-next',closed=0 WHERE id=1", []).unwrap();
+        assert!(crate::api::dispatch(&reader, "tasks.list", json!({"cursor":cursor})).await.is_err());
+        assert_eq!(crate::api::dispatch(&reader, "tasks.list", Value::Null).await.unwrap(), json!({"tasks":[],"next_cursor":null}));
     }
 
     #[test]

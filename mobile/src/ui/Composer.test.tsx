@@ -34,7 +34,7 @@ function slot(make: () => any) {
   if (!(index in slots)) slots[index] = make();
   return { index, value: slots[index] };
 }
-mock.module("react", () => ({
+const react = {
   ...hookReact,
   useState: (initial: any) => {
     const item = slot(() => initial);
@@ -43,7 +43,9 @@ mock.module("react", () => ({
   useRef: (initial: any) => slot(() => ({ current: initial })).value,
   useMemo: (compute: () => any) => { cursor++; return compute(); },
   useEffect: hookEffect,
-}));
+};
+// Zustand's React consumer imports default React; keep both export forms on the same hooks.
+mock.module("react", () => ({ ...react, default: react }));
 const jsx = (type: Node["type"], props: any): Node => ({ type, props });
 mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
 mock.module("react-native", () => ({

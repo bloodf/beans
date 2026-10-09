@@ -10,6 +10,8 @@ The compiled `storage-upgrade <scratch-home>` command deliberately invokes the s
 
 Home creation and mutable startup share one admission lifetime on Unix. `ensure_home_admission` returns its precreation guard to `App::load`, which passes it to local store admission without dropping or reacquiring it and releases it on return or error. The read-only home validator keeps its directory-check, preflight and legacy-marker ordering; exclusion lives outside that validator.
 
+Configured absolute macOS `/var/...` homes support only the verified system `/var -> private/var` alias through descriptor-bound trusted-prefix admission. Relative paths retain current-directory semantics and receive no platform alias exception. The platform root namespace must remain privileged and stable; supplied home suffixes still open without following links. Scratch verification uses an explicit `/var` spelling of its owned physical temporary suffix as well as ordinary temporary-home consumers, rather than changing the historical CLI path to bypass admission.
+
 
 Commands:
 

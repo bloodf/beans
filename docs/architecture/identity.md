@@ -40,6 +40,8 @@ Ordinary Unix creation acquires coordinated directory exclusion before the first
 
 Borrowed Unix store admission requires a guard and compares the requested database parent's opened directory device/inode to the guard's retained descriptor before SQLite effects. A guard for another valid home is rejected; independently valid marker files do not establish that binding. Non-Unix ordinary admission retains its nullable guard behavior, while staged admission fails closed.
 
+On macOS, only absolute `/var` with the exact root-owned alias target `private/var` is a supported platform entry. Alias metadata/readlink observations resolve relative to the retained root descriptor; root, private and var ownership/mode checks use the same no-follow-opened handles retained for admission. Original-path prefix and home identity are revalidated before path effects. This assumes the privileged root namespace stays stable during the operation; it does not protect against arbitrary root mutation. User-controlled suffix links and relative `var/...` symlinks remain refused, without broad canonicalization or blanket user-ancestor ownership checks.
+
 This is an incompatible fresh format, not an upgrade of existing accounts. No reset, migration, old-home reuse or mixed-format pairing/sync occurs. Existing installed apps, accounts and services remain separate; a production cutover needs its own explicit authorization.
 
 

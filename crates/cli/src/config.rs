@@ -168,9 +168,13 @@ impl Config {
         #[cfg(not(unix))]
         let admission: Option<StorageAdmission> = None;
         let marked = self.validate_home()?;
+        #[cfg(unix)]
+        if let Some(guard) = admission.as_ref() { guard.validate_platform_namespace()?; }
         std::fs::create_dir_all(&self.home)?;
         #[cfg(unix)]
         if let Some(guard) = admission.as_mut() { guard.attach_created_home()?; }
+        #[cfg(unix)]
+        if let Some(guard) = admission.as_ref() { guard.validate_target(&self.home)?; }
         set_private(&self.home)?;
         if !marked {
             use std::io::Write;
@@ -274,9 +278,10 @@ impl StorageAdmission {
     fn acquire_path(home: &Path, allow_missing: bool) -> anyhow::Result<Self> {
         use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::ffi::OsStrExt;
-        let mut directory = Self::open_directory(Path::new(if home.is_absolute() { "/" } else { "." }))?;
-        let mut ancestors = Vec::new();
-        let segments: Vec<_> = home.components().filter_map(|part| match part {
+        let (mut directory, normalized, mut ancestors) = Self::platform_entry(home)?;
+        let path = normalized.as_ref();
+        for ancestor in &ancestors { Self::lock(ancestor, libc::LOCK_SH)?; }
+        let segments: Vec<_> = path.components().filter_map(|part| match part {
             std::path::Component::Normal(segment) => Some(Ok(segment)),
             std::path::Component::RootDir | std::path::Component::CurDir => None,
             _ => Some(Err(anyhow::anyhow!("Storage admission refuses parent traversal"))),
@@ -343,6 +348,7 @@ impl StorageAdmission {
         anyhow::bail!("Descriptor storage admission is unsupported on this platform");
         #[cfg(unix)] {
             use std::os::unix::fs::MetadataExt;
+            self.validate_platform_namespace()?;
             let target = Self::open_directory(home)?.metadata()?;
             let retained = self.directory.metadata()?;
             if target.dev() != retained.dev() || target.ino() != retained.ino() {
@@ -353,23 +359,93 @@ impl StorageAdmission {
     }
 
     #[cfg(unix)]
-    fn open_directory(home: &Path) -> anyhow::Result<std::fs::File> {
+    fn validate_platform_namespace(&self) -> anyhow::Result<()> {
+        #[cfg(target_os = "macos")] {
+            use std::os::unix::fs::MetadataExt;
+            let (entry, _, mut prefix) = Self::platform_entry(&self.home)?;
+            if !prefix.is_empty() {
+                prefix.push(entry);
+            }
+            for (index, current) in prefix.iter().enumerate() {
+                let retained = self.ancestors.get(index).unwrap_or(&self.directory);
+                let current = current.metadata()?;
+                let retained = retained.metadata()?;
+                if current.dev() != retained.dev() || current.ino() != retained.ino() {
+                    anyhow::bail!("Platform namespace changed during admission");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Only the privileged macOS root alias is supported; its namespace must stay stable.
+    #[cfg(unix)]
+    fn platform_entry(home: &Path) -> anyhow::Result<(std::fs::File, std::borrow::Cow<'_, Path>, Vec<std::fs::File>)> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let root = options.open(if home.is_absolute() { "/" } else { "." })?;
+        #[cfg(target_os = "macos")] {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(suffix) = home.strip_prefix("/var") {
+                let name = std::ffi::CString::new("var")?;
+                let mut before: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { libc::fstatat(root.as_raw_fd(), name.as_ptr(), &mut before, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                if before.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                    let mut target = [0u8; 32];
+                    let count = unsafe { libc::readlinkat(root.as_raw_fd(), name.as_ptr(), target.as_mut_ptr().cast(), target.len()) };
+                    let mut after: libc::stat = unsafe { std::mem::zeroed() };
+                    if unsafe { libc::fstatat(root.as_raw_fd(), name.as_ptr(), &mut after, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+                        return Err(std::io::Error::last_os_error().into());
+                    }
+                    if count != 11 || &target[..11] != b"private/var" || before.st_uid != 0
+                        || before.st_dev != after.st_dev || before.st_ino != after.st_ino
+                        || before.st_mode != after.st_mode || before.st_uid != after.st_uid {
+                        anyhow::bail!("Storage admission refuses an unstable platform alias");
+                    }
+                    let trusted = |file: &std::fs::File| -> anyhow::Result<()> {
+                        let metadata = file.metadata()?;
+                        if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+                            anyhow::bail!("Storage admission requires a trusted platform root");
+                        }
+                        Ok(())
+                    };
+                    trusted(&root)?;
+                    let private = Self::open_component(&root, std::ffi::OsStr::new("private"))?;
+                    trusted(&private)?;
+                    let var = Self::open_component(&private, std::ffi::OsStr::new("var"))?;
+                    trusted(&var)?;
+                    return Ok((var, std::borrow::Cow::Borrowed(suffix), vec![root, private]));
+                }
+            }
+        }
+        Ok((root, std::borrow::Cow::Borrowed(home), Vec::new()))
+    }
+
+    #[cfg(unix)]
+    fn open_component(parent: &std::fs::File, segment: &std::ffi::OsStr) -> anyhow::Result<std::fs::File> {
         use std::os::fd::{AsRawFd, FromRawFd};
         use std::os::unix::ffi::OsStrExt;
-        let mut options = std::fs::OpenOptions::new();
-        use std::os::unix::fs::OpenOptionsExt;
-        options.read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        let mut directory = options.open(if home.is_absolute() { "/" } else { "." })?;
+        let name = std::ffi::CString::new(segment.as_bytes())?;
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 { return Err(std::io::Error::last_os_error().into()); }
+        Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+    }
+
+    #[cfg(unix)]
+    fn open_directory(home: &Path) -> anyhow::Result<std::fs::File> {
+        let (mut directory, normalized, _prefix) = Self::platform_entry(home)?;
+        let home = normalized.as_ref();
         for part in home.components() {
             let segment = match part {
                 std::path::Component::Normal(segment) => segment,
                 std::path::Component::RootDir | std::path::Component::CurDir => continue,
                 _ => anyhow::bail!("Storage admission refuses parent traversal"),
             };
-            let name = std::ffi::CString::new(segment.as_bytes())?;
-            let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-            if fd < 0 { return Err(std::io::Error::last_os_error().into()); }
-            directory = unsafe { std::fs::File::from_raw_fd(fd) };
+            directory = Self::open_component(&directory, segment)?;
         }
         Ok(directory)
     }
@@ -403,6 +479,7 @@ impl StorageAdmission {
     #[cfg(unix)]
     fn verify(&self, marker: &std::fs::File, bytes: &[u8]) -> anyhow::Result<()> {
         use std::os::unix::fs::MetadataExt;
+        self.validate_platform_namespace()?;
         let same = |a: std::fs::Metadata, b: std::fs::Metadata| a.dev() == b.dev() && a.ino() == b.ino();
         if !same(self.directory.metadata()?, Self::open_directory(&self.home)?.metadata()?) {
             anyhow::bail!("Storage directory changed during admission");
@@ -611,6 +688,34 @@ mod format_tests {
         use std::os::unix::fs::symlink;
         let home = tempfile::tempdir().unwrap();
         let config = Config { home: home.path().into(), port: 0 };
+        let hostile = home.path().join("hostile-entry");
+        symlink(home.path(), &hostile).unwrap();
+        assert!(StorageAdmission::acquire(&hostile).is_err());
+        assert!(StorageAdmission::acquire_creation(&hostile.join("missing")).is_err());
+        std::fs::remove_file(&hostile).unwrap();
+        #[cfg(target_os = "macos")] {
+            let physical = std::fs::canonicalize(home.path()).unwrap();
+            let suffix = physical.strip_prefix("/private/var").expect("macOS fixture requires its OS temporary root");
+            let alias = Config { home: Path::new("/var").join(suffix).join("explicit-alias"), port: 0 };
+            let actual = Config { home: physical.join("explicit-alias"), port: 0 };
+            let app = crate::app::App::load(alias.clone()).unwrap();
+            drop(app);
+            let guard = alias.ensure_home_admission().unwrap();
+            guard.as_ref().unwrap().validate_target(&actual.home).unwrap();
+            drop(guard);
+            std::fs::remove_dir_all(&actual.home).unwrap();
+            alias.ensure_home().unwrap();
+            let staged = alias.preload_staged_storage().unwrap();
+            drop(staged);
+            let guard = alias.staged_storage_admission().unwrap();
+            guard.validate_target(&actual.home).unwrap();
+            drop(guard);
+            let hostile = alias.home.join("hostile");
+            symlink(&actual.home, &hostile).unwrap();
+            assert!(StorageAdmission::acquire(&hostile).is_err());
+            assert!(StorageAdmission::acquire_creation(&hostile.join("missing")).is_err());
+            std::fs::remove_dir_all(&actual.home).unwrap();
+        }
         let fresh_home = home.path().join("fresh-parent");
         let fresh = Config { home: fresh_home, port: 0 };
         assert!(!fresh.home.exists());

@@ -54,20 +54,67 @@ pub fn store(app: &App, file: &OutgoingFile) -> anyhow::Result<Attachment> {
 /// A source failure drops the staged batch, including writes reusing an existing attachment id.
 pub fn store_many(app: &App, files: &[OutgoingFile]) -> anyhow::Result<Vec<Attachment>> {
     if files.is_empty() { return Ok(Vec::new()); }
-    let staging = tempfile::tempdir_in(&app.config.home)?;
-    let mut attachments = Vec::with_capacity(files.len());
-    for file in files {
-        attachments.push(store_at(staging.path(), file)?);
+    let mut staged=prepare_many(app,files)?;
+    staged.finalize(app)?;
+    staged.accepted=true;
+    Ok(staged.attachments.clone())
+}
+
+pub(crate) struct StagedFiles {
+    staging: tempfile::TempDir,
+    pub attachments: Vec<Attachment>,
+    installed: Vec<(PathBuf, Option<PathBuf>)>,
+    accepted: bool,
+}
+
+pub(crate) fn prepare_many(app: &App, files: &[OutgoingFile]) -> anyhow::Result<StagedFiles> {
+    let staging=tempfile::tempdir_in(&app.config.home)?;
+    let mut attachments=Vec::with_capacity(files.len());
+    for file in files { attachments.push(store_at(staging.path(),file)?); }
+    Ok(StagedFiles {staging,attachments,installed:Vec::new(),accepted:false})
+}
+
+impl StagedFiles {
+    pub(crate) fn outbox(&self, app: &App, chat: &str) -> anyhow::Result<Vec<crate::app::OutboxItem>> {
+        let Some(dek)=app.dek() else {return Ok(Vec::new())};
+        self.attachments.iter().map(|attachment| Ok(crate::app::OutboxItem {
+            id:attachment.id.clone(),kind:"file".into(),recipient:None,
+            ciphertext:crate::crypto::encrypt(&dek,"file",&std::fs::read(self.staging.path().join(&attachment.id))?)?,
+            slot:None,group:Some(crate::model::relay_name(chat)),
+        })).collect()
     }
-    let dir = app.config.files_dir();
-    std::fs::create_dir_all(&dir)?;
-    crate::config::set_private(&dir)?;
-    // Duplicate ids retain the last file, as sequential storage did.
-    for entry in std::fs::read_dir(staging.path())? {
-        let entry = entry?;
-        std::fs::rename(entry.path(), dir.join(entry.file_name()))?;
+    pub(crate) fn finalize(&mut self, app: &App) -> anyhow::Result<()> {
+        if self.attachments.is_empty() {return Ok(())}
+        let dir=app.config.files_dir(); std::fs::create_dir_all(&dir)?; crate::config::set_private(&dir)?;
+        let ids:std::collections::HashSet<_>=self.attachments.iter().map(|a|a.id.clone()).collect();
+        for id in ids {
+            let destination=dir.join(&id);
+            anyhow::ensure!(!destination.exists() || destination.is_file(), "Attachment destination is not a file");
+            let backup=if destination.exists() {
+                let backup=self.staging.path().join(format!("backup-{id}"));
+                std::fs::rename(&destination,&backup)?; Some(backup)
+            } else {None};
+            self.installed.push((destination.clone(),backup));
+            std::fs::rename(self.staging.path().join(id),destination)?;
+        }
+        Ok(())
     }
-    Ok(attachments)
+    pub(crate) fn accept(&mut self) {self.accepted=true;}
+}
+
+impl Drop for StagedFiles {
+    fn drop(&mut self) {
+        if self.accepted {return}
+        for (destination,backup) in self.installed.iter().rev() {
+            let _=std::fs::remove_file(destination);
+            if let Some(backup)=backup {
+                if let Err(error)=std::fs::rename(backup,destination) {
+                    tracing::error!(%error, path=%destination.display(), "Restoring rejected attachment failed; retaining staging backup");
+                    let _=self.staging.disable_cleanup(true);
+                }
+            }
+        }
+    }
 }
 
 fn store_at(dir: &Path, file: &OutgoingFile) -> anyhow::Result<Attachment> {

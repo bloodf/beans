@@ -310,11 +310,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || App::load(config))
             .map_err(|_| anyhow::anyhow!("Doctor could not load local account data; no report was produced. Check storage access and account format locally; private details are omitted."))?
     } else {
-        App::load(config)?
+        if matches!(command, Command::Serve { .. }) { App::load_owner(config)? } else { App::load(config)? }
     };
 
     match command {
         Command::Serve { parent_pid, ready_stdout } => {
+            if app.legacy_execution_closed()? {
+                tracing::warn!("Legacy home remains available; only explicit local user submissions can mint new tasks, ambiguous synced and automatic execution stays closed");
+            }
             app.close_orphan_proposals()?;
             beans::service::trim_log();
             beans::update::start(&app);

@@ -66,6 +66,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Protocols](docs/architecture/protocols.md) | The app ↔ CLI websocket and the CLI ↔ relay requests and blobs |
 | [Local API](docs/architecture/local-api.md) | The `/ws` socket: trust boundary, field errors, every method with params and results, events, secret-bearing methods, memory and setup bodies |
 | [CLI (runtime)](docs/architecture/runtime.md) | Data directory, local websocket access, proxy/certificate trust, agent loop and notifications |
+| [Local task authority](docs/architecture/tasks.md) | Exclusive execution ownership, durable Job.id admission, invocation receipts, recovery and replay fences |
 | [CLI service and updates](docs/architecture/service-updates.md) | CLI installation, standalone services, Runner admission drain and update availability |
 | [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review |
 | [Terminal sessions](docs/architecture/terminal-sessions.md) | A bot's commands in terminals of their own: when a call returns, background commands, the command's card, answering and stopping, Running tasks |

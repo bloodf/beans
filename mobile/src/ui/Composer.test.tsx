@@ -48,6 +48,7 @@ const react = {
 mock.module("react", () => ({ ...react, default: react }));
 const jsx = (type: Node["type"], props: any): Node => ({ type, props });
 mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
+mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx }));
 mock.module("react-native", () => ({
   Platform: { get OS() { return platform; } },
   View: "View", Pressable: "Pressable", TextInput: "TextInput", Text: "Text", ScrollView: "ScrollView",

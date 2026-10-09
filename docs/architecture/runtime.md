@@ -32,6 +32,8 @@ Over HTTPS, those requests, public catalog requests, and the relay's sync socket
 
 Installation, standalone services and Runner admission drain are described in [CLI service and updates](service-updates.md).
 
+The staged `history164_types` module provides closed history event and producer validation, bounded list/export response codecs, and canonical authenticated cursors. Its HMAC helpers borrow an existing purpose key and host-supplied account namespace, distinguishing `LocalTaskEpoch` from `ImportedAccount` without creating task authority. Response validation binds the cursor to the filter, watermark, last-scanned position and captured host context. This pure module is not connected to live history handlers or SQL storage and performs no filesystem export.
+
 ## Diagnostics report
 
 `diagnostics.report` and `beans doctor --json` use the same builder. The report contains `schema_version: 1`, `versions {core, relay_protocol}`, `this_device {os, is_runner, has_identity}`, `home {exists}`, `port {free}`, `relay`, `providers`, `plugins`, `mcp_json` and `runners`. It uploads nothing; consumers must let the user review before sharing.

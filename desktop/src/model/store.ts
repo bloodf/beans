@@ -1600,13 +1600,11 @@ export class AppStore {
     this.emit({ kind: "chatsChanged" });
   }
 
-  /** Sends the message and returns the chat it landed in. `mentions` are the bots picked from the `@`
-   * menu, which the CLI hands the bot by id; `replyTo` is the message the user answers, which the bot
-   * reads quoted. */
-  send(text: string, attachments: OutgoingAttachment[], mentions: string[], chatID: string, replyTo?: string): string {
+  /** Returns admission acknowledgement, not proof that a Runner has finished the turn. */
+  async send(text: string, attachments: OutgoingAttachment[], mentions: string[], chatID: string, replyTo?: string): Promise<{ chatID: string; acknowledged: boolean }> {
     const trimmed = text.trim();
     const chat = this.chat(chatID);
-    if ((trimmed === "" && attachments.length === 0) || !chat) return chatID;
+    if ((trimmed === "" && attachments.length === 0) || !chat) return { chatID, acknowledged: false };
     const original = replyTo ? chat.messages.find((message) => message.id === replyTo) : undefined;
     const quote = original ? quoteOf(original) : undefined;
 
@@ -1625,7 +1623,7 @@ export class AppStore {
 
     if (this.isMock) {
       this.replyEngine?.respond(trimmed, chat, message.id);
-      return chatID;
+      return { chatID, acknowledged: true };
     }
 
     // Expect a turn to start; the CLI's job events confirm or clear this. A DM names its bot right
@@ -1645,22 +1643,36 @@ export class AppStore {
         this.emit({ kind: "chatsChanged" });
       }, 4000);
     }
-    this.perform("chats.send", {
-      chat_id: chatID,
-      text: trimmed,
-      message_id: message.id,
-      mentions,
-      attachments: attachments.map((outgoing) => ({
-        id: outgoing.attachment.id,
-        path: outgoing.path,
-        name: outgoing.attachment.name,
-        mime: outgoing.attachment.mime,
-        width: outgoing.attachment.width ?? null,
-        height: outgoing.attachment.height ?? null,
-      })),
-      ...(quote ? { reply_to: quote.messageID } : {}),
-    });
-    return chatID;
+    try {
+      const result = await this.request<{ message?: { id?: string } } | null>("chats.send", {
+        chat_id: chatID,
+        text: trimmed,
+        message_id: message.id,
+        mentions,
+        attachments: attachments.map((outgoing) => ({
+          id: outgoing.attachment.id,
+          path: outgoing.path,
+          name: outgoing.attachment.name,
+          mime: outgoing.attachment.mime,
+          width: outgoing.attachment.width ?? null,
+          height: outgoing.attachment.height ?? null,
+        })),
+        ...(quote ? { reply_to: quote.messageID } : {}),
+      });
+      if (result?.message?.id === message.id) return { chatID, acknowledged: true };
+    } catch {
+      // The transport does not distinguish API refusal from a lost response. Do not retry
+      // or claim no remote effect. Remove only our local accepted-looking placeholder.
+    }
+    const current = this.chat(chatID);
+    if (current?.messages.includes(message)) {
+      this.replaceChat({ ...current, messages: current.messages.filter((row) => row !== message) });
+      this.emit({ kind: "messageRemoved", chatID, messageID: message.id });
+    }
+    this.runningJobs = this.runningJobs.filter((job) => job.id !== `pending:${chatID}`);
+    this.emit({ kind: "respondingChanged", chatID });
+    this.emit({ kind: "chatsChanged" });
+    return { chatID, acknowledged: false };
   }
 
   // MARK: - Attachments

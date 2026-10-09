@@ -80,7 +80,7 @@ export function Composer(props: {
   placeholder: string;
   bots: Bot[];
   isResponding: boolean;
-  onSend: (text: string, attachments: OutgoingAttachment[], mentions: string[], replyTo?: string) => void;
+  onSend: (text: string, attachments: OutgoingAttachment[], mentions: string[], replyTo?: string) => Promise<boolean>;
   onStop: () => void;
   ref?: (handle: ComposerHandle) => void;
   onHeight?: (height: number) => void;
@@ -93,6 +93,9 @@ export function Composer(props: {
   const [expanded, setExpanded] = createSignal(false);
   const [mention, setMention] = createSignal<{ start: number; end: number; bots: Bot[]; x: number; top: number; bottom: number } | null>(null);
   const [mentionIndex, setMentionIndex] = createSignal(0);
+  const [pending, setPending] = createSignal(false);
+  const [sendUnknown, setSendUnknown] = createSignal(false);
+  let revision = 0;
   let picked: Bot[] = draft?.picked ?? [];
   let area: HTMLTextAreaElement | undefined;
   let backdrop: HTMLDivElement | undefined;
@@ -101,11 +104,12 @@ export function Composer(props: {
   let menu: HTMLDivElement | undefined;
 
   const hasContent = () => text().trim() !== "" || attachments().length > 0;
-  const ownsDraft = () => text() !== "" || attachments().length > 0 || reply() !== null;
+  const ownsDraft = () => pending() || text() !== "" || attachments().length > 0 || reply() !== null;
   currentDraft = ownsDraft;
 
   const focus = () => area?.focus();
   const replaceText = (value: string) => {
+    revision++;
     setText(value);
     picked = [];
     if (area) area.value = value;
@@ -115,11 +119,13 @@ export function Composer(props: {
     });
   };
   const startReply = (to: ComposerReply) => {
+    revision++;
     setReply(to);
     updateLayout();
     focus();
   };
   const cancelReply = () => {
+    revision++;
     setReply(null);
     updateLayout();
   };
@@ -213,6 +219,7 @@ export function Composer(props: {
     }
     const insertion = `@${bot.name} `;
     area.setRangeText(insertion, range.start, range.end, "end");
+    revision++;
     setText(area.value);
     picked.push(bot);
     setMention(null);
@@ -234,6 +241,7 @@ export function Composer(props: {
       else added.push(outgoing(info));
     }
     if (added.length > 0) {
+      revision++;
       setAttachments([...attachments(), ...added]);
       updateLayout();
     }
@@ -315,20 +323,32 @@ export function Composer(props: {
 
   // MARK: Send
 
-  const send = () => {
-    if (!hasContent()) return;
+  const send = async () => {
+    if (pending() || !hasContent()) return;
+    const submittedRevision = revision;
     const value = text().trim();
     // A pick counts while its `@Name` is still in the text.
     const lowered = value.toLowerCase();
     const mentions = picked.filter((bot) => lowered.includes(`@${bot.name.toLowerCase()}`)).map((bot) => bot.id);
     const sending = attachments();
     const answering = reply()?.messageID;
-    picked = [];
-    setAttachments([]);
-    setMention(null);
-    setReply(null);
-    replaceText("");
-    props.onSend(value, sending, mentions, answering);
+    setPending(true);
+    setSendUnknown(false);
+    try {
+      const acknowledged = await props.onSend(value, sending, mentions, answering);
+      if (!acknowledged) {
+        setSendUnknown(true);
+      } else if (revision === submittedRevision) {
+        setAttachments([]);
+        setMention(null);
+        setReply(null);
+        replaceText("");
+      }
+    } catch {
+      setSendUnknown(true);
+    } finally {
+      setPending(false);
+    }
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
@@ -463,6 +483,7 @@ export function Composer(props: {
                     title={L("Remove")}
                     aria-label={L("Remove")}
                     onClick={() => {
+                      revision++;
                       setAttachments(attachments().filter((other) => other !== item));
                       updateLayout();
                       focus();
@@ -491,6 +512,7 @@ export function Composer(props: {
             aria-label={reply() ? L("Reply…") : props.placeholder}
             spellcheck={true}
             onInput={(event) => {
+              revision++;
               setText(event.currentTarget.value);
               updateLayout();
               updateMentions();
@@ -519,12 +541,15 @@ export function Composer(props: {
             </button>
           </Show>
           <Show when={hasContent() || !props.isResponding}>
-            <button class="composer-button primary" title={sendTooltip()} aria-label={L("Send")} disabled={!hasContent()} onClick={send}>
+            <button class="composer-button primary" title={sendTooltip()} aria-label={L("Send")} disabled={pending() || !hasContent()} onClick={() => void send()}>
               <Icon name="arrow.up" size={15} strokeWidth={2.6} />
             </button>
           </Show>
         </div>
       </div>
+      <Show when={pending() || sendUnknown()}>
+        <div role="status">{pending() ? L("Waiting for send acknowledgement…") : L("Send not confirmed. Draft retained; check the chat before sending again.")}</div>
+      </Show>
       <Show when={mention()}>
         {(panel) => {
           // Above the caret's line, or under it where there is no room above; five rows show and

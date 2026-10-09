@@ -7,13 +7,13 @@ fn signed_discovery_rechecks_revocation_after_scan() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
     runtime.block_on(async {
         let home = std::env::temp_dir().join(format!("beans-discovery-{}", uuid::Uuid::new_v4()));
+        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         let root = home.join("selected");
         std::fs::create_dir_all(&root).unwrap();
         let source = "---\nname: Fixture\ndescription: Selected metadata\nlicense: MIT\nhooks: forbidden\n---\nBODY_PRIVATE\n";
         std::fs::write(root.join("SKILL.md"), source).unwrap();
         let hook = root.join("hook.sh");
         std::fs::write(&hook, "#!/bin/sh\ntouch marker\n").unwrap();
-        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Synthetic Runner".into())).unwrap();
         let runner = app.this_device_id().unwrap();
         let phone = crate::keys::Machine::generate();

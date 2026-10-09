@@ -85,6 +85,14 @@ fn validate_input(m: &ValidatedMutation, input: &ReservedInput) -> Result<Vec<u8
 }
 fn check_head(tx: &Transaction<'_>, ns: &ArtifactNamespace, r: &ArtifactRevision) -> Result<()> {
     refuse_removed(tx,ns,&r.chat_id,&r.id)?;
+    r.validate().map_err(|_|StoreError::Invalid)?;
+    if let Some(parent_id)=r.parent_revision.as_deref() {
+        let stored=tx.query_row("SELECT revision_json,content_hash FROM artifact_revisions WHERE account_id=?1 AND namespace_key=?2 AND artifact_id=?3 AND revision_id=?4",params![ns.account_id,ns.namespace_key,r.id,parent_id],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).optional()?;
+        let Some((bytes,stored_hash))=stored else{return Err(StoreError::Incomplete)};
+        let parent=match ArtifactEnvelope::parse(bytes.as_bytes()).map_err(|_|StoreError::Invalid)? {ArtifactEnvelope::Revision(parent)=>parent,_=>return Err(StoreError::Invalid)};
+        ensure(parent.revision_id==parent_id && parent.content_hash==stored_hash)?;
+        r.validate_parent(Some(&parent)).map_err(|_|StoreError::Invalid)?;
+    }
     let head=tx.query_row("SELECT head_revision,head_hash,graph_state,chat_id,runner_id FROM artifact_lineages WHERE account_id=?1 AND namespace_key=?2 AND id=?3",params![ns.account_id,ns.namespace_key,r.id],|row|Ok((row.get::<_,Option<String>>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?))).optional()?;
     match head { None if r.parent_revision.is_none()=>Ok(()),None=>Err(StoreError::Incomplete),Some((rev,hash,state,chat,runner))=>{
         if state=="removed" {return Err(StoreError::Removed)}
@@ -102,7 +110,11 @@ fn reserve_workspace_tx(tx: &Transaction<'_>, m: &ValidatedMutation, input: &Res
     let ns=&m.namespace;
     refuse_removed(tx,ns,&input.revision.chat_id,&input.revision.id)?;
     let previous=lookup_acceptance_tx(tx,EvidenceReadView{namespace:ns},&input.key)?;
-    if !matches!(previous,Lookup::Absent) { compare_snapshot(tx,ns,input,&bytes)?; return Ok(previous) }
+    match previous {
+        Lookup::Accepted(result)=>return Ok(Lookup::Accepted(result)),
+        Lookup::Reserved(reservation)=>{compare_snapshot(tx,ns,input,&bytes)?;return Ok(Lookup::Reserved(reservation))},
+        Lookup::Absent=>{}
+    }
     check_head(tx,ns,&input.revision)?;
     tx.execute("INSERT INTO artifact_snapshots VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![ns.account_id,ns.namespace_key,input.snapshot_id,input.key.requester,input.key.request_id,input.revision.revision_id,bytes,input.plaintext,input.revision.content_hash,input.metadata_plaintext,input.file_ciphertext,input.metadata_ciphertext])?;
     tx.execute("INSERT INTO artifact_acceptances VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'reserved',NULL,NULL)",params![ns.account_id,ns.namespace_key,input.key.requester,input.key.request_id,input.key.artifact_id,input.key.origin_key,&input.key.fingerprint[..],input.revision.revision_id,input.snapshot_id,m.incarnation,m.owner_epoch])?;
@@ -179,8 +191,17 @@ fn install_tombstone_tx(tx: &Transaction<'_>, m: &ValidatedMutation, control: &T
         insert_intent(tx,ns,&control.blob_id,None,if control.scope==Scope::Lineage{Some(&control.target_id)}else{None},&control.chat_id,UploadPhase::Control,&control.ciphertext)?;
     }
     for identity in &control.cleanup_blobs {
-        ensure(identity.blob_id!=control.blob_id && structural(&identity.blob_id))?;
-        tx.execute("INSERT INTO artifact_cleanup VALUES(?1,?2,?3,?4,?5,?6,'pending',NULL) ON CONFLICT(account_id,namespace_key,blob_id) DO NOTHING",params![ns.account_id,ns.namespace_key,identity.blob_id,control.chat_id,if control.scope==Scope::Lineage{Some(&control.target_id)}else{None},control.blob_id])?;
+        ensure(identity.phase!=UploadPhase::Control && identity.blob_id!=control.blob_id)?;
+        let owned=tx.query_row("SELECT i.chat_id,i.artifact_id,r.revision_json,r.file_id,r.record_id FROM artifact_intents i JOIN artifact_revisions r ON r.account_id=i.account_id AND r.namespace_key=i.namespace_key AND r.revision_id=i.revision_id AND r.artifact_id=i.artifact_id WHERE i.account_id=?1 AND i.namespace_key=?2 AND i.blob_id=?3 AND i.revision_id IS ?4 AND i.intent_revision=?5 AND i.ciphertext_sha256=?6 AND i.phase=?7 AND i.phase IN ('bytes','metadata')",params![ns.account_id,ns.namespace_key,identity.blob_id,identity.revision_id,identity.intent_revision,identity.ciphertext_sha256,identity.phase.text()],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?))).optional()?;
+        let Some((chat,artifact,bytes,file,record))=owned else{return Err(StoreError::Invalid)};
+        let revision=match ArtifactEnvelope::parse(bytes.as_bytes()).map_err(|_|StoreError::Invalid)? {ArtifactEnvelope::Revision(r)=>r,_=>return Err(StoreError::Invalid)};
+        ensure(chat==control.chat_id && revision.chat_id==chat && revision.id==artifact && identity.revision_id.as_deref()==Some(revision.revision_id.as_str()) && file==revision.file_id && record==format!("{}.record",revision.revision_id) && identity.blob_id==if identity.phase==UploadPhase::Bytes{file}else{record} && (control.scope==Scope::Chat || artifact==control.target_id))?;
+        let previous=tx.query_row("SELECT chat_id,artifact_id,required_tombstone_id FROM artifact_cleanup WHERE account_id=?1 AND namespace_key=?2 AND blob_id=?3",params![ns.account_id,ns.namespace_key,identity.blob_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,String>(2)?))).optional()?;
+        if let Some((old_chat,old_artifact,old_control))=previous {
+            if old_chat!=chat || old_artifact.as_deref()!=Some(artifact.as_str()) || old_control!=control.blob_id {return Err(StoreError::RequestBodyChanged)}
+        } else {
+            tx.execute("INSERT INTO artifact_cleanup VALUES(?1,?2,?3,?4,?5,?6,'pending',NULL)",params![ns.account_id,ns.namespace_key,identity.blob_id,chat,artifact,control.blob_id])?;
+        }
     }
     tx.execute("UPDATE artifact_lineages SET graph_state='removed' WHERE account_id=?1 AND namespace_key=?2 AND ((?3='chat' AND chat_id=?4) OR (?3='lineage' AND id=?5))",params![ns.account_id,ns.namespace_key,scope,control.chat_id,control.target_id])?;
     Ok(())
@@ -233,11 +254,24 @@ mod tests {
         let tx=db.transaction().unwrap();assert_eq!(count(&tx,"artifact_lineages"),0);assert_eq!(count(&tx,"artifact_revisions"),0);assert_eq!(count(&tx,"artifact_intents"),0);tx.execute_batch("DROP TRIGGER fail_metadata").unwrap();let result=commit_artifact_acceptance_tx(&tx,&m,&input,&proof).unwrap();tx.commit().unwrap();
         let tx=db.transaction().unwrap();assert_eq!(commit_artifact_acceptance_tx(&tx,&m,&input,&proof).unwrap(),result);let stored:Vec<u8>=tx.query_row("SELECT ciphertext FROM artifact_intents WHERE phase='bytes'",[],|r|r.get(0)).unwrap();assert_eq!(stored,input.file_ciphertext);let stored_metadata:Vec<u8>=tx.query_row("SELECT ciphertext FROM artifact_intents WHERE phase='metadata'",[],|r|r.get(0)).unwrap();assert_eq!(stored_metadata,input.metadata_ciphertext);tx.rollback().unwrap();
         let mut changed=input.key.clone();changed.fingerprint[0]^=1;let tx=db.transaction().unwrap();assert!(matches!(lookup_acceptance_tx(&tx,EvidenceReadView{namespace:&m.namespace},&changed),Err(StoreError::RequestBodyChanged)));tx.rollback().unwrap();
+        let original_revision=input.revision.clone();let original_metadata=input.metadata_plaintext.clone();let original_file=input.file_ciphertext.clone();let original_cipher=input.metadata_ciphertext.clone();
+        input.revision.revision_id="00000000-0000-4000-8000-000000000002".into();input.revision.file_id=format!("{}.file",input.revision.revision_id);input.revision.created_at=9.0;input.snapshot_id="regenerated".into();input.metadata_plaintext=serde_json::to_vec(&input.revision).unwrap();input.file_ciphertext=vec![7;40];input.metadata_ciphertext=vec![8;input.metadata_plaintext.len()+40];
+        let tx=db.transaction().unwrap();let Lookup::Accepted(retry)=reserve_workspace_tx(&tx,&m,&input).unwrap() else{panic!("accepted retry")};assert_eq!(retry,result);assert_eq!(count(&tx,"artifact_snapshots"),1);assert_eq!(count(&tx,"artifact_revisions"),1);assert_eq!(count(&tx,"artifact_intents"),2);let stored:String=tx.query_row("SELECT revision_json FROM artifact_revisions",[],|r|r.get(0)).unwrap();let persisted:ArtifactRevision=serde_json::from_str(&stored).unwrap();assert_eq!(persisted.created_at,1.0);tx.rollback().unwrap();
+        input.revision=original_revision;input.metadata_plaintext=original_metadata;input.file_ciphertext=original_file;input.metadata_ciphertext=original_cipher;input.snapshot_id="snapshot".into();
+        let mut child=input.revision.clone();child.revision_id="00000000-0000-4000-8000-000000000003".into();child.file_id=format!("{}.file",child.revision_id);child.parent_revision=Some(input.revision.revision_id.clone());child.parent_content_hash=Some(input.revision.content_hash.clone());
+        let tx=db.transaction().unwrap();check_head(&tx,&m.namespace,&child).unwrap();tx.execute("DELETE FROM artifact_revisions",[]).unwrap();assert!(matches!(check_head(&tx,&m.namespace,&child),Err(StoreError::Incomplete)));tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();let mut wrong=input.revision.clone();wrong.chat_id="foreign".into();tx.execute("UPDATE artifact_revisions SET revision_json=?1",[serde_json::to_string(&wrong).unwrap()]).unwrap();assert!(matches!(check_head(&tx,&m.namespace,&child),Err(StoreError::Invalid)));tx.rollback().unwrap();
+        let child_origin=ArtifactOrigin::UserRevision{authenticated_request_id:"child-request".into()};let child_key=AcceptanceKey{artifact_id:child.id.clone(),requester:m.requester.clone(),request_id:"child-request".into(),origin_key:"[\"user_revision\",\"child-request\"]".into(),fingerprint: {let mut user=child.clone();user.card_id=None;acceptance_fingerprint(&input.authority,&child_origin,"child-request",&user,Some((&input.revision.revision_id,&input.revision.content_hash))).unwrap()}};
+        child.card_id=None;let child_metadata=serde_json::to_vec(&child).unwrap();let child_input=ReservedInput{key:child_key,authority:input.authority.clone(),origin:child_origin,revision:child.clone(),snapshot_id:"child-snapshot".into(),plaintext:vec![],metadata_ciphertext:vec![4;child_metadata.len()+40],metadata_plaintext:child_metadata,file_ciphertext:vec![5;40]};let child_proof=ObservedPublication{attempt_id:"child-attempt".into(),snapshot_id:"child-snapshot".into(),revision_id:child.revision_id.clone(),content_hash:child.content_hash.clone()};
+        let tx=db.transaction().unwrap();let Lookup::Reserved(reserved)=reserve_workspace_tx(&tx,&m,&child_input).unwrap() else{panic!("child")};admit_workspace_attempt_tx(&tx,&m,&reserved,"child-attempt").unwrap();commit_artifact_acceptance_tx(&tx,&m,&child_input,&child_proof).unwrap();tx.commit().unwrap();
         let byte=IntentIdentity{blob_id:input.revision.file_id.clone(),revision_id:Some(input.revision.revision_id.clone()),intent_revision:1,ciphertext_sha256:sha256_hex(&input.file_ciphertext),phase:UploadPhase::Bytes};
         let metadata=IntentIdentity{blob_id:format!("{}.record",input.revision.revision_id),revision_id:byte.revision_id.clone(),intent_revision:1,ciphertext_sha256:sha256_hex(&input.metadata_ciphertext),phase:UploadPhase::Metadata};let gates=Eligibility{capability_one:true,safety_ready:true};
         let tx=db.transaction().unwrap();assert!(!eligible_intent_tx(&tx,EvidenceReadView{namespace:&m.namespace},&metadata,&gates).unwrap());assert!(ack_bytes_tx(&tx,&m,&byte,10).unwrap());assert!(eligible_intent_tx(&tx,EvidenceReadView{namespace:&m.namespace},&metadata,&gates).unwrap());tx.commit().unwrap();
+        let other=TombstoneInput{scope:Scope::Chat,target_id:"other-chat".into(),chat_id:"other-chat".into(),blob_id:removed_chat_id("other-chat").unwrap(),ciphertext:vec![6;40],cleanup_blobs:vec![]};let tx=db.transaction().unwrap();install_tombstone_tx(&tx,&m,&other).unwrap();tx.commit().unwrap();
+        let hostile=TombstoneInput{scope:Scope::Chat,target_id:"chat".into(),chat_id:"chat".into(),blob_id:removed_chat_id("chat").unwrap(),ciphertext:vec![3;40],cleanup_blobs:vec![IntentIdentity{blob_id:other.blob_id.clone(),revision_id:None,intent_revision:1,ciphertext_sha256:sha256_hex(&other.ciphertext),phase:UploadPhase::Control}]};let tx=db.transaction().unwrap();assert!(matches!(install_tombstone_tx(&tx,&m,&hostile),Err(StoreError::Invalid)));tx.rollback().unwrap();
+        let cross=TombstoneInput{scope:Scope::Chat,target_id:"other-chat".into(),chat_id:"other-chat".into(),blob_id:other.blob_id.clone(),ciphertext:other.ciphertext.clone(),cleanup_blobs:vec![IntentIdentity{blob_id:byte.blob_id.clone(),revision_id:byte.revision_id.clone(),intent_revision:1,ciphertext_sha256:byte.ciphertext_sha256.clone(),phase:UploadPhase::Bytes}]};let tx=db.transaction().unwrap();assert!(matches!(install_tombstone_tx(&tx,&m,&cross),Err(StoreError::Invalid)));tx.rollback().unwrap();
         let tomb=TombstoneInput{scope:Scope::Chat,target_id:"chat".into(),chat_id:"chat".into(),blob_id:removed_chat_id("chat").unwrap(),ciphertext:vec![3;40],cleanup_blobs:vec![byte]};
-        let tx=db.transaction().unwrap();install_tombstone_tx(&tx,&m,&tomb).unwrap();tx.rollback().unwrap();let tx=db.transaction().unwrap();assert_eq!(count(&tx,"artifact_tombstones"),0);assert_eq!(count(&tx,"artifact_cleanup"),0);install_tombstone_tx(&tx,&m,&tomb).unwrap();tx.commit().unwrap();
+        let tx=db.transaction().unwrap();install_tombstone_tx(&tx,&m,&tomb).unwrap();tx.rollback().unwrap();let tx=db.transaction().unwrap();assert_eq!(count(&tx,"artifact_tombstones"),1);assert_eq!(count(&tx,"artifact_cleanup"),0);install_tombstone_tx(&tx,&m,&tomb).unwrap();install_tombstone_tx(&tx,&m,&tomb).unwrap();tx.commit().unwrap();
         let tx=db.transaction().unwrap();assert!(!eligible_cleanup_tx(&tx,EvidenceReadView{namespace:&m.namespace},&tomb.cleanup_blobs[0].blob_id).unwrap());tx.execute("UPDATE artifact_intents SET state='synced',ack_seq=11 WHERE blob_id=?1 AND phase='control'",[&tomb.blob_id]).unwrap();assert!(eligible_cleanup_tx(&tx,EvidenceReadView{namespace:&m.namespace},&tomb.cleanup_blobs[0].blob_id).unwrap());tx.commit().unwrap();
         let tx=db.transaction().unwrap();assert!(matches!(commit_artifact_acceptance_tx(&tx,&m,&input,&proof),Err(StoreError::Removed)));assert!(matches!(eligible_intent_tx(&tx,EvidenceReadView{namespace:&m.namespace},&metadata,&gates),Err(StoreError::Removed)));assert_eq!(count(&tx,"artifact_cleanup"),1);tx.rollback().unwrap();
     }

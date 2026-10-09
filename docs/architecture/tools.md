@@ -17,6 +17,8 @@ On Runner restart, a persisted pending proposal has no live approval waiter; sta
 
 The shared core's `crates/cli/src/artifacts.rs` provides a closed artifact parser with required-nullable and duplicate-field checks, bounded revision/save validation, byte-hash and parent checks, domain-separated length-prefixed identities, and a private canonical request fingerprint. It returns validated data; this pure boundary does not implement persistence, workspace publication, sync, or API admission.
 
+The private `artifacts/store.rs` unit implements eight account-and-binary-namespace-scoped tables through borrowed SQLite transactions. It reserves exact revision metadata, plaintext and ciphertext payloads, rejects substituted retry bytes, records acceptance and publication intents together, and gates metadata eligibility on a persisted byte acknowledgment; tombstones refuse later acceptance. The caller owns transaction commit/rollback and prevalidated authority. Production schema installation, workspace effects, sync and API hooks remain separate and are not activated by this unit.
+
 Plugin tools (`<plugin>__<tool>`, such as `github__create_issue`) come from the MCP servers of the plugins installed on the bot's Runner. A bot calls them from codemode scripts; the model never gets them as tools of its own, so the tool list is the same for the whole turn, and from one turn to the next.
 
 Coding tools (`beans_agent::tools`, ports of pi’s built-ins, same schemas and truncation rules: 2000 lines / 50KB, whichever first):

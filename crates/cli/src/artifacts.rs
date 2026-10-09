@@ -1,5 +1,7 @@
 //! Pure artifact wire validation and canonical identity. This module performs no I/O or admission.
 
+mod store;
+
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;

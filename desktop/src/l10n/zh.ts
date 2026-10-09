@@ -43,6 +43,8 @@ export const zh: Record<string, string> = {
   "@everyone what would you check first?": "@everyone 你们会先检查什么？",
   "%@ · %d turn": "%1$@ · %2$d 轮",
   "%@ · %d turns": "%1$@ · %2$d 轮",
+  "Unknown cost": "费用未知",
+  "%@ known subtotal · total unknown": "已知小计 %@ · 总费用未知",
   "%@ · failed": "%@ · 失败",
   "%@ · fetching…": "%@ · 正在获取…",
   "%@ · Next %@": "%1$@ · 下次 %2$@",

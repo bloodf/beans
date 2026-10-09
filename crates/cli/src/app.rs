@@ -1777,6 +1777,7 @@ impl App {
         let updated = {
             let mut state = self.state.lock().unwrap();
             let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
+            let first = chat.usage.is_none();
             let entry = chat.usage.get_or_insert_with(ChatUsage::default);
             entry.context_tokens = beans_agent::estimate::context_tokens(usage);
             entry.context_window = context_window;
@@ -1784,6 +1785,7 @@ impl App {
             entry.output_tokens += usage.output;
             entry.cache_read_tokens += usage.cache_read;
             entry.cost_usd += usage.cost.total;
+            entry.cost_known = Some((first || entry.cost_known == Some(true)) && usage.cost.known == Some(true));
             entry.turns += 1;
             entry.model = model.to_string();
             entry.updated_at = crate::config::now_secs();
@@ -1801,11 +1803,13 @@ impl App {
         let updated = {
             let mut state = self.state.lock().unwrap();
             let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
+            let first = chat.usage.is_none();
             let entry = chat.usage.get_or_insert_with(ChatUsage::default);
             entry.input_tokens += usage.input + usage.cache_read + usage.cache_write;
             entry.output_tokens += usage.output;
             entry.cache_read_tokens += usage.cache_read;
             entry.cost_usd += usage.cost.total;
+            entry.cost_known = Some((first || entry.cost_known == Some(true)) && usage.cost.known == Some(true));
             entry.updated_at = crate::config::now_secs();
             entry.clone()
         };
@@ -2298,6 +2302,92 @@ mod tests {
         }
         assert!(!config.database_path().exists());
         assert!(!home.path().join("format.json").exists());
+    }
+
+    #[cfg(feature = "runner")]
+    #[test]
+    fn chat_cost_distinguishes_absent_zero_priced_and_mixed() {
+        use beans_agent::models::{ModelInfo, Rates, ThinkingMode};
+        use beans_agent::Usage;
+
+        let mut info = ModelInfo {
+            id: "fixture".into(), name: "Fixture".into(), provider: "fixture".into(),
+            context_window: 4096, max_output: 1024, reasoning: false, images: false,
+            rates: None, tiers: Vec::new(), thinking: ThinkingMode::Effort,
+            levels: Vec::new(), wire: None,
+        };
+        let mut absent = Usage { input: 1_000_000, output: 500_000, total_tokens: 1_500_000, ..Usage::default() };
+        absent.cost = info.cost_of(&absent);
+        let mut zero_call = Usage::default();
+        zero_call.cost = info.cost_of(&zero_call);
+        let mut free = absent.clone();
+        info.rates = Some(Rates { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 });
+        free.cost = info.cost_of(&free);
+        let mut priced = absent.clone();
+        info.rates = Some(Rates { input: 2.0, output: 4.0, cache_read: 0.0, cache_write: 0.0 });
+        priced.cost = info.cost_of(&priced);
+        assert_eq!((absent.cost.total, absent.cost.known), (0.0, Some(false)));
+        assert_eq!((free.cost.total, free.cost.known), (0.0, Some(true)));
+        assert_eq!((priced.cost.total, priced.cost.known), (4.0, Some(true)));
+        for unknown in [&absent, &zero_call, &Usage::default()] {
+            let mut aggregate = Usage::default();
+            aggregate.add(unknown);
+            aggregate.add(&priced);
+            assert_eq!((aggregate.cost.total, aggregate.cost.known), (4.0, Some(false)));
+            let mut reverse = Usage::default();
+            reverse.add(&priced);
+            reverse.add(unknown);
+            assert_eq!((reverse.cost.total, reverse.cost.known), (4.0, Some(false)));
+        }
+        let mut known = Usage::default();
+        known.add(&free);
+        known.add(&priced);
+        assert_eq!((known.cost.total, known.cost.known), (4.0, Some(true)));
+
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        for (id, first, side, subtotal, complete) in [
+            ("absent", &absent, None, 0.0, false),
+            ("free", &free, None, 0.0, true),
+            ("priced", &priced, None, 4.0, true),
+            ("mixed", &priced, Some(&absent), 4.0, false),
+            ("reverse", &absent, Some(&priced), 4.0, false),
+            ("zero-call", &zero_call, Some(&priced), 4.0, false),
+        ] {
+            app.state.lock().expect("test state lock").chats.push(chat(id, "dm", &[], None));
+            app.record_usage(id, "fixture", first, 4096);
+            let before = app.chat(id).unwrap().usage.unwrap();
+            if let Some(side) = side { app.add_side_usage(id, side); }
+            let usage = app.chat(id).unwrap().usage.unwrap();
+            assert_eq!((usage.cost_usd, usage.cost_known), (subtotal, Some(complete)));
+            assert_eq!((usage.context_tokens, usage.context_window, usage.turns, &usage.model),
+                (before.context_tokens, before.context_window, 1, &before.model));
+            let snapshot = app.snapshot();
+            let wire = snapshot["chats"].as_array().unwrap().iter().find(|row| row["id"] == id).unwrap();
+            assert_eq!(wire["usage"]["cost_usd"], json!(subtotal));
+            assert_eq!(wire["usage"]["cost_known"], json!(complete));
+        }
+        app.state.lock().expect("test state lock").chats.push(chat("side-first", "dm", &[], None));
+        app.add_side_usage("side-first", &free);
+        assert_eq!(app.chat("side-first").unwrap().usage.unwrap().cost_known, Some(true));
+        app.record_usage("side-first", "fixture", &absent, 4096);
+        assert_eq!(app.chat("side-first").unwrap().usage.unwrap().cost_known, Some(false));
+        let old: ChatUsage = serde_json::from_value(json!({
+            "context_tokens": 0, "context_window": 0, "input_tokens": 0,
+            "output_tokens": 0, "cache_read_tokens": 0, "cost_usd": 3.0,
+            "turns": 0, "model": "fixture", "updated_at": 0.0
+        })).unwrap();
+        let mut old_chat = chat("historical", "dm", &[], None);
+        old_chat.usage = Some(old);
+        app.state.lock().expect("test state lock").chats.push(old_chat);
+        app.add_side_usage("historical", &priced);
+        let historical = app.chat("historical").unwrap().usage.unwrap();
+        assert_eq!((historical.cost_usd, historical.cost_known), (7.0, Some(false)));
+        app.save_state_now();
+        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        for id in ["absent", "free", "priced", "mixed", "reverse", "zero-call", "side-first", "historical"] {
+            assert_eq!(reloaded.chat(id).unwrap().usage, app.chat(id).unwrap().usage);
+        }
     }
 
     #[test]

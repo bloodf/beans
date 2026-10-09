@@ -15,6 +15,7 @@ pub mod embeddings;
 pub mod events;
 pub mod files;
 pub mod artifacts;
+pub mod history164_types;
 pub mod identity;
 pub mod keys;
 #[cfg(feature = "runner")]

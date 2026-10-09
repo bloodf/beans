@@ -456,17 +456,16 @@ pub async fn compact_in_place(
     if cut.first_kept == 0 {
         return Ok(None);
     }
-    let mut usage = Usage::default();
-    match summarize_in_place(provider, shape, convert, messages, skip, &cut, previous_summary.is_some(), settings, custom_instructions, options, cancel).await? {
+    let spent = match summarize_in_place(provider, shape, convert, messages, skip, &cut, previous_summary.is_some(), settings, custom_instructions, options, cancel).await? {
         InPlace::Summary(result) => return Ok(Some(result)),
         InPlace::Declined { why, spent } => {
             tracing::info!(why, "summarizing inside the conversation fell back to a summary of the transcript");
-            usage.add(&spent);
+            spent
         }
-    }
+    };
     let result = compact(provider, body, previous_summary.as_deref(), settings, custom_instructions, options, cancel).await?;
     Ok(result.map(|mut result| {
-        result.usage.add(&usage);
+        if let Some(spent) = spent { result.usage.add(&spent); }
         result
     }))
 }
@@ -482,8 +481,8 @@ pub fn earlier_summary(messages: &[AgentMessage]) -> (Option<String>, usize) {
 
 enum InPlace {
     Summary(CompactResult),
-    /// No summary came of it, for `why`; `spent` is what an answered request cost.
-    Declined { why: &'static str, spent: Usage },
+    /// No summary came of it; `spent` is absent only when no request ran.
+    Declined { why: &'static str, spent: Option<Usage> },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -500,7 +499,7 @@ async fn summarize_in_place(
     options: &RequestOptions,
     cancel: &CancellationToken,
 ) -> Result<InPlace, String> {
-    let declined = |why| Ok(InPlace::Declined { why, spent: Usage::default() });
+    let declined = |why| Ok(InPlace::Declined { why, spent: None });
     let window = provider.model_info().map(|info| info.context_window).unwrap_or(0);
     if window == 0 {
         return declined("the model's window is unknown");
@@ -546,7 +545,7 @@ async fn summarize_in_place(
         _ => "",
     };
     if !why.is_empty() {
-        return Ok(InPlace::Declined { why, spent });
+        return Ok(InPlace::Declined { why, spent: Some(spent) });
     }
 
     let mut summary = message.text().trim().to_string();
@@ -929,6 +928,65 @@ mod tests {
         let requests = provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].system_prompt, SUMMARIZATION_SYSTEM_PROMPT);
+    }
+
+    #[tokio::test]
+    async fn no_call_declines_preserve_known_fallback_cost_but_unpriced_calls_do_not() {
+        struct BoundaryProvider {
+            info: crate::models::ModelInfo,
+            fallback_cost: crate::Cost,
+            requests: std::sync::atomic::AtomicUsize,
+            unpriced_in_place: bool,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for BoundaryProvider {
+            fn provider_id(&self) -> &str { "fixture" }
+            fn model_id(&self) -> &str { "fixture" }
+            fn model_info(&self) -> Option<&crate::models::ModelInfo> { Some(&self.info) }
+            async fn stream(&self, request: ModelRequest, _cancel: CancellationToken) -> crate::provider::AssistantEventStream {
+                use crate::provider::AssistantEvent as E;
+                self.requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let in_place = request.system_prompt == "You are Chef.";
+                if !self.unpriced_in_place { assert!(!in_place, "no-request decline must not stream in place"); }
+                let (text, usage) = if in_place {
+                    ("Not a summary", Usage::default())
+                } else {
+                    ("## Goal\nFrom text", Usage { output: 7, cost: self.fallback_cost, ..Usage::default() })
+                };
+                Box::pin(futures::stream::iter(vec![
+                    E::Start,
+                    E::TextStart { index: 0 },
+                    E::TextDelta { index: 0, delta: text.into() },
+                    E::TextEnd { index: 0 },
+                    E::Done { stop_reason: StopReason::Stop, usage },
+                ]))
+            }
+        }
+
+        let messages = vec![user("first"), assistant(&"a".repeat(400)), user("second"), assistant(&"b".repeat(400)), user("third"), assistant("c")];
+        let settings = CompactionSettings { enabled: true, reserve_tokens: 16_384, keep_recent_tokens: 2, max_input_tokens: 0 };
+        for window in [0, 1024, 200_000] {
+            for dollars in [0.0, 2.0] {
+                let provider = BoundaryProvider {
+                    info: crate::models::ModelInfo {
+                        id: "fixture".into(), name: "Fixture".into(), provider: "fixture".into(),
+                        context_window: window, max_output: 16_384, reasoning: false, images: false,
+                        rates: None, tiers: Vec::new(), thinking: crate::models::ThinkingMode::Effort,
+                        levels: Vec::new(), wire: None,
+                    },
+                    fallback_cost: crate::Cost { total: dollars, output: dollars, known: Some(true), ..crate::Cost::default() },
+                    requests: std::sync::atomic::AtomicUsize::new(0),
+                    unpriced_in_place: window == 200_000,
+                };
+                let result = compact_in_place(&provider, &shape(), as_llm, &messages, &settings, None, &RequestOptions::default(), &CancellationToken::new()).await.unwrap().unwrap();
+                assert_eq!(result.summary, "## Goal\nFrom text");
+                assert_eq!(result.usage.output, 7);
+                assert_eq!(result.usage.cost.total, dollars);
+                assert_eq!(result.usage.cost.known, Some(window != 200_000));
+                assert_eq!(provider.requests.load(std::sync::atomic::Ordering::Relaxed), if window == 200_000 { 2 } else { 1 });
+            }
+        }
     }
 
     #[test]

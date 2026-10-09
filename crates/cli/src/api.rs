@@ -573,6 +573,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             routines::run_now(app, &string(&params, "id")?)?;
             Ok(Value::Null)
         }
+        "routines.reauthorize" => {
+            let routine = routines::reauthorize(app, &string(&params, "id")?)?;
+            Ok(json!({ "routine": app.routine_out(&routine) }))
+        }
         "routines.describe" => routines::describe(&string(&params, "schedule")?),
 
         // The marketplace: plugins, each with the Runners that have it, and bots to add from a

@@ -38,6 +38,33 @@ pub struct TaskLease {
     pub(crate) incarnation: u64,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ScheduleLease {
+    pub revision: String,
+    pub binding: String,
+    pub occurrence: i64,
+}
+
+pub(crate) fn schedule_binding(state: &State, routine: &crate::model::Routine) -> anyhow::Result<String> {
+    let bot = state.bots.iter().find(|b| b.id == routine.bot_id);
+    let dm = state.chats.iter().find(|c| c.meta.kind == "dm" && c.meta.bot_ids.contains(&routine.bot_id));
+    Ok(serde_json::to_string(&(routine.id.as_str(), routine.bot_id.as_str(), &routine.name, &routine.prompt, &routine.schedule, routine.is_enabled, routine.enabled_at, &routine.check, bot.map(|b| &b.runner_id), dm.map(|c| (&c.meta.id, &c.meta.bot_ids)), state.paused, &state.pause_version))?)
+}
+
+fn schedule_unresolved_tx(tx: &Transaction<'_>, epoch: &str, routine: &str) -> anyhow::Result<bool> {
+    Ok(tx.query_row("SELECT EXISTS(SELECT 1 FROM local_tasks t WHERE account_epoch=?1 AND routine_id=?2 AND (state IN ('queued','running') OR (state IN ('interrupted','needs_review') AND resolved_at IS NULL) OR EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=t.account_epoch AND r.task_id=t.task_id AND r.state IN ('started','unknown'))))", params![epoch,routine], |r| r.get(0))?)
+}
+
+fn consume_schedule_tx(tx: &Transaction<'_>, lease: &TaskLease, routine: &str, schedule: &ScheduleLease, next: i64) -> anyhow::Result<()> {
+    check_authority_tx(tx, lease)?;
+    anyhow::ensure!(!schedule_unresolved_tx(tx,&lease.account_epoch,routine)?, "Routine has pending or unknown intent");
+    anyhow::ensure!(next > schedule.occurrence, "Invalid next occurrence");
+    let changed=tx.execute("UPDATE routine_schedule_authority SET next_at=?6 WHERE account_epoch=?1 AND routine_id=?2 AND revision=?3 AND binding=?4 AND next_at=?5 AND revoked=0",params![lease.account_epoch,routine,schedule.revision,schedule.binding,schedule.occurrence,next])?;
+    anyhow::ensure!(changed==1,"Schedule authority changed or occurrence consumed");
+    tx.execute("INSERT INTO routine_schedule_occurrences VALUES(?1,?2,?3,?4)",params![lease.account_epoch,routine,schedule.revision,schedule.occurrence])?;
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskState { Queued, Running, Finished, Interrupted, NeedsReview }
 
@@ -149,6 +176,40 @@ fn queue_task_tx(tx: &Transaction<'_>, lease: &TaskLease, job: &crate::model::Jo
 }
 
 impl LocalStore {
+    pub(crate) fn reauthorize_schedule(&self, lease: &TaskLease, routine: &str, binding: &str, next: i64) -> anyhow::Result<()> {
+        self.safety(|tx| {
+            check_authority_tx(tx,lease)?;
+            anyhow::ensure!(!schedule_unresolved_tx(tx,&lease.account_epoch,routine)?,"Routine has pending or unknown intent");
+            tx.execute("INSERT INTO routine_schedule_authority VALUES(?1,?2,?3,?4,?5,0) ON CONFLICT(account_epoch,routine_id) DO UPDATE SET revision=excluded.revision,binding=excluded.binding,next_at=excluded.next_at,revoked=0",params![lease.account_epoch,routine,uuid::Uuid::new_v4().to_string(),binding,next])?;
+            Ok(())
+        })
+    }
+    pub(crate) fn revoke_schedule(&self, routine: &str) -> anyhow::Result<()> {
+        self.safety(|tx| { tx.execute("UPDATE routine_schedule_authority SET revoked=1 WHERE routine_id=?1",[routine])?; Ok(()) })
+    }
+    pub(crate) fn reconcile_schedules(&self, state: &State) -> anyhow::Result<()> {
+        self.safety(|tx| reconcile_schedules_tx(tx,state))
+    }
+    pub(crate) fn schedule_lease(&self, routine: &str, binding: &str, now: i64, next: i64) -> anyhow::Result<Option<ScheduleLease>> {
+        self.safety(|tx| {
+            // Skip elapsed occurrences, never dispatch a missed-tick backlog.
+            tx.execute("UPDATE routine_schedule_authority SET next_at=?4 WHERE routine_id=?1 AND binding=?2 AND revoked=0 AND next_at<?3",params![routine,binding,now.saturating_sub(30),next])?;
+            Ok(tx.query_row("SELECT revision,binding,next_at FROM routine_schedule_authority WHERE routine_id=?1 AND binding=?2 AND revoked=0 AND next_at<=?3 AND account_epoch=(SELECT account_epoch FROM task_authority WHERE id=1 AND closed=0)",params![routine,binding,now],|r|Ok(ScheduleLease{revision:r.get(0)?,binding:r.get(1)?,occurrence:r.get(2)?})).optional()?)
+        })
+    }
+    pub(crate) fn commit_scheduled_occurrence(&self, lease: &TaskLease, job: Option<&crate::model::Job>, routine: &str, schedule: &ScheduleLease, next: i64, chat: &str, bot: &str, at: i64, set: &std::collections::BTreeMap<String,serde_json::Value>, delete: &[String]) -> anyhow::Result<()> {
+        self.safety(|tx| {
+            consume_schedule_tx(tx,lease,routine,schedule,next)?;
+            if let Some(job)=job {
+                anyhow::ensure!(queue_task_tx(tx,lease,job,true)?,"Routine task already fenced");
+                tx.execute("UPDATE local_tasks SET check_report=?3 WHERE account_epoch=?1 AND task_id=?2",params![lease.account_epoch,lease.task_id,serde_json::to_string(&job.check)?])?;
+            }
+            for key in delete { tx.execute("DELETE FROM codemode_store WHERE chat_id=?1 AND bot_id=?2 AND key=?3",params![chat,bot,key])?; }
+            for (key,value) in set { tx.execute("INSERT INTO codemode_store VALUES(?1,?2,?3,?4) ON CONFLICT(chat_id,bot_id,key) DO UPDATE SET json=excluded.json",params![chat,bot,key,serde_json::to_string(value)?])?; }
+            tx.execute("INSERT INTO routine_check_commits VALUES(?1,?2,?3) ON CONFLICT(account_epoch,routine_id) DO UPDATE SET checked_at=excluded.checked_at",params![lease.account_epoch,routine,at])?;
+            Ok(())
+        })
+    }
     pub(crate) fn commit_submission(&self, message: &Message, tasks: &[(crate::model::Job, TaskLease)], outbox: &[OutboxItem], finalize: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<Upsert> {
         self.safety(|tx| {
             for (job,lease) in tasks { anyhow::ensure!(queue_task_tx(tx,lease,job,true)?, "Submission task already fenced"); }
@@ -398,7 +459,10 @@ impl LocalStore {
             .query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
         let current=["task_authority","task_fences","local_tasks","task_invocations","task_effect_receipts","routine_check_commits","task_safety_version"];
         let task_count=current.iter().filter(|name|tables.contains(**name)).count();
-        if version==2 {
+        if version==3 {
+            anyhow::ensure!(tables.contains("routine_schedule_authority") && tables.contains("routine_schedule_occurrences"),"Schedule safety schema is incomplete");
+        }
+        if version==2 || version==3 {
             anyhow::ensure!(task_count==current.len(),"Current task schema is incomplete; restoring missing safety tables is forbidden");
         } else if !tables.is_empty() && task_count==0 {
             anyhow::ensure!(version==1,"Unsupported predecessor schema version");
@@ -572,7 +636,13 @@ impl LocalStore {
              CREATE TABLE IF NOT EXISTS routine_check_commits (
                  account_epoch TEXT NOT NULL, routine_id TEXT NOT NULL, checked_at INTEGER NOT NULL,
                  PRIMARY KEY(account_epoch,routine_id));
-             PRAGMA user_version = 2;",
+             CREATE TABLE IF NOT EXISTS routine_schedule_authority (
+                 account_epoch TEXT NOT NULL, routine_id TEXT NOT NULL, revision TEXT NOT NULL,
+                 binding TEXT NOT NULL, next_at INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), PRIMARY KEY(account_epoch,routine_id));
+             CREATE TABLE IF NOT EXISTS routine_schedule_occurrences (
+                 account_epoch TEXT NOT NULL, routine_id TEXT NOT NULL, revision TEXT NOT NULL,
+                 occurrence INTEGER NOT NULL, PRIMARY KEY(account_epoch,routine_id,revision,occurrence));
+             PRAGMA user_version = 3;",
         )?;
         if !connection.prepare("SELECT paused FROM metadata").is_ok() {
             connection.execute("ALTER TABLE metadata ADD COLUMN paused INTEGER NOT NULL DEFAULT 0", [])?;
@@ -1577,6 +1647,8 @@ impl LocalStore {
             "task_invocations",
             "local_tasks",
             "routine_check_commits",
+            "routine_schedule_authority",
+            "routine_schedule_occurrences",
             "memory_config",
             "memory_deliveries",
             "memory_fences",
@@ -1649,7 +1721,20 @@ pub(crate) fn queue_outbox_tx(tx: &Transaction<'_>, item: &OutboxItem) -> anyhow
     Ok(())
 }
 
+fn reconcile_schedules_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
+    let authorities: Vec<(String,String)> = tx.prepare("SELECT routine_id,binding FROM routine_schedule_authority WHERE revoked=0")?
+        .query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    for (id,binding) in authorities {
+        let current=state.routines.iter().find(|r|r.id==id).map(|r|schedule_binding(state,r)).transpose()?;
+        if current.as_deref()!=Some(binding.as_str()) {
+            tx.execute("UPDATE routine_schedule_authority SET revoked=1 WHERE routine_id=?1",[id])?;
+        }
+    }
+    Ok(())
+}
+
 fn save_state_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
+    reconcile_schedules_tx(tx,state)?;
     save_metadata_tx(tx, state)?;
     sync_json_table(
         tx,
@@ -2127,7 +2212,7 @@ mod tests {
         let home=tempfile::tempdir().unwrap(); let path=home.path().join("beans.sqlite3");
         let store=LocalStore::open(&path).unwrap();
         store.upsert(&message("legacy-transcript",1.0)).unwrap();
-        store.connection.lock().unwrap().execute_batch("DROP TABLE task_authority; DROP TABLE task_fences; DROP TABLE local_tasks; DROP TABLE task_invocations; DROP TABLE task_effect_receipts; DROP TABLE routine_check_commits; DROP TABLE task_safety_version; PRAGMA user_version=1;").unwrap();
+        store.connection.lock().unwrap().execute_batch("DROP TABLE task_authority; DROP TABLE task_fences; DROP TABLE local_tasks; DROP TABLE task_invocations; DROP TABLE task_effect_receipts; DROP TABLE routine_check_commits; DROP TABLE task_safety_version; DROP TABLE routine_schedule_authority; DROP TABLE routine_schedule_occurrences; PRAGMA user_version=1;").unwrap();
         drop(store);
         let reopened=LocalStore::open(&path).unwrap();
         reopened.recover_task_owner("owner-test").unwrap();

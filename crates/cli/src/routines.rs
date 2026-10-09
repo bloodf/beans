@@ -179,6 +179,31 @@ pub fn describe(schedule_text: &str) -> Result<Value, String> {
     }))
 }
 
+/// Explicit local user authority, never called by the bot's routine tool or provisioning.
+pub fn reauthorize(app: &Arc<App>, id: &str) -> Result<Routine, String> {
+    let _policy=app.roster_edit.lock().unwrap();
+    let _lifecycle=app.plugin_admission(None)?;
+    let routine=app.routine(id).ok_or("Unknown routine")?;
+    if !routine.is_enabled { return Err("Enable the routine before reauthorizing its schedule.".into()); }
+    let chat=app.state.lock().unwrap().chats.iter().find(|c|c.meta.kind=="dm" && c.meta.bot_ids.contains(&routine.bot_id)).cloned().ok_or("Routine DM unavailable")?;
+    let job=job_in_chat(app,&routine,chat.meta.id);
+    app.check_local_job(&job).map_err(|e|e.to_string())?;
+    if !app.local_device().is_some_and(|d|d.is_runner()) { return Err("Local Runner required".into()); }
+    let chat=app.chat(&job.chat_id).ok_or("Routine DM unavailable")?;
+    if chat.meta.kind!="dm" { return Err("Routine requires its direct chat.".into()); }
+    let lease=app.task_lease(&job).map_err(|e|e.to_string())?;
+    let next=schedule::parse(&routine.schedule)?.next_after(now_unix()).ok_or("Schedule has no future occurrence")?;
+    let binding=crate::local_store::schedule_binding(&app.state.lock().unwrap(),&routine).map_err(|e|e.to_string())?;
+    app.store.reauthorize_schedule(&lease,id,&binding,next).map_err(|e|e.to_string())?;
+    Ok(routine)
+}
+
+#[cfg(feature="runner")]
+fn capture_schedule(app: &App, routine: &Routine, now: i64) -> anyhow::Result<Option<crate::local_store::ScheduleLease>> {
+    let binding=crate::local_store::schedule_binding(&app.state.lock().unwrap(),routine)?;
+    let next=schedule::parse(&routine.schedule).map_err(anyhow::Error::msg)?.next_after(now).ok_or_else(||anyhow::anyhow!("No future occurrence"))?;
+    app.store.schedule_lease(&routine.id,&binding,now,next)
+}
 // MARK: - Running
 
 /// Starts a run of the routine now, here or on the bot's Runner through the relay. Refuses
@@ -198,9 +223,13 @@ pub fn run_now(app: &Arc<App>, id: &str) -> Result<(), String> {
 /// The job that runs a routine: a `routine` turn in the bot's direct chat.
 fn job_for(app: &Arc<App>, routine: &Routine) -> Result<Job, String> {
     let dm = app.dm_with(&routine.bot_id, None).map_err(|e| e.to_string())?;
-    Ok(Job {
+    Ok(job_in_chat(app,routine,dm.meta.id))
+}
+
+fn job_in_chat(app: &App, routine: &Routine, chat_id: String) -> Job {
+    Job {
         id: format!("job-{}", uuid::Uuid::new_v4()),
-        chat_id: dm.meta.id,
+        chat_id,
         bot_id: routine.bot_id.clone(),
         kind: "routine".into(),
         trigger_message_id: String::new(),
@@ -213,7 +242,7 @@ fn job_for(app: &Arc<App>, routine: &Routine) -> Result<Job, String> {
         is_winding_down: false,
         setup: None,
         created_at: now_secs(),
-    })
+    }
 }
 
 /// A run began on this Runner: the schedule counts from now, so a slow run is not queued
@@ -245,14 +274,14 @@ pub async fn run(app: Arc<App>) {
 /// away, in which case the due ones are paused with a notice instead.
 #[cfg(feature = "runner")]
 pub fn tick(app: &Arc<App>) {
-    if !app.is_execution_owner() || app.is_paused() || app.legacy_execution_closed().unwrap_or(true) { return; }
+    if !app.is_execution_owner() || app.is_paused() { return; }
     let Some(this) = app.this_device_id() else { return };
     let now = now_unix();
     let enabled: Vec<Routine> = app.state.lock().unwrap().routines.iter().filter(|r| r.is_enabled).cloned().collect();
     let due: Vec<Routine> = enabled
         .into_iter()
-        .filter(|r| due_at(app, r).is_some_and(|t| t <= now))
         .filter(|r| app.bot(&r.bot_id).is_some_and(|b| b.runner_id == this) && !app.is_routine_running(&r.id) && !app.routine_checks.is_running(&r.id))
+        .filter(|r| capture_schedule(app,r,now).ok().flatten().is_some())
         .collect();
     if due.is_empty() {
         return;
@@ -265,13 +294,20 @@ pub fn tick(app: &Arc<App>) {
         // While an update holds new work back, a due routine stays due: the next tick after
         // the lease ends starts it.
         let Some(admission) = app.update.try_admit() else { return };
+        let schedule=match capture_schedule(app,&routine,now) { Ok(Some(schedule))=>schedule, Ok(None)=>continue, Err(error)=>{tracing::error!(%error,"Schedule capture refused"); continue;} };
         if routine.check.is_some() {
-            check_then_run(app, routine, admission);
+            check_then_run(app, routine, schedule, admission);
             continue;
         }
-        started(app, &routine.id);
-        match job_for(app, &routine) {
-            Ok(job) => runtime::spawn_local_job(app.clone(), job, None, admission),
+        match job_for(app,&routine).and_then(|mut job| {
+            let lease=app.task_lease(&job).map_err(|e|e.to_string())?;
+            commit_scheduled_check(app,&routine,&mut job,&lease,&schedule,&CheckRun {found:None,error:None,result:String::new()},&beans_agent::codemode::StoreWrites::default(),&CancellationToken::new()).map_err(|e|e.to_string())?;
+            Ok((job,lease))
+        }) {
+            Ok((job,lease)) => {
+                started(app,&routine.id);
+                runtime::spawn_admitted_local_job(app.clone(),job,None,admission,lease);
+            }
             Err(error) => tracing::warn!(%error, routine = %routine.name, "starting a routine"),
         }
     }
@@ -393,7 +429,7 @@ pub fn next_run_shown(app: &App, routine: &Routine) -> Option<i64> {
 /// seen; so what this one found still starts its run, after that one, as the chat runs one turn
 /// at a time.
 #[cfg(feature = "runner")]
-fn check_then_run(app: &Arc<App>, routine: Routine, admission: crate::update_control::Admission) {
+fn check_then_run(app: &Arc<App>, routine: Routine, schedule: crate::local_store::ScheduleLease, admission: crate::update_control::Admission) {
     if !app.is_execution_owner() { return; }
     let cancel = CancellationToken::new();
     if !app.routine_checks.start(&routine.id, &cancel) { return; }
@@ -403,7 +439,7 @@ fn check_then_run(app: &Arc<App>, routine: Routine, admission: crate::update_con
         let mut job = match job_for(&app,&routine) { Ok(job) => job, Err(_) => { checked(&app,&routine.id); return; } };
         let lease = match app.task_lease(&job) { Ok(lease) => lease, Err(_) => { checked(&app,&routine.id); return; } };
         let (found,writes) = run_check_staged(&app,&routine,&cancel).await;
-        let committed = commit_scheduled_check(&app,&routine,&mut job,&lease,&found,&writes,&cancel);
+        let committed = commit_scheduled_check(&app,&routine,&mut job,&lease,&schedule,&found,&writes,&cancel);
         checked(&app,&routine.id);
         match committed {
             Ok(true) => runtime::spawn_admitted_local_job(app.clone(),job,None,app.update.hold(),lease),
@@ -414,17 +450,22 @@ fn check_then_run(app: &Arc<App>, routine: Routine, admission: crate::update_con
 }
 
 #[cfg(feature = "runner")]
-fn commit_scheduled_check(app: &App, routine: &Routine, job: &mut Job, lease: &crate::local_store::TaskLease, found: &CheckRun, writes: &beans_agent::codemode::StoreWrites, cancel: &CancellationToken) -> anyhow::Result<bool> {
+fn commit_scheduled_check(app: &App, routine: &Routine, job: &mut Job, lease: &crate::local_store::TaskLease, schedule: &crate::local_store::ScheduleLease, found: &CheckRun, writes: &beans_agent::codemode::StoreWrites, cancel: &CancellationToken) -> anyhow::Result<bool> {
     let _policy = app.roster_edit.lock().unwrap();
     let _lifecycle = app.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
     anyhow::ensure!(!cancel.is_cancelled() && !app.is_paused(), "Routine check was cancelled");
     let current = app.routine(&routine.id).ok_or_else(|| anyhow::anyhow!("Routine was deleted"))?;
     anyhow::ensure!(current.is_enabled && current.check == routine.check && current.bot_id==routine.bot_id, "Routine changed during check");
     app.check_local_job(job)?;
-    anyhow::ensure!(!app.store.routine_needs_review(&lease.account_epoch,&routine.id)?, "Routine requires review");
+    anyhow::ensure!(app.local_device().is_some_and(|d|d.is_runner()),"Local Runner required");
+    let binding=crate::local_store::schedule_binding(&app.state.lock().unwrap(),&current)?;
+    anyhow::ensure!(binding==schedule.binding,"Schedule revision changed");
+    let now=now_unix();
+    let next=schedule::parse(&current.schedule).map_err(anyhow::Error::msg)?.next_after(now.max(schedule.occurrence)).ok_or_else(||anyhow::anyhow!("No future occurrence"))?;
     job.check = found.report();
-    app.store.commit_routine_check(lease,job.check.as_ref().map(|_| &*job),&routine.id,&job.chat_id,&job.bot_id,now_unix(),&writes.set,&writes.delete)?;
-    Ok(job.check.is_some())
+    let run=routine.check.is_none() || job.check.is_some();
+    app.store.commit_scheduled_occurrence(lease,run.then_some(&*job),&routine.id,schedule,next,&job.chat_id,&job.bot_id,now,&writes.set,&writes.delete)?;
+    Ok(run)
 }
 
 /// How a check went.
@@ -641,9 +682,76 @@ mod tests {
 
     #[cfg(feature="runner")]
     #[tokio::test]
+    async fn explicit_schedule_authority_barrier_duplicate_and_reopen() {
+        let scratch=scratch_app(); let app=&scratch.0;
+        let routine=create(app,"b1","Watch CAS","every 10m","Report",Some("return 'new';"),true).unwrap();
+        let now=now_unix();
+        app.dm_with("b1",None).unwrap();
+        assert!(capture_schedule(app,&routine,now+600).unwrap().is_none());
+        crate::api::dispatch(app,"routines.reauthorize",serde_json::json!({"id":routine.id})).await.unwrap();
+        let arm=|at| {
+            app.store.connection.lock().unwrap().execute("UPDATE routine_schedule_authority SET next_at=?1 WHERE routine_id=?2",rusqlite::params![at,routine.id]).unwrap();
+            capture_schedule(app,&routine,at).unwrap().unwrap()
+        };
+        let schedule=arm(now);
+        let mut job=job_for(app,&routine).unwrap(); let lease=app.task_lease(&job).unwrap();
+        let writes=beans_agent::codemode::StoreWrites {set:std::collections::BTreeMap::from([("seen".into(),serde_json::json!(true))]),delete:vec![]};
+        let found=CheckRun {found:Some("new".into()),error:None,result:"new".into()};
+        let (ready_tx,ready_rx)=tokio::sync::oneshot::channel();
+        let (release_tx,release_rx)=tokio::sync::oneshot::channel();
+        let worker=app.clone(); let captured=routine.clone(); let old=schedule.clone();
+        let pending=tokio::spawn(async move {
+            ready_tx.send(()).unwrap(); release_rx.await.unwrap();
+            commit_scheduled_check(&worker,&captured,&mut job,&lease,&old,&found,&writes,&CancellationToken::new())
+        });
+        ready_rx.await.unwrap();
+        crate::api::dispatch(app,"routines.reauthorize",serde_json::json!({"id":routine.id})).await.unwrap();
+        release_tx.send(()).unwrap(); assert!(pending.await.unwrap().is_err());
+        let dm=app.dm_with("b1",None).unwrap();
+        assert!(!app.store.codemode_values(&dm.meta.id,"b1").unwrap().contains_key("seen"));
+        let schedule=arm(now);
+        let mut job=job_for(app,&routine).unwrap(); let lease=app.task_lease(&job).unwrap();
+        let found=CheckRun {found:Some("new".into()),error:None,result:"new".into()};
+        let writes=beans_agent::codemode::StoreWrites {set:std::collections::BTreeMap::from([("seen".into(),serde_json::json!(true))]),delete:vec![]};
+        app.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER reject_schedule BEFORE INSERT ON routine_check_commits BEGIN SELECT RAISE(ABORT,'synthetic rejection'); END;").unwrap();
+        assert!(commit_scheduled_check(app,&routine,&mut job,&lease,&schedule,&found,&writes,&CancellationToken::new()).is_err());
+        assert_eq!(app.store.task_state(&lease).unwrap(),None);
+        assert!(!app.store.codemode_values(&dm.meta.id,"b1").unwrap().contains_key("seen"));
+        app.store.connection.lock().unwrap().execute_batch("DROP TRIGGER reject_schedule;").unwrap();
+        assert!(commit_scheduled_check(app,&routine,&mut job,&lease,&schedule,&found,&writes,&CancellationToken::new()).unwrap());
+        assert_eq!(app.store.task_state(&lease).unwrap(),Some(crate::local_store::TaskState::Queued));
+        assert_eq!(app.store.codemode_values(&dm.meta.id,"b1").unwrap().get("seen"),Some(&serde_json::json!(true)));
+        assert!(commit_scheduled_check(app,&routine,&mut job,&lease,&schedule,&found,&writes,&CancellationToken::new()).is_err());
+        assert!(reauthorize(app,&routine.id).is_err(),"pending intent blocks new authority");
+        assert!(app.store.start_task(&lease).unwrap());
+        let binding=crate::local_store::InvocationBinding {invocation_id:"invocation-schedule".into(),parent_invocation_id:None,ordinal:0,attempt_id:"attempt-schedule".into(),receipt_id:"receipt-schedule".into(),revision:1,digest:[42;32]};
+        assert!(app.store.insert_invocation(&lease,&binding).unwrap());
+        assert!(app.store.decide_invocation(&lease,&binding,crate::local_store::AuthorizationDecision::Authorized,crate::local_store::AuthorizationKind::UserOnce,None,None,now).unwrap());
+        assert!(app.store.admit_invocation(&lease,&binding).unwrap());
+        let reopened=crate::local_store::LocalStore::open(&scratch.1.join("beans.sqlite3")).unwrap();
+        reopened.recover_task_owner("replacement-owner").unwrap();
+        let count:i64=reopened.connection.lock().unwrap().query_row("SELECT count(*) FROM routine_schedule_occurrences WHERE routine_id=?1",[&routine.id],|r|r.get(0)).unwrap();
+        assert_eq!(count,1);
+        assert_eq!(reopened.task_state(&lease).unwrap(),Some(crate::local_store::TaskState::NeedsReview));
+        let mut recovered=lease.clone(); recovered.owner_epoch="replacement-owner".into();
+        assert!(reopened.reauthorize_schedule(&recovered,&routine.id,&schedule.binding,now+600).is_err(),"recovered intent blocks new authority");
+        assert!(reopened.resolve_task(&recovered,now).unwrap());
+        assert!(reopened.reauthorize_schedule(&recovered,&routine.id,&schedule.binding,now+600).is_err(),"resolved history does not erase unknown receipt");
+        let state:String=reopened.connection.lock().unwrap().query_row("SELECT state FROM task_effect_receipts WHERE receipt_id=?1",[&binding.receipt_id],|r|r.get(0)).unwrap();
+        assert_eq!(state,"unknown");
+        assert!(reopened.commit_scheduled_occurrence(&lease,Some(&job),&routine.id,&schedule,now+600,&job.chat_id,&job.bot_id,now,&writes.set,&[]).is_err());
+    }
+
+    #[cfg(feature="runner")]
+    #[tokio::test]
     async fn scheduled_check_reassignment_wins_before_atomic_commit() {
         let scratch=scratch_app(); let app=&scratch.0;
         let routine=create(app,"b1","Watch","every 10m","Report changes",Some("store('seen',true); return 'new';"),true).unwrap();
+        app.dm_with("b1",None).unwrap();
+        reauthorize(app,&routine.id).unwrap();
+        let future=now_unix()+600;
+        app.store.connection.lock().unwrap().execute("UPDATE routine_schedule_authority SET next_at=?1",[future]).unwrap();
+        let schedule=capture_schedule(app,&routine,future).unwrap().unwrap();
         let mut job=job_for(app,&routine).unwrap(); let lease=app.task_lease(&job).unwrap();
         let writes=beans_agent::codemode::StoreWrites { set:std::collections::BTreeMap::from([("seen".into(),serde_json::json!(true))]),delete:vec![] };
         let found=CheckRun { found:Some("new".into()),error:None,result:"new".into() };
@@ -652,7 +760,7 @@ mod tests {
         let worker=app.clone(); let task_id=job.id.clone(); let chat_id=job.chat_id.clone();
         let pending=tokio::spawn(async move {
             ready_tx.send(()).unwrap(); release_rx.await.unwrap();
-            commit_scheduled_check(&worker,&routine,&mut job,&lease,&found,&writes,&CancellationToken::new())
+            commit_scheduled_check(&worker,&routine,&mut job,&lease,&schedule,&found,&writes,&CancellationToken::new())
         });
         ready_rx.await.unwrap();
         app.update_bot("b1",|bot|bot.runner_id="other-runner".into()).unwrap();
@@ -721,6 +829,9 @@ mod tests {
         // Armed an hour and a bit ago: due now.
         let now = now_secs();
         app.update_routine(&hourly.id, |r| r.enabled_at = now - 3700.0).unwrap();
+        app.dm_with("b1",None).unwrap();
+        reauthorize(app,&hourly.id).unwrap();
+        app.store.connection.lock().unwrap().execute("UPDATE routine_schedule_authority SET next_at=?1",[now_unix()]).unwrap();
         tick(app);
         let ran = app.routine(&hourly.id).unwrap();
         let first_run = ran.last_run_at.expect("started");
@@ -757,6 +868,9 @@ mod tests {
             r.enabled_at = long_ago;
         })
         .unwrap();
+        app.dm_with("b1",None).unwrap();
+        reauthorize(app,&brief.id).unwrap();
+        app.store.connection.lock().unwrap().execute("UPDATE routine_schedule_authority SET next_at=?1 WHERE routine_id=?2",rusqlite::params![now_unix(),brief.id]).unwrap();
         tick(app);
         let paused = app.routine(&brief.id).unwrap();
         assert!(!paused.is_enabled && paused.paused_reason.as_deref() == Some("away") && paused.last_run_at.is_none());
@@ -903,6 +1017,9 @@ mod tests {
         let quiet = create(app, "b1", "Quiet", "every 10m", "Tell me what is new.", Some("return null;"), true).unwrap();
         let now = now_secs();
         app.update_routine(&quiet.id, |r| r.enabled_at = now - 700.0).unwrap();
+        app.dm_with("b1",None).unwrap();
+        reauthorize(app,&quiet.id).unwrap();
+        app.store.connection.lock().unwrap().execute("UPDATE routine_schedule_authority SET next_at=?1 WHERE routine_id=?2",rusqlite::params![now_unix(),quiet.id]).unwrap();
         let mut events = app.events.subscribe();
         tick(app);
         for _ in 0..200 {
@@ -929,6 +1046,8 @@ mod tests {
 
         let found = create(app, "b1", "Found", "every 10m", "Tell me what is new.", Some("return 'Two new pull requests';"), true).unwrap();
         app.update_routine(&found.id, |r| r.enabled_at = now - 700.0).unwrap();
+        reauthorize(app,&found.id).unwrap();
+        app.store.connection.lock().unwrap().execute("UPDATE routine_schedule_authority SET next_at=?1 WHERE routine_id=?2",rusqlite::params![now_unix(),found.id]).unwrap();
         tick(app);
         for _ in 0..200 {
             if app.routine(&found.id).unwrap().last_outcome.is_some() {

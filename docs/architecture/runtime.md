@@ -36,6 +36,8 @@ Installation, standalone services and Runner admission drain are described in [C
 
 Local user submissions commit transcript, encrypted outbox and exact first-turn task admission together before publishing or steering. Attachments use private staging and rollback backups; filesystem finalization and SQLite commit are separate failure boundaries, described in [Local task authority](tasks.md#admission-and-recovery).
 
+Future routine ticks require explicit local `routines.reauthorize` authority under the current execution owner. Creation, editing and resume do not authorize automatic execution. Exact revision and unique occurrence admission share the durable staged check/task transaction; missed occurrences are skipped, not caught up. Pause, Runner, membership or definition changes revoke schedule admission. Pending or unknown matching intent blocks reauthorization. See [Local task authority](tasks.md#routine-checks-and-retention).
+
 
 ## Diagnostics report
 

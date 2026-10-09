@@ -1350,6 +1350,12 @@ impl App {
     }
 
     pub fn roster_changed(&self, upload: bool) {
+        let reconciled=self.store.reconcile_schedules(&self.state.lock().unwrap());
+        if let Err(error)=reconciled {
+            let lifecycle=self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0,true));
+            tracing::error!(%error,"Schedule revocation failed; account admission closed");
+        }
         self.save_state();
         if upload {
             self.push_roster();
@@ -1716,9 +1722,13 @@ impl App {
         let _edit = self.roster_edit.lock().unwrap();
         let routine = {
             let mut state = self.state.lock().unwrap();
-            let routine = state.routines.iter_mut().find(|r| r.id == id).ok_or_else(|| anyhow::anyhow!("Unknown routine"))?;
-            update(routine);
-            routine.clone()
+            let index=state.routines.iter().position(|r|r.id==id).ok_or_else(||anyhow::anyhow!("Unknown routine"))?;
+            let before=crate::local_store::schedule_binding(&state,&state.routines[index])?;
+            let mut routine=state.routines[index].clone();
+            update(&mut routine);
+            if before!=crate::local_store::schedule_binding(&state,&routine)? { self.store.revoke_schedule(id)?; }
+            state.routines[index]=routine.clone();
+            routine
         };
         self.roster_changed(true);
         Ok(routine)

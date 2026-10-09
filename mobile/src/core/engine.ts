@@ -148,7 +148,7 @@ class Engine {
         break;
       case "roster.changed": {
         const { removed } = applyRoster(data);
-        for (const chatId of removed) removeChat(chatId);
+        for (const chatId of removed) removeChat(chatId, false);
         break;
       }
       case "message.added":
@@ -224,11 +224,53 @@ class Engine {
   /// turns it calls for.
   /// `replyTo` is the message the user answers, which the bot reads quoted.
   async sendMessage(chatId: string, text: string, files: PickedFile[] = [], mentions: string[] = [], replyTo?: string): Promise<Message> {
-    const attachments = files.map((file) => ({ path: pathOf(file.uri), name: file.name, mime: file.mime, width: file.width, height: file.height }));
-    const { message } = await core.request<{ message: Message }>("chats.send", { chat_id: chatId, text, attachments, mentions, ...(replyTo ? { reply_to: replyTo } : {}) });
-    upsertMessage(message);
-    setStatus(chatId, null);
-    return message;
+    const source = useStore.getState();
+    let invalidated = false;
+    const unsubscribe = useStore.subscribe(state => {
+      if (state.identityId !== source.identityId || state.relayUrl !== source.relayUrl
+        || state.deviceId !== source.deviceId || state.paired !== source.paired
+        || (source.chats.some(chat => chat.id === chatId) && !state.chats.some(chat => chat.id === chatId))) invalidated = true;
+    });
+    try {
+      const attachments = files.map((file) => ({ path: pathOf(file.uri), name: file.name, mime: file.mime, width: file.width, height: file.height }));
+      const result = await core.request<{ message: Message }>("chats.send", { chat_id: chatId, text, attachments, mentions, ...(replyTo ? { reply_to: replyTo } : {}) });
+      const message = result?.message;
+      // Rust str::trim uses Unicode White_Space (not JavaScript's BOM-inclusive trim).
+      const normalizedText = text.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+      const body = message?.body;
+      const validAuthor = (author: any) => author?.kind === "you" || (author?.kind === "bot" && typeof author.bot_id === "string" && !!author.bot_id);
+      const unsigned = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+      const timestamp = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0;
+      const reply = body?.kind === "text" ? body.reply_to : undefined;
+      const acknowledgedFiles = body?.kind === "text" && body.attachments !== undefined ? body.attachments : [];
+      const validFiles = Array.isArray(acknowledgedFiles) && acknowledgedFiles.length === files.length
+        && acknowledgedFiles.every((attachment, index) => {
+          const file = files[index]!;
+          return typeof attachment?.id === "string" && /^att-[a-zA-Z0-9-]+$/.test(attachment.id)
+            && typeof attachment.name === "string" && typeof attachment.mime === "string" && attachment.mime.includes("/")
+            && unsigned(attachment.size) && (attachment.width === undefined || unsigned(attachment.width))
+            && (attachment.height === undefined || unsigned(attachment.height))
+            && (!file.name.trim() || attachment.name === file.name)
+            && (!file.mime.includes("/") || attachment.mime === file.mime)
+            && (file.width === undefined || file.height === undefined || (attachment.width === file.width && attachment.height === file.height));
+        });
+      const validReply = replyTo ? reply?.message_id === replyTo && typeof reply.text === "string" && validAuthor(reply.author)
+        : reply === undefined || reply === null;
+      if (!message || typeof message.id !== "string" || !message.id || message.chat_id !== chatId
+        || message.author?.kind !== "you" || body?.kind !== "text" || body.text !== normalizedText
+        || message.state?.kind !== "complete" || !timestamp(message.created_at)
+        || (message.promoted_at !== undefined && !timestamp(message.promoted_at))
+        || (message.queued !== undefined && typeof message.queued !== "boolean")
+        || (body.mentions !== undefined && (!Array.isArray(body.mentions) || !body.mentions.every(id => typeof id === "string")))
+        || !validFiles || !validReply) throw new Error(t("Could not send"));
+      if (!invalidated) {
+        upsertMessage(message);
+        setStatus(chatId, null);
+      }
+      return message;
+    } finally {
+      unsubscribe();
+    }
   }
 
   /// Has the bot's turn read a message it holds for its next step now: a command it waits on goes

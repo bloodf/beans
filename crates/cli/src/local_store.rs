@@ -433,9 +433,11 @@ impl LocalStore {
         Ok(self.connection.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM local_tasks WHERE account_epoch=?1 AND routine_id=?2 AND state IN ('interrupted','needs_review') AND resolved_at IS NULL)", params![epoch,routine], |r| r.get(0))?)
     }
 
-    /// Borrowed task safety transaction for a caller that admits its task invocation and any
-    /// workspace effect belonging to it in one atomic step. Same settings, same mutex, same
-    /// IMMEDIATE scope as every other safety write; the closure owns COMMIT or rollback.
+    /// Borrowed task safety transaction, so one caller can admit its task invocation and a
+    /// workspace effect belonging to it in one step. Same settings, same mutex, same IMMEDIATE
+    /// scope as every other safety write; the closure owns COMMIT or rollback. No such workspace
+    /// effect is admitted through it yet: `artifacts::store` exports no facade and no production
+    /// path installs its tables, so today the closure carries the task admission alone.
     pub(crate) fn safety_tx<T>(&self, write: impl FnOnce(&Transaction<'_>) -> anyhow::Result<T>) -> anyhow::Result<T> {
         self.safety(write)
     }

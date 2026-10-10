@@ -711,6 +711,15 @@ body.resizing * {
   }
 }
 
+/* Reduce Motion stops the sweep; the working row keeps its text, dot and dimming. This block
+   follows the animation it stops so equal specificity still resolves to `animation: none`. */
+@media (prefers-reduced-motion: reduce) {
+  .shimmer,
+  .working-text {
+    animation: none;
+  }
+}
+
 .transcript-status {
   display: flex;
   align-items: center;

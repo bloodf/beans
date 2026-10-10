@@ -48,7 +48,7 @@ fn proposal_schema_present(tx: &Transaction<'_>) -> std::result::Result<bool,Pro
 fn proposal_projection(lookup: Lookup, participant: &ProposalParticipant) -> ProposalArtifactReplay {
     match lookup {
         Lookup::Absent=>ProposalArtifactReplay::Absent,
-        Lookup::Accepted(result)=>ProposalArtifactReplay::Accepted(result),
+        Lookup::Accepted{result,workspace_state,attempt_id}=>ProposalArtifactReplay::Accepted{result,workspace_state,attempt_id},
         Lookup::Reserved(reservation)=>{
             let workspace_state=reservation.workspace_state;let attempt_id=reservation.attempt_id.clone();
             ProposalArtifactReplay::Reserved{reservation:ProposalArtifactReservation(ProposalReservation{reservation,account_id:participant.mutation.namespace.account_id.clone(),namespace_key:participant.mutation.namespace.namespace_key.clone()}),workspace_state,attempt_id}
@@ -154,7 +154,7 @@ struct ReservedInput { key: AcceptanceKey, authority: ArtifactAuthority, origin:
 #[derive(Debug)]
 struct Reservation { key: AcceptanceKey, revision_id: String, snapshot_id: String, incarnation: u64, owner_epoch: String, workspace_state: WorkspaceState, attempt_id: Option<String> }
 #[derive(Debug)]
-enum Lookup { Absent, Reserved(Reservation), Accepted(ArtifactResult) }
+enum Lookup { Absent, Reserved(Reservation), Accepted { result: ArtifactResult, workspace_state: WorkspaceState, attempt_id: Option<String> } }
 struct ObservedPublication { attempt_id: String, snapshot_id: String, revision_id: String, content_hash: String }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UploadPhase { Bytes, Metadata, Control }
@@ -190,7 +190,14 @@ fn lookup_acceptance_tx(tx: &Transaction<'_>, view: EvidenceReadView<'_>, key: &
     refuse_removed(tx,ns,&record.chat_id,&id)?;
     if requester!=key.requester || request!=key.request_id || id!=key.artifact_id || origin!=key.origin_key || fp.as_slice()!=key.fingerprint { return Err(StoreError::RequestBodyChanged); }
     let workspace_state=match state.as_str() {"reserved"=>WorkspaceState::Reserved,"attempt_admitted"=>WorkspaceState::AttemptAdmitted,"published"=>WorkspaceState::Published,"unindexed"=>WorkspaceState::Unindexed,"uncertain"=>WorkspaceState::Uncertain,_=>return Err(StoreError::Invalid)};
-    match result { Some(value)=>Ok(Lookup::Accepted(serde_json::from_str(&value).map_err(|_|StoreError::Invalid)?)),None=>Ok(Lookup::Reserved(Reservation {key:key.clone(),revision_id:revision,snapshot_id:snapshot,incarnation,owner_epoch:owner,workspace_state,attempt_id})) }
+    match result {
+        Some(value)=>{
+            let accepted:ArtifactResult=serde_json::from_str(&value).map_err(|_|StoreError::Invalid)?;
+            ensure(workspace_state==WorkspaceState::Published && attempt_id.as_deref().is_some_and(structural) && accepted.id==record.id && accepted.revision_id==record.revision_id && accepted.content_hash==record.content_hash && accepted.workspace==WorkspaceState::Published)?;
+            Ok(Lookup::Accepted{result:accepted,workspace_state,attempt_id})
+        },
+        None=>Ok(Lookup::Reserved(Reservation {key:key.clone(),revision_id:revision,snapshot_id:snapshot,incarnation,owner_epoch:owner,workspace_state,attempt_id}))
+    }
 }
 fn validate_input(m: &ValidatedMutation, input: &ReservedInput) -> Result<Vec<u8>> {
     m.validate()?;
@@ -232,7 +239,7 @@ fn reserve_workspace_tx(tx: &Transaction<'_>, m: &ValidatedMutation, input: &Res
     refuse_removed(tx,ns,&input.revision.chat_id,&input.revision.id)?;
     let previous=lookup_acceptance_tx(tx,EvidenceReadView{namespace:ns},&input.key)?;
     match previous {
-        Lookup::Accepted(result)=>return Ok(Lookup::Accepted(result)),
+        accepted @ Lookup::Accepted{..}=>return Ok(accepted),
         Lookup::Reserved(reservation)=>{compare_snapshot(tx,ns,input,&bytes)?;return Ok(Lookup::Reserved(reservation))},
         Lookup::Absent=>{}
     }
@@ -258,7 +265,7 @@ fn insert_intent(tx: &Transaction<'_>, ns: &ArtifactNamespace, blob: &str, revis
 fn commit_artifact_acceptance_tx(tx: &Transaction<'_>, m: &ValidatedMutation, input: &ReservedInput, proof: &ObservedPublication) -> Result<ArtifactResult> {
     let bytes=validate_input(m,input)?; let ns=&m.namespace; let r=&input.revision;
     refuse_removed(tx,ns,&r.chat_id,&r.id)?;
-    if let Lookup::Accepted(result)=lookup_acceptance_tx(tx,EvidenceReadView{namespace:ns},&input.key)? {return Ok(result)}
+    if let Lookup::Accepted{result,..}=lookup_acceptance_tx(tx,EvidenceReadView{namespace:ns},&input.key)? {return Ok(result)}
     compare_snapshot(tx,ns,input,&bytes)?;
     let admitted:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM artifact_acceptances WHERE account_id=?1 AND namespace_key=?2 AND requester=?3 AND request_id=?4 AND snapshot_id=?5 AND revision_id=?6 AND attempt_id=?7 AND incarnation=?8 AND owner_epoch=?9 AND workspace_state='attempt_admitted')",params![ns.account_id,ns.namespace_key,m.requester,input.key.request_id,proof.snapshot_id,proof.revision_id,proof.attempt_id,m.incarnation,m.owner_epoch],|r|r.get(0))?;
     ensure(proof.snapshot_id==input.snapshot_id && proof.revision_id==r.revision_id && proof.content_hash==r.content_hash)?;
@@ -381,7 +388,7 @@ mod tests {
         let mut changed=input.key.clone();changed.fingerprint[0]^=1;let tx=db.transaction().unwrap();assert!(matches!(lookup_acceptance_tx(&tx,EvidenceReadView{namespace:&m.namespace},&changed),Err(StoreError::RequestBodyChanged)));tx.rollback().unwrap();
         let original_revision=input.revision.clone();let original_metadata=input.metadata_plaintext.clone();let original_file=input.file_ciphertext.clone();let original_cipher=input.metadata_ciphertext.clone();
         input.revision.revision_id="00000000-0000-4000-8000-000000000002".into();input.revision.file_id=format!("{}.file",input.revision.revision_id);input.revision.created_at=9.0;input.snapshot_id="regenerated".into();input.metadata_plaintext=serde_json::to_vec(&input.revision).unwrap();input.file_ciphertext=vec![7;40];input.metadata_ciphertext=vec![8;input.metadata_plaintext.len()+40];
-        let tx=db.transaction().unwrap();let Lookup::Accepted(retry)=reserve_workspace_tx(&tx,&m,&input).unwrap() else{panic!("accepted retry")};assert_eq!(retry,result);assert_eq!(count(&tx,"artifact_snapshots"),1);assert_eq!(count(&tx,"artifact_revisions"),1);assert_eq!(count(&tx,"artifact_intents"),2);let stored:String=tx.query_row("SELECT revision_json FROM artifact_revisions",[],|r|r.get(0)).unwrap();let persisted:ArtifactRevision=serde_json::from_str(&stored).unwrap();assert_eq!(persisted.created_at,1.0);tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();let Lookup::Accepted{result:retry,..}=reserve_workspace_tx(&tx,&m,&input).unwrap() else{panic!("accepted retry")};assert_eq!(retry,result);assert_eq!(count(&tx,"artifact_snapshots"),1);assert_eq!(count(&tx,"artifact_revisions"),1);assert_eq!(count(&tx,"artifact_intents"),2);let stored:String=tx.query_row("SELECT revision_json FROM artifact_revisions",[],|r|r.get(0)).unwrap();let persisted:ArtifactRevision=serde_json::from_str(&stored).unwrap();assert_eq!(persisted.created_at,1.0);tx.rollback().unwrap();
         input.revision=original_revision;input.metadata_plaintext=original_metadata;input.file_ciphertext=original_file;input.metadata_ciphertext=original_cipher;input.snapshot_id="snapshot".into();
         let mut child=input.revision.clone();child.revision_id="00000000-0000-4000-8000-000000000003".into();child.file_id=format!("{}.file",child.revision_id);child.parent_revision=Some(input.revision.revision_id.clone());child.parent_content_hash=Some(input.revision.content_hash.clone());
         let tx=db.transaction().unwrap();check_head(&tx,&m.namespace,&child).unwrap();tx.execute("DELETE FROM artifact_revisions",[]).unwrap();assert!(matches!(check_head(&tx,&m.namespace,&child),Err(StoreError::Incomplete)));tx.rollback().unwrap();
@@ -426,6 +433,7 @@ mod tests {
         let tx=db.transaction().unwrap();tx.execute_batch("ALTER TABLE artifact_snapshots RENAME TO corrupt_snapshot; CREATE TABLE artifact_snapshots(account_id TEXT)").unwrap();assert!(matches!(lookup_proposal_artifact_tx(&tx,&proposal),Err(ProposalArtifactError::Storage)));assert!(matches!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Existing),Err(ProposalArtifactError::Storage)));tx.rollback().unwrap();
         let tx=db.transaction().unwrap();let ProposalArtifactReplay::Reserved{workspace_state,attempt_id,..}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("retained")};assert_eq!(workspace_state,WorkspaceState::AttemptAdmitted);assert_eq!(attempt_id.as_deref(),Some("attempt"));tx.rollback().unwrap();
         let authority=proposal.0.input.authority.clone();let tx=db.transaction().unwrap();let restored=load_retained_proposal_artifact_tx(&tx,&authority,"chat","bot","card","request").unwrap().unwrap();assert!(matches_proposal_host_input(&restored,&authority,"chat","bot","card","request",Some("note.md"),b"").unwrap());assert!(!matches_proposal_host_input(&restored,&authority,"chat","bot","card","request",Some("other.md"),b"").unwrap());let ProposalArtifactReplay::Reserved{reservation,..}=lookup_proposal_artifact_tx(&tx,&restored).unwrap() else{panic!("retained admitted")};let hash:[u8;32]=Sha256::digest(b"").into();assert!(observed_proposal_publication(&restored,&reservation,"wrong",0,hash).is_err());let proof=observed_proposal_publication(&restored,&reservation,"attempt",0,hash).unwrap();finalize_proposal_artifact_tx(&tx,&restored,&proof).unwrap();tx.rollback().unwrap();
-        let tx=db.transaction().unwrap();assert_eq!(count(&tx,"artifact_revisions"),0);let restored=load_retained_proposal_artifact_tx(&tx,&authority,"chat","bot","card","request").unwrap().unwrap();let ProposalArtifactReplay::Reserved{reservation,..}=lookup_proposal_artifact_tx(&tx,&restored).unwrap() else{panic!("completion rollback")};let proof=observed_proposal_publication(&restored,&reservation,"attempt",0,Sha256::digest(b"").into()).unwrap();finalize_proposal_artifact_tx(&tx,&restored,&proof).unwrap();tx.commit().unwrap();let tx=db.transaction().unwrap();assert!(matches!(lookup_proposal_artifact_tx(&tx,&proposal).unwrap(),ProposalArtifactReplay::Accepted(_)));assert_eq!(count(&tx,"artifact_revisions"),1);tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();assert_eq!(count(&tx,"artifact_revisions"),0);let restored=load_retained_proposal_artifact_tx(&tx,&authority,"chat","bot","card","request").unwrap().unwrap();let ProposalArtifactReplay::Reserved{reservation,..}=lookup_proposal_artifact_tx(&tx,&restored).unwrap() else{panic!("completion rollback")};let proof=observed_proposal_publication(&restored,&reservation,"attempt",0,Sha256::digest(b"").into()).unwrap();finalize_proposal_artifact_tx(&tx,&restored,&proof).unwrap();tx.commit().unwrap();let tx=db.transaction().unwrap();let ProposalArtifactReplay::Accepted{result,workspace_state,attempt_id}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("accepted projection")};assert_eq!(result.revision_id,proposal.0.input.revision.revision_id);assert_eq!(workspace_state,WorkspaceState::Published);assert_eq!(attempt_id.as_deref(),Some("attempt"));assert_eq!(count(&tx,"artifact_revisions"),1);tx.rollback().unwrap();
+        for invalid in [None,Some(""),Some("bad\nidentity")] {let tx=db.transaction().unwrap();tx.execute("UPDATE artifact_acceptances SET attempt_id=?1",[invalid]).unwrap();assert!(lookup_proposal_artifact_tx(&tx,&proposal).is_err());assert!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Existing).is_err());tx.rollback().unwrap();}
     }
 }

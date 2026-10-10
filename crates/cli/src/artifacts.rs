@@ -59,7 +59,7 @@ pub(crate) enum ProposalAttemptHistory { Fresh, Existing }
 
 pub(crate) enum ProposalArtifactReplay {
     Absent,
-    Accepted(ArtifactResult),
+    Accepted { result: ArtifactResult, workspace_state: WorkspaceState, attempt_id: Option<String> },
     Reserved { reservation: ProposalArtifactReservation, workspace_state: WorkspaceState, attempt_id: Option<String> },
 }
 
@@ -84,6 +84,7 @@ pub(crate) fn admit_proposal_artifact_attempt_tx(tx: &rusqlite::Transaction<'_>,
 pub(crate) fn matches_proposal_host_input(proposal: &ProposalArtifact, authority: &ArtifactAuthority, chat_id: &str, bot_id: &str, card_id: &str, request_id: &str, path: Option<&str>, plaintext: &[u8]) -> Result<bool, ProposalArtifactError> {
     store::proposal_matches_host(&proposal.0,authority,chat_id,bot_id,card_id,request_id,path,plaintext)
 }
+
 
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};

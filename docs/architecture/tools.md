@@ -19,6 +19,8 @@ The shared core's `crates/cli/src/artifacts.rs` provides a closed artifact parse
 
 The private `artifacts/store.rs` unit implements eight account-and-binary-namespace-scoped tables through borrowed SQLite transactions. It reserves exact revision metadata, plaintext and ciphertext payloads, rejects substituted retry bytes, records acceptance and publication intents together, and gates metadata eligibility on a persisted byte acknowledgment; tombstones refuse later acceptance. The caller owns transaction commit/rollback and prevalidated authority. Production schema installation, workspace effects, sync and API hooks remain separate and are not activated by this unit.
 
+Private reservation lookup also returns the persisted workspace state and attempt ID, so a caller can distinguish a fresh reservation from an admitted, uncertain or unindexed attempt without inferring state from a card. This projection does not grant dispatch authority or permit replay of an admitted workspace effect.
+
 Plugin tools (`<plugin>__<tool>`, such as `github__create_issue`) come from the MCP servers of the plugins installed on the bot's Runner. A bot calls them from codemode scripts; the model never gets them as tools of its own, so the tool list is the same for the whole turn, and from one turn to the next.
 
 Coding tools (`beans_agent::tools`, ports of pi’s built-ins, same schemas and truncation rules: 2000 lines / 50KB, whichever first):

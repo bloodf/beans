@@ -112,7 +112,7 @@ pub(super) fn proposal_matches_host(participant: &ProposalParticipant, authority
     validate_input(&participant.mutation,&participant.input).map_err(proposal_error)?;
     if !structural(chat) || !structural(bot) || !structural(card) || !structural(request) || !optional(path,relative_path) {return Err(ProposalArtifactError::Invalid)}
     let input=&participant.input;
-    Ok(&input.authority==authority && input.key.request_id==request && input.revision.chat_id==chat && input.revision.bot_id.as_deref()==Some(bot) && input.revision.card_id.as_deref()==Some(card) && input.revision.path.as_deref()==path && input.plaintext==plaintext)
+    Ok(&input.authority==authority && input.key.request_id==request && input.revision.chat_id==chat && input.revision.bot_id.as_deref()==Some(bot) && input.revision.card_id.as_deref()==Some(card) && input.revision.path.as_deref()==path && path==Some(input.revision.name.as_str()) && input.revision.mime=="text/plain" && input.revision.parent_revision.is_none() && input.revision.parent_content_hash.is_none() && input.plaintext==plaintext)
 }
 
 #[derive(Debug)]
@@ -399,7 +399,7 @@ mod tests {
     fn proposal_facade_preserves_caller_atomicity_and_storage_uncertainty() {
         let mut db=Connection::open_in_memory().unwrap();
         db.pragma_update(None,"synchronous",2).unwrap();db.pragma_update(None,"fullfsync",1).unwrap();
-        let (_,input,_)=input();
+        let (_,mut input,_)=input();input.revision.name="note.md".into();input.metadata_plaintext=serde_json::to_vec(&input.revision).unwrap();input.metadata_ciphertext=vec![2;input.metadata_plaintext.len()+40];
         let value=ProposalArtifactInput{authority:input.authority,chat_id:"chat".into(),bot_id:"bot".into(),card_id:"card".into(),request_id:input.key.request_id,revision:input.revision,snapshot_id:input.snapshot_id,plaintext:input.plaintext,metadata_plaintext:input.metadata_plaintext,file_ciphertext:input.file_ciphertext,metadata_ciphertext:input.metadata_ciphertext};
         let proposal=freeze_proposal_artifact(value).unwrap();
         let tx=db.transaction().unwrap();

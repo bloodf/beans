@@ -5,13 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildReleaseManifest } from "./release-github.ts";
 import { readVersion, ROOT } from "./app.ts";
+import { archiveFixture } from "./release-archive-fixture.ts";
 const paths: string[] = [];
 afterEach(async () => { await Promise.all(paths.map((path) => rm(path, { recursive: true, force: true }))); });
-test("all-platform CLI preflight rejects missing notes before loading private credentials", async () => {
+test("all-platform CLI preflight rejects missing public policy before loading private credentials", async () => {
   const path = await mkdtemp(join(tmpdir(), "beans-release-preflight-")); paths.push(path);
   await mkdir(join(path, "scripts"));
   await mkdir(join(path, "updates"));
-  for (const name of ["app.ts", "changelog.ts", "release-signing.ts", "release-github.ts"]) {
+  for (const name of ["app.ts", "changelog.ts", "release-signing.ts", "release-github.ts", "release-eas.ts", "release-build-inputs.ts"]) {
     await copyFile(join(ROOT, "scripts", name), join(path, "scripts", name));
   }
   await copyFile(join(ROOT, "updates", "public-key.txt"), join(path, "updates", "public-key.txt"));
@@ -21,7 +22,7 @@ test("all-platform CLI preflight rejects missing notes before loading private cr
     cwd: path, env: { ...process.env, BEANS_UPDATE_PRIVATE_KEY: "" },
   });
   expect(result.exitCode).not.toBe(0);
-  expect(result.stderr.toString()).toContain("CHANGELOG.md requires notes for 1.0.13");
+  expect(result.stderr.toString()).toContain("public trust policy unavailable");
 });
 async function server() {
   const path = await mkdtemp(join(tmpdir(), "beans-release-fixture-")); paths.push(path);
@@ -30,7 +31,7 @@ async function server() {
 }
 const tag = `beans-v${readVersion()}`;
 const revision = "a".repeat(40);
-test("complete all inventory requires hash-bound EAS store provenance", async () => {
+test("matching provenance cannot bypass native inspection; stale hashes still reject", async () => {
   const path = await server();
   const v = readVersion();
   const names = [`Beans-${v}.zip`, `Beans-${v}.dmg`, "appcast.xml", `Beans-${v}.apk`, `Beans-${v}.aab`, `Beans-${v}-store.ipa`, `Beans Setup ${v}.exe`, `beans_${v}_amd64.deb`, `beans_${v}_arm64.deb`, "install-linux-amd64.sh", "install-linux-arm64.sh", ...["windows-amd64", "linux-amd64", "linux-arm64"].flatMap((p) => [`update-${p}.json`, `beans-${v}-${p}.tar.gz`])];
@@ -43,13 +44,12 @@ test("complete all inventory requires hash-bound EAS store provenance", async ()
   }
   for (const [index, profile] of ["github", "production", "testflight"].entries()) {
     const artifact = `Beans-${v}${profile === "github" ? ".apk" : profile === "production" ? ".aab" : "-store.ipa"}`;
-    await writeFile(join(path, `eas-${profile}.json`), JSON.stringify({ schema: 1, version: v, revision, profile, artifact, size: 7, sha256: sha, project: "11111111-1111-4111-8111-111111111111", buildId: `${index + 2}2222222-2222-4222-8222-222222222222`, buildNumber: String(40 + index), platform: profile === "testflight" ? "IOS" : "ANDROID" }));
+    const bytes = archiveFixture();
+    await writeFile(join(path, artifact), bytes);
+    await writeFile(join(path, `eas-${profile}.json`), JSON.stringify({ schema: 1, version: v, revision, profile, artifact, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), project: "11111111-1111-4111-8111-111111111111", buildId: `${index + 2}2222222-2222-4222-8222-222222222222`, buildNumber: String(40 + index), platform: profile === "testflight" ? "IOS" : "ANDROID" }));
   }
-  const result = await buildReleaseManifest(tag, revision, path, "all");
-  expect(result.artifacts.find((a) => a.name.endsWith("-store.ipa"))?.component).toBe("ios-store");
-  expect(result.artifacts.some((a) => a.component === "ios")).toBe(false);
-  expect(result).toEqual(await buildReleaseManifest(tag, revision, path, "all"));
-  await writeFile(join(path, `Beans-${v}.aab`), "changed");
+  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("APK binary manifest missing");
+  await writeFile(join(path, `Beans-${v}.apk`), "changed");
   await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("provenance");
 });
 test("server inventory is deterministic and cannot finalize all", async () => {

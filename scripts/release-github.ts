@@ -5,6 +5,8 @@ import { basename, join, resolve } from "node:path";
 import { readVersion, ROOT } from "./app.ts";
 import { extractReleaseNotes } from "./changelog.ts";
 import { releasePrivateKey, signReleaseBytes } from "./release-signing.ts";
+import { verifyEasBinary } from "./release-eas.ts";
+import { preflightReleaseTrust, publicTrustArguments, type PublicTrustPolicies } from "./release-build-inputs.ts";
 
 export interface ReleaseArtifact {
   name: string;
@@ -102,7 +104,7 @@ function scopedArtifact(name: string, version: string, core: string, scope: Rele
   return artifact;
 }
 
-export async function buildReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server"): Promise<ReleaseManifest> {
+export async function buildReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server", policies: PublicTrustPolicies = {}): Promise<ReleaseManifest> {
   scope = releaseScope(scope);
   const version = releaseVersion(tag);
   if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error("Release revision must be the exact40-character tag commit");
@@ -133,7 +135,7 @@ export async function buildReleaseManifest(tag: string, revision: string, direct
   }
   if (scope === "all") {
     const identities = new Set<string>();
-    for (const profile of ["github", "production", "testflight"]) {
+    for (const profile of ["github", "production", "testflight"] as const) {
       const proof = await Bun.file(join(directory, `eas-${profile}.json`)).json();
       const name = `Beans-${version}${profile === "testflight" ? "-store.ipa" : profile === "production" ? ".aab" : ".apk"}`;
       const artifact = artifacts.find((entry) => entry.name === name)!;
@@ -145,12 +147,17 @@ export async function buildReleaseManifest(tag: string, revision: string, direct
         throw new Error(`Invalid EAS artifact provenance: ${profile}`);
       }
       identities.add(proof.buildId);
+      const bytes = new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer());
+      if (createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) throw new Error(`EAS binary changed during finalization: ${profile}`);
+      await verifyEasBinary(bytes, profile, version, proof.buildNumber, policies[profile]);
     }
   }
   return { schema: 1, version, revision, protocol: await releaseProtocol(), artifacts };
 }
-export async function writeReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server"): Promise<ReleaseManifest> {
-  const manifest = await buildReleaseManifest(tag, revision, directory, scope);
+export async function writeReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server", policies: PublicTrustPolicies = {}): Promise<ReleaseManifest> {
+  scope = releaseScope(scope);
+  preflightReleaseTrust(scope, policies);
+  const manifest = await buildReleaseManifest(tag, revision, directory, scope, policies);
   const bytes = Buffer.from(`${JSON.stringify(manifest)}\n`);
   if (bytes.length > 64 * 1024) throw new Error("Release manifest exceeds64KiB");
   const signature = await signReleaseBytes(bytes);
@@ -165,8 +172,9 @@ async function gh(args: string[]): Promise<string> {
   if (code !== 0) throw new Error(`GitHub release operation failed (${code}): ${stderr}`);
   return stdout;
 }
-async function publish(tag: string, revision: string, directory: string, scope: ReleaseScope): Promise<void> {
-  const manifest = await writeReleaseManifest(tag, revision, directory, scope);
+async function publish(tag: string, revision: string, directory: string, scope: ReleaseScope, policies: PublicTrustPolicies): Promise<void> {
+  preflightReleaseTrust(scope, policies);
+  const manifest = await writeReleaseManifest(tag, revision, directory, scope, policies);
   const release = JSON.parse(await gh(["api", `repos/${repository}/releases/tags/${tag}`]));
   if (release.draft || release.prerelease || release.tag_name !== tag) throw new Error("Only this exact published stable release can be finalized");
   const tagCommit = JSON.parse(await gh(["api", `repos/${repository}/commits/${tag}`])).sha;
@@ -253,11 +261,13 @@ export async function stageDesktopAssets(inventory: string, destination: string)
 
 
 if (import.meta.main) {
-  const [command, first, second, third, fourth, ...extra] = process.argv.slice(2);
+  const parsed = await publicTrustArguments(process.argv.slice(2));
+  const [command, first, second, third, fourth, ...extra] = parsed.args;
   if (extra.length) throw new Error("Unexpected release arguments");
   if (command === "check" && first && !third && !fourth) {
     const scope = releaseScope(second);
     const version = releaseVersion(first);
+    preflightReleaseTrust(scope, parsed.policies);
     if (scope === "all" && !extractReleaseNotes(await Bun.file(join(ROOT, "CHANGELOG.md")).text(), version)) {
       throw new Error(`CHANGELOG.md requires notes for ${version} before all-platform builds`);
     }
@@ -268,8 +278,8 @@ if (import.meta.main) {
   } else if (command === "desktop" && first && second && !third && !fourth) {
     await stageDesktopAssets(resolve(first), resolve(second));
   } else if (command === "manifest" && first && second && third) {
-    await writeReleaseManifest(first, second, resolve(third), releaseScope(fourth));
+    await writeReleaseManifest(first, second, resolve(third), releaseScope(fourth), parsed.policies);
   } else if (command === "publish" && first && second && third) {
-    await publish(first, second, resolve(third), releaseScope(fourth));
-  } else throw new Error("usage: release-github.ts check <tag> [server|all] | collect <source> <dir> [server|all] | desktop <inventory> <dir> | manifest|publish <tag> <revision> <dir> [server|all]");
+    await publish(first, second, resolve(third), releaseScope(fourth), parsed.policies);
+  } else throw new Error("usage: release-github.ts check <tag> [server|all] | collect <source> <dir> [server|all] | desktop <inventory> <dir> | manifest|publish <tag> <revision> <dir> [server|all]; check/manifest/publish all require --public-trust-policy <public-json-path>");
 }

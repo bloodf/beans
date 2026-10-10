@@ -368,9 +368,9 @@ impl App {
     /// recheck until the create-only write has returned, so a revocation of the answering
     /// Device is ordered against the effect: it either lands before the recheck (which then
     /// refuses, with no syscall) or it blocks until the write is done. The admission itself is
-    /// one borrowed safety transaction: the task invocation admission and the workspace
-    /// attempt belonging to it commit or roll back together, and nothing dispatches on a
-    /// false result or an unacknowledged commit.
+    /// one borrowed safety transaction, held open for exactly the workspace attempt that belongs
+    /// to this invocation; that attempt does not exist yet, so today the transaction admits the
+    /// task invocation alone. Nothing dispatches on a false result or an unacknowledged commit.
     #[cfg(feature = "runner")]
     pub fn save_admitted_proposal(&self, lease: &crate::local_store::TaskLease, invocation: &crate::plugins::mcp::ProposalInvocation, approval: &crate::plugins::mcp::HostApproval, dispatch: impl FnOnce() -> Result<(), String>) -> crate::local_store::ProposalSaveOutcome {
         let local = self.this_device_id();
@@ -385,8 +385,11 @@ impl App {
             return crate::local_store::ProposalSaveOutcome::NotDispatched;
         }
         let admitted = self.store.safety_tx(|tx| {
-            // The workspace attempt that belongs to this invocation joins this same
-            // transaction; a sibling failure rolls back the admission and its started receipt.
+            // NOT YET ATOMIC WITH A WORKSPACE ATTEMPT. The borrowed transaction is the seam
+            // the artifact owner must join this admission to, so that a sibling failure rolls
+            // back the admission and its started receipt together. No artifact facade is
+            // exported from `artifacts::store` and no production path installs its tables, so
+            // that participation does not exist yet and this branch does not stand in for it.
             crate::local_store::admit_invocation_tx(tx, lease, &approval.binding)
         });
         drop(state);

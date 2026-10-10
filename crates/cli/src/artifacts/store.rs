@@ -34,7 +34,7 @@ impl ValidatedMutation {
 struct AcceptanceKey { artifact_id: String, requester: String, request_id: String, origin_key: String, fingerprint: [u8;32] }
 struct ReservedInput { key: AcceptanceKey, authority: ArtifactAuthority, origin: ArtifactOrigin, revision: ArtifactRevision, snapshot_id: String, plaintext: Vec<u8>, metadata_plaintext: Vec<u8>, file_ciphertext: Vec<u8>, metadata_ciphertext: Vec<u8> }
 #[derive(Debug)]
-struct Reservation { key: AcceptanceKey, revision_id: String, snapshot_id: String, incarnation: u64, owner_epoch: String }
+struct Reservation { key: AcceptanceKey, revision_id: String, snapshot_id: String, incarnation: u64, owner_epoch: String, workspace_state: WorkspaceState, attempt_id: Option<String> }
 #[derive(Debug)]
 enum Lookup { Absent, Reserved(Reservation), Accepted(ArtifactResult) }
 struct ObservedPublication { attempt_id: String, snapshot_id: String, revision_id: String, content_hash: String }
@@ -64,12 +64,13 @@ fn refuse_removed(tx: &Transaction<'_>, ns: &ArtifactNamespace, chat: &str, id: 
 }
 fn lookup_acceptance_tx(tx: &Transaction<'_>, view: EvidenceReadView<'_>, key: &AcceptanceKey) -> Result<Lookup> {
     let ns=view.namespace;
-    let row=tx.query_row("SELECT a.requester,a.request_id,a.artifact_id,a.origin_key,a.fingerprint,a.revision_id,a.snapshot_id,a.incarnation,a.owner_epoch,a.accepted_result_json,s.revision_json FROM artifact_acceptances a JOIN artifact_snapshots s ON s.account_id=a.account_id AND s.namespace_key=a.namespace_key AND s.snapshot_id=a.snapshot_id AND s.requester=a.requester AND s.request_id=a.request_id AND s.revision_id=a.revision_id WHERE a.account_id=?1 AND a.namespace_key=?2 AND ((a.requester=?3 AND a.request_id=?4) OR a.origin_key=?5)",params![ns.account_id,ns.namespace_key,key.requester,key.request_id,key.origin_key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?,r.get::<_,u64>(7)?,r.get::<_,String>(8)?,r.get::<_,Option<String>>(9)?,r.get::<_,Vec<u8>>(10)?))).optional()?;
-    let Some((requester,request,id,origin,fp,revision,snapshot,incarnation,owner,result,bytes))=row else { return Ok(Lookup::Absent) };
+    let row=tx.query_row("SELECT a.requester,a.request_id,a.artifact_id,a.origin_key,a.fingerprint,a.revision_id,a.snapshot_id,a.incarnation,a.owner_epoch,a.accepted_result_json,s.revision_json,a.workspace_state,a.attempt_id FROM artifact_acceptances a JOIN artifact_snapshots s ON s.account_id=a.account_id AND s.namespace_key=a.namespace_key AND s.snapshot_id=a.snapshot_id AND s.requester=a.requester AND s.request_id=a.request_id AND s.revision_id=a.revision_id WHERE a.account_id=?1 AND a.namespace_key=?2 AND ((a.requester=?3 AND a.request_id=?4) OR a.origin_key=?5)",params![ns.account_id,ns.namespace_key,key.requester,key.request_id,key.origin_key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?,r.get::<_,u64>(7)?,r.get::<_,String>(8)?,r.get::<_,Option<String>>(9)?,r.get::<_,Vec<u8>>(10)?,r.get::<_,String>(11)?,r.get::<_,Option<String>>(12)?))).optional()?;
+    let Some((requester,request,id,origin,fp,revision,snapshot,incarnation,owner,result,bytes,state,attempt_id))=row else { return Ok(Lookup::Absent) };
     let record=match ArtifactEnvelope::parse(&bytes).map_err(|_|StoreError::Invalid)? { ArtifactEnvelope::Revision(r)=>r,_=>return Err(StoreError::Invalid) };
     refuse_removed(tx,ns,&record.chat_id,&id)?;
     if requester!=key.requester || request!=key.request_id || id!=key.artifact_id || origin!=key.origin_key || fp.as_slice()!=key.fingerprint { return Err(StoreError::RequestBodyChanged); }
-    match result { Some(value)=>Ok(Lookup::Accepted(serde_json::from_str(&value).map_err(|_|StoreError::Invalid)?)),None=>Ok(Lookup::Reserved(Reservation {key:key.clone(),revision_id:revision,snapshot_id:snapshot,incarnation,owner_epoch:owner})) }
+    let workspace_state=match state.as_str() {"reserved"=>WorkspaceState::Reserved,"attempt_admitted"=>WorkspaceState::AttemptAdmitted,"published"=>WorkspaceState::Published,"unindexed"=>WorkspaceState::Unindexed,"uncertain"=>WorkspaceState::Uncertain,_=>return Err(StoreError::Invalid)};
+    match result { Some(value)=>Ok(Lookup::Accepted(serde_json::from_str(&value).map_err(|_|StoreError::Invalid)?)),None=>Ok(Lookup::Reserved(Reservation {key:key.clone(),revision_id:revision,snapshot_id:snapshot,incarnation,owner_epoch:owner,workspace_state,attempt_id})) }
 }
 fn validate_input(m: &ValidatedMutation, input: &ReservedInput) -> Result<Vec<u8>> {
     m.validate()?;
@@ -235,7 +236,11 @@ mod tests {
         let tx=db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();install_schema_tx(&tx).unwrap();tx.commit().unwrap();
         let tx=db.transaction().unwrap();reserve_workspace_tx(&tx,&m,&input).unwrap();tx.rollback().unwrap();
         let tx=db.transaction().unwrap();assert_eq!(count(&tx,"artifact_snapshots"),0);assert!(matches!(reserve_workspace_tx(&tx,&m,&input).unwrap(),Lookup::Reserved(_)));tx.commit().unwrap();
-        let tx=db.transaction().unwrap();let Lookup::Reserved(reservation)=lookup_acceptance_tx(&tx,EvidenceReadView{namespace:&m.namespace},&input.key).unwrap() else{panic!("reservation")};admit_workspace_attempt_tx(&tx,&m,&reservation,"attempt").unwrap();tx.commit().unwrap();
+        let tx=db.transaction().unwrap();let Lookup::Reserved(reservation)=lookup_acceptance_tx(&tx,EvidenceReadView{namespace:&m.namespace},&input.key).unwrap() else{panic!("reservation")};assert_eq!(reservation.workspace_state,WorkspaceState::Reserved);assert_eq!(reservation.attempt_id,None);let admitted=admit_workspace_attempt_tx(&tx,&m,&reservation,"attempt").unwrap();assert_eq!(admitted.workspace_state,WorkspaceState::AttemptAdmitted);assert_eq!(admitted.attempt_id.as_deref(),Some("attempt"));tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();let Lookup::Reserved(reservation)=lookup_acceptance_tx(&tx,EvidenceReadView{namespace:&m.namespace},&input.key).unwrap() else{panic!("reservation")};assert_eq!(reservation.workspace_state,WorkspaceState::Reserved);assert_eq!(reservation.attempt_id,None);admit_workspace_attempt_tx(&tx,&m,&reservation,"attempt").unwrap();tx.commit().unwrap();
+        for (state,expected) in [("attempt_admitted",WorkspaceState::AttemptAdmitted),("uncertain",WorkspaceState::Uncertain),("unindexed",WorkspaceState::Unindexed)] {
+            let tx=db.transaction().unwrap();tx.execute("UPDATE artifact_acceptances SET workspace_state=?1 WHERE account_id=?2 AND namespace_key=?3 AND request_id=?4",params![state,m.namespace.account_id,m.namespace.namespace_key,input.key.request_id]).unwrap();let Lookup::Reserved(projected)=lookup_acceptance_tx(&tx,EvidenceReadView{namespace:&m.namespace},&input.key).unwrap() else{panic!("persisted state")};assert_eq!(projected.workspace_state,expected);assert_eq!(projected.attempt_id.as_deref(),Some("attempt"));assert!(matches!(lookup_acceptance_tx(&tx,EvidenceReadView{namespace:&imported},&input.key).unwrap(),Lookup::Absent));tx.rollback().unwrap();
+        }
         let tx=db.transaction().unwrap();assert!(matches!(lookup_acceptance_tx(&tx,EvidenceReadView{namespace:&imported},&input.key).unwrap(),Lookup::Absent));tx.rollback().unwrap();
         let imported_mutation=ValidatedMutation{namespace:imported,actual_account_epoch:"epoch".into(),owner_epoch:"owner".into(),incarnation:1,requester:"requester".into(),runner_id:"runner".into()};
         let tx=db.transaction().unwrap();assert!(matches!(reserve_workspace_tx(&tx,&imported_mutation,&input),Err(StoreError::ReadNamespaceCannotMutate)));tx.rollback().unwrap();

@@ -173,6 +173,77 @@ const MEMORY_RPC_METHODS: Readonly<Record<string, true>> = {
   "memory.lance.import.apply": true,
 };
 
+type SkillDiscoveryReply = { version: 1; status: "scanned" | "unsupported"; skills: { path: string; name: string | null; description: string | null; license: string | null }[]; diagnostics: { path: string | null; code: string }[] };
+
+function decodeSkillDiscovery(value: unknown): SkillDiscoveryReply {
+  const invalid = (): never => { throw new RequestError(L("Skill discovery is unavailable.")); };
+  const object = (value: unknown, keys: string[]): Record<string, unknown> => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
+    const row = value as Record<string, unknown>;
+    if (Object.keys(row).length !== keys.length || keys.some((key) => !Object.hasOwn(row, key))) return invalid();
+    return row;
+  };
+  const text = (value: unknown, max: number, nullable: boolean): string | null => {
+    if (nullable && value === null) return null;
+    if (typeof value !== "string" || new TextEncoder().encode(value).length > max || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) return invalid();
+    return value;
+  };
+  const path = (value: unknown, nullable: boolean): string | null => {
+    const label = text(value, 4096, nullable);
+    if (label !== null && (!label || /[\\\\:]/u.test(label) || label.split("/").some((part) => !part || part === "." || part === ".."))) return invalid();
+    return label;
+  };
+  const reply = object(value, ["version", "status", "skills", "diagnostics"]);
+  if (reply.version !== 1 || (reply.status !== "scanned" && reply.status !== "unsupported") || !Array.isArray(reply.skills) || !Array.isArray(reply.diagnostics)) return invalid();
+  if (reply.skills.length > 256 || reply.diagnostics.length > 4096 || (reply.status === "unsupported" && reply.skills.length !== 0)) return invalid();
+  return { version: 1, status: reply.status, skills: reply.skills.map((value) => {
+    const row = object(value, ["path", "name", "description", "license"]);
+    return { path: path(row.path, false)!, name: text(row.name, 256, true), description: text(row.description, 2048, true), license: text(row.license, 256, true) };
+  }), diagnostics: reply.diagnostics.map((value) => {
+    const row = object(value, ["path", "code"]);
+    if (typeof row.code !== "string" || !["secure_discovery_unavailable", "unsupported_metadata", "discovery_limit", "missing_metadata", "path_not_inspected"].includes(row.code)) return invalid();
+    return { path: path(row.path, true), code: row.code };
+  }) };
+}
+
+export type SkillLibrarySummary = { name: string | null; description: string | null; license: string | null; findings: string[]; file_count: number; total_bytes: number };
+export type SkillLibraryPreview = { version: 1; runner_id: string; token: string; expires_in_seconds: number; source: string; destination: string; summary: SkillLibrarySummary };
+export type SkillLibraryImport = { version: 1; runner_id: string; managed_id: string; summary: SkillLibrarySummary; durability_warning: boolean };
+export type SkillLibraryRemoval = { version: 1; runner_id: string; managed_id: string; cleanup_warning: boolean; durability_warning: boolean };
+
+function decodeSkillLibrary(value: unknown, action: "preview" | "import" | "uninstall", runnerID: string): SkillLibraryPreview | SkillLibraryImport | SkillLibraryRemoval {
+  const invalid = (): never => { throw new RequestError(L("Skill library request failed. Preview again before importing.")); };
+  const object = (value: unknown, keys: string[]): Record<string, unknown> => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
+    const row = value as Record<string, unknown>;
+    if (Object.keys(row).length !== keys.length || keys.some((key) => !Object.hasOwn(row, key))) return invalid();
+    return row;
+  };
+  const text = (value: unknown, max: number): string => {
+    if (typeof value !== "string" || new TextEncoder().encode(value).length > max || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) return invalid();
+    return value;
+  };
+  const id = (value: unknown): string => { const s = text(value, 32); return /^[0-9a-f]{32}$/.test(s) ? s : invalid(); };
+  const summary = (value: unknown): SkillLibrarySummary => {
+    const s = object(value, ["name", "description", "license", "findings", "file_count", "total_bytes"]);
+    if (!Number.isInteger(s.file_count) || (s.file_count as number) < 1 || (s.file_count as number) > 256 || !Number.isInteger(s.total_bytes) || (s.total_bytes as number) < 0 || (s.total_bytes as number) > 16 * 1024 * 1024 || !Array.isArray(s.findings) || s.findings.length > 64) return invalid();
+    return { name: s.name === null ? null : text(s.name, 256), description: s.description === null ? null : text(s.description, 2048), license: s.license === null ? null : text(s.license, 256), findings: s.findings.map((s) => text(s, 512)), file_count: s.file_count as number, total_bytes: s.total_bytes as number };
+  };
+  const keys = action === "preview" ? ["version", "runner_id", "token", "expires_in_seconds", "source", "destination", "summary"] : action === "import" ? ["version", "runner_id", "managed_id", "summary", "durability_warning"] : ["version", "runner_id", "managed_id", "cleanup_warning", "durability_warning"];
+  const r = object(value, keys);
+  if (r.version !== 1 || r.runner_id !== runnerID) return invalid();
+  if (action === "preview") {
+    if (!Number.isInteger(r.expires_in_seconds) || (r.expires_in_seconds as number) < 1 || (r.expires_in_seconds as number) > 300) return invalid();
+    const source = text(r.source, 4096), destination = text(r.destination, 4096);
+    if (!source.startsWith("/") || !destination.startsWith("/")) return invalid();
+    return { version: 1, runner_id: runnerID, token: id(r.token), expires_in_seconds: r.expires_in_seconds as number, source, destination, summary: summary(r.summary) };
+  }
+  if (typeof r.durability_warning !== "boolean") return invalid();
+  if (action === "import") return { version: 1, runner_id: runnerID, managed_id: id(r.managed_id), summary: summary(r.summary), durability_warning: r.durability_warning };
+  if (typeof r.cleanup_warning !== "boolean") return invalid();
+  return { version: 1, runner_id: runnerID, managed_id: id(r.managed_id), cleanup_warning: r.cleanup_warning, durability_warning: r.durability_warning };
+}
+
 export class AppStore {
   /** The seeded demo (`BEANS_MOCK=1`), which runs without a CLI. */
   get isMock(): boolean {
@@ -333,6 +404,57 @@ export class AppStore {
     if (!Object.hasOwn(MEMORY_RPC_METHODS, method)) throw new RequestError(L("Unsupported memory request"));
     if (this.isMock) throw new RequestError(L("Memory services are unavailable in demo mode."));
     return this.request<unknown>(method, params);
+  }
+
+  /** Read-only discovery remains bound to this account and connection across completion. */
+  async discoverSkills(runnerID: string, root: string): Promise<SkillDiscoveryReply> {
+    const generation = this.bootstrapGeneration, identity = this.identityID;
+    const runner = this.runners.find((device) => device.id === runnerID);
+    if (this.isMock || !this.isConnected || !this.hasIdentity || !identity || !runner) throw new RequestError(L("Skill discovery is unavailable."));
+    const runnerOS = runner.os, runnerKey = runner.machineKey;
+    let changed = false;
+    const bindingMatches = () => this.runners.some((device) => device.id === runnerID && device.os === runnerOS && device.machineKey === runnerKey);
+    const unsubscribe = this.subscribe((event) => {
+      if (event.kind === "identityChanged" || event.kind === "connectionChanged" || ((event.kind === "rosterChanged" || event.kind === "snapshotReplaced") && !bindingMatches())) changed = true;
+    });
+    try {
+      const result = await this.request<unknown>("skills.discovery", { version: 1, runner_id: runnerID, root });
+      if (changed || generation !== this.bootstrapGeneration || identity !== this.identityID || !this.isConnected || !this.hasIdentity || !bindingMatches()) throw new RequestError(L("Skill discovery authority changed. Scan again."));
+      return decodeSkillDiscovery(result);
+    } finally { unsubscribe(); }
+  }
+
+  private async skillLibraryRequest(action: "preview" | "import" | "uninstall", runnerID: string, params: Record<string, unknown>) {
+    const generation = this.bootstrapGeneration, identity = this.identityID;
+    const runner = this.runners.find((device) => device.id === runnerID);
+    if (this.isMock || !this.isConnected || !this.hasIdentity || !identity || !runner) throw new RequestError(L("Skill library request failed. Preview again before importing."));
+    const os = runner.os, key = runner.machineKey;
+    let changed = false;
+    const matches = () => this.runners.some((d) => d.id === runnerID && d.os === os && d.machineKey === key);
+    const unsubscribe = this.subscribe((event) => {
+      if (event.kind === "identityChanged" || event.kind === "connectionChanged" || ((event.kind === "rosterChanged" || event.kind === "snapshotReplaced") && !matches())) changed = true;
+    });
+    try {
+      const result = await this.request<unknown>(`skills.library.${action}`, { version: 1, runner_id: runnerID, ...params });
+      if (changed || generation !== this.bootstrapGeneration || identity !== this.identityID || !this.isConnected || !this.hasIdentity || !matches()) throw new RequestError(L("Skill library authority changed. Preview again."));
+      return decodeSkillLibrary(result, action, runnerID);
+    } finally { unsubscribe(); }
+  }
+
+  async previewSkillLibrary(runnerID: string, root: string): Promise<SkillLibraryPreview> {
+    const reply = await this.skillLibraryRequest("preview", runnerID, { root }) as SkillLibraryPreview;
+    if (reply.source !== root) throw new RequestError(L("Skill library request failed. Preview again before importing."));
+    return reply;
+  }
+
+  async importSkillLibrary(runnerID: string, token: string): Promise<SkillLibraryImport> {
+    return await this.skillLibraryRequest("import", runnerID, { token, confirmed: true }) as SkillLibraryImport;
+  }
+
+  async uninstallSkillLibrary(runnerID: string, managedID: string): Promise<SkillLibraryRemoval> {
+    const reply = await this.skillLibraryRequest("uninstall", runnerID, { managed_id: managedID, confirmed: true }) as SkillLibraryRemoval;
+    if (reply.managed_id !== managedID) throw new RequestError(L("Skill library request failed. Preview again before importing."));
+    return reply;
   }
 
   private async bootstrap(generation: number): Promise<void> {
@@ -1549,13 +1671,18 @@ export class AppStore {
     this.emit({ kind: "chatsChanged" });
   }
 
-  /** Sends the message and returns the chat it landed in. `mentions` are the bots picked from the `@`
-   * menu, which the CLI hands the bot by id; `replyTo` is the message the user answers, which the bot
-   * reads quoted. */
-  send(text: string, attachments: OutgoingAttachment[], mentions: string[], chatID: string, replyTo?: string): string {
+  /** Returns admission acknowledgement, not proof that a Runner has finished the turn. */
+  async send(text: string, attachments: OutgoingAttachment[], mentions: string[], chatID: string, replyTo?: string): Promise<{ chatID: string; acknowledged: boolean }> {
     const trimmed = text.trim();
     const chat = this.chat(chatID);
-    if ((trimmed === "" && attachments.length === 0) || !chat) return chatID;
+    if ((trimmed === "" && attachments.length === 0) || !chat) return { chatID, acknowledged: false };
+    const identity = this.identityID;
+    const generation = this.bootstrapGeneration;
+    let invalidated = false;
+    const unsubscribe = this.subscribe((event) => {
+      if (event.kind === "identityChanged" || event.kind === "connectionChanged") invalidated = true;
+    });
+    const ownsCompletion = () => !invalidated && identity === this.identityID && generation === this.bootstrapGeneration;
     const original = replyTo ? chat.messages.find((message) => message.id === replyTo) : undefined;
     const quote = original ? quoteOf(original) : undefined;
 
@@ -1574,42 +1701,62 @@ export class AppStore {
 
     if (this.isMock) {
       this.replyEngine?.respond(trimmed, chat, message.id);
-      return chatID;
+      unsubscribe();
+      return { chatID, acknowledged: true };
     }
 
     // Expect a turn to start; the CLI's job events confirm or clear this. A DM names its bot right
     // away so the working row appears with the send.
+    let pendingJob: RunningJob | undefined;
     if (chat.botIDs.length > 0) {
       const pendingID = `pending:${chatID}`;
       this.clearAvatarErrors(chatID);
-      this.runningJobs.push({ id: pendingID, chatID, botID: isDM(chat) ? chat.botIDs[0]! : "",
-        previousMessages: new Set(this.chat(chatID)?.messages.map((message) => message.id)) });
+      pendingJob = { id: pendingID, chatID, botID: isDM(chat) ? chat.botIDs[0]! : "",
+        previousMessages: new Set(this.chat(chatID)?.messages.map((message) => message.id)) };
+      this.runningJobs.push(pendingJob);
       this.emit({ kind: "respondingChanged", chatID });
       this.emit({ kind: "chatsChanged" });
       setTimeout(() => {
-        if (!this.runningJobs.some((job) => job.id === pendingID)) return;
+        if (!ownsCompletion() || !this.runningJobs.includes(pendingJob!)) return;
         // Nothing started (no Runner answered); stop showing the bot at work.
-        this.runningJobs = this.runningJobs.filter((job) => job.id !== pendingID);
+        this.runningJobs = this.runningJobs.filter((job) => job !== pendingJob);
         this.emit({ kind: "respondingChanged", chatID });
         this.emit({ kind: "chatsChanged" });
       }, 4000);
     }
-    this.perform("chats.send", {
-      chat_id: chatID,
-      text: trimmed,
-      message_id: message.id,
-      mentions,
-      attachments: attachments.map((outgoing) => ({
-        id: outgoing.attachment.id,
-        path: outgoing.path,
-        name: outgoing.attachment.name,
-        mime: outgoing.attachment.mime,
-        width: outgoing.attachment.width ?? null,
-        height: outgoing.attachment.height ?? null,
-      })),
-      ...(quote ? { reply_to: quote.messageID } : {}),
-    });
-    return chatID;
+    try {
+      const result = await this.request<{ message?: { id?: string } } | null>("chats.send", {
+        chat_id: chatID,
+        text: trimmed,
+        message_id: message.id,
+        mentions,
+        attachments: attachments.map((outgoing) => ({
+          id: outgoing.attachment.id,
+          path: outgoing.path,
+          name: outgoing.attachment.name,
+          mime: outgoing.attachment.mime,
+          width: outgoing.attachment.width ?? null,
+          height: outgoing.attachment.height ?? null,
+        })),
+        ...(quote ? { reply_to: quote.messageID } : {}),
+      });
+      if (ownsCompletion() && result?.message?.id === message.id) return { chatID, acknowledged: true };
+    } catch {
+      // The transport does not distinguish API refusal from a lost response. Do not retry
+      // or claim no remote effect. Remove only our local accepted-looking placeholder.
+    } finally {
+      unsubscribe();
+    }
+    if (!ownsCompletion()) return { chatID, acknowledged: false };
+    const current = this.chat(chatID);
+    if (current?.messages.includes(message)) {
+      this.replaceChat({ ...current, messages: current.messages.filter((row) => row !== message) });
+      this.emit({ kind: "messageRemoved", chatID, messageID: message.id });
+    }
+    this.runningJobs = this.runningJobs.filter((job) => job !== pendingJob);
+    this.emit({ kind: "respondingChanged", chatID });
+    this.emit({ kind: "chatsChanged" });
+    return { chatID, acknowledged: false };
   }
 
   // MARK: - Attachments

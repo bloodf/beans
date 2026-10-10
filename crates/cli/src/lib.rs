@@ -14,6 +14,8 @@ pub mod diagnostics;
 pub mod embeddings;
 pub mod events;
 pub mod files;
+pub mod artifacts;
+pub mod history164_types;
 pub mod identity;
 pub mod keys;
 #[cfg(feature = "runner")]
@@ -42,6 +44,8 @@ pub mod served;
 pub mod service;
 #[cfg(feature = "runner")]
 pub mod shell;
+pub mod skill_discovery;
+pub mod skill_library;
 pub mod sync;
 pub mod local_store;
 #[cfg(feature = "runner")]

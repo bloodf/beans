@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use beans_agent::models::{ModelInfo, Rates, ThinkingMode, Wire};
+use beans_agent::models::{ModelInfo, ThinkingMode, Wire};
 use beans_agent::providers::anthropic::ANTHROPIC_BASE_URL;
 use beans_agent::providers::{
     AnthropicProvider, ChatGptProvider, ChatGptTokens, GrokProvider, GrokTokenSource, GrokTokens, OpenAiCompatProvider,
@@ -369,7 +369,7 @@ fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> Mode
         max_output: listed.and_then(|entry| entry.max_output).unwrap_or(0),
         reasoning: listed.and_then(|entry| entry.reasoning).unwrap_or(false),
         images: capabilities.images.unwrap_or(false),
-        rates: Rates { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 },
+        rates: None,
         tiers: Vec::new(),
         thinking,
         levels: listed.map(|entry| provider.levels(entry)).unwrap_or_default(),
@@ -560,7 +560,7 @@ mod tests {
         // A familiar model ID is not a capability declaration.
         let known = provider_for(app, "custom:vision-lab", Some("anthropic/claude-sonnet-5"), None).unwrap();
         let info = known.model_info().unwrap();
-        assert_eq!((info.context_window, info.images, info.rates.input), (0, false, 0.0));
+        assert_eq!((info.context_window, info.images, info.rates), (0, false, None));
 
         // Nothing advertised: no window, text only, no guessed thinking.
         let unknown = provider_for(app, "custom:vision-lab", Some("mystery"), Some(ThinkingLevel::Max)).unwrap();

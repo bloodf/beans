@@ -504,6 +504,7 @@ enum Wire {
         var outputTokens: Int
         var cacheReadTokens: Int
         var costUsd: Double
+        var costKnown: Bool?
         var turns: Int
         var model: String
     }
@@ -869,6 +870,6 @@ extension Wire.ChatUsage {
     func toModel() -> ChatUsage {
         ChatUsage(
             contextTokens: contextTokens, contextWindow: contextWindow, inputTokens: inputTokens, outputTokens: outputTokens,
-            cacheReadTokens: cacheReadTokens, costUSD: costUsd, turns: turns, model: model)
+            cacheReadTokens: cacheReadTokens, costUSD: costUsd, costKnown: costKnown, turns: turns, model: model)
     }
 }

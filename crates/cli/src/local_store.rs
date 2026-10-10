@@ -447,11 +447,30 @@ impl LocalStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
         let config = crate::config::Config { home: parent.into(), port: 0 };
-        config.validate_home()?;
-        if path.exists() {
-            crate::config::validate_database(path)?;
+        let admission = config.ensure_home_admission()?;
+        Self::open_with_admission(path, admission.as_ref(), false)
+    }
+
+    /// Deliberate staged scratch entry; ordinary App callers retain legacy admission.
+    pub fn open_staged(path: &Path) -> anyhow::Result<Self> {
+        let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let config = crate::config::Config { home: parent.into(), port: 0 };
+        let admission = config.staged_storage_admission()?;
+        Self::open_with_admission(path, Some(&admission), true)
+    }
+
+    pub(crate) fn open_with_admission(path: &Path, admission: Option<&crate::config::StorageAdmission>, staged: bool) -> anyhow::Result<Self> {
+        let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let config = crate::config::Config { home: parent.into(), port: 0 };
+        #[cfg(unix)]
+        admission.ok_or_else(|| anyhow::anyhow!("Storage admission guard is required"))?.validate_target(parent)?;
+        if staged {
+            admission.ok_or_else(|| anyhow::anyhow!("Staged admission guard is required"))?.revalidate_staged()?;
+        } else {
+            config.validate_home()?;
+            if let Some(admission) = admission { admission.revalidate_legacy()?; }
         }
-        config.ensure_home()?;
+        if path.exists() { crate::config::validate_database(path)?; }
         let connection =
             Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         // Classify before CREATE IF NOT EXISTS can conceal a partial current schema.
@@ -474,6 +493,10 @@ impl LocalStore {
             anyhow::ensure!(task_count==current.len(),"Partial task safety schema");
         }
         connection.pragma_update(None, "application_id", crate::config::SQLITE_APPLICATION_ID)?;
+        // Task durability is FULL for the whole connection lifetime, ordinary or staged: the
+        // private safety transaction refuses to run below FULL/fullfsync, so an ordinary open
+        // must not settle on NORMAL and re-reset it later.
+        connection.pragma_update(None, "synchronous", 2)?;
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = FULL;

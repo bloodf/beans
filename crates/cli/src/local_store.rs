@@ -186,8 +186,8 @@ pub(crate) fn load_invocation_tx(conn: &Connection, lease: &TaskLease, invocatio
     let row = conn.query_row(
         "SELECT parent_id,ordinal,attempt_id,receipt_id,revision,digest,state FROM task_invocations WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND invocation_id=?5",
         params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,invocation_id],
-        |row| Ok((row.get::<_,Option<String>>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,i64>(4)?,row.get::<_,Vec<u8>>(5)?,row.get::<_,String>(6)?)))?;
-    let (parent, ordinal, attempt_id, receipt_id, revision, digest, state) = row;
+        |row| Ok((row.get::<_,Option<String>>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,i64>(4)?,row.get::<_,Vec<u8>>(5)?,row.get::<_,String>(6)?))).optional()?;
+    let Some((parent, ordinal, attempt_id, receipt_id, revision, digest, state)) = row else { return Ok(None) };
     let digest: [u8;32] = digest.try_into().map_err(|_| anyhow::anyhow!("Invalid persisted invocation digest"))?;
     anyhow::ensure!(ordinal >= 0 && revision >= 0, "Invalid persisted invocation identity");
     let binding = InvocationBinding { invocation_id: invocation_id.to_string(), parent_invocation_id: parent, ordinal: ordinal as u64, attempt_id, receipt_id, revision: revision as u64, digest };

@@ -2494,6 +2494,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let app = App::load_owner(Config { home: home.path().into(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Runner".into())).unwrap();
+        app.store.safety_tx(|tx| crate::artifacts::drop_proposal_artifact_scratch_tx(tx)
+            .map_err(|error| anyhow::anyhow!("{error:?}"))).unwrap();
         let mut owner = bot("b1");
         owner.runner_id = app.this_device_id().unwrap();
         owner.workdir = Some(home.path().to_string_lossy().into_owned());

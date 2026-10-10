@@ -3183,8 +3183,6 @@ mod tests {
             description: None, bot_ids: vec!["draft-bot".into()], owner_bot_id: None, is_pinned: false, created_at: 0.0 },
             unread_count: 0, usage: None, compactions: Vec::new() });
         let lease = running_task(app, "joined-job");
-        app.store.safety_tx(|tx| crate::artifacts::install_proposal_artifact_scratch_tx(tx)
-            .map_err(|error| anyhow::anyhow!("{error:?}"))).unwrap();
         let task = tokio::spawn({
             let app = app.clone();
             async move { propose(&app, "draft-chat", "draft-bot", "joined-job:save", Some("Draft".into()),
@@ -3354,6 +3352,8 @@ mod tests {
         let scratch = scratch_owner();
         let app = &scratch.0;
         crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.store.safety_tx(|tx| crate::artifacts::drop_proposal_artifact_scratch_tx(tx)
+            .map_err(|error| anyhow::anyhow!("{error:?}"))).unwrap();
         let here = app.this_device_id().unwrap();
         let bot: Bot = serde_json::from_value(json!({
             "id": "draft-bot", "name": "Draft Bot", "description": "", "symbol_name": "", "accent": "",

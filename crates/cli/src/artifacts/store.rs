@@ -2,6 +2,80 @@
 use super::*;
 use rusqlite::{params, OptionalExtension, Transaction};
 
+pub(super) struct ProposalParticipant { mutation: ValidatedMutation, input: ReservedInput }
+pub(super) struct ProposalReservation { reservation: Reservation, account_id: String, namespace_key: Vec<u8> }
+
+fn proposal_error(error: StoreError) -> ProposalArtifactError {
+    match error {
+        StoreError::Invalid | StoreError::ReadNamespaceCannotMutate=>ProposalArtifactError::Invalid,
+        StoreError::Removed=>ProposalArtifactError::Removed,
+        StoreError::RequestBodyChanged=>ProposalArtifactError::BodyChanged,
+        StoreError::Incomplete=>ProposalArtifactError::Incomplete,
+        StoreError::StaleAttempt=>ProposalArtifactError::StaleAttempt,
+        StoreError::Conflict{current_revision,current_hash}=>ProposalArtifactError::Conflict{current_revision,current_hash},
+        StoreError::Storage(_)=>ProposalArtifactError::Storage,
+    }
+}
+
+pub(super) fn proposal_participant(value: ProposalArtifactInput) -> std::result::Result<ProposalParticipant,ProposalArtifactError> {
+    let namespace=ArtifactNamespace::new(&value.authority.account_id,NamespaceKind::LocalTaskEpoch,&value.authority.account_epoch).map_err(proposal_error)?;
+    let mutation=ValidatedMutation{namespace,actual_account_epoch:value.authority.account_epoch.clone(),owner_epoch:value.authority.owner_epoch.clone(),incarnation:value.authority.incarnation,requester:value.authority.requester.clone(),runner_id:value.authority.runner_id.clone()};
+    let origin=ArtifactOrigin::Proposal{chat_id:value.chat_id,bot_id:value.bot_id,card_id:value.card_id};
+    let expected=value.revision.parent_revision.as_deref().zip(value.revision.parent_content_hash.as_deref());
+    let fingerprint=acceptance_fingerprint(&value.authority,&origin,&value.request_id,&value.revision,expected).map_err(|_|ProposalArtifactError::Invalid)?;
+    let origin_key=match &origin {ArtifactOrigin::Proposal{chat_id,bot_id,card_id}=>serde_json::to_string(&serde_json::json!(["proposal",chat_id,bot_id,card_id])).map_err(|_|ProposalArtifactError::Invalid)?,_=>unreachable!()};
+    let key=AcceptanceKey{artifact_id:value.revision.id.clone(),requester:value.authority.requester.clone(),request_id:value.request_id,origin_key,fingerprint};
+    let input=ReservedInput{key,authority:value.authority,origin,revision:value.revision,snapshot_id:value.snapshot_id,plaintext:value.plaintext,metadata_plaintext:value.metadata_plaintext,file_ciphertext:value.file_ciphertext,metadata_ciphertext:value.metadata_ciphertext};
+    validate_input(&mutation,&input).map_err(proposal_error)?;
+    Ok(ProposalParticipant{mutation,input})
+}
+
+fn proposal_durability(tx: &Transaction<'_>) -> std::result::Result<(),ProposalArtifactError> {
+    let full:i64=tx.pragma_query_value(None,"synchronous",|r|r.get(0)).map_err(|_|ProposalArtifactError::Storage)?;
+    let sync:i64=tx.pragma_query_value(None,"fullfsync",|r|r.get(0)).map_err(|_|ProposalArtifactError::Storage)?;
+    if full==2 && sync==1 {Ok(())} else {Err(ProposalArtifactError::Storage)}
+}
+fn proposal_schema_present(tx: &Transaction<'_>) -> std::result::Result<bool,ProposalArtifactError> {
+    let names=["artifact_lineages","artifact_revisions","artifact_acceptances","artifact_snapshots","artifact_intents","artifact_tombstones","artifact_cleanup","artifact_safety_replay"];
+    let mut present=0;
+    for name in names {
+        let found:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",[name],|r|r.get(0)).map_err(|_|ProposalArtifactError::Storage)?;
+        if found {present+=1;}
+    }
+    match present {0=>Ok(false),8=>Ok(true),_=>Err(ProposalArtifactError::Storage)}
+}
+
+fn proposal_projection(lookup: Lookup, participant: &ProposalParticipant) -> ProposalArtifactReplay {
+    match lookup {
+        Lookup::Absent=>ProposalArtifactReplay::Absent,
+        Lookup::Accepted(result)=>ProposalArtifactReplay::Accepted(result),
+        Lookup::Reserved(reservation)=>{
+            let workspace_state=reservation.workspace_state;let attempt_id=reservation.attempt_id.clone();
+            ProposalArtifactReplay::Reserved{reservation:ProposalArtifactReservation(ProposalReservation{reservation,account_id:participant.mutation.namespace.account_id.clone(),namespace_key:participant.mutation.namespace.namespace_key.clone()}),workspace_state,attempt_id}
+        }
+    }
+}
+
+pub(super) fn proposal_lookup(tx: &Transaction<'_>, participant: &ProposalParticipant) -> std::result::Result<ProposalArtifactReplay,ProposalArtifactError> {
+    if !proposal_schema_present(tx)? {return Err(ProposalArtifactError::Storage)}
+    lookup_acceptance_tx(tx,EvidenceReadView{namespace:&participant.mutation.namespace},&participant.input.key).map(|value|proposal_projection(value,participant)).map_err(proposal_error)
+}
+
+pub(super) fn proposal_reserve(tx: &Transaction<'_>, participant: &ProposalParticipant, history: ProposalAttemptHistory) -> std::result::Result<ProposalArtifactReplay,ProposalArtifactError> {
+    if !proposal_schema_present(tx)? {
+        return Err(match history {ProposalAttemptHistory::Fresh=>ProposalArtifactError::NotDispatched,ProposalAttemptHistory::Existing=>ProposalArtifactError::Storage});
+    }
+    proposal_durability(tx)?;
+    reserve_workspace_tx(tx,&participant.mutation,&participant.input).map(|value|proposal_projection(value,participant)).map_err(proposal_error)
+}
+
+pub(super) fn proposal_admit(tx: &Transaction<'_>, participant: &ProposalParticipant, handle: &ProposalReservation, attempt: &str) -> std::result::Result<(),ProposalArtifactError> {
+    if !proposal_schema_present(tx)? {return Err(ProposalArtifactError::Storage)}
+    proposal_durability(tx)?;
+    if handle.account_id!=participant.mutation.namespace.account_id || handle.namespace_key!=participant.mutation.namespace.namespace_key || handle.reservation.key.fingerprint!=participant.input.key.fingerprint || handle.reservation.key.request_id!=participant.input.key.request_id {return Err(ProposalArtifactError::Invalid)}
+    admit_workspace_attempt_tx(tx,&participant.mutation,&handle.reservation,attempt).map(|_|()).map_err(proposal_error)
+}
+
 #[derive(Debug)]
 enum StoreError { Invalid, ReadNamespaceCannotMutate, Removed, RequestBodyChanged, Conflict { current_revision: String, current_hash: String }, Incomplete, StaleAttempt, Storage(rusqlite::Error) }
 type Result<T, E = StoreError> = std::result::Result<T, E>;
@@ -279,5 +353,25 @@ mod tests {
         let tx=db.transaction().unwrap();install_tombstone_tx(&tx,&m,&tomb).unwrap();tx.rollback().unwrap();let tx=db.transaction().unwrap();assert_eq!(count(&tx,"artifact_tombstones"),1);assert_eq!(count(&tx,"artifact_cleanup"),0);install_tombstone_tx(&tx,&m,&tomb).unwrap();install_tombstone_tx(&tx,&m,&tomb).unwrap();tx.commit().unwrap();
         let tx=db.transaction().unwrap();assert!(!eligible_cleanup_tx(&tx,EvidenceReadView{namespace:&m.namespace},&tomb.cleanup_blobs[0].blob_id).unwrap());tx.execute("UPDATE artifact_intents SET state='synced',ack_seq=11 WHERE blob_id=?1 AND phase='control'",[&tomb.blob_id]).unwrap();assert!(eligible_cleanup_tx(&tx,EvidenceReadView{namespace:&m.namespace},&tomb.cleanup_blobs[0].blob_id).unwrap());tx.commit().unwrap();
         let tx=db.transaction().unwrap();assert!(matches!(commit_artifact_acceptance_tx(&tx,&m,&input,&proof),Err(StoreError::Removed)));assert!(matches!(eligible_intent_tx(&tx,EvidenceReadView{namespace:&m.namespace},&metadata,&gates),Err(StoreError::Removed)));assert_eq!(count(&tx,"artifact_cleanup"),1);tx.rollback().unwrap();
+    }
+    #[test]
+    fn proposal_facade_preserves_caller_atomicity_and_storage_uncertainty() {
+        let mut db=Connection::open_in_memory().unwrap();
+        db.pragma_update(None,"synchronous",2).unwrap();db.pragma_update(None,"fullfsync",1).unwrap();
+        let (_,input,_)=input();
+        let value=ProposalArtifactInput{authority:input.authority,chat_id:"chat".into(),bot_id:"bot".into(),card_id:"card".into(),request_id:input.key.request_id,revision:input.revision,snapshot_id:input.snapshot_id,plaintext:input.plaintext,metadata_plaintext:input.metadata_plaintext,file_ciphertext:input.file_ciphertext,metadata_ciphertext:input.metadata_ciphertext};
+        let proposal=freeze_proposal_artifact(value).unwrap();
+        let tx=db.transaction().unwrap();
+        assert!(matches!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Fresh),Err(ProposalArtifactError::NotDispatched)));
+        assert!(matches!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Existing),Err(ProposalArtifactError::Storage)));
+        assert!(matches!(lookup_proposal_artifact_tx(&tx,&proposal),Err(ProposalArtifactError::Storage)));
+        tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();tx.execute_batch("CREATE TABLE artifact_acceptances(broken TEXT)").unwrap();assert!(matches!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Fresh),Err(ProposalArtifactError::Storage)));tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();install_schema_tx(&tx).unwrap();tx.execute_batch("CREATE TABLE fixture_task_admission(receipt TEXT PRIMARY KEY)").unwrap();let ProposalArtifactReplay::Reserved{reservation:_,workspace_state,attempt_id}=reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Fresh).unwrap() else{panic!("reservation")};assert_eq!(workspace_state,WorkspaceState::Reserved);assert_eq!(attempt_id,None);tx.commit().unwrap();
+        let tx=db.transaction().unwrap();let ProposalArtifactReplay::Reserved{reservation,..}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("lookup")};tx.execute("INSERT INTO fixture_task_admission VALUES('started')",[]).unwrap();admit_proposal_artifact_attempt_tx(&tx,&proposal,&reservation,"attempt").unwrap();tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();assert_eq!(count(&tx,"fixture_task_admission"),0);let ProposalArtifactReplay::Reserved{reservation,workspace_state,attempt_id}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("rollback")};assert_eq!(workspace_state,WorkspaceState::Reserved);assert_eq!(attempt_id,None);tx.execute("INSERT INTO fixture_task_admission VALUES('started')",[]).unwrap();admit_proposal_artifact_attempt_tx(&tx,&proposal,&reservation,"attempt").unwrap();tx.commit().unwrap();
+        let tx=db.transaction().unwrap();let ProposalArtifactReplay::Reserved{reservation,workspace_state,attempt_id}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("admitted")};assert_eq!(workspace_state,WorkspaceState::AttemptAdmitted);assert_eq!(attempt_id.as_deref(),Some("attempt"));assert_eq!(count(&tx,"fixture_task_admission"),1);assert!(matches!(admit_proposal_artifact_attempt_tx(&tx,&proposal,&reservation,"again"),Err(ProposalArtifactError::StaleAttempt)));tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();tx.execute_batch("ALTER TABLE artifact_snapshots RENAME TO corrupt_snapshot; CREATE TABLE artifact_snapshots(account_id TEXT)").unwrap();assert!(matches!(lookup_proposal_artifact_tx(&tx,&proposal),Err(ProposalArtifactError::Storage)));assert!(matches!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Existing),Err(ProposalArtifactError::Storage)));tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();let ProposalArtifactReplay::Reserved{workspace_state,attempt_id,..}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("retained")};assert_eq!(workspace_state,WorkspaceState::AttemptAdmitted);assert_eq!(attempt_id.as_deref(),Some("attempt"));tx.rollback().unwrap();
     }
 }

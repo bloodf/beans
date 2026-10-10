@@ -2,6 +2,63 @@
 
 mod store;
 
+/// Host-validated proposal inputs. This is not an authority issuer or a schema installer.
+pub(crate) struct ProposalArtifactInput {
+    pub authority: ArtifactAuthority,
+    pub chat_id: String,
+    pub bot_id: String,
+    pub card_id: String,
+    pub request_id: String,
+    pub revision: ArtifactRevision,
+    pub snapshot_id: String,
+    pub plaintext: Vec<u8>,
+    pub metadata_plaintext: Vec<u8>,
+    pub file_ciphertext: Vec<u8>,
+    pub metadata_ciphertext: Vec<u8>,
+}
+
+pub(crate) struct ProposalArtifact(store::ProposalParticipant);
+pub(crate) struct ProposalArtifactReservation(store::ProposalReservation);
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ProposalArtifactError {
+    NotDispatched,
+    Invalid,
+    Removed,
+    BodyChanged,
+    Incomplete,
+    StaleAttempt,
+    Conflict { current_revision: String, current_hash: String },
+    Storage,
+}
+
+/// Host caller must check existing task outcomes first; failed lookup is never Fresh.
+pub(crate) enum ProposalAttemptHistory { Fresh, Existing }
+
+pub(crate) enum ProposalArtifactReplay {
+    Absent,
+    Accepted(ArtifactResult),
+    Reserved { reservation: ProposalArtifactReservation, workspace_state: WorkspaceState, attempt_id: Option<String> },
+}
+
+pub(crate) fn freeze_proposal_artifact(input: ProposalArtifactInput) -> Result<ProposalArtifact, ProposalArtifactError> {
+    store::proposal_participant(input).map(ProposalArtifact)
+}
+
+/// Call before task admission. Absence of installed tables never permits a task-only effect.
+pub(crate) fn lookup_proposal_artifact_tx(tx: &rusqlite::Transaction<'_>, proposal: &ProposalArtifact) -> Result<ProposalArtifactReplay, ProposalArtifactError> {
+    store::proposal_lookup(tx, &proposal.0)
+}
+
+pub(crate) fn reserve_proposal_artifact_tx(tx: &rusqlite::Transaction<'_>, proposal: &ProposalArtifact, history: ProposalAttemptHistory) -> Result<ProposalArtifactReplay, ProposalArtifactError> {
+    store::proposal_reserve(tx, &proposal.0, history)
+}
+
+/// Caller joins this with task admission in ONE FULL transaction and owns rollback/commit.
+pub(crate) fn admit_proposal_artifact_attempt_tx(tx: &rusqlite::Transaction<'_>, proposal: &ProposalArtifact, reservation: &ProposalArtifactReservation, attempt_id: &str) -> Result<(), ProposalArtifactError> {
+    store::proposal_admit(tx, &proposal.0, &reservation.0, attempt_id)
+}
+
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;

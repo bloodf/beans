@@ -21,6 +21,8 @@ The private `artifacts/store.rs` unit implements eight account-and-binary-namesp
 
 Private reservation lookup also returns the persisted workspace state and attempt ID, so a caller can distinguish a fresh reservation from an admitted, uncertain or unindexed attempt without inferring state from a card. This projection does not grant dispatch authority or permit replay of an admitted workspace effect.
 
+A proposal-scoped crate facade borrows the caller's transaction for reservation lookup, reservation and attempt admission without exposing the private store. Mutation requires FULL/fullfsync; it changes no connection settings. Only verified absent tables with caller-established fresh intent yield `NotDispatched` before task admission; existing-outcome lookup, partial schema and query failures return errors rather than downgrade uncertainty. The caller must join task and artifact admission atomically and retain current authority through dispatch; the facade installs no schema or live consumer hooks.
+
 Plugin tools (`<plugin>__<tool>`, such as `github__create_issue`) come from the MCP servers of the plugins installed on the bot's Runner. A bot calls them from codemode scripts; the model never gets them as tools of its own, so the tool list is the same for the whole turn, and from one turn to the next.
 
 Coding tools (`beans_agent::tools`, ports of pi’s built-ins, same schemas and truncation rules: 2000 lines / 50KB, whichever first):

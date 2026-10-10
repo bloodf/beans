@@ -142,6 +142,19 @@ fn check_running_tx(tx: &Transaction<'_>, lease: &TaskLease) -> anyhow::Result<(
     Ok(())
 }
 
+/// Caller owns the safety transaction and the protected host policy recheck.
+/// A true result is dispatch permission only after the caller acknowledges COMMIT.
+pub(crate) fn admit_invocation_tx(tx: &Transaction<'_>, lease: &TaskLease, binding: &InvocationBinding) -> anyhow::Result<bool> {
+    validate_binding(binding)?;
+    check_running_tx(tx, lease)?;
+    let changed = tx.execute("UPDATE task_invocations SET state='admitted' WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND invocation_id=?5 AND parent_id IS ?6 AND ordinal=?7 AND attempt_id=?8 AND receipt_id=?9 AND revision=?10 AND digest=?11 AND state='authorized'",
+        params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.invocation_id,binding.parent_invocation_id,binding.ordinal,binding.attempt_id,binding.receipt_id,binding.revision,binding.digest.as_slice()])?;
+    if changed == 0 { return Ok(false); }
+    tx.execute("INSERT INTO task_effect_receipts VALUES(?1,?2,?3,?4,?5,?6,'started')",
+        params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.attempt_id,binding.receipt_id])?;
+    Ok(true)
+}
+
 fn upsert_message_tx(tx: &Transaction<'_>, message: &Message) -> anyhow::Result<Upsert> {
     let json = serde_json::to_string(message)?;
     let existing: Option<(String, String, i64)> = tx.query_row("SELECT message_json, chat_id, position FROM messages WHERE id=?1", [&message.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
@@ -404,16 +417,7 @@ impl LocalStore {
     /// Called only after the host's protected policy recheck; successful commit is the
     /// single dispatch permission. Any error, including ambiguous acknowledgment, forbids I/O.
     pub(crate) fn admit_invocation(&self, lease: &TaskLease, binding: &InvocationBinding) -> anyhow::Result<bool> {
-        validate_binding(binding)?;
-        self.safety(|tx| {
-            check_running_tx(tx, lease)?;
-            let changed = tx.execute("UPDATE task_invocations SET state='admitted' WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND invocation_id=?5 AND parent_id IS ?6 AND ordinal=?7 AND attempt_id=?8 AND receipt_id=?9 AND revision=?10 AND digest=?11 AND state='authorized'",
-                params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.invocation_id,binding.parent_invocation_id,binding.ordinal,binding.attempt_id,binding.receipt_id,binding.revision,binding.digest.as_slice()])?;
-            if changed == 0 { return Ok(false); }
-            tx.execute("INSERT INTO task_effect_receipts VALUES(?1,?2,?3,?4,?5,?6,'started')",
-                params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.attempt_id,binding.receipt_id])?;
-            Ok(true)
-        })
+        self.safety(|tx| admit_invocation_tx(tx, lease, binding))
     }
 
     pub(crate) fn finish_receipt(&self, lease: &TaskLease, binding: &InvocationBinding, outcome: ReceiptOutcome) -> anyhow::Result<bool> {
@@ -2123,6 +2127,18 @@ mod tests {
         assert!(store.queue_task(&lease,&job).unwrap()); assert!(store.start_task(&lease).unwrap());
         assert!(store.insert_invocation(&lease,&binding).unwrap());
         assert!(store.decide_invocation(&lease,&binding,AuthorizationDecision::Authorized,AuthorizationKind::Rule,None,None,0).unwrap());
+        let rejected: anyhow::Result<()> = store.safety(|tx| {
+            assert!(admit_invocation_tx(tx, &lease, &binding)?);
+            anyhow::bail!("synthetic sibling mutation rejection")
+        });
+        assert!(rejected.is_err());
+        {
+            let connection = store.connection.lock().unwrap();
+            let state: String = connection.query_row("SELECT state FROM task_invocations WHERE account_epoch=?1 AND task_id=?2 AND invocation_id=?3", params![lease.account_epoch,lease.task_id,binding.invocation_id], |row| row.get(0)).unwrap();
+            assert_eq!(state, "authorized");
+            let receipt: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM task_effect_receipts WHERE account_epoch=?1 AND task_id=?2 AND attempt_id=?3 AND receipt_id=?4)", params![lease.account_epoch,lease.task_id,binding.attempt_id,binding.receipt_id], |row| row.get(0)).unwrap();
+            assert!(!receipt);
+        }
         assert!(store.admit_invocation(&lease,&binding).unwrap());
         assert!(!store.admit_invocation(&lease,&binding).unwrap());
         assert!(store.finish_receipt(&lease,&binding,ReceiptOutcome::Unknown).unwrap());

@@ -2591,7 +2591,6 @@ async fn await_proposal_answer(app: &Arc<App>, chat_id: &str, card_id: &str, inv
             answered_by: None,
         });
     }
-    let _guard = OccurrenceGuard(app, card_id.to_string());
     await_answer(app, chat_id, card_id, None, cancel, ask).await
 }
 
@@ -2717,7 +2716,7 @@ pub async fn propose(app: &Arc<App>, chat_id: &str, bot_id: &str, call_id: &str,
             if !card_is_ours(&card) || !body_matches(&card) {
                 return Err("Proposal already awaits review or its draft changed.".into());
             }
-            let mut repaired = card;
+            let mut repaired = card.clone();
             settle_permission_card(&mut repaired.body, outcome, None);
             if repaired != card { app.upsert_message(repaired, true); }
             return Ok(outcome.into());
@@ -2776,6 +2775,7 @@ async fn ask_and_dispatch(app: &Arc<App>, lease: crate::local_store::TaskLease, 
     });
     card.id = invocation.card_id.clone();
     let asked = card.clone();
+    let _guard = OccurrenceGuard(app, invocation.card_id.clone());
     let choice = await_proposal_answer(app, &invocation.chat_id, &invocation.card_id, &invocation, cancel, || {
         app.upsert_message(asked.clone(), true);
         crate::push::permission(app, &asked);
@@ -2783,7 +2783,7 @@ async fn ask_and_dispatch(app: &Arc<App>, lease: crate::local_store::TaskLease, 
     // The retained record, not the woken waiter, is what can produce an approval.
     let approval = host_approval_of(app, &invocation.card_id, choice, &invocation);
 
-    let (disposition, refusal) = match approval {
+    let (disposition, refusal) = match approval.as_ref() {
         Some(approval) if choice == Decision::Allowed && !cancel.is_cancelled() => {
             // The decision is durable before the write: a crash after this leaves an authorized
             // origin that any later call reads as refused, never as something to retry silently.
@@ -2817,7 +2817,17 @@ async fn ask_and_dispatch(app: &Arc<App>, lease: crate::local_store::TaskLease, 
             return Ok(ProposalDisposition::NotApproved);
         }
         match approval {
-            Some(_) => settle_permission_card(&mut current.body, disposition.into(), refusal),
+            Some(_) => {
+                let outcome = match disposition {
+                    ProposalDisposition::Saved => Some(crate::local_store::ProposalSaveOutcome::Saved),
+                    ProposalDisposition::AlreadySaved => Some(crate::local_store::ProposalSaveOutcome::AlreadySaved),
+                    ProposalDisposition::NotDispatched => Some(crate::local_store::ProposalSaveOutcome::NotDispatched),
+                    ProposalDisposition::Unknown => Some(crate::local_store::ProposalSaveOutcome::Unknown),
+                    ProposalDisposition::NotApproved => None,
+                };
+                if let Some(outcome) = outcome { settle_permission_card(&mut current.body, outcome, refusal); }
+                else if let Body::Permission { decision, .. } = &mut current.body { *decision = "denied".into(); }
+            },
             None => {
                 let row = if choice == Decision::Always { Decision::Denied }
                     else if cancel.is_cancelled() && choice == Decision::Denied { Decision::Dismissed }
@@ -3021,7 +3031,7 @@ mod tests {
         assert_eq!(std::fs::read(workspace.join("notes/through-alias.md")).unwrap(), b"inside");
     }
     #[tokio::test]
-    async fn proposal_review_writes_once_and_decline_never_writes() {
+    async fn proposal_review_refuses_missing_participant_and_decline_never_writes() {
         let scratch = scratch_owner();
         let app = &scratch.0;
         crate::identity::create(app, Some("Workbench".into())).unwrap();
@@ -3057,7 +3067,7 @@ mod tests {
                 }).await.unwrap();
                 if response == Decision::Allowed {
                     let forged = json!({ "chat_id": "draft-chat", "message_id": card.id, "decision": "always" });
-                    assert!(super::super::serve_request(&app, "permission.answer", &forged, None).await.is_err());
+                    assert_eq!(super::super::serve_request(&app, "permission.answer", &forged, None).await.unwrap()["answered"], false);
                     assert!(!answer(&app, &card.id, Decision::Always));
                     assert!(matches!(app.message("draft-chat", &card.id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"));
                     let request = json!({ "chat_id": "draft-chat", "message_id": card.id, "decision": "allow" });
@@ -3082,17 +3092,16 @@ mod tests {
                 result
             }
         };
-        let saved = |result: Result<ProposalDisposition, String>| matches!(result.unwrap(), ProposalDisposition::Saved);
-        assert!(saved(run("draft-job:first".into(), "draft.md", Decision::Allowed).await));
-        assert_eq!(std::fs::read(workspace.join("draft.md")).unwrap(), "Exact 🌍\n".as_bytes());
-        // A replay of the same origin after the receipt completed writes nothing again: the
-        // accepted outcome is AlreadySaved, and the file the user edited afterwards stands.
-        std::fs::write(workspace.join("draft.md"), "changed after approval").unwrap();
+        assert_eq!(run("draft-job:first".into(), "draft.md", Decision::Allowed).await.unwrap(), ProposalDisposition::NotDispatched);
+        assert!(!workspace.exists(), "refusal must precede even workspace creation");
         let replay = propose(app, "draft-chat", "draft-bot", "draft-job:first", Some("Draft".into()), Some("Exact 🌍\n".into()), Some("draft.md".into()), &CancellationToken::new()).await.unwrap();
-        assert_eq!(replay, ProposalDisposition::AlreadySaved);
-        assert_eq!(std::fs::read(workspace.join("draft.md")).unwrap(), b"changed after approval");
-        assert!(saved(run("other-job:first".into(), "second-draft.md", Decision::Allowed).await));
-        assert_eq!(std::fs::read(workspace.join("second-draft.md")).unwrap(), "Exact 🌍\n".as_bytes());
+        assert_eq!(replay, ProposalDisposition::NotDispatched);
+        assert_eq!(run("other-job:first".into(), "second-draft.md", Decision::Allowed).await.unwrap(), ProposalDisposition::NotDispatched);
+        assert!(!workspace.exists());
+        let receipts: i64 = app.store.connection.lock().unwrap().query_row(
+            "SELECT count(*) FROM task_effect_receipts", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(receipts, 0);
         assert_eq!(run("draft-job:second".into(), "declined.md", Decision::Denied).await.unwrap(), ProposalDisposition::NotApproved);
         assert!(!workspace.join("declined.md").exists());
         assert_eq!(run("draft-job:revoked".into(), "revoked.md", Decision::Allowed).await.unwrap(), ProposalDisposition::NotDispatched);
@@ -3101,6 +3110,7 @@ mod tests {
         assert_eq!(run("draft-job:paused".into(), "paused.md", Decision::Allowed).await.unwrap(), ProposalDisposition::NotDispatched);
         assert!(!workspace.join("paused.md").exists());
         assert!(app.messages("draft-chat").iter().any(|card| matches!(&card.body, Body::Permission { tool, decision, path, .. } if tool == "propose" && decision == "failed" && path.as_deref() == Some("paused.md"))));
+        std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("existing.md"), "keep").unwrap();
         assert_eq!(run("draft-job:existing".into(), "existing.md", Decision::Allowed).await.unwrap(), ProposalDisposition::NotDispatched);
         assert_eq!(std::fs::read(workspace.join("existing.md")).unwrap(), b"keep");
@@ -3138,7 +3148,7 @@ mod tests {
             let (started, ready) = tokio::sync::oneshot::channel();
             let job = tokio::spawn(async move {
                 let _ = started.send(());
-                propose(&app_for_job, "draft-chat", "draft-bot", call_id, Some("Reviewed".into()), Some("reviewed bytes".into()), Some("reviewed.md".into()), &CancellationToken::new()).await
+                propose(&app_for_job, "draft-chat", "draft-bot", &call_id, Some("Reviewed".into()), Some("reviewed bytes".into()), Some("reviewed.md".into()), &CancellationToken::new()).await
             });
             ready.await.unwrap();
             let card = tokio::time::timeout(std::time::Duration::from_secs(2), async {

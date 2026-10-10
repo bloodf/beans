@@ -364,53 +364,17 @@ impl App {
         Ok(())
     }
 
-    /// Admits an approved proposal and dispatches it. `state` is held from the membership
-    /// recheck until the create-only write has returned, so a revocation of the answering
-    /// Device is ordered against the effect: it either lands before the recheck (which then
-    /// refuses, with no syscall) or it blocks until the write is done. The admission itself is
-    /// one borrowed safety transaction, held open for exactly the workspace attempt that belongs
-    /// to this invocation; that attempt does not exist yet, so today the transaction admits the
-    /// task invocation alone. Nothing dispatches on a false result or an unacknowledged commit.
+    /// Refuses proposal saves while the artifact admission participant is unavailable.
+    /// No task admission, started receipt, or workspace backend entry occurs here. The real
+    /// participant must share one acknowledged FULL transaction with task admission; its
+    /// synchronous dispatch must retain State from the policy recheck until dispatch returns.
     #[cfg(feature = "runner")]
-    pub fn save_admitted_proposal(&self, lease: &crate::local_store::TaskLease, invocation: &crate::plugins::mcp::ProposalInvocation, approval: &crate::plugins::mcp::HostApproval, dispatch: impl FnOnce() -> Result<(), String>) -> crate::local_store::ProposalSaveOutcome {
-        let local = self.this_device_id();
-        let _policy = self.roster_edit.lock().unwrap();
-        let lifecycle = match self.plugin_admission(Some(lease.incarnation)) {
-            Ok(lifecycle) => lifecycle,
-            Err(_) => return crate::local_store::ProposalSaveOutcome::NotDispatched,
-        };
-        let state = self.state.lock().unwrap();
-        if !self.is_execution_owner()
-            || Self::check_proposal_permission(&state, local.as_deref(), invocation, approval).is_err() {
-            return crate::local_store::ProposalSaveOutcome::NotDispatched;
-        }
-        let admitted = self.store.safety_tx(|tx| {
-            // NOT YET ATOMIC WITH A WORKSPACE ATTEMPT. The borrowed transaction is the seam
-            // the artifact owner must join this admission to, so that a sibling failure rolls
-            // back the admission and its started receipt together. No artifact facade is
-            // exported from `artifacts::store` and no production path installs its tables, so
-            // that participation does not exist yet and this branch does not stand in for it.
-            crate::local_store::admit_invocation_tx(tx, lease, &approval.binding)
-        });
-        drop(state);
-        match admitted {
-            Err(_) => return crate::local_store::ProposalSaveOutcome::NotDispatched,
-            Ok(false) => return crate::local_store::ProposalSaveOutcome::NotDispatched,
-            Ok(true) => {},
-        }
-        let written = dispatch();
-        let (outcome, result) = match &written {
-            Ok(()) => (crate::local_store::ReceiptOutcome::Finished, crate::local_store::ProposalSaveOutcome::Saved),
-            Err(_) => (crate::local_store::ReceiptOutcome::DefinitelyNotSent, crate::local_store::ProposalSaveOutcome::NotDispatched),
-        };
-        // The write already happened: a receipt that cannot be recorded leaves the outcome
-        // ambiguous, never a claim that nothing was written.
-        if self.plugin_admission(Some(lease.incarnation)).is_ok() && self.store.finish_receipt(lease, &approval.binding, outcome).is_err() {
-            return crate::local_store::ProposalSaveOutcome::Unknown;
-        }
-        drop(lifecycle);
-        result
+    pub fn save_admitted_proposal(&self, _lease: &crate::local_store::TaskLease, _invocation: &crate::plugins::mcp::ProposalInvocation, _approval: &crate::plugins::mcp::HostApproval, _dispatch: impl FnOnce() -> Result<(), String>) -> crate::local_store::ProposalSaveOutcome {
+        // The private artifact facade and production activation are absent. Task admission
+        // alone cannot authorize a workspace effect, even with an authenticated approval.
+        crate::local_store::ProposalSaveOutcome::NotDispatched
     }
+
     pub fn task_history_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         let lifecycle=self.plugin_admission(None).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(self.is_execution_owner(),"History resolution requires execution ownership");
@@ -2436,14 +2400,13 @@ mod tests {
         ScratchApp(app, home)
     }
 
-    /// A proposal write happens under a held membership guard, so a revocation that lands while
-    /// the write is in flight waits for it rather than racing past it.
+    /// Missing artifact admission refuses before consuming an authorized binding or entering
+    /// the workspace backend, including on a repeated save attempt.
     #[cfg(feature = "runner")]
     #[test]
-    fn proposal_admission_orders_membership_removal_against_the_write() {
-        let home = std::env::temp_dir().join(format!("beans-app-{}", uuid::Uuid::new_v4()));
-        let app = App::load_owner(Config { home: home.clone(), port: 0 }).unwrap();
-        let _ = std::fs::remove_dir_all(&home);
+    fn proposal_missing_participant_preserves_authorization_without_dispatch_or_receipt() {
+        let home = tempfile::tempdir().unwrap();
+        let app = App::load_owner(Config { home: home.path().into(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Runner".into())).unwrap();
         let mut owner = bot("b1");
         owner.runner_id = app.this_device_id().unwrap();
@@ -2474,7 +2437,7 @@ mod tests {
             crate::local_store::AuthorizationKind::UserOnce, Some(card_id), Some(peer), 0).unwrap());
         let invocation = crate::plugins::mcp::ProposalInvocation {
             card_id: card_id.into(), chat_id: "chat".into(), bot_id: "b1".into(), binding: frozen.binding.clone(),
-            snapshot_digest: digest, workdir: home.clone(), path: "draft.md".into(), content: "bytes".into(),
+            snapshot_digest: digest, workdir: home.path().into(), path: "draft.md".into(), content: "bytes".into(),
             title: Some("Draft".into()), content_option: Some("bytes".into()), path_option: Some("draft.md".into()),
         };
         let approval = crate::plugins::mcp::HostApproval {
@@ -2482,93 +2445,39 @@ mod tests {
             answering_device: peer.into(),
         };
 
-        // The dispatch holds the write open; the revocation must block behind it.
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let worker = {
-            let app = app.clone();
-            let invocation = crate::plugins::mcp::ProposalInvocation { binding: frozen.binding.clone(), ..invocation };
-            let writes = writes.clone();
-            std::thread::spawn(move || {
-                let outcome = app.save_admitted_proposal(&lease, &invocation, &approval, || {
-                    writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    entered_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
-                    Ok(())
-                });
-                outcome
-            })
-        };
-        entered_rx.recv().unwrap();
-        let removed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let revoker = {
-            let app = app.clone();
-            let removed = removed.clone();
-            std::thread::spawn(move || {
-                app.state.lock().unwrap().listed_machines.remove(peer);
-                removed.store(true, std::sync::atomic::Ordering::SeqCst);
-            })
-        };
-        assert!(!removed.load(std::sync::atomic::Ordering::SeqCst), "a revocation in flight must not complete before the write returns");
-        release_tx.send(()).unwrap();
-        assert_eq!(worker.join().unwrap(), crate::local_store::ProposalSaveOutcome::Saved);
-        revoker.join().unwrap();
-        assert!(removed.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(!app.is_paired_actor(peer));
-
-        // A second dispatch of the same origin is refused before any I/O: the invocation is no
-        // longer authorized, and its completed receipt is what a replay reads.
-        let writes = writes.clone();
-        let refused = app.save_admitted_proposal(&lease, &invocation, &approval, || { writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst); Ok(()) });
-        assert_eq!(refused, crate::local_store::ProposalSaveOutcome::NotDispatched);
-        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1, "a refused admission must not write");
-        assert_eq!(app.proposal_outcome(card_id).unwrap(), Some(crate::local_store::ProposalSaveOutcome::AlreadySaved));
-    }
-
-    /// A revoked sender cannot produce an effect at all: the recheck happens before the store
-    /// transaction, so nothing is admitted and nothing is written.
-    #[cfg(feature = "runner")]
-    #[test]
-    fn proposal_admission_refuses_an_unpaired_approver_before_any_write() {
-        let home = std::env::temp_dir().join(format!("beans-app-{}", uuid::Uuid::new_v4()));
-        let app = App::load_owner(Config { home: home.clone(), port: 0 }).unwrap();
-        let _ = std::fs::remove_dir_all(&home);
-        crate::identity::create(&app, Some("Runner".into())).unwrap();
-        let mut owner = bot("b1");
-        owner.runner_id = app.this_device_id().unwrap();
-        app.state.lock().unwrap().bots.push(owner);
-        app.state.lock().unwrap().chats.push(chat("chat", "dm", &["b1"], Some("b1")));
-        let job = Job { id: "job".into(), chat_id: "chat".into(), bot_id: "b1".into(), kind: "turn".into(),
-            trigger_message_id: "trigger".into(), routine_id: None, check: None, requested_by: "requester".into(),
-            from_bot_id: None, hops: 0, round: 0, is_winding_down: false, setup: None, created_at: 0.0 };
-        let lease = app.queue_local_task(&job).unwrap().expect("fixture task must durably admit");
-        assert!(app.store.start_task(&lease).unwrap());
-        let card_id = "msg-propose-unpaired";
-        let mut digest = [0u8;32];
-        digest[0] = 9;
-        let frozen = app.freeze_proposal_invocation(&lease, card_id, 1, digest, "attempt-d", "receipt-d").unwrap();
-        assert!(app.decide_task_invocation(&lease, &frozen.binding, crate::local_store::AuthorizationDecision::Authorized,
-            crate::local_store::AuthorizationKind::UserOnce, Some(card_id), Some("ghost"), 0).unwrap());
-        let invocation = crate::plugins::mcp::ProposalInvocation {
-            card_id: card_id.into(), chat_id: "chat".into(), bot_id: "b1".into(), binding: frozen.binding.clone(),
-            snapshot_digest: digest, workdir: home.clone(), path: "draft.md".into(), content: "bytes".into(),
-            title: Some("Draft".into()), content_option: Some("bytes".into()), path_option: Some("draft.md".into()),
-        };
-        let approval = crate::plugins::mcp::HostApproval {
-            card_id: card_id.into(), generation: 1, binding: frozen.binding.clone(), snapshot_digest: digest,
-            answering_device: "ghost".into(),
-        };
-        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counted = writes.clone();
-        assert_eq!(app.save_admitted_proposal(&lease, &invocation, &approval, move || { counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst); Ok(()) }),
-            crate::local_store::ProposalSaveOutcome::NotDispatched);
-        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 0);
-        // The origin stays authorized: nothing dispatched, so nothing recorded a receipt.
+        let before = app.store.load_invocation(&lease, card_id).unwrap().unwrap();
+        assert_eq!(before.1, crate::local_store::InvocationState::Authorized);
+        let mut dispatches = 0;
+        for _ in 0..2 {
+            let outcome = app.save_admitted_proposal(&lease, &invocation, &approval, || {
+                dispatches += 1;
+                std::fs::create_dir_all(home.path().join("workspace")).unwrap();
+                Ok(())
+            });
+            assert_eq!(outcome, crate::local_store::ProposalSaveOutcome::NotDispatched);
+            assert_eq!(app.store.load_invocation(&lease, card_id).unwrap().unwrap(), before);
+            let receipts: i64 = app.store.connection.lock().unwrap().query_row(
+                "SELECT count(*) FROM task_effect_receipts WHERE account_epoch=?1 AND receipt_id=?2",
+                rusqlite::params![lease.account_epoch, frozen.binding.receipt_id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(receipts, 0);
+        }
+        assert_eq!(dispatches, 0);
+        assert!(!home.path().join("workspace").exists());
         assert_eq!(app.proposal_outcome(card_id).unwrap(), Some(crate::local_store::ProposalSaveOutcome::NotDispatched));
-        assert!(!home.join("draft.md").exists());
+
+        // Existing effect-bearing evidence predates this refusal and must remain uncertain.
+        assert!(app.store.admit_invocation(&lease, &frozen.binding).unwrap());
+        assert!(app.store.finish_receipt(&lease, &frozen.binding, crate::local_store::ReceiptOutcome::Unknown).unwrap());
+        assert_eq!(app.proposal_outcome(card_id).unwrap(), Some(crate::local_store::ProposalSaveOutcome::Unknown));
+        assert_eq!(app.save_admitted_proposal(&lease, &invocation, &approval, || {
+            dispatches += 1;
+            Ok(())
+        }), crate::local_store::ProposalSaveOutcome::NotDispatched);
+        assert_eq!(dispatches, 0);
+        assert_eq!(app.proposal_outcome(card_id).unwrap(), Some(crate::local_store::ProposalSaveOutcome::Unknown));
     }
+
 
     #[test]
     fn task_owner_process_probe() {

@@ -104,12 +104,18 @@ export function SheetHost() {
     <For each={sheets.read()}>
       {(entry, index) => {
         let frame: HTMLDivElement | undefined;
-        // The dialog is named by its visible title, so a reader announces it on opening.
+        // The dialog takes the name a reader announces: its own visible title, or the name the sheet declares.
         onSettled(() => {
-          const title = frame?.querySelector<HTMLElement>(".sheet-title");
-          if (!frame || !title) return;
-          title.id ||= `sheet-title-${entry.id}`;
-          frame.setAttribute("aria-labelledby", title.id);
+          if (!frame) return;
+          const title = frame.querySelector<HTMLElement>(".sheet-title");
+          if (title) {
+            title.id ||= `sheet-title-${entry.id}`;
+            frame.setAttribute("aria-labelledby", title.id);
+            return;
+          }
+          // A sheet with no visible title carries its own name on its root; one with neither stays unnamed.
+          const own = frame.firstElementChild?.getAttribute("aria-label");
+          if (own) frame.setAttribute("aria-label", own);
         });
         const covered = () => index() < sheets.read().length - 1;
         return (

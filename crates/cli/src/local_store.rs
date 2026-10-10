@@ -179,6 +179,15 @@ pub(crate) fn admit_invocation_tx(tx: &Transaction<'_>, lease: &TaskLease, bindi
     Ok(true)
 }
 
+/// Caller owns the safety transaction and retains the admitted invocation binding.
+/// A true result is durable completion only after the caller acknowledges COMMIT.
+pub(crate) fn finish_receipt_tx(tx: &Transaction<'_>, lease: &TaskLease, binding: &InvocationBinding, outcome: ReceiptOutcome) -> anyhow::Result<bool> {
+    validate_binding(binding)?;
+    check_authority_tx(tx, lease)?;
+    Ok(tx.execute("UPDATE task_effect_receipts SET state=?7 WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND attempt_id=?5 AND receipt_id=?6 AND state='started' AND EXISTS(SELECT 1 FROM task_invocations i WHERE i.account_epoch=?1 AND i.task_id=?2 AND i.owner_epoch=?3 AND i.execution_id=?4 AND i.attempt_id=?5 AND i.receipt_id=?6 AND i.invocation_id=?8 AND i.revision=?9 AND i.digest=?10 AND i.state='admitted')",
+        params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.attempt_id,binding.receipt_id,outcome.as_str(),binding.invocation_id,binding.revision,binding.digest.as_slice()])? == 1)
+}
+
 /// Retained binding read through the caller's connection or transaction, so a freeze inside
 /// one safety transaction never re-enters the non-reentrant connection mutex.
 pub(crate) fn load_invocation_tx(conn: &Connection, lease: &TaskLease, invocation_id: &str) -> anyhow::Result<Option<(InvocationBinding, InvocationState)>> {
@@ -533,12 +542,7 @@ impl LocalStore {
     }
 
     pub(crate) fn finish_receipt(&self, lease: &TaskLease, binding: &InvocationBinding, outcome: ReceiptOutcome) -> anyhow::Result<bool> {
-        validate_binding(binding)?;
-        self.safety(|tx| {
-            check_authority_tx(tx, lease)?;
-            Ok(tx.execute("UPDATE task_effect_receipts SET state=?7 WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND attempt_id=?5 AND receipt_id=?6 AND state='started' AND EXISTS(SELECT 1 FROM task_invocations i WHERE i.account_epoch=?1 AND i.task_id=?2 AND i.owner_epoch=?3 AND i.execution_id=?4 AND i.attempt_id=?5 AND i.receipt_id=?6 AND i.invocation_id=?8 AND i.revision=?9 AND i.digest=?10 AND i.state='admitted')",
-                params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.attempt_id,binding.receipt_id,outcome.as_str(),binding.invocation_id,binding.revision,binding.digest.as_slice()])? == 1)
-        })
+        self.safety(|tx| finish_receipt_tx(tx, lease, binding, outcome))
     }
 
     pub(crate) fn resolve_task(&self, lease: &TaskLease, at: i64) -> anyhow::Result<bool> {

@@ -2,6 +2,12 @@
 
 mod store;
 
+/// Scratch fixtures only: caller owns connection, durability setup and commit/rollback.
+#[cfg(test)]
+pub(crate) fn install_proposal_artifact_scratch_tx(tx: &rusqlite::Transaction<'_>) -> Result<(), ProposalArtifactError> {
+    store::install_proposal_scratch_tx(tx)
+}
+
 /// Host-validated proposal inputs. This is not an authority issuer or a schema installer.
 pub(crate) struct ProposalArtifactInput {
     pub authority: ArtifactAuthority,

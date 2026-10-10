@@ -120,6 +120,11 @@ enum StoreError { Invalid, ReadNamespaceCannotMutate, Removed, RequestBodyChange
 type Result<T, E = StoreError> = std::result::Result<T, E>;
 impl From<rusqlite::Error> for StoreError { fn from(e: rusqlite::Error) -> Self { Self::Storage(e) } }
 fn ensure(ok: bool) -> Result<()> { if ok { Ok(()) } else { Err(StoreError::Invalid) } }
+
+#[cfg(test)]
+pub(super) fn install_proposal_scratch_tx(tx: &Transaction<'_>) -> std::result::Result<(),ProposalArtifactError> {
+    install_schema_tx(tx).map_err(proposal_error)
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum NamespaceKind { LocalTaskEpoch, ImportedAccount }
 #[derive(Clone, Debug)]

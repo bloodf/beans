@@ -71,6 +71,171 @@ macro_rules! ok {
 }
 
 #[tokio::test]
+async fn managed_companion_atomic_receipts_survive_replacement_and_teardown() {
+    for (store, _) in backends().await {
+        let who = name("managed-account");
+        ok!(store.register_identity(&who, "content", &name("machine"), "box", "attestation"));
+        let request = |transaction: &str, expected: i64| ManagedCompanion {
+            account_id: who.clone(), transaction_id: transaction.into(), expected_slot_seq: expected,
+            policy_id: format!("p-{transaction}"), policy_ciphertext: b"opaque-policy".to_vec(),
+            roster_id: format!("r-{transaction}"), roster_ciphertext: b"opaque-roster".to_vec(),
+            checkpoint_transaction_id: None,
+        };
+        let mut first_request = request("first", 0);
+        first_request.policy_id = first_request.transaction_id.clone();
+        let first = ok!(store.commit_managed_companion(first_request.clone(), 0));
+        assert_eq!((first.policy_seq, first.roster_seq), (1, 2));
+        assert_eq!(first.request_sha256, first.request_commitment().unwrap());
+        let before = ok!(store.blobs_since(&who, "m", 0, &[], 500, i64::MAX));
+        let quota = 10_000;
+        let receipt_json = serde_json::to_vec(&first).unwrap();
+        let charge = 2 * (first.policy_ciphertext_len + first.roster_ciphertext_len) + receipt_json.len() as i64;
+        let remaining = quota as i64 - charge;
+        assert!(store.commit_managed_companion(request("stale", 0), 0).await.is_err());
+        assert!(store.commit_managed_companion(request("quota", first.roster_seq), 1).await.is_err());
+        assert_eq!(ok!(store.managed_receipt(&who, "stale")), None);
+        assert_eq!(ok!(store.managed_receipt(&who, "quota")), None);
+        let after = ok!(store.blobs_since(&who, "m", 0, &[], 500, i64::MAX));
+        assert_eq!(after.1, before.1);
+        assert_eq!(after.0.iter().map(|row| (&row.id, row.seq, &row.ciphertext)).collect::<Vec<_>>(), before.0.iter().map(|row| (&row.id, row.seq, &row.ciphertext)).collect::<Vec<_>>());
+        assert!(used(&store, &who, remaining, quota).await);
+        assert!(!used(&store, &who, remaining + 1, quota).await);
+        let mut changed = first_request.clone();
+        changed.roster_ciphertext.push(0);
+        assert!(store.commit_managed_companion(changed, 0).await.is_err());
+        let mut oversized = request("oversized", first.roster_seq);
+        oversized.policy_ciphertext = vec![0; MANAGED_COMPANION_BYTES];
+        assert!(store.commit_managed_companion(oversized, 0).await.is_err());
+        let mut large_receipt = request("large-receipt", first.roster_seq);
+        large_receipt.transaction_id = "t".repeat(1024);
+        assert!(store.commit_managed_companion(large_receipt, 0).await.is_err());
+        let second = ok!(store.commit_managed_companion(request("second", first.roster_seq), 0));
+        assert_eq!((second.policy_seq, second.roster_seq), (3, 4));
+        assert_eq!(ok!(store.commit_managed_companion(first_request.clone(), 1)), first);
+        ok!(store.delete_blob(&who, &first.policy_id));
+        ok!(store.delete_group(&who, "unrelated-group"));
+        assert_eq!(ok!(store.managed_receipt(&who, "first")), Some(first.clone()));
+        for id in [&first.policy_id, &first.roster_id, &second.policy_id, &second.roster_id] {
+            assert!(store.precheck_blob(&who, id, None, 1, 0).await.is_err());
+            assert!(store.insert_blob(blob(&who, id, b"different"), 0).await.is_err());
+        }
+        let other = name("other-account");
+        ok!(store.insert_blob(blob(&other, &first.policy_id, b"independent"), 0));
+        ok!(store.delete_identity(&other, false));
+        let ordinary = ok!(store.insert_blob(NewBlob { kind: "roster".into(), slot: slot("roster", false), expected_slot_seq: Some(second.roster_seq), ..blob(&who, "ordinary-roster", b"ordinary") }, 0));
+        assert_eq!(ordinary.seq, 5);
+        assert_eq!(ok!(store.commit_managed_companion(first_request.clone(), 0)), first);
+        assert!(store.insert_blob(blob(&who, &second.roster_id, b"reuse"), 0).await.is_err());
+        let ordinary_policy = ok!(store.insert_blob(NewBlob { kind: "policy".into(), ..blob(&who, "ordinary-policy", b"ordinary-action") }, 0));
+        assert_eq!(ordinary_policy.seq, 6);
+        let page = ok!(store.managed_cut(&who, "", "", 0, 0, 1));
+        assert_eq!(page.through, 6);
+        assert!(!page.done);
+        assert_eq!(page.next_since, 2);
+        match &page.blobs[0] {
+            ManagedCutBlob::Managed { receipt, policy_ciphertext, roster_ciphertext } => {
+                assert_eq!(receipt, &first);
+                assert_eq!(policy_ciphertext, &first_request.policy_ciphertext);
+                assert_eq!(roster_ciphertext, &first_request.roster_ciphertext);
+            }
+            _ => panic!("Managed history lost receipt subtype"),
+        }
+        assert!(store.managed_cut(&who, &page.context, &page.cut_token, first.policy_seq, page.next_since, 1).await.is_err());
+        assert!(store.managed_cut(&who, "wrong-context", &page.cut_token, page.through, page.next_since, 1).await.is_err());
+        assert!(store.managed_cut(&who, &page.context, "forged", page.through, page.next_since, 1).await.is_err());
+        assert!(store.managed_cut(&who, "", "", first.policy_seq, 0, 1).await.is_err());
+        ok!(store.insert_blob(NewBlob { kind: "policy".into(), ..blob(&who, "after-cut", b"later") }, 0));
+        let tail = ok!(store.managed_cut(&who, &page.context, &page.cut_token, page.through, page.next_since, 1));
+        assert!(!tail.done);
+        assert_eq!(tail.next_since, 4);
+        match &tail.blobs[0] { ManagedCutBlob::Managed { receipt, .. } => assert_eq!(receipt, &second), _ => panic!("Missing second managed receipt") }
+        let final_page = ok!(store.managed_cut(&who, &tail.context, &tail.cut_token, tail.through, tail.next_since, 1));
+        assert!(final_page.done);
+        assert_eq!(final_page.next_since, 6);
+        match &final_page.blobs[0] { ManagedCutBlob::Ordinary { id,seq,ciphertext } => { assert_eq!(id, "ordinary-policy"); assert_eq!(*seq, 6); assert_eq!(ciphertext, b"ordinary-action"); }, _ => panic!("Ordinary policy missing from complete cut") }
+        ok!(store.reset_managed_replay_context(&who));
+        assert!(store.managed_cut(&who, &page.context, &page.cut_token, page.through, page.next_since, 1).await.is_err());
+        let restored = ok!(store.managed_cut(&who, "", "", 0, 0, 1));
+        assert_ne!(restored.context, page.context);
+        ok!(store.delete_identity(&who, true));
+        assert_eq!(ok!(store.managed_receipt(&who, "first")), None);
+        assert!(store.managed_cut(&who, &page.context, &page.cut_token, page.through, page.next_since, 1).await.is_err());
+        ok!(store.register_identity(&who, "content", &name("replacement-machine"), "box", "attestation"));
+        let reset = ok!(store.managed_cut(&who, "", "", 0, 0, 1));
+        assert!(reset.done && reset.blobs.is_empty());
+        assert_ne!(reset.context, page.context);
+        assert!(store.managed_cut(&who, &page.context, &page.cut_token, page.through, page.next_since, 1).await.is_err());
+        ok!(store.delete_identity(&who, false));
+        assert!(used(&store, &who, quota as i64, quota).await);
+        let temporary = name("teardown-without-revoke");
+        ok!(store.register_identity(&temporary, "content", &name("machine"), "box", "attestation"));
+        let mut temporary_request = request("temporary", 0);
+        temporary_request.account_id = temporary.clone();
+        ok!(store.commit_managed_companion(temporary_request, 0));
+        ok!(store.delete_identity(&temporary, false));
+        assert_eq!(ok!(store.managed_receipt(&temporary, "temporary")), None);
+        assert!(managed_capacity(65_535, MANAGED_HISTORY_BYTES - 1, 1, 1024).is_ok());
+        assert!(managed_capacity(65_536, 0, 1, 1).is_err());
+        assert!(managed_capacity(0, MANAGED_HISTORY_BYTES, 1, 1).is_err());
+        assert!(managed_capacity(0, 0, 1, 1025).is_err());
+        let session = ReplaySession::default();
+        let claims = session.claims("account", "incarnation", "", "", 0, 0, 1).unwrap();
+        let token_page = session.page(claims, vec![ManagedCutBlob::Ordinary { id: "policy".into(), seq: 1, ciphertext: vec![1] }], false).unwrap();
+        assert!(ReplaySession::default().claims("account", "incarnation", &token_page.context, &token_page.cut_token, 1, 1, 1).is_err());
+        let mut claims = session.claims("account", "incarnation", "", "", 0, 0, 1).unwrap();
+        claims.envelopes = 1_048_576;
+        assert!(session.page(claims, vec![ManagedCutBlob::Ordinary { id: "limit".into(), seq: 1, ciphertext: vec![1] }], false).is_err());
+        let mut claims = session.claims("account", "incarnation", "", "", 0, 0, 1).unwrap();
+        claims.bytes = 1024 * 1024 * 1024;
+        assert!(session.page(claims, vec![ManagedCutBlob::Ordinary { id: "bytes".into(), seq: 1, ciphertext: vec![1] }], false).is_err());
+        let mut split = first.clone();
+        split.account_id = "account".into();
+        split.request_sha256 = split.request_commitment().unwrap();
+        let claims = session.claims("account", "incarnation", "", "", 0, 0, split.policy_seq).unwrap();
+        assert!(session.page(claims, vec![ManagedCutBlob::Managed { receipt: split, policy_ciphertext: first_request.policy_ciphertext.clone(), roster_ciphertext: first_request.roster_ciphertext.clone() }], false).is_err());
+        let claims = session.claims("account", "incarnation", "", "", 0, 0, 1).unwrap();
+        assert!(session.page(claims, vec![ManagedCutBlob::Ordinary { id: "oversized".into(), seq: 1, ciphertext: vec![0; 3 * 1024 * 1024] }], false).is_err());
+        let mut claims = session.claims("account", "incarnation", "", "", 0, 0, 1).unwrap();
+        claims.expires = now() - 1;
+        let expired = session.page(claims, vec![], false).unwrap();
+        assert!(session.claims("account", "incarnation", &expired.context, &expired.cut_token, 1, 1, 1).is_err());
+        let mut claims = session.claims("account", "incarnation", "", "", 0, 0, 1).unwrap();
+        claims.pages = 65_536;
+        let exhausted = session.page(claims, vec![], false).unwrap();
+        assert!(session.claims("account", "incarnation", &exhausted.context, &exhausted.cut_token, 1, 1, 1).is_err());
+        let bounded = name("metadata-replay-account");
+        ok!(store.register_identity(&bounded, "content", &name("machine"), "box", "attestation"));
+        ok!(store.insert_blob(NewBlob { kind: "policy".into(), ..blob(&bounded, "small-first", b"small") }, 0));
+        let large = vec![255; 3 * 1024 * 1024];
+        ok!(store.insert_blob(NewBlob { kind: "policy".into(), ..blob(&bounded, "oversized-lookahead", &large) }, 0));
+        let prefix = ok!(store.managed_cut(&bounded, "", "", 0, 0, 1));
+        assert_eq!(prefix.through, 2);
+        assert!(!prefix.done);
+        assert_eq!(prefix.next_since, 1);
+        match &prefix.blobs[0] { ManagedCutBlob::Ordinary { id,ciphertext,.. } => { assert_eq!(id, "small-first"); assert_eq!(ciphertext, b"small"); }, _ => panic!("Small prefix missing") }
+        assert!(store.managed_cut(&bounded, &prefix.context, &prefix.cut_token, prefix.through, prefix.next_since, 1).await.is_err());
+        ok!(store.delete_identity(&bounded, false));
+        let oversized = name("oversized-first-account");
+        ok!(store.register_identity(&oversized, "content", &name("machine"), "box", "attestation"));
+        ok!(store.insert_blob(NewBlob { kind: "policy".into(), ..blob(&oversized, "oversized-first", &large) }, 0));
+        assert!(store.managed_cut(&oversized, "", "", 0, 0, 1).await.is_err());
+        ok!(store.delete_identity(&oversized, false));
+        let large_pair = name("large-lookahead-account");
+        ok!(store.register_identity(&large_pair, "content", &name("machine"), "box", "attestation"));
+        let admitted = vec![255; 1024 * 1024];
+        for id in ["large-first", "large-second"] {
+            ok!(store.insert_blob(NewBlob { kind: "policy".into(), ..blob(&large_pair, id, &admitted) }, 0));
+        }
+        let first_page = ok!(store.managed_cut(&large_pair, "", "", 0, 0, 1));
+        assert!(!first_page.done && first_page.next_since == 1);
+        let second_page = ok!(store.managed_cut(&large_pair, &first_page.context, &first_page.cut_token, first_page.through, first_page.next_since, 1));
+        assert!(second_page.done && second_page.next_since == 2);
+        match &second_page.blobs[0] { ManagedCutBlob::Ordinary { id,ciphertext,.. } => { assert_eq!(id, "large-second"); assert_eq!(ciphertext, &admitted); }, _ => panic!("Large second page missing") }
+        ok!(store.delete_identity(&large_pair, false));
+    }
+}
+
+#[tokio::test]
 async fn a_slot_keeps_its_first_and_latest_blob() {
     for (store, _) in backends().await {
         let who = name("identity");

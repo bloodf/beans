@@ -160,6 +160,214 @@ pub struct NewBlob {
     pub payload: Payload,
 }
 
+const MANAGED_RECEIPT_LIMIT: i64 = 65_536;
+const MANAGED_HISTORY_BYTES: i64 = 64 * 1024 * 1024;
+const MANAGED_RECEIPT_BYTES: usize = 1024;
+pub(crate) const MANAGED_COMPANION_BYTES: usize = 32_768;
+
+fn managed_capacity(count: i64, bytes: i64, additional: i64, receipt_bytes: usize) -> ApiResult<()> {
+    if count >= MANAGED_RECEIPT_LIMIT || receipt_bytes > MANAGED_RECEIPT_BYTES
+        || bytes.checked_add(additional).is_none_or(|total| total > MANAGED_HISTORY_BYTES)
+    {
+        return Err(ApiError::too_large("Managed receipt lifetime capacity exceeded"));
+    }
+    Ok(())
+}
+
+/// Staged encrypted companion transaction; never a plaintext managed-action DTO.
+#[derive(Clone)]
+pub struct ManagedCompanion {
+    pub account_id: String,
+    pub transaction_id: String,
+    pub expected_slot_seq: i64,
+    pub policy_id: String,
+    pub policy_ciphertext: Vec<u8>,
+    pub roster_id: String,
+    pub roster_ciphertext: Vec<u8>,
+    pub checkpoint_transaction_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedReceipt {
+    pub schema_version: u8,
+    pub account_id: String,
+    pub transaction_id: String,
+    pub request_sha256: String,
+    pub expected_slot_seq: i64,
+    pub policy_id: String,
+    pub policy_ciphertext_len: i64,
+    pub policy_sha256: String,
+    pub policy_seq: i64,
+    pub roster_id: String,
+    pub roster_ciphertext_len: i64,
+    pub roster_sha256: String,
+    pub roster_seq: i64,
+    #[serde(deserialize_with = "required_nullable")]
+    pub checkpoint_transaction_id: Option<String>,
+}
+
+fn required_nullable<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer)
+}
+
+impl ManagedReceipt {
+    pub fn request_commitment(&self) -> ApiResult<String> {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(&serde_json::json!([
+            "beans-managed-skill-commit", 1, self.account_id, self.transaction_id, self.expected_slot_seq,
+            [self.policy_id, self.policy_ciphertext_len, self.policy_sha256, "managed_skill_policy", null, null, null],
+            [self.roster_id, self.roster_ciphertext_len, self.roster_sha256, "roster", "roster", null, null],
+            self.checkpoint_transaction_id
+        ])).map_err(|_| ApiError::internal("Request commitment serialization failed"))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+}
+
+impl ManagedCompanion {
+    pub fn receipt(&self, policy_seq: i64, roster_seq: i64) -> ApiResult<ManagedReceipt> {
+        crate::routes::validate_managed_companion(self)?;
+        use sha2::{Digest, Sha256};
+        let mut receipt = ManagedReceipt {
+            schema_version: 1, account_id: self.account_id.clone(), transaction_id: self.transaction_id.clone(),
+            request_sha256: String::new(), expected_slot_seq: self.expected_slot_seq,
+            policy_id: self.policy_id.clone(), policy_ciphertext_len: self.policy_ciphertext.len() as i64,
+            policy_sha256: format!("{:x}", Sha256::digest(&self.policy_ciphertext)), policy_seq,
+            roster_id: self.roster_id.clone(), roster_ciphertext_len: self.roster_ciphertext.len() as i64,
+            roster_sha256: format!("{:x}", Sha256::digest(&self.roster_ciphertext)), roster_seq,
+            checkpoint_transaction_id: self.checkpoint_transaction_id.clone(),
+        };
+        receipt.request_sha256 = receipt.request_commitment()?;
+        Ok(receipt)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedCut {
+    pub schema_version: u8,
+    pub context: String,
+    pub cut_token: String,
+    pub through: i64,
+    pub next_since: i64,
+    pub done: bool,
+    pub blobs: Vec<ManagedCutBlob>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "subtype", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ManagedCutBlob {
+    Ordinary { id: String, seq: i64, ciphertext: Vec<u8> },
+    Managed { receipt: ManagedReceipt, policy_ciphertext: Vec<u8>, roster_ciphertext: Vec<u8> },
+}
+
+impl ManagedCutBlob {
+    fn seq(&self) -> i64 {
+        match self { Self::Ordinary { seq, .. } => *seq, Self::Managed { receipt, .. } => receipt.policy_seq }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplayClaims {
+    account: String, incarnation: String, context: String, through: i64, expires: i64,
+    cursor: i64, pages: u32, envelopes: i64, bytes: i64,
+}
+
+struct ReplaySession { nonce: String, key: [u8; 32] }
+
+impl Default for ReplaySession {
+    fn default() -> Self {
+        use rand::RngCore;
+        let mut key = [0; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        Self { nonce: uuid::Uuid::new_v4().to_string(), key }
+    }
+}
+
+impl ReplaySession {
+    fn claims(&self, account: &str, incarnation: &str, context: &str, token: &str, through: i64, since: i64, head: i64) -> ApiResult<ReplayClaims> {
+        use hmac::{Hmac, Mac};
+        if token.is_empty() {
+            if since != 0 || through != 0 || !context.is_empty() { return Err(ApiError::bad_request("First replay requires since=0 and no cut")); }
+            return Ok(ReplayClaims { account: account.into(), incarnation: incarnation.into(), context: format!("{incarnation}:{}", self.nonce), through: head, expires: now() + 300, cursor: 0, pages: 0, envelopes: 0, bytes: 0 });
+        }
+        if token.len() > 4096 { return Err(ApiError::bad_request("Invalid replay token")); }
+        let (payload, signature) = token.split_once('.').ok_or_else(|| ApiError::bad_request("Invalid replay token"))?;
+        let bytes = crate::auth::b64url_decode(payload)?;
+        let signature = crate::auth::b64url_decode(signature)?;
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&self.key).map_err(|_| ApiError::internal("Replay key unavailable"))?;
+        mac.update(&bytes);
+        mac.verify_slice(&signature).map_err(|_| ApiError::conflict("Replay token authentication failed"))?;
+        let claims: ReplayClaims = serde_json::from_slice(&bytes).map_err(|_| ApiError::bad_request("Invalid replay claims"))?;
+        if claims.account != account || claims.incarnation != incarnation || claims.context != format!("{incarnation}:{}", self.nonce)
+            || claims.context != context || claims.through != through || claims.cursor != since || claims.expires <= now()
+            || claims.pages >= 65_537 || since < 0 || since > through || through > head
+        { return Err(ApiError::conflict("Replay context, cut or cursor changed")); }
+        Ok(claims)
+    }
+
+    fn page(&self, mut claims: ReplayClaims, rows: Vec<ManagedCutBlob>, has_more: bool) -> ApiResult<ManagedCut> {
+        use hmac::{Hmac, Mac};
+        if has_more && rows.is_empty() { return Err(ApiError::conflict("Empty nonfinal replay page")); }
+        let mut blobs = Vec::new();
+        let mut page_bytes = 0;
+        let mut last = claims.cursor;
+        let done = !has_more;
+        for row in rows {
+            let seq = row.seq();
+            if seq <= last || seq > claims.through { return Err(ApiError::conflict("Invalid replay order")); }
+            if let ManagedCutBlob::Managed { receipt, policy_ciphertext, roster_ciphertext } = &row {
+                use sha2::Digest;
+                if receipt.schema_version != 1 || receipt.account_id != claims.account || receipt.policy_seq <= 0
+                    || receipt.policy_seq >= receipt.roster_seq || receipt.roster_seq > claims.through
+                    || receipt.request_sha256 != receipt.request_commitment()?
+                    || receipt.policy_ciphertext_len != policy_ciphertext.len() as i64
+                    || receipt.roster_ciphertext_len != roster_ciphertext.len() as i64
+                    || receipt.policy_sha256 != format!("{:x}", sha2::Sha256::digest(policy_ciphertext))
+                    || receipt.roster_sha256 != format!("{:x}", sha2::Sha256::digest(roster_ciphertext))
+                { return Err(ApiError::conflict("Replay companion linkage invalid or cut bisected")); }
+            }
+            let transport_bound = match &row {
+                ManagedCutBlob::Ordinary { ciphertext, .. } => ciphertext.len().saturating_mul(4).saturating_add(8192),
+                ManagedCutBlob::Managed { policy_ciphertext, roster_ciphertext, .. } => policy_ciphertext.len().saturating_add(roster_ciphertext.len()).saturating_mul(4).saturating_add(8192),
+            };
+            if transport_bound > 8 * 1024 * 1024 { return Err(ApiError::too_large("Replay envelope exceeds encoded page bound")); }
+            let size = serde_json::to_vec(&row).map_err(|_| ApiError::internal("Replay serialization failed"))?.len();
+            if !blobs.is_empty() || page_bytes + size + 8192 > 8 * 1024 * 1024 {
+                return Err(ApiError::too_large("Replay envelope exceeds page bound"));
+            }
+            page_bytes += size;
+            claims.envelopes += 1;
+            claims.bytes += match &row { ManagedCutBlob::Ordinary { ciphertext, .. } => ciphertext.len() as i64, ManagedCutBlob::Managed { policy_ciphertext, .. } => policy_ciphertext.len() as i64 };
+            if claims.envelopes > 1_048_576 || claims.bytes > 1024 * 1024 * 1024 { return Err(ApiError::too_large("Replay history bound exceeded")); }
+            last = match &row { ManagedCutBlob::Ordinary { seq, .. } => *seq, ManagedCutBlob::Managed { receipt, .. } => receipt.roster_seq };
+            blobs.push(row);
+        }
+        claims.pages += 1;
+        claims.cursor = if done { claims.through } else { last };
+        let payload = serde_json::to_vec(&claims).map_err(|_| ApiError::internal("Replay token serialization failed"))?;
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&self.key).map_err(|_| ApiError::internal("Replay key unavailable"))?;
+        mac.update(&payload);
+        let cut_token = format!("{}.{}", crate::auth::b64url_encode(&payload), crate::auth::b64url_encode(&mac.finalize().into_bytes()));
+        Ok(ManagedCut { schema_version: 1, context: claims.context, cut_token, through: claims.through, next_since: claims.cursor, done, blobs })
+    }
+}
+
+fn validate_replay_payload_size(policy_bytes: i64, roster_bytes: i64) -> ApiResult<()> {
+    if policy_bytes < 0 || roster_bytes < 0
+        || policy_bytes.checked_add(roster_bytes).and_then(|bytes| bytes.checked_mul(4)).and_then(|bytes| bytes.checked_add(8192)).is_none_or(|bytes| bytes > 8 * 1024 * 1024)
+    {
+        return Err(ApiError::too_large("Replay envelope exceeds encoded page bound"));
+    }
+    Ok(())
+}
+
+fn validate_managed_cut(limit: i64) -> ApiResult<()> {
+    if !(1..=1024).contains(&limit) { return Err(ApiError::bad_request("Replay page limit out of range")); }
+    Ok(())
+}
+
 /// What a deleted identity leaves for the caller to finish: its machines' tokens and sockets
 /// to end, and its `file` objects to remove.
 pub struct DeletedIdentity {
@@ -222,6 +430,7 @@ impl Revoked {
 pub struct Local {
     pub hub: Hub,
     pub revoked: Revoked,
+    replay: ReplaySession,
 }
 
 /// Something every relay process has to hear about. With SQLite there is one process and the
@@ -281,6 +490,8 @@ pub trait Store: Send + Sync {
     /// Deletes the identity and everything the relay holds for it. With `revoke` its machines'
     /// keys are remembered as revoked, so every Device gets `410` and forgets the identity;
     /// without, a Device that comes back registers again and keeps what it has.
+    /// True account teardown also deletes retained managed receipts and encrypted history,
+    /// regardless of `revoke`; blob/group deletion and roster supersession never do.
     async fn delete_identity(&self, identity_pubkey: &str, revoke: bool) -> ApiResult<DeletedIdentity>;
     /// Identities with no sign of life since `before`: registered earlier, every machine last
     /// seen earlier, the newest blob older, and no socket open now.
@@ -297,6 +508,13 @@ pub trait Store: Send + Sync {
     /// Stores a blob under the identity's next sequence number. A known id returns its
     /// existing seq. `quota_bytes` of 0 means unlimited.
     async fn insert_blob(&self, blob: NewBlob, quota_bytes: u64) -> ApiResult<Inserted>;
+    /// Staged only. Receipt lookup precedes CAS; exact retries return the original receipt.
+    async fn commit_managed_companion(&self, request: ManagedCompanion, quota_bytes: u64) -> ApiResult<ManagedReceipt>;
+    async fn managed_receipt(&self, account_id: &str, transaction_id: &str) -> ApiResult<Option<ManagedReceipt>>;
+    /// Empty context/token and through=0 capture first committed snapshot; continuation is authenticated.
+    async fn managed_cut(&self, account_id: &str, context: &str, cut_token: &str, through: i64, since: i64, limit: i64) -> ApiResult<ManagedCut>;
+    /// Staged maintenance primitive: rotate restored account storage context before admission.
+    async fn reset_managed_replay_context(&self, account_id: &str) -> ApiResult<()>;
     /// A page of blobs after `since` that this machine may see (unaddressed ones and its own
     /// envelopes), and the identity's head seq. The page ends at `limit` rows or before the
     /// row that would take it past `max_bytes`, and always holds one row when there is one.

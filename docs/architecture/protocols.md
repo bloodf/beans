@@ -50,6 +50,8 @@ Custom credentials and provider statuses add optional `capabilities { context_wi
 - A queued roster from a store created before baseline persistence has no evidence to distinguish old state from offline edits. If its observed slot changed, sync detects the conflict in a non-destructive roster preview, leaves its ciphertext, local transcript, file outbox, and creation markers queued, applies current policy events, and reports manual reconciliation instead of uploading stale state. With an unchanged slot, the queued content can upload after current policy is imposed.
 - A roster-validation conflict emits disconnected `relay.status` with its `error.message` even when the sync socket successfully upgraded before preview or pull failed. Repeated upgrades and conflict failures report the same cause while retaining queued ciphertext and its frozen baseline and leaving the remote roster unchanged. Ordinary post-connection socket loss remains quiet during retry, and stale bearers retry authentication without an error warning. This status behavior does not change fieldwise merge precedence or roster CAS.
 
+See [Managed policy receipts and replay](managed-policy-replay.md) for the staged managed-policy commit, receipt retention and authenticated replay primitives.
+
 ```
 App_B → CLI_B
 CLI_B encrypts user message + job-for-A → relay

@@ -125,6 +125,15 @@ fn ensure(ok: bool) -> Result<()> { if ok { Ok(()) } else { Err(StoreError::Inva
 pub(super) fn install_proposal_scratch_tx(tx: &Transaction<'_>) -> std::result::Result<(),ProposalArtifactError> {
     install_schema_tx(tx).map_err(proposal_error)
 }
+
+#[cfg(test)]
+pub(super) fn drop_proposal_scratch_tx(tx:&Transaction<'_>)->std::result::Result<(),ProposalArtifactError> {
+    for definition in ARTIFACT_SCHEMA.split(';').filter(|sql|!sql.trim().is_empty()) {
+        let tokens=schema_tokens(definition).map_err(proposal_error)?;
+        tx.execute_batch(&format!("DROP TABLE {}",tokens[2])).map_err(|_|ProposalArtifactError::Storage)?;
+    }
+    Ok(())
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum NamespaceKind { LocalTaskEpoch, ImportedAccount }
 #[derive(Clone, Debug)]
@@ -190,7 +199,7 @@ fn schema_tokens(sql: &str) -> Result<Vec<String>> {
         } else if matches!(ch,'"'|'`'|'[') {
             let end=if ch=='[' {']'}else{ch};let mut token=String::new();let mut closed=false;
             while let Some(next)=chars.next() {if next==end {closed=true;break}token.push(next.to_ascii_lowercase());}
-            ensure(closed)?;tokens.push(token);
+            ensure(closed)?;tokens.push(format!("quoted:{token}"));
         } else if ch.is_ascii_alphanumeric() || ch=='_' {
             let mut token=String::from(ch.to_ascii_lowercase());while chars.peek().is_some_and(|c|c.is_ascii_alphanumeric() || *c=='_') {token.push(chars.next().unwrap().to_ascii_lowercase());}tokens.push(token);
         } else {tokens.push(ch.to_string());}
@@ -508,5 +517,8 @@ mod tests {
             let tx=db.transaction().unwrap();tx.execute_batch(change).unwrap();assert!(validate_proposal_artifact_schema(&tx,false).is_err());assert!(install_proposal_artifact_schema_tx(&tx).is_err());tx.rollback().unwrap();
         }
         let tx=db.transaction().unwrap();tx.execute_batch("DROP TABLE artifact_cleanup").unwrap();tx.execute_batch(&ARTIFACT_SCHEMA.split(';').find(|s|s.contains("CREATE TABLE artifact_cleanup")).unwrap().replace("'pending','removed','blocked'","'pending','blocked'")).unwrap();assert!(validate_proposal_artifact_schema(&tx,true).is_err());tx.rollback().unwrap();
+        for (table,from,to) in [("artifact_revisions","length(content_hash)=64","length(content_hash)=\"64\""),("artifact_cleanup","'pending','removed','blocked'","'pending','removed','BLOCKED'")] {
+            let tx=db.transaction().unwrap();tx.execute_batch(&format!("DROP TABLE {table}")).unwrap();let definition=ARTIFACT_SCHEMA.split(';').find(|sql|sql.contains(&format!("CREATE TABLE {table}("))).unwrap();tx.execute_batch(&definition.replace(from,to)).unwrap();assert!(validate_proposal_artifact_schema(&tx,true).is_err());assert!(install_proposal_artifact_schema_tx(&tx).is_err());tx.rollback().unwrap();
+        }
     }
 }

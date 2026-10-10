@@ -18,6 +18,11 @@ pub(crate) fn install_proposal_artifact_scratch_tx(tx: &rusqlite::Transaction<'_
     store::install_proposal_scratch_tx(tx)
 }
 
+#[cfg(test)]
+pub(crate) fn drop_proposal_artifact_scratch_tx(tx:&rusqlite::Transaction<'_>)->Result<(),ProposalArtifactError> {
+    store::drop_proposal_scratch_tx(tx)
+}
+
 /// Host-validated proposal inputs. This is not an authority issuer or a schema installer.
 pub(crate) struct ProposalArtifactInput {
     pub authority: ArtifactAuthority,

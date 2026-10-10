@@ -1655,7 +1655,11 @@ mod tests {
         let complete = json!({"schema_version":1,"context":"incarnation:session","cut_token":"opaque",
             "through":2,"next_since":2,"done":true,"blobs":[{"subtype":"managed","receipt":receipt,
                 "policy_ciphertext":policy,"roster_ciphertext":roster}]});
-        async fn list(HttpState(values): HttpState<Arc<(Value,Value)>>,
+        let rejected_pause = json!({"id":"must-not-apply","kind":"policy","recipient_machine_pubkey":null,
+            "seq":1,"created_at":1,"ciphertext":crate::keys::b64(&crate::crypto::encrypt_json(
+                &[31;32],"policy",&PolicyBlob { paused:Some(true),bot_id:None,capabilities:None,removed:false,
+                    version:PolicyVersion { counter:9,device_id:"remote".into() } }).unwrap())});
+        async fn list(HttpState(values): HttpState<Arc<(Value,Value,Value)>>,
             Query(query): Query<std::collections::HashMap<String,String>>) -> Json<Value> {
             if query.contains_key("receipt_transaction_id") { return Json(values.1.clone()); }
             if query.contains_key("policy_replay") {
@@ -1663,7 +1667,7 @@ mod tests {
                     values.0[usize::from(query.contains_key("cut_token"))].clone()
                 } else { values.0.clone() });
             }
-            Json(json!({"blobs":[],"seq":0}))
+            Json(values.2.clone())
         }
         let mut partial = complete.clone(); partial["through"] = json!(1); partial["next_since"] = json!(1);
         let mut mismatch = complete.clone(); mismatch["blobs"][0]["policy_ciphertext"] = json!([9,2,3]);
@@ -1674,11 +1678,15 @@ mod tests {
         let tail = json!({"schema_version":1,"context":"incarnation:session","cut_token":"next",
             "through":3,"next_since":3,"done":true,"blobs":[]});
         let mut stale = tail.clone(); stale["context"] = json!("replacement:session");
+        let downgrade = json!({"blobs":[],"seq":3});
         for (page, lookup, accepted) in [(partial,receipt.clone(),false),(mismatch,receipt.clone(),false),
             (complete.clone(),wrong_receipt,false),(unsupported,receipt.clone(),false),
             (json!([prefix.clone(),stale]),receipt.clone(),false),
+            (json!([prefix.clone(),downgrade]),receipt.clone(),false),
             (json!([prefix,tail]),receipt.clone(),true),(complete,receipt,true)] {
-            let server = Router::new().route("/v1/blobs",get(list)).with_state(Arc::new((page,lookup)));
+            let legacy = if accepted { json!({"blobs":[],"seq":0}) }
+                else { json!({"blobs":[rejected_pause.clone()],"seq":1}) };
+            let server = Router::new().route("/v1/blobs",get(list)).with_state(Arc::new((page,lookup,legacy)));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}",listener.local_addr().unwrap());
             let task = tokio::spawn(async move { axum::serve(listener,server).await.unwrap() });
@@ -1692,6 +1700,43 @@ mod tests {
             assert_eq!(first_sync_quietly(app,&url,"synthetic",&machine).await.is_ok(),accepted);
             assert_eq!(projection(&app.state.lock().unwrap()),before);
             assert_eq!(projection(&app.store.load_state().unwrap()),durable);
+            task.abort();
+            let _ = task.await;
+        }
+
+        // A protocol-5 relay ignores the optional query and returns its ordinary page.
+        // Both callers must still apply the encrypted Pause, never managed authority.
+        async fn legacy_list(HttpState(blob): HttpState<Value>,
+            Query(query): Query<std::collections::HashMap<String,String>>) -> Json<Value> {
+            let since = query["since"].parse::<i64>().unwrap();
+            Json(json!({"blobs":if since == 0 { vec![blob] } else { vec![] },"seq":1}))
+        }
+        for controls in [true,false] {
+            let scratch = scratch_app();
+            let app = &scratch.0;
+            crate::identity::create(app,Some("Legacy Device".into())).unwrap();
+            let machine = app.machine_file().unwrap();
+            let pause = PolicyBlob { paused:Some(true),bot_id:None,capabilities:None,removed:false,
+                version:PolicyVersion { counter:7,device_id:"legacy-device".into() } };
+            let blob = json!({"id":"legacy-pause","kind":"policy","recipient_machine_pubkey":null,
+                "seq":1,"created_at":1,"ciphertext":crate::keys::b64(
+                    &crate::crypto::encrypt_json(&app.dek().unwrap(),"policy",&pause).unwrap())});
+            let server = Router::new().route("/v1/blobs",get(legacy_list))
+                .route("/v1/groups/{group}/blobs",get(|| async { Json(json!({"slots":[],"has_more":false})) }))
+                .with_state(blob);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}",listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener,server).await.unwrap() });
+            assert!(!app.is_paused());
+            if controls { pull_controls(app,&url,"synthetic",&machine).await.unwrap(); }
+            else { first_sync_quietly(app,&url,"synthetic",&machine).await.unwrap(); }
+            let state = app.state.lock().unwrap();
+            assert!(state.paused);
+            assert_eq!(state.pause_version,pause.version);
+            assert_eq!(state.last_seq,if controls { 0 } else { 1 });
+            assert_eq!(state.roster_slot_seq,0);
+            drop(state);
+            assert!(app.store.load_state().unwrap().paused);
             task.abort();
             let _ = task.await;
         }

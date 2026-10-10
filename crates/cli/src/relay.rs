@@ -95,6 +95,48 @@ struct PolicyCut {
     blobs: Vec<PolicyCutBlob>,
 }
 
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyPolicyPage {
+    blobs: Vec<LegacyPolicyBlob>,
+    seq: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyPolicyBlob {
+    id: String,
+    kind: String,
+    #[serde(deserialize_with = "required_policy_nullable")]
+    recipient_machine_pubkey: Option<String>,
+    seq: i64,
+    ciphertext: String,
+    created_at: i64,
+}
+
+pub(crate) enum PolicyInspection {
+    LegacyTransport,
+    CompleteOpaqueCut,
+}
+
+impl LegacyPolicyPage {
+    fn validate(&self) -> RelayResult<()> {
+        let mut last = 0;
+        let mut ids = std::collections::HashSet::new();
+        if self.seq < 0 || self.blobs.len() > 500 { return Err(invalid_policy_replay()); }
+        for blob in &self.blobs {
+            let ciphertext = crate::keys::unb64(&blob.ciphertext).map_err(|_| invalid_policy_replay())?;
+            if !policy_blob_id(&blob.id) || !ids.insert(&blob.id) || blob.kind != "policy"
+                || blob.recipient_machine_pubkey.is_some() || blob.seq <= last || blob.seq > self.seq
+                || blob.created_at < 0 || ciphertext.is_empty() || ciphertext.len() > 4 * 1024 * 1024
+            { return Err(invalid_policy_replay()); }
+            last = blob.seq;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "subtype", rename_all = "snake_case", deny_unknown_fields)]
 enum PolicyCutBlob {
@@ -479,7 +521,7 @@ impl RelayClient {
     }
 
     /// Inspects opaque commitments only. Completion never supplies activation authority.
-    pub(crate) async fn inspect_policy_replay(&self, url: &str, token: &str, account: &str) -> RelayResult<()> {
+    pub(crate) async fn inspect_policy_replay(&self, url: &str, token: &str, account: &str) -> RelayResult<PolicyInspection> {
         let mut cursor = 0;
         let mut cut: Option<(String, String, i64)> = None;
         let mut blob_ids = std::collections::HashSet::new();
@@ -491,11 +533,22 @@ impl RelayClient {
             if let Some((context, token, through)) = &cut {
                 query.extend([("context", context.clone()), ("cut_token", token.clone()), ("through", through.to_string())]);
             }
-            let page: PolicyCut = tokio::time::timeout_at(deadline, async {
+            let page: Result<PolicyCut, PolicyInspection> = tokio::time::timeout_at(deadline, async {
                 let response = self.http().get(format!("{url}/v1/blobs")).bearer_auth(token).query(&query)
                     .timeout(std::time::Duration::from_secs(60)).send().await?;
-                Self::policy_response(response).await
+                let bytes = Self::policy_response_bytes(response).await?;
+                if cut.is_none() {
+                    if let Ok(legacy) = serde_json::from_slice::<LegacyPolicyPage>(&bytes) {
+                        legacy.validate()?;
+                        return Ok(Err(PolicyInspection::LegacyTransport));
+                    }
+                }
+                serde_json::from_slice::<PolicyCut>(&bytes).map(Ok).map_err(|_| invalid_policy_replay())
             }).await.map_err(|_| invalid_policy_replay())??;
+            let page = match page {
+                Ok(page) => page,
+                Err(outcome) => return Ok(outcome),
+            };
             if page.schema_version != 1 || !policy_identifier(&page.context, 1024)
                 || !policy_identifier(&page.cut_token, 4096) || page.through < cursor
                 || page.blobs.len() > 1 || (!page.done && page.blobs.is_empty())
@@ -531,14 +584,18 @@ impl RelayClient {
             }
             if page.next_since != if page.done { page.through } else { last }
                 || (!page.done && page.next_since <= cursor) { return Err(invalid_policy_replay()); }
-            if page.done { return Ok(()); }
+            if page.done { return Ok(PolicyInspection::CompleteOpaqueCut); }
             cursor = page.next_since;
             cut = Some((page.context, page.cut_token, page.through));
         }
         Err(invalid_policy_replay())
     }
 
-    async fn policy_response<T: serde::de::DeserializeOwned>(mut response: reqwest::Response) -> RelayResult<T> {
+    async fn policy_response<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> RelayResult<T> {
+        serde_json::from_slice(&Self::policy_response_bytes(response).await?).map_err(|_| invalid_policy_replay())
+    }
+
+    async fn policy_response_bytes(mut response: reqwest::Response) -> RelayResult<Vec<u8>> {
         let status = response.status();
         if !status.is_success() {
             return Err(RelayError { status: Some(status.as_u16()), message: "Managed policy replay refused".into() });
@@ -549,7 +606,7 @@ impl RelayClient {
             if chunk.len() > POLICY_PAGE_BYTES - bytes.len() { return Err(invalid_policy_replay()); }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(|_| invalid_policy_replay())
+        Ok(bytes)
     }
 
     /// A chat backwards: the `limit` messages placed below `before` (the newest without it),

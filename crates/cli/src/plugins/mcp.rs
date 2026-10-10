@@ -2472,6 +2472,147 @@ impl Decision {
     }
 }
 
+/// What a proposal call returns. `Unknown` is an ordinary result, never an error: the model is
+/// told the outcome is uncertain and must not propose the same draft again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalDisposition {
+    /// Denied, dismissed, expired, Always refused, or the card was replaced: the user did not
+    /// authorize this draft.
+    NotApproved,
+    /// This call wrote the draft and the write was acknowledged durably.
+    Saved,
+    /// A completed acceptance for this origin was found by lookup; nothing was written again.
+    AlreadySaved,
+    /// Authorized, then definitively refused before any I/O.
+    NotDispatched,
+    /// Started, admitted, or an unacknowledged commit or write: the draft may or may not exist.
+    Unknown,
+}
+
+impl From<crate::local_store::ProposalSaveOutcome> for ProposalDisposition {
+    fn from(outcome: crate::local_store::ProposalSaveOutcome) -> Self {
+        match outcome {
+            crate::local_store::ProposalSaveOutcome::Saved => Self::Saved,
+            crate::local_store::ProposalSaveOutcome::AlreadySaved => Self::AlreadySaved,
+            crate::local_store::ProposalSaveOutcome::NotDispatched => Self::NotDispatched,
+            crate::local_store::ProposalSaveOutcome::Unknown => Self::Unknown,
+        }
+    }
+}
+
+pub const PROPOSAL_UNKNOWN_SUMMARY: &str = "Save outcome unknown: the draft may or may not be written. Not retried.";
+pub const PROPOSAL_CHANGED_SUMMARY: &str = "Proposal changed while awaiting approval.";
+
+/// The frozen invocation a proposal card is bound to, prepared before the question is asked.
+pub(crate) struct ProposalInvocation {
+    pub card_id: String,
+    pub chat_id: String,
+    pub bot_id: String,
+    pub binding: crate::local_store::InvocationBinding,
+    /// Digest of the exact draft the question asked about, so an answer cannot approve a
+    /// replacement written while the Runner waited.
+    pub snapshot_digest: [u8;32],
+    pub workdir: std::path::PathBuf,
+    pub path: String,
+    pub content: String,
+    pub title: Option<String>,
+    pub content_option: Option<String>,
+    pub path_option: Option<String>,
+}
+
+/// One live proposal wait. Retained after the answer arrives: removing the oneshot waiter must
+/// not remove the record that binds the approval to the invocation it was asked for.
+pub(crate) struct ProposalOccurrence {
+    pub generation: u64,
+    pub binding_digest: [u8;32],
+    pub snapshot_digest: [u8;32],
+    /// Set once, under the map lock, by the only writer that may answer a proposal.
+    pub answered_by: Option<super::AnsweringDevice>,
+}
+
+/// An approval that can only be built from a retained occurrence and an authenticated device.
+pub(crate) struct HostApproval {
+    pub card_id: String,
+    pub generation: u64,
+    pub binding: crate::local_store::InvocationBinding,
+    pub snapshot_digest: [u8;32],
+    pub answering_device: String,
+}
+
+/// The only place a durable outcome becomes card fields. No new decision string is introduced:
+/// an uncertain save reads as `failed` with a constant summary, so clients need no change.
+pub(crate) fn settle_permission_card(body: &mut Body, outcome: crate::local_store::ProposalSaveOutcome, refusal: Option<&str>) {
+    let Body::Permission { decision, summary, .. } = body else { return };
+    match outcome {
+        crate::local_store::ProposalSaveOutcome::Saved | crate::local_store::ProposalSaveOutcome::AlreadySaved => { *decision = "allowed".into(); }
+        crate::local_store::ProposalSaveOutcome::NotDispatched => {
+            *decision = "failed".into();
+            if let Some(refusal) = refusal { *summary = refusal.to_string(); }
+        }
+        crate::local_store::ProposalSaveOutcome::Unknown => {
+            *decision = "failed".into();
+            *summary = PROPOSAL_UNKNOWN_SUMMARY.into();
+        }
+    }
+}
+
+/// A decision with no authorized device is not an approval, whatever woke the waiter.
+fn host_approval(occurrence: &ProposalOccurrence, decision: Decision, invocation: &ProposalInvocation) -> Option<HostApproval> {
+    if decision != Decision::Allowed { return None; }
+    let device = occurrence.answered_by.as_ref()?;
+    if occurrence.snapshot_digest != invocation.snapshot_digest || occurrence.binding_digest != invocation.binding.digest { return None; }
+    Some(HostApproval {
+        card_id: invocation.card_id.clone(),
+        generation: occurrence.generation,
+        binding: invocation.binding.clone(),
+        snapshot_digest: occurrence.snapshot_digest,
+        answering_device: device.0.clone(),
+    })
+}
+
+/// Registers the proposal waiter exactly as `await_answer` does, and additionally retains the
+/// occurrence. The record is removed by `OccurrenceGuard` on every exit, after the final save.
+struct OccurrenceGuard<'a>(&'a Arc<App>, String);
+impl Drop for OccurrenceGuard<'_> {
+    fn drop(&mut self) { self.0.proposal_occurrences.lock().unwrap().remove(&self.1); }
+}
+
+/// Posts the question and waits. Unlike `await_answer` the record survives the answer, so the
+/// approval that arrives is still bound to this invocation.
+async fn await_proposal_answer(app: &Arc<App>, chat_id: &str, card_id: &str, invocation: &ProposalInvocation, cancel: &CancellationToken, ask: impl FnOnce()) -> Decision {
+    let generation = app.proposal_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    {
+        let mut occurrences = app.proposal_occurrences.lock().unwrap();
+        if occurrences.contains_key(card_id) { return Decision::Denied; }
+        occurrences.insert(card_id.to_string(), ProposalOccurrence {
+            generation,
+            binding_digest: invocation.binding.digest,
+            snapshot_digest: invocation.snapshot_digest,
+            answered_by: None,
+        });
+    }
+    let _guard = OccurrenceGuard(app, card_id.to_string());
+    await_answer(app, chat_id, card_id, None, cancel, ask).await
+}
+
+/// The authenticated path for a proposal answer. `Always` is refused: a proposal never becomes
+/// a standing rule. The answering Device is recorded once, before the waiter is woken.
+pub(super) fn answer_proposal(app: &Arc<App>, message_id: &str, decision: Decision, by: super::AnsweringDevice) -> bool {
+    if decision == Decision::Always { return false; }
+    {
+        let mut occurrences = app.proposal_occurrences.lock().unwrap();
+        let Some(occurrence) = occurrences.get_mut(message_id) else { return false };
+        if occurrence.answered_by.is_some() { return false; }
+        occurrence.answered_by = Some(by);
+    }
+    // The oneshot is woken here rather than through `answer`, which refuses every proposal id.
+    // The retained record is what the approval is later built from.
+    match app.pending_permissions.lock().unwrap().remove(message_id) {
+        Some((_, tx)) => tx.send(decision).is_ok(),
+        None => false,
+    }
+}
+
 /// Posts a permission card in the chat and waits for the user's answer, from this Device or
 /// any paired one. `reason` is why Auto-review paused the action. `always` adds an
 /// Auto-review rule for the exact tool before answering.
@@ -2539,79 +2680,161 @@ pub async fn ask_with_rule(
     decision
 }
 
-/// One model call has one durable card, even after a repeated turn or relay sync.
-pub async fn propose(app: &Arc<App>, chat_id: &str, bot_id: &str, call_id: &str, title: Option<String>, content: Option<String>, path: Option<String>, cancel: &CancellationToken) -> Result<bool, String> {
+/// One model call has one durable card, even after a repeated turn or relay sync. The draft is
+/// written only after a bound, authenticated approval and a task-bound admission.
+pub async fn propose(app: &Arc<App>, chat_id: &str, bot_id: &str, call_id: &str, title: Option<String>, content: Option<String>, path: Option<String>, cancel: &CancellationToken) -> Result<ProposalDisposition, String> {
     if title.as_deref().is_some_and(|text| text.chars().count() > 120 || text.contains('\0') || text.contains('\r'))
         || path.as_deref().is_some_and(|text| text.chars().count() > 240 || text.chars().any(|ch| matches!(ch, '\0' | '\n' | '\r' | '\\')))
         || content.as_deref().is_some_and(|text| text.chars().count() > 20_000 || text.len() > 65_536) {
         return Err("Proposal exceeds its title, path, or content limit.".into());
     }
-    let Some(path_value) = path.as_deref() else { return Err("Proposal path is required.".into()); };
-    let relative = std::path::Path::new(path_value);
+    let Some(path_value) = path.clone() else { return Err("Proposal path is required.".into()); };
+    let relative = std::path::Path::new(&path_value);
     if path_value.is_empty() || relative.is_absolute() || path_value.split('/').any(|part| part.is_empty() || part == "." || part == "..")
         || relative.components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
         return Err("Proposal path must stay inside bot workspace.".into());
     }
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!("{chat_id}\0{bot_id}\0{call_id}").as_bytes());
-    let card_id = format!("msg-propose-{digest:x}");
-    if let Some(card) = app.message(chat_id, &card_id) {
-        return match (&card.author, card.body) {
-            (Author::Bot { bot_id: author }, Body::Permission { plugin_id, tool, decision, title: existing_title, content: existing_content, path: existing_path, .. })
-                if author == bot_id && plugin_id == "computer" && tool == "propose" && existing_title == title && existing_content == content && existing_path == path && decision == "allowed" => Ok(true),
-            (Author::Bot { bot_id: author }, Body::Permission { plugin_id, tool, decision, title: existing_title, content: existing_content, path: existing_path, .. })
-                if author == bot_id && plugin_id == "computer" && tool == "propose" && existing_title == title && existing_content == content && existing_path == path && decision != "pending" => Ok(false),
-            _ => Err("Proposal already awaits review or its draft changed.".into()),
-        };
+    // The card id is the durable invocation key: host-derived, execution-independent, and
+    // recoverable from the card row, so a replay finds its own evidence.
+    let card_id = format!("msg-propose-{:x}", Sha256::digest(format!("{chat_id}\0{bot_id}\0{call_id}").as_bytes()));
+    let body_matches = |card: &Message| matches!(&card.body, Body::Permission { plugin_id, tool, title: existing_title, content: existing_content, path: existing_path, .. }
+        if plugin_id == "computer" && tool == "propose" && existing_title == &title && existing_content == &content && existing_path == &path);
+    let card_is_ours = |card: &Message| matches!(&card.author, Author::Bot { bot_id: author } if author == bot_id);
+
+    // A live wait for this origin owns it: a concurrent duplicate cannot register a second one.
+    if app.proposal_occurrences.lock().unwrap().contains_key(&card_id) {
+        return Err("Proposal already awaits review or its draft changed.".into());
     }
-    let label = title.as_deref().unwrap_or(path_value).chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch }).collect::<String>();
-    let summary = format!("Review draft: {label}");
-    let mut card = Message::new(chat_id, Author::Bot { bot_id: bot_id.to_string() }, Body::Permission {
+    let existing = app.message(chat_id, &card_id);
+    // A store fault here is not a refusal: the outcome cannot be known.
+    match app.proposal_outcome(&card_id) {
+        Err(_) => return Ok(ProposalDisposition::Unknown),
+        // Durable evidence outranks the row: it survives a crash between admission and
+        // publication, and repairs a stale row without ever dispatching again.
+        Ok(Some(outcome)) => {
+            let Some(card) = existing else { return Ok(outcome.into()) };
+            if !card_is_ours(&card) || !body_matches(&card) {
+                return Err("Proposal already awaits review or its draft changed.".into());
+            }
+            let mut repaired = card;
+            settle_permission_card(&mut repaired.body, outcome, None);
+            if repaired != card { app.upsert_message(repaired, true); }
+            return Ok(outcome.into());
+        },
+        Ok(None) => {},
+    }
+    if let Some(card) = existing {
+        if !card_is_ours(&card) || !body_matches(&card) {
+            return Err("Proposal already awaits review or its draft changed.".into());
+        }
+        let Body::Permission { decision, summary, .. } = &card.body else { unreachable!() };
+        return Ok(match decision.as_str() {
+            "pending" => return Err("Proposal already awaits review or its draft changed.".into()),
+            // A row that claims success without a completed acceptance is historic, not proof.
+            "allowed" => ProposalDisposition::Unknown,
+            "denied" | "dismissed" | "expired" => ProposalDisposition::NotApproved,
+            _ if summary == PROPOSAL_UNKNOWN_SUMMARY => ProposalDisposition::Unknown,
+            _ if summary == PROPOSAL_CHANGED_SUMMARY => ProposalDisposition::NotApproved,
+            _ => ProposalDisposition::NotDispatched,
+        });
+    }
+
+    // No row and no evidence: freeze this origin's invocation, or load the retained one. A
+    // refusal here means nothing was posted, approved or written, so a retry is safe.
+    let lease = app.task_execution(call_id.split_once(':').map_or(call_id, |(job, _)| job))
+        .map_err(|_| "Proposal could not be prepared.".to_string())?
+        .ok_or_else(|| "Proposal could not be prepared.".to_string())?;
+    let Some(bot) = app.bot(bot_id) else { return Err("Bot or valid proposal no longer exists.".into()); };
+    let content_text = content.clone().unwrap_or_default();
+    let workdir = bot.working_directory(&app.config.home);
+    let mut binding_digest = [0u8;32];
+    binding_digest.copy_from_slice(&Sha256::digest(format!("{chat_id}\0{bot_id}\0{call_id}\0{path_value}\0{content_text}").as_bytes()));
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let frozen = app.freeze_proposal_invocation(&lease, &card_id, 1, binding_digest, &format!("attempt-{nonce}"), &format!("receipt-{nonce}"))
+        .map_err(|_| "Proposal could not be prepared.".to_string())?;
+    if frozen.binding.digest != binding_digest {
+        return Err("Proposal already awaits review or its draft changed.".into());
+    }
+    match frozen.state {
+        crate::local_store::InvocationState::Pending => {},
+        crate::local_store::InvocationState::Denied | crate::local_store::InvocationState::Dismissed | crate::local_store::InvocationState::Expired => return Ok(ProposalDisposition::NotApproved),
+        crate::local_store::InvocationState::Admitted => return Ok(ProposalDisposition::Unknown),
+        crate::local_store::InvocationState::Authorized => return Ok(ProposalDisposition::NotDispatched),
+    }
+    ask_and_dispatch(app, lease, ProposalInvocation { card_id, chat_id: chat_id.to_string(), bot_id: bot_id.to_string(), binding: frozen.binding, snapshot_digest: binding_digest, workdir, path: path_value, content: content_text, title: title.clone(), content_option: content.clone(), path_option: path.clone() }, cancel).await
+}
+
+/// Asks about a frozen origin, then either dispatches it under a bound approval or settles the
+/// card from what was actually decided.
+async fn ask_and_dispatch(app: &Arc<App>, lease: crate::local_store::TaskLease, invocation: ProposalInvocation, cancel: &CancellationToken) -> Result<ProposalDisposition, String> {
+    let mut card = Message::new(&invocation.chat_id, Author::Bot { bot_id: invocation.bot_id.clone() }, Body::Permission {
         plugin_id: "computer".into(), plugin_name: this_runner(app), tool: "propose".into(),
-        summary, arguments: Value::Null, decision: "pending".into(), reason: None,
-        rule: None, command: None, title: title.clone(), content: content.clone(), path: path.clone(), link: None, code: None,
+        summary: format!("Review draft: {}", invocation.title.as_deref().unwrap_or(&invocation.path).chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect::<String>()),
+        arguments: Value::Null, decision: "pending".into(), reason: None, rule: None, command: None,
+        title: invocation.title.clone(), content: invocation.content_option.clone(), path: invocation.path_option.clone(), link: None, code: None,
     });
-    card.id = card_id;
-    let choice = await_answer(app, chat_id, &card.id, None, cancel, || {
-        app.upsert_message(card.clone(), true);
-        crate::push::permission(app, &card);
+    card.id = invocation.card_id.clone();
+    let asked = card.clone();
+    let choice = await_proposal_answer(app, &invocation.chat_id, &invocation.card_id, &invocation, cancel, || {
+        app.upsert_message(asked.clone(), true);
+        crate::push::permission(app, &asked);
     }).await;
-    if let Some(mut current) = app.message(chat_id, &card.id) {
+    // The retained record, not the woken waiter, is what can produce an approval.
+    let approval = host_approval_of(app, &invocation.card_id, choice, &invocation);
+
+    let (disposition, refusal) = match approval {
+        Some(approval) if choice == Decision::Allowed && !cancel.is_cancelled() => {
+            // The decision is durable before the write: a crash after this leaves an authorized
+            // origin that any later call reads as refused, never as something to retry silently.
+            let decided = app.decide_task_invocation(&lease, &approval.binding, crate::local_store::AuthorizationDecision::Authorized,
+                crate::local_store::AuthorizationKind::UserOnce, Some(&invocation.card_id), Some(&approval.answering_device), crate::config::now_unix());
+            let outcome = if decided.unwrap_or(false) {
+                let workdir = invocation.workdir.clone();
+                let path = invocation.path.clone();
+                let content = invocation.content.clone();
+                app.save_admitted_proposal(&lease, &invocation, &approval, move || save_proposal(&workdir, &path, &content))
+            } else {
+                crate::local_store::ProposalSaveOutcome::NotDispatched
+            };
+            let refusal = matches!(outcome, crate::local_store::ProposalSaveOutcome::NotDispatched)
+                .then_some("User approved, but the draft was not written: the request was refused before any save.");
+            (ProposalDisposition::from(outcome), refusal)
+        },
+        _ => (ProposalDisposition::NotApproved, None),
+    };
+
+    if let Some(mut current) = app.message(&invocation.chat_id, &invocation.card_id) {
         // A paired Device can replace the row while the Runner waits. Never approve a different
         // draft, nor write the original draft based on an answer to a replaced card.
         if current.author != card.author || current.body != card.body {
-            if current.author == card.author && matches!(&current.body, Body::Permission { plugin_id, tool, decision, .. }
-                if plugin_id == "computer" && tool == "propose" && decision == "pending") {
-                let mut failed = card;
-                if let Body::Permission { decision, summary, .. } = &mut failed.body {
-                    *decision = "failed".into();
-                    *summary = "Proposal changed while awaiting approval.".into();
-                }
-                app.upsert_message(failed, true);
+            let mut failed = card;
+            if let Body::Permission { decision, summary, .. } = &mut failed.body {
+                *decision = "failed".into();
+                *summary = PROPOSAL_CHANGED_SUMMARY.into();
             }
-            return Ok(false);
+            app.upsert_message(failed, true);
+            return Ok(ProposalDisposition::NotApproved);
         }
-        let Body::Permission { decision, summary, .. } = &mut current.body else { unreachable!() };
-        let saved = if choice == Decision::Allowed && !cancel.is_cancelled() {
-            if app.is_paused() || !app.bot(bot_id).is_some_and(|bot| bot.runner_id == app.this_device_id().unwrap_or_default() && bot.capabilities.write) {
-                Err("Account paused or bot write access removed.".to_string())
-            } else {
-                match app.bot(bot_id) {
-                    Some(bot) => save_proposal(&bot.working_directory(&app.config.home), path_value, content.as_deref().unwrap_or("")),
-                    None => Err("Bot or valid proposal no longer exists.".into()),
-                }
-            }
-        } else { Ok(()) };
-        match saved {
-            Ok(()) => *decision = if choice == Decision::Always { "denied" } else if cancel.is_cancelled() && choice == Decision::Denied { "dismissed" } else { choice.as_str() }.into(),
-            Err(error) => { *decision = "failed".into(); *summary = error; }
+        match approval {
+            Some(_) => settle_permission_card(&mut current.body, disposition.into(), refusal),
+            None => {
+                let row = if choice == Decision::Always { Decision::Denied }
+                    else if cancel.is_cancelled() && choice == Decision::Denied { Decision::Dismissed }
+                    else { choice };
+                if let Body::Permission { decision, .. } = &mut current.body { *decision = row.as_str().into(); }
+            },
         }
-        let approved = *decision == "allowed";
         app.upsert_message(current, true);
-        return Ok(approved);
     }
-    Ok(false)
+    Ok(disposition)
+}
+
+/// Builds the approval from the retained record, or nothing: a decision with no authenticated
+/// Device behind it is not an approval, whatever woke the waiter.
+fn host_approval_of(app: &Arc<App>, card_id: &str, decision: Decision, invocation: &ProposalInvocation) -> Option<HostApproval> {
+    let occurrences = app.proposal_occurrences.lock().unwrap();
+    host_approval(occurrences.get(card_id)?, decision, invocation)
 }
 
 /// Open each ancestor by handle; publish without replacing existing content or following links.
@@ -2708,7 +2931,10 @@ pub async fn await_answer(app: &Arc<App>, chat_id: &str, message_id: &str, alway
 /// `chats.permission` reached the Runner: hands the answer to the waiting tool. False when
 /// nothing waits on that message (answered already, or expired).
 pub fn answer(app: &Arc<App>, message_id: &str, decision: Decision) -> bool {
-    if decision == Decision::Always && message_id.starts_with("msg-propose-") { return false; }
+    // A proposal card is answered only through `answer_proposal`, which records the
+    // authenticated Device that answered; every other decision here would build an approval
+    // with no sender.
+    if message_id.starts_with("msg-propose-") { return false; }
     match app.pending_permissions.lock().unwrap().remove(message_id) {
         Some((_, tx)) => tx.send(decision).is_ok(),
         None => false,
@@ -2735,6 +2961,7 @@ pub fn dismissed_call(reason: String) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::AnsweringDevice;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// An App over a scratch home, removed when the test ends.
@@ -2749,6 +2976,27 @@ mod tests {
         let home = std::env::temp_dir().join(format!("beans-mcp-{}", uuid::Uuid::new_v4()));
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    /// A proposal only writes under an admitted task invocation, so the fixture runs as the
+    /// execution owner with real running tasks rather than a bare loaded app.
+    fn scratch_owner() -> ScratchApp {
+        let home = std::env::temp_dir().join(format!("beans-mcp-{}", uuid::Uuid::new_v4()));
+        let app = App::load_owner(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        ScratchApp(app, home)
+    }
+
+    fn draft_job(id: &str) -> Job {
+        Job { id: id.into(), chat_id: "draft-chat".into(), bot_id: "draft-bot".into(), kind: "turn".into(),
+            trigger_message_id: "trigger".into(), routine_id: None, check: None, requested_by: "requester".into(),
+            from_bot_id: None, hops: 0, round: 0, is_winding_down: false, setup: None, created_at: 0.0 }
+    }
+
+    /// A running task whose id is the proposal's job, so the origin freezes against it.
+    fn running_task(app: &Arc<App>, id: &str) -> crate::local_store::TaskLease {
+        let lease = app.queue_local_task(&draft_job(id)).unwrap().expect("fixture task must durably admit");
+        assert!(app.store.start_task(&lease).unwrap());
+        lease
     }
     #[cfg(unix)]
     #[test]
@@ -2774,7 +3022,7 @@ mod tests {
     }
     #[tokio::test]
     async fn proposal_review_writes_once_and_decline_never_writes() {
-        let scratch = scratch_app();
+        let scratch = scratch_owner();
         let app = &scratch.0;
         crate::identity::create(app, Some("Workbench".into())).unwrap();
         let here = app.this_device_id().unwrap();
@@ -2788,12 +3036,16 @@ mod tests {
             unread_count: 0, usage: None, compactions: Vec::new(),
         });
         let workspace = bot.working_directory(&app.config.home);
-        let run = |id: &'static str, path: &'static str, response: Decision| {
+        // The proposal's invocation is bound to a real running task; its id prefixes every
+        // call id, exactly as a live turn's does.
+        running_task(app, "draft-job");
+        running_task(app, "other-job");
+        let run = |id: String, path: &'static str, response: Decision| {
             let app = app.clone();
             async move {
                 let job = tokio::spawn({
                     let app = app.clone();
-                    async move { propose(&app, "draft-chat", "draft-bot", id, Some("Draft".into()), Some("Exact 🌍\n".into()), Some(path.into()), &CancellationToken::new()).await }
+                    async move { propose(&app, "draft-chat", "draft-bot", &id, Some("Draft".into()), Some("Exact 🌍\n".into()), Some(path.into()), &CancellationToken::new()).await }
                 });
                 let card = tokio::time::timeout(std::time::Duration::from_secs(2), async {
                     loop {
@@ -2819,7 +3071,7 @@ mod tests {
                 if path == "paused.md" {
                     app.state.lock().unwrap().paused = true;
                 }
-                assert!(answer(&app, &card.id, response));
+                assert!(answer_proposal(&app, &card.id, response, AnsweringDevice(app.this_device_id().unwrap())));
                 let result = job.await.unwrap();
                 if path == "revoked.md" {
                     app.state.lock().unwrap().bots.iter_mut().find(|bot| bot.id == "draft-bot").unwrap().capabilities.write = true;
@@ -2830,23 +3082,27 @@ mod tests {
                 result
             }
         };
-        assert!(run("first", "draft.md", Decision::Allowed).await.unwrap());
+        let saved = |result: Result<ProposalDisposition, String>| matches!(result.unwrap(), ProposalDisposition::Saved);
+        assert!(saved(run("draft-job:first".into(), "draft.md", Decision::Allowed).await));
         assert_eq!(std::fs::read(workspace.join("draft.md")).unwrap(), "Exact 🌍\n".as_bytes());
+        // A replay of the same origin after the receipt completed writes nothing again: the
+        // accepted outcome is AlreadySaved, and the file the user edited afterwards stands.
         std::fs::write(workspace.join("draft.md"), "changed after approval").unwrap();
-        assert!(propose(app, "draft-chat", "draft-bot", "first", Some("Draft".into()), Some("Exact 🌍\n".into()), Some("draft.md".into()), &CancellationToken::new()).await.unwrap());
+        let replay = propose(app, "draft-chat", "draft-bot", "draft-job:first", Some("Draft".into()), Some("Exact 🌍\n".into()), Some("draft.md".into()), &CancellationToken::new()).await.unwrap();
+        assert_eq!(replay, ProposalDisposition::AlreadySaved);
         assert_eq!(std::fs::read(workspace.join("draft.md")).unwrap(), b"changed after approval");
-        assert!(run("different-job:same-call", "second-draft.md", Decision::Allowed).await.unwrap());
+        assert!(saved(run("other-job:first".into(), "second-draft.md", Decision::Allowed).await));
         assert_eq!(std::fs::read(workspace.join("second-draft.md")).unwrap(), "Exact 🌍\n".as_bytes());
-        assert!(!run("second", "declined.md", Decision::Denied).await.unwrap());
+        assert_eq!(run("draft-job:second".into(), "declined.md", Decision::Denied).await.unwrap(), ProposalDisposition::NotApproved);
         assert!(!workspace.join("declined.md").exists());
-        assert!(!run("revoked", "revoked.md", Decision::Allowed).await.unwrap());
+        assert_eq!(run("draft-job:revoked".into(), "revoked.md", Decision::Allowed).await.unwrap(), ProposalDisposition::NotDispatched);
         assert!(!workspace.join("revoked.md").exists());
         assert!(app.messages("draft-chat").iter().any(|card| matches!(&card.body, Body::Permission { tool, decision, path, .. } if tool == "propose" && decision == "failed" && path.as_deref() == Some("revoked.md"))));
-        assert!(!run("paused", "paused.md", Decision::Allowed).await.unwrap());
+        assert_eq!(run("draft-job:paused".into(), "paused.md", Decision::Allowed).await.unwrap(), ProposalDisposition::NotDispatched);
         assert!(!workspace.join("paused.md").exists());
         assert!(app.messages("draft-chat").iter().any(|card| matches!(&card.body, Body::Permission { tool, decision, path, .. } if tool == "propose" && decision == "failed" && path.as_deref() == Some("paused.md"))));
         std::fs::write(workspace.join("existing.md"), "keep").unwrap();
-        assert!(!run("existing", "existing.md", Decision::Allowed).await.unwrap());
+        assert_eq!(run("draft-job:existing".into(), "existing.md", Decision::Allowed).await.unwrap(), ProposalDisposition::NotDispatched);
         assert_eq!(std::fs::read(workspace.join("existing.md")).unwrap(), b"keep");
         assert!(propose(app, "draft-chat", "draft-bot", "too-big", None, Some("a".repeat(20_001)), Some("large.md".into()), &CancellationToken::new()).await.is_err());
         assert!(propose(app, "draft-chat", "draft-bot", "too-many-bytes", None, Some("🌍".repeat(16_385)), Some("large.md".into()), &CancellationToken::new()).await.is_err());
@@ -2856,7 +3112,7 @@ mod tests {
 
     #[tokio::test]
     async fn proposal_rejects_changed_card_after_answer_wait() {
-        let scratch = scratch_app();
+        let scratch = scratch_owner();
         let app = &scratch.0;
         crate::identity::create(app, Some("Workbench".into())).unwrap();
         let bot: Bot = serde_json::from_value(json!({
@@ -2872,10 +3128,12 @@ mod tests {
                 unread_count: 0, usage: None, compactions: Vec::new(),
             });
         }
-        for (call_id, changed_path, changed_content) in [
+        running_task(app, "draft-job");
+        for (suffix, changed_path, changed_content) in [
             ("swapped-path", Some("swapped.md"), None),
             ("swapped-content", None, Some("forged bytes")),
         ] {
+            let call_id = format!("draft-job:{suffix}");
             let app_for_job = app.clone();
             let (started, ready) = tokio::sync::oneshot::channel();
             let job = tokio::spawn(async move {
@@ -2897,8 +3155,8 @@ mod tests {
                 if let Some(value) = changed_content { *content = Some(value.into()); }
             }
             app.upsert_message(altered, false);
-            assert!(answer(app, &card.id, Decision::Allowed));
-            assert!(!job.await.unwrap().unwrap());
+            assert!(answer_proposal(app, &card.id, Decision::Allowed, AnsweringDevice(app.this_device_id().unwrap())));
+            assert_eq!(job.await.unwrap().unwrap(), ProposalDisposition::NotApproved);
             assert!(!workspace.join("reviewed.md").exists());
             assert!(!workspace.join("swapped.md").exists());
             assert!(matches!(app.message("draft-chat", &card.id).unwrap().body, Body::Permission { decision, .. } if decision == "failed"));

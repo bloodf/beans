@@ -90,6 +90,30 @@ pub struct InvocationBinding {
     pub digest: [u8; 32],
 }
 
+/// Persisted state of one frozen invocation. Unknown stored text is an error, never a guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InvocationState { Pending, Authorized, Denied, Dismissed, Expired, Admitted }
+
+impl InvocationState {
+    fn parse(text: &str) -> anyhow::Result<Self> {
+        Ok(match text {
+            "pending" => Self::Pending, "authorized" => Self::Authorized, "denied" => Self::Denied,
+            "dismissed" => Self::Dismissed, "expired" => Self::Expired, "admitted" => Self::Admitted,
+            _ => anyhow::bail!("Invalid persisted invocation state"),
+        })
+    }
+}
+
+/// The outcome a durable proposal origin already carries. `Saved` is never produced here:
+/// only a live, acknowledged save produces it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProposalSaveOutcome { Saved, AlreadySaved, NotDispatched, Unknown }
+
+/// A frozen invocation, either minted by this call or loaded from the retained row. `created`
+/// false means the host must use `binding` as returned and discard its own candidate.
+#[derive(Clone, Debug)]
+pub(crate) struct FrozenInvocation { pub binding: InvocationBinding, pub state: InvocationState, pub created: bool }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthorizationDecision { Authorized, Denied, Dismissed, Expired }
 
@@ -153,6 +177,22 @@ pub(crate) fn admit_invocation_tx(tx: &Transaction<'_>, lease: &TaskLease, bindi
     tx.execute("INSERT INTO task_effect_receipts VALUES(?1,?2,?3,?4,?5,?6,'started')",
         params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,binding.attempt_id,binding.receipt_id])?;
     Ok(true)
+}
+
+/// Retained binding read through the caller's connection or transaction, so a freeze inside
+/// one safety transaction never re-enters the non-reentrant connection mutex.
+pub(crate) fn load_invocation_tx(conn: &Connection, lease: &TaskLease, invocation_id: &str) -> anyhow::Result<Option<(InvocationBinding, InvocationState)>> {
+    structural_id(invocation_id)?;
+    let row = conn.query_row(
+        "SELECT parent_id,ordinal,attempt_id,receipt_id,revision,digest,state FROM task_invocations WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND invocation_id=?5",
+        params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,invocation_id],
+        |row| Ok((row.get::<_,Option<String>>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,i64>(4)?,row.get::<_,Vec<u8>>(5)?,row.get::<_,String>(6)?)))?;
+    let (parent, ordinal, attempt_id, receipt_id, revision, digest, state) = row;
+    let digest: [u8;32] = digest.try_into().map_err(|_| anyhow::anyhow!("Invalid persisted invocation digest"))?;
+    anyhow::ensure!(ordinal >= 0 && revision >= 0, "Invalid persisted invocation identity");
+    let binding = InvocationBinding { invocation_id: invocation_id.to_string(), parent_invocation_id: parent, ordinal: ordinal as u64, attempt_id, receipt_id, revision: revision as u64, digest };
+    validate_binding(&binding)?;
+    Ok(Some((binding, InvocationState::parse(&state)?)))
 }
 
 fn upsert_message_tx(tx: &Transaction<'_>, message: &Message) -> anyhow::Result<Upsert> {
@@ -391,6 +431,75 @@ impl LocalStore {
 
     pub(crate) fn routine_needs_review(&self, epoch: &str, routine: &str) -> anyhow::Result<bool> {
         Ok(self.connection.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM local_tasks WHERE account_epoch=?1 AND routine_id=?2 AND state IN ('interrupted','needs_review') AND resolved_at IS NULL)", params![epoch,routine], |r| r.get(0))?)
+    }
+
+    /// Borrowed task safety transaction for a caller that admits its task invocation and any
+    /// workspace effect belonging to it in one atomic step. Same settings, same mutex, same
+    /// IMMEDIATE scope as every other safety write; the closure owns COMMIT or rollback.
+    pub(crate) fn safety_tx<T>(&self, write: impl FnOnce(&Transaction<'_>) -> anyhow::Result<T>) -> anyhow::Result<T> {
+        self.safety(write)
+    }
+
+    /// Read-only and fallible. Keyed by the full lease plus `invocation_id`. Any stored value
+    /// that is not a complete, structural, 32-byte binding is an error, never a partial one.
+    pub(crate) fn load_invocation(&self, lease: &TaskLease, invocation_id: &str) -> anyhow::Result<Option<(InvocationBinding, InvocationState)>> {
+        structural_id(invocation_id)?;
+        let connection = self.connection.lock().unwrap();
+        load_invocation_tx(&connection, lease, invocation_id)
+    }
+
+    /// One safety transaction loads the retained binding, or mints one: the select and the
+    /// insert are serialised by IMMEDIATE, so a parallel proposal in the same execution gets
+    /// the next ordinal and a collision surfaces as Err rather than a silent false.
+    pub(crate) fn freeze_or_load_invocation(&self, lease: &TaskLease, invocation_id: &str, revision: u64, digest: [u8;32], attempt_id: &str, receipt_id: &str) -> anyhow::Result<FrozenInvocation> {
+        structural_id(invocation_id)?;
+        self.safety(|tx| {
+            check_running_tx(tx, lease)?;
+            if let Some((binding, state)) = load_invocation_tx(tx, lease, invocation_id)? {
+                return Ok(FrozenInvocation { binding, state, created: false });
+            }
+            let ordinal: i64 = tx.query_row("SELECT COALESCE(MAX(ordinal)+1,0) FROM task_invocations WHERE account_epoch=?1 AND task_id=?2 AND execution_id=?3 AND parent_id IS NULL",
+                params![lease.account_epoch,lease.task_id,lease.execution_id], |row| row.get(0))?;
+            anyhow::ensure!(ordinal >= 0, "Invalid proposal ordinal");
+            let binding = InvocationBinding { invocation_id: invocation_id.to_string(), parent_invocation_id: None, ordinal: ordinal as u64, attempt_id: attempt_id.to_string(), receipt_id: receipt_id.to_string(), revision, digest };
+            validate_binding(&binding)?;
+            tx.execute("INSERT INTO task_invocations(account_epoch,task_id,owner_epoch,execution_id,invocation_id,parent_id,ordinal,attempt_id,receipt_id,revision,digest,state) VALUES(?1,?2,?3,?4,?5,NULL,?6,?7,?8,?9,?10,'pending')",
+                params![lease.account_epoch,lease.task_id,lease.owner_epoch,lease.execution_id,invocation_id,ordinal,binding.attempt_id,binding.receipt_id,revision,digest.as_slice()])?;
+            Ok(FrozenInvocation { binding, state: InvocationState::Pending, created: true })
+        })
+    }
+
+    /// Read-only fold of every execution's evidence for one proposal origin. `None` means the
+    /// display row still decides; Err is a store fault, which the caller maps to Unknown.
+    pub(crate) fn proposal_origin_outcome(&self, account_epoch: &str, card_id: &str) -> anyhow::Result<Option<ProposalSaveOutcome>> {
+        structural_id(card_id)?;
+        let rows: Vec<(String,Option<String>)> = {
+            let connection = self.connection.lock().unwrap();
+            let mut statement = connection.prepare(
+                "SELECT i.state,r.state FROM task_invocations i LEFT JOIN task_effect_receipts r ON r.account_epoch=i.account_epoch AND r.receipt_id=i.receipt_id WHERE i.account_epoch=?1 AND i.invocation_id=?2")?;
+            statement.query_map(params![account_epoch,card_id], |row| Ok((row.get(0)?,row.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        let mut outcome: Option<ProposalSaveOutcome> = None;
+        for (invocation, receipt) in rows {
+            let candidate = match InvocationState::parse(&invocation)? {
+                InvocationState::Admitted => match receipt.as_deref() {
+                    Some("finished") => ProposalSaveOutcome::AlreadySaved,
+                    Some("failed") => ProposalSaveOutcome::NotDispatched,
+                    Some("started") | Some("unknown") | None => ProposalSaveOutcome::Unknown,
+                    Some(other) => anyhow::bail!("Invalid persisted receipt state {other}"),
+                },
+                InvocationState::Authorized => ProposalSaveOutcome::NotDispatched,
+                InvocationState::Pending | InvocationState::Denied | InvocationState::Dismissed | InvocationState::Expired => continue,
+            };
+            // Fold conservatively across executions: a completed acceptance outranks an
+            // ambiguity, and an ambiguity outranks a refusal that never dispatched.
+            outcome = Some(match (outcome, candidate) {
+                (Some(ProposalSaveOutcome::AlreadySaved), _) | (None, ProposalSaveOutcome::AlreadySaved) => ProposalSaveOutcome::AlreadySaved,
+                (Some(ProposalSaveOutcome::Unknown), _) | (None, ProposalSaveOutcome::Unknown) => ProposalSaveOutcome::Unknown,
+                (current, _) => current.unwrap_or(ProposalSaveOutcome::NotDispatched),
+            });
+        }
+        Ok(outcome)
     }
 
     /// Freeze once; changing a binding is a different invocation, not an UPDATE.
@@ -2188,6 +2297,38 @@ mod tests {
         assert!(store.commit_routine_check(&lease,Some(&job),"routine-test",&job.chat_id,&job.bot_id,1,&set,&[]).unwrap());
         assert_eq!(store.task_state(&lease).unwrap(),Some(TaskState::Queued));
         assert_eq!(store.codemode_values(&job.chat_id,&job.bot_id).unwrap().get("seen"),Some(&serde_json::json!(true)));
+    }
+
+    /// The retained binding loader is all-or-nothing: a row that is not a complete structural
+    /// binding is an error, never a partially rebuilt one, and freezing an origin twice never
+    /// remints an attempt.
+    #[test]
+    fn frozen_invocation_loads_retained_identity_and_rejects_a_corrupt_row() {
+        let scratch=scratch(); let store=&scratch.0;
+        let (lease,job)=task_fixture(store,"job-freeze");
+        assert!(store.queue_task(&lease,&job).unwrap());
+        assert!(store.start_task(&lease).unwrap());
+        let frozen=store.freeze_or_load_invocation(&lease,"msg-propose-test",1,[7;32],"attempt-a","receipt-a").unwrap();
+        assert!(frozen.created);
+        assert_eq!(frozen.state,InvocationState::Pending);
+        assert_eq!(frozen.binding.ordinal,0);
+        let again=store.freeze_or_load_invocation(&lease,"msg-propose-test",1,[7;32],"attempt-b","receipt-b").unwrap();
+        assert!(!again.created);
+        assert_eq!(again.binding.attempt_id,"attempt-a");
+        assert_eq!(again.binding.receipt_id,"receipt-a");
+        assert_eq!(again.binding.ordinal,0);
+        let second=store.freeze_or_load_invocation(&lease,"msg-propose-other",1,[8;32],"attempt-c","receipt-c").unwrap();
+        assert_eq!(second.binding.ordinal,1);
+        let (loaded,state)=store.load_invocation(&lease,"msg-propose-test").unwrap().unwrap();
+        assert_eq!(loaded,frozen.binding);
+        assert_eq!(state,InvocationState::Pending);
+        assert!(store.load_invocation(&lease,"msg-propose-absent").unwrap().is_none());
+        store.connection.lock().unwrap().execute("UPDATE task_invocations SET digest=?2 WHERE invocation_id=?1",params!["msg-propose-test",&vec![1u8;16][..]]).unwrap();
+        assert!(store.load_invocation(&lease,"msg-propose-test").is_err(),"a short digest must not load as a binding");
+        assert!(store.freeze_or_load_invocation(&lease,"msg-propose-test",1,[7;32],"attempt-d","receipt-d").is_err(),"a corrupt retained row must not be silently reminted");
+        store.connection.lock().unwrap().execute("UPDATE task_invocations SET digest=?2 WHERE invocation_id=?1",params!["msg-propose-test",&vec![7u8;32][..]]).unwrap();
+        store.connection.lock().unwrap().execute("UPDATE task_invocations SET state='not-a-state' WHERE invocation_id='msg-propose-test'").unwrap();
+        assert!(store.load_invocation(&lease,"msg-propose-test").is_err(),"unknown persisted state must not be guessed");
     }
 
     #[test]

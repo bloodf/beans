@@ -8,6 +8,11 @@
 
 #[cfg(feature = "runner")]
 pub mod mcp;
+
+/// The authenticated Device that answered a proposal. Only the `permission.answer` arm may
+/// build one and `mcp::answer_proposal` is its only consumer, so an approval always has a sender.
+#[cfg(feature = "runner")]
+pub(crate) struct AnsweringDevice(pub(crate) String);
 pub mod mcp_json;
 #[cfg(feature = "runner")]
 pub mod review;
@@ -938,10 +943,17 @@ pub async fn serve_request(app: &Arc<App>, verb: &str, body: &Value, requested_b
                 return Ok(json!({ "answered": answered }));
             }
             let crate::model::Body::Permission { tool, decision: current, .. } = &card.body else { return Err("Not a permission request".into()) };
-            if tool == "propose" && decision == mcp::Decision::Always { return Err("Always allow is unavailable for proposals".into()); }
+            // A proposal answer carries the authenticated Device it came from, and only this
+            // arm may construct one: the body never names the answering device.
+            if tool == "propose" {
+                let answering = AnsweringDevice(match requested_by {
+                    Some(id) => id.to_string(),
+                    None => app.this_device_id().ok_or("Pair a Runner first")?,
+                });
+                return Ok(json!({ "answered": mcp::answer_proposal(app, message_id, decision, answering) }));
+            }
             if current != "pending" { return Ok(json!({ "answered": false })); }
             if mcp::answer(app, message_id, decision) { return Ok(json!({ "answered": true })); }
-            if tool == "propose" { return Ok(json!({ "answered": false })); }
             mcp::answer_sign_in(app, chat_id, message_id, decision, elsewhere()).await
         }
         other => Err(format!("Unknown request {other}")),

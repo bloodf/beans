@@ -2995,8 +2995,15 @@ impl Tool for Propose {
             }
         }
         let call_id = format!("{}:{id}", self.job_id);
-        let approved = crate::plugins::mcp::propose(&self.app, &self.chat_id, &self.bot.id, &call_id, title, content, path, &cancel).await.map_err(ToolError)?;
-        Ok(ToolResult::text(if approved { "User approved draft and saved it." } else { "Draft was not saved." }))
+        let disposition = crate::plugins::mcp::propose(&self.app, &self.chat_id, &self.bot.id, &call_id, title, content, path, &cancel).await.map_err(ToolError)?;
+        // Every disposition is an ordinary result: an uncertain save says so plainly, so the
+        // model is not nudged into proposing the same draft again.
+        Ok(ToolResult::text(match disposition {
+            crate::plugins::mcp::ProposalDisposition::Saved | crate::plugins::mcp::ProposalDisposition::AlreadySaved => "User approved draft and saved it.",
+            crate::plugins::mcp::ProposalDisposition::NotApproved => "Draft was not saved.",
+            crate::plugins::mcp::ProposalDisposition::NotDispatched => "User approved, but the draft was not written: the request was refused before any save.",
+            crate::plugins::mcp::ProposalDisposition::Unknown => "The save outcome is uncertain: the draft may or may not have been written. It was not retried and will not be retried automatically. Do not propose it again; ask the user to check the file.",
+        }))
     }
 }
 
@@ -3461,7 +3468,12 @@ mod tests {
             loop {
                 let pending = app.messages("chat").into_iter().find(|message| matches!(&message.body, Body::Permission { decision, .. } if decision == "pending"));
                 if let Some(card) = pending {
-                    assert!(crate::plugins::mcp::answer(&app, &card.id, decision));
+                    let device = crate::plugins::AnsweringDevice(app.this_device_id().unwrap());
+                    if card.id.starts_with("msg-propose-") {
+                        assert!(crate::plugins::mcp::answer_proposal(&app, &card.id, decision, device));
+                    } else {
+                        assert!(crate::plugins::mcp::answer(&app, &card.id, decision));
+                    }
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;

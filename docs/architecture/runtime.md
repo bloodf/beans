@@ -30,6 +30,14 @@ Installation, standalone services and Runner admission drain are described in [C
 
 The staged `history164_types` module provides closed history event and producer validation, bounded list/export response codecs, and canonical authenticated cursors. Its HMAC helpers borrow an existing purpose key and host-supplied account namespace, distinguishing `LocalTaskEpoch` from `ImportedAccount` without creating task authority. Response validation binds the cursor to the filter, watermark, last-scanned position and captured host context. This pure module is not connected to live history handlers or SQL storage and performs no filesystem export.
 
+## Serve shutdown
+
+`beans serve` starts work it does not own: sync, routines, the plugin and MCP starts, the marketplace check, the login-shell environment, the model refresh and the local websocket, plus per-request handlers inside it. Before any of them start, `serve::run` records each of those boundaries as work with no known end, so the process never claims it knows when their writing stops. Only the startup model-catalog check is owned: `catalog::check_in_background_owned` holds a permit for it, and the drain joins that permit.
+
+A shutdown — SIGTERM, SIGINT, SIGHUP, or the app that started the CLI going away — stops the commands bots left running in their terminals, cancels the turns in flight, and joins owned work, all under one deadline (10 s). Then the process ends exactly as it did before: a signal still ends it by that signal, and a parent that went away still exits 0. Refusing a final flush changes nothing about how the process ends, only that nothing is written at the end.
+
+This is a bounded drain, not quiescence. Work with no known end is still running when the process ends, untracked interiors (a plugin's MCP server, a plugin's sign-in, the login-shell cache) are untouched, and a turn stopped mid-flight stays as it was recorded: a job sent to another Runner whose wait is cancelled loses its row and is not replayed. Tracking those boundaries is later work, and until it lands no shutdown writes a final state.
+
 ## Diagnostics report
 
 `diagnostics.report` and `beans doctor --json` use the same builder. The report contains `schema_version: 1`, `versions {core, relay_protocol}`, `this_device {os, is_runner, has_identity}`, `home {exists}`, `port {free}`, `relay`, `providers`, `plugins`, `mcp_json` and `runners`. It uploads nothing; consumers must let the user review before sharing.

@@ -24,6 +24,8 @@ Private reservation lookup also returns the persisted workspace state and attemp
 
 A proposal-scoped crate facade borrows the caller's transaction for retained input loading, reservation lookup, reservation, attempt admission and publication finalization without exposing the private store. Opaque comparison binds exact host authority, origin, request, path and bytes. Attempt admission returns an updated opaque handle; the trusted actual create backend uses that handle and the same attempt ID to construct a publication proof. Mutation requires FULL/fullfsync and changes no connection settings. Missing or corrupt retained snapshots remain errors, never fresh absence. The facade installs no production schema; its test-only scratch adapter delegates the existing private installer.
 
+Separate crate-private schema adapters validate the original eight artifact table definitions and unique keys without mutation, rejecting partial schemas, changed constraints, extra indexes and triggers. Installation borrows the caller's transaction and uses the same original DDL only when all eight tables are absent; it does not configure connections, assign a schema version or activate production callers.
+
 Plugin tools (`<plugin>__<tool>`, such as `github__create_issue`) come from the MCP servers of the plugins installed on the bot's Runner. A bot calls them from codemode scripts; the model never gets them as tools of its own, so the tool list is the same for the whole turn, and from one turn to the next.
 
 Coding tools (`beans_agent::tools`, ports of pi’s built-ins, same schemas and truncation rules: 2000 lines / 50KB, whichever first):

@@ -2,6 +2,16 @@
 
 mod store;
 
+/// Read-only original artifact schema validation; absent is permitted only for predecessors.
+pub(crate) fn validate_proposal_artifact_schema(connection: &rusqlite::Connection, require_present: bool) -> Result<(), ProposalArtifactError> {
+    store::proposal_validate_schema(connection,require_present)
+}
+
+/// Caller owns atomic installation/version transaction. No configuration or task schema edits.
+pub(crate) fn install_proposal_artifact_schema_tx(tx: &rusqlite::Transaction<'_>) -> Result<(), ProposalArtifactError> {
+    store::proposal_install_schema(tx)
+}
+
 /// Scratch fixtures only: caller owns connection, durability setup and commit/rollback.
 #[cfg(test)]
 pub(crate) fn install_proposal_artifact_scratch_tx(tx: &rusqlite::Transaction<'_>) -> Result<(), ProposalArtifactError> {

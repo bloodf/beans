@@ -165,16 +165,78 @@ struct Eligibility { capability_one: bool, safety_ready: bool }
 enum Scope { Chat, Lineage }
 struct TombstoneInput { scope: Scope, target_id: String, chat_id: String, blob_id: String, ciphertext: Vec<u8>, cleanup_blobs: Vec<IntentIdentity> }
 
-fn install_schema_tx(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch("CREATE TABLE artifact_lineages(account_id TEXT NOT NULL,namespace_key BLOB NOT NULL,id TEXT NOT NULL,chat_id TEXT NOT NULL,runner_id TEXT NOT NULL,root_revision TEXT NOT NULL,head_revision TEXT,head_hash TEXT,graph_state TEXT NOT NULL CHECK(graph_state IN ('ready','incomplete','conflict','removed')),PRIMARY KEY(account_id,namespace_key,id));
+const ARTIFACT_SCHEMA: &str = "CREATE TABLE artifact_lineages(account_id TEXT NOT NULL,namespace_key BLOB NOT NULL,id TEXT NOT NULL,chat_id TEXT NOT NULL,runner_id TEXT NOT NULL,root_revision TEXT NOT NULL,head_revision TEXT,head_hash TEXT,graph_state TEXT NOT NULL CHECK(graph_state IN ('ready','incomplete','conflict','removed')),PRIMARY KEY(account_id,namespace_key,id));
 CREATE TABLE artifact_revisions(account_id TEXT NOT NULL,namespace_key BLOB NOT NULL,revision_id TEXT NOT NULL,artifact_id TEXT NOT NULL,parent_revision TEXT,parent_hash TEXT,content_hash TEXT NOT NULL CHECK(length(content_hash)=64),size INTEGER NOT NULL CHECK(size>=0),file_id TEXT NOT NULL,record_id TEXT NOT NULL,revision_json TEXT NOT NULL,PRIMARY KEY(account_id,namespace_key,revision_id),UNIQUE(account_id,namespace_key,file_id),UNIQUE(account_id,namespace_key,record_id));
 CREATE TABLE artifact_acceptances(account_id TEXT NOT NULL,namespace_key BLOB NOT NULL,requester TEXT NOT NULL,request_id TEXT NOT NULL,artifact_id TEXT NOT NULL,origin_key TEXT NOT NULL,fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32),revision_id TEXT NOT NULL,snapshot_id TEXT NOT NULL,incarnation INTEGER NOT NULL,owner_epoch TEXT NOT NULL,workspace_state TEXT NOT NULL CHECK(workspace_state IN ('reserved','attempt_admitted','published','unindexed','uncertain')),attempt_id TEXT,accepted_result_json TEXT,PRIMARY KEY(account_id,namespace_key,requester,request_id),UNIQUE(account_id,namespace_key,origin_key),UNIQUE(account_id,namespace_key,revision_id));
 CREATE TABLE artifact_snapshots(account_id TEXT NOT NULL,namespace_key BLOB NOT NULL,snapshot_id TEXT NOT NULL,requester TEXT NOT NULL,request_id TEXT NOT NULL,revision_id TEXT NOT NULL,revision_json BLOB NOT NULL,plaintext BLOB NOT NULL,content_hash TEXT NOT NULL CHECK(length(content_hash)=64),metadata_plaintext BLOB NOT NULL,file_ciphertext BLOB NOT NULL,metadata_ciphertext BLOB NOT NULL,PRIMARY KEY(account_id,namespace_key,snapshot_id),UNIQUE(account_id,namespace_key,requester,request_id),UNIQUE(account_id,namespace_key,revision_id));
 CREATE TABLE artifact_intents(account_id TEXT NOT NULL,namespace_key BLOB NOT NULL,blob_id TEXT NOT NULL,revision_id TEXT,artifact_id TEXT,chat_id TEXT NOT NULL,phase TEXT NOT NULL CHECK(phase IN ('bytes','metadata','control')),ciphertext BLOB NOT NULL,ciphertext_sha256 TEXT NOT NULL,intent_revision INTEGER NOT NULL CHECK(intent_revision>0),ack_seq INTEGER,state TEXT NOT NULL CHECK(state IN ('pending','synced','blocked')),error_code TEXT,PRIMARY KEY(account_id,namespace_key,blob_id));
 CREATE TABLE artifact_tombstones(account_id TEXT NOT NULL,namespace_key BLOB NOT NULL,scope TEXT NOT NULL CHECK(scope IN ('chat','lineage')),target_id TEXT NOT NULL,chat_id TEXT NOT NULL,blob_id TEXT NOT NULL,ack_seq INTEGER,PRIMARY KEY(account_id,namespace_key,scope,target_id));
 CREATE TABLE artifact_cleanup(account_id TEXT NOT NULL,namespace_key BLOB NOT NULL,blob_id TEXT NOT NULL,chat_id TEXT NOT NULL,artifact_id TEXT,required_tombstone_id TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','removed','blocked')),error_code TEXT,PRIMARY KEY(account_id,namespace_key,blob_id));
-CREATE TABLE artifact_safety_replay(account_id TEXT NOT NULL,namespace_key BLOB NOT NULL,relay_context TEXT NOT NULL,captured_head INTEGER NOT NULL,through_seq INTEGER NOT NULL,ready INTEGER NOT NULL CHECK(ready IN (0,1)),PRIMARY KEY(account_id,namespace_key,relay_context));")?;
+CREATE TABLE artifact_safety_replay(account_id TEXT NOT NULL,namespace_key BLOB NOT NULL,relay_context TEXT NOT NULL,captured_head INTEGER NOT NULL,through_seq INTEGER NOT NULL,ready INTEGER NOT NULL CHECK(ready IN (0,1)),PRIMARY KEY(account_id,namespace_key,relay_context));";
+
+fn install_schema_tx(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(ARTIFACT_SCHEMA)?;
     Ok(())
+}
+
+fn schema_tokens(sql: &str) -> Result<Vec<String>> {
+    let mut tokens=Vec::new();let mut chars=sql.chars().peekable();
+    while let Some(ch)=chars.next() {
+        if ch.is_whitespace() || ch==';' {continue}
+        if ch=='\'' {
+            let mut token=String::from("'");let mut closed=false;
+            while let Some(next)=chars.next() {token.push(next);if next=='\'' {if chars.peek()==Some(&'\'') {token.push(chars.next().unwrap());}else{closed=true;break}}}
+            ensure(closed)?;tokens.push(token);
+        } else if matches!(ch,'"'|'`'|'[') {
+            let end=if ch=='[' {']'}else{ch};let mut token=String::new();let mut closed=false;
+            while let Some(next)=chars.next() {if next==end {closed=true;break}token.push(next.to_ascii_lowercase());}
+            ensure(closed)?;tokens.push(token);
+        } else if ch.is_ascii_alphanumeric() || ch=='_' {
+            let mut token=String::from(ch.to_ascii_lowercase());while chars.peek().is_some_and(|c|c.is_ascii_alphanumeric() || *c=='_') {token.push(chars.next().unwrap().to_ascii_lowercase());}tokens.push(token);
+        } else {tokens.push(ch.to_string());}
+    }
+    if tokens.get(2).is_some_and(|t|t=="if") {ensure(tokens.get(3).is_some_and(|t|t=="not") && tokens.get(4).is_some_and(|t|t=="exists"))?;tokens.drain(2..5);}
+    Ok(tokens)
+}
+
+pub(super) fn proposal_validate_schema(db: &rusqlite::Connection, require_present: bool) -> std::result::Result<(),ProposalArtifactError> {
+    validate_schema(db,require_present).map_err(proposal_error)
+}
+fn validate_schema(db: &rusqlite::Connection, require_present: bool) -> Result<()> {
+    let mut expected=std::collections::BTreeMap::new();
+    for definition in ARTIFACT_SCHEMA.split(';').filter(|s|!s.trim().is_empty()) {let tokens=schema_tokens(definition)?;expected.insert(tokens[2].clone(),tokens);}
+    let mut statement=db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master")?;
+    let rows=statement.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?)))?;
+    let mut present=0;
+    for row in rows {
+        let (kind,name,table,sql)=row?;
+        if let Some(tokens)=expected.get(&name) {
+            ensure(kind=="table" && table==name && schema_tokens(sql.as_deref().ok_or(StoreError::Invalid)?)?==*tokens)?;present+=1;
+        } else if expected.contains_key(&table) {ensure(kind=="index" && sql.is_none() && name.starts_with("sqlite_autoindex_"))?;}
+        else if name.starts_with("artifact_") {return Err(StoreError::Invalid)}
+    }
+    if present==0 {return ensure(!require_present)}
+    ensure(present==8)?;
+    for (table,tokens) in expected {
+        let mut keys=Vec::new();let mut index=0;
+        while index<tokens.len() {
+            let primary=tokens[index]=="primary" && tokens.get(index+1).is_some_and(|t|t=="key");
+            let unique=tokens[index]=="unique";
+            if primary || unique {let start=index+if primary{3}else{2};let mut columns=Vec::new();let mut cursor=start;while tokens.get(cursor).is_some_and(|t|t!=")") {if tokens[cursor]!="," {columns.push(tokens[cursor].clone());}cursor+=1;}keys.push(columns);index=cursor;}index+=1;
+        }
+        let mut found=Vec::new();let mut indexes=db.prepare(&format!("PRAGMA index_list('{table}')"))?;
+        let rows=indexes.query_map([],|r|Ok((r.get::<_,String>(1)?,r.get::<_,bool>(2)?,r.get::<_,String>(3)?,r.get::<_,bool>(4)?)))?;
+        for row in rows {let (name,unique,origin,partial)=row?;ensure(unique && !partial && matches!(origin.as_str(),"pk"|"u"))?;let escaped=name.replace('\'',"''");let mut info=db.prepare(&format!("PRAGMA index_info('{escaped}')"))?;let columns=info.query_map([],|r|r.get::<_,String>(2))?.collect::<rusqlite::Result<Vec<_>>>()?;found.push(columns);}
+        keys.sort();found.sort();ensure(keys==found)?;
+    }
+    Ok(())
+}
+
+pub(super) fn proposal_install_schema(tx: &Transaction<'_>) -> std::result::Result<(),ProposalArtifactError> {
+    validate_schema(tx,false).map_err(proposal_error)?;
+    let exists:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='artifact_lineages')",[],|r|r.get(0)).map_err(|_|ProposalArtifactError::Storage)?;
+    if !exists {install_schema_tx(tx).map_err(proposal_error)?;}
+    validate_schema(tx,true).map_err(proposal_error)
 }
 fn refuse_removed(tx: &Transaction<'_>, ns: &ArtifactNamespace, chat: &str, id: &str) -> Result<()> {
     let removed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM artifact_tombstones WHERE account_id=?1 AND namespace_key=?2 AND ((scope='chat' AND target_id=?3) OR (scope='lineage' AND target_id=?4)))",params![ns.account_id,ns.namespace_key,chat,id],|r|r.get(0))?;
@@ -435,5 +497,16 @@ mod tests {
         let authority=proposal.0.input.authority.clone();let tx=db.transaction().unwrap();let restored=load_retained_proposal_artifact_tx(&tx,&authority,"chat","bot","card","request").unwrap().unwrap();assert!(matches_proposal_host_input(&restored,&authority,"chat","bot","card","request",Some("note.md"),b"").unwrap());assert!(!matches_proposal_host_input(&restored,&authority,"chat","bot","card","request",Some("other.md"),b"").unwrap());let ProposalArtifactReplay::Reserved{reservation,..}=lookup_proposal_artifact_tx(&tx,&restored).unwrap() else{panic!("retained admitted")};let hash:[u8;32]=Sha256::digest(b"").into();assert!(observed_proposal_publication(&restored,&reservation,"wrong",0,hash).is_err());let proof=observed_proposal_publication(&restored,&reservation,"attempt",0,hash).unwrap();finalize_proposal_artifact_tx(&tx,&restored,&proof).unwrap();tx.rollback().unwrap();
         let tx=db.transaction().unwrap();assert_eq!(count(&tx,"artifact_revisions"),0);let restored=load_retained_proposal_artifact_tx(&tx,&authority,"chat","bot","card","request").unwrap().unwrap();let ProposalArtifactReplay::Reserved{reservation,..}=lookup_proposal_artifact_tx(&tx,&restored).unwrap() else{panic!("completion rollback")};let proof=observed_proposal_publication(&restored,&reservation,"attempt",0,Sha256::digest(b"").into()).unwrap();finalize_proposal_artifact_tx(&tx,&restored,&proof).unwrap();tx.commit().unwrap();let tx=db.transaction().unwrap();let ProposalArtifactReplay::Accepted{result,workspace_state,attempt_id}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("accepted projection")};assert_eq!(result.revision_id,proposal.0.input.revision.revision_id);assert_eq!(workspace_state,WorkspaceState::Published);assert_eq!(attempt_id.as_deref(),Some("attempt"));assert_eq!(count(&tx,"artifact_revisions"),1);tx.rollback().unwrap();
         for invalid in [None,Some(""),Some("bad\nidentity")] {let tx=db.transaction().unwrap();tx.execute("UPDATE artifact_acceptances SET attempt_id=?1",[invalid]).unwrap();assert!(lookup_proposal_artifact_tx(&tx,&proposal).is_err());assert!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Existing).is_err());tx.rollback().unwrap();}
+    }
+    #[test]
+    fn original_schema_adapters_refuse_partial_and_changed_semantics() {
+        let mut db=Connection::open_in_memory().unwrap();
+        validate_proposal_artifact_schema(&db,false).unwrap();assert!(validate_proposal_artifact_schema(&db,true).is_err());
+        let tx=db.transaction().unwrap();install_proposal_artifact_schema_tx(&tx).unwrap();validate_proposal_artifact_schema(&tx,true).unwrap();tx.rollback().unwrap();validate_proposal_artifact_schema(&db,false).unwrap();
+        let tx=db.transaction().unwrap();install_proposal_artifact_schema_tx(&tx).unwrap();tx.commit().unwrap();validate_proposal_artifact_schema(&db,true).unwrap();
+        for change in ["DROP TABLE artifact_cleanup", "CREATE TRIGGER bad_artifact AFTER INSERT ON artifact_lineages BEGIN SELECT 1; END", "CREATE INDEX extra_artifact ON artifact_lineages(chat_id)", "DROP TABLE artifact_cleanup; CREATE VIEW artifact_cleanup AS SELECT 1"] {
+            let tx=db.transaction().unwrap();tx.execute_batch(change).unwrap();assert!(validate_proposal_artifact_schema(&tx,false).is_err());assert!(install_proposal_artifact_schema_tx(&tx).is_err());tx.rollback().unwrap();
+        }
+        let tx=db.transaction().unwrap();tx.execute_batch("DROP TABLE artifact_cleanup").unwrap();tx.execute_batch(&ARTIFACT_SCHEMA.split(';').find(|s|s.contains("CREATE TABLE artifact_cleanup")).unwrap().replace("'pending','removed','blocked'","'pending','blocked'")).unwrap();assert!(validate_proposal_artifact_schema(&tx,true).is_err());tx.rollback().unwrap();
     }
 }

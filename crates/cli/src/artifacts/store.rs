@@ -2,11 +2,129 @@
 use super::*;
 use rusqlite::{params, OptionalExtension, Transaction};
 
+pub(super) struct ProposalParticipant { mutation: ValidatedMutation, input: ReservedInput }
+pub(super) struct ProposalReservation { reservation: Reservation, account_id: String, namespace_key: Vec<u8> }
+
+fn proposal_error(error: StoreError) -> ProposalArtifactError {
+    match error {
+        StoreError::Invalid | StoreError::ReadNamespaceCannotMutate=>ProposalArtifactError::Invalid,
+        StoreError::Removed=>ProposalArtifactError::Removed,
+        StoreError::RequestBodyChanged=>ProposalArtifactError::BodyChanged,
+        StoreError::Incomplete=>ProposalArtifactError::Incomplete,
+        StoreError::StaleAttempt=>ProposalArtifactError::StaleAttempt,
+        StoreError::Conflict{current_revision,current_hash}=>ProposalArtifactError::Conflict{current_revision,current_hash},
+        StoreError::Storage(_)=>ProposalArtifactError::Storage,
+    }
+}
+
+pub(super) fn proposal_participant(value: ProposalArtifactInput) -> std::result::Result<ProposalParticipant,ProposalArtifactError> {
+    let namespace=ArtifactNamespace::new(&value.authority.account_id,NamespaceKind::LocalTaskEpoch,&value.authority.account_epoch).map_err(proposal_error)?;
+    let mutation=ValidatedMutation{namespace,actual_account_epoch:value.authority.account_epoch.clone(),owner_epoch:value.authority.owner_epoch.clone(),incarnation:value.authority.incarnation,requester:value.authority.requester.clone(),runner_id:value.authority.runner_id.clone()};
+    let origin=ArtifactOrigin::Proposal{chat_id:value.chat_id,bot_id:value.bot_id,card_id:value.card_id};
+    let expected=value.revision.parent_revision.as_deref().zip(value.revision.parent_content_hash.as_deref());
+    let fingerprint=acceptance_fingerprint(&value.authority,&origin,&value.request_id,&value.revision,expected).map_err(|_|ProposalArtifactError::Invalid)?;
+    let origin_key=match &origin {ArtifactOrigin::Proposal{chat_id,bot_id,card_id}=>serde_json::to_string(&serde_json::json!(["proposal",chat_id,bot_id,card_id])).map_err(|_|ProposalArtifactError::Invalid)?,_=>unreachable!()};
+    let key=AcceptanceKey{artifact_id:value.revision.id.clone(),requester:value.authority.requester.clone(),request_id:value.request_id,origin_key,fingerprint};
+    let input=ReservedInput{key,authority:value.authority,origin,revision:value.revision,snapshot_id:value.snapshot_id,plaintext:value.plaintext,metadata_plaintext:value.metadata_plaintext,file_ciphertext:value.file_ciphertext,metadata_ciphertext:value.metadata_ciphertext};
+    validate_input(&mutation,&input).map_err(proposal_error)?;
+    Ok(ProposalParticipant{mutation,input})
+}
+
+fn proposal_durability(tx: &Transaction<'_>) -> std::result::Result<(),ProposalArtifactError> {
+    let full:i64=tx.pragma_query_value(None,"synchronous",|r|r.get(0)).map_err(|_|ProposalArtifactError::Storage)?;
+    let sync:i64=tx.pragma_query_value(None,"fullfsync",|r|r.get(0)).map_err(|_|ProposalArtifactError::Storage)?;
+    if full==2 && sync==1 {Ok(())} else {Err(ProposalArtifactError::Storage)}
+}
+fn proposal_schema_present(tx: &Transaction<'_>) -> std::result::Result<bool,ProposalArtifactError> {
+    let names=["artifact_lineages","artifact_revisions","artifact_acceptances","artifact_snapshots","artifact_intents","artifact_tombstones","artifact_cleanup","artifact_safety_replay"];
+    let mut present=0;
+    for name in names {
+        let found:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",[name],|r|r.get(0)).map_err(|_|ProposalArtifactError::Storage)?;
+        if found {present+=1;}
+    }
+    match present {0=>Ok(false),8=>Ok(true),_=>Err(ProposalArtifactError::Storage)}
+}
+
+fn proposal_projection(lookup: Lookup, participant: &ProposalParticipant) -> ProposalArtifactReplay {
+    match lookup {
+        Lookup::Absent=>ProposalArtifactReplay::Absent,
+        Lookup::Accepted{result,workspace_state,attempt_id}=>ProposalArtifactReplay::Accepted{result,workspace_state,attempt_id},
+        Lookup::Reserved(reservation)=>{
+            let workspace_state=reservation.workspace_state;let attempt_id=reservation.attempt_id.clone();
+            ProposalArtifactReplay::Reserved{reservation:ProposalArtifactReservation(ProposalReservation{reservation,account_id:participant.mutation.namespace.account_id.clone(),namespace_key:participant.mutation.namespace.namespace_key.clone()}),workspace_state,attempt_id}
+        }
+    }
+}
+
+pub(super) fn proposal_lookup(tx: &Transaction<'_>, participant: &ProposalParticipant) -> std::result::Result<ProposalArtifactReplay,ProposalArtifactError> {
+    if !proposal_schema_present(tx)? {return Err(ProposalArtifactError::Storage)}
+    lookup_acceptance_tx(tx,EvidenceReadView{namespace:&participant.mutation.namespace},&participant.input.key).map(|value|proposal_projection(value,participant)).map_err(proposal_error)
+}
+
+pub(super) fn proposal_reserve(tx: &Transaction<'_>, participant: &ProposalParticipant, history: ProposalAttemptHistory) -> std::result::Result<ProposalArtifactReplay,ProposalArtifactError> {
+    if !proposal_schema_present(tx)? {
+        return Err(match history {ProposalAttemptHistory::Fresh=>ProposalArtifactError::NotDispatched,ProposalAttemptHistory::Existing=>ProposalArtifactError::Storage});
+    }
+    proposal_durability(tx)?;
+    reserve_workspace_tx(tx,&participant.mutation,&participant.input).map(|value|proposal_projection(value,participant)).map_err(proposal_error)
+}
+
+pub(super) fn proposal_admit(tx: &Transaction<'_>, participant: &ProposalParticipant, handle: &ProposalReservation, attempt: &str) -> std::result::Result<ProposalReservation,ProposalArtifactError> {
+    if !proposal_schema_present(tx)? {return Err(ProposalArtifactError::Storage)}
+    proposal_durability(tx)?;
+    if handle.account_id!=participant.mutation.namespace.account_id || handle.namespace_key!=participant.mutation.namespace.namespace_key || handle.reservation.key.fingerprint!=participant.input.key.fingerprint || handle.reservation.key.request_id!=participant.input.key.request_id {return Err(ProposalArtifactError::Invalid)}
+    admit_workspace_attempt_tx(tx,&participant.mutation,&handle.reservation,attempt).map(|reservation|ProposalReservation{reservation,account_id:handle.account_id.clone(),namespace_key:handle.namespace_key.clone()}).map_err(proposal_error)
+}
+
+pub(super) struct ProposalCompletion { proof: ObservedPublication, account_id: String, namespace_key: Vec<u8>, request_id: String, fingerprint: [u8;32] }
+
+pub(super) fn proposal_completion(participant: &ProposalParticipant, handle: &ProposalReservation, attempt: &str, size: u64, digest: [u8;32]) -> std::result::Result<ProposalCompletion,ProposalArtifactError> {
+    let input=&participant.input;
+    let expected_digest:[u8;32]=Sha256::digest(&input.plaintext).into();
+    if handle.account_id!=participant.mutation.namespace.account_id || handle.namespace_key!=participant.mutation.namespace.namespace_key || handle.reservation.key.fingerprint!=input.key.fingerprint || handle.reservation.key.request_id!=input.key.request_id || handle.reservation.snapshot_id!=input.snapshot_id || handle.reservation.revision_id!=input.revision.revision_id || size!=input.revision.size || digest!=expected_digest || !structural(attempt) {return Err(ProposalArtifactError::Invalid)}
+    if handle.reservation.workspace_state!=WorkspaceState::AttemptAdmitted || handle.reservation.attempt_id.as_deref()!=Some(attempt) {return Err(ProposalArtifactError::StaleAttempt)}
+    Ok(ProposalCompletion{proof:ObservedPublication{attempt_id:attempt.into(),snapshot_id:input.snapshot_id.clone(),revision_id:input.revision.revision_id.clone(),content_hash:input.revision.content_hash.clone()},account_id:handle.account_id.clone(),namespace_key:handle.namespace_key.clone(),request_id:input.key.request_id.clone(),fingerprint:input.key.fingerprint})
+}
+
+pub(super) fn proposal_finalize(tx: &Transaction<'_>, participant: &ProposalParticipant, completion: &ProposalCompletion) -> std::result::Result<ArtifactResult,ProposalArtifactError> {
+    if !proposal_schema_present(tx)? {return Err(ProposalArtifactError::Storage)}
+    proposal_durability(tx)?;
+    if completion.account_id!=participant.mutation.namespace.account_id || completion.namespace_key!=participant.mutation.namespace.namespace_key || completion.request_id!=participant.input.key.request_id || completion.fingerprint!=participant.input.key.fingerprint {return Err(ProposalArtifactError::Invalid)}
+    commit_artifact_acceptance_tx(tx,&participant.mutation,&participant.input,&completion.proof).map_err(proposal_error)
+}
+
+pub(super) fn proposal_load_retained(tx: &Transaction<'_>, authority: &ArtifactAuthority, chat: &str, bot: &str, card: &str, request: &str) -> std::result::Result<Option<ProposalParticipant>,ProposalArtifactError> {
+    if !proposal_schema_present(tx)? {return Err(ProposalArtifactError::Storage)}
+    let ns=ArtifactNamespace::new(&authority.account_id,NamespaceKind::LocalTaskEpoch,&authority.account_epoch).map_err(proposal_error)?;
+    let origin=serde_json::to_string(&serde_json::json!(["proposal",chat,bot,card])).map_err(|_|ProposalArtifactError::Invalid)?;
+    let row=tx.query_row("SELECT requester,request_id,artifact_id,origin_key,revision_id,snapshot_id FROM artifact_acceptances WHERE account_id=?1 AND namespace_key=?2 AND ((requester=?3 AND request_id=?4) OR origin_key=?5)",params![ns.account_id,ns.namespace_key,authority.requester,request,origin],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?))).optional().map_err(|_|ProposalArtifactError::Storage)?;
+    let Some((requester,stored_request,artifact,stored_origin,revision,snapshot))=row else{return Ok(None)};
+    if requester!=authority.requester || stored_request!=request || stored_origin!=origin {return Err(ProposalArtifactError::BodyChanged)}
+    let (revision_json,plaintext,metadata_plaintext,file_ciphertext,metadata_ciphertext)=tx.query_row("SELECT revision_json,plaintext,metadata_plaintext,file_ciphertext,metadata_ciphertext FROM artifact_snapshots WHERE account_id=?1 AND namespace_key=?2 AND snapshot_id=?3 AND requester=?4 AND request_id=?5 AND revision_id=?6",params![ns.account_id,ns.namespace_key,snapshot,requester,stored_request,revision],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,Vec<u8>>(2)?,r.get::<_,Vec<u8>>(3)?,r.get::<_,Vec<u8>>(4)?))).map_err(|_|ProposalArtifactError::Storage)?;
+    let record=match ArtifactEnvelope::parse(&revision_json).map_err(|_|ProposalArtifactError::Invalid)? {ArtifactEnvelope::Revision(value)=>value,_=>return Err(ProposalArtifactError::Invalid)};
+    if record.id!=artifact || record.revision_id!=revision {return Err(ProposalArtifactError::Invalid)}
+    let participant=proposal_participant(ProposalArtifactInput{authority:authority.clone(),chat_id:chat.into(),bot_id:bot.into(),card_id:card.into(),request_id:request.into(),revision:record,snapshot_id:snapshot,plaintext,metadata_plaintext,file_ciphertext,metadata_ciphertext})?;
+    proposal_lookup(tx,&participant)?;
+    Ok(Some(participant))
+}
+
+pub(super) fn proposal_matches_host(participant: &ProposalParticipant, authority: &ArtifactAuthority, chat: &str, bot: &str, card: &str, request: &str, path: Option<&str>, plaintext: &[u8]) -> std::result::Result<bool,ProposalArtifactError> {
+    validate_input(&participant.mutation,&participant.input).map_err(proposal_error)?;
+    if !structural(chat) || !structural(bot) || !structural(card) || !structural(request) || !optional(path,relative_path) {return Err(ProposalArtifactError::Invalid)}
+    let input=&participant.input;
+    Ok(&input.authority==authority && input.key.request_id==request && input.revision.chat_id==chat && input.revision.bot_id.as_deref()==Some(bot) && input.revision.card_id.as_deref()==Some(card) && input.revision.path.as_deref()==path && path==Some(input.revision.name.as_str()) && input.revision.mime=="text/plain" && input.revision.parent_revision.is_none() && input.revision.parent_content_hash.is_none() && input.plaintext==plaintext)
+}
+
 #[derive(Debug)]
 enum StoreError { Invalid, ReadNamespaceCannotMutate, Removed, RequestBodyChanged, Conflict { current_revision: String, current_hash: String }, Incomplete, StaleAttempt, Storage(rusqlite::Error) }
 type Result<T, E = StoreError> = std::result::Result<T, E>;
 impl From<rusqlite::Error> for StoreError { fn from(e: rusqlite::Error) -> Self { Self::Storage(e) } }
 fn ensure(ok: bool) -> Result<()> { if ok { Ok(()) } else { Err(StoreError::Invalid) } }
+
+#[cfg(test)]
+pub(super) fn install_proposal_scratch_tx(tx: &Transaction<'_>) -> std::result::Result<(),ProposalArtifactError> {
+    install_schema_tx(tx).map_err(proposal_error)
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum NamespaceKind { LocalTaskEpoch, ImportedAccount }
 #[derive(Clone, Debug)]
@@ -36,7 +154,7 @@ struct ReservedInput { key: AcceptanceKey, authority: ArtifactAuthority, origin:
 #[derive(Debug)]
 struct Reservation { key: AcceptanceKey, revision_id: String, snapshot_id: String, incarnation: u64, owner_epoch: String, workspace_state: WorkspaceState, attempt_id: Option<String> }
 #[derive(Debug)]
-enum Lookup { Absent, Reserved(Reservation), Accepted(ArtifactResult) }
+enum Lookup { Absent, Reserved(Reservation), Accepted { result: ArtifactResult, workspace_state: WorkspaceState, attempt_id: Option<String> } }
 struct ObservedPublication { attempt_id: String, snapshot_id: String, revision_id: String, content_hash: String }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UploadPhase { Bytes, Metadata, Control }
@@ -64,13 +182,22 @@ fn refuse_removed(tx: &Transaction<'_>, ns: &ArtifactNamespace, chat: &str, id: 
 }
 fn lookup_acceptance_tx(tx: &Transaction<'_>, view: EvidenceReadView<'_>, key: &AcceptanceKey) -> Result<Lookup> {
     let ns=view.namespace;
-    let row=tx.query_row("SELECT a.requester,a.request_id,a.artifact_id,a.origin_key,a.fingerprint,a.revision_id,a.snapshot_id,a.incarnation,a.owner_epoch,a.accepted_result_json,s.revision_json,a.workspace_state,a.attempt_id FROM artifact_acceptances a JOIN artifact_snapshots s ON s.account_id=a.account_id AND s.namespace_key=a.namespace_key AND s.snapshot_id=a.snapshot_id AND s.requester=a.requester AND s.request_id=a.request_id AND s.revision_id=a.revision_id WHERE a.account_id=?1 AND a.namespace_key=?2 AND ((a.requester=?3 AND a.request_id=?4) OR a.origin_key=?5)",params![ns.account_id,ns.namespace_key,key.requester,key.request_id,key.origin_key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?,r.get::<_,u64>(7)?,r.get::<_,String>(8)?,r.get::<_,Option<String>>(9)?,r.get::<_,Vec<u8>>(10)?,r.get::<_,String>(11)?,r.get::<_,Option<String>>(12)?))).optional()?;
-    let Some((requester,request,id,origin,fp,revision,snapshot,incarnation,owner,result,bytes,state,attempt_id))=row else { return Ok(Lookup::Absent) };
+    let row=tx.query_row("SELECT requester,request_id,artifact_id,origin_key,fingerprint,revision_id,snapshot_id,incarnation,owner_epoch,accepted_result_json,workspace_state,attempt_id FROM artifact_acceptances WHERE account_id=?1 AND namespace_key=?2 AND ((requester=?3 AND request_id=?4) OR origin_key=?5)",params![ns.account_id,ns.namespace_key,key.requester,key.request_id,key.origin_key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?,r.get::<_,u64>(7)?,r.get::<_,String>(8)?,r.get::<_,Option<String>>(9)?,r.get::<_,String>(10)?,r.get::<_,Option<String>>(11)?))).optional()?;
+    let Some((requester,request,id,origin,fp,revision,snapshot,incarnation,owner,result,state,attempt_id))=row else { return Ok(Lookup::Absent) };
+    let bytes:Vec<u8>=tx.query_row("SELECT revision_json FROM artifact_snapshots WHERE account_id=?1 AND namespace_key=?2 AND snapshot_id=?3 AND requester=?4 AND request_id=?5 AND revision_id=?6",params![ns.account_id,ns.namespace_key,snapshot,requester,request,revision],|r|r.get(0))?;
     let record=match ArtifactEnvelope::parse(&bytes).map_err(|_|StoreError::Invalid)? { ArtifactEnvelope::Revision(r)=>r,_=>return Err(StoreError::Invalid) };
+    ensure(record.id==id && record.revision_id==revision)?;
     refuse_removed(tx,ns,&record.chat_id,&id)?;
     if requester!=key.requester || request!=key.request_id || id!=key.artifact_id || origin!=key.origin_key || fp.as_slice()!=key.fingerprint { return Err(StoreError::RequestBodyChanged); }
     let workspace_state=match state.as_str() {"reserved"=>WorkspaceState::Reserved,"attempt_admitted"=>WorkspaceState::AttemptAdmitted,"published"=>WorkspaceState::Published,"unindexed"=>WorkspaceState::Unindexed,"uncertain"=>WorkspaceState::Uncertain,_=>return Err(StoreError::Invalid)};
-    match result { Some(value)=>Ok(Lookup::Accepted(serde_json::from_str(&value).map_err(|_|StoreError::Invalid)?)),None=>Ok(Lookup::Reserved(Reservation {key:key.clone(),revision_id:revision,snapshot_id:snapshot,incarnation,owner_epoch:owner,workspace_state,attempt_id})) }
+    match result {
+        Some(value)=>{
+            let accepted:ArtifactResult=serde_json::from_str(&value).map_err(|_|StoreError::Invalid)?;
+            ensure(workspace_state==WorkspaceState::Published && attempt_id.as_deref().is_some_and(structural) && accepted.id==record.id && accepted.revision_id==record.revision_id && accepted.content_hash==record.content_hash && accepted.workspace==WorkspaceState::Published)?;
+            Ok(Lookup::Accepted{result:accepted,workspace_state,attempt_id})
+        },
+        None=>Ok(Lookup::Reserved(Reservation {key:key.clone(),revision_id:revision,snapshot_id:snapshot,incarnation,owner_epoch:owner,workspace_state,attempt_id}))
+    }
 }
 fn validate_input(m: &ValidatedMutation, input: &ReservedInput) -> Result<Vec<u8>> {
     m.validate()?;
@@ -112,7 +239,7 @@ fn reserve_workspace_tx(tx: &Transaction<'_>, m: &ValidatedMutation, input: &Res
     refuse_removed(tx,ns,&input.revision.chat_id,&input.revision.id)?;
     let previous=lookup_acceptance_tx(tx,EvidenceReadView{namespace:ns},&input.key)?;
     match previous {
-        Lookup::Accepted(result)=>return Ok(Lookup::Accepted(result)),
+        accepted @ Lookup::Accepted{..}=>return Ok(accepted),
         Lookup::Reserved(reservation)=>{compare_snapshot(tx,ns,input,&bytes)?;return Ok(Lookup::Reserved(reservation))},
         Lookup::Absent=>{}
     }
@@ -138,7 +265,7 @@ fn insert_intent(tx: &Transaction<'_>, ns: &ArtifactNamespace, blob: &str, revis
 fn commit_artifact_acceptance_tx(tx: &Transaction<'_>, m: &ValidatedMutation, input: &ReservedInput, proof: &ObservedPublication) -> Result<ArtifactResult> {
     let bytes=validate_input(m,input)?; let ns=&m.namespace; let r=&input.revision;
     refuse_removed(tx,ns,&r.chat_id,&r.id)?;
-    if let Lookup::Accepted(result)=lookup_acceptance_tx(tx,EvidenceReadView{namespace:ns},&input.key)? {return Ok(result)}
+    if let Lookup::Accepted{result,..}=lookup_acceptance_tx(tx,EvidenceReadView{namespace:ns},&input.key)? {return Ok(result)}
     compare_snapshot(tx,ns,input,&bytes)?;
     let admitted:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM artifact_acceptances WHERE account_id=?1 AND namespace_key=?2 AND requester=?3 AND request_id=?4 AND snapshot_id=?5 AND revision_id=?6 AND attempt_id=?7 AND incarnation=?8 AND owner_epoch=?9 AND workspace_state='attempt_admitted')",params![ns.account_id,ns.namespace_key,m.requester,input.key.request_id,proof.snapshot_id,proof.revision_id,proof.attempt_id,m.incarnation,m.owner_epoch],|r|r.get(0))?;
     ensure(proof.snapshot_id==input.snapshot_id && proof.revision_id==r.revision_id && proof.content_hash==r.content_hash)?;
@@ -261,7 +388,7 @@ mod tests {
         let mut changed=input.key.clone();changed.fingerprint[0]^=1;let tx=db.transaction().unwrap();assert!(matches!(lookup_acceptance_tx(&tx,EvidenceReadView{namespace:&m.namespace},&changed),Err(StoreError::RequestBodyChanged)));tx.rollback().unwrap();
         let original_revision=input.revision.clone();let original_metadata=input.metadata_plaintext.clone();let original_file=input.file_ciphertext.clone();let original_cipher=input.metadata_ciphertext.clone();
         input.revision.revision_id="00000000-0000-4000-8000-000000000002".into();input.revision.file_id=format!("{}.file",input.revision.revision_id);input.revision.created_at=9.0;input.snapshot_id="regenerated".into();input.metadata_plaintext=serde_json::to_vec(&input.revision).unwrap();input.file_ciphertext=vec![7;40];input.metadata_ciphertext=vec![8;input.metadata_plaintext.len()+40];
-        let tx=db.transaction().unwrap();let Lookup::Accepted(retry)=reserve_workspace_tx(&tx,&m,&input).unwrap() else{panic!("accepted retry")};assert_eq!(retry,result);assert_eq!(count(&tx,"artifact_snapshots"),1);assert_eq!(count(&tx,"artifact_revisions"),1);assert_eq!(count(&tx,"artifact_intents"),2);let stored:String=tx.query_row("SELECT revision_json FROM artifact_revisions",[],|r|r.get(0)).unwrap();let persisted:ArtifactRevision=serde_json::from_str(&stored).unwrap();assert_eq!(persisted.created_at,1.0);tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();let Lookup::Accepted{result:retry,..}=reserve_workspace_tx(&tx,&m,&input).unwrap() else{panic!("accepted retry")};assert_eq!(retry,result);assert_eq!(count(&tx,"artifact_snapshots"),1);assert_eq!(count(&tx,"artifact_revisions"),1);assert_eq!(count(&tx,"artifact_intents"),2);let stored:String=tx.query_row("SELECT revision_json FROM artifact_revisions",[],|r|r.get(0)).unwrap();let persisted:ArtifactRevision=serde_json::from_str(&stored).unwrap();assert_eq!(persisted.created_at,1.0);tx.rollback().unwrap();
         input.revision=original_revision;input.metadata_plaintext=original_metadata;input.file_ciphertext=original_file;input.metadata_ciphertext=original_cipher;input.snapshot_id="snapshot".into();
         let mut child=input.revision.clone();child.revision_id="00000000-0000-4000-8000-000000000003".into();child.file_id=format!("{}.file",child.revision_id);child.parent_revision=Some(input.revision.revision_id.clone());child.parent_content_hash=Some(input.revision.content_hash.clone());
         let tx=db.transaction().unwrap();check_head(&tx,&m.namespace,&child).unwrap();tx.execute("DELETE FROM artifact_revisions",[]).unwrap();assert!(matches!(check_head(&tx,&m.namespace,&child),Err(StoreError::Incomplete)));tx.rollback().unwrap();
@@ -279,5 +406,34 @@ mod tests {
         let tx=db.transaction().unwrap();install_tombstone_tx(&tx,&m,&tomb).unwrap();tx.rollback().unwrap();let tx=db.transaction().unwrap();assert_eq!(count(&tx,"artifact_tombstones"),1);assert_eq!(count(&tx,"artifact_cleanup"),0);install_tombstone_tx(&tx,&m,&tomb).unwrap();install_tombstone_tx(&tx,&m,&tomb).unwrap();tx.commit().unwrap();
         let tx=db.transaction().unwrap();assert!(!eligible_cleanup_tx(&tx,EvidenceReadView{namespace:&m.namespace},&tomb.cleanup_blobs[0].blob_id).unwrap());tx.execute("UPDATE artifact_intents SET state='synced',ack_seq=11 WHERE blob_id=?1 AND phase='control'",[&tomb.blob_id]).unwrap();assert!(eligible_cleanup_tx(&tx,EvidenceReadView{namespace:&m.namespace},&tomb.cleanup_blobs[0].blob_id).unwrap());tx.commit().unwrap();
         let tx=db.transaction().unwrap();assert!(matches!(commit_artifact_acceptance_tx(&tx,&m,&input,&proof),Err(StoreError::Removed)));assert!(matches!(eligible_intent_tx(&tx,EvidenceReadView{namespace:&m.namespace},&metadata,&gates),Err(StoreError::Removed)));assert_eq!(count(&tx,"artifact_cleanup"),1);tx.rollback().unwrap();
+    }
+    #[test]
+    fn proposal_facade_preserves_caller_atomicity_and_storage_uncertainty() {
+        let mut db=Connection::open_in_memory().unwrap();
+        db.pragma_update(None,"synchronous",2).unwrap();db.pragma_update(None,"fullfsync",1).unwrap();
+        let (_,mut input,_)=input();input.revision.name="note.md".into();input.metadata_plaintext=serde_json::to_vec(&input.revision).unwrap();input.metadata_ciphertext=vec![2;input.metadata_plaintext.len()+40];
+        let value=ProposalArtifactInput{authority:input.authority,chat_id:"chat".into(),bot_id:"bot".into(),card_id:"card".into(),request_id:input.key.request_id,revision:input.revision,snapshot_id:input.snapshot_id,plaintext:input.plaintext,metadata_plaintext:input.metadata_plaintext,file_ciphertext:input.file_ciphertext,metadata_ciphertext:input.metadata_ciphertext};
+        let proposal=freeze_proposal_artifact(value).unwrap();
+        let tx=db.transaction().unwrap();
+        assert!(matches!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Fresh),Err(ProposalArtifactError::NotDispatched)));
+        assert!(matches!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Existing),Err(ProposalArtifactError::Storage)));
+        assert!(matches!(lookup_proposal_artifact_tx(&tx,&proposal),Err(ProposalArtifactError::Storage)));
+        tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();tx.execute_batch("CREATE TABLE artifact_acceptances(broken TEXT)").unwrap();assert!(matches!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Fresh),Err(ProposalArtifactError::Storage)));tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();install_schema_tx(&tx).unwrap();tx.execute_batch("CREATE TABLE fixture_task_admission(receipt TEXT PRIMARY KEY)").unwrap();let ProposalArtifactReplay::Reserved{reservation:_,workspace_state,attempt_id}=reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Fresh).unwrap() else{panic!("reservation")};assert_eq!(workspace_state,WorkspaceState::Reserved);assert_eq!(attempt_id,None);tx.commit().unwrap();
+        let tx=db.transaction().unwrap();assert!(matches!(lookup_proposal_artifact_tx(&tx,&proposal).unwrap(),ProposalArtifactReplay::Reserved{..}));tx.rollback().unwrap();
+        for state in ["reserved","attempt_admitted"] {
+            for corruption in ["DELETE FROM artifact_snapshots","UPDATE artifact_snapshots SET request_id='inconsistent-request'"] {
+                let tx=db.transaction().unwrap();tx.execute("UPDATE artifact_acceptances SET workspace_state=?1,attempt_id=CASE WHEN ?1='attempt_admitted' THEN 'attempt' ELSE NULL END",[state]).unwrap();tx.execute(corruption,[]).unwrap();assert_eq!(tx.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'artifact_%'",[],|r|r.get::<_,i64>(0)).unwrap(),8);assert!(matches!(lookup_proposal_artifact_tx(&tx,&proposal),Err(ProposalArtifactError::Storage)));assert!(matches!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Fresh),Err(ProposalArtifactError::Storage)));tx.rollback().unwrap();
+            }
+        }
+        let tx=db.transaction().unwrap();let ProposalArtifactReplay::Reserved{reservation,..}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("lookup")};tx.execute("INSERT INTO fixture_task_admission VALUES('started')",[]).unwrap();admit_proposal_artifact_attempt_tx(&tx,&proposal,&reservation,"attempt").unwrap();tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();assert_eq!(count(&tx,"fixture_task_admission"),0);let ProposalArtifactReplay::Reserved{reservation,workspace_state,attempt_id}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("rollback")};assert_eq!(workspace_state,WorkspaceState::Reserved);assert_eq!(attempt_id,None);tx.execute("INSERT INTO fixture_task_admission VALUES('started')",[]).unwrap();admit_proposal_artifact_attempt_tx(&tx,&proposal,&reservation,"attempt").unwrap();tx.commit().unwrap();
+        let tx=db.transaction().unwrap();let ProposalArtifactReplay::Reserved{reservation,workspace_state,attempt_id}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("admitted")};assert_eq!(workspace_state,WorkspaceState::AttemptAdmitted);assert_eq!(attempt_id.as_deref(),Some("attempt"));assert_eq!(count(&tx,"fixture_task_admission"),1);assert!(matches!(admit_proposal_artifact_attempt_tx(&tx,&proposal,&reservation,"again"),Err(ProposalArtifactError::StaleAttempt)));tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();tx.execute_batch("ALTER TABLE artifact_snapshots RENAME TO corrupt_snapshot; CREATE TABLE artifact_snapshots(account_id TEXT)").unwrap();assert!(matches!(lookup_proposal_artifact_tx(&tx,&proposal),Err(ProposalArtifactError::Storage)));assert!(matches!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Existing),Err(ProposalArtifactError::Storage)));tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();let ProposalArtifactReplay::Reserved{workspace_state,attempt_id,..}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("retained")};assert_eq!(workspace_state,WorkspaceState::AttemptAdmitted);assert_eq!(attempt_id.as_deref(),Some("attempt"));tx.rollback().unwrap();
+        let authority=proposal.0.input.authority.clone();let tx=db.transaction().unwrap();let restored=load_retained_proposal_artifact_tx(&tx,&authority,"chat","bot","card","request").unwrap().unwrap();assert!(matches_proposal_host_input(&restored,&authority,"chat","bot","card","request",Some("note.md"),b"").unwrap());assert!(!matches_proposal_host_input(&restored,&authority,"chat","bot","card","request",Some("other.md"),b"").unwrap());let ProposalArtifactReplay::Reserved{reservation,..}=lookup_proposal_artifact_tx(&tx,&restored).unwrap() else{panic!("retained admitted")};let hash:[u8;32]=Sha256::digest(b"").into();assert!(observed_proposal_publication(&restored,&reservation,"wrong",0,hash).is_err());let proof=observed_proposal_publication(&restored,&reservation,"attempt",0,hash).unwrap();finalize_proposal_artifact_tx(&tx,&restored,&proof).unwrap();tx.rollback().unwrap();
+        let tx=db.transaction().unwrap();assert_eq!(count(&tx,"artifact_revisions"),0);let restored=load_retained_proposal_artifact_tx(&tx,&authority,"chat","bot","card","request").unwrap().unwrap();let ProposalArtifactReplay::Reserved{reservation,..}=lookup_proposal_artifact_tx(&tx,&restored).unwrap() else{panic!("completion rollback")};let proof=observed_proposal_publication(&restored,&reservation,"attempt",0,Sha256::digest(b"").into()).unwrap();finalize_proposal_artifact_tx(&tx,&restored,&proof).unwrap();tx.commit().unwrap();let tx=db.transaction().unwrap();let ProposalArtifactReplay::Accepted{result,workspace_state,attempt_id}=lookup_proposal_artifact_tx(&tx,&proposal).unwrap() else{panic!("accepted projection")};assert_eq!(result.revision_id,proposal.0.input.revision.revision_id);assert_eq!(workspace_state,WorkspaceState::Published);assert_eq!(attempt_id.as_deref(),Some("attempt"));assert_eq!(count(&tx,"artifact_revisions"),1);tx.rollback().unwrap();
+        for invalid in [None,Some(""),Some("bad\nidentity")] {let tx=db.transaction().unwrap();tx.execute("UPDATE artifact_acceptances SET attempt_id=?1",[invalid]).unwrap();assert!(lookup_proposal_artifact_tx(&tx,&proposal).is_err());assert!(reserve_proposal_artifact_tx(&tx,&proposal,ProposalAttemptHistory::Existing).is_err());tx.rollback().unwrap();}
     }
 }

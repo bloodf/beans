@@ -357,6 +357,7 @@ impl App {
         anyhow::ensure!(approval.binding.digest == invocation.binding.digest && approval.binding == invocation.binding, "Approval is not bound to this invocation");
         anyhow::ensure!(approval.snapshot_digest == invocation.snapshot_digest, "Approval is not bound to this draft");
         anyhow::ensure!(approval.card_id == invocation.card_id, "Approval is not bound to this card");
+        anyhow::ensure!(invocation.draft_digest() == invocation.snapshot_digest && invocation.snapshot_digest == invocation.binding.digest, "Proposal draft binding changed");
         let bot = state.bots.iter().find(|bot| bot.id == invocation.bot_id).ok_or_else(|| anyhow::anyhow!("Bot no longer exists"))?;
         anyhow::ensure!(bot.runner_id == local_device.unwrap_or_default() && bot.capabilities.write, "Bot write access removed");
         anyhow::ensure!(state.chats.iter().any(|chat| chat.meta.id == invocation.chat_id && chat.meta.bot_ids.contains(&invocation.bot_id)), "Proposal chat is no longer live");
@@ -364,15 +365,100 @@ impl App {
         Ok(())
     }
 
-    /// Refuses proposal saves while the artifact admission participant is unavailable.
-    /// No task admission, started receipt, or workspace backend entry occurs here. The real
-    /// participant must share one acknowledged FULL transaction with task admission; its
-    /// synchronous dispatch must retain State from the policy recheck until dispatch returns.
+    /// Joins task and artifact admission before a synchronous create-only publication.
+    /// State remains held across acknowledged admission and backend return; completion joins
+    /// artifact acceptance and the exact started receipt in a second FULL transaction.
     #[cfg(feature = "runner")]
-    pub fn save_admitted_proposal(&self, _lease: &crate::local_store::TaskLease, _invocation: &crate::plugins::mcp::ProposalInvocation, _approval: &crate::plugins::mcp::HostApproval, _dispatch: impl FnOnce() -> Result<(), String>) -> crate::local_store::ProposalSaveOutcome {
-        // The private artifact facade and production activation are absent. Task admission
-        // alone cannot authorize a workspace effect, even with an authenticated approval.
-        crate::local_store::ProposalSaveOutcome::NotDispatched
+    pub(crate) fn save_admitted_proposal(
+        &self,
+        lease: &crate::local_store::TaskLease,
+        invocation: &crate::plugins::mcp::ProposalInvocation,
+        approval: &crate::plugins::mcp::HostApproval,
+        proposal: &crate::artifacts::ProposalArtifact,
+        dispatch: impl FnOnce(&crate::artifacts::ProposalArtifactReservation) -> Result<crate::artifacts::ProposalPublicationProof, crate::artifacts::ProposalDispatchFailure>,
+    ) -> crate::local_store::ProposalSaveOutcome {
+        use crate::artifacts::{ProposalArtifactError, ProposalArtifactReplay, ProposalAttemptHistory, WorkspaceState};
+        use crate::local_store::{InvocationState, ProposalSaveOutcome, ReceiptOutcome};
+        let _policy = self.roster_edit.lock().unwrap();
+        match self.proposal_outcome(&invocation.card_id) {
+            Err(_) | Ok(Some(ProposalSaveOutcome::Unknown)) | Ok(Some(ProposalSaveOutcome::AlreadySaved)) => return ProposalSaveOutcome::Unknown,
+            _ => {},
+        }
+        let Ok(_lifecycle) = self.plugin_admission(Some(lease.incarnation)) else { return ProposalSaveOutcome::NotDispatched };
+        let local = self.this_device_id();
+        let Some(machine) = self.machine_file() else { return ProposalSaveOutcome::Unknown };
+        let authority = crate::artifacts::ArtifactAuthority { account_id: machine.identity_pubkey, incarnation: lease.incarnation,
+            requester: local.clone().unwrap_or_default(), runner_id: local.clone().unwrap_or_default(),
+            owner_epoch: lease.owner_epoch.clone(), account_epoch: lease.account_epoch.clone() };
+        if !crate::artifacts::matches_proposal_host_input(proposal, &authority, &invocation.chat_id, &invocation.bot_id,
+            &invocation.card_id, &invocation.card_id, Some(&invocation.path), invocation.content.as_bytes()).unwrap_or(false) {
+            return ProposalSaveOutcome::Unknown;
+        }
+        let state = self.state.lock().unwrap();
+        if !self.is_execution_owner() || Self::check_proposal_permission(&state, local.as_deref(), invocation, approval).is_err()
+            || state.bots.iter().find(|bot| bot.id == invocation.bot_id).is_none_or(|bot| bot.working_directory(&self.config.home) != invocation.workdir) {
+            return ProposalSaveOutcome::NotDispatched;
+        }
+        let mut participant_absent = false;
+        let admission = self.store.safety_tx(|tx| {
+            let (binding, status) = crate::local_store::load_invocation_tx(tx, lease, &invocation.card_id)?
+                .ok_or_else(|| anyhow::anyhow!("Proposal binding absent"))?;
+            anyhow::ensure!(binding == invocation.binding && status == InvocationState::Authorized, "Proposal not authorized");
+            let card: String = tx.query_row("SELECT message_json FROM messages WHERE id=?1 AND chat_id=?2", rusqlite::params![invocation.card_id, invocation.chat_id], |row| row.get(0))?;
+            let card: Message = serde_json::from_str(&card)?;
+            anyhow::ensure!(matches!(&card.author, crate::model::Author::Bot { bot_id } if bot_id == &invocation.bot_id)
+                && matches!(&card.body, crate::model::Body::Permission { tool, title, content, path, .. }
+                    if tool == "propose" && title == &invocation.title && content == &invocation.content_option && path == &invocation.path_option), "Proposal card changed");
+            let task_matches: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_tasks WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND chat_id=?5 AND bot_id=?6 AND state='running' AND cancel_requested=0)",
+                rusqlite::params![lease.account_epoch, lease.task_id, lease.owner_epoch, lease.execution_id, invocation.chat_id, invocation.bot_id], |row| row.get(0))?;
+            anyhow::ensure!(task_matches, "Proposal task origin changed");
+            let receipts: i64 = tx.query_row(
+                "SELECT count(*) FROM task_effect_receipts WHERE account_epoch=?1 AND receipt_id=?2",
+                rusqlite::params![lease.account_epoch, binding.receipt_id], |row| row.get(0))?;
+            anyhow::ensure!(receipts == 0, "Proposal already has effect evidence");
+            let replay = match crate::artifacts::reserve_proposal_artifact_tx(tx, proposal, ProposalAttemptHistory::Fresh) {
+                Ok(value) => value,
+                Err(ProposalArtifactError::NotDispatched) => {
+                    participant_absent = true;
+                    anyhow::bail!("Artifact participant unavailable");
+                },
+                Err(error) => anyhow::bail!("Artifact reservation failed: {error:?}"),
+            };
+            let ProposalArtifactReplay::Reserved { reservation, workspace_state: WorkspaceState::Reserved, attempt_id: None } = replay
+                else { anyhow::bail!("Proposal already has artifact effect evidence") };
+            let admitted = crate::artifacts::admit_proposal_artifact_attempt_tx(tx, proposal, &reservation, &binding.attempt_id)
+                .map_err(|error| anyhow::anyhow!("Artifact admission failed: {error:?}"))?;
+            anyhow::ensure!(crate::local_store::admit_invocation_tx(tx, lease, &binding)?, "Task admission rejected");
+            Ok(admitted)
+        });
+        let reservation = match admission {
+            Ok(reservation) => reservation,
+            Err(_) if participant_absent => return ProposalSaveOutcome::NotDispatched,
+            Err(_) => return ProposalSaveOutcome::Unknown,
+        };
+        let publication = dispatch(&reservation);
+        drop(state);
+        match publication {
+            Ok(proof) => {
+                let completion = self.store.safety_tx(|tx| {
+                    crate::artifacts::finalize_proposal_artifact_tx(tx, proposal, &proof)
+                        .map_err(|error| anyhow::anyhow!("Artifact completion failed: {error:?}"))?;
+                    anyhow::ensure!(crate::local_store::finish_receipt_tx(tx, lease, &invocation.binding, ReceiptOutcome::Finished)?, "Proposal receipt completion rejected");
+                    Ok(())
+                });
+                if completion.is_ok() { ProposalSaveOutcome::Saved } else { ProposalSaveOutcome::Unknown }
+            },
+            Err(crate::artifacts::ProposalDispatchFailure::DefinitivePreEffectRefusal) => {
+                if self.store.finish_receipt(lease, &invocation.binding, ReceiptOutcome::DefinitelyNotSent).unwrap_or(false) {
+                    ProposalSaveOutcome::NotDispatched
+                } else { ProposalSaveOutcome::Unknown }
+            },
+            Err(crate::artifacts::ProposalDispatchFailure::Unknown) => {
+                let _ = self.store.finish_receipt(lease, &invocation.binding, ReceiptOutcome::Unknown);
+                ProposalSaveOutcome::Unknown
+            },
+        }
     }
 
     pub fn task_history_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
@@ -2410,6 +2496,7 @@ mod tests {
         crate::identity::create(&app, Some("Runner".into())).unwrap();
         let mut owner = bot("b1");
         owner.runner_id = app.this_device_id().unwrap();
+        owner.workdir = Some(home.path().to_string_lossy().into_owned());
         app.state.lock().unwrap().bots.push(owner);
         app.state.lock().unwrap().chats.push(chat("chat", "dm", &["b1"], Some("b1")));
         let peer = "peer-device";
@@ -2421,8 +2508,12 @@ mod tests {
         assert!(app.store.start_task(&lease).unwrap());
 
         let card_id = "msg-propose-fixture";
-        let mut digest = [0u8;32];
-        digest[0] = 7;
+        use sha2::{Digest, Sha256};
+        let workdir = home.path().to_path_buf();
+        let title = Some("Draft".to_string());
+        let content = Some("bytes".to_string());
+        let path = Some("draft.md".to_string());
+        let digest: [u8;32] = Sha256::digest(serde_json::to_vec(&("chat", "b1", card_id, &title, &content, &path, &workdir, "draft.md", "bytes")).unwrap()).into();
         let frozen = app.freeze_proposal_invocation(&lease, card_id, 1, digest, "attempt-a", "receipt-a").unwrap();
         assert!(frozen.created);
         // A second freeze of the same origin loads the retained binding and mints nothing.
@@ -2444,15 +2535,23 @@ mod tests {
             card_id: card_id.into(), generation: 1, binding: frozen.binding.clone(), snapshot_digest: digest,
             answering_device: peer.into(),
         };
+        let proposal = crate::plugins::mcp::prepare_proposal_artifact(&app, &lease, &invocation, true).unwrap();
+        let mut card = Message::new("chat", crate::model::Author::Bot { bot_id: "b1".into() }, crate::model::Body::Permission {
+            plugin_id: "computer".into(), plugin_name: "Runner".into(), tool: "propose".into(), summary: "Review draft".into(),
+            arguments: serde_json::Value::Null, decision: "pending".into(), reason: None, rule: None, command: None,
+            title: invocation.title.clone(), content: invocation.content_option.clone(), path: invocation.path_option.clone(), link: None, code: None,
+        });
+        card.id = card_id.into();
+        app.upsert_message(card, false);
 
         let before = app.store.load_invocation(&lease, card_id).unwrap().unwrap();
         assert_eq!(before.1, crate::local_store::InvocationState::Authorized);
         let mut dispatches = 0;
         for _ in 0..2 {
-            let outcome = app.save_admitted_proposal(&lease, &invocation, &approval, || {
+            let outcome = app.save_admitted_proposal(&lease, &invocation, &approval, &proposal, |_| {
                 dispatches += 1;
                 std::fs::create_dir_all(home.path().join("workspace")).unwrap();
-                Ok(())
+                Err(crate::artifacts::ProposalDispatchFailure::Unknown)
             });
             assert_eq!(outcome, crate::local_store::ProposalSaveOutcome::NotDispatched);
             assert_eq!(app.store.load_invocation(&lease, card_id).unwrap().unwrap(), before);
@@ -2470,10 +2569,10 @@ mod tests {
         assert!(app.store.admit_invocation(&lease, &frozen.binding).unwrap());
         assert!(app.store.finish_receipt(&lease, &frozen.binding, crate::local_store::ReceiptOutcome::Unknown).unwrap());
         assert_eq!(app.proposal_outcome(card_id).unwrap(), Some(crate::local_store::ProposalSaveOutcome::Unknown));
-        assert_eq!(app.save_admitted_proposal(&lease, &invocation, &approval, || {
+        assert_eq!(app.save_admitted_proposal(&lease, &invocation, &approval, &proposal, |_| {
             dispatches += 1;
-            Ok(())
-        }), crate::local_store::ProposalSaveOutcome::NotDispatched);
+            Err(crate::artifacts::ProposalDispatchFailure::Unknown)
+        }), crate::local_store::ProposalSaveOutcome::Unknown);
         assert_eq!(dispatches, 0);
         assert_eq!(app.proposal_outcome(card_id).unwrap(), Some(crate::local_store::ProposalSaveOutcome::Unknown));
     }

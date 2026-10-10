@@ -2,6 +2,90 @@
 
 mod store;
 
+/// Scratch fixtures only: caller owns connection, durability setup and commit/rollback.
+#[cfg(test)]
+pub(crate) fn install_proposal_artifact_scratch_tx(tx: &rusqlite::Transaction<'_>) -> Result<(), ProposalArtifactError> {
+    store::install_proposal_scratch_tx(tx)
+}
+
+/// Host-validated proposal inputs. This is not an authority issuer or a schema installer.
+pub(crate) struct ProposalArtifactInput {
+    pub authority: ArtifactAuthority,
+    pub chat_id: String,
+    pub bot_id: String,
+    pub card_id: String,
+    pub request_id: String,
+    pub revision: ArtifactRevision,
+    pub snapshot_id: String,
+    pub plaintext: Vec<u8>,
+    pub metadata_plaintext: Vec<u8>,
+    pub file_ciphertext: Vec<u8>,
+    pub metadata_ciphertext: Vec<u8>,
+}
+
+pub(crate) struct ProposalArtifact(store::ProposalParticipant);
+pub(crate) struct ProposalArtifactReservation(store::ProposalReservation);
+pub(crate) struct ProposalPublicationProof(store::ProposalCompletion);
+pub(crate) enum ProposalDispatchFailure { DefinitivePreEffectRefusal, Unknown }
+
+/// Trusted backend calls only after checked write, file sync, no-clobber and directory sync.
+pub(crate) fn observed_proposal_publication(proposal: &ProposalArtifact, reservation: &ProposalArtifactReservation, attempt_id: &str, observed_size: u64, observed_hash: [u8;32]) -> Result<ProposalPublicationProof, ProposalArtifactError> {
+    store::proposal_completion(&proposal.0,&reservation.0,attempt_id,observed_size,observed_hash).map(ProposalPublicationProof)
+}
+
+pub(crate) fn finalize_proposal_artifact_tx(tx: &rusqlite::Transaction<'_>, proposal: &ProposalArtifact, proof: &ProposalPublicationProof) -> Result<ArtifactResult, ProposalArtifactError> {
+    store::proposal_finalize(tx,&proposal.0,&proof.0)
+}
+
+/// Current authenticated host context is required; missing/corrupt retained data is an error.
+pub(crate) fn load_retained_proposal_artifact_tx(tx: &rusqlite::Transaction<'_>, authority: &ArtifactAuthority, chat_id: &str, bot_id: &str, card_id: &str, request_id: &str) -> Result<Option<ProposalArtifact>, ProposalArtifactError> {
+    store::proposal_load_retained(tx,authority,chat_id,bot_id,card_id,request_id).map(|value|value.map(ProposalArtifact))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ProposalArtifactError {
+    NotDispatched,
+    Invalid,
+    Removed,
+    BodyChanged,
+    Incomplete,
+    StaleAttempt,
+    Conflict { current_revision: String, current_hash: String },
+    Storage,
+}
+
+/// Host caller must check existing task outcomes first; failed lookup is never Fresh.
+pub(crate) enum ProposalAttemptHistory { Fresh, Existing }
+
+pub(crate) enum ProposalArtifactReplay {
+    Absent,
+    Accepted { result: ArtifactResult, workspace_state: WorkspaceState, attempt_id: Option<String> },
+    Reserved { reservation: ProposalArtifactReservation, workspace_state: WorkspaceState, attempt_id: Option<String> },
+}
+
+pub(crate) fn freeze_proposal_artifact(input: ProposalArtifactInput) -> Result<ProposalArtifact, ProposalArtifactError> {
+    store::proposal_participant(input).map(ProposalArtifact)
+}
+
+/// Call before task admission. Absence of installed tables never permits a task-only effect.
+pub(crate) fn lookup_proposal_artifact_tx(tx: &rusqlite::Transaction<'_>, proposal: &ProposalArtifact) -> Result<ProposalArtifactReplay, ProposalArtifactError> {
+    store::proposal_lookup(tx, &proposal.0)
+}
+
+pub(crate) fn reserve_proposal_artifact_tx(tx: &rusqlite::Transaction<'_>, proposal: &ProposalArtifact, history: ProposalAttemptHistory) -> Result<ProposalArtifactReplay, ProposalArtifactError> {
+    store::proposal_reserve(tx, &proposal.0, history)
+}
+
+/// Caller joins this with task admission in ONE FULL transaction and owns rollback/commit.
+pub(crate) fn admit_proposal_artifact_attempt_tx(tx: &rusqlite::Transaction<'_>, proposal: &ProposalArtifact, reservation: &ProposalArtifactReservation, attempt_id: &str) -> Result<ProposalArtifactReservation, ProposalArtifactError> {
+    store::proposal_admit(tx, &proposal.0, &reservation.0, attempt_id).map(ProposalArtifactReservation)
+}
+
+pub(crate) fn matches_proposal_host_input(proposal: &ProposalArtifact, authority: &ArtifactAuthority, chat_id: &str, bot_id: &str, card_id: &str, request_id: &str, path: Option<&str>, plaintext: &[u8]) -> Result<bool, ProposalArtifactError> {
+    store::proposal_matches_host(&proposal.0,authority,chat_id,bot_id,card_id,request_id,path,plaintext)
+}
+
+
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;

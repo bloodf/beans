@@ -3246,7 +3246,8 @@ mod tests {
         }).await.expect("new proposal must become reviewable");
         reloaded.close_orphan_proposals().unwrap();
         assert!(matches!(reloaded.message("chat", &new_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"));
-        assert!(crate::plugins::mcp::answer_proposal(&reloaded, &new_id, crate::plugins::mcp::Decision::Denied, crate::plugins::AnsweringDevice(reloaded.this_device_id().unwrap())));
+        let request = serde_json::json!({ "chat_id": "chat", "message_id": new_id, "decision": "deny" });
+        assert_eq!(crate::plugins::serve_request(&reloaded, "permission.answer", &request, None).await.unwrap()["answered"], true);
         assert_eq!(review.await.unwrap().unwrap(), crate::plugins::mcp::ProposalDisposition::NotApproved);
     }
 

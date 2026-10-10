@@ -479,7 +479,8 @@ impl LocalStore {
             let connection = self.connection.lock().unwrap();
             let mut statement = connection.prepare(
                 "SELECT i.state,r.state FROM task_invocations i LEFT JOIN task_effect_receipts r ON r.account_epoch=i.account_epoch AND r.receipt_id=i.receipt_id WHERE i.account_epoch=?1 AND i.invocation_id=?2")?;
-            statement.query_map(params![account_epoch,card_id], |row| Ok((row.get(0)?,row.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+            let rows = statement.query_map(params![account_epoch,card_id], |row| Ok((row.get(0)?,row.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            rows
         };
         let mut outcome: Option<ProposalSaveOutcome> = None;
         for (invocation, receipt) in rows {
@@ -2329,7 +2330,7 @@ mod tests {
         assert!(store.load_invocation(&lease,"msg-propose-test").is_err(),"a short digest must not load as a binding");
         assert!(store.freeze_or_load_invocation(&lease,"msg-propose-test",1,[7;32],"attempt-d","receipt-d").is_err(),"a corrupt retained row must not be silently reminted");
         store.connection.lock().unwrap().execute("UPDATE task_invocations SET digest=?2 WHERE invocation_id=?1",params!["msg-propose-test",&vec![7u8;32][..]]).unwrap();
-        store.connection.lock().unwrap().execute("UPDATE task_invocations SET state='not-a-state' WHERE invocation_id='msg-propose-test'").unwrap();
+        store.connection.lock().unwrap().execute("UPDATE task_invocations SET state='not-a-state' WHERE invocation_id='msg-propose-test'", []).unwrap();
         assert!(store.load_invocation(&lease,"msg-propose-test").is_err(),"unknown persisted state must not be guessed");
     }
 

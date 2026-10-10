@@ -3468,9 +3468,9 @@ mod tests {
             loop {
                 let pending = app.messages("chat").into_iter().find(|message| matches!(&message.body, Body::Permission { decision, .. } if decision == "pending"));
                 if let Some(card) = pending {
-                    let device = crate::plugins::AnsweringDevice(app.this_device_id().unwrap());
                     if card.id.starts_with("msg-propose-") {
-                        assert!(crate::plugins::mcp::answer_proposal(&app, &card.id, decision, device));
+                        let request = json!({ "chat_id": "chat", "message_id": card.id, "decision": decision.as_str() });
+                        assert_eq!(crate::plugins::serve_request(&app, "permission.answer", &request, None).await.unwrap()["answered"], true);
                     } else {
                         assert!(crate::plugins::mcp::answer(&app, &card.id, decision));
                     }

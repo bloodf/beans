@@ -739,7 +739,10 @@ impl LocalStore {
         if path.exists() { crate::config::validate_database(path)?; }
         let mut connection = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         let profile = classify_schema(&connection)?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=16777216;")?;
+        connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=16777216;")?;
+        // A fresh database has no committed identity header yet. Entering WAL here
+        // publishes an application_id=0 main file that raw-header admission rejects.
+        if profile != SchemaProfile::Empty { connection.execute_batch("PRAGMA journal_mode=WAL;")?; }
         #[cfg(unix)]
         admission.ok_or_else(|| anyhow::anyhow!("Storage admission guard is required"))?.validate_target(parent)?;
         if staged {
@@ -752,6 +755,7 @@ impl LocalStore {
         anyhow::ensure!(classify_schema(&tx)? == profile, "Storage schema changed during admission");
         install_local_schema_tx(&tx, profile)?;
         tx.commit()?;
+        if profile == SchemaProfile::Empty { connection.execute_batch("PRAGMA journal_mode=WAL;")?; }
         crate::config::set_private(path)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -2368,6 +2372,25 @@ mod tests {
         let (cancelled,new_job) = task_fixture(store,"job-cancel-first");
         store.cancel_tasks(&cancelled.account_epoch,Some(&new_job.id),None,None).unwrap();
         assert!(!store.queue_task(&cancelled,&new_job).unwrap());
+    }
+
+    #[test]
+    fn fresh_schema_identity_survives_live_store_readmission() {
+        let home = tempfile::tempdir().unwrap();
+        let config = crate::config::Config { home: home.path().into(), port: 0 };
+        let store = LocalStore::open(&config.database_path()).unwrap();
+        // Admission reads the main-file header, not the first connection's WAL view.
+        crate::config::validate_database(&config.database_path()).unwrap();
+        assert!(config.validate_home().unwrap());
+        let reopened = LocalStore::open(&config.database_path()).unwrap();
+        for current in [&store, &reopened] {
+            let conn = current.connection.lock().unwrap();
+            assert_eq!(classify_schema(&conn).unwrap(), SchemaProfile::Current);
+            let journal: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0)).unwrap();
+            assert_eq!(journal, "wal");
+            let synchronous: i64 = conn.pragma_query_value(None, "synchronous", |r| r.get(0)).unwrap();
+            assert_eq!(synchronous, 2);
+        }
     }
 
     #[test]

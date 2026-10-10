@@ -616,6 +616,11 @@ struct ListBlobs {
     kinds: Option<String>,
     #[serde(default)]
     limit: Option<i64>,
+    policy_replay: Option<u8>,
+    context: Option<String>,
+    cut_token: Option<String>,
+    through: Option<i64>,
+    receipt_transaction_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -643,7 +648,20 @@ impl From<db::BlobRow> for BlobOut {
 
 /// A page of the identity's log after `since`. A Device pulls pages until one comes back
 /// empty, and again whenever its sync socket says `blobs`.
-async fn list_blobs(State(state): State<AppState>, auth: Auth, Query(query): Query<ListBlobs>) -> ApiResult<Json<Value>> {
+async fn list_blobs(State(state): State<AppState>, auth: Auth, axum::extract::RawQuery(raw): axum::extract::RawQuery, Query(query): Query<ListBlobs>) -> ApiResult<Json<Value>> {
+    if query.policy_replay.is_some() || query.receipt_transaction_id.is_some() {
+        let mut seen = std::collections::HashSet::new();
+        for field in raw.as_deref().unwrap_or("").split('&') {
+            let key = field.split('=').next().unwrap_or("");
+            if !["since", "kinds", "limit", "policy_replay", "context", "cut_token", "through", "receipt_transaction_id"].contains(&key) || !seen.insert(key) {
+                return Err(ApiError::bad_request("Unknown or duplicate managed replay query field"));
+            }
+        }
+        return managed_policy_transport(&state, &auth, query).await;
+    }
+    if query.context.is_some() || query.cut_token.is_some() || query.through.is_some() {
+        return Err(ApiError::bad_request("Replay fields require policy_replay=1"));
+    }
     let mut kinds: Vec<String> = query
         .kinds
         .as_deref()
@@ -666,6 +684,48 @@ async fn list_blobs(State(state): State<AppState>, auth: Auth, Query(query): Que
     let (rows, head) = state.db.blobs_since(&auth.identity_pubkey, &auth.machine_pubkey, query.since, &kinds, limit, MAX_PAGE_BYTES).await?;
     let blobs: Vec<BlobOut> = rows.into_iter().map(BlobOut::from).collect();
     Ok(Json(json!({ "blobs": blobs, "seq": head })))
+}
+
+/// The existing blobs route owns this account-authenticated, opt-in transport.
+async fn managed_policy_transport(state: &AppState, auth: &Auth, query: ListBlobs) -> ApiResult<Json<Value>> {
+    if query.policy_replay != Some(1) || query.kinds.as_deref().is_some_and(|kinds| kinds != "policy")
+        || query.since < 0 || query.limit.is_some_and(|limit| !(1..=1024).contains(&limit))
+        || query.context.as_ref().is_some_and(|value| value.len() > 1024)
+        || query.cut_token.as_ref().is_some_and(|value| value.len() > 4096)
+    { return Err(ApiError::bad_request("Invalid managed policy replay request")); }
+    require_current_machine(state, auth).await?;
+    let value = if let Some(transaction) = query.receipt_transaction_id {
+        if transaction.is_empty() || transaction.len() > 1024 || transaction.chars().any(char::is_control)
+            || query.since != 0 || query.limit.is_some() || query.context.is_some() || query.cut_token.is_some() || query.through.is_some()
+        { return Err(ApiError::bad_request("Invalid managed receipt request")); }
+        let receipt = state.db.managed_receipt(&auth.identity_pubkey, &transaction).await?
+            .ok_or_else(|| ApiError::not_found("Managed receipt not found"))?;
+        if receipt.account_id != auth.identity_pubkey || receipt.schema_version != 1 || receipt.policy_seq <= 0
+            || receipt.policy_seq >= receipt.roster_seq || receipt.request_sha256 != receipt.request_commitment()?
+        { return Err(ApiError::internal("Invalid managed receipt commitment")); }
+        serde_json::to_value(receipt).map_err(|_| ApiError::internal("Receipt serialization failed"))?
+    } else {
+        let continuation = query.cut_token.is_some();
+        if continuation != query.context.is_some() || continuation != query.through.is_some()
+            || (!continuation && query.since != 0) || query.cut_token.as_ref().is_some_and(String::is_empty)
+            || query.context.as_ref().is_some_and(String::is_empty) || query.through.is_some_and(|through| through < query.since)
+        { return Err(ApiError::bad_request("Replay requires first capture or complete continuation")); }
+        let page = state.db.managed_cut(&auth.identity_pubkey, query.context.as_deref().unwrap_or(""),
+            query.cut_token.as_deref().unwrap_or(""), query.through.unwrap_or(0), query.since, query.limit.unwrap_or(1)).await?;
+        serde_json::to_value(page).map_err(|_| ApiError::internal("Replay serialization failed"))?
+    };
+    require_current_machine(state, auth).await?;
+    if serde_json::to_vec(&value).map_err(|_| ApiError::internal("Replay serialization failed"))?.len() > MAX_PAGE_BYTES as usize {
+        return Err(ApiError::too_large("Managed policy response exceeds page bound"));
+    }
+    Ok(Json(value))
+}
+
+async fn require_current_machine(state: &AppState, auth: &Auth) -> ApiResult<()> {
+    if !state.db.machines_for(&auth.identity_pubkey).await?.iter().any(|machine| machine.machine_pubkey == auth.machine_pubkey) {
+        return Err(ApiError::gone("Machine is no longer paired to this account"));
+    }
+    Ok(())
 }
 
 // MARK: - Sync socket

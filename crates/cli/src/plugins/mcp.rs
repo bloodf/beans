@@ -2520,6 +2520,15 @@ pub(crate) struct ProposalInvocation {
     pub path_option: Option<String>,
 }
 
+impl ProposalInvocation {
+    pub(crate) fn draft_digest(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(&(&self.chat_id, &self.bot_id, &self.card_id, &self.title,
+            &self.content_option, &self.path_option, &self.workdir, &self.path, &self.content)).expect("Proposal fields serialize");
+        Sha256::digest(bytes).into()
+    }
+}
+
 /// One live proposal wait. Retained after the answer arrives: removing the oneshot waiter must
 /// not remove the record that binds the approval to the invocation it was asked for.
 pub(crate) struct ProposalOccurrence {
@@ -2712,6 +2721,25 @@ pub async fn propose(app: &Arc<App>, chat_id: &str, bot_id: &str, call_id: &str,
         // Durable evidence outranks the row: it survives a crash between admission and
         // publication, and repairs a stale row without ever dispatching again.
         Ok(Some(outcome)) => {
+            let outcome = if outcome == crate::local_store::ProposalSaveOutcome::AlreadySaved {
+                let joined = (|| -> anyhow::Result<bool> {
+                    let task = call_id.split_once(':').map_or(call_id, |(job, _)| job);
+                    let lease = app.task_execution(task)?.or(app.task_history_execution(task)?).ok_or_else(|| anyhow::anyhow!("Proposal lease absent"))?;
+                    let _lifecycle = app.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+                    let machine = app.machine_file().ok_or_else(|| anyhow::anyhow!("Account absent"))?;
+                    let runner = machine.machine()?.pubkey();
+                    let authority = crate::artifacts::ArtifactAuthority { account_id: machine.identity_pubkey, incarnation: lease.incarnation,
+                        requester: runner.clone(), runner_id: runner, owner_epoch: lease.owner_epoch, account_epoch: lease.account_epoch };
+                    app.store.safety_tx(|tx| {
+                        let proposal = crate::artifacts::load_retained_proposal_artifact_tx(tx, &authority, chat_id, bot_id, &card_id, &card_id)
+                            .map_err(|error| anyhow::anyhow!("Artifact replay failed: {error:?}"))?.ok_or_else(|| anyhow::anyhow!("Artifact absent"))?;
+                        anyhow::ensure!(crate::artifacts::matches_proposal_host_input(&proposal, &authority, chat_id, bot_id, &card_id, &card_id, Some(&path_value), content.as_deref().unwrap_or_default().as_bytes())
+                            .map_err(|error| anyhow::anyhow!("Artifact replay mismatch: {error:?}"))?, "Artifact changed");
+                        Ok(matches!(crate::artifacts::lookup_proposal_artifact_tx(tx, &proposal), Ok(crate::artifacts::ProposalArtifactReplay::Accepted(_))))
+                    })
+                })();
+                if joined.unwrap_or(false) { outcome } else { crate::local_store::ProposalSaveOutcome::Unknown }
+            } else { outcome };
             let Some(card) = existing else { return Ok(outcome.into()) };
             if !card_is_ours(&card) || !body_matches(&card) {
                 return Err("Proposal already awaits review or its draft changed.".into());
@@ -2747,8 +2775,9 @@ pub async fn propose(app: &Arc<App>, chat_id: &str, bot_id: &str, call_id: &str,
     let Some(bot) = app.bot(bot_id) else { return Err("Bot or valid proposal no longer exists.".into()); };
     let content_text = content.clone().unwrap_or_default();
     let workdir = bot.working_directory(&app.config.home);
-    let mut binding_digest = [0u8;32];
-    binding_digest.copy_from_slice(&Sha256::digest(format!("{chat_id}\0{bot_id}\0{call_id}\0{path_value}\0{content_text}").as_bytes()));
+    let digest_bytes = serde_json::to_vec(&(chat_id, bot_id, &card_id, &title, &content, &path, &workdir, &path_value, &content_text))
+        .map_err(|_| "Proposal draft unavailable")?;
+    let binding_digest: [u8; 32] = Sha256::digest(digest_bytes).into();
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let frozen = app.freeze_proposal_invocation(&lease, &card_id, 1, binding_digest, &format!("attempt-{nonce}"), &format!("receipt-{nonce}"))
         .map_err(|_| "Proposal could not be prepared.".to_string())?;
@@ -2761,12 +2790,83 @@ pub async fn propose(app: &Arc<App>, chat_id: &str, bot_id: &str, call_id: &str,
         crate::local_store::InvocationState::Admitted => return Ok(ProposalDisposition::Unknown),
         crate::local_store::InvocationState::Authorized => return Ok(ProposalDisposition::NotDispatched),
     }
-    ask_and_dispatch(app, lease, ProposalInvocation { card_id, chat_id: chat_id.to_string(), bot_id: bot_id.to_string(), binding: frozen.binding, snapshot_digest: binding_digest, workdir, path: path_value, content: content_text, title: title.clone(), content_option: content.clone(), path_option: path.clone() }, cancel).await
+    ask_and_dispatch(app, lease, ProposalInvocation { card_id, chat_id: chat_id.to_string(), bot_id: bot_id.to_string(), binding: frozen.binding, snapshot_digest: binding_digest, workdir, path: path_value, content: content_text, title: title.clone(), content_option: content.clone(), path_option: path.clone() }, frozen.created, cancel).await
+}
+
+/// Captures host authority and original encrypted bytes before the permission waiter exists.
+pub(crate) fn prepare_proposal_artifact(app: &Arc<App>, lease: &crate::local_store::TaskLease, invocation: &ProposalInvocation, fresh: bool) -> Result<crate::artifacts::ProposalArtifact, String> {
+    use crate::artifacts::{ArtifactAuthority, ArtifactRevision, ProposalArtifactInput};
+    use sha2::{Digest, Sha256};
+    let _policy = app.roster_edit.lock().unwrap();
+    let _lifecycle = app.plugin_admission(Some(lease.incarnation))?;
+    let machine = app.machine_file().ok_or("Account unavailable")?;
+    let runner = machine.machine().map_err(|_| "Runner unavailable")?.pubkey();
+    let dek = machine.dek().map_err(|_| "Account key unavailable")?;
+    let state = app.state.lock().unwrap();
+    let bot = state.bots.iter().find(|bot| bot.id == invocation.bot_id).ok_or("Bot unavailable")?;
+    if state.paused || bot.runner_id != runner || !bot.capabilities.write
+        || bot.working_directory(&app.config.home) != invocation.workdir
+        || !state.chats.iter().any(|chat| chat.meta.id == invocation.chat_id && chat.meta.bot_ids.contains(&invocation.bot_id))
+        || !matches!(machine.os.as_str(), "macos" | "linux" | "windows") {
+        return Err("Proposal authority unavailable".into());
+    }
+    let authority = ArtifactAuthority { account_id: machine.identity_pubkey, incarnation: lease.incarnation,
+        requester: runner.clone(), runner_id: runner.clone(), owner_epoch: lease.owner_epoch.clone(), account_epoch: lease.account_epoch.clone() };
+    let retained = app.store.safety_tx(|tx| {
+        let origin: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM local_tasks WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND chat_id=?5 AND bot_id=?6 AND state='running' AND cancel_requested=0)",
+            rusqlite::params![lease.account_epoch, lease.task_id, lease.owner_epoch, lease.execution_id, invocation.chat_id, invocation.bot_id], |row| row.get(0))?;
+        anyhow::ensure!(origin, "Proposal task origin changed");
+        let tables: i64 = tx.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('artifact_lineages','artifact_revisions','artifact_acceptances','artifact_snapshots','artifact_intents','artifact_tombstones','artifact_cleanup','artifact_safety_replay')", [], |row| row.get(0))?;
+        if fresh && tables == 0 { return Ok(None); }
+        // Only a new invocation may use the verified-absent schema refusal later. Retained
+        // input lookup errors never become a fresh snapshot or regenerated ciphertext.
+        crate::artifacts::load_retained_proposal_artifact_tx(tx, &authority, &invocation.chat_id, &invocation.bot_id, &invocation.card_id, &invocation.card_id)
+            .map_err(|error| anyhow::anyhow!("Retained artifact unavailable: {error:?}"))
+    });
+    match retained {
+        Ok(Some(proposal)) => {
+            if !crate::artifacts::matches_proposal_host_input(&proposal, &authority, &invocation.chat_id, &invocation.bot_id,
+                &invocation.card_id, &invocation.card_id, Some(&invocation.path), invocation.content.as_bytes()).map_err(|_| "Retained artifact invalid")? {
+                return Err("Retained artifact draft changed".into());
+            }
+            return Ok(proposal);
+        },
+        Ok(None) if fresh => {},
+        Ok(None) => return Err("Retained artifact missing".into()),
+        Err(_) => return Err("Retained artifact unavailable".into()),
+    }
+    let revision_id = uuid::Uuid::new_v4().to_string();
+    let revision = ArtifactRevision { version: 1, id: crate::artifacts::proposal_id(&invocation.chat_id, &invocation.bot_id, &invocation.card_id).map_err(|_| "Invalid proposal origin")?,
+        file_id: format!("{revision_id}.file"), revision_id, name: invocation.path.clone(), mime: "text/plain".into(),
+        size: invocation.content.len() as u64, content_hash: format!("{:x}", Sha256::digest(invocation.content.as_bytes())),
+        parent_revision: None, parent_content_hash: None, chat_id: invocation.chat_id.clone(), bot_id: Some(invocation.bot_id.clone()),
+        runner_id: runner, card_id: Some(invocation.card_id.clone()), attachment_id: None, created_at: crate::config::now_unix() as f64, path: Some(invocation.path.clone()) };
+    revision.verify_bytes(invocation.content.as_bytes()).map_err(|_| "Invalid proposal bytes")?;
+    let metadata_plaintext = serde_json::to_vec(&revision).map_err(|_| "Invalid artifact metadata")?;
+    let file_ciphertext = crate::crypto::encrypt(&dek, "file", invocation.content.as_bytes()).map_err(|_| "Artifact encryption failed")?;
+    let metadata_ciphertext = crate::crypto::encrypt(&dek, "artifact", &metadata_plaintext).map_err(|_| "Artifact encryption failed")?;
+    let proposal = crate::artifacts::freeze_proposal_artifact(ProposalArtifactInput { authority, chat_id: invocation.chat_id.clone(), bot_id: invocation.bot_id.clone(),
+        card_id: invocation.card_id.clone(), request_id: invocation.card_id.clone(), revision, snapshot_id: uuid::Uuid::new_v4().to_string(),
+        plaintext: invocation.content.as_bytes().to_vec(), metadata_plaintext, file_ciphertext, metadata_ciphertext }).map_err(|_| "Invalid artifact participant")?;
+    let mut absent = false;
+    let persisted = app.store.safety_tx(|tx| {
+        match crate::artifacts::reserve_proposal_artifact_tx(tx, &proposal, crate::artifacts::ProposalAttemptHistory::Fresh) {
+            Ok(crate::artifacts::ProposalArtifactReplay::Reserved { workspace_state: crate::artifacts::WorkspaceState::Reserved, attempt_id: None, .. }) => Ok(()),
+            Err(crate::artifacts::ProposalArtifactError::NotDispatched) => { absent = true; anyhow::bail!("Participant absent") },
+            _ => anyhow::bail!("Artifact reservation uncertain"),
+        }
+    });
+    if persisted.is_err() && !absent { return Err("Artifact reservation uncertain".into()); }
+    Ok(proposal)
 }
 
 /// Asks about a frozen origin, then either dispatches it under a bound approval or settles the
 /// card from what was actually decided.
-async fn ask_and_dispatch(app: &Arc<App>, lease: crate::local_store::TaskLease, invocation: ProposalInvocation, cancel: &CancellationToken) -> Result<ProposalDisposition, String> {
+async fn ask_and_dispatch(app: &Arc<App>, lease: crate::local_store::TaskLease, invocation: ProposalInvocation, fresh: bool, cancel: &CancellationToken) -> Result<ProposalDisposition, String> {
+    let proposal = match prepare_proposal_artifact(app, &lease, &invocation, fresh) {
+        Ok(proposal) => proposal,
+        Err(_) => return Ok(ProposalDisposition::Unknown),
+    };
     let mut card = Message::new(&invocation.chat_id, Author::Bot { bot_id: invocation.bot_id.clone() }, Body::Permission {
         plugin_id: "computer".into(), plugin_name: this_runner(app), tool: "propose".into(),
         summary: format!("Review draft: {}", invocation.title.as_deref().unwrap_or(&invocation.path).chars().map(|ch| if ch.is_control() { ' ' } else { ch }).collect::<String>()),
@@ -2793,7 +2893,12 @@ async fn ask_and_dispatch(app: &Arc<App>, lease: crate::local_store::TaskLease, 
                 let workdir = invocation.workdir.clone();
                 let path = invocation.path.clone();
                 let content = invocation.content.clone();
-                app.save_admitted_proposal(&lease, &invocation, &approval, move || save_proposal(&workdir, &path, &content))
+                app.save_admitted_proposal(&lease, &invocation, &approval, &proposal, |reservation| {
+                    save_proposal(&workdir, &path, &content).map_err(|_| crate::artifacts::ProposalDispatchFailure::Unknown)?;
+                    use sha2::{Digest, Sha256};
+                    crate::artifacts::observed_proposal_publication(&proposal, reservation, &invocation.binding.attempt_id,
+                        content.len() as u64, Sha256::digest(content.as_bytes()).into()).map_err(|_| crate::artifacts::ProposalDispatchFailure::Unknown)
+                })
             } else {
                 crate::local_store::ProposalSaveOutcome::NotDispatched
             };
@@ -2814,7 +2919,9 @@ async fn ask_and_dispatch(app: &Arc<App>, lease: crate::local_store::TaskLease, 
                 *summary = PROPOSAL_CHANGED_SUMMARY.into();
             }
             app.upsert_message(failed, true);
-            return Ok(ProposalDisposition::NotApproved);
+            return Ok(if matches!(disposition, ProposalDisposition::Saved | ProposalDisposition::AlreadySaved | ProposalDisposition::Unknown) {
+                ProposalDisposition::Unknown
+            } else { ProposalDisposition::NotApproved });
         }
         match approval {
             Some(_) => {
@@ -2893,7 +3000,9 @@ fn save_proposal(workdir: &std::path::Path, path: &str, content: &str) -> Result
         if unsafe { libc::linkat(dir.as_raw_fd(), temp.as_ptr(), dir.as_raw_fd(), target.as_ptr(), 0) } != 0 {
             return Err(format!("Publishing draft without overwrite: {}", std::io::Error::last_os_error()));
         }
-        let _ = unsafe { libc::fsync(dir.as_raw_fd()) };
+        if unsafe { libc::fsync(dir.as_raw_fd()) } != 0 {
+            return Err(format!("Syncing proposal parent: {}", std::io::Error::last_os_error()));
+        }
         Ok(())
     })();
     unsafe { libc::unlinkat(dir.as_raw_fd(), temp.as_ptr(), 0) };
@@ -3030,6 +3139,152 @@ mod tests {
         save_proposal(&alias, "notes/through-alias.md", "inside").unwrap();
         assert_eq!(std::fs::read(workspace.join("notes/through-alias.md")).unwrap(), b"inside");
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proposal_approval_joins_real_artifact_and_receipt_before_save_and_completion() {
+        let scratch = scratch_owner();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        let runner = app.this_device_id().unwrap();
+        let bot: Bot = serde_json::from_value(json!({ "id": "draft-bot", "name": "Draft Bot", "description": "",
+            "symbol_name": "", "accent": "", "runner_id": runner, "provider": "deepseek", "created_at": 0.0 })).unwrap();
+        let workspace = bot.working_directory(&app.config.home);
+        app.state.lock().unwrap().bots.push(bot);
+        app.state.lock().unwrap().chats.push(Chat { meta: ChatMeta { id: "draft-chat".into(), kind: "dm".into(), title: None,
+            description: None, bot_ids: vec!["draft-bot".into()], owner_bot_id: None, is_pinned: false, created_at: 0.0 },
+            unread_count: 0, usage: None, compactions: Vec::new() });
+        let lease = running_task(app, "joined-job");
+        app.store.safety_tx(|tx| crate::artifacts::install_proposal_artifact_scratch_tx(tx)
+            .map_err(|error| anyhow::anyhow!("{error:?}"))).unwrap();
+        let task = tokio::spawn({
+            let app = app.clone();
+            async move { propose(&app, "draft-chat", "draft-bot", "joined-job:save", Some("Draft".into()),
+                Some("Exact 🌍\n".into()), Some("draft.md".into()), &CancellationToken::new()).await }
+        });
+        let card = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(card) = app.messages("draft-chat").into_iter().find(|card| matches!(&card.body,
+                    Body::Permission { tool, decision, .. } if tool == "propose" && decision == "pending")) { break card; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let answer = json!({ "chat_id": "draft-chat", "message_id": card.id, "decision": "allow" });
+        assert_eq!(super::super::serve_request(app, "permission.answer", &answer, None).await.unwrap()["answered"], true);
+        assert_eq!(task.await.unwrap().unwrap(), ProposalDisposition::Saved);
+        assert_eq!(std::fs::read(workspace.join("draft.md")).unwrap(), "Exact 🌍\n".as_bytes());
+        let (binding, state) = app.store.load_invocation(&lease, &card.id).unwrap().unwrap();
+        assert_eq!(state, crate::local_store::InvocationState::Admitted);
+        let connection = app.store.connection.lock().unwrap();
+        let receipt: String = connection.query_row("SELECT state FROM task_effect_receipts WHERE account_epoch=?1 AND receipt_id=?2",
+            rusqlite::params![lease.account_epoch, binding.receipt_id], |row| row.get(0)).unwrap();
+        assert_eq!(receipt, "finished");
+        let (artifact_state, attempt, plaintext, metadata, file_ciphertext, metadata_ciphertext): (String, String, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) = connection.query_row(
+            "SELECT a.workspace_state,a.attempt_id,s.plaintext,s.metadata_plaintext,s.file_ciphertext,s.metadata_ciphertext FROM artifact_acceptances a JOIN artifact_snapshots s ON s.account_id=a.account_id AND s.namespace_key=a.namespace_key AND s.snapshot_id=a.snapshot_id WHERE a.request_id=?1",
+            [&card.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).unwrap();
+        assert_eq!(artifact_state, "published");
+        assert_eq!(attempt, binding.attempt_id);
+        assert_eq!(plaintext, "Exact 🌍\n".as_bytes());
+        let dek = app.dek().unwrap();
+        assert_eq!(crate::crypto::decrypt(&dek, "file", &file_ciphertext).unwrap(), plaintext);
+        assert_eq!(crate::crypto::decrypt(&dek, "artifact", &metadata_ciphertext).unwrap(), metadata);
+        let revision: crate::artifacts::ArtifactRevision = serde_json::from_slice(&metadata).unwrap();
+        assert_eq!(revision.path.as_deref(), Some("draft.md"));
+        assert_eq!(revision.card_id.as_deref(), Some(card.id.as_str()));
+        drop(connection);
+        std::fs::write(workspace.join("draft.md"), "user edit").unwrap();
+        assert_eq!(propose(app, "draft-chat", "draft-bot", "joined-job:save", Some("Draft".into()), Some("Exact 🌍\n".into()),
+            Some("draft.md".into()), &CancellationToken::new()).await.unwrap(), ProposalDisposition::AlreadySaved);
+        assert_eq!(std::fs::read(workspace.join("draft.md")).unwrap(), b"user edit");
+        app.store.connection.lock().unwrap().execute("DELETE FROM artifact_snapshots WHERE request_id=?1", [&card.id]).unwrap();
+        assert_eq!(propose(app, "draft-chat", "draft-bot", "joined-job:save", Some("Draft".into()), Some("Exact 🌍\n".into()),
+            Some("draft.md".into()), &CancellationToken::new()).await.unwrap(), ProposalDisposition::Unknown);
+        assert_eq!(std::fs::read(workspace.join("draft.md")).unwrap(), b"user edit");
+        let allow = |call: &'static str, path: &'static str| {
+            let app = app.clone();
+            async move {
+                let pending = tokio::spawn({ let app = app.clone(); async move {
+                    propose(&app, "draft-chat", "draft-bot", call, Some("Draft".into()), Some("Exact 🌍\n".into()), Some(path.into()), &CancellationToken::new()).await
+                }});
+                let card = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        if let Some(card) = app.messages("draft-chat").into_iter().find(|card| matches!(&card.body,
+                            Body::Permission { decision, path: current, .. } if decision == "pending" && current.as_deref() == Some(path))) { break card; }
+                        tokio::task::yield_now().await;
+                    }
+                }).await.unwrap();
+                let request = json!({ "chat_id": "draft-chat", "message_id": card.id, "decision": "allow" });
+                assert_eq!(super::super::serve_request(&app, "permission.answer", &request, None).await.unwrap()["answered"], true);
+                (card.id, pending.await.unwrap().unwrap())
+            }
+        };
+        app.store.connection.lock().unwrap().execute_batch("CREATE TEMP TRIGGER reject_joint_receipt BEFORE INSERT ON task_effect_receipts BEGIN SELECT RAISE(ABORT,'fixture admission rejection'); END;").unwrap();
+        let (rejected, outcome) = allow("joined-job:reject", "rejected.md").await;
+        assert_eq!(outcome, ProposalDisposition::Unknown);
+        assert!(!workspace.join("rejected.md").exists());
+        let connection = app.store.connection.lock().unwrap();
+        let (artifact_state, attempt): (String, Option<String>) = connection.query_row("SELECT workspace_state,attempt_id FROM artifact_acceptances WHERE request_id=?1", [&rejected], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(artifact_state, "reserved");
+        assert_eq!(attempt, None);
+        let count: i64 = connection.query_row("SELECT count(*) FROM task_effect_receipts WHERE receipt_id=(SELECT receipt_id FROM task_invocations WHERE invocation_id=?1)", [&rejected], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+        connection.execute_batch("DROP TRIGGER reject_joint_receipt; CREATE TEMP TRIGGER reject_joint_completion BEFORE UPDATE OF accepted_result_json ON artifact_acceptances BEGIN SELECT RAISE(ABORT,'fixture completion rejection'); END;").unwrap();
+        drop(connection);
+        let (uncertain, outcome) = allow("joined-job:uncertain", "uncertain.md").await;
+        assert_eq!(outcome, ProposalDisposition::Unknown);
+        assert_eq!(std::fs::read(workspace.join("uncertain.md")).unwrap(), "Exact 🌍\n".as_bytes());
+        let connection = app.store.connection.lock().unwrap();
+        let (artifact_state, accepted): (String, Option<String>) = connection.query_row("SELECT workspace_state,accepted_result_json FROM artifact_acceptances WHERE request_id=?1", [&uncertain], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(artifact_state, "attempt_admitted");
+        assert_eq!(accepted, None);
+        let receipt: String = connection.query_row("SELECT r.state FROM task_effect_receipts r JOIN task_invocations i ON i.receipt_id=r.receipt_id AND i.account_epoch=r.account_epoch WHERE i.invocation_id=?1", [&uncertain], |row| row.get(0)).unwrap();
+        assert_eq!(receipt, "started");
+        connection.execute_batch("DROP TRIGGER reject_joint_completion").unwrap();
+        drop(connection);
+        std::fs::write(workspace.join("uncertain.md"), "retained uncertainty").unwrap();
+        assert_eq!(propose(app, "draft-chat", "draft-bot", "joined-job:uncertain", Some("Draft".into()), Some("Exact 🌍\n".into()), Some("uncertain.md".into()), &CancellationToken::new()).await.unwrap(), ProposalDisposition::Unknown);
+        assert_eq!(std::fs::read(workspace.join("uncertain.md")).unwrap(), b"retained uncertainty");
+        let state_card = "msg-propose-state-boundary";
+        let mut invocation = ProposalInvocation { card_id: state_card.into(), chat_id: "draft-chat".into(), bot_id: "draft-bot".into(),
+            binding: binding.clone(), snapshot_digest: [0;32], workdir: workspace.clone(), path: "state.md".into(), content: "state bytes".into(),
+            title: Some("State".into()), content_option: Some("state bytes".into()), path_option: Some("state.md".into()) };
+        let digest = invocation.draft_digest();
+        let frozen = app.freeze_proposal_invocation(&lease, state_card, 1, digest, "state-attempt", "state-receipt").unwrap();
+        invocation.binding = frozen.binding;
+        invocation.snapshot_digest = digest;
+        let participant = prepare_proposal_artifact(app, &lease, &invocation, true).unwrap();
+        let mut state_message = card.clone();
+        state_message.id = state_card.into();
+        if let Body::Permission { title, content, path, decision, .. } = &mut state_message.body {
+            *title = invocation.title.clone(); *content = invocation.content_option.clone(); *path = invocation.path_option.clone(); *decision = "pending".into();
+        }
+        let guard = OccurrenceGuard(app, state_card.into());
+        let answerer = tokio::spawn({ let app = app.clone(); async move {
+            loop {
+                if app.message("draft-chat", state_card).is_some() {
+                    let request = json!({ "chat_id": "draft-chat", "message_id": state_card, "decision": "allow" });
+                    assert_eq!(super::super::serve_request(&app, "permission.answer", &request, None).await.unwrap()["answered"], true);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }});
+        let choice = await_proposal_answer(app, "draft-chat", state_card, &invocation, &CancellationToken::new(), || app.upsert_message(state_message, false)).await;
+        answerer.await.unwrap();
+        let approval = host_approval_of(app, state_card, choice, &invocation).unwrap();
+        assert!(app.decide_task_invocation(&lease, &invocation.binding, crate::local_store::AuthorizationDecision::Authorized,
+            crate::local_store::AuthorizationKind::UserOnce, Some(state_card), Some(&approval.answering_device), crate::config::now_unix()).unwrap());
+        let outcome = app.save_admitted_proposal(&lease, &invocation, &approval, &participant, |admitted| {
+            let app = app.clone();
+            std::thread::spawn(move || assert!(matches!(app.state.try_lock(), Err(std::sync::TryLockError::WouldBlock)))).join().unwrap();
+            save_proposal(&invocation.workdir, &invocation.path, &invocation.content).map_err(|_| crate::artifacts::ProposalDispatchFailure::Unknown)?;
+            use sha2::{Digest, Sha256};
+            crate::artifacts::observed_proposal_publication(&participant, admitted, &invocation.binding.attempt_id,
+                invocation.content.len() as u64, Sha256::digest(invocation.content.as_bytes()).into()).map_err(|_| crate::artifacts::ProposalDispatchFailure::Unknown)
+        });
+        assert_eq!(outcome, crate::local_store::ProposalSaveOutcome::Saved);
+        assert_eq!(std::fs::read(workspace.join("state.md")).unwrap(), b"state bytes");
+        drop(guard);
+    }
+
     #[tokio::test]
     async fn proposal_review_refuses_missing_participant_and_decline_never_writes() {
         let scratch = scratch_owner();
@@ -3081,7 +3336,8 @@ mod tests {
                 if path == "paused.md" {
                     app.state.lock().unwrap().paused = true;
                 }
-                assert!(answer_proposal(&app, &card.id, response, AnsweringDevice(app.this_device_id().unwrap())));
+                let request = json!({ "chat_id": "draft-chat", "message_id": card.id, "decision": response.as_str() });
+                assert_eq!(super::super::serve_request(&app, "permission.answer", &request, None).await.unwrap()["answered"], true);
                 let result = job.await.unwrap();
                 if path == "revoked.md" {
                     app.state.lock().unwrap().bots.iter_mut().find(|bot| bot.id == "draft-bot").unwrap().capabilities.write = true;

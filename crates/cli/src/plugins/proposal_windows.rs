@@ -15,7 +15,7 @@ use windows_sys::Win32::Foundation::{
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_REPARSE_POINT_ENCOUNTERED, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetFileInformationByHandleEx, FileAttributeTagInfo, DELETE,
+    CreateFileW, FlushFileBuffers, GetFileInformationByHandleEx, FileAttributeTagInfo, DELETE,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
     FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -64,7 +64,7 @@ fn open_child(parent: &OwnedHandle, name: &OsStr, create: bool, workspace_dir: b
     let mut status_block: IO_STATUS_BLOCK = unsafe { mem::zeroed() };
     let mut raw: HANDLE = ptr::null_mut();
     let access = if create { FILE_WRITE_DATA | DELETE | SYNCHRONIZE }
-        else { FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE };
+        else { FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA | SYNCHRONIZE };
     let options = if create { FILE_NON_DIRECTORY_FILE } else { FILE_DIRECTORY_FILE };
     let mut status = unsafe { NtCreateFile(&mut raw, access, &attrs, &mut status_block, ptr::null(),
         0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -105,7 +105,7 @@ pub(super) fn save_proposal(workdir: &Path, path: &str, content: &str) -> Result
     if !matches!(components.next(), Some(Component::RootDir)) { return Err("Workspace needs an absolute Windows path.".into()); }
     volume.push("\\");
     let wide: Vec<u16> = volume.as_os_str().encode_wide().chain([0]).collect();
-    let raw = unsafe { CreateFileW(wide.as_ptr(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+    let raw = unsafe { CreateFileW(wide.as_ptr(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, ptr::null(), OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, ptr::null_mut()) };
     if raw == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
@@ -124,6 +124,7 @@ pub(super) fn save_proposal(workdir: &Path, path: &str, content: &str) -> Result
     let temp_name = format!(".beans-propose-{}", uuid::Uuid::new_v4());
     let temporary = open_child(&dir, OsStr::new(&temp_name), true, false)?;
     let mut temporary = std::fs::File::from(temporary);
+    let mut published = false;
     let result = (|| -> Result<(), String> {
         temporary.write_all(content.as_bytes()).map_err(|e| format!("Writing draft: {e}"))?;
         temporary.sync_all().map_err(|e| format!("Syncing draft: {e}"))?;
@@ -145,9 +146,13 @@ pub(super) fn save_proposal(workdir: &Path, path: &str, content: &str) -> Result
             return Err("Proposal draft already exists; existing content was not changed.".into());
         }
         if status < 0 { return Err(format!("Publishing draft without overwrite: NTSTATUS {status:#010x}")); }
+        published = true;
+        if unsafe { FlushFileBuffers(dir.as_raw_handle()) } == 0 {
+            return Err(format!("Syncing proposal parent: {}", std::io::Error::last_os_error()));
+        }
         Ok(())
     })();
-    if result.is_err() {
+    if result.is_err() && !published {
         // Delete by the original directory handle, never by a reconstructed workspace path.
         let mut io: IO_STATUS_BLOCK = unsafe { mem::zeroed() };
         let delete: u8 = 1;

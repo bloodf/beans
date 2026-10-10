@@ -11,6 +11,115 @@ use serde::de::DeserializeOwned;
 use crate::app::{OutboxItem, SentJob, Slot, State};
 use crate::model::{Author, Body, LiveTurn, Message};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SchemaProfile { Empty, PreTask, InitialTask, Core, Scheduled, Current }
+
+// Compare SQL tokens, not incidental whitespace or identifier quoting. The original
+// DDL is the single definition of column, default, key, index and CHECK semantics.
+fn schema_tokens(sql: &str) -> anyhow::Result<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch.is_whitespace() || ch == ';' { continue; }
+        if matches!(ch, '\'' | '"' | '`' | '[') {
+            let end = if ch == '[' { ']' } else { ch };
+            let mut value = String::new();
+            let mut closed = false;
+            while let Some(c) = chars.next() {
+                if c == end {
+                    if chars.peek() == Some(&end) { chars.next(); value.push(c); }
+                    else { closed = true; break; }
+                } else { value.push(c); }
+            }
+            anyhow::ensure!(closed, "Unterminated schema token");
+            tokens.push(if ch == '\'' { format!("'{}'", value.replace('\'', "''")) } else { value.to_ascii_lowercase() });
+        } else if ch.is_ascii_alphanumeric() || ch == '_' {
+            let mut word = String::from(ch);
+            while chars.peek().is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_') { word.push(chars.next().unwrap()); }
+            tokens.push(word.to_ascii_lowercase());
+        } else {
+            anyhow::ensure!(matches!(ch, '(' | ')' | ',' | '=' | '>' | '<' | '+' | '-'), "Unsupported schema token");
+            tokens.push(ch.to_string());
+        }
+    }
+    for at in [3, 2] {
+        if tokens.get(at).map(String::as_str) == Some("if") && tokens.get(at+1).map(String::as_str) == Some("not") && tokens.get(at+2).map(String::as_str) == Some("exists") { tokens.drain(at..at+3); }
+    }
+    Ok(tokens)
+}
+
+fn task_schema_name(name: &str) -> bool { name.starts_with("task_") || name == "local_tasks" || name.starts_with("routine_schedule_") || name == "routine_check_commits" }
+
+fn classify_schema(conn: &Connection) -> anyhow::Result<SchemaProfile> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    classify_schema_version(conn, version)
+}
+
+fn classify_schema_version(conn: &Connection, version: i64) -> anyhow::Result<SchemaProfile> {
+    let application: u32 = conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
+    let objects: Vec<(String, String, String, Option<String>)> = conn.prepare("SELECT name,type,tbl_name,sql FROM sqlite_master WHERE substr(name,1,7) != 'sqlite_'")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?;
+    if objects.is_empty() {
+        anyhow::ensure!(version == 0 && (application == 0 || application == crate::config::SQLITE_APPLICATION_ID), "Unsupported empty schema identity");
+        return Ok(SchemaProfile::Empty);
+    }
+    anyhow::ensure!(application == crate::config::SQLITE_APPLICATION_ID && (1..=4).contains(&version), "Unsupported populated schema identity/version");
+    let tables = objects.iter().filter(|(_,kind,_,_)| kind == "table").map(|(name,_,_,_)| name.as_str()).collect::<std::collections::HashSet<_>>();
+    let count = tables.iter().filter(|name| task_schema_name(name)).count();
+    let profile = match (version, count) {
+        (1,0) => SchemaProfile::PreTask,
+        (1,6) if !tables.contains("task_safety_version") => SchemaProfile::InitialTask,
+        (1 | 2,7) => SchemaProfile::Core,
+        (3,9) => SchemaProfile::Scheduled,
+        (4,9) => SchemaProfile::Current,
+        _ => anyhow::bail!("Unsupported partial task schema"),
+    };
+    let mut names = std::collections::HashSet::new();
+    for sql in LocalStore::SCHEMA.split(';').filter(|s| !s.trim().is_empty()) {
+        let mut required = schema_tokens(sql)?;
+        let unique = required.get(1).map(String::as_str) == Some("unique");
+        let kind = required[if unique { 2 } else { 1 }].clone();
+        let name = required[if unique { 3 } else { 2 }].clone();
+        names.insert(name.clone());
+        let omitted = task_schema_name(&name) && (profile == SchemaProfile::PreTask || (matches!(profile,SchemaProfile::InitialTask | SchemaProfile::Core) && name.starts_with("routine_schedule_")) || (profile == SchemaProfile::InitialTask && name == "task_safety_version"));
+        if omitted { anyhow::ensure!(!objects.iter().any(|(n,_,_,_)| n == &name), "Unexpected predecessor object {name}"); continue; }
+        let actual = objects.iter().find(|(n,_,_,_)| n == &name).ok_or_else(|| anyhow::anyhow!("Missing schema object {name}"))?;
+        anyhow::ensure!(actual.1 == kind, "Wrong schema object type {name}");
+        if profile == SchemaProfile::InitialTask && name == "task_authority" {
+            let at = required.iter().position(|t| t == "admission_floor").ok_or_else(|| anyhow::anyhow!("Invalid original authority schema"))?;
+            required.drain(at-1..at+2);
+        }
+        anyhow::ensure!(schema_tokens(actual.3.as_deref().ok_or_else(|| anyhow::anyhow!("Missing schema SQL"))?)? == required, "Mismatched schema definition {name}");
+    }
+    for (name,_,table,_) in &objects {
+        if task_schema_name(name) || task_schema_name(table) { anyhow::ensure!(names.contains(name), "Unexpected task schema object {name}"); }
+    }
+    if tables.contains("task_safety_version") {
+        let invalid: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM task_safety_version WHERE id IS NOT 1 OR version IS NOT 1)", [], |r| r.get(0))?;
+        anyhow::ensure!(!invalid, "Invalid task safety version record");
+    }
+    crate::artifacts::validate_proposal_artifact_schema(conn, profile == SchemaProfile::Current)
+        .map_err(|error| anyhow::anyhow!("Artifact schema validation failed: {error:?}"))?;
+    Ok(profile)
+}
+
+fn install_local_schema_tx(tx: &Transaction<'_>, profile: SchemaProfile) -> anyhow::Result<()> {
+    let synchronous: i64 = tx.pragma_query_value(None,"synchronous",|r|r.get(0))?;
+    let fullfsync: i64 = tx.pragma_query_value(None,"fullfsync",|r|r.get(0))?;
+    let checkpoint: i64 = tx.pragma_query_value(None,"checkpoint_fullfsync",|r|r.get(0))?;
+    anyhow::ensure!(synchronous == 2 && fullfsync == 1 && checkpoint == 1,"Installer durability is unavailable");
+    if profile == SchemaProfile::InitialTask { tx.execute_batch("ALTER TABLE task_authority ADD COLUMN admission_floor REAL;")?; }
+    if profile != SchemaProfile::Current { tx.execute_batch(LocalStore::SCHEMA)?; }
+    if profile != SchemaProfile::Current {
+        crate::artifacts::install_proposal_artifact_schema_tx(tx)
+            .map_err(|error| anyhow::anyhow!("Artifact schema installation failed: {error:?}"))?;
+    }
+    if profile == SchemaProfile::Empty { tx.pragma_update(None, "application_id", crate::config::SQLITE_APPLICATION_ID)?; }
+    anyhow::ensure!(classify_schema_version(tx, 4)? == SchemaProfile::Current, "Installed schema mismatch");
+    if profile != SchemaProfile::Current { tx.pragma_update(None, "user_version", 4)?; }
+    Ok(())
+}
+
 pub struct LocalStore {
     pub(crate) connection: Mutex<Connection>,
 }
@@ -591,41 +700,27 @@ impl LocalStore {
             if let Some(admission) = admission { admission.revalidate_legacy()?; }
         }
         if path.exists() { crate::config::validate_database(path)?; }
-        let connection =
-            Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
-        // Classify before CREATE IF NOT EXISTS can conceal a partial current schema.
-        let version:i64=connection.pragma_query_value(None,"user_version",|r|r.get(0))?;
-        let tables:std::collections::HashSet<String>=connection.prepare("SELECT name FROM sqlite_master WHERE type='table'")?
-            .query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
-        let current=["task_authority","task_fences","local_tasks","task_invocations","task_effect_receipts","routine_check_commits","task_safety_version"];
-        let task_count=current.iter().filter(|name|tables.contains(**name)).count();
-        if version==3 {
-            anyhow::ensure!(tables.contains("routine_schedule_authority") && tables.contains("routine_schedule_occurrences"),"Schedule safety schema is incomplete");
+        let mut connection = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let profile = classify_schema(&connection)?;
+        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=16777216;")?;
+        #[cfg(unix)]
+        admission.ok_or_else(|| anyhow::anyhow!("Storage admission guard is required"))?.validate_target(parent)?;
+        if staged {
+            admission.ok_or_else(|| anyhow::anyhow!("Staged admission guard is required"))?.revalidate_staged()?;
+        } else {
+            config.validate_home()?;
+            if let Some(admission) = admission { admission.revalidate_legacy()?; }
         }
-        if version==2 || version==3 {
-            anyhow::ensure!(task_count==current.len(),"Current task schema is incomplete; restoring missing safety tables is forbidden");
-        } else if !tables.is_empty() && task_count==0 {
-            anyhow::ensure!(version==1,"Unsupported predecessor schema version");
-            for table in ["metadata","bots","chats","messages","outbox","sent_jobs","device_turns","codemode_store","memory_turn_admissions","memory_deliveries"] {
-                anyhow::ensure!(tables.contains(table),"Unsupported partial predecessor schema");
-            }
-        } else if task_count>0 {
-            anyhow::ensure!(task_count==current.len(),"Partial task safety schema");
-        }
-        connection.pragma_update(None, "application_id", crate::config::SQLITE_APPLICATION_ID)?;
-        // Task durability is FULL for the whole connection lifetime, ordinary or staged: the
-        // private safety transaction refuses to run below FULL/fullfsync, so an ordinary open
-        // must not settle on NORMAL and re-reset it later.
-        connection.pragma_update(None, "synchronous", 2)?;
-        connection.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = FULL;
-             PRAGMA fullfsync = ON;
-             PRAGMA checkpoint_fullfsync = ON;
-             PRAGMA foreign_keys = ON;
-             PRAGMA busy_timeout = 5000;
-             PRAGMA journal_size_limit = 16777216;
-             CREATE TABLE IF NOT EXISTS metadata (
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        anyhow::ensure!(classify_schema(&tx)? == profile, "Storage schema changed during admission");
+        install_local_schema_tx(&tx, profile)?;
+        tx.commit()?;
+        crate::config::set_private(path)?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+        })
+    }
+    const SCHEMA: &'static str = "CREATE TABLE IF NOT EXISTS metadata (
                  id                       INTEGER PRIMARY KEY CHECK (id = 1),
                  auto_review_json         TEXT NOT NULL,
                  last_seq                 INTEGER NOT NULL,
@@ -786,28 +881,7 @@ impl LocalStore {
              CREATE TABLE IF NOT EXISTS routine_schedule_occurrences (
                  account_epoch TEXT NOT NULL, routine_id TEXT NOT NULL, revision TEXT NOT NULL,
                  occurrence INTEGER NOT NULL, PRIMARY KEY(account_epoch,routine_id,revision,occurrence));
-             PRAGMA user_version = 3;",
-        )?;
-        if !connection.prepare("SELECT paused FROM metadata").is_ok() {
-            connection.execute("ALTER TABLE metadata ADD COLUMN paused INTEGER NOT NULL DEFAULT 0", [])?;
-        }
-        if connection.prepare("SELECT policy_json FROM metadata").is_err() {
-            connection.execute("ALTER TABLE metadata ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'", [])?;
-        }
-        if connection.prepare("SELECT roster_slot_seq FROM metadata").is_err() {
-            connection.execute("ALTER TABLE metadata ADD COLUMN roster_slot_seq INTEGER NOT NULL DEFAULT 0", [])?;
-        }
-        if connection.prepare("SELECT original_json FROM pending_chat_creates").is_err() {
-            connection.execute("ALTER TABLE pending_chat_creates ADD COLUMN original_json TEXT", [])?;
-        }
-        if connection.prepare("SELECT admission_floor FROM task_authority").is_err() {
-            connection.execute("ALTER TABLE task_authority ADD COLUMN admission_floor REAL", [])?;
-        }
-        crate::config::set_private(path)?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-        })
-    }
+             ";
 
     pub fn load_state(&self) -> anyhow::Result<State> {
         let connection = self.connection.lock().unwrap();
@@ -2257,6 +2331,73 @@ mod tests {
         let (cancelled,new_job) = task_fixture(store,"job-cancel-first");
         store.cancel_tasks(&cancelled.account_epoch,Some(&new_job.id),None,None).unwrap();
         assert!(!store.queue_task(&cancelled,&new_job).unwrap());
+    }
+
+    #[test]
+    fn schema_admission_profiles_corruption_and_atomic_rollback() {
+        for (version, profile) in [(1,SchemaProfile::PreTask),(1,SchemaProfile::InitialTask),(1,SchemaProfile::Core),(2,SchemaProfile::Core),(3,SchemaProfile::Scheduled),(4,SchemaProfile::Current)] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON;").unwrap();
+            conn.pragma_update(None,"application_id",crate::config::SQLITE_APPLICATION_ID).unwrap();
+            for sql in LocalStore::SCHEMA.split(';').filter(|s| !s.trim().is_empty()) {
+                let tokens=schema_tokens(sql).unwrap();
+                let name=&tokens[if tokens[1]=="unique" {3} else {2}];
+                if task_schema_name(name) && (profile==SchemaProfile::PreTask || (matches!(profile,SchemaProfile::InitialTask|SchemaProfile::Core) && name.starts_with("routine_schedule_")) || (profile==SchemaProfile::InitialTask && name=="task_safety_version")) {continue;}
+                let sql=if profile==SchemaProfile::InitialTask && name=="task_authority" {sql.replace(", admission_floor REAL", "")} else {sql.to_string()};
+                conn.execute_batch(&sql).unwrap();
+            }
+            if profile==SchemaProfile::Current {
+                let tx=conn.transaction().unwrap(); crate::artifacts::install_proposal_artifact_schema_tx(&tx).unwrap(); tx.commit().unwrap();
+            }
+            conn.pragma_update(None,"user_version",version).unwrap();
+            conn.execute("INSERT INTO messages VALUES('kept','chat',1,0,0,'you',NULL,'text',1,1,'retained')",[]).unwrap();
+            assert_eq!(classify_schema(&conn).unwrap(),profile);
+            {
+                let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+                install_local_schema_tx(&tx,profile).unwrap();
+                assert_eq!(classify_schema(&tx).unwrap(),SchemaProfile::Current);
+                // A later sibling failure rolls back task/artifact DDL and the marker.
+                tx.rollback().unwrap();
+            }
+            assert_eq!(classify_schema(&conn).unwrap(),profile);
+            let retained:String=conn.query_row("SELECT message_json FROM messages WHERE id='kept'",[],|r|r.get(0)).unwrap();
+            assert_eq!(retained,"retained");
+            let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+            install_local_schema_tx(&tx,profile).unwrap(); tx.commit().unwrap();
+            assert_eq!(classify_schema(&conn).unwrap(),SchemaProfile::Current);
+            conn.execute_batch("ALTER TABLE task_authority ADD COLUMN unexpected TEXT;").unwrap();
+            assert!(classify_schema(&conn).is_err());
+            conn.execute_batch("ALTER TABLE task_authority DROP COLUMN unexpected;").unwrap();
+            conn.execute_batch("DROP INDEX task_invocation_ordinal; CREATE INDEX task_invocation_ordinal ON task_invocations(account_epoch,task_id,execution_id,ordinal);").unwrap();
+            assert!(classify_schema(&conn).is_err());
+        }
+        let conn=Connection::open_in_memory().unwrap();
+        assert_eq!(classify_schema(&conn).unwrap(),SchemaProfile::Empty);
+        conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;").unwrap();
+        {
+            let mut conn=Connection::open_in_memory().unwrap();
+            conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON;").unwrap();
+            let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+            install_local_schema_tx(&tx,SchemaProfile::Empty).unwrap();
+            assert!(tx.execute("INSERT INTO task_safety_version VALUES(2,1)",[]).is_err());
+            tx.rollback().unwrap();
+            assert_eq!(classify_schema(&conn).unwrap(),SchemaProfile::Empty);
+        }
+        conn.execute_batch("CREATE TABLE unrelated(value TEXT);").unwrap();
+        assert!(classify_schema(&conn).is_err());
+        for version in [1,2,3,4,5] {conn.pragma_update(None,"user_version",version).unwrap(); assert!(classify_schema(&conn).is_err());}
+        let conn=Connection::open_in_memory().unwrap();
+        conn.execute_batch(LocalStore::SCHEMA).unwrap();
+        conn.pragma_update(None,"application_id",crate::config::SQLITE_APPLICATION_ID).unwrap();
+        for version in [0,2,5] {conn.pragma_update(None,"user_version",version).unwrap(); assert!(classify_schema(&conn).is_err());}
+        conn.pragma_update(None,"user_version",3).unwrap();
+        conn.execute_batch("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql,'length(digest)=32','length(digest)=31') WHERE name='task_invocations'; PRAGMA writable_schema=OFF;").unwrap();
+        assert!(classify_schema(&conn).is_err());
+        conn.execute_batch("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql,'length(digest)=31','length(digest)=32') WHERE name='task_invocations'; PRAGMA writable_schema=OFF;").unwrap();
+        conn.execute_batch("CREATE TRIGGER task_extra AFTER INSERT ON local_tasks BEGIN DELETE FROM task_fences; END;").unwrap();
+        assert!(classify_schema(&conn).is_err());
+        conn.execute_batch("DROP TRIGGER task_extra; DROP TABLE task_effect_receipts; CREATE VIEW task_effect_receipts AS SELECT * FROM local_tasks;").unwrap();
+        assert!(classify_schema(&conn).is_err());
     }
 
     #[test]

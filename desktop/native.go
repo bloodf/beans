@@ -374,7 +374,7 @@ func (n *nativeDesktop) view(c *ui.Context) {
 							}
 						})
 					}
-					if ui.Button(c.Key(chat.ID), n.store.Title(chat)).Clicked() {
+					if ui.Button(c.Key(chat.ID), n.store.Title(chat)).Selected(n.store.Selected == chat.ID).Clicked() {
 						n.store.Selected = chat.ID
 					}
 				}

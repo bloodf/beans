@@ -433,6 +433,25 @@ struct PutBlob {
     group: Option<String>,
 }
 
+/// Staged primitive validation; no production route or protocol-floor activation.
+pub(crate) fn validate_managed_companion(request: &db::ManagedCompanion) -> ApiResult<()> {
+    let identifier = |value: &str| !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control);
+    if !identifier(&request.account_id) || !identifier(&request.transaction_id)
+        || request.checkpoint_transaction_id.as_deref().is_some_and(|id| !identifier(id) || id == request.transaction_id)
+        || !valid_id(&request.policy_id) || !valid_id(&request.roster_id)
+        || request.policy_id == request.roster_id || request.expected_slot_seq < 0
+    {
+        return Err(ApiError::bad_request("Invalid managed companion identity or expectation"));
+    }
+    let encoded = |bytes: usize| bytes.saturating_mul(4).saturating_add(2) / 3;
+    if request.policy_ciphertext.is_empty() || request.roster_ciphertext.is_empty()
+        || encoded(request.policy_ciphertext.len()).saturating_add(encoded(request.roster_ciphertext.len())) > db::MANAGED_COMPANION_BYTES
+    {
+        return Err(ApiError::bad_request("Ciphertext size out of range"));
+    }
+    Ok(())
+}
+
 /// Ids are client-chosen (uuids, `msg-<uuid>`) and become object keys, so only a plain charset.
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -451,6 +470,9 @@ async fn put_blob(State(state): State<AppState>, auth: Auth, headers: HeaderMap,
     }
     if body.kind == "file" {
         return Err(ApiError::bad_request("Upload attachments with PUT /v1/files/{id}"));
+    }
+    if body.kind == "policy" && (body.slot.is_some() || body.group.is_some() || body.recipient_machine_pubkey.is_some()) {
+        return Err(ApiError::bad_request("Policy requires unaddressed unslotted ungrouped envelope"));
     }
     let id = body.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     if !valid_id(&id) {

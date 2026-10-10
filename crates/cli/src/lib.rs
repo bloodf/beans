@@ -52,6 +52,9 @@ pub mod local_store;
 pub mod turns;
 pub mod update_control;
 #[cfg(feature = "cli")]
+pub mod serve;
+pub(crate) mod serve_owner;
+#[cfg(feature = "cli")]
 pub mod update;
 #[cfg(feature = "server")]
 pub mod ws;

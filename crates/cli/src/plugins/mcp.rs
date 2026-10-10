@@ -2688,6 +2688,53 @@ pub async fn ask_with_rule(
     decision
 }
 
+/// Reconciles persisted participants for one retained invocation without granting replay.
+fn reconcile_proposal_outcome(app: &Arc<App>, chat: &str, bot: &str, call: &str, card: &str, path: &str,
+    plaintext: &str, aggregate: crate::local_store::ProposalSaveOutcome) -> anyhow::Result<crate::local_store::ProposalSaveOutcome> {
+    use crate::local_store::{InvocationState, ProposalSaveOutcome};
+    use crate::artifacts::{ProposalArtifactReplay, WorkspaceState};
+    use rusqlite::OptionalExtension;
+    if aggregate == ProposalSaveOutcome::Unknown { return Ok(ProposalSaveOutcome::Unknown); }
+    let task = call.split_once(':').map_or(call, |(job, _)| job);
+    let lease = app.task_execution(task)?.or(app.task_history_execution(task)?).ok_or_else(|| anyhow::anyhow!("Proposal lease absent"))?;
+    let _lifecycle = app.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+    let machine = app.machine_file().ok_or_else(|| anyhow::anyhow!("Account absent"))?;
+    let runner = machine.machine()?.pubkey();
+    let authority = crate::artifacts::ArtifactAuthority { account_id: machine.identity_pubkey, incarnation: lease.incarnation,
+        requester: runner.clone(), runner_id: runner, owner_epoch: lease.owner_epoch.clone(), account_epoch: lease.account_epoch.clone() };
+    app.store.safety_tx(|tx| {
+        let (binding, invocation_state) = crate::local_store::load_invocation_tx(tx, &lease, card)?.ok_or_else(|| anyhow::anyhow!("Proposal invocation absent"))?;
+        let origin: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM local_tasks WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND chat_id=?5 AND bot_id=?6)",
+            rusqlite::params![lease.account_epoch, lease.task_id, lease.owner_epoch, lease.execution_id, chat, bot], |row| row.get(0))?;
+        anyhow::ensure!(origin, "Proposal task origin mismatch");
+        let receipt: Option<(String, String)> = tx.query_row(
+            "SELECT state,attempt_id FROM task_effect_receipts WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND receipt_id=?5",
+            rusqlite::params![lease.account_epoch, lease.task_id, lease.owner_epoch, lease.execution_id, binding.receipt_id],
+            |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+        if let Some((state, attempt)) = &receipt {
+            anyhow::ensure!(attempt == &binding.attempt_id && matches!(state.as_str(), "started" | "finished" | "failed" | "unknown"), "Proposal receipt incompatible");
+        }
+        let receipt_free = invocation_state == InvocationState::Authorized && receipt.is_none();
+        let tables: i64 = tx.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('artifact_lineages','artifact_revisions','artifact_acceptances','artifact_snapshots','artifact_intents','artifact_tombstones','artifact_cleanup','artifact_safety_replay')", [], |row| row.get(0))?;
+        if tables == 0 && receipt_free && aggregate == ProposalSaveOutcome::NotDispatched { return Ok(ProposalSaveOutcome::NotDispatched); }
+        let proposal = crate::artifacts::load_retained_proposal_artifact_tx(tx, &authority, chat, bot, card, card)
+            .map_err(|error| anyhow::anyhow!("Artifact replay failed: {error:?}"))?;
+        let Some(proposal) = proposal else { return Ok(ProposalSaveOutcome::Unknown) };
+        anyhow::ensure!(crate::artifacts::matches_proposal_host_input(&proposal, &authority, chat, bot, card, card, Some(path), plaintext.as_bytes())
+            .map_err(|error| anyhow::anyhow!("Artifact replay mismatch: {error:?}"))?, "Artifact changed");
+        let replay = crate::artifacts::lookup_proposal_artifact_tx(tx, &proposal).map_err(|error| anyhow::anyhow!("Artifact replay failed: {error:?}"))?;
+        match replay {
+            ProposalArtifactReplay::Accepted { workspace_state: WorkspaceState::Published, attempt_id: Some(attempt), .. }
+                if aggregate == ProposalSaveOutcome::AlreadySaved && invocation_state == InvocationState::Admitted
+                    && attempt == binding.attempt_id && receipt.as_ref().is_some_and(|(state, receipt_attempt)| state == "finished" && receipt_attempt == &attempt)
+                    => Ok(ProposalSaveOutcome::AlreadySaved),
+            ProposalArtifactReplay::Reserved { workspace_state: WorkspaceState::Reserved, attempt_id: None, .. }
+                if receipt_free && aggregate == ProposalSaveOutcome::NotDispatched => Ok(ProposalSaveOutcome::NotDispatched),
+            _ => Ok(ProposalSaveOutcome::Unknown),
+        }
+    })
+}
+
 /// One model call has one durable card, even after a repeated turn or relay sync. The draft is
 /// written only after a bound, authenticated approval and a task-bound admission.
 pub async fn propose(app: &Arc<App>, chat_id: &str, bot_id: &str, call_id: &str, title: Option<String>, content: Option<String>, path: Option<String>, cancel: &CancellationToken) -> Result<ProposalDisposition, String> {
@@ -2721,25 +2768,8 @@ pub async fn propose(app: &Arc<App>, chat_id: &str, bot_id: &str, call_id: &str,
         // Durable evidence outranks the row: it survives a crash between admission and
         // publication, and repairs a stale row without ever dispatching again.
         Ok(Some(outcome)) => {
-            let outcome = if outcome == crate::local_store::ProposalSaveOutcome::AlreadySaved {
-                let joined = (|| -> anyhow::Result<bool> {
-                    let task = call_id.split_once(':').map_or(call_id, |(job, _)| job);
-                    let lease = app.task_execution(task)?.or(app.task_history_execution(task)?).ok_or_else(|| anyhow::anyhow!("Proposal lease absent"))?;
-                    let _lifecycle = app.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
-                    let machine = app.machine_file().ok_or_else(|| anyhow::anyhow!("Account absent"))?;
-                    let runner = machine.machine()?.pubkey();
-                    let authority = crate::artifacts::ArtifactAuthority { account_id: machine.identity_pubkey, incarnation: lease.incarnation,
-                        requester: runner.clone(), runner_id: runner, owner_epoch: lease.owner_epoch, account_epoch: lease.account_epoch };
-                    app.store.safety_tx(|tx| {
-                        let proposal = crate::artifacts::load_retained_proposal_artifact_tx(tx, &authority, chat_id, bot_id, &card_id, &card_id)
-                            .map_err(|error| anyhow::anyhow!("Artifact replay failed: {error:?}"))?.ok_or_else(|| anyhow::anyhow!("Artifact absent"))?;
-                        anyhow::ensure!(crate::artifacts::matches_proposal_host_input(&proposal, &authority, chat_id, bot_id, &card_id, &card_id, Some(&path_value), content.as_deref().unwrap_or_default().as_bytes())
-                            .map_err(|error| anyhow::anyhow!("Artifact replay mismatch: {error:?}"))?, "Artifact changed");
-                        Ok(matches!(crate::artifacts::lookup_proposal_artifact_tx(tx, &proposal), Ok(crate::artifacts::ProposalArtifactReplay::Accepted(_))))
-                    })
-                })();
-                if joined.unwrap_or(false) { outcome } else { crate::local_store::ProposalSaveOutcome::Unknown }
-            } else { outcome };
+            let outcome = reconcile_proposal_outcome(app, chat_id, bot_id, call_id, &card_id, &path_value,
+                content.as_deref().unwrap_or_default(), outcome).unwrap_or(crate::local_store::ProposalSaveOutcome::Unknown);
             let Some(card) = existing else { return Ok(outcome.into()) };
             if !card_is_ours(&card) || !body_matches(&card) {
                 return Err("Proposal already awaits review or its draft changed.".into());
@@ -3194,6 +3224,11 @@ mod tests {
         assert_eq!(propose(app, "draft-chat", "draft-bot", "joined-job:save", Some("Draft".into()), Some("Exact 🌍\n".into()),
             Some("draft.md".into()), &CancellationToken::new()).await.unwrap(), ProposalDisposition::AlreadySaved);
         assert_eq!(std::fs::read(workspace.join("draft.md")).unwrap(), b"user edit");
+        app.store.connection.lock().unwrap().execute("UPDATE artifact_acceptances SET attempt_id='wrong-completed-attempt' WHERE request_id=?1", [&card.id]).unwrap();
+        assert_eq!(propose(app, "draft-chat", "draft-bot", "joined-job:save", Some("Draft".into()), Some("Exact 🌍\n".into()),
+            Some("draft.md".into()), &CancellationToken::new()).await.unwrap(), ProposalDisposition::Unknown);
+        assert_eq!(std::fs::read(workspace.join("draft.md")).unwrap(), b"user edit");
+        app.store.connection.lock().unwrap().execute("UPDATE artifact_acceptances SET attempt_id=?2 WHERE request_id=?1", rusqlite::params![card.id, binding.attempt_id]).unwrap();
         app.store.connection.lock().unwrap().execute("DELETE FROM artifact_snapshots WHERE request_id=?1", [&card.id]).unwrap();
         assert_eq!(propose(app, "draft-chat", "draft-bot", "joined-job:save", Some("Draft".into()), Some("Exact 🌍\n".into()),
             Some("draft.md".into()), &CancellationToken::new()).await.unwrap(), ProposalDisposition::Unknown);
@@ -3228,6 +3263,15 @@ mod tests {
         assert_eq!(count, 0);
         connection.execute_batch("DROP TRIGGER reject_joint_receipt; CREATE TEMP TRIGGER reject_joint_completion BEFORE UPDATE OF accepted_result_json ON artifact_acceptances BEGIN SELECT RAISE(ABORT,'fixture completion rejection'); END;").unwrap();
         drop(connection);
+        let rejected_binding = app.store.load_invocation(&lease, &rejected).unwrap().unwrap();
+        assert_eq!(rejected_binding.1, crate::local_store::InvocationState::Authorized);
+        for artifact_state in ["attempt_admitted", "uncertain"] {
+            app.store.connection.lock().unwrap().execute("UPDATE artifact_acceptances SET workspace_state=?2,attempt_id='artifact-only-attempt' WHERE request_id=?1", rusqlite::params![rejected, artifact_state]).unwrap();
+            assert_eq!(propose(app, "draft-chat", "draft-bot", "joined-job:reject", Some("Draft".into()), Some("Exact 🌍\n".into()), Some("rejected.md".into()), &CancellationToken::new()).await.unwrap(), ProposalDisposition::Unknown);
+            assert!(!workspace.join("rejected.md").exists());
+            assert_eq!(app.store.load_invocation(&lease, &rejected).unwrap().unwrap(), rejected_binding);
+        }
+        app.store.connection.lock().unwrap().execute("UPDATE artifact_acceptances SET workspace_state='reserved',attempt_id=NULL WHERE request_id=?1", [&rejected]).unwrap();
         let (uncertain, outcome) = allow("joined-job:uncertain", "uncertain.md").await;
         assert_eq!(outcome, ProposalDisposition::Unknown);
         assert_eq!(std::fs::read(workspace.join("uncertain.md")).unwrap(), "Exact 🌍\n".as_bytes());
@@ -3242,6 +3286,26 @@ mod tests {
         std::fs::write(workspace.join("uncertain.md"), "retained uncertainty").unwrap();
         assert_eq!(propose(app, "draft-chat", "draft-bot", "joined-job:uncertain", Some("Draft".into()), Some("Exact 🌍\n".into()), Some("uncertain.md".into()), &CancellationToken::new()).await.unwrap(), ProposalDisposition::Unknown);
         assert_eq!(std::fs::read(workspace.join("uncertain.md")).unwrap(), b"retained uncertainty");
+        app.store.connection.lock().unwrap().execute_batch("CREATE TEMP TRIGGER reject_finished_receipt BEFORE UPDATE OF state ON task_effect_receipts WHEN NEW.state='finished' BEGIN SELECT RAISE(ABORT,'fixture receipt completion rejection'); END;").unwrap();
+        let (receipt_rejected, outcome) = allow("joined-job:receipt-rejected", "receipt-rejected.md").await;
+        assert_eq!(outcome, ProposalDisposition::Unknown);
+        assert_eq!(std::fs::read(workspace.join("receipt-rejected.md")).unwrap(), "Exact 🌍\n".as_bytes());
+        let connection = app.store.connection.lock().unwrap();
+        let (artifact_state, accepted, revision_id): (String, Option<String>, String) = connection.query_row(
+            "SELECT workspace_state,accepted_result_json,revision_id FROM artifact_acceptances WHERE request_id=?1", [&receipt_rejected], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(artifact_state, "attempt_admitted");
+        assert_eq!(accepted, None);
+        let intents: i64 = connection.query_row("SELECT count(*) FROM artifact_intents WHERE revision_id=?1", [&revision_id], |row| row.get(0)).unwrap();
+        assert_eq!(intents, 0);
+        let revisions: i64 = connection.query_row("SELECT count(*) FROM artifact_revisions WHERE revision_id=?1", [&revision_id], |row| row.get(0)).unwrap();
+        assert_eq!(revisions, 0);
+        let receipt: String = connection.query_row("SELECT r.state FROM task_effect_receipts r JOIN task_invocations i ON i.receipt_id=r.receipt_id AND i.account_epoch=r.account_epoch WHERE i.invocation_id=?1", [&receipt_rejected], |row| row.get(0)).unwrap();
+        assert_eq!(receipt, "started");
+        connection.execute_batch("DROP TRIGGER reject_finished_receipt").unwrap();
+        drop(connection);
+        std::fs::write(workspace.join("receipt-rejected.md"), "completion uncertainty").unwrap();
+        assert_eq!(propose(app, "draft-chat", "draft-bot", "joined-job:receipt-rejected", Some("Draft".into()), Some("Exact 🌍\n".into()), Some("receipt-rejected.md".into()), &CancellationToken::new()).await.unwrap(), ProposalDisposition::Unknown);
+        assert_eq!(std::fs::read(workspace.join("receipt-rejected.md")).unwrap(), b"completion uncertainty");
         let state_card = "msg-propose-state-boundary";
         let mut invocation = ProposalInvocation { card_id: state_card.into(), chat_id: "draft-chat".into(), bot_id: "draft-bot".into(),
             binding: binding.clone(), snapshot_digest: [0;32], workdir: workspace.clone(), path: "state.md".into(), content: "state bytes".into(),

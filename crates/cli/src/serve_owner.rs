@@ -85,15 +85,14 @@ impl ServeOwner {
     }
 
     /// Waits until no owned work is live, or `deadline` passes. Call off the async runtime.
+    /// A latched boundary does not shorten this wait: it refuses a final flush, and the work that
+    /// is live is still waited for.
     pub(crate) fn join_closed_until(&self, deadline: Instant) -> Result<(), ShutdownFailure> {
         let mut state = self.lock();
         loop {
             if state.live == 0 {
                 state.phase = Phase::Closed;
                 return Ok(());
-            }
-            if let Some(boundary) = state.missing.first() {
-                return Err(ShutdownFailure::MissingClosure(boundary));
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() { return Err(ShutdownFailure::Deadline); }
@@ -147,16 +146,18 @@ mod tests {
     #[test]
     fn owned_work_is_joined_and_then_the_drain_reports_the_missing_boundary() {
         let owner = ServeOwner::new();
+        owner.declare_unsupported("sync::run");
         let permit = owner.root_work("catalog::check_in_background");
         assert!(permit.is_some());
         assert_eq!(owner.live(), 1);
         owner.close_roots();
-        // Nothing is missing yet, so the zero deadline is what ends this join.
+        // The latch stands, and the join still waits: only owned work and the deadline end it.
+        assert_eq!(owner.flush_refusal(), Some(ShutdownFailure::MissingClosure("sync::run")));
         assert_eq!(owner.join_closed_until(Instant::now()), Err(ShutdownFailure::Deadline));
         drop(permit);
         assert_eq!(owner.live(), 0);
         assert_eq!(owner.join_closed_until(soon()), Ok(()));
-        assert_eq!(owner.flush_refusal(), None);
+        assert_eq!(owner.flush_refusal(), Some(ShutdownFailure::MissingClosure("sync::run")));
     }
 
     #[test]

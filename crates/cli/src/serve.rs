@@ -103,7 +103,7 @@ async fn drain(owner: &Arc<ServeOwner>, app: &Arc<App>, reason: StopReason) {
         Err(error) => tracing::error!(%error, ?reason, "the drain did not finish"),
     }
     if let Some(failure) = owner.flush_refusal() {
-        tracing::warn!(%failure, "beans serve did not track all of its work; no final flush");
+        tracing::warn!(%failure, owned_still_running = owner.live(), "beans serve did not track all of its work; no final flush");
     }
 }
 
@@ -203,7 +203,16 @@ pub async fn run(app: Arc<App>, parent_pid: Option<u32>, ready_stdout: bool) -> 
     tokio::spawn(crate::app::refresh_models_periodically(Arc::clone(&app)));
 
     let serving = Arc::clone(&app);
-    let listener = tokio::spawn(async move { crate::ws::serve(serving, ready_stdout).await });
+    let listener = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            // Whether it ended by stopping or by failing to bind, the websocket ending is the stop
+            // reason; what it returned is still what the caller reports.
+            let outcome = crate::ws::serve(serving, ready_stdout).await;
+            supervisor.notify(StopReason::ServeEnded);
+            outcome
+        })
+    };
     let reason = {
         let supervisor = Arc::clone(&supervisor);
         tokio::task::spawn_blocking(move || supervisor.wait_first()).await?
@@ -225,21 +234,27 @@ pub async fn run(app: Arc<App>, parent_pid: Option<u32>, ready_stdout: bool) -> 
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::{BufRead, Read, Write};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::sync::mpsc::Receiver;
-    use std::time::Duration;
+    use std::sync::{Arc, Condvar, Mutex, PoisonError};
+    use std::time::{Duration, Instant};
 
     /// The real Serve entry, in this process, for the parent test to drive.
     #[test]
     #[ignore]
     fn serve_child_process() {
         let home = std::env::var("BEANS_TEST_HOME").expect("BEANS_TEST_HOME");
+        let port: u16 = std::env::var("BEANS_TEST_PORT").ok().and_then(|value| value.trim().parse().ok()).unwrap_or(0);
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         runtime.block_on(async {
-            let app = Arc::new(beans::app::App::load(beans::config::Config { home: PathBuf::from(home), port: 0 }).unwrap());
-            super::run(app, None, true).await.unwrap();
+            let app = crate::app::App::load(crate::config::Config { home: PathBuf::from(home), port }).unwrap();
+            // What `main` does with it: a Serve that cannot start reports and leaves nonzero.
+            if let Err(error) = super::run(app, None, true).await {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
         });
     }
 
@@ -298,8 +313,9 @@ mod tests {
         std::env::temp_dir().join(format!("beans-serve-drain-{}", uuid::Uuid::new_v4()))
     }
 
-    fn spawn_child(home: &Path, models_url: &str, drain_ms: u64) -> Child {
-        Command::new(std::env::current_exe().unwrap())
+    fn child_command(home: &Path, models_url: &str, drain_ms: u64, port: u16) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
             .args(["--ignored", "--exact", "serve::tests::serve_child_process", "--nocapture", "--test-threads", "1"])
             .env_clear()
             .env("HOME", home)
@@ -307,17 +323,46 @@ mod tests {
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("BEANS_TEST_HOME", home)
             .env("BEANS_TEST_DRAIN_MS", drain_ms.to_string())
+            .env("BEANS_TEST_PORT", port.to_string())
             .env("BEANS_MODELS_URL", models_url)
             .env("RUST_LOG", "off")
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("the real Serve child starts")
+            .stdout(Stdio::piped());
+        command
+    }
+
+    /// A child Serve is this test's to clean up: it is killed and reaped when the test ends early, so
+    /// a failed assertion never leaves a real `beans serve` running.
+    struct ChildGuard(Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    impl std::ops::Deref for ChildGuard {
+        type Target = Child;
+        fn deref(&self) -> &Child { &self.0 }
+    }
+
+    impl std::ops::DerefMut for ChildGuard {
+        fn deref_mut(&mut self) -> &mut Child { &mut self.0 }
+    }
+
+    fn spawn_guarded(command: &mut Command) -> ChildGuard {
+        ChildGuard(command.spawn().expect("the real Serve child starts"))
+    }
+
+    fn spawn_child(home: &Path, models_url: &str, drain_ms: u64) -> ChildGuard {
+        spawn_guarded(child_command(home, models_url, drain_ms, 0).stderr(Stdio::null()))
     }
 
     /// Waits for the child's own ready record, the same one `beans serve --ready-stdout` prints.
-    fn wait_ready(child: &mut Child) {
+    fn wait_ready(child: &mut ChildGuard) {
         let stdout = child.stdout.take().expect("the child prints its ready record");
         let (ready_tx, ready) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -332,15 +377,20 @@ mod tests {
         ready.recv_timeout(Duration::from_secs(60)).expect("beans serve reports ready");
     }
 
-    fn signal_child(child: &Child) {
+    fn signal_child(child: &ChildGuard) {
         unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     }
 
-    fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
-        let deadline = Instant::now() + Duration::from_secs(60);
+    fn wait_for_exit(child: &mut ChildGuard) -> std::process::ExitStatus {
+        wait_for_exit_within(child, Duration::from_secs(60))
+            .expect("beans serve ends on its own")
+    }
+
+    fn wait_for_exit_within(child: &mut ChildGuard, within: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + within;
         loop {
-            if let Some(status) = child.try_wait().unwrap() { return status; }
-            assert!(Instant::now() < deadline, "beans serve did not end within its budget");
+            if let Some(status) = child.try_wait().unwrap() { return Some(status); }
+            if Instant::now() >= deadline { return None; }
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -350,7 +400,27 @@ mod tests {
         assert_eq!(status.signal(), Some(libc::SIGTERM), "the process still ends by its own signal: {status:?}");
     }
 
+    /// A Serve that cannot bind its port says so and leaves, instead of waiting for a stop reason
+    /// that never comes. The bound error is what `main` reported before, still reported.
+    #[test]
+    fn a_port_already_taken_ends_the_process_with_that_error() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let home = scratch();
+        let mut child = spawn_guarded(child_command(&home, "", 700, port).stderr(Stdio::piped()));
+        let status = wait_for_exit_within(&mut child, Duration::from_secs(30))
+            .expect("a Serve that cannot bind reports and leaves");
+        assert!(!status.success(), "a Serve that cannot bind leaves nonzero: {status:?}");
+        let mut reported = String::new();
+        child.stderr.take().unwrap().read_to_string(&mut reported).unwrap();
+        assert!(reported.contains("cannot bind"), "the bind failure is reported: {reported}");
+        drop(taken);
+        std::fs::remove_dir_all(home).ok();
+    }
+
     /// The drain waits for the catalog check this process owns, then ends by the original signal.
+    /// This runs with the startup latch standing, so it is also the regression that a latched
+    /// boundary must not shorten the wait for owned work.
     #[test]
     fn drain_joins_owned_work_before_the_process_ends() {
         let (url, arrived, gate) = catalog_server();

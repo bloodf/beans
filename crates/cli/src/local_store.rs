@@ -14,15 +14,16 @@ use crate::model::{Author, Body, LiveTurn, Message};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SchemaProfile { Empty, PreTask, InitialTask, Core, Scheduled, Current }
 
-// Compare SQL tokens, not incidental whitespace or identifier quoting. The original
-// DDL is the single definition of column, default, key, index and CHECK semantics.
+// Compare original SQL tokens without collapsing quoted expressions into numbers.
+// Single-quoted values stay exact; other quoted constructs conservatively refuse.
 fn schema_tokens(sql: &str) -> anyhow::Result<Vec<String>> {
     let mut tokens = Vec::new();
     let mut chars = sql.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch.is_whitespace() || ch == ';' { continue; }
-        if matches!(ch, '\'' | '"' | '`' | '[') {
-            let end = if ch == '[' { ']' } else { ch };
+        anyhow::ensure!(!matches!(ch, '"' | '`' | '['), "Quoted schema identifiers/expressions are unsupported");
+        if ch == '\'' {
+            let end = ch;
             let mut value = String::new();
             let mut closed = false;
             while let Some(c) = chars.next() {
@@ -32,7 +33,7 @@ fn schema_tokens(sql: &str) -> anyhow::Result<Vec<String>> {
                 } else { value.push(c); }
             }
             anyhow::ensure!(closed, "Unterminated schema token");
-            tokens.push(if ch == '\'' { format!("'{}'", value.replace('\'', "''")) } else { value.to_ascii_lowercase() });
+            tokens.push(format!("'{}'", value.replace('\'', "''")));
         } else if ch.is_ascii_alphanumeric() || ch == '_' {
             let mut word = String::from(ch);
             while chars.peek().is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_') { word.push(chars.next().unwrap()); }
@@ -46,6 +47,41 @@ fn schema_tokens(sql: &str) -> anyhow::Result<Vec<String>> {
         if tokens.get(at).map(String::as_str) == Some("if") && tokens.get(at+1).map(String::as_str) == Some("not") && tokens.get(at+2).map(String::as_str) == Some("exists") { tokens.drain(at..at+3); }
     }
     Ok(tokens)
+}
+
+fn validate_task_keys(conn: &Connection, table: &str, tokens: &[String]) -> anyhow::Result<()> {
+    let mut expected = Vec::new();
+    for at in 0..tokens.len() {
+        let primary = tokens[at] == "primary" && tokens.get(at+1).map(String::as_str) == Some("key");
+        let unique = tokens[at] == "unique";
+        let start = at + if primary { 3 } else { 2 };
+        if (primary || unique) && tokens.get(start-1).map(String::as_str) == Some("(") {
+            let columns = tokens[start..].iter().take_while(|t| t.as_str() != ")").filter(|t| t.as_str() != ",").cloned().collect::<Vec<_>>();
+            expected.push((if primary { "pk" } else { "u" }.to_string(), columns));
+        }
+    }
+    let indexes = conn.prepare(&format!("PRAGMA index_list('{table}')"))?.query_map([], |r| Ok((r.get::<_,String>(1)?,r.get::<_,bool>(2)?,r.get::<_,String>(3)?,r.get::<_,bool>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut found = Vec::new();
+    for (name,unique,origin,partial) in indexes {
+        anyhow::ensure!(unique && !partial, "Invalid task key index {name}");
+        let escaped = name.replace('\'', "''");
+        let columns = conn.prepare(&format!("PRAGMA index_xinfo('{escaped}')"))?.query_map([], |r| Ok((r.get::<_,Option<String>>(2)?,r.get::<_,bool>(3)?,r.get::<_,String>(4)?,r.get::<_,bool>(5)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut key = Vec::new();
+        for (column,descending,collation,is_key) in columns {
+            if !is_key { continue; }
+            anyhow::ensure!(!descending && collation == "BINARY", "Changed task key ordering/collation");
+            key.push(column);
+        }
+        if origin == "c" {
+            anyhow::ensure!(table == "task_invocations" && name == "task_invocation_ordinal" && key == vec![Some("account_epoch".into()),Some("task_id".into()),Some("execution_id".into()),None,Some("ordinal".into())], "Unexpected task expression index");
+        } else {
+            anyhow::ensure!(matches!(origin.as_str(),"pk" | "u"), "Unexpected task index origin");
+            found.push((origin,key.into_iter().collect::<Option<Vec<_>>>().ok_or_else(|| anyhow::anyhow!("Unexpected implicit task expression"))?));
+        }
+    }
+    expected.sort(); found.sort();
+    anyhow::ensure!(expected == found, "Implicit task PK/UNIQUE mismatch {table}");
+    Ok(())
 }
 
 fn task_schema_name(name: &str) -> bool { name.starts_with("task_") || name == "local_tasks" || name.starts_with("routine_schedule_") || name == "routine_check_commits" }
@@ -90,6 +126,7 @@ fn classify_schema_version(conn: &Connection, version: i64) -> anyhow::Result<Sc
             required.drain(at-1..at+2);
         }
         anyhow::ensure!(schema_tokens(actual.3.as_deref().ok_or_else(|| anyhow::anyhow!("Missing schema SQL"))?)? == required, "Mismatched schema definition {name}");
+        if kind == "table" && task_schema_name(&name) { validate_task_keys(conn, &name, &required)?; }
     }
     for (name,_,table,_) in &objects {
         if task_schema_name(name) || task_schema_name(table) { anyhow::ensure!(names.contains(name), "Unexpected task schema object {name}"); }
@@ -2391,6 +2428,18 @@ mod tests {
         conn.pragma_update(None,"application_id",crate::config::SQLITE_APPLICATION_ID).unwrap();
         for version in [0,2,5] {conn.pragma_update(None,"user_version",version).unwrap(); assert!(classify_schema(&conn).is_err());}
         conn.pragma_update(None,"user_version",3).unwrap();
+        conn.execute_batch("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql,'length(digest)=32','length(digest)=\"32\"') WHERE name='task_invocations'; PRAGMA writable_schema=OFF;").unwrap();
+        assert!(classify_schema(&conn).is_err());
+        conn.execute_batch("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql,'length(digest)=\"32\"','length(digest)=32') WHERE name='task_invocations'; PRAGMA writable_schema=OFF;").unwrap();
+        {
+            let corrupt=Connection::open_in_memory().unwrap();
+            corrupt.execute_batch(&LocalStore::SCHEMA.replace("UNIQUE(account_epoch,receipt_id),", "")).unwrap();
+            corrupt.pragma_update(None,"application_id",crate::config::SQLITE_APPLICATION_ID).unwrap();
+            corrupt.pragma_update(None,"user_version",3).unwrap();
+            // Stored CREATE text claims the original key; actual index state does not.
+            corrupt.execute_batch("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql,'UNIQUE(account_epoch,task_id,execution_id,invocation_id)','UNIQUE(account_epoch,receipt_id), UNIQUE(account_epoch,task_id,execution_id,invocation_id)') WHERE name='task_invocations'; PRAGMA writable_schema=OFF;").unwrap();
+            assert!(classify_schema(&corrupt).is_err());
+        }
         conn.execute_batch("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql,'length(digest)=32','length(digest)=31') WHERE name='task_invocations'; PRAGMA writable_schema=OFF;").unwrap();
         assert!(classify_schema(&conn).is_err());
         conn.execute_batch("PRAGMA writable_schema=ON; UPDATE sqlite_master SET sql=replace(sql,'length(digest)=31','length(digest)=32') WHERE name='task_invocations'; PRAGMA writable_schema=OFF;").unwrap();

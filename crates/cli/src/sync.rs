@@ -278,6 +278,7 @@ enum FirstSync {
 }
 
 async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<FirstSync, RelayError> {
+    app.relay.inspect_policy_replay(url, token, &machine_file.identity_pubkey).await?;
     // The relay keeps the latest roster alone, so the chats have their names and bots before
     // their messages land.
     let (mut since, mut head) = (0, None);
@@ -483,6 +484,7 @@ fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
 /// stays unrecorded on the relay for the main pull to take in order. The cursor stays put.
 async fn pull_controls(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<(), RelayError> {
     let Ok(machine) = machine_file.machine() else { return Ok(()) };
+    app.relay.inspect_policy_replay(url, token, &machine_file.identity_pubkey).await?;
     let mut since = app.state.lock().unwrap().last_seq;
     loop {
         let (blobs, _) = app.relay.list_blobs(url, token, since, "policy,memory_config,job_cancel,job_result,request,response").await?;
@@ -1610,6 +1612,91 @@ mod tests {
         ScratchApp(app, home)
     }
 
+    fn policy_cut_fixture(log: &[serde_json::Value], query: &std::collections::HashMap<String,String>) -> serde_json::Value {
+        use serde_json::json;
+        let since = query["since"].parse::<i64>().unwrap();
+        let through = query.get("through").map(|value| value.parse::<i64>().unwrap())
+            .unwrap_or_else(|| log.iter().filter_map(|blob| blob["seq"].as_i64()).max().unwrap_or(0));
+        let mut rows = log.iter().filter(|blob| blob["kind"] == "policy"
+            && blob["seq"].as_i64().unwrap() > since && blob["seq"].as_i64().unwrap() <= through);
+        let first = rows.next();
+        let done = rows.next().is_none();
+        let blobs: Vec<_> = first.into_iter().map(|blob| json!({"subtype":"ordinary","id":blob["id"],
+            "seq":blob["seq"],"ciphertext":crate::keys::unb64(blob["ciphertext"].as_str().unwrap()).unwrap()})).collect();
+        json!({"schema_version":1,"context":"fixture:session","cut_token":"opaque",
+            "through":through,"next_since":if done { through } else { first.unwrap()["seq"].as_i64().unwrap() },
+            "done":done,"blobs":blobs})
+    }
+
+    #[tokio::test]
+    async fn managed_policy_reader_refuses_invalid_cuts_without_activation() {
+        use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
+        use serde_json::{json, Value};
+        use sha2::{Digest, Sha256};
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let machine = crate::keys::MachineFile {
+            format: crate::config::Format::BeansV2, machine_secret: crate::keys::b64(&[17; 32]),
+            identity_pubkey: "account".into(), content_pubkey: String::new(),
+            account_dek: crate::keys::b64(&[31; 32]), name: "synthetic".into(), os: "ios".into(),
+            os_version: String::new(), model: String::new(), registered: false, relay_url: None, created_at: 1,
+        };
+        let policy = vec![1u8, 2, 3];
+        let roster = vec![4u8, 5, 6];
+        let ph = format!("{:x}", Sha256::digest(&policy));
+        let rh = format!("{:x}", Sha256::digest(&roster));
+        let commitment = json!(["beans-managed-skill-commit",1,"account","transaction",0,
+            ["policy",3,ph,"managed_skill_policy",null,null,null],
+            ["roster",3,rh,"roster","roster",null,null],null]);
+        let receipt = json!({"schema_version":1,"account_id":"account","transaction_id":"transaction",
+            "request_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&commitment).unwrap())),
+            "expected_slot_seq":0,"policy_id":"policy","policy_ciphertext_len":3,"policy_sha256":ph,"policy_seq":1,
+            "roster_id":"roster","roster_ciphertext_len":3,"roster_sha256":rh,"roster_seq":2,"checkpoint_transaction_id":null});
+        let complete = json!({"schema_version":1,"context":"incarnation:session","cut_token":"opaque",
+            "through":2,"next_since":2,"done":true,"blobs":[{"subtype":"managed","receipt":receipt,
+                "policy_ciphertext":policy,"roster_ciphertext":roster}]});
+        async fn list(HttpState(values): HttpState<Arc<(Value,Value)>>,
+            Query(query): Query<std::collections::HashMap<String,String>>) -> Json<Value> {
+            if query.contains_key("receipt_transaction_id") { return Json(values.1.clone()); }
+            if query.contains_key("policy_replay") {
+                return Json(if values.0.is_array() {
+                    values.0[usize::from(query.contains_key("cut_token"))].clone()
+                } else { values.0.clone() });
+            }
+            Json(json!({"blobs":[],"seq":0}))
+        }
+        let mut partial = complete.clone(); partial["through"] = json!(1); partial["next_since"] = json!(1);
+        let mut mismatch = complete.clone(); mismatch["blobs"][0]["policy_ciphertext"] = json!([9,2,3]);
+        let mut wrong_receipt = receipt.clone(); wrong_receipt["account_id"] = json!("other-account");
+        let mut unsupported = complete.clone(); unsupported["schema_version"] = json!(2);
+        let mut prefix = complete.clone(); prefix["through"] = json!(3);
+        prefix["done"] = json!(false);
+        let tail = json!({"schema_version":1,"context":"incarnation:session","cut_token":"next",
+            "through":3,"next_since":3,"done":true,"blobs":[]});
+        let mut stale = tail.clone(); stale["context"] = json!("replacement:session");
+        for (page, lookup, accepted) in [(partial,receipt.clone(),false),(mismatch,receipt.clone(),false),
+            (complete.clone(),wrong_receipt,false),(unsupported,receipt.clone(),false),
+            (json!([prefix.clone(),stale]),receipt.clone(),false),
+            (json!([prefix,tail]),receipt.clone(),true),(complete,receipt,true)] {
+            let server = Router::new().route("/v1/blobs",get(list)).with_state(Arc::new((page,lookup)));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}",listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener,server).await.unwrap() });
+            let projection = |state: &crate::app::State| (
+                state.last_seq, state.roster_slot_seq, state.paused, state.policy_clock,
+                state.pause_version.clone(), state.capability_versions.clone(), state.policy_capabilities.clone(),
+                state.deleted_bot_versions.clone(), state.bots.clone(), state.applied_blob_ids.clone());
+            let before = projection(&app.state.lock().unwrap());
+            let durable = projection(&app.store.load_state().unwrap());
+            assert_eq!(pull_controls(app,&url,"synthetic",&machine).await.is_ok(),accepted);
+            assert_eq!(first_sync_quietly(app,&url,"synthetic",&machine).await.is_ok(),accepted);
+            assert_eq!(projection(&app.state.lock().unwrap()),before);
+            assert_eq!(projection(&app.store.load_state().unwrap()),durable);
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
     #[tokio::test]
     async fn incoming_read_page_commits_or_retries_without_consuming_receipt() {
         let scratch = scratch_app();
@@ -1730,6 +1817,7 @@ mod tests {
         }
         async fn list(HttpState(fixture): HttpState<Arc<RelayFixture>>,
             Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&fixture.blobs, &query)); }
             let since: i64 = query["since"].parse().unwrap();
             let kinds: Vec<&str> = query["kinds"].split(',').collect();
             Json(json!({"blobs": fixture.blobs.iter().filter(|blob|
@@ -2334,6 +2422,7 @@ mod tests {
         }
         async fn list(HttpState(slot): HttpState<Arc<Mutex<RelaySlot>>>, Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
             let slot = slot.lock().await;
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             let since: i64 = query["since"].parse().unwrap();
             let blobs: Vec<Value> = slot.roster.iter().filter(|blob| blob["seq"].as_i64().unwrap() > since).cloned().collect();
             Json(json!({ "blobs": blobs, "seq": slot.seq }))
@@ -2447,6 +2536,7 @@ mod tests {
             writes: Arc<AtomicUsize>,
         }
         async fn list(HttpState(relay): HttpState<Relay>, Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             let blobs = if query["kinds"] == "roster" { vec![relay.roster] } else { vec![] };
             Json(json!({"blobs": blobs, "seq": 8}))
         }
@@ -2589,6 +2679,7 @@ mod tests {
         }
         async fn list(HttpState(slot): HttpState<Arc<Mutex<(i64, Option<Value>)>>>, Query(query): Query<std::collections::HashMap<String,String>>) -> Json<Value> {
             let slot = slot.lock().await;
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             Json(json!({"blobs":slot.1.iter().filter(|blob| blob["seq"].as_i64().unwrap() > query["since"].parse::<i64>().unwrap()).cloned().collect::<Vec<_>>(),"seq":slot.0}))
         }
         for case in ["removals", "additions", "legacy"] {
@@ -2666,6 +2757,7 @@ mod tests {
         }
         async fn list(HttpState(slot): HttpState<Arc<Mutex<(i64, Option<Value>)>>>, Query(query): Query<std::collections::HashMap<String,String>>) -> Json<Value> {
             let slot = slot.lock().await;
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             Json(json!({"blobs":slot.1.iter().filter(|blob| blob["seq"].as_i64().unwrap() > query["since"].parse::<i64>().unwrap()).cloned().collect::<Vec<_>>(),"seq":slot.0}))
         }
         let slot = Arc::new(Mutex::new((0, None)));
@@ -2783,6 +2875,7 @@ mod tests {
         struct PullGate { blob: Value, entered: Notify, release: Notify }
         async fn list(HttpState(gate): HttpState<Arc<PullGate>>,
             Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             gate.entered.notify_one();
             gate.release.notified().await;
             let since: i64 = query["since"].parse().unwrap();
@@ -2902,6 +2995,7 @@ mod tests {
         }
         async fn list(HttpState(slot): HttpState<Arc<Mutex<LostReply>>>, Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
             let slot = slot.lock().await;
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             let since: i64 = query["since"].parse().unwrap();
             Json(json!({"blobs": if since == 0 { slot.roster.iter().cloned().collect::<Vec<_>>() } else { Vec::new() }, "seq":1}))
         }
@@ -3159,6 +3253,7 @@ mod tests {
         use serde_json::{json, Value};
 
         async fn list(HttpState(log): HttpState<Arc<Vec<Value>>>, Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&log, &query)); }
             let since: i64 = query["since"].parse().unwrap();
             let kinds: Vec<&str> = query["kinds"].split(',').collect();
             let head = log.iter().map(|blob| blob["seq"].as_i64().unwrap()).max().unwrap_or(0);

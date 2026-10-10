@@ -74,10 +74,17 @@ fn load_cached_from(config: &Config, url: &str) {
 
 /// Check once when startup/bootstrap calls this; later calls respect the one-hour freshness.
 pub fn check_in_background(app: &Arc<App>) {
+    check_in_background_owned(app, None);
+}
+
+/// The same check, held by whoever owns it. `beans serve` passes the permit it will wait on; every
+/// other caller passes none and behaves exactly as before.
+pub fn check_in_background_owned(app: &Arc<App>, permit: Option<crate::serve_owner::WorkPermit>) {
     enable(app);
     if fetch_disabled() || app.catalog.source.lock().is_none() { return; }
     let app = Arc::clone(app);
     tokio::spawn(async move {
+        let _permit = permit;
         if let Err(error) = check(&app, false).await {
             tracing::warn!(%error, "checking model catalog");
         }

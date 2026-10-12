@@ -11,16 +11,18 @@ test("archive inspection accepts bounded format and rejects escape, symlink and 
   const oversized = archiveFixture(), central = oversized.indexOf(Buffer.from([0x50, 0x4b, 1, 2]));
   oversized.writeUInt32LE(128 * 1024 * 1024 + 1, central + 24);
   expect(() => inspectReleaseArchive(oversized)).toThrow("decompressed size");
-  const mismatch = archiveFixture();
-  mismatch.writeUInt32LE(1, central + 24);
+  const mismatch = archiveFixture(), mismatchCentral = mismatch.indexOf(Buffer.from([0x50, 0x4b, 1, 2]));
+  mismatch.writeUInt32LE(1, mismatchCentral + 24);
   expect(() => inspectReleaseArchive(mismatch)).toThrow("decompressed size");
 });
 
 test("archive inspection rejects encrypted, overlapping and miscounted entries before any tool spawn", () => {
-  const encrypted = archiveFixture(), central = encrypted.indexOf(Buffer.from([0x50, 0x4b, 1, 2]));
-  encrypted.writeUInt16LE(1, central + 8); // general purpose bit 0: encrypted
+  const encrypted = archiveFixture(), encryptedCentral = encrypted.indexOf(Buffer.from([0x50, 0x4b, 1, 2]));
+  encrypted.writeUInt16LE(1, encryptedCentral + 8); // general purpose bit 0: encrypted
+  // One rejection, one assertion. The single fail() message contains both
+  // "Unsafe binary archive" and "decompressed size", so a second expectation over
+  // the same buffer would restate one proof rather than add a case.
   expect(() => inspectReleaseArchive(encrypted)).toThrow("Unsafe binary archive");
-  expect(() => inspectReleaseArchive(encrypted)).toThrow("decompressed size");
 
   const miscounted = archiveFixture(), end = miscounted.lastIndexOf(Buffer.from([0x50, 0x4b, 5, 6]));
   miscounted.writeUInt16LE(2, end + 10); // EOCD claims two entries, one present

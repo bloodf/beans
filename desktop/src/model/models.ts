@@ -360,13 +360,14 @@ export interface ModelChecklist {
 }
 
 /** Whether a roster event carries the custom provider a refresh was waiting for. The credential has
- * to be the same connected provider with a catalog that changed in any way, ids or metadata; an
- * unrelated roster change, or one that dropped or disconnected the provider, settles nothing. */
+ * to be the same connected provider on the same endpoint — another Device repointing it is not this
+ * refresh's answer — with a catalog that changed in any way, ids or metadata. An unrelated roster
+ * change, or one that dropped or disconnected the provider, settles nothing. */
 export function refreshSettled(before: ProviderCredential | undefined, after: ProviderCredential | undefined): boolean {
   if (!before || !after || before.kind !== after.kind || !after.isConnected) return false;
   if (!after.models?.length) return false;
-  const facts = (credential: ProviderCredential) => JSON.stringify([credential.api, credential.baseURL, credential.capabilities, credential.models]);
-  return facts(before) !== facts(after);
+  if (before.api !== after.api || before.baseURL !== after.baseURL) return false;
+  return JSON.stringify([before.capabilities, before.models]) !== JSON.stringify([after.capabilities, after.models]);
 }
 
 /** A provider's saved models, all picked, the first the default; or an empty list. */

@@ -115,12 +115,33 @@ export async function checkCustomProviderRefresh() {
     assert(text().includes("Models updated"), "The refreshed catalog did not settle the refresh");
     assert(text().includes("gemma3"), "A model the refreshed catalog added is missing from the sheet");
 
-    // A reply that promises nothing changes settles as unchanged without waiting for an event.
+    // Another Device repointing the same provider is not this refresh's answer: it must stay pending.
     button("Refresh Models")!.click();
     await settle();
+    assert(calls === 3, `Expected a third refresh request, saw ${calls}`);
+    reply({ updated: 1 });
+    await settle();
+    store.providers = [{ ...provider([{ id: "qwen3", levels: ["low"] }, { id: "remote", levels: ["low"] }]), baseURL: "http://127.0.0.1:1234/v1" }];
+    internals.emit({ kind: "rosterChanged" });
+    await new Promise((resolve) => setTimeout(resolve, 5200));
+    await settle();
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await settle();
+    assert(!text().includes("Models updated"), `A repointed provider settled the refresh: ${statusLine()}`);
+    assert(!text().includes("remote"), "A catalog from another endpoint was merged into the sheet");
+    store.providers = [provider([{ id: "qwen3", levels: ["low", "high"], contextWindow: 32768 }, { id: "gemma3", levels: ["low"] }])];
+    internals.emit({ kind: "rosterChanged" });
+    await settle();
+    assert(!button("Refresh Models")!.disabled, `The sheet stayed busy after the repoint wait: ${statusLine()}`);
+
+    // A reply that promises nothing changes settles as unchanged without waiting for an event.
+    assert(!button("Refresh Models")!.disabled, `Refresh stayed disabled before the unchanged reply: ${statusLine()} / saved=${store.credential("custom:lab")?.baseURL} runners=${store.runners.length} this=${store.thisDevice?.id}`);
+    button("Refresh Models")!.click();
+    await settle();
+    assert(calls === 4, `Expected a fourth refresh request, saw ${calls}`);
     reply({ updated: 0 });
     await settle();
-    assert(text().includes("Models unchanged"), "An unchanged reply did not settle the refresh");
+    assert(text().includes("Models unchanged"), `An unchanged reply did not settle the refresh: ${statusLine()}`);
 
     // A failure leaves the sheet idle with the reason, and no silent second attempt.
     failWith = new Error("Runner refused the catalog");
@@ -130,8 +151,8 @@ export async function checkCustomProviderRefresh() {
     await settle();
     assert(text().includes("Runner refused the catalog"), "The refresh failure did not reach the status line");
     assert(!button("Refresh Models")!.disabled, "The sheet stayed busy after a failed refresh");
-    assert(calls === 4, `Expected exactly four refresh requests, saw ${calls}`);
-    return { refreshCalls: calls, dirtySourceFenced: true, unrelatedEventIgnored: true, otherAccountIgnored: true, metadataOnlySettled: true, unchangedReplySettled: true, failureSurfaced: true };
+    assert(calls === 5, `Expected exactly five refresh requests, saw ${calls}`);
+    return { refreshCalls: calls, dirtySourceFenced: true, unrelatedEventIgnored: true, otherAccountIgnored: true, metadataOnlySettled: true, unchangedReplySettled: true, failureSurfaced: true, repointIgnored: true };
   } finally {
     dispose();
     internals.transport = realTransport;

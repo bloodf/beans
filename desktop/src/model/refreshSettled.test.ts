@@ -39,3 +39,8 @@ test("a dropped or disconnected provider settles nothing", () => {
   expect(refreshSettled(saved, { ...saved, models: [] })).toBe(false);
   expect(refreshSettled(saved, { ...saved, isConnected: false })).toBe(false);
 });
+
+test("a repointed provider on another endpoint settles nothing", () => {
+  expect(refreshSettled(saved, { ...saved, baseURL: "http://127.0.0.1:1234/v1" })).toBe(false);
+  expect(refreshSettled(saved, { ...saved, api: "responses", models: [{ id: "other", levels: [] }] })).toBe(false);
+});

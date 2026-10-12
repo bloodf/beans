@@ -33,6 +33,7 @@ import {
   type CustomProviderKind,
   type ProviderCredential,
 } from "../../model/models";
+import { track } from "../../model/reactive";
 import { errorText, store } from "../../model/store";
 import { Button, PopUpButton, SearchField, Spinner, TextField } from "../controls";
 import { Icon } from "../icons";
@@ -130,6 +131,7 @@ function CustomProviderSheet(props: {
   const saved = () => (kind ? store.credential(kind) : undefined);
   const editedSource = () => ({ api: api(), baseURL: baseURL().trim(), key: key() });
   const sourceDirty = () => {
+    track.roster();
     const provider = saved();
     if (!provider) return false;
     const source = editedSource();

@@ -213,13 +213,14 @@ mod tests {
             let source = fixture_root(host);
             assert!(source.is_dir(), "missing fixture root {}", source.display());
             // (fixture directory, expected loaded names, expected diagnostic fragments)
-            let mismatched = vec!["does not match parent directory"];
+            // Beans validates one rule for every host: a declared name that differs from its
+            // directory is diagnosed. There is no host special case in the loader.
             let extended_name = host_name(host);
             let cases: Vec<(&str, Vec<&str>, Vec<&str>)> = vec![
                 ("minimal", vec!["minimal"], vec![]),
-                ("extended", vec![&extended_name], vec![]),
-                ("duplicate-a", vec!["shared-name"], if *host == "pi" { vec![] } else { mismatched.clone() }),
-                ("duplicate-b", vec!["shared-name"], if *host == "pi" { vec![] } else { mismatched.clone() }),
+                ("extended", vec![&extended_name], vec!["does not match parent directory \"extended\""]),
+                ("duplicate-a", vec!["shared-name"], vec!["does not match parent directory \"duplicate-a\""]),
+                ("duplicate-b", vec!["shared-name"], vec!["does not match parent directory \"duplicate-b\""]),
                 ("malformed", vec![], vec!["description is required"]),
             ];
             for (case, want_names, want_diagnostics) in cases {
@@ -233,39 +234,79 @@ mod tests {
                 for want in &want_diagnostics {
                     if !messages.iter().any(|m| m.contains(want)) { failures.push(format!("{host}/{case}: missing diagnostic {want:?} in {messages:?}")); }
                 }
-                if host == &"claude" && case == "extended" && !loaded.skills.iter().any(|s| s.disable_model_invocation) {
-                    failures.push("claude/extended: disable-model-invocation was not honoured".into());
+                if case == "extended" {
+                    if host == &"claude" && !loaded.skills.iter().any(|s| s.disable_model_invocation) {
+                        failures.push("claude/extended: disable-model-invocation was not honoured".into());
+                    }
+                    // Host extension metadata stays inert text: one skill, the declared body, and
+                    // no sidecar or extra frontmatter surfacing as a skill of its own.
+                    let body = parse_frontmatter(&std::fs::read_to_string(case_dir.join("SKILL.md")).unwrap()).body;
+                    let Some(skill) = loaded.skills.first() else { failures.push(format!("{host}/extended: nothing loaded")); continue };
+                    if loaded.skills.len() != 1 || skill.content != body {
+                        failures.push(format!("{host}/extended: expected one skill with the declared body, got {:?}", loaded.skills));
+                    }
+                    for marker in ["allow_implicit_invocation", "display_name"] {
+                        if loaded.skills.iter().any(|s| s.content.contains(marker)) {
+                            failures.push(format!("{host}/extended: sidecar content {marker:?} reached a skill body"));
+                        }
+                    }
+                    // The sidecar directory is never walked: no skill path may enter it.
+                    if loaded.skills.iter().any(|s| s.path.components().any(|c| c.as_os_str() == "agents")) {
+                        failures.push(format!("{host}/extended: a sidecar path became a skill: {:?}", loaded.skills));
+                    }
+                    if host == &"claude" && !skill.content.contains("!`git status`") {
+                        failures.push("claude/extended: the inert dynamic-context line is not in the body".into());
+                    }
                 }
             }
-        }
-        // pi does not require the name to match its directory; the other three hosts do.
-        for host in HOSTS.iter().filter(|h| **h != "pi") {
-            let loaded = load_skills(&[temp.join(host).join("duplicate-b")]);
-            assert!(loaded.diagnostics.iter().any(|d| d.message.contains("does not match parent directory \"duplicate-b\"")), "{host}: {loaded:?}");
-            assert_eq!(loaded.skills.len(), 1, "{host} duplicate pair must not merge");
+            // Both halves of the duplicate pair in one root: two distinct skills, never merged.
+            let pair = temp.join(host).join("duplicate-pair");
+            copy_tree(&source.join("duplicate-a"), &pair.join("duplicate-a"));
+            copy_tree(&source.join("duplicate-b"), &pair.join("duplicate-b"));
+            let loaded = load_skills(&[pair]);
+            let names: Vec<&str> = loaded.skills.iter().map(|s| s.name.as_str()).collect();
+            if names != vec!["shared-name", "shared-name"] {
+                failures.push(format!("{host}: duplicate pair loaded {names:?}, expected two distinct skills"));
+            }
+            if loaded.skills.iter().any(|s| s.content == loaded.skills[0].content && s.path == loaded.skills[0].path) {
+                failures.push(format!("{host}: duplicate pair collapsed onto one entry"));
+            }
+            assert_eq!(loaded.diagnostics.len(), 2, "{host}: each half of the pair must be diagnosed");
         }
         let _ = std::fs::remove_dir_all(&temp);
         assert!(failures.is_empty(), "{failures:#?}");
     }
 
     /// The bounded scanner is the loader that enforces escape and size limits; the generic
-    /// listing loader has no size or symlink policy. Off Linux it fails closed with no opens.
+    /// listing loader has no size or symlink policy. Off Linux it fails closed with no opens,
+    /// which is not proof that the escape and size logic exists.
     #[test]
     fn bounded_scanner_rejects_symlink_escape_and_oversize() {
         let temp = std::env::temp_dir().join(format!("beans-host-bounds-{}", uuid::Uuid::new_v4()));
+        // The scanner opens the root from `/` with no symlink resolution, so a symlinked
+        // system temp must be resolved here, as the sibling discovery regression does.
+        let temp = temp.canonicalize().unwrap();
         let root = temp.join("root");
+        let outside = temp.join("outside");
         std::fs::create_dir_all(root.join("valid")).unwrap();
         std::fs::create_dir_all(root.join("oversize")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(root.join("valid/SKILL.md"), "---\nname: valid\ndescription: In bounds\n---\nbody").unwrap();
         std::fs::write(root.join("oversize/SKILL.md"), "---\nname: oversize\ndescription: Too large\n---\n").unwrap();
         let oversize = std::fs::OpenOptions::new().write(true).open(root.join("oversize/SKILL.md")).unwrap();
         oversize.set_len(crate::harness::skill_discovery::MAX_FILE_BYTES + 1).unwrap();
+        // A real file outside the root, not a dangling link: the escape must have a target.
+        std::fs::write(outside.join("SKILL.md"), "---\nname: outside\ndescription: forbidden\n---\n").unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(temp.join("outside"), root.join("escape")).unwrap();
+        {
+            std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+            std::os::unix::fs::symlink(outside.join("SKILL.md"), root.join("file-escape")).unwrap();
+        }
         let result = crate::harness::skill_discovery::discover_skills(&root);
         #[cfg(target_os = "linux")]
         {
             assert!(result.skills.iter().any(|s| s.path == Path::new("valid/SKILL.md")), "{result:?}");
+            assert!(!result.skills.iter().any(|s| s.fields.get("name").map(String::as_str) == Some("outside")), "{result:?}");
             for fragment in ["symlink rejected", "exceeds"] {
                 assert!(result.diagnostics.iter().any(|d| d.message.contains(fragment)), "missing {fragment}: {:?}", result.diagnostics);
             }

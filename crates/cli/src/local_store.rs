@@ -2474,7 +2474,15 @@ mod tests {
         let donor_store = LocalStore::open(&donor_config.database_path()).unwrap();
         {
             let conn = donor_store.connection.lock().unwrap();
-            conn.execute("UPDATE metadata SET last_seq=7 WHERE id=1", []).unwrap();
+            // A fresh store installs the schema but no metadata row, so seed the sentinel
+            // against the schema we just created and prove the row is really there.
+            let seeded = conn
+                .execute(
+                    "INSERT INTO metadata (id, auto_review_json, last_seq, credentials_uploaded) VALUES (1, '{}', 7, 0)",
+                    [],
+                )
+                .unwrap();
+            assert_eq!(seeded, 1, "the donor metadata sentinel must exist before the swap");
         }
         drop(donor_store);
         let donor_bytes = std::fs::read(donor_config.database_path()).unwrap();

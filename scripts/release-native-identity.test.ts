@@ -8,6 +8,7 @@ import { readNativeIdentity } from "./release-native-identity.ts";
 import { stageLocalBuild } from "./release-eas.ts";
 import { ROOT, readVersion } from "./app.ts";
 import { archiveFixture } from "./release-archive-fixture.ts";
+import { inspectReleaseArchive } from "./release-build-inputs.ts";
 
 // One pipeline over public test-only artifacts: two repo APK fixtures (hash-pinned) read by the real
 // aapt2, and IPAs zipped here and read by the real unzip/plutil. Metadata only: no signer, team or
@@ -100,5 +101,47 @@ test("hostile archives are refused before any native tool spawns", async () => {
       }
     }
     expect(existsSync(marker)).toBe(false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+// Nested overlap: the outer STORED member's payload embeds a complete inner local header, name and one
+// byte, and the inner central entry points inside it. Every per-entry guard passes (distinct names,
+// matching flags/method, in-bounds spans); only the final span comparison can refuse it.
+function stored(entries: { name: string; local: number; size: number }[], body: Buffer): Buffer {
+  const central = Buffer.concat(entries.map(({ name, local, size }) => {
+    const header = Buffer.alloc(46 + name.length);
+    header.writeUInt32LE(0x02014b50); header.writeUInt16LE(0x0314, 4); header.writeUInt16LE(20, 6);
+    header.writeUInt32LE(size, 20); header.writeUInt32LE(size, 24); header.writeUInt16LE(name.length, 28);
+    header.writeUInt32LE(local, 42); header.write(name, 46);
+    return header;
+  }));
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(central.length, 12); end.writeUInt32LE(body.length, 16);
+  return Buffer.concat([body, central, end]);
+}
+const localHeader = (name: string, size: number) => {
+  const header = Buffer.alloc(30 + name.length);
+  header.writeUInt32LE(0x04034b50); header.writeUInt16LE(20, 4);
+  header.writeUInt32LE(size, 18); header.writeUInt32LE(size, 22); header.writeUInt16LE(name.length, 26); header.write(name, 30);
+  return header;
+};
+test("nested span overlap is refused before any tool spawn; a non-overlapping two-entry control is admitted", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "beans-overlap-"));
+  try {
+    const marker = join(dir, "spawned"), bin = join(dir, "bin"); await mkdir(bin);
+    for (const tool of ["unzip", "aapt2", "bundletool", "plutil"]) { await writeFile(join(bin, tool), `#!/bin/sh\ntouch ${marker}\nexit 0\n`); await chmod(join(bin, tool), 0o755); }
+    // outer payload = inner local header + inner name + 1 data byte; inner offset points into it.
+    const inner = Buffer.concat([localHeader("inner", 1), Buffer.from("x")]);
+    const outerHeader = localHeader("outer", inner.length);
+    const overlapping = stored([{ name: "outer", local: 0, size: inner.length }, { name: "inner", local: outerHeader.length, size: 1 }], Buffer.concat([outerHeader, inner]));
+    expect(() => inspectReleaseArchive(overlapping)).toThrow("Unsafe binary archive");
+    await writeFile(join(dir, "nested.apk"), overlapping);
+    for (const profile of ["github", "production", "testflight"] as const) expect(() => readNativeIdentity(join(dir, "nested.apk"), profile, { PATH: bin }), profile).toThrow("Unsafe binary archive");
+    expect(existsSync(marker)).toBe(false);
+    // Control: the same two names laid out one after the other are admitted by the same inspector.
+    const first = Buffer.concat([localHeader("outer", 1), Buffer.from("a")]), second = Buffer.concat([localHeader("inner", 1), Buffer.from("b")]);
+    const control = stored([{ name: "outer", local: 0, size: 1 }, { name: "inner", local: first.length, size: 1 }], Buffer.concat([first, second]));
+    expect(inspectReleaseArchive(control)).toEqual(["outer", "inner"]);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

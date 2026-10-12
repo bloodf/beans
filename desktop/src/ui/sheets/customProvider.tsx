@@ -283,21 +283,24 @@ function CustomProviderSheet(props: {
     const binding = { account: store.identityID, connected: store.isConnected, runner: checked?.machineKey, status: checked?.status };
     const sameBinding = () => store.identityID === binding.account && store.isConnected === binding.connected && store.runners.some((device) => device.id === runnerID() && device.machineKey === binding.runner && device.status === binding.status);
     let unsubscribe = () => {};
+    let settleNow = (_refreshed?: ProviderCredential) => {};
     const answered = new Promise<ProviderCredential | undefined>((resolve) => {
-      const settle = (refreshed?: ProviderCredential) => { unsubscribe(); watching.delete(settle); resolve(refreshed); };
-      watching.add(settle);
+      settleNow = (refreshed?: ProviderCredential) => { unsubscribe(); watching.delete(settleNow); resolve(refreshed); };
+      watching.add(settleNow);
       unsubscribe = store.subscribe((event) => {
         if (closed || !sameBinding() || (event.kind !== "rosterChanged" && event.kind !== "snapshotReplaced")) return;
         const refreshed = store.credential(provider);
-        if (refreshSettled(before, refreshed)) settle(refreshed);
+        if (refreshSettled(before, refreshed)) settleNow(refreshed);
       });
       // ponytail: a fixed wait; the roster carries no per-provider revision, so a slow sync leaves
       // the status pending until the user refreshes again.
-      setTimeout(() => settle(), 5000);
+      setTimeout(() => settleNow(), 5000);
     });
     begin(L("Loading models…"));
     try {
       const updated = await store.refreshProviderModels(runnerID(), provider);
+      // A reply that promises no change leaves nothing to wait for.
+      if (!updated) settleNow();
       const refreshed = await answered;
       if (closed) return;
       if (refreshed) {

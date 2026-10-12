@@ -58,12 +58,16 @@ export async function checkCustomProviderRefresh() {
   };
   const dispose = render(() => <><SheetHost /><PageMenuHost /></>, root);
   const settle = async () => { await Promise.resolve(); flush(); await new Promise((resolve) => setTimeout(resolve, 0)); flush(); };
-  const button = (text: string) => [...root.querySelectorAll("button")].find((each) => each.textContent?.trim() === text) as HTMLButtonElement | undefined;
-  const text = () => root.textContent ?? "";
+  const button = (text: string) => [...document.querySelectorAll("button")].find((each) => each.textContent?.trim() === text) as HTMLButtonElement | undefined;
+  const text = () => document.body.textContent ?? "";
+  const statusLine = () => document.querySelector(".status-line")?.textContent?.trim() ?? "(no status line)";
   const type = (label: string, value: string) => {
-    const field = [...root.querySelectorAll<HTMLElement>("[aria-label]")].find((each) => each.getAttribute("aria-label") === label)!;
-    field.querySelector("input")!.value = value;
-    field.querySelector("input")!.dispatchEvent(new Event("input", { bubbles: true }));
+    const field = [...document.querySelectorAll<HTMLElement>("[aria-label]")].find((each) => each.getAttribute("aria-label") === label);
+    assert(field, `No field labelled ${label}`);
+    const input = field!.matches("input") ? field! as HTMLInputElement : field!.querySelector("input");
+    assert(input, `${label} has no input to type into`);
+    input!.value = value;
+    input!.dispatchEvent(new Event("input", { bubbles: true }));
     flush();
   };
   try {
@@ -92,8 +96,10 @@ export async function checkCustomProviderRefresh() {
     store.providers = [provider([{ id: "qwen3", levels: ["low"] }, { id: "gemma3", levels: ["low"] }])];
     internals.emit({ kind: "rosterChanged" });
     reply({ updated: 1 });
+    // The sheet's own bounded wait has to run out before it can say the catalog is still pending.
+    await new Promise((resolve) => setTimeout(resolve, 5200));
     await settle();
-    assert(text().includes("has not reached this Device yet"), "A provider from another account settled the refresh");
+    assert(text().includes("has not reached this Device yet"), `A provider from another account settled the refresh: ${statusLine()}`);
 
     // Same account, same Runner, the refreshed catalog arrives on the roster: same ids, new metadata.
     store.identityID = "account-1";
@@ -125,6 +131,7 @@ export async function checkCustomProviderRefresh() {
     assert(text().includes("Runner refused the catalog"), "The refresh failure did not reach the status line");
     assert(!button("Refresh Models")!.disabled, "The sheet stayed busy after a failed refresh");
     assert(calls === 4, `Expected exactly four refresh requests, saw ${calls}`);
+    return { refreshCalls: calls, dirtySourceFenced: true, unrelatedEventIgnored: true, otherAccountIgnored: true, metadataOnlySettled: true, unchangedReplySettled: true, failureSurfaced: true };
   } finally {
     dispose();
     internals.transport = realTransport;

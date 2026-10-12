@@ -11,6 +11,11 @@ use serde::de::DeserializeOwned;
 use crate::app::{OutboxItem, SentJob, Slot, State};
 use crate::model::{Author, Body, LiveTurn, Message};
 
+/// Test-only seam firing on the real admission path, immediately before the schema
+/// transaction. Never present in a production build.
+#[cfg(test)]
+static BEFORE_SCHEMA_INSTALL: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SchemaProfile { Empty, PreTask, InitialTask, Core, Scheduled, Current }
 
@@ -725,6 +730,19 @@ impl LocalStore {
         Self::open_with_admission(path, Some(&admission), true)
     }
 
+    /// Test-only seam firing on the real admission path, immediately before the schema
+    /// transaction. Never present in a production build.
+    #[cfg(test)]
+    pub(crate) fn before_schema_install(replace: impl Fn() + Send + 'static) {
+        *BEFORE_SCHEMA_INSTALL.lock().unwrap() = Some(Box::new(replace));
+    }
+
+    #[cfg(test)]
+    fn run_before_schema_install() {
+        let hook = BEFORE_SCHEMA_INSTALL.lock().unwrap().take();
+        if let Some(hook) = hook { hook(); }
+    }
+
     pub(crate) fn open_with_admission(path: &Path, admission: Option<&crate::config::StorageAdmission>, staged: bool) -> anyhow::Result<Self> {
         let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
         let config = crate::config::Config { home: parent.into(), port: 0 };
@@ -745,7 +763,10 @@ impl LocalStore {
         };
         #[cfg(not(unix))]
         let owned: Option<crate::config::OwnedEmptyDatabase> = None;
+        // SQLite must not be allowed to create or adopt a different inode at this path.
+        if let Some(owned) = &owned { owned.require_identity(path)?; }
         let mut connection = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+        if let Some(owned) = &owned { owned.require_identity(path)?; }
         let profile = classify_schema(&connection)?;
         connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=16777216;")?;
         // A fresh database has no committed identity header yet. Entering WAL here
@@ -759,6 +780,9 @@ impl LocalStore {
             config.validate_home_except(owned.as_ref())?;
             if let Some(admission) = admission { admission.revalidate_legacy()?; }
         }
+        if let Some(owned) = &owned { owned.require_identity(path)?; }
+        #[cfg(test)]
+        Self::run_before_schema_install();
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         anyhow::ensure!(classify_schema(&tx)? == profile, "Storage schema changed during admission");
         install_local_schema_tx(&tx, profile)?;
@@ -2418,14 +2442,32 @@ mod tests {
         std::fs::write(foreign_config.database_path(), []).unwrap();
         assert!(LocalStore::open(&foreign_config.database_path()).is_err());
 
+        #[cfg_attr(not(unix), allow(unused_variables))]
         let replaced = tempfile::tempdir().unwrap();
         let replaced_config = crate::config::Config { home: replaced.path().into(), port: 0 };
-        let guard = replaced_config.ensure_home_admission().unwrap().unwrap();
-        let owned = crate::config::claim_owned_database(&guard, &replaced_config.database_path()).unwrap();
-        let swap = replaced.path().join("swap.sqlite3");
+        #[cfg(unix)]
+        {
+            let guard = replaced_config.ensure_home_admission().unwrap().unwrap();
+            let owned = crate::config::claim_owned_database(&guard, &replaced_config.database_path()).unwrap();
+            let swap = replaced.path().join("swap.sqlite3");
+            std::fs::write(&swap, []).unwrap();
+            std::fs::rename(&swap, replaced_config.database_path()).unwrap();
+            assert!(owned.retain_identity(&replaced_config.database_path()).is_err());
+        }
+    }
+
+    /// The replacement lands on the real admission path, before the schema is installed,
+    /// so `open_with_admission` itself must refuse rather than a helper catching it later.
+    #[test]
+    #[cfg(unix)]
+    fn admission_refuses_a_database_replaced_before_the_schema_is_installed() {
+        let home = tempfile::tempdir().unwrap();
+        let config = crate::config::Config { home: home.path().into(), port: 0 };
+        let swap = home.path().join("swap");
         std::fs::write(&swap, []).unwrap();
-        std::fs::rename(&swap, replaced_config.database_path()).unwrap();
-        assert!(owned.retain_identity(&replaced_config.database_path()).is_err());
+        let (from, to) = (swap, config.database_path());
+        LocalStore::before_schema_install(move || std::fs::rename(&from, &to).unwrap());
+        assert!(LocalStore::open(&config.database_path()).is_err());
     }
 
     #[test]

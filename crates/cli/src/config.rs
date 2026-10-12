@@ -664,8 +664,9 @@ impl OwnedEmptyDatabase {
             && metadata.len() == 0 && metadata.dev() == self.device && metadata.ino() == self.inode)
     }
 
-    /// The claimed inode must still back the path once the schema is committed.
-    pub(crate) fn retain_identity(&self, path: &Path) -> anyhow::Result<()> {
+    /// The path must still resolve to the claimed inode. This is identity, not the
+    /// still-empty exception: a replacement carrying a valid Beans header is refused too.
+    pub(crate) fn require_identity(&self, path: &Path) -> anyhow::Result<()> {
         #[cfg(not(unix))]
         anyhow::bail!("Descriptor storage admission is unsupported on this platform");
         #[cfg(unix)] {
@@ -674,9 +675,15 @@ impl OwnedEmptyDatabase {
             if !metadata.is_file() || metadata.dev() != self.device || metadata.ino() != self.inode {
                 anyhow::bail!("Storage database was replaced during admission; data is untouched");
             }
-            self.file.sync_all()?;
-            validate_database(path)
+            Ok(())
         }
+    }
+
+    /// The claimed inode must still back the path once the schema is committed.
+    pub(crate) fn retain_identity(&self, path: &Path) -> anyhow::Result<()> {
+        self.require_identity(path)?;
+        #[cfg(unix)] self.file.sync_all()?;
+        validate_database(path)
     }
 }
 

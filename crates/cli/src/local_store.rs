@@ -725,23 +725,9 @@ impl LocalStore {
         Self::open_with_admission(path, Some(&admission), true)
     }
 
-    #[cfg(test)]
-    fn trace_admission_header(path: &Path, phase: &str) {
-        if std::env::var_os("BEANS_TEST_STORAGE_PHASES").is_none() { return; }
-        use std::io::Read;
-        let header = std::fs::File::open(path).and_then(|file| {
-            let mut bytes = Vec::with_capacity(72);
-            file.take(72).read_to_end(&mut bytes)?;
-            Ok(bytes)
-        });
-        eprintln!("storage-phase {phase} path={} header={header:02x?}", path.display());
-    }
-
     pub(crate) fn open_with_admission(path: &Path, admission: Option<&crate::config::StorageAdmission>, staged: bool) -> anyhow::Result<Self> {
         let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
         let config = crate::config::Config { home: parent.into(), port: 0 };
-        #[cfg(test)]
-        Self::trace_admission_header(path, "entry-before-home-validation");
         #[cfg(unix)]
         admission.ok_or_else(|| anyhow::anyhow!("Storage admission guard is required"))?.validate_target(parent)?;
         if staged {
@@ -751,52 +737,36 @@ impl LocalStore {
             if let Some(admission) = admission { admission.revalidate_legacy()?; }
         }
         if path.exists() { crate::config::validate_database(path)?; }
-        #[cfg(test)]
-        Self::trace_admission_header(path, "before-connection-open");
+        // A missing database is created exclusively under this admission, so its descriptor
+        // identifies the one file home validation may admit before the schema commits.
+        #[cfg(unix)]
+        let owned = if path.exists() { None } else {
+            Some(crate::config::claim_owned_database(admission.ok_or_else(|| anyhow::anyhow!("Storage admission guard is required"))?, path)?)
+        };
+        #[cfg(not(unix))]
+        let owned: Option<crate::config::OwnedEmptyDatabase> = None;
         let mut connection = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
-        #[cfg(test)]
-        Self::trace_admission_header(path, "after-connection-open");
         let profile = classify_schema(&connection)?;
-        #[cfg(test)]
-        {
-            Self::trace_admission_header(path, "after-classification-before-pragmas");
-            if std::env::var_os("BEANS_TEST_STORAGE_PHASES").is_some() {
-                let journal = connection.pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0));
-                eprintln!("storage-phase classified profile={profile:?} journal={journal:?}");
-            }
-        }
         connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=16777216;")?;
-        #[cfg(test)]
-        Self::trace_admission_header(path, "after-durability-pragmas");
         // A fresh database has no committed identity header yet. Entering WAL here
         // publishes an application_id=0 main file that raw-header admission rejects.
         if profile != SchemaProfile::Empty { connection.execute_batch("PRAGMA journal_mode=WAL;")?; }
-        #[cfg(test)]
-        Self::trace_admission_header(path, "before-post-configuration-home-validation");
         #[cfg(unix)]
         admission.ok_or_else(|| anyhow::anyhow!("Storage admission guard is required"))?.validate_target(parent)?;
         if staged {
             admission.ok_or_else(|| anyhow::anyhow!("Staged admission guard is required"))?.revalidate_staged()?;
         } else {
-            config.validate_home()?;
+            config.validate_home_except(owned.as_ref())?;
             if let Some(admission) = admission { admission.revalidate_legacy()?; }
         }
-        #[cfg(test)]
-        Self::trace_admission_header(path, "after-post-configuration-home-validation");
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         anyhow::ensure!(classify_schema(&tx)? == profile, "Storage schema changed during admission");
-        #[cfg(test)]
-        Self::trace_admission_header(path, "before-installation");
         install_local_schema_tx(&tx, profile)?;
-        #[cfg(test)]
-        Self::trace_admission_header(path, "after-installation-before-commit");
         tx.commit()?;
-        #[cfg(test)]
-        Self::trace_admission_header(path, "after-installation-commit");
         if profile == SchemaProfile::Empty { connection.execute_batch("PRAGMA journal_mode=WAL;")?; }
-        #[cfg(test)]
-        Self::trace_admission_header(path, "after-fresh-wal-before-return");
         crate::config::set_private(path)?;
+        // The committed schema must answer for the exact file this admission created.
+        if let Some(owned) = &owned { owned.retain_identity(path)?; }
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -2418,14 +2388,10 @@ mod tests {
     fn fresh_schema_identity_survives_live_store_readmission() {
         let home = tempfile::tempdir().unwrap();
         let config = crate::config::Config { home: home.path().into(), port: 0 };
-        LocalStore::trace_admission_header(&config.database_path(), "scenario-before-first-open");
         let store = LocalStore::open(&config.database_path()).unwrap();
-        LocalStore::trace_admission_header(&config.database_path(), "scenario-after-first-open-before-raw-validation");
         // Admission reads the main-file header, not the first connection's WAL view.
         crate::config::validate_database(&config.database_path()).unwrap();
-        LocalStore::trace_admission_header(&config.database_path(), "scenario-after-raw-validation-before-home-validation");
         assert!(config.validate_home().unwrap());
-        LocalStore::trace_admission_header(&config.database_path(), "scenario-before-second-live-open");
         let reopened = LocalStore::open(&config.database_path()).unwrap();
         for current in [&store, &reopened] {
             let conn = current.connection.lock().unwrap();
@@ -2435,6 +2401,31 @@ mod tests {
             let synchronous: i64 = conn.pragma_query_value(None, "synchronous", |r| r.get(0)).unwrap();
             assert_eq!(synchronous, 2);
         }
+    }
+
+    /// Admission owns only the file it created: a foreign empty file and a replaced inode
+    /// are both refused, and the fresh file is strictly valid once its schema commits.
+    #[test]
+    fn admission_owns_only_the_database_it_created() {
+        let fresh = tempfile::tempdir().unwrap();
+        let fresh_config = crate::config::Config { home: fresh.path().into(), port: 0 };
+        let store = LocalStore::open(&fresh_config.database_path()).unwrap();
+        crate::config::validate_database(&fresh_config.database_path()).unwrap();
+        drop(store);
+
+        let foreign = tempfile::tempdir().unwrap();
+        let foreign_config = crate::config::Config { home: foreign.path().into(), port: 0 };
+        std::fs::write(foreign_config.database_path(), []).unwrap();
+        assert!(LocalStore::open(&foreign_config.database_path()).is_err());
+
+        let replaced = tempfile::tempdir().unwrap();
+        let replaced_config = crate::config::Config { home: replaced.path().into(), port: 0 };
+        let guard = replaced_config.ensure_home_admission().unwrap().unwrap();
+        let owned = crate::config::claim_owned_database(&guard, &replaced_config.database_path()).unwrap();
+        let swap = replaced.path().join("swap.sqlite3");
+        std::fs::write(&swap, []).unwrap();
+        std::fs::rename(&swap, replaced_config.database_path()).unwrap();
+        assert!(owned.retain_identity(&replaced_config.database_path()).is_err());
     }
 
     #[test]

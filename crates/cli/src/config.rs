@@ -104,6 +104,12 @@ impl Config {
 
     /// Read-only admission, before permissions, recovery, or account normalization.
     pub fn validate_home(&self) -> anyhow::Result<bool> {
+        self.validate_home_except(None)
+    }
+
+    /// `owned` names the single database file this admission just created. It is the only
+    /// entry allowed to stay headerless while its schema transaction is still open.
+    pub(crate) fn validate_home_except(&self, owned: Option<&OwnedEmptyDatabase>) -> anyhow::Result<bool> {
         match std::fs::symlink_metadata(&self.home) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
@@ -132,7 +138,8 @@ impl Config {
             if path.file_name().is_some_and(|name| name == "state.json") {
                 anyhow::bail!("Beans v2 migration required for {}; existing data is untouched", self.home.display());
             }
-            if path.extension().is_some_and(|extension| extension == "sqlite3") {
+            if path.extension().is_some_and(|extension| extension == "sqlite3")
+                && !owned.is_some_and(|owned| owned.still_empty(&path)) {
                 validate_database(&path)?;
             }
         }
@@ -632,6 +639,63 @@ pub fn validate_database(path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("Beans v2 migration required for {}; database is untouched", path.display());
     }
     Ok(())
+}
+
+/// The one database file this admission created itself, retained across the schema
+/// transaction by descriptor and inode. It is the only file allowed to stay headerless,
+/// and only while it is still empty.
+pub(crate) struct OwnedEmptyDatabase {
+    #[cfg(unix)]
+    file: std::fs::File,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl OwnedEmptyDatabase {
+    #[cfg(not(unix))]
+    pub(crate) fn still_empty(&self, _path: &Path) -> bool { false }
+
+    #[cfg(unix)]
+    pub(crate) fn still_empty(&self, path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()
+            && metadata.len() == 0 && metadata.dev() == self.device && metadata.ino() == self.inode)
+    }
+
+    /// The claimed inode must still back the path once the schema is committed.
+    pub(crate) fn retain_identity(&self, path: &Path) -> anyhow::Result<()> {
+        #[cfg(not(unix))]
+        anyhow::bail!("Descriptor storage admission is unsupported on this platform");
+        #[cfg(unix)] {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = std::fs::symlink_metadata(path)?;
+            if !metadata.is_file() || metadata.dev() != self.device || metadata.ino() != self.inode {
+                anyhow::bail!("Storage database was replaced during admission; data is untouched");
+            }
+            self.file.sync_all()?;
+            validate_database(path)
+        }
+    }
+}
+
+/// Create the database exclusively under this admission, keeping its descriptor. Any
+/// existing entry, including an empty one, belongs to someone else and is refused.
+#[cfg(unix)]
+pub(crate) fn claim_owned_database(guard: &StorageAdmission, path: &Path) -> anyhow::Result<OwnedEmptyDatabase> {
+    use anyhow::Context;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    let name = path.file_name().ok_or_else(|| anyhow::anyhow!("Storage admission requires a database file name"))?;
+    let name = std::ffi::CString::new(name.as_bytes())?;
+    let file = guard.open_child(&name, libc::O_RDWR | libc::O_CREAT | libc::O_EXCL)
+        .with_context(|| format!("Storage admission could not create {} exclusively", path.display()))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() != 0 {
+        anyhow::bail!("Storage admission requires a fresh empty database; existing data is untouched");
+    }
+    Ok(OwnedEmptyDatabase { file, device: metadata.dev(), inode: metadata.ino() })
 }
 
 /// Writes atomically with mode 0600.

@@ -16,7 +16,7 @@ test("archive inspection accepts bounded format and rejects escape, symlink and 
   expect(() => inspectReleaseArchive(mismatch)).toThrow("decompressed size");
 });
 
-test("archive inspection rejects encrypted, overlapping and miscounted entries before any tool spawn", () => {
+test("archive inspection rejects encrypted and miscounted entries before any tool spawn", () => {
   const encrypted = archiveFixture(), encryptedCentral = encrypted.indexOf(Buffer.from([0x50, 0x4b, 1, 2]));
   encrypted.writeUInt16LE(1, encryptedCentral + 8); // general purpose bit 0: encrypted
   // One rejection, one assertion. The single fail() message contains both

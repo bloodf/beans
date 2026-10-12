@@ -102,7 +102,9 @@ function scopedArtifact(name: string, version: string, core: string, scope: Rele
   return artifact;
 }
 
-export async function buildReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server"): Promise<ReleaseManifest> {
+// Real signer/identity verification of a locally built binary (#275). Local proofs are refused without it.
+export type LocalBinaryVerifier = (bytes: Uint8Array, profile: string, version: string, buildNumber: string) => Promise<void>;
+export async function buildReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server", verifyLocal?: LocalBinaryVerifier): Promise<ReleaseManifest> {
   scope = releaseScope(scope);
   const version = releaseVersion(tag);
   if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error("Release revision must be the exact40-character tag commit");
@@ -133,24 +135,33 @@ export async function buildReleaseManifest(tag: string, revision: string, direct
   }
   if (scope === "all") {
     const identities = new Set<string>();
+    const numbers = new Set<string>();
     for (const profile of ["github", "production", "testflight"]) {
       const proof = await Bun.file(join(directory, `eas-${profile}.json`)).json();
       const name = `Beans-${version}${profile === "testflight" ? "-store.ipa" : profile === "production" ? ".aab" : ".apk"}`;
       const artifact = artifacts.find((entry) => entry.name === name)!;
+      const local = proof.kind === "local-exact-source";
+      const platform = profile === "testflight" ? "IOS" : "ANDROID";
+      // A local build has no EAS build record, so it carries no buildId; a cloud proof must carry a distinct one.
+      const identity = local ? proof.buildId === undefined && !numbers.has(`${platform}:${proof.buildNumber}`)
+        : proof.kind === undefined && /^[a-f0-9-]{36}$/i.test(proof.buildId ?? "") && !identities.has(proof.buildId);
       if (proof.schema !== 1 || proof.revision !== revision || proof.version !== version || proof.profile !== profile ||
           proof.artifact !== name || proof.sha256 !== artifact.sha256 || proof.size !== artifact.size ||
-          !/^[a-f0-9-]{36}$/i.test(proof.project ?? "") || !/^[a-f0-9-]{36}$/i.test(proof.buildId ?? "") ||
-          !/^[1-9]\d*$/.test(proof.buildNumber ?? "") || Number(proof.buildNumber) > 2_100_000_000 ||
-          proof.platform !== (profile === "testflight" ? "IOS" : "ANDROID") || identities.has(proof.buildId)) {
+          !/^[a-f0-9-]{36}$/i.test(proof.project ?? "") || !identity ||
+          !/^[1-9]\d*$/.test(proof.buildNumber ?? "") || Number(proof.buildNumber) > 2_100_000_000 || proof.platform !== platform) {
         throw new Error(`Invalid EAS artifact provenance: ${profile}`);
       }
-      identities.add(proof.buildId);
+      if (local) {
+        if (!verifyLocal) throw new Error(`Local exact-source ${profile} binary requires the trusted-binary verifier (#275)`);
+        await verifyLocal(new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer()), profile, version, proof.buildNumber);
+        numbers.add(`${platform}:${proof.buildNumber}`);
+      } else identities.add(proof.buildId);
     }
   }
   return { schema: 1, version, revision, protocol: await releaseProtocol(), artifacts };
 }
-export async function writeReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server"): Promise<ReleaseManifest> {
-  const manifest = await buildReleaseManifest(tag, revision, directory, scope);
+export async function writeReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server", verifyLocal?: LocalBinaryVerifier): Promise<ReleaseManifest> {
+  const manifest = await buildReleaseManifest(tag, revision, directory, scope, verifyLocal);
   const bytes = Buffer.from(`${JSON.stringify(manifest)}\n`);
   if (bytes.length > 64 * 1024) throw new Error("Release manifest exceeds64KiB");
   const signature = await signReleaseBytes(bytes);

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readVersion } from "./app.ts";
-import { downloadArtifact, runEasRelease, stageEasBuild, validateEasBuild } from "./release-eas.ts";
+import { downloadArtifact, runEasRelease, runLocalEasRelease, stageEasBuild, validateEasBuild } from "./release-eas.ts";
 import { androidNdk, hostLibrary } from "./release-build-inputs.ts";
 
 const revision = "a".repeat(40);
@@ -83,4 +83,55 @@ describe("EAS provenance", () => {
   for (const invalid of [{ status: "IN_PROGRESS" }, { gitCommitHash: "b".repeat(40) }, { app: { id: "other" } }, { appVersion: "1.0.12" }, { platform: "IOS" }, { buildProfile: "production" }, { appBuildVersion: "0" }, { artifacts: { buildUrl: "http://artifacts.eascdn.net/build.apk" } }, { artifacts: { buildUrl: "https://localhost/build.apk" } }]) {
     test(`rejects ${JSON.stringify(invalid)}`, () => expect(() => validateEasBuild({ ...build, ...invalid }, "github", revision, "1.0.11", project)).toThrow());
   }
+});
+describe("local exact-source provenance", () => {
+  const zip = new Uint8Array([0x50, 0x4b, 3, 4, 1]);
+  const identity = (over: object = {}) => async () => ({ identifier: "ai.amoena.beans", version: readVersion(), buildNumber: "77", ...over });
+  const env = { EXPO_TOKEN: "t", BEANS_EXPO_OWNER: "o", BEANS_EXPO_PROJECT_ID: project, BEANS_APPLE_TEAM_ID: "ABCDE12345" };
+  const git = (head = revision, dirty = "") => (args: string[]) => ({ exitCode: 0, stdout: Buffer.from(args.includes("rev-parse") ? head : dirty) }) as any;
+  async function withEnv(values: Record<string, string | undefined>, body: () => Promise<void>) {
+    const old = Object.fromEntries(Object.keys(values).map((name) => [name, process.env[name]]));
+    for (const [name, value] of Object.entries(values)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+    try { await body(); } finally { for (const [name, value] of Object.entries(old)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } }
+  }
+  test("runs eas --local, takes the number from the binary and refuses every mismatch", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "beans-local-eas-"));
+    try {
+      await withEnv(env, async () => {
+        let args: string[] = [];
+        const run = (command: string[]) => { args = command; return { exitCode: 0 } as any; };
+        // The fake builder writes the artifact where --output points, like eas does.
+        const builder = (command: string[]) => { args = command; require("node:fs").writeFileSync(command[command.indexOf("--output") + 1], zip); return { exitCode: 0 } as any; };
+        for (const [profile, platform] of [["github", "android"], ["production", "android"], ["testflight", "ios"]] as const) {
+          await runLocalEasRelease([profile, revision, join(directory, profile)], identity(), builder, git());
+          expect(args).toEqual(expect.arrayContaining(["--local", "--non-interactive", "--platform", platform, "--profile", profile]));
+          for (const forbidden of ["--json", "--wait"]) expect(args).not.toContain(forbidden);
+          const proof = await Bun.file(join(directory, profile, `eas-${profile}.json`)).json();
+          expect(proof).toMatchObject({ kind: "local-exact-source", buildNumber: "77", revision, project });
+          expect(proof.buildId).toBeUndefined();
+          expect(JSON.stringify(proof)).not.toContain("https");
+        }
+        const bad = join(directory, "bad");
+        for (const [name, call] of [
+          ["wrong identifier", () => runLocalEasRelease(["github", revision, bad], identity({ identifier: "ai.amoena.beans.dev" }), builder, git())],
+          ["wrong version", () => runLocalEasRelease(["github", revision, bad], identity({ version: "0.0.1" }), builder, git())],
+          ["zero number", () => runLocalEasRelease(["github", revision, bad], identity({ buildNumber: "0" }), builder, git())],
+          ["huge number", () => runLocalEasRelease(["github", revision, bad], identity({ buildNumber: "2100000001" }), builder, git())],
+          ["dirty tree", () => runLocalEasRelease(["github", revision, bad], identity(), builder, git(revision, "M x"))],
+          ["other HEAD", () => runLocalEasRelease(["github", revision, bad], identity(), builder, git("b".repeat(40)))],
+          ["build failure", () => runLocalEasRelease(["github", revision, bad], identity(), () => ({ exitCode: 1 }) as any, git())],
+          ["build wrote nothing", () => runLocalEasRelease(["github", revision, bad], identity(), run, git())],
+          ["not a zip", () => runLocalEasRelease(["github", revision, bad], identity(), (command) => { require("node:fs").writeFileSync(command[command.indexOf("--output") + 1], "no"); return { exitCode: 0 } as any; }, git())],
+          ["existing proof", () => runLocalEasRelease(["github", revision, join(directory, "github")], identity(), builder, git())],
+          ["bad profile", () => runLocalEasRelease(["preview", revision, bad], identity(), builder, git())],
+        ] as const) await expect(call(), name).rejects.toThrow();
+        await withEnv({ BEANS_APPLE_TEAM_ID: undefined }, async () => {
+          await expect(runLocalEasRelease(["testflight", revision, bad], identity(), builder, git())).rejects.toThrow("BEANS_APPLE_TEAM_ID");
+        });
+        await withEnv({ EXPO_TOKEN: undefined }, async () => {
+          await expect(runLocalEasRelease(["github", revision, bad], identity(), builder, git())).rejects.toThrow("required");
+        });
+      });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
 });

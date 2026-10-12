@@ -62,13 +62,13 @@ test("native identity reader: real public APK metadata, real IPA plists, every m
       await expect(stageLocalBuild(other, "testflight", "a".repeat(40), join(dir, "other"), async (p, q) => readNativeIdentity(p, q, env))).rejects.toThrow("differs from the release identity");
       expect(existsSync(join(dir, "other", "eas-testflight.json"))).toBe(false);
     } finally { if (old === undefined) delete process.env.BEANS_EXPO_PROJECT_ID; else process.env.BEANS_EXPO_PROJECT_ID = old; }
-    // Real aapt2 on the public test-only APKs, only when both the pinned fixtures and the tool are present.
-    const present = buildTools && Object.keys(pinned).every(name => existsSync(join(fixtures, name)));
-    if (present) {
-      for (const [name, digest] of Object.entries(pinned)) expect(createHash("sha256").update(await Bun.file(join(fixtures, name)).bytes()).digest("hex")).toBe(digest);
-      expect(readNativeIdentity(join(fixtures, "valid-test-only.apk"), "github", env)).toEqual({ identifier: "ai.amoena.beans", version: "1.0.14", buildNumber: "42" });
-      expect(readNativeIdentity(join(fixtures, "wrong-identity-test-only.apk"), "github", env).identifier).toBe("ai.amoena.beans.dev");
+    // Real aapt2 on the public test-only APKs. Missing tool or fixtures fail the test: a skip is not a pass.
+    if (!buildTools) throw new Error("aapt2 not found: install Android build-tools or set ANDROID_HOME");
+    for (const [name, digest] of Object.entries(pinned)) {
+      if (!existsSync(join(fixtures, name))) throw new Error(`Public APK fixture missing: ${name} (set BEANS_PUBLIC_APK_FIXTURES)`);
+      expect(createHash("sha256").update(await Bun.file(join(fixtures, name)).bytes()).digest("hex")).toBe(digest);
     }
-    console.log(JSON.stringify({ realApkFixturesRead: Boolean(present) }));
+    expect(readNativeIdentity(join(fixtures, "valid-test-only.apk"), "github", env)).toEqual({ identifier: "ai.amoena.beans", version: "1.0.14", buildNumber: "42" });
+    expect(readNativeIdentity(join(fixtures, "wrong-identity-test-only.apk"), "github", env)).toEqual({ identifier: "ai.amoena.beans.dev", version: "1.0.14", buildNumber: "42" });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

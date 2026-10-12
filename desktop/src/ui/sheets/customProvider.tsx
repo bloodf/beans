@@ -23,6 +23,7 @@ import {
   orderedModelIDs,
   presetProvider,
   providerName,
+  refreshSettled,
   savedChecklist,
   suggestedProviderName,
   takeListing,
@@ -122,6 +123,18 @@ function CustomProviderSheet(props: {
   const [spinning, setSpinning] = createSignal(false);
   const [status, setStatus] = createSignal<{ text: string; color: string } | null>(null);
   let closed = false;
+  /** Refreshes waiting for the roster, ended together when the sheet goes away. */
+  const watching = new Set<(refreshed?: ProviderCredential) => void>();
+  /** The saved connection this sheet is editing, as the roster last delivered it. A refresh asks
+   * the Runner about that provider, so unsaved edits to its source are not what gets checked. */
+  const saved = () => (kind ? store.credential(kind) : undefined);
+  const editedSource = () => ({ api: api(), baseURL: baseURL().trim(), key: key() });
+  const sourceDirty = () => {
+    const provider = saved();
+    if (!provider) return false;
+    const source = editedSource();
+    return source.api !== provider.api || source.baseURL !== provider.baseURL?.trim() || source.key !== props.apiKey;
+  };
 
   /** The name to save: the one typed, else the known server's name or the host. */
   const savedName = () => name().trim() || suggestedProviderName(baseURL());
@@ -177,6 +190,7 @@ function CustomProviderSheet(props: {
   onCleanup(() => {
     closed = true;
     clearTimeout(timer);
+    for (const settle of [...watching]) settle();
   });
 
   /** A message in place of the list when it has no rows: what the sheet needs, that it is loading,
@@ -251,6 +265,56 @@ function CustomProviderSheet(props: {
       props.dismiss();
       props.onSave(savedKind);
     } catch (error) {
+      if (!closed) fail(error);
+    }
+  };
+
+  /** Asks the Runner to re-read the saved provider's catalog, then folds the roster's answer in.
+   * The reply says whether any catalog changed, but the provider itself arrives on the roster, so
+   * this waits for an event that carries it — an unrelated roster change settles nothing — and
+   * never retries. Silence after a reply that promised a change stays pending, not "unchanged". */
+  const refreshModels = async () => {
+    if (!kind) return;
+    clearTimeout(timer);
+    ++generation;
+    const provider = kind;
+    const before = saved();
+    const checked = store.runners.find((device) => device.id === runnerID());
+    const binding = { account: store.identityID, connected: store.isConnected, runner: checked?.machineKey, status: checked?.status };
+    const sameBinding = () => store.identityID === binding.account && store.isConnected === binding.connected && store.runners.some((device) => device.id === runnerID() && device.machineKey === binding.runner && device.status === binding.status);
+    let unsubscribe = () => {};
+    const answered = new Promise<ProviderCredential | undefined>((resolve) => {
+      const settle = (refreshed?: ProviderCredential) => { unsubscribe(); watching.delete(settle); resolve(refreshed); };
+      watching.add(settle);
+      unsubscribe = store.subscribe((event) => {
+        if (closed || !sameBinding() || (event.kind !== "rosterChanged" && event.kind !== "snapshotReplaced")) return;
+        const refreshed = store.credential(provider);
+        if (refreshSettled(before, refreshed)) settle(refreshed);
+      });
+      // ponytail: a fixed wait; the roster carries no per-provider revision, so a slow sync leaves
+      // the status pending until the user refreshes again.
+      setTimeout(() => settle(), 5000);
+    });
+    begin(L("Loading models…"));
+    try {
+      const updated = await store.refreshProviderModels(runnerID(), provider);
+      const refreshed = await answered;
+      if (closed) return;
+      if (refreshed) {
+        const current = checklist();
+        const known = new Set(current.models.map((model) => model.id));
+        const merged = takeListing(current, refreshed.models ?? [], false);
+        setChecklist({ ...merged, selected: new Set([...current.selected, ...(refreshed.models ?? []).filter((model) => !known.has(model.id)).map((model) => model.id)]) });
+        setStatus({ text: L("Models updated"), color: "var(--label-2)" });
+      } else if (!updated) {
+        setStatus({ text: L("Models unchanged"), color: "var(--label-2)" });
+      } else {
+        setStatus({ text: L("Runner reported a new catalog. It has not reached this Device yet; try again in a moment."), color: "var(--label-2)" });
+      }
+      setBusy(false);
+      setSpinning(false);
+    } catch (error) {
+      for (const settle of [...watching]) settle();
       if (!closed) fail(error);
     }
   };
@@ -351,26 +415,10 @@ function CustomProviderSheet(props: {
       </div>
       <Button disabled={busy() || !runnerReady() || !validWindow() || !isUsableBaseURL(baseURL())} onClick={() => loadModels(0, true)}>{L("Check Connection")}</Button>
       <div class="field-note">{runner() ? L("Requests run on %@. Listing verifies connectivity/catalog only, not inference.", runner()!.name) : L("Pair an online desktop Runner before checking.")}</div>
-      <Show when={kind}><Button disabled={busy() || !runnerReady()} onClick={async () => {
-        clearTimeout(timer);
-        ++generation;
-        const source = { api: api(), baseURL: baseURL().trim(), key: key() };
-        begin(L("Loading models…"));
-        try {
-          const updated = await store.refreshProviderModels(runnerID(), kind);
-          if (!closed) {
-            const refreshed = kind ? store.credential(kind) : undefined;
-            if (refreshed?.api === source.api && refreshed.baseURL === source.baseURL && source.key === props.apiKey) {
-              const current = checklist();
-              const known = new Set(current.models.map((model) => model.id));
-              const merged = takeListing(current, refreshed.models ?? [], false);
-              setChecklist({ ...merged, selected: new Set([...current.selected, ...(refreshed.models ?? []).filter((model) => !known.has(model.id)).map((model) => model.id)]) });
-            }
-            setBusy(false); setSpinning(false); setStatus({ text: updated ? L("Models updated") : L("Models unchanged"), color: "var(--label-2)" });
-          }
-        }
-        catch (error) { if (!closed) fail(error); }
-      }}>{L("Refresh Models")}</Button></Show>
+      <Show when={kind}><Button disabled={busy() || !runnerReady() || sourceDirty()} onClick={refreshModels}>{L("Refresh Models")}</Button></Show>
+      <Show when={kind && sourceDirty()}>
+        <div class="field-note">{L("Refresh checks the saved provider. Save these changes first.")}</div>
+      </Show>
       <Show when={simpleSetup}><Button onClick={() => setCustomize(!customize())}>{L("Advanced")}</Button></Show>
       <Show when={customize()}>
       <div class="custom-models">

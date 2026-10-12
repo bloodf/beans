@@ -359,6 +359,16 @@ export interface ModelChecklist {
   defaultID?: string;
 }
 
+/** Whether a roster event carries the custom provider a refresh was waiting for. The credential has
+ * to be the same connected provider with a catalog that changed in any way, ids or metadata; an
+ * unrelated roster change, or one that dropped or disconnected the provider, settles nothing. */
+export function refreshSettled(before: ProviderCredential | undefined, after: ProviderCredential | undefined): boolean {
+  if (!before || !after || before.kind !== after.kind || !after.isConnected) return false;
+  if (!after.models?.length) return false;
+  const facts = (credential: ProviderCredential) => JSON.stringify([credential.api, credential.baseURL, credential.capabilities, credential.models]);
+  return facts(before) !== facts(after);
+}
+
 /** A provider's saved models, all picked, the first the default; or an empty list. */
 export function savedChecklist(models: readonly CustomModel[] = []): ModelChecklist {
   return { models, selected: new Set(models.map((model) => model.id)), added: new Set(), defaultID: models[0]?.id };

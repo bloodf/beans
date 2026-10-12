@@ -267,6 +267,13 @@ export async function checkSkillCompareConsumer() {
     const uncorrelated = store.compareSkillLibrary(selected.id, source, "e".repeat(32)).then(() => false, () => true);
     finish({ version: 1, runner_id: selected.id, managed_id: original, added: [], removed: [], changed: [] });
     assert(await uncorrelated, "Uncorrelated compare reply accepted");
-    return { mounted: true, automaticRequests: 0, mutation: "none", request: "exact-ID read-only", maxSegments: 5, countsRendered: true, inert: true, inventedConfirmation: false, failureState: "visible", accountABA: "fenced", runnerKeyABA: "fenced", connectionABA: "fenced", malformedRejected: invalid.length, uncorrelated: "rejected" };
+    // Every compare string must exist in the table, so the shipped zh cannot fall back to English.
+    setLanguage("zh-Hans");
+    for (const key of ["Compare source with copy…", "Compare on %@, copy %@ against the selected source. Read-only.", "%@ only in the source.", "%@ only in the copy.", "%@ differ between source and copy.", "Nothing was changed and nothing is enabled here. Applying a difference needs its own confirmed action."]) {
+      assert(L(key, selected.name, original, 2, 2, 2) !== key, `No zh entry for: ${key}`);
+    }
+    assert(L("%@ only in the source.", 2).includes("2"), "zh compare count placeholder wrong");
+    setLanguage("en");
+    return { mounted: true, automaticRequests: 0, mutation: "none", request: "exact-ID read-only", maxSegments: 5, countsRendered: true, inert: true, inventedConfirmation: false, zhCoverage: "complete", failureState: "visible", accountABA: "fenced", runnerKeyABA: "fenced", connectionABA: "fenced", malformedRejected: invalid.length, uncorrelated: "rejected" };
   } finally { dispose(); root.remove(); Object.assign(store, saved); internals.transport = transport; }
 }

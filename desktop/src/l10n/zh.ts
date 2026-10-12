@@ -1170,4 +1170,10 @@ export const zh: Record<string, string> = {
   "Cancel KeepBoth": "取消保留两个副本",
   "Kept both copies. Original %@, new copy %@ from %@, digest %@.": "已保留两个副本。原始副本 %1$@，来自 %3$@ 的新副本 %2$@，摘要 %4$@。",
   "Label and digest come from the Runner. Not authenticated provenance, and no update replaces the original copy.": "标签和摘要来自 Runner。不是经过认证的来源证明，也没有更新会替换原始副本。",
+  "Compare source with copy…": "比较源与副本…",
+  "Compare on %@, copy %@ against the selected source. Read-only.": "在 %1$@ 上比较副本 %2$@ 与所选源。只读。",
+  "%@ only in the source.": "仅存在于源中的 %1$d 项。",
+  "%@ only in the copy.": "仅存在于副本中的 %1$d 项。",
+  "%@ differ between source and copy.": "源与副本之间有 %1$d 项不同。",
+  "Nothing was changed and nothing is enabled here. Applying a difference needs its own confirmed action.": "此处未做任何更改，也未启用任何功能。应用差异需要另行确认的操作。",
 };

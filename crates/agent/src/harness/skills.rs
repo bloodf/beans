@@ -184,4 +184,96 @@ mod tests {
         assert!(invocation.starts_with("<skill name=\"deploy\"") && invocation.ends_with("focus on staging"));
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// Hosts in the accepted r3 matrix, each with the four committed fixture cases. Inert
+    /// text only: nothing under `tests/fixtures/skill-hosts` runs.
+    const HOSTS: &[&str] = &["claude", "cursor", "codex", "pi"];
+
+    fn fixture_root(host: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/skill-hosts").join(host)
+    }
+
+    /// The name each host's extended fixture declares: the others match their directory.
+    fn host_name(host: &str) -> String { if host == "pi" { "pi-extended".into() } else { format!("{host}-extended") } }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() { copy_tree(&entry.path(), &target); } else { std::fs::copy(entry.path(), &target).unwrap(); }
+        }
+    }
+
+    #[test]
+    fn host_matrix_fixtures_load_as_expected() {
+        let temp = std::env::temp_dir().join(format!("beans-host-matrix-{}", uuid::Uuid::new_v4()));
+        let mut failures: Vec<String> = Vec::new();
+        for host in HOSTS {
+            let source = fixture_root(host);
+            assert!(source.is_dir(), "missing fixture root {}", source.display());
+            // (fixture directory, expected loaded names, expected diagnostic fragments)
+            let mismatched = vec!["does not match parent directory"];
+            let extended_name = host_name(host);
+            let cases: Vec<(&str, Vec<&str>, Vec<&str>)> = vec![
+                ("minimal", vec!["minimal"], vec![]),
+                ("extended", vec![&extended_name], vec![]),
+                ("duplicate-a", vec!["shared-name"], if *host == "pi" { vec![] } else { mismatched.clone() }),
+                ("duplicate-b", vec!["shared-name"], if *host == "pi" { vec![] } else { mismatched.clone() }),
+                ("malformed", vec![], vec!["description is required"]),
+            ];
+            for (case, want_names, want_diagnostics) in cases {
+                let case_dir = if case == "extended" && *host == "pi" { source.join("extended-dir") } else { source.join(case) };
+                let root = temp.join(host).join(case);
+                copy_tree(&case_dir, &root);
+                let loaded = load_skills(&[root]);
+                let names: Vec<&str> = loaded.skills.iter().map(|s| s.name.as_str()).collect();
+                let messages: Vec<&str> = loaded.diagnostics.iter().map(|d| d.message.as_str()).collect();
+                if names != want_names { failures.push(format!("{host}/{case}: loaded {names:?}, expected {want_names:?}")); }
+                for want in &want_diagnostics {
+                    if !messages.iter().any(|m| m.contains(want)) { failures.push(format!("{host}/{case}: missing diagnostic {want:?} in {messages:?}")); }
+                }
+                if host == &"claude" && case == "extended" && !loaded.skills.iter().any(|s| s.disable_model_invocation) {
+                    failures.push("claude/extended: disable-model-invocation was not honoured".into());
+                }
+            }
+        }
+        // pi does not require the name to match its directory; the other three hosts do.
+        for host in HOSTS.iter().filter(|h| **h != "pi") {
+            let loaded = load_skills(&[temp.join(host).join("duplicate-b")]);
+            assert!(loaded.diagnostics.iter().any(|d| d.message.contains("does not match parent directory \"duplicate-b\"")), "{host}: {loaded:?}");
+            assert_eq!(loaded.skills.len(), 1, "{host} duplicate pair must not merge");
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The bounded scanner is the loader that enforces escape and size limits; the generic
+    /// listing loader has no size or symlink policy. Off Linux it fails closed with no opens.
+    #[test]
+    fn bounded_scanner_rejects_symlink_escape_and_oversize() {
+        let temp = std::env::temp_dir().join(format!("beans-host-bounds-{}", uuid::Uuid::new_v4()));
+        let root = temp.join("root");
+        std::fs::create_dir_all(root.join("valid")).unwrap();
+        std::fs::create_dir_all(root.join("oversize")).unwrap();
+        std::fs::write(root.join("valid/SKILL.md"), "---\nname: valid\ndescription: In bounds\n---\nbody").unwrap();
+        std::fs::write(root.join("oversize/SKILL.md"), "---\nname: oversize\ndescription: Too large\n---\n").unwrap();
+        let oversize = std::fs::OpenOptions::new().write(true).open(root.join("oversize/SKILL.md")).unwrap();
+        oversize.set_len(crate::harness::skill_discovery::MAX_FILE_BYTES + 1).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(temp.join("outside"), root.join("escape")).unwrap();
+        let result = crate::harness::skill_discovery::discover_skills(&root);
+        #[cfg(target_os = "linux")]
+        {
+            assert!(result.skills.iter().any(|s| s.path == Path::new("valid/SKILL.md")), "{result:?}");
+            for fragment in ["symlink rejected", "exceeds"] {
+                assert!(result.diagnostics.iter().any(|d| d.message.contains(fragment)), "missing {fragment}: {:?}", result.diagnostics);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(result.skills.is_empty() && result.diagnostics.iter().any(|d| d.message.contains("unsupported")), "{result:?}");
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 }

@@ -1,9 +1,10 @@
-import { lstatSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
+import { inspectReleaseArchive } from "./release-build-inputs.ts";
 import type { InspectNative, NativeIdentity } from "./release-eas.ts";
 
 // Public native metadata only: identifier, version and build number printed by installed tools.
 // This is NOT a trust decision. Signer, team and entitlement verification stay a separate mandatory
-// gate (the verifier buildReleaseManifest requires), and ZIP shape here proves nothing about origin.
+// gate (the verifier buildReleaseManifest requires), and archive shape here proves nothing about origin.
 type Profile = Parameters<InspectNative>[1];
 type Env = Record<string, string | undefined>;
 
@@ -18,22 +19,13 @@ const field = (value: unknown): string => {
   if (typeof value !== "string" || !value || value.length > 256 || /[\x00-\x1f\x7f]/.test(value)) throw new Error("Native identity field is missing or malformed");
   return value;
 };
-// Entry names come from the archive and are untrusted: bound count, reject duplicates and path tricks.
-function entries(path: string, env: Env): string[] {
-  run(["unzip", "-tqq", path], env);
-  const names = run(["unzip", "-Z1", path], env).toString().split("\n").filter(Boolean);
-  if (!names.length || names.length > 20_000 || new Set(names).size !== names.length ||
-      names.some(name => name.startsWith("/") || /[\\\x00-\x1f\x7f]/.test(name) || name.split("/").some(part => part === ".." || part === "."))) {
-    throw new Error("Unsafe binary archive structure");
-  }
-  return names;
-}
-
 export function readNativeIdentity(path: string, profile: Profile, env: Env = process.env): NativeIdentity {
   if (!["github", "production", "testflight"].includes(profile) || !path.startsWith("/")) throw new Error("Invalid native identity request");
   const info = lstatSync(path);
   if (!info.isFile() || info.size < 22 || info.size > 2 ** 30) throw new Error("Native artifact must be a regular unlinked file of bounded size");
-  const names = entries(path, env);
+  // Hostile archive structure is refused by the shared bounded inspector before any tool runs.
+  const names = inspectReleaseArchive(readFileSync(path));
+  run(["unzip", "-tqq", path], env);
   if (profile === "github") {
     if (!names.includes("AndroidManifest.xml")) throw new Error("APK binary manifest missing");
     const packages = run(["aapt2", "dump", "badging", path], env).toString().split("\n").filter(line => line.startsWith("package:"));

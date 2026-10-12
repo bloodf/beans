@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readNativeIdentity } from "./release-native-identity.ts";
 import { stageLocalBuild } from "./release-eas.ts";
 import { ROOT, readVersion } from "./app.ts";
+import { archiveFixture } from "./release-archive-fixture.ts";
 
 // One pipeline over public test-only artifacts: two repo APK fixtures (hash-pinned) read by the real
 // aapt2, and IPAs zipped here and read by the real unzip/plutil. Metadata only: no signer, team or
@@ -70,5 +71,34 @@ test("native identity reader: real public APK metadata, real IPA plists, every m
     }
     expect(readNativeIdentity(join(fixtures, "valid-test-only.apk"), "github", env)).toEqual({ identifier: "ai.amoena.beans", version: "1.0.14", buildNumber: "42" });
     expect(readNativeIdentity(join(fixtures, "wrong-identity-test-only.apk"), "github", env)).toEqual({ identifier: "ai.amoena.beans.dev", version: "1.0.14", buildNumber: "42" });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+// Hostile archives are refused by the shared inspector before any tool is spawned: stub tools on PATH
+// would leave a marker if they ran. Duplicate names and span overlap are not claimed here (helper limits).
+test("hostile archives are refused before any native tool spawns", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "beans-hostile-"));
+  try {
+    const marker = join(dir, "spawned"), bin = join(dir, "bin"); await mkdir(bin);
+    for (const tool of ["unzip", "aapt2", "bundletool", "plutil"]) { await writeFile(join(bin, tool), `#!/bin/sh\ntouch ${marker}\nexit 0\n`); await chmod(join(bin, tool), 0o755); }
+    const stubs = { PATH: bin };
+    const central = (b: Buffer) => b.indexOf(Buffer.from([0x50, 0x4b, 1, 2]));
+    const mutations: [string, string, (b: Buffer) => Buffer][] = [
+      ["escape name", "Unsafe binary archive", () => archiveFixture("../escape")],
+      ["absolute name", "Unsafe binary archive", () => archiveFixture("/absolute")],
+      ["symlink entry", "Unsafe binary archive", () => archiveFixture("link", "../../escape", 0xa1ff)],
+      ["oversize claim", "decompressed size", (b) => { b.writeUInt32LE(128 * 1024 * 1024 + 1, central(b) + 24); return b; }],
+      ["size mismatch", "decompressed size", (b) => { b.writeUInt32LE(1, central(b) + 24); return b; }],
+      ["encrypted flag", "Unsafe binary archive", (b) => { b.writeUInt16LE(1, central(b) + 8); return b; }],
+      ["entry count mismatch", "Unsafe binary archive", (b) => { b.writeUInt16LE(2, b.lastIndexOf(Buffer.from([0x50, 0x4b, 5, 6])) + 10); return b; }],
+    ];
+    for (const [name, message, mutate] of mutations) {
+      const path = join(dir, `${name.replaceAll(" ", "-")}.apk`);
+      await writeFile(path, mutate(archiveFixture()));
+      for (const profile of ["github", "production", "testflight"] as const) {
+        expect(() => readNativeIdentity(path, profile, stubs), `${name} ${profile}`).toThrow(message);
+      }
+    }
+    expect(existsSync(marker)).toBe(false);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

@@ -1149,6 +1149,7 @@ fn apply_policy(app: &Arc<App>, policy: PolicyBlob) {
                     removed_bots.push(id.clone());
                     state.bots.retain(|bot| bot.id != id);
                     state.routines.retain(|routine| routine.bot_id != id);
+                    state.workflows.retain(|workflow| workflow.bot_id != id);
                     for chat in &mut state.chats {
                         if chat.meta.bot_ids.iter().any(|member| member == &id) {
                             if !chat.meta.is_group() { removed.push(chat.meta.id.clone()); continue; }
@@ -1309,6 +1310,7 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
     }
     merge_entities!(routines, bot_id, name, prompt, schedule, is_enabled, enabled_at,
         last_run_at, last_outcome, paused_reason, check);
+    merge_entities!(workflows, bot_id, name, definition);
     if queued.auto_review.is_enabled != base.auto_review.is_enabled {
         remote.auto_review.is_enabled = queued.auto_review.is_enabled;
     }
@@ -1341,6 +1343,7 @@ fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob) -> Ros
     accept_creations!(bots);
     accept_creations!(chats);
     accept_creations!(routines);
+    accept_creations!(workflows);
     base
 }
 
@@ -1474,10 +1477,12 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
             if chat.owner_bot_id.as_ref().is_some_and(|id| !chat.bot_ids.contains(id)) { chat.owner_bot_id = chat.bot_ids.first().cloned(); }
         }
         roster.routines.retain(|routine| !state.deleted_bot_versions.contains_key(&routine.bot_id));
+        roster.workflows.retain(|workflow| !state.deleted_bot_versions.contains_key(&workflow.bot_id));
         let removed_bots: Vec<String> = before.into_iter().filter(|id| !roster.bots.iter().any(|bot| bot.id == *id)).collect();
         let kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
         state.bots = roster.bots;
         state.routines = roster.routines;
+        state.workflows = roster.workflows;
         state.auto_review = roster.auto_review;
         let incoming_ids: Vec<String> = roster.chats.iter().map(|c| c.id.clone()).collect();
         let removed: Vec<String> = state.chats.iter().filter(|c| !incoming_ids.contains(&c.meta.id)

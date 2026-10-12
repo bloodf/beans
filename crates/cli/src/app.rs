@@ -58,6 +58,7 @@ pub struct State {
     pub bots: Vec<Bot>,
     pub chats: Vec<Chat>,
     pub routines: Vec<Routine>,
+    pub workflows: Vec<WorkflowRecord>,
     pub auto_review: AutoReview,
     pub paused: bool,
     pub policy_clock: u64,
@@ -743,6 +744,7 @@ impl App {
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
                 routines: state.routines.clone(),
+                workflows: state.workflows.clone(),
                 auto_review: state.auto_review.clone(),
                 paused: state.paused,
                 policy_clock: state.policy_clock,
@@ -1323,6 +1325,7 @@ impl App {
 
             state.bots.retain(|bot| bot.id != id);
             state.routines.retain(|routine| routine.bot_id != id);
+            state.workflows.retain(|workflow| workflow.bot_id != id);
             let version = self.next_policy_version(&mut state);
             state.deleted_bot_versions.insert(id.to_string(), version.clone());
             state.capability_versions.remove(id);
@@ -1583,6 +1586,46 @@ impl App {
             state.routines.retain(|r| r.id != id);
             if state.routines.len() == before {
                 anyhow::bail!("Unknown routine");
+            }
+        }
+        self.roster_changed(true);
+        Ok(())
+    }
+
+    // MARK: - Workflows
+
+    /// A bot's saved workflows, oldest first.
+    pub fn workflows_of(&self, bot_id: &str) -> Vec<WorkflowRecord> {
+        let mut workflows: Vec<WorkflowRecord> = self.state.lock().unwrap().workflows.iter().filter(|w| w.bot_id == bot_id).cloned().collect();
+        workflows.sort_by(|a, b| a.created_at.partial_cmp(&b.created_at).unwrap_or(std::cmp::Ordering::Equal));
+        workflows
+    }
+
+    /// Adds a saved workflow and publishes the roster. `workflow::create` checks it first.
+    pub fn insert_workflow(&self, workflow: WorkflowRecord) -> anyhow::Result<WorkflowRecord> {
+        let _edit = self.roster_edit.lock().unwrap();
+        if self.bot(&workflow.bot_id).is_none() {
+            anyhow::bail!("Unknown bot");
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.workflows.iter().any(|w| w.id == workflow.id) {
+                anyhow::bail!("Workflow id already exists");
+            }
+            state.workflows.push(workflow.clone());
+        }
+        self.roster_changed(true);
+        Ok(workflow)
+    }
+
+    pub fn delete_workflow(&self, id: &str) -> anyhow::Result<()> {
+        let _edit = self.roster_edit.lock().unwrap();
+        {
+            let mut state = self.state.lock().unwrap();
+            let before = state.workflows.len();
+            state.workflows.retain(|w| w.id != id);
+            if state.workflows.len() == before {
+                anyhow::bail!("Unknown workflow");
             }
         }
         self.roster_changed(true);

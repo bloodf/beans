@@ -39,6 +39,10 @@ When the user has not written in any chat for seven days, due routines are pause
 
 The macOS app's DM inspector has a Routines section: a row per routine (clock, pause, or running icon; the schedule in words and the next run, or the next check; a switch that pauses or resumes) that opens a sheet with the state, schedule, next run or check and last run, the prompt, the check in a monospaced block when there is one, and Run Now, Pause/Resume, Edit in Chat (which puts `Edit my routine "Name": ` in the composer), and Delete. With none, the section says routines are set up by asking the bot. The Windows and Linux app's sheet is the same. The phone's chat details show the same list with a switch; a tap offers Run Now and Delete.
 
+## Saved workflows
+
+A saved workflow is a bot's definition kept in the roster beside its routines (`WorkflowRecord { id, bot_id, name, definition, created_at }`, `workflows.create` / `workflows.list` / `workflows.delete`). A `definition` is `{ version: 1, revision, steps }`, one to 20 steps of a `prompt` (at most 8,000 characters), optional `tools` (at most 16 unique names) and an optional `approval` flag, at most 64 KiB in all; any other field is refused. A bot keeps 20 workflows with distinct names. Nothing runs a definition, and a definition grants nothing: only the bot's Runner saves one, and it refuses a tool the bot's live capabilities deny or that is not one of the bot's own tools or a tool a plugin installed there last offered. The roster keeps the definition as the JSON it was saved with, so a newer schema passes through any Device untouched. `workflows.list` marks a definition `unavailable` when it fails a check later (a newer schema, a revoked tool) and `unverified` on a Device that is not the bot's Runner; it never deletes or rewrites one. Deleting a bot deletes its workflows (`crates/cli/src/workflow.rs`).
+
 ## Memory
 
 Every bot keeps its own long-term memory on its Runner, in Grok Bot's shape of a curated profile over append-only logs, as plain markdown under `~/.beans-v2/workspaces/<bot id>/` (keyed by id, so a rename or a changed working directory never moves it; `crates/cli/src/memory.rs`):

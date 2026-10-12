@@ -95,6 +95,11 @@ impl LocalStore {
                  position INTEGER NOT NULL,
                  json     TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS workflows (
+                 id       TEXT PRIMARY KEY NOT NULL,
+                 position INTEGER NOT NULL,
+                 json     TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS group_deletes (
                  id       TEXT PRIMARY KEY NOT NULL,
                  position INTEGER NOT NULL
@@ -240,6 +245,7 @@ impl LocalStore {
             bots: load_json_table(&connection, "bots")?,
             chats: load_json_table(&connection, "chats")?,
             routines: load_json_table(&connection, "routines")?,
+            workflows: load_json_table(&connection, "workflows")?,
             auto_review,
             paused,
             policy_clock: policy.policy_clock,
@@ -1264,6 +1270,7 @@ impl LocalStore {
             "bots",
             "chats",
             "routines",
+            "workflows",
             "group_deletes",
             "blob_deletes",
             "device_seen",
@@ -1351,6 +1358,15 @@ fn save_state_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
             .routines
             .iter()
             .map(|routine| (routine.id.clone(), serde_json::to_string(routine)))
+            .collect::<Vec<_>>(),
+    )?;
+    sync_json_table(
+        tx,
+        "workflows",
+        state
+            .workflows
+            .iter()
+            .map(|workflow| (workflow.id.clone(), serde_json::to_string(workflow)))
             .collect::<Vec<_>>(),
     )?;
     sync_ordered_ids(tx, "group_deletes", &state.group_deletes)?;

@@ -17,6 +17,10 @@ use crate::model::{Bot, WorkflowRecord};
 
 pub const SCHEMA_VERSION: u64 = 1;
 pub const MAX_PER_BOT: usize = 20;
+/// Every bot together: no bot count is capped elsewhere, so this default bounds what a roster
+/// carries and persists.
+pub const MAX_TOTAL: usize = 256;
+pub const MAX_ID_CHARS: usize = 64;
 pub const MAX_NAME_CHARS: usize = 60;
 pub const MAX_REVISION_CHARS: usize = 64;
 pub const MAX_STEPS: usize = 20;
@@ -151,38 +155,59 @@ pub fn create(app: &Arc<App>, bot_id: &str, name: &str, definition: Value) -> Re
     app.insert_workflow(record).map_err(|e| e.to_string())
 }
 
-/// The records of an incoming roster that fit the bounds, for the roster to keep. A record over
-/// a bound is not taken: the one this Device already holds under its id stays (the last
-/// accepted definition), and a new one is skipped, with a warning. Only that record is affected,
-/// never the rest of the roster. Within bounds a definition is kept as it arrived, whatever its
-/// schema: status is worked out here from the bot's capabilities and never comes from the wire.
-pub fn admit(incoming: Vec<WorkflowRecord>, current: &[WorkflowRecord]) -> Vec<WorkflowRecord> {
+/// The records of an incoming roster that this Device takes, for the roster to keep. A record
+/// is taken when its id, bot id, name and definition fit their bounds and its bot is in the
+/// roster (`bot_ids`). One that does not, or whose id appears more than once in the incoming
+/// list, is not taken: the record this Device already holds under that id stays (the last
+/// accepted definition), and a new one is skipped, so a deleted bot's workflows are never
+/// brought back. Over the per-bot and total quotas the records already held win, then the rest
+/// by id, so the same incoming set gives the same result in any order. Only the offending
+/// record is affected, never the rest of the roster. A definition within bounds is kept as it
+/// arrived, whatever its schema; status is worked out here and never comes from the wire.
+pub fn admit(incoming: Vec<WorkflowRecord>, current: &[WorkflowRecord], bot_ids: &std::collections::HashSet<String>) -> Vec<WorkflowRecord> {
+    let held = |id: &str| current.iter().find(|held| held.id == id && bot_ids.contains(&held.bot_id)).cloned();
     let fits = |record: &WorkflowRecord| {
-        record.id.chars().count() <= 64
+        record.id.chars().count() <= MAX_ID_CHARS
+            && record.bot_id.chars().count() <= MAX_ID_CHARS
+            && bot_ids.contains(&record.bot_id)
             && record.name.chars().count() <= MAX_NAME_CHARS
             && serde_json::to_vec(&record.definition).is_ok_and(|bytes| bytes.len() <= MAX_DEFINITION_BYTES)
     };
-    let mut per_bot = std::collections::HashMap::<String, usize>::new();
-    let mut admitted = Vec::with_capacity(incoming.len());
-    for record in incoming {
-        let record = if fits(&record) {
-            record
-        } else {
-            tracing::warn!(workflow = %record.id.chars().take(64).collect::<String>(), "incoming workflow is over its bounds");
-            match current.iter().find(|held| held.id == record.id) {
-                Some(held) => held.clone(),
-                None => continue,
-            }
-        };
-        let count = per_bot.entry(record.bot_id.clone()).or_default();
-        if *count >= MAX_PER_BOT {
-            tracing::warn!("incoming workflows over the per-bot limit are skipped");
-            continue;
-        }
-        *count += 1;
-        admitted.push(record);
+    let mut copies = std::collections::HashMap::<String, usize>::new();
+    for record in &incoming {
+        *copies.entry(record.id.clone()).or_default() += 1;
     }
-    admitted
+    let mut resolved: Vec<WorkflowRecord> = Vec::new();
+    for record in incoming {
+        let candidate = if copies[&record.id] == 1 && fits(&record) {
+            Some(record)
+        } else {
+            tracing::warn!(workflow = %record.id.chars().take(MAX_ID_CHARS).collect::<String>(), "incoming workflow is not taken");
+            held(&record.id)
+        };
+        if let Some(candidate) = candidate.filter(|c| !resolved.iter().any(|kept| kept.id == c.id)) {
+            resolved.push(candidate);
+        }
+    }
+    let mut order: Vec<usize> = (0..resolved.len()).collect();
+    order.sort_by(|&a, &b| {
+        let is_new = |i: usize| !current.iter().any(|held| held.id == resolved[i].id);
+        (is_new(a), &resolved[a].id).cmp(&(is_new(b), &resolved[b].id))
+    });
+    let mut per_bot = std::collections::HashMap::<String, usize>::new();
+    let mut taken = vec![false; resolved.len()];
+    let mut total = 0;
+    for index in order {
+        let count = per_bot.entry(resolved[index].bot_id.clone()).or_default();
+        if *count < MAX_PER_BOT && total < MAX_TOTAL {
+            *count += 1;
+            total += 1;
+            taken[index] = true;
+        } else {
+            tracing::warn!("incoming workflows over their quota are skipped");
+        }
+    }
+    resolved.into_iter().zip(taken).filter_map(|(record, taken)| taken.then_some(record)).collect()
 }
 
 /// A workflow as the apps see it: the stored fields plus `state`. `valid` means this Device is

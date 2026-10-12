@@ -1281,7 +1281,8 @@ fn merge_ids(remote: &mut Vec<String>, base: &[String], local: &[String]) {
 // Compare fields, not whole entities: remote changes to other fields remain intact.
 fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob) -> RosterBlob {
     // Bound incoming workflow records before they merge, persist or upload again.
-    remote.workflows = crate::workflow::admit(std::mem::take(&mut remote.workflows), &base.workflows);
+    let bot_ids = remote.bots.iter().chain(&queued.bots).map(|bot| bot.id.clone()).collect();
+    remote.workflows = crate::workflow::admit(std::mem::take(&mut remote.workflows), &base.workflows, &bot_ids);
     macro_rules! merge_entities {
         ($field:ident, $($member:ident),+ $(,)?) => {
             for old in &base.$field {
@@ -1484,7 +1485,9 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
         let kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
         state.bots = roster.bots;
         state.routines = roster.routines;
-        state.workflows = crate::workflow::admit(std::mem::take(&mut roster.workflows), &state.workflows);
+        let bot_ids = state.bots.iter().map(|bot| bot.id.clone()).collect();
+        let admitted = crate::workflow::admit(std::mem::take(&mut roster.workflows), &state.workflows, &bot_ids);
+        state.workflows = admitted;
         state.auto_review = roster.auto_review;
         let incoming_ids: Vec<String> = roster.chats.iter().map(|c| c.id.clone()).collect();
         let removed: Vec<String> = state.chats.iter().filter(|c| !incoming_ids.contains(&c.meta.id)
@@ -2184,6 +2187,60 @@ mod tests {
         assert_eq!(shown[1]["state"], "unavailable");
         let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
         assert_eq!(restarted.workflows_of("b1"), held, "what was kept is what reloads");
+    }
+
+    #[test]
+    fn workflows_inbound_bot_ids_duplicates_and_quotas_merge_deterministically() {
+        use crate::model::WorkflowRecord;
+        use serde_json::json;
+        let definition = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] });
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition: definition.clone(), created_at: 1.0,
+        };
+        let held = workflow("held", "b0");
+        let mut base = RosterBlob { bots: (0..14).map(|i| bot(&format!("b{i}"))).collect(), ..Default::default() };
+        base.workflows = vec![held.clone()];
+        let local = base.clone();
+
+        // 14 bots with 20 each is 280: over the total of 256. Plus an oversize bot id, a bot
+        // that is not in the roster, two records sharing one id, and a 21st for bot b1.
+        let mut incoming: Vec<WorkflowRecord> = vec![held.clone()];
+        for i in 0..14 {
+            for n in 0..20 {
+                incoming.push(workflow(&format!("w-{i:02}-{n:02}"), &format!("b{i}")));
+            }
+        }
+        incoming.push(workflow("w-01-extra", "b1"));
+        incoming.push(workflow("long-bot", &"b".repeat(65)));
+        incoming.push(workflow("ghost", "deleted-bot"));
+        incoming.push(workflow("twin", "b2"));
+        incoming.push(WorkflowRecord { name: "other".into(), ..workflow("twin", "b3") });
+        let merge = |incoming: &[WorkflowRecord]| {
+            let mut remote = base.clone();
+            remote.workflows = incoming.to_vec();
+            merge_rosters(remote, &base, &local).workflows
+        };
+        let merged = merge(&incoming);
+        let ids = |records: &[WorkflowRecord]| { let mut ids: Vec<String> = records.iter().map(|w| w.id.clone()).collect(); ids.sort(); ids };
+        assert_eq!(merged.len(), crate::workflow::MAX_TOTAL, "the total is capped, not the roster");
+        assert!(merged.iter().any(|w| w.id == "held"), "a held record keeps its place under the quota");
+        for gone in ["w-01-extra", "long-bot", "ghost", "twin"] {
+            assert!(!merged.iter().any(|w| w.id == gone), "{gone} is not taken");
+        }
+        for i in 0..14 {
+            let count = merged.iter().filter(|w| w.bot_id == format!("b{i}")).count();
+            assert!(count <= crate::workflow::MAX_PER_BOT, "b{i}: {count}");
+        }
+        // The same set in the opposite order gives the same result.
+        let mut reversed = incoming.clone();
+        reversed.reverse();
+        assert_eq!(ids(&merge(&reversed)), ids(&merged), "quota and duplicate handling do not depend on order");
+        // A duplicate id keeps what is held under it, and a held record is never replaced by a
+        // record for a bot the roster no longer has.
+        let mut clash = held.clone();
+        clash.bot_id = "deleted-bot".into();
+        assert_eq!(merge(&[clash.clone(), clash]), vec![held.clone()]);
+        assert!(merge(&[workflow("held", "deleted-bot")]).iter().all(|w| w.bot_id == "b0"));
     }
 
     fn policy(device: &str, counter: u64, paused: Option<bool>, capabilities: Option<Capabilities>) -> PolicyBlob {

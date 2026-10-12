@@ -142,6 +142,7 @@ export default function ChatScreen() {
   const publishComposerExtra = useCallback(() => {
     const actual = composerActual.current;
     const compact = composerCompact.current;
+    if (!Number.isFinite(compact)) return;
     const expanded = actual > compact + 1;
     composerExtraTarget.value = expanded
       ? actual

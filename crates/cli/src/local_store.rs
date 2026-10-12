@@ -15,7 +15,7 @@ use crate::model::{Author, Body, LiveTurn, Message};
 /// path and to the calling test, so parallel tests never consume each other's hook.
 #[cfg(test)]
 thread_local! {
-    static BEFORE_FINAL_IDENTITY_CHECK: std::cell::RefCell<Option<(PathBuf, Box<dyn Fn()>)>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_FINAL_IDENTITY_CHECK: std::cell::RefCell<Option<(PathBuf, Box<dyn FnOnce()>)>> = const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -735,9 +735,8 @@ impl LocalStore {
     /// Test-only seam for one database path. Never present in a production build.
     #[cfg(test)]
     pub(crate) fn replace_before_final_identity_check(path: &Path, replace: impl FnOnce() + 'static) {
-        let mut replace = Some(replace);
         BEFORE_FINAL_IDENTITY_CHECK.with(|slot| {
-            *slot.borrow_mut() = Some((path.to_path_buf(), Box::new(move || replace.take().map(|hook| hook()))));
+            *slot.borrow_mut() = Some((path.to_path_buf(), Box::new(replace)));
         });
     }
 

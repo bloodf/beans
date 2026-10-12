@@ -1,6 +1,7 @@
 // Run through the installed Solid Vite plugin. Synthetic transport proves mounted consumer only.
 import { render } from "@solidjs/web";
 import { flush } from "solid-js";
+import { L, setLanguage } from "../../l10n";
 import { store } from "../../model/store";
 import { SkillDiscoverySheet } from "./skillDiscovery";
 import { PageMenuHost } from "../menu";
@@ -134,6 +135,25 @@ export async function checkSkillKeepBothConsumer() {
     assert(root.textContent?.includes("Not authenticated provenance"), "KeepBoth implied authenticated provenance");
     assert(button("Remove managed copy…"), "KeepBoth removed the original copy");
     await installed();
+    // Bounded reply parameters: the longest allowed label, and a durability warning that
+    // arrives with an already published copy rather than replacing it with a failure.
+    const longLabel = "l".repeat(256);
+    click("Keep both copies…"); click("Confirm KeepBoth");
+    finish({ version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: longLabel, digest, summary, durability_warning: true }); await settle();
+    assert(root.textContent?.includes(longLabel), "Bounded 256-byte label not rendered");
+    assert(root.querySelector("[role=alert]")?.textContent?.includes("durability or private cleanup needs attention"), "Durability warning not reported with the committed copy");
+    assert(root.textContent?.includes("Not authenticated provenance"), "Durability warning dropped the outcome");
+    // A scan over the same sheet must not leave the previous copy, confirmation or outcome up.
+    click("Scan");
+    assert(!root.textContent?.includes(original) && !root.textContent?.includes(copy) && !button("Confirm KeepBoth"), "Scan left a stale copy, confirmation or outcome");
+    finish({ version: 1, status: "scanned", skills: [], diagnostics: [] }); await settle();
+    // Chinese reorders the two IDs and the label; positional slots must keep each value in its own place.
+    setLanguage("zh-Hans");
+    const outcome = L("Kept both copies. Original %@, new copy %@ from %@, digest %@.", original, copy, "selected-source", digest.slice(0, 12));
+    assert(outcome.includes(original) && outcome.includes(copy) && outcome.includes("selected-source") && outcome.includes(digest.slice(0, 12)), "zh placeholders lost or swapped values");
+    assert(outcome.indexOf(original) < outcome.indexOf("selected-source") && outcome.indexOf("selected-source") < outcome.indexOf(copy), "zh positional order wrong");
+    setLanguage("en");
+    await installed();
     const beforeFailure = calls.length; click("Keep both copies…"); click("Confirm KeepBoth");
     reject(new Error("skill_library_source_changed")); await settle();
     assert(calls.length === beforeFailure + 1 && root.querySelector("[role=alert]")?.textContent?.includes("Preview again"), "KeepBoth failure did not render error state");
@@ -160,6 +180,6 @@ export async function checkSkillKeepBothConsumer() {
     const uncorrelated = store.keepBothSkillLibrary(selected.id, token, "e".repeat(32)).then(() => false, () => true);
     finish({ version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: "selected-source", digest, summary, durability_warning: false });
     assert(await uncorrelated, "Uncorrelated KeepBoth reply accepted");
-    return { mounted: true, automaticRequests: 0, confirmation: "explicit", originalPreserved: true, duplicateDistinguishable: true, provenanceClaim: "absent", failureState: "visible", accountABA: "fenced", runnerKeyABA: "fenced", malformedRejected: invalid.length, uncorrelated: "rejected" };
+    return { mounted: true, automaticRequests: 0, confirmation: "explicit", originalPreserved: true, duplicateDistinguishable: true, provenanceClaim: "absent", failureState: "visible", accountABA: "fenced", runnerKeyABA: "fenced", boundedLabelBytes: longLabel.length, durabilityWarning: "committed-with-warning", scanClearsCopy: true, zhPlaceholders: "positional", malformedRejected: invalid.length, uncorrelated: "rejected" };
   } finally { dispose(); root.remove(); Object.assign(store, saved); internals.transport = transport; }
 }

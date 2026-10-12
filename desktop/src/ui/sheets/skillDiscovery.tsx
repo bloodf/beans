@@ -41,7 +41,7 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
     const request = ++revision;
     const selected = runner()!;
     selectedBinding = { id: selected.id, os: selected.os, key: selected.machineKey };
-    setBusy(true); setResult(undefined); setPreview(undefined); setFailure("");
+    setBusy(true); setResult(undefined); setPreview(undefined); setManaged(undefined); setRemoveConfirmation(false); setKeepBothConfirmation(false); setBoth(undefined); setFailure("");
     try {
       const next = await store.discoverSkills(runnerID(), root());
       if (alive && request === revision) setResult(next);

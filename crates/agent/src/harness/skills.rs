@@ -218,13 +218,21 @@ mod tests {
             let extended_name = host_name(host);
             let cases: Vec<(&str, Vec<&str>, Vec<&str>)> = vec![
                 ("minimal", vec!["minimal"], vec![]),
-                ("extended", vec![&extended_name], vec!["does not match parent directory \"extended\""]),
-                ("duplicate-a", vec!["shared-name"], vec!["does not match parent directory \"duplicate-a\""]),
-                ("duplicate-b", vec!["shared-name"], vec!["does not match parent directory \"duplicate-b\""]),
+                ("extended", vec![&extended_name], vec![]),
+                ("duplicate-a", vec!["shared-name"], vec![]),
+                ("duplicate-b", vec!["shared-name"], vec![]),
                 ("malformed", vec![], vec!["description is required"]),
             ];
             for (case, want_names, want_diagnostics) in cases {
                 let case_dir = if case == "extended" && *host == "pi" { source.join("extended-dir") } else { source.join(case) };
+                // The diagnostic names the real parent directory of the file, so it is built
+                // from the fixture directory rather than from the case label.
+                let parent = case_dir.file_name().unwrap().to_string_lossy().to_string();
+                let mut want_diagnostics = want_diagnostics.clone();
+                // Only the cases whose declared name differs from their directory are diagnosed.
+                if matches!(case, "extended" | "duplicate-a" | "duplicate-b") {
+                    want_diagnostics.push(format!("does not match parent directory \"{parent}\""));
+                }
                 let root = temp.join(host).join(case);
                 copy_tree(&case_dir, &root);
                 let loaded = load_skills(&[root]);
@@ -268,10 +276,15 @@ mod tests {
             if names != vec!["shared-name", "shared-name"] {
                 failures.push(format!("{host}: duplicate pair loaded {names:?}, expected two distinct skills"));
             }
-            if loaded.skills.iter().any(|s| s.content == loaded.skills[0].content && s.path == loaded.skills[0].path) {
-                failures.push(format!("{host}: duplicate pair collapsed onto one entry"));
+            // Compare distinct entries only: a pair that collapsed would share one path.
+            if let [first, second] = loaded.skills.as_slice() {
+                if first.path == second.path {
+                    failures.push(format!("{host}: duplicate pair collapsed onto {}", first.path.display()));
+                }
             }
-            assert_eq!(loaded.diagnostics.len(), 2, "{host}: each half of the pair must be diagnosed");
+            if loaded.diagnostics.len() != 2 {
+                failures.push(format!("{host}: duplicate pair produced {} diagnostics, expected one per half", loaded.diagnostics.len()));
+            }
         }
         let _ = std::fs::remove_dir_all(&temp);
         assert!(failures.is_empty(), "{failures:#?}");
@@ -283,6 +296,7 @@ mod tests {
     #[test]
     fn bounded_scanner_rejects_symlink_escape_and_oversize() {
         let temp = std::env::temp_dir().join(format!("beans-host-bounds-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp).unwrap();
         // The scanner opens the root from `/` with no symlink resolution, so a symlinked
         // system temp must be resolved here, as the sibling discovery regression does.
         let temp = temp.canonicalize().unwrap();

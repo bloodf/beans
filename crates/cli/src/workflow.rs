@@ -151,6 +151,40 @@ pub fn create(app: &Arc<App>, bot_id: &str, name: &str, definition: Value) -> Re
     app.insert_workflow(record).map_err(|e| e.to_string())
 }
 
+/// The records of an incoming roster that fit the bounds, for the roster to keep. A record over
+/// a bound is not taken: the one this Device already holds under its id stays (the last
+/// accepted definition), and a new one is skipped, with a warning. Only that record is affected,
+/// never the rest of the roster. Within bounds a definition is kept as it arrived, whatever its
+/// schema: status is worked out here from the bot's capabilities and never comes from the wire.
+pub fn admit(incoming: Vec<WorkflowRecord>, current: &[WorkflowRecord]) -> Vec<WorkflowRecord> {
+    let fits = |record: &WorkflowRecord| {
+        record.id.chars().count() <= 64
+            && record.name.chars().count() <= MAX_NAME_CHARS
+            && serde_json::to_vec(&record.definition).is_ok_and(|bytes| bytes.len() <= MAX_DEFINITION_BYTES)
+    };
+    let mut per_bot = std::collections::HashMap::<String, usize>::new();
+    let mut admitted = Vec::with_capacity(incoming.len());
+    for record in incoming {
+        let record = if fits(&record) {
+            record
+        } else {
+            tracing::warn!(workflow = %record.id.chars().take(64).collect::<String>(), "incoming workflow is over its bounds");
+            match current.iter().find(|held| held.id == record.id) {
+                Some(held) => held.clone(),
+                None => continue,
+            }
+        };
+        let count = per_bot.entry(record.bot_id.clone()).or_default();
+        if *count >= MAX_PER_BOT {
+            tracing::warn!("incoming workflows over the per-bot limit are skipped");
+            continue;
+        }
+        *count += 1;
+        admitted.push(record);
+    }
+    admitted
+}
+
 /// A workflow as the apps see it: the stored fields plus `state`. `valid` means this Device is
 /// the bot's Runner and the definition passes every check against the bot's capabilities now;
 /// `unavailable` (with a `reason`) means it fails one; `unverified` means this Device cannot

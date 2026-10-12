@@ -1280,6 +1280,8 @@ fn merge_ids(remote: &mut Vec<String>, base: &[String], local: &[String]) {
 // The queued snapshot describes intent relative to the last roster this Device observed.
 // Compare fields, not whole entities: remote changes to other fields remain intact.
 fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob) -> RosterBlob {
+    // Bound incoming workflow records before they merge, persist or upload again.
+    remote.workflows = crate::workflow::admit(std::mem::take(&mut remote.workflows), &base.workflows);
     macro_rules! merge_entities {
         ($field:ident, $($member:ident),+ $(,)?) => {
             for old in &base.$field {
@@ -1482,7 +1484,7 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
         let kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
         state.bots = roster.bots;
         state.routines = roster.routines;
-        state.workflows = roster.workflows;
+        state.workflows = crate::workflow::admit(std::mem::take(&mut roster.workflows), &state.workflows);
         state.auto_review = roster.auto_review;
         let incoming_ids: Vec<String> = roster.chats.iter().map(|c| c.id.clone()).collect();
         let removed: Vec<String> = state.chats.iter().filter(|c| !incoming_ids.contains(&c.meta.id)
@@ -1613,6 +1615,7 @@ mod tests {
 
     fn scratch_app() -> ScratchApp {
         let home = std::env::temp_dir().join(format!("beans-sync-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
     }
@@ -2086,7 +2089,7 @@ mod tests {
     }
 
     #[test]
-    fn two_devices_merge_workflows_per_bot_and_keep_a_foreign_schema_byte_for_byte() {
+    fn workflows_two_devices_merge_per_bot_and_keep_a_foreign_schema_byte_for_byte() {
         use crate::model::WorkflowRecord;
         use serde_json::json;
         let scratch = scratch_app();
@@ -2097,9 +2100,16 @@ mod tests {
         let workflow = |id: &str, bot: &str, definition: serde_json::Value| WorkflowRecord {
             id: id.into(), bot_id: bot.into(), name: id.into(), definition, created_at: 1.0,
         };
-        let valid = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "Summarize" }] });
+        let this = app.this_device_id().unwrap();
+        let manifest = crate::plugins::Manifest::parse(&json!({ "id": "linear", "name": "Linear", "servers": { "api": { "type": "stdio", "command": "false" } } })).unwrap();
+        crate::plugins::install(app, manifest, "inline").unwrap();
+        let catalog = app.config.plugins_dir().join("linear").join("catalog.json");
+        crate::config::write_json_private(&catalog, &json!({ "servers": { "api": { "tools": [{ "name": "list_issues", "inputSchema": { "type": "object" } }] } } })).unwrap();
+        let valid = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "Summarize", "tools": ["linear__list_issues"] }] });
         let foreign = json!({ "version": 2, "revision": "r9", "steps": [{ "prompt": "x", "future": [1, { "a": null }] }], "extra": true });
-        let mut base = RosterBlob { bots: vec![bot("b1"), bot("b2")], ..Default::default() };
+        let huge = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "y".repeat(crate::workflow::MAX_DEFINITION_BYTES + 1) }] });
+        let local_bot = |id: &str| Bot { runner_id: this.clone(), ..bot(id) };
+        let mut base = RosterBlob { bots: vec![local_bot("b1"), local_bot("b2")], ..Default::default() };
         base.workflows = vec![workflow("old", "b2", valid.clone())];
         app.store.observe_roster(1, &base).unwrap();
         apply_roster(app, base.clone());
@@ -2109,12 +2119,12 @@ mod tests {
         let mut local = base.clone();
         local.workflows = vec![workflow("mine", "b1", valid.clone())];
         let mut remote = base.clone();
-        remote.workflows = vec![workflow("old", "b2", valid.clone()), workflow("theirs", "b1", foreign.clone())];
+        remote.workflows = vec![workflow("old", "b2", valid.clone()), workflow("theirs", "b1", foreign.clone()), workflow("huge", "b1", huge)];
         remote.workflows[0].name = "renamed".into();
 
         let merged = merge_rosters(remote, &base, &local);
         let ids: Vec<&str> = merged.workflows.iter().map(|w| w.id.as_str()).collect();
-        assert_eq!(ids, ["theirs", "mine"], "the local drop of \"old\" wins; both creations survive");
+        assert_eq!(ids, ["theirs", "mine"], "the local drop of \"old\" wins; both creations survive; the oversize one is not taken");
         assert_eq!(merged.workflows[0].definition, foreign, "a foreign schema is carried byte for byte");
 
         let granted = app.state.lock().unwrap().bots.iter().map(|b| b.capabilities.clone()).collect::<Vec<_>>();
@@ -2125,12 +2135,55 @@ mod tests {
         let shown = listed(app);
         let state = |id: &str| shown.iter().find(|(wid, _)| wid == id).unwrap().1["state"].clone();
         assert_eq!(state("theirs"), "unavailable", "the foreign schema is invalid here, kept as is");
-        assert_eq!(state("mine"), "unverified", "bot b1 runs on another Device, so nothing is called valid");
+        assert_eq!(state("mine"), "valid", "its tool is the catalog's own identifier and the bot may use it");
         assert_eq!(app.state.lock().unwrap().bots.iter().map(|b| b.capabilities.clone()).collect::<Vec<_>>(), granted, "grants do not change");
+        app.state.lock().unwrap().bots.iter_mut().find(|b| b.id == "b1").unwrap().capabilities.plugins = Some(Vec::new());
+        let revoked = listed(app);
+        assert_eq!(revoked.iter().find(|(id, _)| id == "mine").unwrap().1["state"], "unavailable", "a revoked plugin makes it unavailable, not gone");
+        assert_eq!(app.workflows_of("b1").len(), 2);
 
         let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
         assert_eq!(restarted.workflows_of("b1").iter().find(|w| w.id == "theirs").unwrap().definition, foreign);
         assert_eq!(restarted.state.lock().unwrap().bots.len(), 2);
+    }
+
+    #[test]
+    fn workflows_inbound_over_bounds_keep_the_last_accepted_and_lose_nothing_else() {
+        use crate::model::WorkflowRecord;
+        use serde_json::json;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let workflow = |id: &str, definition: serde_json::Value| WorkflowRecord {
+            id: id.into(), bot_id: "b1".into(), name: id.into(), definition, created_at: 1.0,
+        };
+        let small = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "Summarize" }] });
+        let huge = json!({ "version": 9, "blob": "x".repeat(crate::workflow::MAX_DEFINITION_BYTES + 1) });
+        let mut base = RosterBlob { bots: vec![bot("b1")], ..Default::default() };
+        base.workflows = vec![workflow("kept", small.clone())];
+        app.store.observe_roster(1, &base).unwrap();
+        apply_roster(app, base.clone());
+        assert_eq!(app.workflows_of("b1").len(), 1);
+
+        // Another Device sends an oversize replacement for "kept", an oversize new one, a
+        // newer-schema one inside the bounds, and an ordinary rename of the bot.
+        let newer = json!({ "version": 2, "revision": "r2", "steps": [], "future": { "a": [1] } });
+        let mut remote = base.clone();
+        remote.bots[0].name = "Renamed".into();
+        remote.workflows = vec![workflow("kept", huge.clone()), workflow("big-new", huge), workflow("newer", newer.clone())];
+        apply_roster(app, remote);
+
+        let held = app.workflows_of("b1");
+        let ids: Vec<&str> = held.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["kept", "newer"], "the oversize new record is skipped; nothing else is lost");
+        assert_eq!(held[0].definition, small, "the last accepted definition stays");
+        assert_eq!(held[1].definition, newer, "a bounded newer schema is kept as it arrived");
+        assert_eq!(app.bot("b1").unwrap().name, "Renamed", "the rest of the roster applied");
+
+        let shown: Vec<serde_json::Value> = held.iter().map(|w| crate::workflow::out(app, w)).collect();
+        assert_eq!(shown[1]["state"], "unavailable");
+        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(restarted.workflows_of("b1"), held, "what was kept is what reloads");
     }
 
     fn policy(device: &str, counter: u64, paused: Option<bool>, capabilities: Option<Capabilities>) -> PolicyBlob {

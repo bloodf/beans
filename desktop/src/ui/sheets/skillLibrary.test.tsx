@@ -82,3 +82,84 @@ export async function checkSkillLibraryConsumer() {
     return { mounted: true, automaticRequests: 0, importConfirmation: "explicit", removalConfirmation: "exact-managed-ID", cancellation: "no-effect", accountABA: "fenced", runnerRemovalABA: "fenced", runnerKeyABA: "fenced", lateImportAccount: "fenced", lateRemovalRunnerABA: "fenced", existingApproval: "cleared", unrelatedRoster: "retained", malformedRejected: invalid.length };
   } finally { dispose(); root.remove(); Object.assign(store, saved); internals.transport = transport; }
 }
+
+export async function checkSkillKeepBothConsumer() {
+  const root = document.createElement("div"); document.body.append(root);
+  const saved = { devices: store.devices, identityID: store.identityID, hasIdentity: store.hasIdentity, isConnected: store.isConnected };
+  const internals = store as unknown as { transport: unknown; emit: (event: { kind: "identityChanged" | "rosterChanged" | "snapshotReplaced" }) => void };
+  const transport = internals.transport;
+  const calls: { method: string; params: Record<string, unknown> }[] = [];
+  let finish: (value: unknown) => void = () => {};
+  let reject: (error: unknown) => void = () => {};
+  const selected = toDevice({ id: "synthetic-runner", name: "Synthetic Linux", os: "linux", model: "Fixture", os_version: "fixture", is_this_device: false, status: "online", last_seen: 1, machine_key: "synthetic-key", plugins: [] });
+  store.devices = [selected]; store.identityID = "synthetic-account"; store.hasIdentity = true; store.isConnected = true;
+  internals.transport = { request: (method: string, params: Record<string, unknown>) => { calls.push({ method, params }); return new Promise((resolve, fail) => { finish = resolve; reject = fail; }); } };
+  const dispose = render(() => <><SkillDiscoverySheet dismiss={() => {}} /><PageMenuHost /></>, root);
+  const settle = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); flush(); };
+  const assert = (ok: unknown, message: string) => { if (!ok) throw new Error(message); };
+  const button = (text: string) => [...root.querySelectorAll("button")].find((b) => b.textContent === text);
+  const click = (text: string) => { const b = button(text); assert(b && !b.disabled, `Missing/enabled button: ${text}`); b!.click(); flush(); };
+  const summary = { name: "FIXTURE_COPY", description: "Inactive", license: null, findings: ["Resources remain inactive"], file_count: 2, total_bytes: 123 };
+  const token = "a".repeat(32), original = "b".repeat(32), copy = "c".repeat(32), digest = "d".repeat(64);
+  const source = "/synthetic-selected";
+  const preview = { version: 1, runner_id: selected.id, token, expires_in_seconds: 300, source, destination: "/synthetic-owned/skill-library", summary };
+  const imported = { version: 1, runner_id: selected.id, managed_id: original, summary, durability_warning: false };
+  const installed = async () => {
+    click("Preview copy"); finish(preview); await settle(); click("Confirm import"); finish(imported); await settle();
+    click("Preview copy"); finish(preview); await settle();
+  };
+  try {
+    flush(); await settle(); assert(calls.length === 0, "Mount automatically requested KeepBoth");
+    const chooser = button("Select a Runner")!;
+    chooser.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 })); flush(); await settle();
+    const option = [...document.querySelectorAll("[role=menuitem], [role=option], button")].find((b) => b.textContent === "Synthetic Linux");
+    assert(option, "Runner option absent"); (option as HTMLElement).click(); await settle();
+    const input = root.querySelector("input")!;
+    input.value = source; input.dispatchEvent(new Event("input", { bubbles: true })); flush();
+    await installed();
+    assert(root.textContent?.includes(original), "Managed copy absent before KeepBoth");
+    assert(button("Keep both copies…"), "KeepBoth action absent for an installed copy");
+    const beforeConfirm = calls.length; click("Keep both copies…");
+    assert(calls.length === beforeConfirm, "KeepBoth published without explicit confirmation");
+    assert(root.textContent?.includes("Original copy is never removed") && root.textContent?.includes(original), "KeepBoth confirmation omitted original-copy safety");
+    click("Cancel KeepBoth"); assert(calls.length === beforeConfirm && !button("Confirm KeepBoth"), "Cancel kept both copies");
+    await installed();
+    const beforeApproval = calls.length; click("Keep both copies…"); click("Confirm KeepBoth");
+    const request = calls.at(-1)!;
+    assert(calls.length === beforeApproval + 1 && request.method === "skills.library.keep_both" && request.params.token === token && request.params.managed_id === original && request.params.confirmed === true && !("root" in request.params) && !("destination" in request.params), "KeepBoth not an explicit exact-ID confirmation");
+    finish({ version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: "selected-source", digest, summary, durability_warning: false }); await settle();
+    const shown = root.textContent ?? "";
+    assert(shown.includes(original) && shown.includes(copy), "KeepBoth did not render both copies");
+    assert(shown.includes("selected-source") && shown.includes(digest.slice(0, 12)) && !shown.includes(digest), "KeepBoth omitted bounded label or short digest");
+    assert(root.textContent?.includes("Not authenticated provenance"), "KeepBoth implied authenticated provenance");
+    assert(button("Remove managed copy…"), "KeepBoth removed the original copy");
+    await installed();
+    const beforeFailure = calls.length; click("Keep both copies…"); click("Confirm KeepBoth");
+    reject(new Error("skill_library_source_changed")); await settle();
+    assert(calls.length === beforeFailure + 1 && root.querySelector("[role=alert]")?.textContent?.includes("Preview again"), "KeepBoth failure did not render error state");
+    assert(!root.textContent?.includes("Not authenticated provenance"), "Failed KeepBoth published an outcome");
+    await installed();
+    for (const transition of ["account", "key"] as const) {
+      await installed();
+      click("Keep both copies…"); click("Confirm KeepBoth");
+      if (transition === "account") { store.identityID = "other-account"; internals.emit({ kind: "identityChanged" }); store.identityID = "synthetic-account"; internals.emit({ kind: "identityChanged" }); }
+      else { store.devices = [{ ...selected, machineKey: "temporary-key" }]; internals.emit({ kind: "rosterChanged" }); store.devices = [selected]; internals.emit({ kind: "snapshotReplaced" }); }
+      flush(); finish({ version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: "PRIVATE_ABA", digest, summary, durability_warning: false }); await settle();
+      assert(!root.textContent?.includes("PRIVATE_ABA") && !root.textContent?.includes("Not authenticated provenance"), `Late ${transition} ABA KeepBoth reply rendered`);
+    }
+    await installed();
+    const invalid = [null, { version: 1, runner_id: selected.id, original_managed_id: original, managed_id: original, source_label: "selected-source", digest, summary, durability_warning: false },
+      { version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: "", digest, summary, durability_warning: false },
+      { version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: "selected-source", digest: "D".repeat(64), summary, durability_warning: false },
+      { version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: "selected-source", digest, summary, durability_warning: false, body: "PRIVATE" },
+      { version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: "selected-source\n", digest, summary, durability_warning: false }];
+    for (const reply of invalid) {
+      const pending = store.keepBothSkillLibrary(selected.id, token, original).then(() => false, () => true);
+      finish(reply); assert(await pending, "Malformed KeepBoth reply accepted");
+    }
+    const uncorrelated = store.keepBothSkillLibrary(selected.id, token, "e".repeat(32)).then(() => false, () => true);
+    finish({ version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: "selected-source", digest, summary, durability_warning: false });
+    assert(await uncorrelated, "Uncorrelated KeepBoth reply accepted");
+    return { mounted: true, automaticRequests: 0, confirmation: "explicit", originalPreserved: true, duplicateDistinguishable: true, provenanceClaim: "absent", failureState: "visible", accountABA: "fenced", runnerKeyABA: "fenced", malformedRejected: invalid.length, uncorrelated: "rejected" };
+  } finally { dispose(); root.remove(); Object.assign(store, saved); internals.transport = transport; }
+}

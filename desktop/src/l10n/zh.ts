@@ -1163,4 +1163,11 @@ export const zh: Record<string, string> = {
   "Skill library request failed. Preview again before importing.": "技能库请求失败。导入前请重新预览。",
   "Skill library authority changed. Preview again.": "技能库权限已改变。请重新预览。",
   "Skill library approval expired. Preview again.": "技能库批准已过期。请重新预览。",
+  "Keep both copies…": "保留两个副本…",
+  "Keep both copies from the preview above. Original copy is never removed or rewritten.": "从上方预览保留两个副本。原始副本不会被移除或重写。",
+  "Original copy %@ stays as it is, even after local edits. The second copy is inactive too.": "原始副本 %@ 保持原样，即使有本地修改。第二个副本同样处于未激活状态。",
+  "Confirm KeepBoth": "确认保留两个副本",
+  "Cancel KeepBoth": "取消保留两个副本",
+  "Kept both copies. Original %@, new copy %@ from %@, digest %@.": "已保留两个副本。原始副本 %@，来自 %@ 的新副本 %@，摘要 %@。",
+  "Label and digest come from the Runner. Not authenticated provenance, and no update replaces the original copy.": "标签和摘要来自 Runner。不是经过认证的来源证明，也没有更新会替换原始副本。",
 };

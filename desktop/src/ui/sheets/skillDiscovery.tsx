@@ -18,6 +18,8 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
   const [preview, setPreview] = createSignal<Awaited<ReturnType<typeof store.previewSkillLibrary>>>();
   const [managed, setManaged] = createSignal<Awaited<ReturnType<typeof store.importSkillLibrary>>>();
   const [removeConfirmation, setRemoveConfirmation] = createSignal(false);
+  const [keepBothConfirmation, setKeepBothConfirmation] = createSignal(false);
+  const [both, setBoth] = createSignal<Awaited<ReturnType<typeof store.keepBothSkillLibrary>>>();
   const [warning, setWarning] = createSignal(false);
   let previewExpires = 0;
   let alive = true, revision = 0;
@@ -27,13 +29,13 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
     const runnerChanged = (event.kind === "rosterChanged" || event.kind === "snapshotReplaced") && selectedBinding !== undefined
       && (!selected || selected.id !== selectedBinding.id || selected.os !== selectedBinding.os || selected.machineKey !== selectedBinding.key);
     if (event.kind === "identityChanged" || event.kind === "connectionChanged" || runnerChanged) {
-      revision++; setResult(undefined); setPreview(undefined); setManaged(undefined); setRemoveConfirmation(false); setWarning(false); setBusy(false); setFailure("");
+      revision++; setResult(undefined); setPreview(undefined); setManaged(undefined); setRemoveConfirmation(false); setKeepBothConfirmation(false); setBoth(undefined); setWarning(false); setBusy(false); setFailure("");
     }
   });
   onCleanup(() => { alive = false; revision++; unsubscribe(); });
   const runners = () => { track.roster(); return store.runners; };
   const runner = () => runners().find((d) => d.id === runnerID());
-  const change = () => { revision++; setResult(undefined); setPreview(undefined); setManaged(undefined); setRemoveConfirmation(false); setWarning(false); setFailure(""); };
+  const change = () => { revision++; setResult(undefined); setPreview(undefined); setManaged(undefined); setRemoveConfirmation(false); setKeepBothConfirmation(false); setBoth(undefined); setWarning(false); setFailure(""); };
   const scan = async () => {
     if (busy() || !runner() || !root()) return;
     const request = ++revision;
@@ -47,19 +49,21 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
       if (alive && request === revision) setFailure(L("Skill discovery failed. Check Runner, path and account, then scan again."));
     } finally { if (alive && request === revision) setBusy(false); }
   };
-  const libraryAction = async (action: "preview" | "import" | "uninstall") => {
+  const libraryAction = async (action: "preview" | "import" | "uninstall" | "keep_both") => {
     if (busy() || !runner() || !root()) return;
     const approved = preview(), installed = managed();
-    if (action === "import" && (!approved || approved.runner_id !== runnerID() || approved.source !== root() || Date.now() >= previewExpires)) {
+    if ((action === "import" || action === "keep_both") && (!approved || approved.runner_id !== runnerID() || approved.source !== root() || Date.now() >= previewExpires)) {
       setPreview(undefined); setFailure(L("Skill library approval expired. Preview again.")); return;
     }
     if (action === "uninstall" && (!installed || !removeConfirmation())) return;
+    if (action === "keep_both" && (!installed || !keepBothConfirmation())) return;
     const request = ++revision, selected = runner()!;
     selectedBinding = { id: selected.id, os: selected.os, key: selected.machineKey };
     setBusy(true); setFailure(""); setWarning(false);
     // Confirmation is spent even when request fails. Never automatically retry a mutation.
     if (action === "import") setPreview(undefined);
     if (action === "uninstall") setRemoveConfirmation(false);
+    if (action === "keep_both") { setKeepBothConfirmation(false); setBoth(undefined); }
     try {
       if (action === "preview") {
         setPreview(undefined);
@@ -68,6 +72,9 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
       } else if (action === "import") {
         const next = await store.importSkillLibrary(runnerID(), approved!.token);
         if (alive && request === revision) { setManaged(next); setWarning(next.durability_warning); }
+      } else if (action === "keep_both") {
+        const next = await store.keepBothSkillLibrary(runnerID(), approved!.token, installed!.managed_id);
+        if (alive && request === revision) { setBoth(next); setWarning(next.durability_warning); }
       } else {
         const next = await store.uninstallSkillLibrary(runnerID(), installed!.managed_id);
         if (alive && request === revision) { setManaged(undefined); setWarning(next.cleanup_warning || next.durability_warning); }
@@ -101,6 +108,18 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
       <Show when={managed()}>{(m) => <div aria-live="polite">
         <p>{L("Managed copy on %@: %@", runner()?.name ?? "—", m().managed_id)}</p>
         <button disabled={busy()} onClick={() => setRemoveConfirmation(true)}>{L("Remove managed copy…")}</button>
+        <button disabled={busy() || !preview()} onClick={() => setKeepBothConfirmation(true)}>{L("Keep both copies…")}</button>
+        <Show when={keepBothConfirmation()}>
+          <p>{L("Keep both copies from the preview above. Original copy is never removed or rewritten.")}</p>
+          <p>{L("Original copy %@ stays as it is, even after local edits. The second copy is inactive too.", m().managed_id)}</p>
+          <button disabled={busy()} onClick={() => void libraryAction("keep_both")}>{L("Confirm KeepBoth")}</button>
+          <button disabled={busy()} onClick={() => setKeepBothConfirmation(false)}>{L("Cancel KeepBoth")}</button>
+        </Show>
+        <Show when={both()}>{(b) => <div aria-live="polite">
+          <p>{L("Kept both copies. Original %@, new copy %@ from %@, digest %@.", b().original_managed_id, b().managed_id, b().source_label, b().digest.slice(0, 12))}</p>
+          <p>{L("Label and digest come from the Runner. Not authenticated provenance, and no update replaces the original copy.")}</p>
+          <p>{b().summary.name}</p><p>{b().summary.description}</p>
+        </div>}</Show>
         <Show when={removeConfirmation()}>
           <p>{L("Remove only managed copy %@? Original source remains untouched.", m().managed_id)}</p>
           <button disabled={busy()} onClick={() => void libraryAction("uninstall")}>{L("Confirm removal")}</button>

@@ -228,7 +228,7 @@ mod tests {
                 // The diagnostic names the real parent directory of the file, so it is built
                 // from the fixture directory rather than from the case label.
                 let parent = case_dir.file_name().unwrap().to_string_lossy().to_string();
-                let mut want_diagnostics = want_diagnostics.clone();
+                let mut want_diagnostics: Vec<String> = want_diagnostics.iter().map(|s| s.to_string()).collect();
                 // Only the cases whose declared name differs from their directory are diagnosed.
                 if matches!(case, "extended" | "duplicate-a" | "duplicate-b") {
                     want_diagnostics.push(format!("does not match parent directory \"{parent}\""));
@@ -240,7 +240,7 @@ mod tests {
                 let messages: Vec<&str> = loaded.diagnostics.iter().map(|d| d.message.as_str()).collect();
                 if names != want_names { failures.push(format!("{host}/{case}: loaded {names:?}, expected {want_names:?}")); }
                 for want in &want_diagnostics {
-                    if !messages.iter().any(|m| m.contains(want)) { failures.push(format!("{host}/{case}: missing diagnostic {want:?} in {messages:?}")); }
+                    if !messages.iter().any(|m| m.contains(want.as_str())) { failures.push(format!("{host}/{case}: missing diagnostic {want:?} in {messages:?}")); }
                 }
                 if case == "extended" {
                     if host == &"claude" && !loaded.skills.iter().any(|s| s.disable_model_invocation) {

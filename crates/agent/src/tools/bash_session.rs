@@ -938,11 +938,14 @@ pub fn session_of(details: &Value) -> Option<&str> {
 pub struct BashInputTool {
     sessions: Arc<dyn BashSessions>,
     waiting_after: Duration,
+    /// The longest the call waits on a command that keeps printing, so never goes quiet:
+    /// `bash_output`'s longest wait.
+    longest_wait: Duration,
 }
 
 impl BashInputTool {
     pub fn new(sessions: Arc<dyn BashSessions>) -> Self {
-        BashInputTool { sessions, waiting_after: WAITING_AFTER }
+        BashInputTool { sessions, waiting_after: WAITING_AFTER, longest_wait: MAX_OUTPUT_WAIT }
     }
 
     /// How long the command may stay silent after the input before the call returns.
@@ -959,7 +962,8 @@ impl Tool for BashInputTool {
     }
     fn description(&self) -> &str {
         "Type into a command that bash left running, by its session id: the text, then Enter unless enter is false. Returns \
-         what the command printed since you last read it, once it ends, asks again, or goes quiet. Keys are control \
+         what the command printed since you last read it, once it ends, asks again, or goes quiet, or at most 2 seconds \
+         later for a command in the background and 5 minutes for any other. Keys are control \
          characters: \\u0003 is Ctrl-C (interrupts the command), \\u0004 is Ctrl-D (ends input), \\u001b is Escape. What you \
          type is not echoed back."
     }
@@ -994,7 +998,11 @@ impl Tool for BashInputTool {
         }
         let (base, since) = (session.total(), Instant::now());
         let idle = Idle { after: self.waiting_after, needs_output: false };
-        let stop = session.wait(base, since, idle, None, &cancel, |_| {}).await;
+        // A command that keeps printing never goes quiet, nor does one that took no notice of a
+        // Ctrl-C: the call returns what it printed by then, with where it stands. One in the
+        // background waits as long as starting it there does.
+        let longest = if session.background() { BACKGROUND_SETTLE } else { self.longest_wait };
+        let stop = session.wait(base, since, idle, Some(since + longest), &cancel, |_| {}).await;
         session_result(&session, self.sessions.as_ref(), from, stop, self.waiting_after, false)
     }
 }
@@ -1394,6 +1402,60 @@ mod tests {
         assert!(failed.0.contains("port 3000 is in use") && failed.0.contains("exited with code 1"), "{}", failed.0);
         let quick = call(&t.bash, json!({"command": "echo done", "background": true})).await.unwrap();
         assert_eq!(quick.text_content(), "done\n");
+    }
+
+    /// Reads a session until it prints `text`, as a model would before it types.
+    async fn printed(session: &BashSession, text: &str) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !session.preview().contains(text) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{text} was printed"));
+    }
+
+    /// Typing into a command that keeps printing returns what it printed instead of waiting for a
+    /// quiet spell that never comes: at the background's own settle time for a command started
+    /// there, at the longest wait otherwise. The command runs on either way, with the output it
+    /// printed still unread.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_returns_while_the_command_keeps_printing() {
+        let ticks = "while true; do echo tick; sleep 0.1; done";
+        // One deadline, both waits: how long the call may hold a command that never goes quiet.
+        for background in [true, false] {
+            let mut t = tools(Duration::from_millis(400));
+            t.input.longest_wait = Duration::from_millis(500);
+            let (command, longest) = if background {
+                (ticks.to_string(), BACKGROUND_SETTLE)
+            } else {
+                (format!("echo ready; read -r x; {ticks}"), Duration::from_millis(500))
+            };
+            let args = json!({"command": command, "background": background});
+            let started = call(&t.bash, args).await.unwrap();
+            let id = session_id(&started);
+            printed(&t.host.get(&id).unwrap(), if background { "tick" } else { "ready" }).await;
+
+            let running = t.host.get(&id).unwrap();
+            let unread = running.total();
+            let elapsed = std::time::Instant::now();
+            let typed = tokio::time::timeout(Duration::from_secs(20), call(&t.input, json!({"session_id": id, "text": "x"})))
+                .await
+                .expect("bash_input returned while the command kept printing")
+                .unwrap();
+            let elapsed = elapsed.elapsed();
+            assert!(elapsed >= longest && elapsed < longest + Duration::from_secs(3), "{background}: {elapsed:?}");
+
+            let text = typed.text_content();
+            let still = if background { "Running in the background as session" } else { "Still running as session" };
+            assert!(text.contains(&format!("[{still} {id}.")), "{text}");
+            assert!(text.contains("tick\n"), "what it printed comes back: {text}");
+            assert!(running.end().is_none(), "the command runs on");
+            assert!(t.host.get(&id).is_some(), "and keeps its session");
+            assert!(running.total() > unread, "the output it printed since is still unread");
+            running.stop("Stopped");
+        }
     }
 
     /// The user sends a command the model is waiting on to the background: the call returns and

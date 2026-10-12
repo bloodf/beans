@@ -120,6 +120,29 @@ fn with_score_legend(response: &str, legend: Value) -> CaseResult {
     CaseResult::Rejected(run_validated(&response))
 }
 
+/// Drives the public entry point, so a caller cannot reach the response rules
+/// with a request the local rules would refuse.
+fn validate_public(request: &str, response: &str) -> CaseResult {
+    let request: DecisionRequest = serde_json::from_str(request).expect("documented request");
+    let response: DecisionResponse = serde_json::from_str(response).expect("documented response");
+    match validate(&request, &response) {
+        Ok(outcomes) => CaseResult::Accepted(outcomes.iter().map(|o| o.question().to_string()).collect()),
+        Err(rejection) => CaseResult::Rejected(rejection),
+    }
+}
+
+fn with_choice_distribution(response: &str, billing: f64, technical: f64) -> CaseResult {
+    let mut response: DecisionResponse = serde_json::from_str(response).expect("documented response");
+    match response.answers.values_mut().next().expect("one answer") {
+        DecisionAnswer::Choice { probabilities, .. } => {
+            probabilities.insert("billing".to_string(), billing);
+            probabilities.insert("technical".to_string(), technical);
+        }
+        other => panic!("expected a choice answer, got {other:?}"),
+    }
+    CaseResult::Rejected(run_validated(&response))
+}
+
 fn run_validated(response: &DecisionResponse) -> DecisionRejection {
     let request: DecisionRequest = serde_json::from_str(SCORE_REQUEST).expect("documented request");
     let request = if matches!(
@@ -280,6 +303,40 @@ fn a_refusal_answer_fails_to_parse() -> CaseResult {
     )
 }
 
+fn an_invalid_request_is_refused_by_validate() -> CaseResult {
+    let alias = CHOICE_REQUEST.replace("jev-1.13.0", "jev-latest");
+    validate_public(&alias, CHOICE_RESPONSE)
+}
+
+fn an_empty_score_question_is_refused_by_validate() -> CaseResult {
+    let empty = r#"{"state":"s","model":"jev-1.13.0","questions":{"frustration":{"type":"score","instructions":"How frustrated is the customer?","criteria":[]}}}"#;
+    validate_public(empty, SCORE_RESPONSE)
+}
+
+fn a_choice_that_is_not_the_highest_probability_is_rejected() -> CaseResult {
+    with_choice_distribution(CHOICE_RESPONSE, 0.6, 0.4)
+}
+
+fn a_tied_choice_is_accepted() -> CaseResult {
+    let tied = CHOICE_RESPONSE.replace(
+        r#""probabilities":{"billing":0.12,"technical":0.88},"confidence":0.88"#,
+        r#""probabilities":{"billing":0.5,"technical":0.5},"confidence":0.5"#,
+    );
+    run(CHOICE_REQUEST, &tied)
+}
+
+fn a_negative_score_is_rejected() -> CaseResult {
+    with_score_score(SCORE_RESPONSE, -0.005)
+}
+
+fn a_score_just_past_the_last_level_is_rejected() -> CaseResult {
+    with_score_score(SCORE_RESPONSE, 2.005)
+}
+
+fn an_inconsistent_weighted_position_is_rejected() -> CaseResult {
+    with_score_score(SCORE_RESPONSE, 1.5)
+}
+
 fn an_unknown_request_field_is_rejected() -> CaseResult {
     run(
         &CHOICE_REQUEST.replace(r#""type":"choice","#, r#""type":"choice","temperature":0.2,"#),
@@ -290,7 +347,7 @@ fn an_unknown_request_field_is_rejected() -> CaseResult {
 #[test]
 fn the_frozen_decision_contract_regression() {
     type Check = fn() -> CaseResult;
-    let cases: [(&str, Check, CaseResult); 23] = [
+    let cases: [(&str, Check, CaseResult); 30] = [
         (
             "a_choice_question_serializes_with_its_option_map",
             a_choice_question_serializes_with_its_option_map,
@@ -441,6 +498,62 @@ fn the_frozen_decision_contract_regression() {
             "a_refusal_answer_fails_to_parse",
             a_refusal_answer_fails_to_parse,
             CaseResult::ParseFailed,
+        ),
+        (
+            "an_invalid_request_is_refused_by_validate",
+            an_invalid_request_is_refused_by_validate,
+            CaseResult::Rejected(DecisionRejection::ModelNotPinned {
+                model: "jev-latest".to_string(),
+            }),
+        ),
+        (
+            "an_empty_score_question_is_refused_by_validate",
+            an_empty_score_question_is_refused_by_validate,
+            CaseResult::Rejected(DecisionRejection::CriteriaBounds {
+                question: "frustration".to_string(),
+                count: 0,
+            }),
+        ),
+        (
+            "a_choice_that_is_not_the_highest_probability_is_rejected",
+            a_choice_that_is_not_the_highest_probability_is_rejected,
+            CaseResult::Rejected(DecisionRejection::ChoiceNotMaximum {
+                question: "route".to_string(),
+                selected: "technical".to_string(),
+                probability: 0.4,
+            }),
+        ),
+        (
+            "a_tied_choice_is_accepted",
+            a_tied_choice_is_accepted,
+            CaseResult::Accepted(vec!["route".to_string()]),
+        ),
+        (
+            "a_negative_score_is_rejected",
+            a_negative_score_is_rejected,
+            CaseResult::Rejected(DecisionRejection::ScoreOutsideLevels {
+                question: "frustration".to_string(),
+                position: -0.005,
+                levels: 3,
+            }),
+        ),
+        (
+            "a_score_just_past_the_last_level_is_rejected",
+            a_score_just_past_the_last_level_is_rejected,
+            CaseResult::Rejected(DecisionRejection::ScoreOutsideLevels {
+                question: "frustration".to_string(),
+                position: 2.005,
+                levels: 3,
+            }),
+        ),
+        (
+            "an_inconsistent_weighted_position_is_rejected",
+            an_inconsistent_weighted_position_is_rejected,
+            CaseResult::Rejected(DecisionRejection::ScoreWeightedMeanMismatch {
+                question: "frustration".to_string(),
+                position: 1.5,
+                weighted: 1.05,
+            }),
         ),
         (
             "an_unknown_request_field_is_rejected",

@@ -75,13 +75,27 @@ test("native identity reader: real public APK metadata, real IPA plists, every m
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+// Stub tools record a spawn with the shell builtin printf, so they work with PATH limited to their own
+// directory (touch would not be found there). The positive control proves a stub really leaves the marker,
+// then clears only this scratch marker, so a later absence means no tool ran.
+async function markerStubs(dir: string) {
+  const marker = join(dir, "spawned"), bin = join(dir, "bin"); await mkdir(bin);
+  const quoted = `'${marker.replaceAll("'", "'\\''")}'`;
+  for (const tool of ["unzip", "aapt2", "bundletool", "plutil"]) { await writeFile(join(bin, tool), `#!/bin/sh\nprintf x > ${quoted}\nexit 0\n`); await chmod(join(bin, tool), 0o755); }
+  for (const tool of ["unzip", "aapt2", "bundletool", "plutil"]) {
+    expect(Bun.spawnSync([join(bin, tool)], { env: { PATH: bin } }).exitCode, `${tool} stub`).toBe(0);
+    expect(existsSync(marker), `${tool} stub leaves the marker`).toBe(true);
+    await rm(marker);
+  }
+  return { marker, bin };
+}
+
 // Hostile archives are refused by the shared inspector before any tool is spawned: stub tools on PATH
 // would leave a marker if they ran. Duplicate names and span overlap are not claimed here (helper limits).
 test("hostile archives are refused before any native tool spawns", async () => {
   const dir = await mkdtemp(join(tmpdir(), "beans-hostile-"));
   try {
-    const marker = join(dir, "spawned"), bin = join(dir, "bin"); await mkdir(bin);
-    for (const tool of ["unzip", "aapt2", "bundletool", "plutil"]) { await writeFile(join(bin, tool), `#!/bin/sh\ntouch ${marker}\nexit 0\n`); await chmod(join(bin, tool), 0o755); }
+    const { marker, bin } = await markerStubs(dir);
     const stubs = { PATH: bin };
     const central = (b: Buffer) => b.indexOf(Buffer.from([0x50, 0x4b, 1, 2]));
     const mutations: [string, string, (b: Buffer) => Buffer][] = [
@@ -129,8 +143,7 @@ const localHeader = (name: string, size: number) => {
 test("nested span overlap is refused before any tool spawn; a non-overlapping two-entry control is admitted", async () => {
   const dir = await mkdtemp(join(tmpdir(), "beans-overlap-"));
   try {
-    const marker = join(dir, "spawned"), bin = join(dir, "bin"); await mkdir(bin);
-    for (const tool of ["unzip", "aapt2", "bundletool", "plutil"]) { await writeFile(join(bin, tool), `#!/bin/sh\ntouch ${marker}\nexit 0\n`); await chmod(join(bin, tool), 0o755); }
+    const { marker, bin } = await markerStubs(dir);
     // outer payload = inner local header + inner name + 1 data byte; inner offset points into it.
     const inner = Buffer.concat([localHeader("inner", 1), Buffer.from("x")]);
     const outerHeader = localHeader("outer", inner.length);

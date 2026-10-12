@@ -2085,6 +2085,54 @@ mod tests {
         assert_eq!(restarted.store.queued_roster().unwrap().unwrap().ciphertext, encrypted.ciphertext);
     }
 
+    #[test]
+    fn two_devices_merge_workflows_per_bot_and_keep_a_foreign_schema_byte_for_byte() {
+        use crate::model::WorkflowRecord;
+        use serde_json::json;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let workflow = |id: &str, bot: &str, definition: serde_json::Value| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition, created_at: 1.0,
+        };
+        let valid = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "Summarize" }] });
+        let foreign = json!({ "version": 2, "revision": "r9", "steps": [{ "prompt": "x", "future": [1, { "a": null }] }], "extra": true });
+        let mut base = RosterBlob { bots: vec![bot("b1"), bot("b2")], ..Default::default() };
+        base.workflows = vec![workflow("old", "b2", valid.clone())];
+        app.store.observe_roster(1, &base).unwrap();
+        apply_roster(app, base.clone());
+
+        // This Device saves one for b1 and drops "old" while offline; the other Device
+        // saved a newer-schema one for b1 and renamed "old".
+        let mut local = base.clone();
+        local.workflows = vec![workflow("mine", "b1", valid.clone())];
+        let mut remote = base.clone();
+        remote.workflows = vec![workflow("old", "b2", valid.clone()), workflow("theirs", "b1", foreign.clone())];
+        remote.workflows[0].name = "renamed".into();
+
+        let merged = merge_rosters(remote, &base, &local);
+        let ids: Vec<&str> = merged.workflows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["theirs", "mine"], "the local drop of \"old\" wins; both creations survive");
+        assert_eq!(merged.workflows[0].definition, foreign, "a foreign schema is carried byte for byte");
+
+        let granted = app.state.lock().unwrap().bots.iter().map(|b| b.capabilities.clone()).collect::<Vec<_>>();
+        apply_roster(app, merged);
+        assert_eq!(app.workflows_of("b1").len(), 2);
+        assert!(app.workflows_of("b2").is_empty());
+        let listed = |app: &Arc<App>| app.workflows_of("b1").iter().map(|w| (w.id.clone(), crate::workflow::out(app, w))).collect::<Vec<_>>();
+        let shown = listed(app);
+        let state = |id: &str| shown.iter().find(|(wid, _)| wid == id).unwrap().1["state"].clone();
+        assert_eq!(state("theirs"), "unavailable", "the foreign schema is invalid here, kept as is");
+        assert_eq!(state("mine"), "unverified", "bot b1 runs on another Device, so nothing is called valid");
+        assert_eq!(app.state.lock().unwrap().bots.iter().map(|b| b.capabilities.clone()).collect::<Vec<_>>(), granted, "grants do not change");
+
+        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(restarted.workflows_of("b1").iter().find(|w| w.id == "theirs").unwrap().definition, foreign);
+        assert_eq!(restarted.state.lock().unwrap().bots.len(), 2);
+    }
+
     fn policy(device: &str, counter: u64, paused: Option<bool>, capabilities: Option<Capabilities>) -> PolicyBlob {
         PolicyBlob { paused, bot_id: capabilities.as_ref().map(|_| "bot".into()), capabilities, removed: false,
             version: PolicyVersion { counter, device_id: device.into() } }

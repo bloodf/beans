@@ -183,3 +183,90 @@ export async function checkSkillKeepBothConsumer() {
     return { mounted: true, automaticRequests: 0, confirmation: "explicit", originalPreserved: true, duplicateDistinguishable: true, provenanceClaim: "absent", failureState: "visible", accountABA: "fenced", runnerKeyABA: "fenced", boundedLabelBytes: longLabel.length, durabilityWarning: "committed-with-warning", scanClearsCopy: true, zhPlaceholders: "positional", malformedRejected: invalid.length, uncorrelated: "rejected" };
   } finally { dispose(); root.remove(); Object.assign(store, saved); internals.transport = transport; }
 }
+
+export async function checkSkillCompareConsumer() {
+  const root = document.createElement("div"); document.body.append(root);
+  const saved = { devices: store.devices, identityID: store.identityID, hasIdentity: store.hasIdentity, isConnected: store.isConnected };
+  const internals = store as unknown as { transport: unknown; emit: (event: { kind: "identityChanged" | "rosterChanged" | "snapshotReplaced" | "connectionChanged" }) => void };
+  const transport = internals.transport;
+  const calls: { method: string; params: Record<string, unknown> }[] = [];
+  let finish: (value: unknown) => void = () => {};
+  let reject: (error: unknown) => void = () => {};
+  const selected = toDevice({ id: "synthetic-runner", name: "Synthetic Linux", os: "linux", model: "Fixture", os_version: "fixture", is_this_device: false, status: "online", last_seen: 1, machine_key: "synthetic-key", plugins: [] });
+  store.devices = [selected]; store.identityID = "synthetic-account"; store.hasIdentity = true; store.isConnected = true;
+  internals.transport = { request: (method: string, params: Record<string, unknown>) => { calls.push({ method, params }); return new Promise((resolve, fail) => { finish = resolve; reject = fail; }); } };
+  const dispose = render(() => <><SkillDiscoverySheet dismiss={() => {}} /><PageMenuHost /></>, root);
+  const settle = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); flush(); };
+  const assert = (ok: unknown, message: string) => { if (!ok) throw new Error(message); };
+  const button = (text: string) => [...root.querySelectorAll("button")].find((b) => b.textContent === text);
+  const click = (text: string) => { const b = button(text); assert(b && !b.disabled, `Missing/enabled button: ${text}`); b!.click(); flush(); };
+  const summary = { name: "FIXTURE_COPY", description: "Inactive", license: null, findings: [], file_count: 2, total_bytes: 123 };
+  const token = "a".repeat(32), original = "b".repeat(32);
+  const source = "/synthetic-selected";
+  const preview = { version: 1, runner_id: selected.id, token, expires_in_seconds: 300, source, destination: "/synthetic-owned/skill-library", summary };
+  const installed = async () => {
+    click("Preview copy"); finish(preview); await settle(); click("Confirm import");
+    finish({ version: 1, runner_id: selected.id, managed_id: original, summary, durability_warning: false }); await settle();
+  };
+  try {
+    flush(); await settle(); assert(calls.length === 0, "Mount automatically compared");
+    const chooser = button("Select a Runner")!;
+    chooser.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 })); flush(); await settle();
+    const option = [...document.querySelectorAll("[role=menuitem], [role=option], button")].find((b) => b.textContent === "Synthetic Linux");
+    assert(option, "Runner option absent"); (option as HTMLElement).click(); await settle();
+    const input = root.querySelector("input")!;
+    input.value = source; input.dispatchEvent(new Event("input", { bubbles: true })); flush();
+    await installed();
+    // Bounded read-only reply: nested labels at the five-segment limit, on all three sides.
+    const added = ["a/b/c/d/e", "resources/added"];
+    const removed = ["resources/removed"];
+    const changed = ["SKILL.md", "resources/changed"];
+    const beforeCompare = calls.length; click("Compare source with copy…");
+    const request = calls.at(-1)!;
+    assert(calls.length === beforeCompare + 1 && request.method === "skills.library.compare" && request.params.root === source && request.params.managed_id === original && !("token" in request.params) && !("confirmed" in request.params), "Compare not a plain read-only exact-ID request");
+    finish({ version: 1, runner_id: selected.id, managed_id: original, added, removed, changed }); await settle();
+    const shown = root.textContent ?? "";
+    for (const label of [...added, ...removed, ...changed]) assert(shown.includes(label), `Compare omitted ${label}`);
+    assert(shown.includes("1 only in the source.") === false && shown.includes("2 only in the source."), "Compare did not count added labels");
+    assert(shown.includes("Read-only.") && shown.includes("Nothing was changed and nothing is enabled here."), "Compare implied a mutation or an enable");
+    assert(!button("Confirm import") && !button("Confirm KeepBoth") && button("Remove managed copy…"), "Compare invented a confirmation");
+    // Nothing on the managed copy changed: the same copy and its removal stay exactly as they were.
+    await installed();
+    const beforeFailure = calls.length; click("Compare source with copy…");
+    reject(new Error("skill_library_failed")); await settle();
+    assert(calls.length === beforeFailure + 1 && root.querySelector("[role=alert]")?.textContent?.includes("Preview again"), "Compare failure did not render an error state");
+    assert(!root.textContent?.includes("only in the source."), "Failed compare published a difference");
+    for (const transition of ["account", "key"] as const) {
+      await installed();
+      click("Compare source with copy…");
+      if (transition === "account") { store.identityID = "other-account"; internals.emit({ kind: "identityChanged" }); store.identityID = "synthetic-account"; internals.emit({ kind: "identityChanged" }); }
+      else { store.devices = [{ ...selected, machineKey: "temporary-key" }]; internals.emit({ kind: "rosterChanged" }); store.devices = [selected]; internals.emit({ kind: "snapshotReplaced" }); }
+      flush(); finish({ version: 1, runner_id: selected.id, managed_id: original, added: ["PRIVATE_ABA"], removed: [], changed: [] }); await settle();
+      assert(!root.textContent?.includes("PRIVATE_ABA") && !root.textContent?.includes("only in the source."), `Late ${transition} ABA compare rendered`);
+    }
+    await installed();
+    click("Compare source with copy…");
+    store.isConnected = false; internals.emit({ kind: "connectionChanged" }); store.isConnected = true; internals.emit({ kind: "connectionChanged" });
+    flush(); finish({ version: 1, runner_id: selected.id, managed_id: original, added: ["PRIVATE_CONNECTION"], removed: [], changed: [] }); await settle();
+    assert(!root.textContent?.includes("PRIVATE_CONNECTION"), "Late connection ABA compare rendered");
+    await installed();
+    const invalid = [null,
+      { version: 1, runner_id: selected.id, managed_id: original, added: ["../escape"], removed: [], changed: [] },
+      { version: 1, runner_id: selected.id, managed_id: original, added: ["/absolute"], removed: [], changed: [] },
+      { version: 1, runner_id: selected.id, managed_id: original, added: ["back\\slash"], removed: [], changed: [] },
+      { version: 1, runner_id: selected.id, managed_id: original, added: ["a/b/c/d/e/f"], removed: [], changed: [] },
+      { version: 1, runner_id: selected.id, managed_id: original, added: ["same"], removed: ["same"], changed: [] },
+      { version: 1, runner_id: selected.id, managed_id: original, added: ["b", "a"], removed: [], changed: [] },
+      { version: 1, runner_id: selected.id, managed_id: original, added: ["dup", "dup"], removed: [], changed: [] },
+      { version: 1, runner_id: selected.id, managed_id: original, added: [], removed: [], changed: [], body: "PRIVATE" },
+      { version: 1, runner_id: selected.id, managed_id: original, added: Array.from({ length: 257 }, (_, i) => `f/${i}`), removed: [], changed: [] }];
+    for (const reply of invalid) {
+      const pending = store.compareSkillLibrary(selected.id, source, original).then(() => false, () => true);
+      finish(reply); assert(await pending, "Malformed compare reply accepted");
+    }
+    const uncorrelated = store.compareSkillLibrary(selected.id, source, "e".repeat(32)).then(() => false, () => true);
+    finish({ version: 1, runner_id: selected.id, managed_id: original, added: [], removed: [], changed: [] });
+    assert(await uncorrelated, "Uncorrelated compare reply accepted");
+    return { mounted: true, automaticRequests: 0, mutation: "none", request: "exact-ID read-only", maxSegments: 5, countsRendered: true, inert: true, inventedConfirmation: false, failureState: "visible", accountABA: "fenced", runnerKeyABA: "fenced", connectionABA: "fenced", malformedRejected: invalid.length, uncorrelated: "rejected" };
+  } finally { dispose(); root.remove(); Object.assign(store, saved); internals.transport = transport; }
+}

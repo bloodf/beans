@@ -95,7 +95,7 @@ def main() -> int:
         vite.wait(timeout=30)
 
     # A short settle proves nothing; every check must have reported.
-    missing = [name for name in ("discovery", "library", "keepBoth") if not (result or {}).get(name)]
+    missing = [name for name in ("discovery", "library", "keepBoth", "compare") if not (result or {}).get(name)]
     if missing:
         error = "; ".join(filter(None, [error, f"no result reported for: {', '.join(missing)}"]))
     print(json.dumps({"source": source_binding(), "result": result, "error": error, "console": console}, indent=2))

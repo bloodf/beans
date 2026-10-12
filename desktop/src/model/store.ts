@@ -212,8 +212,10 @@ export type SkillLibraryImport = { version: 1; runner_id: string; managed_id: st
 export type SkillLibraryRemoval = { version: 1; runner_id: string; managed_id: string; cleanup_warning: boolean; durability_warning: boolean };
 /** An inactive second copy. The Runner supplies label and digest; neither is authenticated provenance. */
 export type SkillLibraryKeepBoth = { version: 1; runner_id: string; original_managed_id: string; managed_id: string; source_label: string; digest: string; summary: SkillLibrarySummary; durability_warning: boolean };
+/** A read-only difference between one selected source and one exact managed copy. Nothing here updates either. */
+export type SkillLibraryCompare = { version: 1; runner_id: string; managed_id: string; added: string[]; removed: string[]; changed: string[] };
 
-function decodeSkillLibrary(value: unknown, action: "preview" | "import" | "uninstall" | "keep_both", runnerID: string): SkillLibraryPreview | SkillLibraryImport | SkillLibraryRemoval | SkillLibraryKeepBoth {
+function decodeSkillLibrary(value: unknown, action: "preview" | "import" | "uninstall" | "keep_both" | "compare", runnerID: string): SkillLibraryPreview | SkillLibraryImport | SkillLibraryRemoval | SkillLibraryKeepBoth | SkillLibraryCompare {
   const invalid = (): never => { throw new RequestError(L("Skill library request failed. Preview again before importing.")); };
   const object = (value: unknown, keys: string[]): Record<string, unknown> => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return invalid();
@@ -226,14 +228,33 @@ function decodeSkillLibrary(value: unknown, action: "preview" | "import" | "unin
     return value;
   };
   const id = (value: unknown): string => { const s = text(value, 32); return /^[0-9a-f]{32}$/.test(s) ? s : invalid(); };
+  // A relative file label, as the Runner reports it: no controls, backslash, colon, empty or
+  // traversing segment, at most five segments, and bounded to 256 changed paths per side.
+  const changed = (value: unknown): string[] => {
+    if (!Array.isArray(value) || value.length > 256) return invalid();
+    const labels = value.map((entry) => {
+      const label = text(entry, 4096) as string;
+      if (!label || /[\\:]/u.test(label) || label.split("/").some((part) => !part || part === "." || part === "..") || label.split("/").length > 5) return invalid();
+      return label;
+    });
+    const sorted = [...labels].sort();
+    if (labels.some((label, index) => label !== sorted[index]) || new Set(labels).size !== labels.length) return invalid();
+    return labels;
+  };
   const summary = (value: unknown): SkillLibrarySummary => {
     const s = object(value, ["name", "description", "license", "findings", "file_count", "total_bytes"]);
     if (!Number.isInteger(s.file_count) || (s.file_count as number) < 1 || (s.file_count as number) > 256 || !Number.isInteger(s.total_bytes) || (s.total_bytes as number) < 0 || (s.total_bytes as number) > 16 * 1024 * 1024 || !Array.isArray(s.findings) || s.findings.length > 64) return invalid();
     return { name: s.name === null ? null : text(s.name, 256), description: s.description === null ? null : text(s.description, 2048), license: s.license === null ? null : text(s.license, 256), findings: s.findings.map((s) => text(s, 512)), file_count: s.file_count as number, total_bytes: s.total_bytes as number };
   };
-  const keys = action === "preview" ? ["version", "runner_id", "token", "expires_in_seconds", "source", "destination", "summary"] : action === "import" ? ["version", "runner_id", "managed_id", "summary", "durability_warning"] : action === "keep_both" ? ["version", "runner_id", "original_managed_id", "managed_id", "source_label", "digest", "summary", "durability_warning"] : ["version", "runner_id", "managed_id", "cleanup_warning", "durability_warning"];
+  const keys = action === "preview" ? ["version", "runner_id", "token", "expires_in_seconds", "source", "destination", "summary"] : action === "import" ? ["version", "runner_id", "managed_id", "summary", "durability_warning"] : action === "keep_both" ? ["version", "runner_id", "original_managed_id", "managed_id", "source_label", "digest", "summary", "durability_warning"] : action === "compare" ? ["version", "runner_id", "managed_id", "added", "removed", "changed"] : ["version", "runner_id", "managed_id", "cleanup_warning", "durability_warning"];
   const r = object(value, keys);
   if (r.version !== 1 || r.runner_id !== runnerID) return invalid();
+  if (action === "compare") {
+    const managed = id(r.managed_id), added = changed(r.added), removed = changed(r.removed), differing = changed(r.changed);
+    const overlaps = (a: string[], b: string[]) => a.some((label) => b.includes(label));
+    if (overlaps(added, removed) || overlaps(added, differing) || overlaps(removed, differing)) return invalid();
+    return { version: 1, runner_id: runnerID, managed_id: managed, added, removed, changed: differing };
+  }
   if (action === "preview") {
     if (!Number.isInteger(r.expires_in_seconds) || (r.expires_in_seconds as number) < 1 || (r.expires_in_seconds as number) > 300) return invalid();
     const source = text(r.source, 4096), destination = text(r.destination, 4096);
@@ -431,7 +452,7 @@ export class AppStore {
     } finally { unsubscribe(); }
   }
 
-  private async skillLibraryRequest(action: "preview" | "import" | "uninstall" | "keep_both", runnerID: string, params: Record<string, unknown>) {
+  private async skillLibraryRequest(action: "preview" | "import" | "uninstall" | "keep_both" | "compare", runnerID: string, params: Record<string, unknown>) {
     const generation = this.bootstrapGeneration, identity = this.identityID;
     const runner = this.runners.find((device) => device.id === runnerID);
     if (this.isMock || !this.isConnected || !this.hasIdentity || !identity || !runner) throw new RequestError(L("Skill library request failed. Preview again before importing."));
@@ -456,6 +477,13 @@ export class AppStore {
 
   async importSkillLibrary(runnerID: string, token: string): Promise<SkillLibraryImport> {
     return await this.skillLibraryRequest("import", runnerID, { token, confirmed: true }) as SkillLibraryImport;
+  }
+
+  /** Reads the difference between the selected source and one exact managed copy. It changes nothing. */
+  async compareSkillLibrary(runnerID: string, root: string, managedID: string): Promise<SkillLibraryCompare> {
+    const reply = await this.skillLibraryRequest("compare", runnerID, { root, managed_id: managedID }) as SkillLibraryCompare;
+    if (reply.managed_id !== managedID) throw new RequestError(L("Skill library request failed. Preview again before importing."));
+    return reply;
   }
 
   async uninstallSkillLibrary(runnerID: string, managedID: string): Promise<SkillLibraryRemoval> {

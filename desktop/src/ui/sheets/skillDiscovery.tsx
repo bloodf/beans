@@ -20,6 +20,7 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
   const [removeConfirmation, setRemoveConfirmation] = createSignal(false);
   const [keepBothConfirmation, setKeepBothConfirmation] = createSignal(false);
   const [both, setBoth] = createSignal<Awaited<ReturnType<typeof store.keepBothSkillLibrary>>>();
+  const [compare, setCompare] = createSignal<Awaited<ReturnType<typeof store.compareSkillLibrary>>>();
   const [warning, setWarning] = createSignal(false);
   let previewExpires = 0;
   let alive = true, revision = 0;
@@ -29,19 +30,19 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
     const runnerChanged = (event.kind === "rosterChanged" || event.kind === "snapshotReplaced") && selectedBinding !== undefined
       && (!selected || selected.id !== selectedBinding.id || selected.os !== selectedBinding.os || selected.machineKey !== selectedBinding.key);
     if (event.kind === "identityChanged" || event.kind === "connectionChanged" || runnerChanged) {
-      revision++; setResult(undefined); setPreview(undefined); setManaged(undefined); setRemoveConfirmation(false); setKeepBothConfirmation(false); setBoth(undefined); setWarning(false); setBusy(false); setFailure("");
+      revision++; setResult(undefined); setPreview(undefined); setManaged(undefined); setRemoveConfirmation(false); setKeepBothConfirmation(false); setBoth(undefined); setCompare(undefined); setWarning(false); setBusy(false); setFailure("");
     }
   });
   onCleanup(() => { alive = false; revision++; unsubscribe(); });
   const runners = () => { track.roster(); return store.runners; };
   const runner = () => runners().find((d) => d.id === runnerID());
-  const change = () => { revision++; setResult(undefined); setPreview(undefined); setManaged(undefined); setRemoveConfirmation(false); setKeepBothConfirmation(false); setBoth(undefined); setWarning(false); setFailure(""); };
+  const change = () => { revision++; setResult(undefined); setPreview(undefined); setManaged(undefined); setRemoveConfirmation(false); setKeepBothConfirmation(false); setBoth(undefined); setCompare(undefined); setWarning(false); setFailure(""); };
   const scan = async () => {
     if (busy() || !runner() || !root()) return;
     const request = ++revision;
     const selected = runner()!;
     selectedBinding = { id: selected.id, os: selected.os, key: selected.machineKey };
-    setBusy(true); setResult(undefined); setPreview(undefined); setManaged(undefined); setRemoveConfirmation(false); setKeepBothConfirmation(false); setBoth(undefined); setFailure("");
+    setBusy(true); setResult(undefined); setPreview(undefined); setManaged(undefined); setRemoveConfirmation(false); setKeepBothConfirmation(false); setBoth(undefined); setCompare(undefined); setFailure("");
     try {
       const next = await store.discoverSkills(runnerID(), root());
       if (alive && request === revision) setResult(next);
@@ -49,7 +50,7 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
       if (alive && request === revision) setFailure(L("Skill discovery failed. Check Runner, path and account, then scan again."));
     } finally { if (alive && request === revision) setBusy(false); }
   };
-  const libraryAction = async (action: "preview" | "import" | "uninstall" | "keep_both") => {
+  const libraryAction = async (action: "preview" | "import" | "uninstall" | "keep_both" | "compare") => {
     if (busy() || !runner() || !root()) return;
     const approved = preview(), installed = managed();
     if ((action === "import" || action === "keep_both") && (!approved || approved.runner_id !== runnerID() || approved.source !== root() || Date.now() >= previewExpires)) {
@@ -57,6 +58,7 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
     }
     if (action === "uninstall" && (!installed || !removeConfirmation())) return;
     if (action === "keep_both" && (!installed || !keepBothConfirmation())) return;
+    if (action === "compare" && !installed) return;
     const request = ++revision, selected = runner()!;
     selectedBinding = { id: selected.id, os: selected.os, key: selected.machineKey };
     setBusy(true); setFailure(""); setWarning(false);
@@ -64,6 +66,7 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
     if (action === "import") setPreview(undefined);
     if (action === "uninstall") setRemoveConfirmation(false);
     if (action === "keep_both") { setKeepBothConfirmation(false); setBoth(undefined); }
+    if (action === "compare") setCompare(undefined);
     try {
       if (action === "preview") {
         setPreview(undefined);
@@ -75,6 +78,10 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
       } else if (action === "keep_both") {
         const next = await store.keepBothSkillLibrary(runnerID(), approved!.token, installed!.managed_id);
         if (alive && request === revision) { setBoth(next); setWarning(next.durability_warning); }
+      } else if (action === "compare") {
+        // Read-only: the reply is a difference to look at, never an offer to apply it.
+        const next = await store.compareSkillLibrary(runnerID(), root(), installed!.managed_id);
+        if (alive && request === revision) setCompare(next);
       } else {
         const next = await store.uninstallSkillLibrary(runnerID(), installed!.managed_id);
         if (alive && request === revision) { setManaged(undefined); setWarning(next.cleanup_warning || next.durability_warning); }
@@ -109,6 +116,7 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
         <p>{L("Managed copy on %@: %@", runner()?.name ?? "—", m().managed_id)}</p>
         <button disabled={busy()} onClick={() => setRemoveConfirmation(true)}>{L("Remove managed copy…")}</button>
         <button disabled={busy() || !preview()} onClick={() => setKeepBothConfirmation(true)}>{L("Keep both copies…")}</button>
+        <button disabled={busy()} onClick={() => void libraryAction("compare")}>{L("Compare source with copy…")}</button>
         <Show when={keepBothConfirmation()}>
           <p>{L("Keep both copies from the preview above. Original copy is never removed or rewritten.")}</p>
           <p>{L("Original copy %@ stays as it is, even after local edits. The second copy is inactive too.", m().managed_id)}</p>
@@ -119,6 +127,13 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
           <p>{L("Kept both copies. Original %@, new copy %@ from %@, digest %@.", b().original_managed_id, b().managed_id, b().source_label, b().digest.slice(0, 12))}</p>
           <p>{L("Label and digest come from the Runner. Not authenticated provenance, and no update replaces the original copy.")}</p>
           <p>{b().summary.name}</p><p>{b().summary.description}</p>
+        </div>}</Show>
+        <Show when={compare()}>{(c) => <div aria-live="polite">
+          <p>{L("Compare on %@, copy %@ against the selected source. Read-only.", runner()?.name ?? "—", c().managed_id)}</p>
+          <p>{L("%@ only in the source.", c().added.length)}</p><For each={c().added}>{(label) => <p>{label}</p>}</For>
+          <p>{L("%@ only in the copy.", c().removed.length)}</p><For each={c().removed}>{(label) => <p>{label}</p>}</For>
+          <p>{L("%@ differ between source and copy.", c().changed.length)}</p><For each={c().changed}>{(label) => <p>{label}</p>}</For>
+          <p>{L("Nothing was changed and nothing is enabled here. Applying a difference needs its own confirmed action.")}</p>
         </div>}</Show>
         <Show when={removeConfirmation()}>
           <p>{L("Remove only managed copy %@? Original source remains untouched.", m().managed_id)}</p>

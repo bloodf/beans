@@ -240,6 +240,16 @@ pub enum DecisionRejection {
         position: f64,
         levels: usize,
     },
+    ChoiceNotMaximum {
+        question: String,
+        selected: String,
+        probability: f64,
+    },
+    ScoreWeightedMeanMismatch {
+        question: String,
+        position: f64,
+        weighted: f64,
+    },
     LegendMismatch { question: String },
     ModelMismatch {
         requested: String,
@@ -315,6 +325,7 @@ pub fn validate(
     request: &DecisionRequest,
     response: &DecisionResponse,
 ) -> Result<Vec<DecisionOutcome>, DecisionRejection> {
+    validate_request(request)?;
     if response.model != request.model {
         return Err(DecisionRejection::ModelMismatch {
             requested: request.model.clone(),
@@ -387,6 +398,19 @@ fn outcome(
             }
             check_probabilities(id, &criteria.keys().cloned().collect(), probabilities)?;
             check_confidence(id, *confidence)?;
+            // The selected option must carry the highest probability. A tie is a
+            // legal selection, so only a strictly better option rejects.
+            let best = probabilities[choice];
+            if probabilities
+                .iter()
+                .any(|(option, value)| option != choice && *value > best)
+            {
+                return Err(DecisionRejection::ChoiceNotMaximum {
+                    question: id.to_string(),
+                    selected: choice.clone(),
+                    probability: best,
+                });
+            }
             Ok(DecisionOutcome::Choice {
                 question: id.to_string(),
                 selected: choice.clone(),
@@ -415,14 +439,28 @@ fn outcome(
                     value: *score,
                 });
             }
-            // The weighted position inherits the probability tolerance, so it may
-            // sit one tolerance outside the last level without being a repair.
+            // The position is a level index and nothing else: no slack, so a
+            // value outside the levels is a rejection and never a rounded one.
             let last = (levels - 1) as f64;
-            if *score < -PROBABILITY_SUM_TOLERANCE || *score > last + PROBABILITY_SUM_TOLERANCE {
+            if !(0.0..=last).contains(score) {
                 return Err(DecisionRejection::ScoreOutsideLevels {
                     question: id.to_string(),
                     position: *score,
                     levels,
+                });
+            }
+            // The position must also be the probability-weighted mean of the
+            // levels, within the documented rounding tolerance. This never
+            // repairs a position; it only accepts one the probabilities justify.
+            let weighted: f64 = probabilities
+                .iter()
+                .map(|(index, value)| index.parse::<f64>().unwrap_or(f64::NAN) * value)
+                .sum();
+            if (score - weighted).abs() > PROBABILITY_SUM_TOLERANCE + PROBABILITY_SUM_ROUNDING {
+                return Err(DecisionRejection::ScoreWeightedMeanMismatch {
+                    question: id.to_string(),
+                    position: *score,
+                    weighted,
                 });
             }
             check_confidence(id, *confidence)?;

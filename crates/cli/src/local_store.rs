@@ -1,7 +1,7 @@
 //! The local SQLite store shared by the desktop CLI and the embedded phone core: account
 //! metadata, sync bookkeeping, messages, and the relay outbox.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::Context;
@@ -11,10 +11,12 @@ use serde::de::DeserializeOwned;
 use crate::app::{OutboxItem, SentJob, Slot, State};
 use crate::model::{Author, Body, LiveTurn, Message};
 
-/// Test-only seam firing on the real admission path, immediately before the schema
-/// transaction. Never present in a production build.
+/// Test-only seam for one database path on the real admission path. It is bound to a
+/// path and to the calling test, so parallel tests never consume each other's hook.
 #[cfg(test)]
-static BEFORE_SCHEMA_INSTALL: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
+thread_local! {
+    static BEFORE_FINAL_IDENTITY_CHECK: std::cell::RefCell<Option<(PathBuf, Box<dyn Fn()>)>> = const { std::cell::RefCell::new(None) };
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SchemaProfile { Empty, PreTask, InitialTask, Core, Scheduled, Current }
@@ -730,17 +732,23 @@ impl LocalStore {
         Self::open_with_admission(path, Some(&admission), true)
     }
 
-    /// Test-only seam firing on the real admission path, immediately before the schema
-    /// transaction. Never present in a production build.
+    /// Test-only seam for one database path. Never present in a production build.
     #[cfg(test)]
-    pub(crate) fn before_schema_install(replace: impl Fn() + Send + 'static) {
-        *BEFORE_SCHEMA_INSTALL.lock().unwrap() = Some(Box::new(replace));
+    pub(crate) fn replace_before_final_identity_check(path: &Path, replace: impl FnOnce() + 'static) {
+        let mut replace = Some(replace);
+        BEFORE_FINAL_IDENTITY_CHECK.with(|slot| {
+            *slot.borrow_mut() = Some((path.to_path_buf(), Box::new(move || replace.take().map(|hook| hook()))));
+        });
     }
 
     #[cfg(test)]
-    fn run_before_schema_install() {
-        let hook = BEFORE_SCHEMA_INSTALL.lock().unwrap().take();
-        if let Some(hook) = hook { hook(); }
+    fn run_replace_before_final_identity_check(path: &Path) {
+        let _ = path;
+        BEFORE_FINAL_IDENTITY_CHECK.with(|slot| {
+            if let Some((hooked, hook)) = slot.borrow_mut().take() {
+                if hooked == path { hook(); }
+            }
+        });
     }
 
     pub(crate) fn open_with_admission(path: &Path, admission: Option<&crate::config::StorageAdmission>, staged: bool) -> anyhow::Result<Self> {
@@ -780,9 +788,9 @@ impl LocalStore {
             config.validate_home_except(owned.as_ref())?;
             if let Some(admission) = admission { admission.revalidate_legacy()?; }
         }
-        if let Some(owned) = &owned { owned.require_identity(path)?; }
         #[cfg(test)]
-        Self::run_before_schema_install();
+        Self::run_replace_before_final_identity_check(path);
+        if let Some(owned) = &owned { owned.require_identity(path)?; }
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         anyhow::ensure!(classify_schema(&tx)? == profile, "Storage schema changed during admission");
         install_local_schema_tx(&tx, profile)?;
@@ -2456,18 +2464,37 @@ mod tests {
         }
     }
 
-    /// The replacement lands on the real admission path, before the schema is installed,
-    /// so `open_with_admission` itself must refuse rather than a helper catching it later.
+    /// A valid Beans database from elsewhere replaces ours immediately before the final
+    /// identity check. The refusal must land before any effect: the foreign file keeps its
+    /// bytes, schema and mode, and our own empty claim is never installed into it.
     #[test]
     #[cfg(unix)]
-    fn admission_refuses_a_database_replaced_before_the_schema_is_installed() {
+    fn admission_refuses_a_foreign_database_swapped_in_before_the_final_identity_check() {
+        let donor = tempfile::tempdir().unwrap();
+        let donor_config = crate::config::Config { home: donor.path().into(), port: 0 };
+        let donor_store = LocalStore::open(&donor_config.database_path()).unwrap();
+        {
+            let conn = donor_store.connection.lock().unwrap();
+            conn.execute("UPDATE metadata SET last_seq=7 WHERE id=1", []).unwrap();
+        }
+        drop(donor_store);
+        let donor_bytes = std::fs::read(donor_config.database_path()).unwrap();
+
         let home = tempfile::tempdir().unwrap();
         let config = crate::config::Config { home: home.path().into(), port: 0 };
-        let swap = home.path().join("swap");
-        std::fs::write(&swap, []).unwrap();
-        let (from, to) = (swap, config.database_path());
-        LocalStore::before_schema_install(move || std::fs::rename(&from, &to).unwrap());
+        let donor_database = donor_config.database_path();
+        let target = config.database_path();
+        let (from, to) = (donor_database, target.clone());
+        LocalStore::replace_before_final_identity_check(&target, move || std::fs::rename(&from, &to).unwrap());
+
         assert!(LocalStore::open(&config.database_path()).is_err());
+        assert_eq!(std::fs::read(&config.database_path()).unwrap(), donor_bytes);
+        let conn = Connection::open(&config.database_path()).unwrap();
+        let seq: i64 = conn.query_row("SELECT last_seq FROM metadata WHERE id=1", [], |row| row.get(0)).unwrap();
+        assert_eq!(seq, 7, "the foreign schema must be untouched");
+        drop(conn);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&config.database_path()).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[test]

@@ -71,6 +71,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [CLI service and updates](docs/architecture/service-updates.md) | CLI installation, standalone services, Runner admission drain and update availability |
 | [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review |
 | [Terminal sessions](docs/architecture/terminal-sessions.md) | A bot's commands in terminals of their own: when a call returns, background commands, the command's card, answering and stopping, Running tasks |
+| [Realtime voice evaluation](docs/architecture/voice-evaluation.md) | Pinned voice stack options: licenses, transports, plaintext recipients, privacy choices and pending live evidence |
 | [Codemode and Plugins](docs/architecture/plugins.md) | Scripts that call plugin tools, MCP plugins and their installs, sign-in, plugin calls at turn time |
 | [Skills](docs/architecture/skills.md) | Bounded metadata discovery, Runner and desktop discovery contract, managed copies, provenance and uninstall |
 | [Marketplace](docs/architecture/marketplace.md) | The relay-backed index of plugins and bot templates, offline fallback and updates, bots added from a template, the marketplace sheet |

@@ -201,21 +201,26 @@ async fn recalled(s:&Scratch)->Vec<String>{
 async fn retained_document_stops_recalling_after_delete_and_notes_survive(){
     let s=Scratch::new();let ledger=Ledger::new();s.register(ledger.clone());
     let bot=s.app.bot(&s.bot).unwrap();let local=beans::memory::MemoryStore::for_bot(&s.home,&bot);
-    local.append_entry("curated local fact",None,0).unwrap();
-    let doc=freeze_document(&s.access().scope.namespace,"service fact",vec![]).unwrap();
-    d::execute(&s.app,&s.access(),BackendRequest::Retain{document:doc.clone()},CancellationToken::new(),false).await.unwrap();
+    local.append_entry("curated local fact",None,0).unwrap();let notes=local.read_index();
+    let access=s.access();
+    let delivery=d::enqueue(&s.app,&access,"service fact",vec![],false,None,&CancellationToken::new()).unwrap();
+    assert_eq!(d::deliver(&s.app,&access,&delivery.id,false,CancellationToken::new()).await.unwrap()["state"],"completed");
+    assert_eq!(s.app.store.memory_delivery(&s.bot,&delivery.id).unwrap().state,OperationState::Completed);
+    let doc=delivery.document;
     assert_eq!(recalled(&s).await,vec!["service fact".to_string()]);
     let old=s.access().scope;
     // The fence bumps the epoch; no live backend is bound to the new scope yet, so the first
     // attempt stops with cleanup pending and nothing erased.
-    assert!(d::delete(&s.app,&s.bot,Some(doc.id.clone()),old.connection_revision.clone(),old.deletion_epoch,CancellationToken::new()).await.is_err());
+    assert_eq!(d::delete(&s.app,&s.bot,Some(doc.id.clone()),old.connection_revision.clone(),old.deletion_epoch,CancellationToken::new()).await.unwrap_err().code,"invalid_endpoint");
     assert!(s.app.store.memory_fence(&s.bot).unwrap().unwrap().pending);
     assert_eq!(ledger.deletes.load(Ordering::SeqCst),0);
+    assert_eq!(ledger.docs.lock().unwrap().as_slice(),&[doc.clone()]);
     s.register(ledger.clone());let fenced=s.access().scope;
     let result=d::delete(&s.app,&s.bot,Some(doc.id.clone()),fenced.connection_revision.clone(),fenced.deletion_epoch,CancellationToken::new()).await.unwrap();
     assert_eq!(result["pending"],false);assert!(!s.app.store.memory_fence(&s.bot).unwrap().unwrap().pending);
+    assert_eq!(ledger.deletes.load(Ordering::SeqCst),1);
     assert!(recalled(&s).await.is_empty());
-    assert!(local.read_index().contains("curated local fact"));
+    assert_eq!(local.read_index(),notes);
 }
 
 #[tokio::test]

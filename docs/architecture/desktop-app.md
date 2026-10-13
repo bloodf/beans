@@ -15,6 +15,8 @@ Solid drafts retain one owner per account identity and chat across chat selectio
 
 The opt-in native memory panel includes embedding-profile Add/Edit/Remove controls with complete API/local-CPU vector-space inputs and explicit secret changes. Profile drafts share memory mutation admission, pending/error retention and account-keyed recovery; the working full client remains the default.
 
+Memory sheets render health and delivery states as distinct plain-language labels from `memoryService.ts`; only `completed` reads as stored, and queued, submitted, processing, failed and delivery-unknown say not stored or unconfirmed.
+
 The native panel also offers each bot's MEMORY.md editor through existing Runner-routed calls, explicit hash-bound Save and confirmed conflict recovery. File size is bounded independently of the per-turn loading budget; note intent shares native close/quit guards and account-separated recovery.
 
 The native note language bridge uses the existing selected language and system locale for English/Simplified Chinese. Preference changes invalidate the native window; note error keys remain language-neutral until rendering so changing language does not discard or rebase a draft. This scope does not establish whole-native localization parity.

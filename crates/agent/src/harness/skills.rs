@@ -225,16 +225,15 @@ mod tests {
             ];
             for (case, want_names, want_diagnostics) in cases {
                 let case_dir = if case == "extended" && *host == "pi" { source.join("extended-dir") } else { source.join(case) };
-                // The diagnostic names the real parent directory of the file, so it is built
-                // from the fixture directory rather than from the case label.
-                let parent = case_dir.file_name().unwrap().to_string_lossy().to_string();
+                let root = temp.join(host).join(case);
+                copy_tree(&case_dir, &root);
+                // The diagnostic names the copied file's parent, not the source fixture directory.
+                let parent = root.file_name().unwrap().to_string_lossy().to_string();
                 let mut want_diagnostics: Vec<String> = want_diagnostics.iter().map(|s| s.to_string()).collect();
                 // Only the cases whose declared name differs from their directory are diagnosed.
                 if matches!(case, "extended" | "duplicate-a" | "duplicate-b") {
                     want_diagnostics.push(format!("does not match parent directory \"{parent}\""));
                 }
-                let root = temp.join(host).join(case);
-                copy_tree(&case_dir, &root);
                 let loaded = load_skills(&[root]);
                 let names: Vec<&str> = loaded.skills.iter().map(|s| s.name.as_str()).collect();
                 let messages: Vec<&str> = loaded.diagnostics.iter().map(|d| d.message.as_str()).collect();

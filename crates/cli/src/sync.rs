@@ -2251,6 +2251,72 @@ mod tests {
         assert!(merge(&[workflow("held", "deleted-bot")]).iter().all(|w| w.bot_id == "b0"));
     }
 
+    /// The final bound is decided against the bot set the merged roster actually has. A remote
+    /// roster at the total bound plus one queued record must end at the bound, with the record
+    /// this Device holds keeping its place.
+    #[test]
+    fn a_full_remote_roster_and_a_queued_record_end_at_the_bound_without_resurrecting() {
+        use crate::model::WorkflowRecord;
+        let definition = serde_json::json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] });
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition: definition.clone(), created_at: 1.0,
+        };
+        let mut base = RosterBlob { bots: (0..13).map(|i| bot(&format!("b{i:02}"))).collect(), ..Default::default() };
+        base.workflows = vec![workflow("held", "b00")];
+        let local = base.clone();
+
+        // The remote roster arrives already at the bound, and a queued local record is waiting.
+        let mut remote = base.clone();
+        for i in 0..13 {
+            for n in 0..crate::workflow::MAX_PER_BOT {
+                if remote.workflows.len() < crate::workflow::MAX_TOTAL {
+                    remote.workflows.push(workflow(&format!("r-{i:02}-{n:02}"), &format!("b{i:02}")));
+                }
+            }
+        }
+        assert_eq!(remote.workflows.len(), crate::workflow::MAX_TOTAL, "the remote roster starts at the bound");
+        let queued = RosterBlob { workflows: vec![workflow("queued-new", "b01")], ..base.clone() };
+
+        let merged = merge_rosters(remote, &base, &queued).workflows;
+        assert!(merged.len() <= crate::workflow::MAX_TOTAL, "the merge grew past the bound: {}", merged.len());
+        assert!(merged.iter().any(|w| w.id == "held"), "a held record lost its place under the bound");
+        for record in &merged {
+            assert!(!record.bot_id.is_empty() && record.id.starts_with("r-") || record.id == "held",
+                "an unexpected record survived: {}", record.id);
+        }
+        for bot in ["b00", "b01"] {
+            let count = merged.iter().filter(|w| w.bot_id == bot).count();
+            assert!(count <= crate::workflow::MAX_PER_BOT, "{bot} kept {count} records");
+        }
+    }
+
+    /// A bot deleted on this Device takes its workflows out of what the merge would otherwise
+    /// hand on. The roster merge keeps records for a bot the base no longer lists only when the
+    /// bot is still in the roster; the deletion path is the rebase filter, so this checks the
+    /// merge does not hand a deleted bot's record back before that filter runs.
+    #[test]
+    fn a_deleted_bots_workflow_is_absent_from_the_merged_roster() {
+        use crate::model::WorkflowRecord;
+        let definition = serde_json::json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] });
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition: definition.clone(), created_at: 1.0,
+        };
+        let mut base = RosterBlob { bots: vec![bot("b1"), bot("b2")], ..Default::default() };
+        base.workflows = vec![workflow("kept", "b1"), workflow("doomed", "b2")];
+        let queued = base.clone();
+
+        // The remote roster has already dropped b2, so its workflows have no bot to belong to.
+        let mut remote = base.clone();
+        remote.bots.retain(|bot| bot.id != "b2");
+        remote.workflows = vec![workflow("kept", "b1"), workflow("doomed", "b2")];
+
+        let merged = merge_rosters(remote, &base, &queued);
+        assert!(merged.bots.iter().all(|bot| bot.id != "b2"), "the deleted bot came back");
+        assert!(!merged.workflows.iter().any(|w| w.id == "doomed"),
+            "a deleted bot's workflow is still in the merged roster");
+        assert!(merged.workflows.iter().any(|w| w.id == "kept"), "a live bot lost its workflow");
+    }
+
     fn policy(device: &str, counter: u64, paused: Option<bool>, capabilities: Option<Capabilities>) -> PolicyBlob {
         PolicyBlob { paused, bot_id: capabilities.as_ref().map(|_| "bot".into()), capabilities, removed: false,
             version: PolicyVersion { counter, device_id: device.into() } }

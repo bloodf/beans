@@ -161,7 +161,7 @@ test("nested span overlap is refused before any tool spawn; a non-overlapping tw
 
 // The reader hands its tools a private snapshot, never the original path: a tool that swaps the original
 // out from under the reader still sees the admitted bytes, and the snapshot is removed afterwards.
-test("tools read the admitted snapshot even if the original is replaced; symlinks and growth are refused", async () => {
+test("tools read the admitted snapshot even if the original is replaced; symlinks, relative paths and directories are refused", async () => {
   const dir = await mkdtemp(join(tmpdir(), "beans-snapshot-"));
   try {
     const original = join(dir, "a.apk"), log = join(dir, "argv"), bin = join(dir, "bin"); await mkdir(bin);

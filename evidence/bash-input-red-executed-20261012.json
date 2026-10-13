@@ -1,0 +1,41 @@
+{
+  "claim": "RED of the 1862dc3b bash_input deadline, executed against an isolated preimage of that exact candidate with the guard removed and nothing else changed.",
+  "candidate": {
+    "branch": "roadmap/p0/bash-input-deadline-20261012",
+    "commit": "1862dc3b197d0eed2d7c02e8009884dae1e18471",
+    "pushed": "origin/roadmap/p0/bash-input-deadline-20261012"
+  },
+  "preimage_worktree": {
+    "path": ".omc/roadmap-p0-p6/worktrees/red-proof-1862",
+    "created_from": "1862dc3b197d0eed2d7c02e8009884dae1e18471 (detached)",
+    "removed_after_run": true,
+    "disposition": "throwaway; removed with git worktree remove --force, branch untouched, no reset of any user WIP, no force push"
+  },
+  "preimage_edit": {
+    "file": "crates/agent/src/tools/bash_session.rs",
+    "scope": "only the two guard lines removed; test kept verbatim from the candidate",
+    "diff": [
+      "-        let longest = if session.background() { BACKGROUND_SETTLE } else { self.longest_wait };",
+      "-        let stop = session.wait(base, since, idle, Some(since + longest), &cancel, |_| {}).await;",
+      "+        let stop = session.wait(base, since, idle, None, &cancel, |_| {}).await;"
+    ],
+    "diff_stat": "1 file changed, 1 insertion(+), 2 deletions(-)",
+    "test_still_present": "input_returns_while_the_command_keeps_printing: 1 occurrence, unmodified"
+  },
+  "red_command": "CARGO_BUILD_JOBS=2 cargo test -p beans-agent tools::bash_session::tests::input_returns_while_the_command_keeps_printing -- --exact",
+  "red_test_deadline": "20s in-test tokio::time::timeout around the bash_input call",
+  "red_raw_exit_code": 101,
+  "red_log": {
+    "test line": "test tools::bash_session::tests::input_returns_while_the_command_keeps_printing ... FAILED",
+    "panic": "crates/agent/src/tools/bash_session.rs:1444:18: bash_input returned while the command kept printing: Elapsed(())",
+    "result line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 203 filtered out; finished in 25.09s",
+    "interpretation": "with wait(..., None, ...) the production bash_input call never returns while the command keeps printing, so the 20s test deadline fires and the test fails with a non-zero exit; the guard is what makes it return"
+  },
+  "green_already_recorded": {
+    "note": "not rerun for this evidence; recorded from the authoring run on the same candidate",
+    "selected_test": "1 passed; 0 failed; 0 ignored; 0 measured; 203 filtered out; finished in 6.65s",
+    "module_sweep": "cargo test -p beans-agent tools::bash_session -> 21 passed; 0 failed"
+  },
+  "candidate_state_after_evidence": "worktree .omc/roadmap-p0-p6/worktrees/bash-input-deadline-20261012 clean at 1862dc3b, tracking origin, no commits added, no force push",
+  "independent_review": "native worker in progress on 1862dc3b"
+}

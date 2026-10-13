@@ -274,7 +274,8 @@ async fn lance_real_temp_scoped_upsert_search_provenance_edit_delete_transfer() 
 
 #[tokio::test]
 async fn lance_index_removal_keeps_notes_and_rebuilds_empty_without_old_evidence() {
-    let notes = beans::memory::MemoryStore::new(tempfile::tempdir().unwrap().keep());
+    let notes_directory = tempfile::tempdir().unwrap();
+    let notes = beans::memory::MemoryStore::new(notes_directory.path());
     notes.append_entry("curated note", None, 0).unwrap();
     let index = tempfile::tempdir().unwrap();
     let a = scope("a");

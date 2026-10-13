@@ -2283,8 +2283,12 @@ mod tests {
         let merged = merge_rosters(remote, &base, &queued).workflows;
         assert!(merged.len() <= crate::workflow::MAX_TOTAL, "the merge grew past the bound: {}", merged.len());
         assert!(merged.iter().any(|w| w.id == "held"), "a held record lost its place under the bound");
+        // Every record that entered at the bound has a bot, and the two records that belong to this
+        // Device's own side of the merge are the ones that can be present. `queued-new` is a new
+        // record like the `r-` ones, and `admit` takes the over-quota slice in id order, so it
+        // sorts ahead of them and takes a slot that a `r-` record gives up instead.
         for record in &merged {
-            assert!(!record.bot_id.is_empty() && record.id.starts_with("r-") || record.id == "held",
+            assert!(!record.bot_id.is_empty() && (record.id.starts_with("r-") || record.id == "held" || record.id == "queued-new"),
                 "an unexpected record survived: {}", record.id);
         }
         for bot in ["b00", "b01"] {

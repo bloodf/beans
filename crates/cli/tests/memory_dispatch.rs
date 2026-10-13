@@ -174,3 +174,63 @@ async fn admitted_text_is_frozen_and_capture_consumption_is_atomic_across_restar
     beans::memory_service::tools::capture_completed(&restarted,&restored,&job.chat_id,&job.trigger_message_id,&[reply_id],CancellationToken::new()).await;
     assert_eq!(restarted.store.memory_deliveries(&s.bot).unwrap().len(),1);
 }
+
+/// Keeps retained documents so recall after delete can prove the item is gone.
+struct Ledger {docs:std::sync::Mutex<Vec<FrozenDocument>>, deletes:AtomicUsize}
+impl Ledger{fn new()->Arc<Self>{Arc::new(Self{docs:Default::default(),deletes:AtomicUsize::new(0)})}}
+#[async_trait]
+impl MemoryBackend for Ledger {
+    fn capabilities(&self)->Capabilities{Capabilities{retain:true,recall:true,delete_document:true,clear:true,..Default::default()}}
+    async fn execute(&self,_scope:&MemoryScope,request:BackendRequest,_cancel:CancellationToken)->Result<BackendResponse,MemoryError>{
+        let mut docs=self.docs.lock().unwrap();
+        Ok(match request{
+            BackendRequest::Retain{document}=>{docs.retain(|d|d.id!=document.id);docs.push(document);BackendResponse::default()},
+            BackendRequest::Recall{..}=>BackendResponse{evidence:docs.iter().map(|d|Evidence{id:d.id.clone(),text:d.text.clone(),document_id:Some(d.id.clone())}).collect(),..Default::default()},
+            BackendRequest::DeleteDocument{document_id,..}=>{self.deletes.fetch_add(1,Ordering::SeqCst);docs.retain(|d|d.id!=document_id);BackendResponse::default()},
+            BackendRequest::Clear{..}=>{self.deletes.fetch_add(1,Ordering::SeqCst);docs.clear();BackendResponse::default()},
+            _=>BackendResponse::default(),
+        })
+    }
+}
+async fn recalled(s:&Scratch)->Vec<String>{
+    d::execute(&s.app,&s.access(),BackendRequest::Recall{query:"fact".into(),budget:RecallBudget::default()},CancellationToken::new(),false).await
+        .unwrap().evidence.into_iter().map(|e|e.text).collect()
+}
+
+#[tokio::test]
+async fn retained_document_stops_recalling_after_delete_and_notes_survive(){
+    let s=Scratch::new();let ledger=Ledger::new();s.register(ledger.clone());
+    let bot=s.app.bot(&s.bot).unwrap();let local=beans::memory::MemoryStore::for_bot(&s.home,&bot);
+    local.append_entry("curated local fact",None,0).unwrap();
+    let doc=freeze_document(&s.access().scope.namespace,"service fact",vec![]).unwrap();
+    d::execute(&s.app,&s.access(),BackendRequest::Retain{document:doc.clone()},CancellationToken::new(),false).await.unwrap();
+    assert_eq!(recalled(&s).await,vec!["service fact".to_string()]);
+    let old=s.access().scope;
+    // The fence bumps the epoch; no live backend is bound to the new scope yet, so the first
+    // attempt stops with cleanup pending and nothing erased.
+    assert!(d::delete(&s.app,&s.bot,Some(doc.id.clone()),old.connection_revision.clone(),old.deletion_epoch,CancellationToken::new()).await.is_err());
+    assert!(s.app.store.memory_fence(&s.bot).unwrap().unwrap().pending);
+    assert_eq!(ledger.deletes.load(Ordering::SeqCst),0);
+    s.register(ledger.clone());let fenced=s.access().scope;
+    let result=d::delete(&s.app,&s.bot,Some(doc.id.clone()),fenced.connection_revision.clone(),fenced.deletion_epoch,CancellationToken::new()).await.unwrap();
+    assert_eq!(result["pending"],false);assert!(!s.app.store.memory_fence(&s.bot).unwrap().unwrap().pending);
+    assert!(recalled(&s).await.is_empty());
+    assert!(local.read_index().contains("curated local fact"));
+}
+
+#[tokio::test]
+async fn delete_with_inflight_operation_reports_pending_cleanup_not_erased(){
+    let s=Scratch::new();let ledger=Ledger::new();s.register(ledger.clone());let access=s.access();
+    let doc=freeze_document(&access.scope.namespace,"service fact",vec![]).unwrap();
+    d::execute(&s.app,&s.access(),BackendRequest::Retain{document:doc.clone()},CancellationToken::new(),false).await.unwrap();
+    let mut delivery=d::enqueue(&s.app,&access,"in flight",vec![],false,None,&CancellationToken::new()).unwrap();
+    let before=delivery.clone();delivery.state=OperationState::Processing;delivery.operation_id=Some("in-flight".into());
+    s.app.store.transition_memory(&before,&delivery).unwrap();
+    let old=access.scope.clone();
+    let result=d::delete(&s.app,&s.bot,None,old.connection_revision.clone(),old.deletion_epoch,CancellationToken::new()).await.unwrap();
+    assert_eq!(result["pending"],true);assert_eq!(result["reason"],"remote_quiescence_unverified");
+    assert!(s.app.store.memory_fence(&s.bot).unwrap().unwrap().pending);
+    assert_eq!(ledger.deletes.load(Ordering::SeqCst),0);
+    let late=d::enqueue(&s.app,&s.access(),"late write",vec![],false,None,&CancellationToken::new());
+    assert_eq!(late.unwrap_err().code,"deletion_pending");
+}

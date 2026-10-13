@@ -2263,7 +2263,6 @@ mod tests {
         };
         let mut base = RosterBlob { bots: (0..13).map(|i| bot(&format!("b{i:02}"))).collect(), ..Default::default() };
         base.workflows = vec![workflow("held", "b00")];
-        let local = base.clone();
 
         // The remote roster arrives already at the bound, and a queued local record is waiting.
         let mut remote = base.clone();
@@ -2303,9 +2302,12 @@ mod tests {
         };
         let mut base = RosterBlob { bots: vec![bot("b1"), bot("b2")], ..Default::default() };
         base.workflows = vec![workflow("kept", "b1"), workflow("doomed", "b2")];
-        let queued = base.clone();
 
-        // The remote roster has already dropped b2, so its workflows have no bot to belong to.
+        // The bot was deleted on this Device, so the queued roster and the remote roster both
+        // left it out; only the remote roster still carries its workflow.
+        let mut queued = base.clone();
+        queued.bots.retain(|bot| bot.id != "b2");
+        queued.workflows.retain(|w| w.id != "doomed");
         let mut remote = base.clone();
         remote.bots.retain(|bot| bot.id != "b2");
         remote.workflows = vec![workflow("kept", "b1"), workflow("doomed", "b2")];

@@ -2318,13 +2318,14 @@ mod tests {
             }
             state.workflows.len()
         };
+        let outbox_before = app.store.outbox().unwrap().len();
 
         let error = app.insert_workflow(workflow_record("b1", crate::workflow::MAX_PER_BOT)).unwrap_err();
         assert!(format!("{error:#}").contains("at most"), "a full bot must say why: {error:#}");
 
         assert_eq!(app.state.lock().unwrap().workflows.len(), held, "a refused create changed the held records");
         assert_eq!(app.store.load_state().unwrap().workflows.len(), 0, "a refused create wrote to the store");
-        assert!(app.store.outbox().unwrap().is_empty(), "a refused create queued an outbox item");
+        assert_eq!(app.store.outbox().unwrap().len(), outbox_before, "a refused create queued an outbox item");
     }
 
     /// Two creates taking the last slot together: exactly one wins. The bound is read under the

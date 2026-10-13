@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readVersion, ROOT } from "./app.ts";
+import { snapshotArtifact } from "./release-native-identity.ts";
 
 const profiles = { github: { platform: "ANDROID", extension: "apk", component: "android" }, production: { platform: "ANDROID", extension: "aab", component: "android-store" }, testflight: { platform: "IOS", extension: "ipa", component: "ios-store" } } as const;
 type Profile = keyof typeof profiles;
@@ -76,18 +77,22 @@ export async function stageLocalBuild(input: string, profile: Profile, revision:
   const project = process.env.BEANS_EXPO_PROJECT_ID ?? "";
   const version = readVersion();
   if (!Object.hasOwn(profiles, profile) || !uuid.test(project) || !/^[a-f0-9]{40}$/.test(revision)) throw new Error("Invalid EAS release identity");
-  const native = await inspect(input, profile);
-  if (native?.identifier !== "ai.amoena.beans" || native.version !== version || !/^[1-9]\d*$/.test(native.buildNumber) || Number(native.buildNumber) > 2_100_000_000) {
-    throw new Error("Local binary differs from the release identity, version or EAS-allocated build number");
-  }
-  if ((await stat(input)).size > 2 ** 30) throw new Error("Local artifact exceeds 1 GiB");
-  const bytes = new Uint8Array(await readFile(input));
-  if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw new Error("Local artifact must be a nonempty ZIP-format APK/AAB/IPA");
-  const name = `Beans-${version}${profile === "testflight" ? "-store" : ""}.${profiles[profile].extension}`;
-  await mkdir(directory, { recursive: true });
-  await writeFile(join(directory, name), bytes, { flag: "wx" });
-  const provenance = { schema: 1, kind: "local-exact-source", revision, version, project, profile, platform: profiles[profile].platform, buildNumber: native.buildNumber, artifact: name, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
-  await writeFile(join(directory, `eas-${profile}.json`), `${JSON.stringify(provenance)}\n`, { flag: "wx" });
+  // One admitted snapshot: the inspector sees the private copy, and the artifact and proof hash are
+  // written from the same retained bytes, so replacing `input` afterwards changes neither.
+  const snapshot = snapshotArtifact(input);
+  try {
+    const bytes = snapshot.bytes;
+    if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw new Error("Local artifact must be a nonempty ZIP-format APK/AAB/IPA");
+    const native = await inspect(snapshot.path, profile);
+    if (native?.identifier !== "ai.amoena.beans" || native.version !== version || !/^[1-9]\d*$/.test(native.buildNumber) || Number(native.buildNumber) > 2_100_000_000) {
+      throw new Error("Local binary differs from the release identity, version or EAS-allocated build number");
+    }
+    const name = `Beans-${version}${profile === "testflight" ? "-store" : ""}.${profiles[profile].extension}`;
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, name), bytes, { flag: "wx" });
+    const provenance = { schema: 1, kind: "local-exact-source", revision, version, project, profile, platform: profiles[profile].platform, buildNumber: native.buildNumber, artifact: name, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+    await writeFile(join(directory, `eas-${profile}.json`), `${JSON.stringify(provenance)}\n`, { flag: "wx" });
+  } finally { snapshot.dispose(); }
 }
 export async function runLocalEasRelease(args: string[], inspect: InspectNative, run = (args: string[], cwd: string) => Bun.spawnSync(args, { cwd, stdout: "inherit", stderr: "inherit" }), git = (args: string[]) => Bun.spawnSync(args, { cwd: ROOT })) {
   const [profile, revision, directory, ...extra] = args;

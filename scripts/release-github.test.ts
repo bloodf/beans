@@ -74,7 +74,14 @@ test("local exact-source pipeline: stage with production code, finalize only thr
     for (const profile of ["github", "production", "testflight"] as const) {
       const input = join(source, profile);
       await writeFile(input, new Uint8Array([0x50, 0x4b, 3, 4, profile.length]));
-      await stageLocalBuild(input, profile, revision, path, inspect);
+      // Replacing the original after the inspector ran must not change what is staged or hashed.
+      await stageLocalBuild(input, profile, revision, path, async (snapshot, kind) => {
+        const result = await inspect(snapshot, kind);
+        await writeFile(input, new Uint8Array([0x50, 0x4b, 3, 4, 99]));
+        return result;
+      });
+      const staged = new Uint8Array(await Bun.file(join(path, `Beans-${v}${profile === "testflight" ? "-store.ipa" : profile === "production" ? ".aab" : ".apk"}`)).arrayBuffer());
+      expect(staged).toEqual(new Uint8Array([0x50, 0x4b, 3, 4, profile.length]));
     }
   } finally { if (previous === undefined) delete process.env.BEANS_EXPO_PROJECT_ID; else process.env.BEANS_EXPO_PROJECT_ID = previous; }
   const proofFile = (profile: string) => join(path, `eas-${profile}.json`);

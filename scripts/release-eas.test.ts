@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readVersion } from "./app.ts";
-import { downloadArtifact, runEasRelease, runLocalEasRelease, stageEasBuild, validateEasBuild } from "./release-eas.ts";
+import { downloadArtifact, runEasRelease, runLocalEasRelease, stageEasBuild, stageLocalBuild, validateEasBuild } from "./release-eas.ts";
 import { androidNdk, hostLibrary } from "./release-build-inputs.ts";
 
 const revision = "a".repeat(40);
@@ -133,5 +133,55 @@ describe("local exact-source provenance", () => {
         });
       });
     } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+});
+describe("local staging binds the inspector and the staged hash to one admitted snapshot", () => {
+  const zip = (tag: number) => new Uint8Array([0x50, 0x4b, 3, 4, tag]);
+  const sha = (bytes: Uint8Array) => require("node:crypto").createHash("sha256").update(bytes).digest("hex");
+  async function withProject(body: (directory: string) => Promise<void>) {
+    const directory = await mkdtemp(join(tmpdir(), "beans-local-snapshot-"));
+    const previous = process.env.BEANS_EXPO_PROJECT_ID;
+    process.env.BEANS_EXPO_PROJECT_ID = project;
+    try { await body(directory); } finally {
+      if (previous === undefined) delete process.env.BEANS_EXPO_PROJECT_ID; else process.env.BEANS_EXPO_PROJECT_ID = previous;
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+  const ok = { identifier: "ai.amoena.beans", version: readVersion(), buildNumber: "77" };
+  test("replacing the original after admission changes neither the inspected bytes nor the staged hash", async () => {
+    await withProject(async (directory) => {
+      const fs = require("node:fs");
+      const original = join(directory, "build.apk"), admitted = zip(1), replacement = zip(2);
+      fs.writeFileSync(original, admitted);
+      let seen = "";
+      await stageLocalBuild(original, "github", revision, join(directory, "out"), async (path) => {
+        // The inspector is handed a private copy, not the original path.
+        expect(path).not.toBe(original);
+        expect(Buffer.from(fs.readFileSync(path))).toEqual(Buffer.from(admitted));
+        // The original is swapped after admission, before staging writes anything.
+        fs.writeFileSync(original, replacement);
+        seen = path;
+        return ok;
+      });
+      const name = `Beans-${readVersion()}.apk`;
+      const staged = new Uint8Array(fs.readFileSync(join(directory, "out", name)));
+      expect(staged).toEqual(admitted);
+      const proof = await Bun.file(join(directory, "out", "eas-github.json")).json();
+      expect(proof).toMatchObject({ sha256: sha(admitted), size: admitted.length });
+      expect(proof.sha256).not.toBe(sha(replacement));
+      // The private snapshot is gone after staging.
+      expect(fs.existsSync(seen)).toBe(false);
+    });
+  });
+  test("a symlink input is refused before the inspector runs and nothing is staged", async () => {
+    await withProject(async (directory) => {
+      const fs = require("node:fs");
+      const target = join(directory, "real.apk"), link = join(directory, "link.apk");
+      fs.writeFileSync(target, zip(1)); fs.symlinkSync(target, link);
+      let inspected = false;
+      await expect(stageLocalBuild(link, "github", revision, join(directory, "out"), async () => { inspected = true; return ok; })).rejects.toThrow();
+      expect(inspected).toBe(false);
+      expect(fs.existsSync(join(directory, "out"))).toBe(false);
+    });
   });
 });

@@ -158,3 +158,39 @@ test("nested span overlap is refused before any tool spawn; a non-overlapping tw
     expect(inspectReleaseArchive(control)).toEqual(["outer", "inner"]);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+// The reader hands its tools a private snapshot, never the original path: a tool that swaps the original
+// out from under the reader still sees the admitted bytes, and the snapshot is removed afterwards.
+test("tools read the admitted snapshot even if the original is replaced; symlinks and growth are refused", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "beans-snapshot-"));
+  try {
+    const original = join(dir, "a.apk"), log = join(dir, "argv"), bin = join(dir, "bin"); await mkdir(bin);
+    const zip = (tag: string) => archiveFixture("AndroidManifest.xml", tag);
+    const admitted = zip("admitted"), replacement = zip("replaced");
+    await writeFile(original, admitted);
+    const q = (p: string) => `'${p.replaceAll("'", "'\\''")}'`;
+    // unzip stub: record the path it received and its content hash, then replace the ORIGINAL file.
+    await writeFile(join(bin, "unzip"), `#!/bin/sh\nfor last; do :; done\nprintf '%s ' "$last" >> ${q(log)}\nshasum -a 256 "$last" | cut -d' ' -f1 >> ${q(log)}\ncp ${q(join(dir, "replacement"))} ${q(original)}\nexit 0\n`);
+    await writeFile(join(bin, "aapt2"), `#!/bin/sh\nfor last; do :; done\nprintf '%s ' "$last" >> ${q(log)}\nshasum -a 256 "$last" | cut -d' ' -f1 >> ${q(log)}\nprintf "package: name='ai.amoena.beans' versionCode='1' versionName='1.0.14'\\n"\n`);
+    await writeFile(join(dir, "replacement"), replacement);
+    for (const tool of ["unzip", "aapt2"]) await chmod(join(bin, tool), 0o755);
+    const identity = readNativeIdentity(original, "github", { PATH: `${bin}:/usr/bin:/bin` });
+    expect(identity).toEqual({ identifier: "ai.amoena.beans", version: "1.0.14", buildNumber: "1" });
+    const rows = (await Bun.file(log).text()).trim().split("\n").map(line => line.split(" "));
+    expect(rows.length).toBe(2);
+    const admittedHash = createHash("sha256").update(admitted).digest("hex");
+    for (const [path, hash] of rows) {
+      expect(path).not.toBe(original);
+      expect(hash).toBe(admittedHash);
+      expect(existsSync(path)).toBe(false); // snapshot removed after the call
+    }
+    expect(createHash("sha256").update(await Bun.file(original).bytes()).digest("hex")).not.toBe(admittedHash); // original really was replaced
+    // A symlink as the final component is refused before any tool runs.
+    await writeFile(join(dir, "real.apk"), admitted);
+    await Bun.spawn(["ln", "-s", join(dir, "real.apk"), join(dir, "link.apk")]).exited;
+    expect(() => readNativeIdentity(join(dir, "link.apk"), "github", { PATH: bin })).toThrow();
+    // Relative paths and non-regular files stay refused.
+    expect(() => readNativeIdentity("a.apk", "github", { PATH: bin })).toThrow();
+    expect(() => readNativeIdentity(dir, "github", { PATH: bin })).toThrow();
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

@@ -5,7 +5,8 @@
 //! not adapter acceptance evidence from captured bytes.
 
 use super::{
-    validate, validate_request, DecisionAnswer, DecisionRejection, DecisionRequest, DecisionResponse,
+    preflight_request, validate, validate_request, DecisionAnswer, DecisionCapabilities,
+    DecisionPreflight, DecisionQuestionType, DecisionRejection, DecisionRequest, DecisionResponse,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -610,6 +611,163 @@ fn the_local_request_rules_pin_models_and_value_shapes() {
     assert!(
         validate_request(&request).is_ok(),
         "a null option value is the documented way to leave an option undescribed"
+    );
+}
+
+#[test]
+fn capability_preflight_preserves_unknowns_and_enforces_known_limits() {
+    use serde_json::json;
+    let cases = [
+        (CHOICE_REQUEST, json!({}), Ok(DecisionPreflight::Unverified)),
+        (
+            CHOICE_REQUEST, json!({"choice": false}),
+            Err(DecisionRejection::QuestionUnsupported {
+                question: "route".into(), asked: DecisionQuestionType::Choice,
+            }),
+        ),
+        (
+            CHOICE_REQUEST, json!({"choice": true}),
+            Ok(DecisionPreflight::Unverified),
+        ),
+        (
+            CHOICE_REQUEST, json!({"choice": true, "max_questions": 1, "choice_options": 2}),
+            Ok(DecisionPreflight::Verified),
+        ),
+        (
+            CHOICE_REQUEST, json!({"choice": true, "max_questions": 1, "choice_options": 1}),
+            Err(DecisionRejection::CapabilityLimit {
+                question: Some("route".into()),
+                limit: "choice_options",
+                count: 2, maximum: 1,
+            }),
+        ),
+        (
+            CHOICE_REQUEST, json!({"max_questions": 0}),
+            Err(DecisionRejection::CapabilityLimit {
+                question: None,
+                limit: "max_questions",
+                count: 1, maximum: 0,
+            }),
+        ),
+        (
+            SCORE_REQUEST, json!({"choice": true, "score": false, "noul": false}),
+            Err(DecisionRejection::QuestionUnsupported {
+                question: "frustration".into(), asked: DecisionQuestionType::Score,
+            }),
+        ),
+        (
+            NOUL_REQUEST, json!({"choice": true, "score": false, "noul": false}),
+            Err(DecisionRejection::QuestionUnsupported {
+                question: "regression".into(), asked: DecisionQuestionType::Noul,
+            }),
+        ),
+        (
+            SCORE_REQUEST, json!({"choice": true}),
+            Ok(DecisionPreflight::Unverified),
+        ),
+        (
+            NOUL_REQUEST, json!({"choice": true}),
+            Ok(DecisionPreflight::Unverified),
+        ),
+        (
+            SCORE_REQUEST, json!({"score": true, "max_questions": 1, "score_levels": 3}),
+            Ok(DecisionPreflight::Verified),
+        ),
+        (
+            SCORE_REQUEST, json!({"score": true, "max_questions": 1, "score_levels": 2}),
+            Err(DecisionRejection::CapabilityLimit {
+                question: Some("frustration".into()),
+                limit: "score_levels",
+                count: 3, maximum: 2,
+            }),
+        ),
+        (
+            NOUL_REQUEST, json!({"noul": true, "max_questions": 1}),
+            Ok(DecisionPreflight::Verified),
+        ),
+        (
+            NOUL_REQUEST, json!({"noul": true}),
+            Ok(DecisionPreflight::Unverified),
+        ),
+        (
+            SCORE_REQUEST, json!({"score": true, "max_questions": 1}),
+            Ok(DecisionPreflight::Unverified),
+        ),
+        (
+            CHOICE_REQUEST, json!({"max_questions": 1, "choice_options": 1}),
+            Err(DecisionRejection::CapabilityLimit {
+                question: Some("route".into()),
+                limit: "choice_options",
+                count: 2, maximum: 1,
+            }),
+        ),
+    ];
+    for (body, facts, expected) in cases {
+        let request: DecisionRequest = serde_json::from_str(body).expect("documented request");
+        let before = serde_json::to_value(&request).expect("request snapshot");
+        let capabilities: DecisionCapabilities =
+            serde_json::from_value(facts.clone()).expect("capability facts");
+        let roundtrip = serde_json::to_value(&capabilities).expect("serialized facts");
+        for field in [
+            "noul",
+            "choice",
+            "score",
+            "max_questions",
+            "choice_options",
+            "score_levels",
+        ] {
+            assert_eq!(roundtrip[field], facts[field], "preserve {field}");
+        }
+        assert_eq!(
+            preflight_request(&request, &capabilities),
+            expected,
+            "{facts}"
+        );
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            before,
+            "never truncate"
+        );
+    }
+    let two_questions = DecisionRequest {
+        state: json!("s"),
+        model: "jev-1.13.0".into(),
+        questions: [CHOICE_REQUEST, NOUL_REQUEST]
+            .into_iter()
+            .flat_map(|body| {
+                serde_json::from_str::<DecisionRequest>(body)
+                    .unwrap()
+                    .questions
+            })
+            .collect(),
+    };
+    for (maximum, expected) in [
+        (2, Ok(DecisionPreflight::Verified)),
+        (
+            1,
+            Err(DecisionRejection::CapabilityLimit {
+                question: None,
+                limit: "max_questions",
+                count: 2, maximum: 1,
+            }),
+        ),
+    ] {
+        let capabilities = DecisionCapabilities {
+            choice: Some(true),
+            noul: Some(true),
+            max_questions: Some(maximum),
+            choice_options: Some(2),
+            ..DecisionCapabilities::default()
+        };
+        assert_eq!(preflight_request(&two_questions, &capabilities), expected);
+    }
+    let invalid: DecisionRequest =
+        serde_json::from_str(&CHOICE_REQUEST.replace("jev-1.13.0", "jev-latest")).unwrap();
+    assert_eq!(
+        preflight_request(&invalid, &DecisionCapabilities::default()),
+        Err(DecisionRejection::ModelNotPinned {
+            model: "jev-latest".into()
+        })
     );
 }
 

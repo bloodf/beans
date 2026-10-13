@@ -104,6 +104,26 @@ impl DecisionQuestion {
     }
 }
 
+/// Explicit caller-supplied facts, not inferred from a model id or catalog.
+/// `None` stays unknown; zero is a known limit that admits no entries.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionCapabilities {
+    pub noul: Option<bool>,
+    pub choice: Option<bool>,
+    pub score: Option<bool>,
+    pub max_questions: Option<usize>,
+    pub choice_options: Option<usize>,
+    pub score_levels: Option<usize>,
+}
+
+/// Local evidence only: neither outcome sends a request or grants permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionPreflight {
+    Verified,
+    Unverified,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DecisionResponse {
     /// The versioned id that answered.
@@ -183,6 +203,16 @@ impl DecisionOutcome {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecisionRejection {
+    QuestionUnsupported {
+        question: String,
+        asked: DecisionQuestionType,
+    },
+    CapabilityLimit {
+        question: Option<String>,
+        limit: &'static str,
+        count: usize,
+        maximum: usize,
+    },
     ModelNotPinned { model: String },
     QuestionIdBlank { question: String },
     StateShape,
@@ -318,6 +348,72 @@ pub fn validate_request(request: &DecisionRequest) -> Result<(), DecisionRejecti
         }
     }
     Ok(())
+}
+
+/// Structural validation first, then all known capability refusals. Missing
+/// relevant facts leave the request unverified, never implicitly supported.
+pub fn preflight_request(
+    request: &DecisionRequest,
+    capabilities: &DecisionCapabilities,
+) -> Result<DecisionPreflight, DecisionRejection> {
+    validate_request(request)?;
+    let mut verified = check_capability_limit(
+        None,
+        "max_questions",
+        request.questions.len(),
+        capabilities.max_questions,
+    )?;
+    for (id, question) in &request.questions {
+        let (support, limit) = match question {
+            DecisionQuestion::Noul { .. } => (capabilities.noul, None),
+            DecisionQuestion::Choice { criteria, .. } => (
+                capabilities.choice,
+                Some((
+                    "choice_options",
+                    criteria.len(),
+                    capabilities.choice_options,
+                )),
+            ),
+            DecisionQuestion::Score { criteria, .. } => (
+                capabilities.score,
+                Some(("score_levels", criteria.len(), capabilities.score_levels)),
+            ),
+        };
+        if support == Some(false) {
+            return Err(DecisionRejection::QuestionUnsupported {
+                question: id.clone(),
+                asked: question.question_type(),
+            });
+        }
+        verified &= support == Some(true);
+        if let Some((name, count, maximum)) = limit {
+            verified &= check_capability_limit(Some(id), name, count, maximum)?;
+        }
+    }
+    Ok(if verified {
+        DecisionPreflight::Verified
+    } else {
+        DecisionPreflight::Unverified
+    })
+}
+
+fn check_capability_limit(
+    question: Option<&String>,
+    limit: &'static str,
+    count: usize,
+    maximum: Option<usize>,
+) -> Result<bool, DecisionRejection> {
+    if let Some(maximum) = maximum {
+        if count > maximum {
+            return Err(DecisionRejection::CapabilityLimit {
+                question: question.cloned(),
+                limit,
+                count,
+                maximum,
+            });
+        }
+    }
+    Ok(maximum.is_some())
 }
 
 /// Response rules. Fail-closed, no repair, no default, no skip.

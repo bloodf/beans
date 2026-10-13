@@ -126,11 +126,10 @@ final class BotMemoryServiceViewController: MemoryFormViewController {
         if selected?.availability == .blocked { health = nil }
         let caps = health?.capabilities ?? .init()
         retainButton.isEnabled = caps.supports(.retain); recallButton?.isEnabled = caps.supports(.recall)
-        reflectButton.isEnabled = caps.supports(.reflect); reflectButton.isHidden = !caps.supports(.reflect)
+        reflectButton.isEnabled = caps.supports(.reflect)
         inspectButton?.isEnabled = caps.supports(.inspect); deleteButton?.isEnabled = caps.supports(.deleteDocument)
         clearButton?.isEnabled = caps.supports(.clear)
         advancedButton?.isEnabled = MemoryAdvancedViewController.features(backend: currentConnection?.backend, capabilities: caps).isEmpty == false
-        advancedButton?.isHidden = advancedButton?.isEnabled != true
         statusButton?.isEnabled = selectedOperation != nil && caps.supports(.operationStatus)
         cancelOperationButton?.isEnabled = selectedOperation != nil && caps.supports(.cancelOperation)
         retryButton?.isEnabled = selectedOperation.map { caps.supports(.retain) && ($0.state == .failed || ($0.state == .deliveryUnknown && caps.idempotentRetain)) } ?? false

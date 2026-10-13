@@ -37,7 +37,7 @@ Recall budgets validate the core bounds: 1–5,000 ms, 1–32,768 response bytes
 
 ## Capabilities and status
 
-Controls consume negotiated capabilities, not a backend-name matrix. Advanced actions require both the feature and its exact verb in `advanced_actions`; absent or empty action lists hide them. Vector document editing uses `memory_edit` / `edit` with only `document_id` and `text`; advanced document deletion is unavailable. Health preserves `ready`, `degraded`, `setup_required`, the optional reason and the deletion-pending flag. Opening the bot sheet reads local configuration and operation metadata, not remote Health. Service checks are explicit; action refreshes update an already checked status.
+Controls consume negotiated capabilities, not a backend-name matrix. The macOS bot sheet disables a control whose capability is absent and keeps it visible (Reflect and provider controls included). Advanced actions require both the feature and its exact verb in `advanced_actions`; absent or empty action lists hide them. Vector document editing uses `memory_edit` / `edit` with only `document_id` and `text`; advanced document deletion is unavailable. Health preserves `ready`, `degraded`, `setup_required`, the optional reason and the deletion-pending flag. Opening the bot sheet reads local configuration and operation metadata, not remote Health. Service checks are explicit; action refreshes update an already checked status.
 
 Operation state remains queued, submitted, processing, completed, failed or delivery_unknown. Only completed means stored. Pending deletion is not verified erasure. The helpers retain core-issued operation IDs and deletion epochs without issuing automatic retries, retain, reflect or deletion requests.
 

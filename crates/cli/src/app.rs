@@ -58,6 +58,7 @@ pub struct State {
     pub bots: Vec<Bot>,
     pub chats: Vec<Chat>,
     pub routines: Vec<Routine>,
+    pub workflows: Vec<WorkflowRecord>,
     pub auto_review: AutoReview,
     pub paused: bool,
     pub policy_clock: u64,
@@ -743,6 +744,7 @@ impl App {
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
                 routines: state.routines.clone(),
+                workflows: state.workflows.clone(),
                 auto_review: state.auto_review.clone(),
                 paused: state.paused,
                 policy_clock: state.policy_clock,
@@ -1323,6 +1325,7 @@ impl App {
 
             state.bots.retain(|bot| bot.id != id);
             state.routines.retain(|routine| routine.bot_id != id);
+            state.workflows.retain(|workflow| workflow.bot_id != id);
             let version = self.next_policy_version(&mut state);
             state.deleted_bot_versions.insert(id.to_string(), version.clone());
             state.capability_versions.remove(id);
@@ -1583,6 +1586,57 @@ impl App {
             state.routines.retain(|r| r.id != id);
             if state.routines.len() == before {
                 anyhow::bail!("Unknown routine");
+            }
+        }
+        self.roster_changed(true);
+        Ok(())
+    }
+
+    // MARK: - Workflows
+
+    /// A bot's saved workflows, oldest first.
+    pub fn workflows_of(&self, bot_id: &str) -> Vec<WorkflowRecord> {
+        let mut workflows: Vec<WorkflowRecord> = self.state.lock().unwrap().workflows.iter().filter(|w| w.bot_id == bot_id).cloned().collect();
+        workflows.sort_by(|a, b| a.created_at.partial_cmp(&b.created_at).unwrap_or(std::cmp::Ordering::Equal));
+        workflows
+    }
+
+    /// Adds a saved workflow and publishes the roster. `workflow::create` checks it first.
+    pub fn insert_workflow(&self, workflow: WorkflowRecord) -> anyhow::Result<WorkflowRecord> {
+        let _edit = self.roster_edit.lock().unwrap();
+        if self.bot(&workflow.bot_id).is_none() {
+            anyhow::bail!("Unknown bot");
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.workflows.iter().any(|w| w.id == workflow.id) {
+                anyhow::bail!("Workflow id already exists");
+            }
+            // The bounds are checked here, under the same lock that admits the record, and
+            // before it is pushed: a create checked only against its own snapshot would let
+            // two creates take the last slot together, and let a full roster grow past what
+            // `workflow::admit` will accept back from the relay.
+            let held = state.workflows.iter().filter(|w| w.bot_id == workflow.bot_id).count();
+            if held >= crate::workflow::MAX_PER_BOT {
+                anyhow::bail!("A bot keeps at most {} workflows. Delete one first.", crate::workflow::MAX_PER_BOT);
+            }
+            if state.workflows.len() >= crate::workflow::MAX_TOTAL {
+                anyhow::bail!("This account keeps at most {} workflows. Delete one first.", crate::workflow::MAX_TOTAL);
+            }
+            state.workflows.push(workflow.clone());
+        }
+        self.roster_changed(true);
+        Ok(workflow)
+    }
+
+    pub fn delete_workflow(&self, id: &str) -> anyhow::Result<()> {
+        let _edit = self.roster_edit.lock().unwrap();
+        {
+            let mut state = self.state.lock().unwrap();
+            let before = state.workflows.len();
+            state.workflows.retain(|w| w.id != id);
+            if state.workflows.len() == before {
+                anyhow::bail!("Unknown workflow");
             }
         }
         self.roster_changed(true);
@@ -2211,6 +2265,107 @@ mod tests {
             capabilities: Default::default(),
             created_at: 1.0,
         }
+    }
+
+    fn workflow_record(bot_id: &str, index: usize) -> WorkflowRecord {
+        WorkflowRecord {
+            id: format!("wf-{bot_id}-{index}"),
+            bot_id: bot_id.into(),
+            name: format!("Workflow {index}"),
+            definition: serde_json::json!({ "steps": [] }),
+            created_at: index as f64,
+        }
+    }
+
+    /// A roster at the total bound refuses the record and touches nothing. The bound is checked
+    /// where the record is admitted, so this is the case a snapshot-only create misses.
+    #[test]
+    fn a_roster_at_the_total_bound_refuses_the_create_and_writes_nothing() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().bots.push(bot("b1"));
+        let held = {
+            let mut state = app.state.lock().unwrap();
+            for index in 0..crate::workflow::MAX_TOTAL {
+                state.workflows.push(workflow_record("b1", index));
+            }
+            app.store.save_state(&state).unwrap();
+            state.workflows.len()
+        };
+        let outbox_before = app.store.outbox().unwrap().len();
+
+        let error = app.insert_workflow(workflow_record("b1", crate::workflow::MAX_TOTAL)).unwrap_err();
+        assert!(format!("{error:#}").contains("at most"), "a full roster must say why: {error:#}");
+
+        assert_eq!(app.state.lock().unwrap().workflows.len(), held);
+        assert_eq!(app.store.load_state().unwrap().workflows.len(), held, "a refused create wrote to the store");
+        assert_eq!(app.store.outbox().unwrap().len(), outbox_before, "a refused create queued an outbox item");
+        assert_eq!(app.workflows_of("b1").len(), crate::workflow::MAX_TOTAL);
+    }
+
+    /// The per-bot bound is refused the same way, and the total is nowhere near.
+    #[test]
+    fn a_bot_at_its_own_bound_refuses_the_create_and_writes_nothing() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().bots.push(bot("b1"));
+        let held = {
+            let mut state = app.state.lock().unwrap();
+            for index in 0..crate::workflow::MAX_PER_BOT {
+                state.workflows.push(workflow_record("b1", index));
+            }
+            state.workflows.len()
+        };
+        let outbox_before = app.store.outbox().unwrap().len();
+
+        let error = app.insert_workflow(workflow_record("b1", crate::workflow::MAX_PER_BOT)).unwrap_err();
+        assert!(format!("{error:#}").contains("at most"), "a full bot must say why: {error:#}");
+
+        assert_eq!(app.state.lock().unwrap().workflows.len(), held, "a refused create changed the held records");
+        assert_eq!(app.store.load_state().unwrap().workflows.len(), 0, "a refused create wrote to the store");
+        assert_eq!(app.store.outbox().unwrap().len(), outbox_before, "a refused create queued an outbox item");
+    }
+
+    /// Two creates taking the last slot together: exactly one wins. The bound is read under the
+    /// lock that admits the record, so the loser sees the winner's record and is refused. A
+    /// create that sized itself against a snapshot taken before the lock would let both in and
+    /// leave a bot with `MAX_PER_BOT + 1`.
+    #[test]
+    fn two_creates_taking_the_last_slot_leave_exactly_one() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().bots.push(bot("b1"));
+        let mut state = app.state.lock().unwrap();
+        for index in 0..crate::workflow::MAX_PER_BOT - 1 {
+            state.workflows.push(workflow_record("b1", index));
+        }
+        drop(state);
+
+        // The two threads race for the single remaining slot; either may take it.
+        let admitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let refused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let workers: Vec<_> = (0..2).map(|attempt| {
+            let app = Arc::clone(app);
+            let admitted = Arc::clone(&admitted);
+            let refused = Arc::clone(&refused);
+            std::thread::spawn(move || {
+                if app.insert_workflow(workflow_record("b1", crate::workflow::MAX_PER_BOT - 1 + attempt)).is_ok() {
+                    admitted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
+
+        assert_eq!(admitted.load(std::sync::atomic::Ordering::SeqCst), 1, "both creates took the last slot");
+        assert_eq!(refused.load(std::sync::atomic::Ordering::SeqCst), 1, "the losing create was not refused");
+        let held = app.workflows_of("b1").len();
+        assert_eq!(held, crate::workflow::MAX_PER_BOT, "a bot kept more than its bound");
+        assert_eq!(app.state.lock().unwrap().workflows.len(), crate::workflow::MAX_PER_BOT, "one record survived for one slot");
     }
 
     fn chat(id: &str, kind: &str, bot_ids: &[&str], owner: Option<&str>) -> Chat {

@@ -29,7 +29,9 @@ export type ArtifactSnapshot = { bytes: Buffer; path: string; dispose: () => voi
 // 0700-directory / 0600 copy and the retained buffer), never the original path again.
 export function snapshotArtifact(input: string): ArtifactSnapshot {
   if (!input.startsWith("/")) throw new Error("Native artifact path must be absolute");
-  const fd = openSync(input, constants.O_RDONLY | constants.O_NOFOLLOW);
+  // O_NONBLOCK keeps open() from waiting forever on a FIFO with no writer; the fstat check below then refuses
+  // anything that is not a regular file, and a regular file is unaffected by the flag.
+  const fd = openSync(input, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   let bytes: Buffer;
   try {
     const info = fstatSync(fd);

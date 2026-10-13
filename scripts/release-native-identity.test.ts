@@ -194,3 +194,38 @@ test("tools read the admitted snapshot even if the original is replaced; symlink
     expect(() => readNativeIdentity(dir, "github", { PATH: bin })).toThrow();
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+// A FIFO with no writer must be refused quickly, not wait forever in open(). The real snapshot and reader
+// run in a subprocess under a watchdog; a watchdog kill is a failure, and no tool/inspector/file may appear.
+test.skipIf(process.platform === "win32")("a FIFO without a writer is refused fast by the snapshot and the reader", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "beans-fifo-"));
+  try {
+    const fifo = join(dir, "pipe.apk"), marker = join(dir, "spawned"), bin = join(dir, "bin"), out = join(dir, "out");
+    if (Bun.spawnSync(["mkfifo", fifo]).exitCode !== 0) throw new Error("mkfifo unavailable: the FIFO refusal cannot be checked on this platform");
+    await mkdir(bin);
+    const q = (p: string) => `'${p.replaceAll("'", "'\\''")}'`;
+    for (const tool of ["unzip", "aapt2", "bundletool", "plutil"]) { await writeFile(join(bin, tool), `#!/bin/sh\nprintf x > ${q(marker)}\nexit 0\n`); await chmod(join(bin, tool), 0o755); }
+    const script = join(dir, "probe.ts");
+    await writeFile(script, `
+      import { snapshotArtifact, readNativeIdentity } from ${JSON.stringify(join(ROOT, "scripts/release-native-identity.ts"))};
+      import { stageLocalBuild } from ${JSON.stringify(join(ROOT, "scripts/release-eas.ts"))};
+      const fifo = process.argv[2], bin = process.argv[3], out = process.argv[4];
+      const refused = (run: () => unknown) => { try { run(); return "ACCEPTED"; } catch { return "refused"; } };
+      process.env.BEANS_EXPO_PROJECT_ID = "11111111-1111-4111-8111-111111111111";
+      let inspected = false;
+      const staged = await stageLocalBuild(fifo, "github", "a".repeat(40), out, async () => { inspected = true; return { identifier: "ai.amoena.beans", version: "x", buildNumber: "1" }; }).then(() => "ACCEPTED", () => "refused");
+      console.log(JSON.stringify({ snapshot: refused(() => snapshotArtifact(fifo)), reader: refused(() => readNativeIdentity(fifo, "github", { PATH: bin })), staged, inspected }));
+    `);
+    const started = Date.now();
+    const child = Bun.spawn([process.execPath, script, fifo, bin, out], { stdout: "pipe", stderr: "pipe" });
+    const watchdog = setTimeout(() => child.kill(), 10_000);
+    const stdout = await new Response(child.stdout).text();
+    const code = await child.exited;
+    clearTimeout(watchdog);
+    expect(Date.now() - started, "refusal must be fast, not a watchdog kill").toBeLessThan(10_000);
+    expect(code, await new Response(child.stderr).text()).toBe(0);
+    expect(JSON.parse(stdout.trim().split("\n").pop()!)).toEqual({ snapshot: "refused", reader: "refused", staged: "refused", inspected: false });
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(out)).toBe(false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

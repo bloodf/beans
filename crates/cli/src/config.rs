@@ -660,7 +660,7 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     // sweep old ones by age if that ever surfaces.
     let mut file = options.open(&tmp)?;
     #[cfg(test)]
-    run_after_private_tmp_created();
+    run_after_private_tmp_created(&tmp);
     if let Err(error) = file.write_all(bytes).and_then(|()| std::fs::rename(&tmp, path)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(error.into());
@@ -671,21 +671,21 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// Observes the private temporary between its creation and its first byte.
 #[cfg(test)]
 thread_local! {
-    static AFTER_PRIVATE_TMP_CREATED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+    static AFTER_PRIVATE_TMP_CREATED: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
-fn replace_after_private_tmp_created(replace: impl FnOnce() + 'static) {
+fn replace_after_private_tmp_created(replace: impl FnOnce(&Path) + 'static) {
     AFTER_PRIVATE_TMP_CREATED.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(replace));
     });
 }
 
 #[cfg(test)]
-fn run_after_private_tmp_created() {
+fn run_after_private_tmp_created(tmp: &Path) {
     AFTER_PRIVATE_TMP_CREATED.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().take() { hook(); }
+        if let Some(hook) = slot.borrow_mut().take() { hook(tmp); }
     });
 }
 
@@ -722,20 +722,21 @@ mod format_tests {
     #[cfg(unix)]
     fn a_private_write_is_private_before_its_first_byte() {
         use std::os::unix::fs::MetadataExt;
+        thread_local! {
+            static MODE_AT_CREATION: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+        }
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("credentials.json");
-        let mut mode_at_creation = None;
-        replace_after_private_tmp_created(|| {
-            let temporary = std::fs::read_dir(home.path()).unwrap()
-                .map(|entry| entry.unwrap().path())
-                .find(|entry| entry.file_name().unwrap().to_string_lossy().starts_with("credentials.tmp-"))
-                .expect("the temporary exists between its creation and its first byte");
-            mode_at_creation = Some(std::fs::symlink_metadata(&temporary).unwrap().mode() & 0o777);
+        replace_after_private_tmp_created(|temporary| {
+            // The temporary is already created and holds no secret byte yet.
+            assert_eq!(std::fs::symlink_metadata(temporary).unwrap().len(), 0);
+            let mode = std::fs::symlink_metadata(temporary).unwrap().mode() & 0o777;
+            MODE_AT_CREATION.with(|cell| cell.set(Some(mode)));
         });
         write_private(&path, br#"{"access_token":"not-a-secret"}"#).unwrap();
-        assert_eq!(mode_at_creation, Some(0o600));
+        assert_eq!(MODE_AT_CREATION.with(|cell| cell.get()), Some(0o600));
         assert_eq!(std::fs::read(&path).unwrap(), br#"{"access_token":"not-a-secret"}"#);
-        assert!(!home.path().join("credentials.json").is_symlink());
+        assert!(!path.is_symlink());
         assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
     }
 

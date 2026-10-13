@@ -225,17 +225,19 @@ async fn retained_document_stops_recalling_after_delete_and_notes_survive(){
 
 #[tokio::test]
 async fn delete_with_inflight_operation_reports_pending_cleanup_not_erased(){
-    let s=Scratch::new();let ledger=Ledger::new();s.register(ledger.clone());let access=s.access();
-    let doc=freeze_document(&access.scope.namespace,"service fact",vec![]).unwrap();
-    d::execute(&s.app,&s.access(),BackendRequest::Retain{document:doc.clone()},CancellationToken::new(),false).await.unwrap();
-    let mut delivery=d::enqueue(&s.app,&access,"in flight",vec![],false,None,&CancellationToken::new()).unwrap();
-    let before=delivery.clone();delivery.state=OperationState::Processing;delivery.operation_id=Some("in-flight".into());
-    s.app.store.transition_memory(&before,&delivery).unwrap();
-    let old=access.scope.clone();
-    let result=d::delete(&s.app,&s.bot,None,old.connection_revision.clone(),old.deletion_epoch,CancellationToken::new()).await.unwrap();
+    let s=Scratch::new();let fixture=Fixture::new(true);s.register(fixture.clone());let access=s.access();
+    let delivery=d::enqueue(&s.app,&access,"in flight",vec![],false,None,&CancellationToken::new()).unwrap();
+    let app=s.app.clone();let bot=s.bot.clone();let entered=fixture.clone();let old=access.scope.clone();
+    let deletion=tokio::spawn(async move{entered.entered.notified().await;
+        d::delete(&app,&bot,None,old.connection_revision,old.deletion_epoch,CancellationToken::new()).await});
+    let retained=d::deliver(&s.app,&access,&delivery.id,false,CancellationToken::new()).await.unwrap();
+    let result=deletion.await.unwrap().unwrap();
+    assert_eq!(retained["state"],"delivery_unknown");
+    let fenced=s.app.store.memory_delivery(&s.bot,&delivery.id).unwrap();
+    assert_eq!(fenced.state,OperationState::DeliveryUnknown);assert_eq!(fenced.error_code.as_deref(),Some("authority_changed"));
     assert_eq!(result["pending"],true);assert_eq!(result["reason"],"remote_quiescence_unverified");
     assert!(s.app.store.memory_fence(&s.bot).unwrap().unwrap().pending);
-    assert_eq!(ledger.deletes.load(Ordering::SeqCst),0);
+    assert_eq!(fixture.calls.load(Ordering::SeqCst),1);
     let late=d::enqueue(&s.app,&s.access(),"late write",vec![],false,None,&CancellationToken::new());
     assert_eq!(late.unwrap_err().code,"deletion_pending");
 }

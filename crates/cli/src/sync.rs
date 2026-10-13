@@ -2319,6 +2319,41 @@ mod tests {
         assert!(merged.workflows.iter().any(|w| w.id == "kept"), "a live bot lost its workflow");
     }
 
+    /// A bot deleted while its upload sat in the outbox takes its workflows with it. That
+    /// outbox item was written before the deletion and no remote roster has been observed, so
+    /// the rebase runs its pre-baseline path and merges nothing: the tombstone filter is the
+    /// only thing standing between the deleted bot's record and what gets uploaded.
+    #[test]
+    fn a_deleted_bots_workflow_is_dropped_from_an_outbox_written_before_the_delete() {
+        use crate::model::WorkflowRecord;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), created_at: 1.0,
+            definition: serde_json::json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] }),
+        };
+
+        let mut held = roster(bot("b1"));
+        held.bots.push(bot("b2"));
+        held.workflows = vec![workflow("kept", "b1"), workflow("doomed", "b2")];
+        apply_roster(app, held);
+        app.push_roster();
+        let pending = app.store.queued_roster().unwrap().unwrap();
+        let uploaded: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &pending.ciphertext).unwrap();
+        assert!(uploaded.workflows.iter().any(|w| w.id == "doomed"), "the outbox item no longer holds the record to drop");
+
+        app.delete_bot("b2").unwrap();
+        rebase_queued_roster(app, &app.machine_file().unwrap(), pending).unwrap();
+
+        let published = app.store.queued_roster().unwrap().unwrap();
+        let roster: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &published.ciphertext).unwrap();
+        assert!(!roster.workflows.iter().any(|w| w.id == "doomed"), "a deleted bot's workflow survived the rebase");
+        assert!(roster.workflows.iter().any(|w| w.id == "kept"), "a live bot lost its workflow");
+    }
+
     fn policy(device: &str, counter: u64, paused: Option<bool>, capabilities: Option<Capabilities>) -> PolicyBlob {
         PolicyBlob { paused, bot_id: capabilities.as_ref().map(|_| "bot".into()), capabilities, removed: false,
             version: PolicyVersion { counter, device_id: device.into() } }

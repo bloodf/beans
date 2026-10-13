@@ -240,7 +240,7 @@ export function outputText(run: { output?: string }): string | undefined {
 
 function commandNote(run: CommandRun): string | undefined {
   if (run.state === "asking") return run.rule !== undefined ? L("Always allow adds the rule “%@”.", run.rule) : undefined;
-  if (run.state === "waiting" && run.sessionID !== undefined) return L("What you type goes straight to the command, not into the chat.");
+  if (takesInput(run) && run.handedOver) return L("What you type goes straight to the command, not into the chat.");
   return undefined;
 }
 
@@ -269,20 +269,20 @@ export function CommandCard(props: {
     () => [run().state, run().output] as const,
     () => {
       setAnswerError(null);
-      if (!takesInput(run())) setAnswer("");
+      if (!answering()) setAnswer("");
     },
     { defer: true },
   );
-  const answering = () => run().state === "waiting" && run().sessionID !== undefined;
+  const answering = () => takesInput(run()) && run().handedOver;
   const send = async () => {
-    if (busy() || !takesInput(run())) return;
+    if (busy() || !answering()) return;
     setBusy(true);
     setAnswerError(null);
     try {
       await props.onSend(answer());
       setAnswer("");
-    } catch (error) {
-      setAnswerError(errorText(error));
+    } catch {
+      setAnswerError(L("Could not send input to the command"));
     } finally {
       setBusy(false);
     }
@@ -336,14 +336,14 @@ export function CommandCard(props: {
             <TextField
               value={answer()}
               secure={!asksYesOrNo(run())}
-              placeholder={L("Type your answer")}
-              label={run().prompt ?? L("Type your answer")}
+              placeholder={L("Send input")}
+              label={run().prompt ?? L("Send input")}
               disabled={busy()}
               onInput={setAnswer}
               onEnter={() => void send()}
             />
             <Button small disabled={busy()} onClick={() => void send()}>
-              {L("Send")}
+              {L("Send input")}
             </Button>
           </div>
         </Show>

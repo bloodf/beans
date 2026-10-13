@@ -8,6 +8,7 @@
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, ScrollView, StyleSheet, Text, View } from "react-native";
+import { randomUUID } from "expo-crypto";
 import { engine } from "../../src/core/engine";
 import {
   CUSTOM_APIS,
@@ -20,6 +21,7 @@ import {
   isHTTPURL,
   isLoopbackHost,
   modelLabel,
+  isRunner,
   modelListingNote,
   presetForURL,
   savedModelRows,
@@ -33,8 +35,7 @@ import { FieldRow, Row, Section } from "../../src/ui/forms";
 import { chooseDefaultModel, setModelListing, startModelDraft, takeModelListing, useModelDraft } from "../../src/ui/modelDraft";
 import { usePalette } from "../../src/ui/theme";
 
-/// How long the form waits after the URL, protocol, or key last changed before it asks the server.
-const LISTING_DELAY_MS = 500;
+// Model checks run only after an explicit user action.
 
 function param(value: string | string[] | undefined): string | undefined {
   return (Array.isArray(value) ? value[0] : value) || undefined;
@@ -54,6 +55,7 @@ export default function CustomProviderScreen() {
   // The provider as it stood when the form opened. The fields start from it, and the form stays
   // as it is while a delete started here takes the provider out of the store.
   const [saved] = useState(status);
+  const [saveKind] = useState(() => kind ?? `custom:setup-${randomUUID().toLowerCase()}`);
   const adding = kind ? undefined : customPreset(param(params.preset));
   const integration = saved?.integration;
   const simpleSetup = !saved && adding?.compatible === true;
@@ -63,6 +65,18 @@ export default function CustomProviderScreen() {
   const [api, setAPI] = useState<CustomAPI>(customAPI(saved?.api ?? adding?.api).id);
   const [baseURL, setBaseURL] = useState(saved?.base_url ?? adding?.baseURL ?? "");
   const [apiKey, setAPIKey] = useState("");
+  const devices = useStore((s) => s.devices);
+  const runners = devices.filter(isRunner);
+  const [runnerID, setRunnerID] = useState(() => runners.find((device) => device.status === "online")?.id ?? "");
+  const runner = runners.find((device) => device.id === runnerID);
+  const runnerReady = !!runner && runner.status === "online";
+  const [contextWindow, setContextWindow] = useState(saved?.capabilities?.context_window?.toString() ?? "");
+  const [images, setImages] = useState<boolean | null>(saved?.capabilities?.images ?? null);
+  const [tools, setTools] = useState<boolean | null>(saved?.capabilities?.tools ?? null);
+  const capabilities = { context_window: contextWindow.trim() ? Number(contextWindow) : null, images, tools };
+  const validWindow = !contextWindow.trim() || (/^[0-9]+$/.test(contextWindow) && Number.isSafeInteger(Number(contextWindow)) && Number(contextWindow) > 0);
+  const [checkRevision, setCheckRevision] = useState(0);
+  const [checked, setChecked] = useState(false);
   // An edited provider's key comes from the core before the server is first asked for models.
   const [keyLoaded, setKeyLoaded] = useState(!saved);
   const [working, setWorking] = useState(false);
@@ -101,32 +115,26 @@ export default function CustomProviderScreen() {
     };
   }, [saved]);
 
-  // The server's models: at once when the form opens with a URL, then a moment after the URL,
-  // the protocol, or the key last changed.
+  // Field changes revoke the previous check and invalidate late replies.
   useEffect(() => () => void (asked.current += 1), []);
   useEffect(() => {
-    if (!keyLoaded) return;
-    const url = baseURL.trim();
+    ++asked.current;
+    setChecked(false);
+    setModelListing({ state: "none" });
+  }, [api, baseURL, apiKey, runnerID, contextWindow, images, tools]);
+  useEffect(() => {
+    if (!checkRevision || !keyLoaded || !runnerReady || !validWindow || !isHTTPURL(baseURL)) return;
     const ask = ++asked.current;
-    const delay = opened.current ? LISTING_DELAY_MS : 0;
-    opened.current = true;
-    if (!isHTTPURL(url)) return setModelListing({ state: "none" });
     setModelListing({ state: "loading" });
-    const timer = setTimeout(() => {
-      engine
-        .listCustomModels({ name: name.trim() || defaultProviderName(url), api, baseURL: url, apiKey, integration })
-        .then(({ listed, models }) => {
-          if (ask === asked.current) {
-            takeModelListing(listed, models, autoSelect.current);
-            if (listed && models.length) autoSelect.current = false;
-          }
-        })
-        .catch((cause) => {
-          if (ask === asked.current) setModelListing({ state: "error", message: messageOf(cause) });
-        });
-    }, delay);
-    return () => clearTimeout(timer);
-  }, [api, baseURL, apiKey, keyLoaded, integration]);
+    engine.listCustomModels({ name: name.trim() || defaultProviderName(baseURL), api, baseURL, apiKey, integration, runnerID, capabilities }).then(({ listed, models }) => {
+      if (ask !== asked.current) return;
+      takeModelListing(listed, models, autoSelect.current);
+      if (listed && models.length) autoSelect.current = false;
+      setChecked(true);
+    }).catch((cause) => {
+      if (ask === asked.current) setModelListing({ state: "error", message: messageOf(cause) });
+    });
+  }, [checkRevision]);
 
   if (kind && (!saved || !isCustomProvider(kind))) {
     return (
@@ -145,7 +153,7 @@ export default function CustomProviderScreen() {
   // has: for the key's hint.
   const preset = adding ?? presetForURL(baseURL) ?? customPreset(saved?.name);
   const requestURL = customRequestURL(api, baseURL);
-  // On a phone, localhost is the phone: the server must be named as the Runners reach it.
+  // Loopback resolves on the selected Runner, never the phone.
   const local = !!adding?.local || isLoopbackHost(host);
   const urlNote = [
     requestURL ? t("Requests go to {url}.", { url: requestURL }) : t("Beans adds {path} to it.", { path: protocol.path }),
@@ -160,14 +168,14 @@ export default function CustomProviderScreen() {
   // Left empty, the name is the preset's whose server the URL names, else the host.
   const fallbackName = defaultProviderName(baseURL);
   const providerName = name.trim() || fallbackName;
-  const canSave = !working && keyLoaded && !!providerName && isHTTPURL(baseURL) && picked.length > 0;
+  const canSave = !working && keyLoaded && runnerReady && validWindow && checked && !!providerName && isHTTPURL(baseURL) && picked.length > 0;
 
   async function save() {
     if (!canSave) return;
     setWorking(true);
     setError(null);
     try {
-      await engine.saveCustomProvider({ kind, integration, name: providerName, api, baseURL, apiKey, models: selectedModelIds(rows, chosenDefault) });
+      await engine.saveCustomProvider({ kind: saveKind, integration, name: providerName, api, baseURL, apiKey, models: selectedModelIds(rows, chosenDefault), runnerID, capabilities });
       router.back();
     } catch (cause) {
       setError(messageOf(cause));
@@ -177,7 +185,7 @@ export default function CustomProviderScreen() {
   }
 
   async function refreshModels() {
-    if (!kind || working || !keyLoaded) return;
+    if (!kind || working || !keyLoaded || !runnerReady) return;
     ++asked.current;
     setWorking(true);
     setRefreshing(true);
@@ -185,7 +193,7 @@ export default function CustomProviderScreen() {
     setRefreshNote(null);
     const before = useStore.getState().providers.find((provider) => provider.kind === kind)?.models;
     try {
-      await engine.refreshCustomModels();
+      await engine.refreshCustomModels(runnerID, kind);
       const after = useStore.getState().providers.find((provider) => provider.kind === kind)?.models;
       setRefreshNote(JSON.stringify(before) === JSON.stringify(after) ? t("Models unchanged") : t("Models updated"));
     } catch (cause) {
@@ -228,6 +236,15 @@ export default function CustomProviderScreen() {
         keyboardDismissMode="on-drag"
         keyboardShouldPersistTaps="handled"
       >
+        <Section footer={t("Loopback belongs to the selected Runner. For another host, use its reachable address and check bind address, firewall and proxy bypass. Do not expose an unauthenticated server publicly.")}>
+          <Row title={t("Check from Runner")} menu={{ title: t("Check from Runner"), value: runner?.name ?? t("None"), choices: working ? [] : runners.map((device) => ({ title: device.name, selected: device.id === runnerID, onPress: () => setRunnerID(device.id) })) }} />
+          <Row title={t("Check Connection")} onPress={!working && keyLoaded && runnerReady && validWindow && isHTTPURL(baseURL) ? () => setCheckRevision((value) => value + 1) : undefined} />
+          <Text style={{ color: p.secondaryLabel }}>{runner ? t("Requests run on {name}. Listing verifies connectivity/catalog only, not inference.", { name: runner.name }) : t("Pair an online desktop Runner before checking.")}</Text>
+        </Section>
+        <Section footer={t("Unknown images stay text-only. Unknown tools are unverified. Tools No cannot run Beans tool-bearing bot turns; tool-free inference remains available.")}>
+          <FieldRow label={t("Context window (tokens)")} value={contextWindow} onChangeText={setContextWindow} keyboardType="number-pad" editable={!working} />
+          {[{ title: t("Image support"), value: images, set: setImages }, { title: t("Tool support"), value: tools, set: setTools }].map((choice) => <Row key={choice.title} title={choice.title} menu={{ title: choice.title, value: choice.value === null ? t("Unknown — use discovery") : choice.value ? t("Yes") : t("No"), choices: [null, true, false].map((value) => ({ title: value === null ? t("Unknown — use discovery") : value ? t("Yes") : t("No"), selected: value === choice.value, onPress: () => { if (!working) choice.set(value); } })) }} />)}
+        </Section>
         {customize && <Section footer={t("Any server that speaks OpenAI’s or Anthropic’s API, such as a gateway or a model server on your network. Encrypted and shared with your paired Devices.")}>
           <FieldRow
             label={t("Name")}
@@ -249,7 +266,7 @@ export default function CustomProviderScreen() {
           />
         </Section>}
 
-        <Section footer={urlNote}>
+        <Section footer={`${urlNote}\n${t("Port suggestions only: 11434 or 1234. Enter your server’s exact URL; Beans never scans ports.")}`}>
           <FieldRow
             label={t("Base URL")}
             value={baseURL}

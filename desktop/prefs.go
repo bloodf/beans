@@ -197,6 +197,9 @@ func (Prefs) Set(patch PreferencesPatch) (Preferences, error) {
 		applyAppearance(after.Appearance)
 	}
 	PreferencesChanged.Broadcast(after)
+	if after.AppLanguage != before.AppLanguage && native.win != nil {
+		native.win.Invalidate()
+	}
 	if after.CLIPort != before.CLIPort {
 		go app.cli.reconnect()
 	}

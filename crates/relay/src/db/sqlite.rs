@@ -102,7 +102,15 @@ const SCHEMA: &str = "
 /// version 1 is `SCHEMA`, version `n + 2` is `MIGRATIONS[n]`, as in the Postgres backend. A
 /// step only adds (a table, a nullable column, an index). Append; never edit a step that has
 /// shipped.
-const MIGRATIONS: &[&str] = &[];
+const MANAGED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS managed_companion_receipts (
+    identity_pubkey TEXT NOT NULL, transaction_id TEXT NOT NULL, receipt TEXT NOT NULL,
+    policy_ciphertext BLOB NOT NULL, roster_ciphertext BLOB NOT NULL,
+    policy_id TEXT NOT NULL, roster_id TEXT NOT NULL,
+    roster_seq INTEGER NOT NULL, size INTEGER NOT NULL,
+    PRIMARY KEY(identity_pubkey, transaction_id), UNIQUE(identity_pubkey, roster_seq),
+    UNIQUE(identity_pubkey, policy_id), UNIQUE(identity_pubkey, roster_id));
+    CREATE TABLE IF NOT EXISTS managed_replay_context(identity_pubkey TEXT PRIMARY KEY, nonce TEXT NOT NULL);";
+const MIGRATIONS: &[&str] = &[MANAGED_SCHEMA];
 
 pub struct Sqlite {
     path: String,
@@ -354,7 +362,7 @@ pub fn delete_identity(connection: &mut Connection, identity_pubkey: &str, revok
     }
     tx.prepare_cached("DELETE FROM challenges WHERE machine_pubkey IN (SELECT machine_pubkey FROM machines WHERE identity_pubkey = ?1)")?
         .execute(params![identity_pubkey])?;
-    for table in ["push_tokens", "pairings", "blobs", "deleted_groups", "sequences", "usage", "machines"] {
+    for table in ["managed_replay_context", "managed_companion_receipts", "push_tokens", "pairings", "blobs", "deleted_groups", "sequences", "usage", "machines"] {
         tx.prepare_cached(&format!("DELETE FROM {table} WHERE identity_pubkey = ?1"))?.execute(params![identity_pubkey])?;
     }
     tx.prepare_cached("DELETE FROM identities WHERE pubkey = ?1")?.execute(params![identity_pubkey])?;
@@ -492,9 +500,9 @@ fn supersede(tx: &Connection, identity_pubkey: &str, slot: &Slot) -> rusqlite::R
     let Some(first) = first else { return Ok(()) };
     let floor = if slot.keep_first { first } else { 0 };
     let freed: i64 = tx
-        .prepare_cached("SELECT COALESCE(SUM(size), 0) FROM blobs WHERE identity_pubkey = ?1 AND slot = ?2 AND seq > ?3")?
+        .prepare_cached("SELECT COALESCE(SUM(size), 0) FROM blobs WHERE identity_pubkey = ?1 AND slot = ?2 AND seq > ?3 AND kind NOT IN ('policy','managed_skill_policy')")?
         .query_row(params![identity_pubkey, slot.name, floor], |row| row.get(0))?;
-    tx.prepare_cached("DELETE FROM blobs WHERE identity_pubkey = ?1 AND slot = ?2 AND seq > ?3")?
+    tx.prepare_cached("DELETE FROM blobs WHERE identity_pubkey = ?1 AND slot = ?2 AND seq > ?3 AND kind NOT IN ('policy','managed_skill_policy')")?
         .execute(params![identity_pubkey, slot.name, floor])?;
     tx.prepare_cached("UPDATE usage SET bytes = MAX(bytes - ?1, 0) WHERE identity_pubkey = ?2")?
         .execute(params![freed, identity_pubkey])?;
@@ -513,11 +521,17 @@ pub fn insert_blob(connection: &mut Connection, blob: &NewBlob, quota_bytes: u64
     };
     let size = payload.size();
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if retained_managed_id(&tx, identity_pubkey, id)? {
+        return Err(ApiError::conflict("Managed blob requires original companion retry"));
+    }
     if let Some(recipient) = recipient_machine_pubkey {
         match machine(&tx, recipient)? {
             Some(machine) if machine.identity_pubkey == identity_pubkey => {}
             _ => return Err(ApiError::bad_request("Recipient is not a machine of this identity")),
         }
+    }
+    if kind == "managed_skill_policy" || (kind == "policy" && (slot.is_some() || group.is_some() || recipient_machine_pubkey.is_some())) {
+        return Err(ApiError::bad_request("Policy requires unaddressed unslotted envelope; managed policy requires companion"));
     }
     if let Some(seq) = blob_seq(&tx, identity_pubkey, id)? {
         return Ok(Inserted { seq, existing: true });
@@ -567,6 +581,73 @@ pub fn insert_blob(connection: &mut Connection, blob: &NewBlob, quota_bytes: u64
     Ok(Inserted { seq, existing: false })
 }
 
+fn retained_managed_id(connection: &Connection, account: &str, id: &str) -> rusqlite::Result<bool> {
+    connection.query_row("SELECT EXISTS(SELECT 1 FROM managed_companion_receipts WHERE identity_pubkey=?1 AND (policy_id=?2 OR roster_id=?2))", params![account,id], |row| row.get(0))
+}
+
+fn managed_receipt(connection: &Connection, account: &str, transaction: &str) -> ApiResult<Option<super::ManagedReceipt>> {
+    let json: Option<String> = connection.query_row(
+        "SELECT receipt FROM managed_companion_receipts WHERE identity_pubkey = ?1 AND transaction_id = ?2",
+        params![account, transaction], |row| row.get(0),
+    ).optional()?;
+    json.map(|json| serde_json::from_str(&json).map_err(|_| ApiError::internal("Invalid stored managed receipt"))).transpose()
+}
+
+fn commit_managed_companion(connection: &mut Connection, request: &super::ManagedCompanion, quota: u64) -> ApiResult<super::ManagedReceipt> {
+    let mut receipt = request.receipt(0, 0)?;
+    let account = &request.account_id;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    let synchronous: i64 = connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+    if synchronous != 2 { return Err(ApiError::internal("Managed commit requires SQLite FULL")); }
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some(previous) = managed_receipt(&tx, account, &request.transaction_id)? {
+        if previous.request_sha256 != receipt.request_sha256 {
+            return Err(ApiError::conflict("Managed transaction identity reused"));
+        }
+        let (policy, roster): (Vec<u8>, Vec<u8>) = tx.query_row("SELECT policy_ciphertext,roster_ciphertext FROM managed_companion_receipts WHERE identity_pubkey=?1 AND transaction_id=?2", params![account,request.transaction_id], |row| Ok((row.get(0)?,row.get(1)?)))?;
+        if policy != request.policy_ciphertext || roster != request.roster_ciphertext {
+            return Err(ApiError::conflict("Managed transaction ciphertext changed"));
+        }
+        return Ok(previous);
+    }
+    let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM identities WHERE pubkey = ?1)", params![account], |row| row.get(0))?;
+    if !exists { return Err(ApiError::not_found("Identity not found")); }
+    if let Some(checkpoint) = &request.checkpoint_transaction_id {
+        if managed_receipt(&tx, account, checkpoint)?.is_none() {
+            return Err(ApiError::conflict("Unknown managed checkpoint"));
+        }
+    }
+    let actual: i64 = tx.query_row("SELECT COALESCE(MAX(seq), 0) FROM blobs WHERE identity_pubkey = ?1 AND slot = 'roster' AND kind = 'roster'", params![account], |row| row.get(0))?;
+    if actual != request.expected_slot_seq { return Err(ApiError::conflict("Roster slot changed")); }
+    for id in [&request.policy_id, &request.roster_id] {
+        if blob_seq(&tx, account, id)?.is_some() { return Err(ApiError::conflict("Managed blob identity reused")); }
+        let retained: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM managed_companion_receipts WHERE identity_pubkey=?1 AND (policy_id=?2 OR roster_id=?2))", params![account,id], |row| row.get(0))?;
+        if retained { return Err(ApiError::conflict("Managed blob identity reused")); }
+    }
+    let head = current_seq(&tx, account)?;
+    receipt.policy_seq = head.checked_add(1).ok_or_else(|| ApiError::conflict("Sequence exhausted"))?;
+    receipt.roster_seq = head.checked_add(2).ok_or_else(|| ApiError::conflict("Sequence exhausted"))?;
+    let json = serde_json::to_string(&receipt).map_err(|_| ApiError::internal("Receipt serialization failed"))?;
+    let history_size = receipt.policy_ciphertext_len + receipt.roster_ciphertext_len + json.len() as i64;
+    let (count, retained): (i64, i64) = tx.query_row("SELECT COUNT(*),COALESCE(SUM(size),0) FROM managed_companion_receipts WHERE identity_pubkey=?1", params![account], |row| Ok((row.get(0)?,row.get(1)?)))?;
+    super::managed_capacity(count, retained, history_size, json.len())?;
+    supersede(&tx, account, &Slot { name: "roster".into(), keep_first: false })?;
+    let charge = history_size + receipt.policy_ciphertext_len + receipt.roster_ciphertext_len;
+    let total = usage(&tx, account)?.checked_add(charge).ok_or_else(|| ApiError::too_large("Storage quota exceeded"))?;
+    if quota > 0 && total as u64 > quota { return Err(ApiError::too_large("Storage quota exceeded")); }
+    for (id, kind, seq, ciphertext, slot) in [
+        (&request.policy_id, "managed_skill_policy", receipt.policy_seq, &request.policy_ciphertext, None),
+        (&request.roster_id, "roster", receipt.roster_seq, &request.roster_ciphertext, Some("roster")),
+    ] {
+        tx.execute("INSERT INTO blobs(identity_pubkey,id,kind,seq,ciphertext,size,created_at,slot) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)", params![account,id,kind,seq,ciphertext,ciphertext.len() as i64,now(),slot])?;
+    }
+    tx.execute("INSERT INTO managed_companion_receipts(identity_pubkey,transaction_id,receipt,policy_ciphertext,roster_ciphertext,roster_seq,size,policy_id,roster_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![account,request.transaction_id,json,request.policy_ciphertext,request.roster_ciphertext,receipt.roster_seq,history_size,request.policy_id,request.roster_id])?;
+    tx.execute("INSERT INTO sequences(identity_pubkey,seq) VALUES (?1,?2) ON CONFLICT(identity_pubkey) DO UPDATE SET seq=excluded.seq", params![account,receipt.roster_seq])?;
+    tx.execute("INSERT INTO usage(identity_pubkey,bytes) VALUES (?1,?2) ON CONFLICT(identity_pubkey) DO UPDATE SET bytes=excluded.bytes", params![account,total])?;
+    tx.commit()?;
+    Ok(receipt)
+}
+
 /// True once the identity deleted this group. It stays deleted: a blob that names it later (a
 /// Runner finishing a turn in a chat another Device deleted) is refused.
 pub fn group_deleted(connection: &Connection, identity_pubkey: &str, group: &str) -> rusqlite::Result<bool> {
@@ -583,7 +664,7 @@ pub fn delete_group(connection: &mut Connection, identity_pubkey: &str, group: &
     tx.prepare_cached("INSERT OR IGNORE INTO deleted_groups (identity_pubkey, group_id, deleted_at) VALUES (?1, ?2, ?3)")?
         .execute(params![identity_pubkey, group, now()])?;
     let rows: Vec<(String, String, i64)> = tx
-        .prepare_cached("DELETE FROM blobs WHERE identity_pubkey = ?1 AND group_id = ?2 RETURNING id, kind, size")?
+        .prepare_cached("DELETE FROM blobs WHERE identity_pubkey = ?1 AND group_id = ?2 AND kind NOT IN ('policy','managed_skill_policy') RETURNING id, kind, size")?
         .query_map(params![identity_pubkey, group], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let freed: i64 = rows.iter().map(|(_, _, size)| size).sum();
@@ -678,7 +759,7 @@ pub fn blob(connection: &Connection, identity_pubkey: &str, machine_pubkey: &str
 pub fn delete_blob(connection: &mut Connection, identity_pubkey: &str, id: &str) -> rusqlite::Result<Option<String>> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let row: Option<(i64, String)> = tx
-        .prepare_cached("DELETE FROM blobs WHERE id = ?1 AND identity_pubkey = ?2 AND kind NOT IN ('roster', 'policy', 'memory_config') RETURNING size, kind")?
+        .prepare_cached("DELETE FROM blobs WHERE id = ?1 AND identity_pubkey = ?2 AND kind NOT IN ('roster', 'policy', 'managed_skill_policy', 'memory_config') RETURNING size, kind")?
         .query_row(params![id, identity_pubkey], |row| Ok((row.get(0)?, row.get(1)?)))
         .optional()?;
     let Some((size, kind)) = row else { return Ok(None) };
@@ -773,7 +854,7 @@ pub fn inactive_identities(connection: &Connection, before: i64) -> rusqlite::Re
 }
 
 pub fn recount_usage(connection: &Connection) -> rusqlite::Result<u64> {
-    const ACTUAL: &str = "(SELECT COALESCE(SUM(size), 0) FROM blobs WHERE blobs.identity_pubkey = usage.identity_pubkey)";
+    const ACTUAL: &str = "((SELECT COALESCE(SUM(size), 0) FROM blobs WHERE blobs.identity_pubkey = usage.identity_pubkey) + (SELECT COALESCE(SUM(size), 0) FROM managed_companion_receipts WHERE managed_companion_receipts.identity_pubkey = usage.identity_pubkey))";
     Ok(connection.execute(&format!("UPDATE usage SET bytes = {ACTUAL} WHERE bytes != {ACTUAL}"), [])? as u64)
 }
 
@@ -879,6 +960,9 @@ impl Store for Sqlite {
     async fn precheck_blob(&self, identity_pubkey: &str, id: &str, group: Option<&str>, size: i64, quota_bytes: u64) -> ApiResult<Option<Inserted>> {
         let (identity_pubkey, id, group) = (identity_pubkey.to_string(), id.to_string(), group.map(str::to_string));
         self.read(move |db| {
+            if retained_managed_id(db, &identity_pubkey, &id)? {
+                return Err(ApiError::conflict("Managed blob requires original companion retry"));
+            }
             if let Some(seq) = blob_seq(db, &identity_pubkey, &id)? {
                 return Ok(Some(Inserted { seq, existing: true }));
             }
@@ -897,6 +981,69 @@ impl Store for Sqlite {
 
     async fn insert_blob(&self, blob: NewBlob, quota_bytes: u64) -> ApiResult<Inserted> {
         self.write(move |db| insert_blob(db, &blob, quota_bytes)).await
+    }
+
+    async fn commit_managed_companion(&self, request: super::ManagedCompanion, quota_bytes: u64) -> ApiResult<super::ManagedReceipt> {
+        self.write(move |db| commit_managed_companion(db, &request, quota_bytes)).await
+    }
+
+    async fn managed_receipt(&self, account_id: &str, transaction_id: &str) -> ApiResult<Option<super::ManagedReceipt>> {
+        let (account, transaction) = (account_id.to_owned(), transaction_id.to_owned());
+        self.read(move |db| managed_receipt(db, &account, &transaction)).await
+    }
+
+    async fn reset_managed_replay_context(&self, account_id: &str) -> ApiResult<()> {
+        let account = account_id.to_owned();
+        self.write(move |db| {
+            db.pragma_update(None, "synchronous", "FULL")?;
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute("INSERT INTO managed_replay_context(identity_pubkey,nonce) SELECT pubkey,?2 FROM identities WHERE pubkey=?1 ON CONFLICT(identity_pubkey) DO UPDATE SET nonce=excluded.nonce", params![account,uuid::Uuid::new_v4().to_string()])?;
+            tx.commit()?;
+            Ok(())
+        }).await
+    }
+
+    async fn managed_cut(&self, account_id: &str, context: &str, cut_token: &str, through: i64, since: i64, limit: i64) -> ApiResult<super::ManagedCut> {
+        super::validate_managed_cut(limit)?;
+        let (account, context, token) = (account_id.to_owned(), context.to_owned(), cut_token.to_owned());
+        let local = self.local.clone();
+        self.write(move |db| {
+            db.pragma_update(None, "synchronous", "FULL")?;
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM identities WHERE pubkey=?1)", params![account], |row| row.get(0))?;
+            if !exists { return Err(ApiError::conflict("Replay account context unavailable")); }
+            tx.execute("INSERT OR IGNORE INTO managed_replay_context(identity_pubkey,nonce) VALUES (?1,?2)", params![account,uuid::Uuid::new_v4().to_string()])?;
+            tx.commit()?;
+            let tx = db.transaction()?;
+            let incarnation: String = tx.query_row("SELECT nonce FROM managed_replay_context WHERE identity_pubkey=?1", params![account], |row| row.get(0))?;
+            let head = current_seq(&tx, &account)?;
+            let claims = local.replay.claims(&account, &incarnation, &context, &token, through, since, head)?;
+            let (count, bytes, malformed): (i64, i64, i64) = tx.query_row("SELECT COUNT(*),COALESCE(SUM(size),0),COALESCE(SUM(bad),0) FROM (
+                SELECT seq,size,CASE WHEN slot IS NOT NULL OR group_id IS NOT NULL OR recipient_machine_pubkey IS NOT NULL THEN 1 ELSE 0 END AS bad FROM blobs WHERE identity_pubkey=?1 AND kind='policy'
+                UNION ALL SELECT roster_seq, length(policy_ciphertext),0 FROM managed_companion_receipts WHERE identity_pubkey=?1
+                ) WHERE seq<=?2", params![account,claims.through], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+            if count > 1_048_576 || bytes > 1024 * 1024 * 1024 || malformed > 0 { return Err(ApiError::too_large("Replay history invalid or exceeds finite bounds")); }
+            let mut statement = tx.prepare("SELECT seq,id,policy_bytes,roster_bytes,transaction_id FROM (
+                SELECT b.seq,b.id,length(b.ciphertext) AS policy_bytes,0 AS roster_bytes,NULL AS transaction_id FROM blobs b WHERE b.identity_pubkey=?1 AND b.kind='policy' AND b.slot IS NULL AND b.group_id IS NULL AND b.recipient_machine_pubkey IS NULL
+                UNION ALL SELECT r.roster_seq-1,r.policy_id,length(r.policy_ciphertext),length(r.roster_ciphertext),r.transaction_id FROM managed_companion_receipts r WHERE r.identity_pubkey=?1
+                ) WHERE seq>?2 AND seq<=?3 ORDER BY seq LIMIT 2")?;
+            let metadata = statement.query_map(params![account,since,claims.through], |row| Ok((row.get::<_, i64>(0)?,row.get::<_, String>(1)?,row.get::<_, i64>(2)?,row.get::<_, i64>(3)?,row.get::<_, Option<String>>(4)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            let mut blobs = Vec::new();
+            if let Some((seq,id,policy_bytes,roster_bytes,transaction)) = metadata.first() {
+                super::validate_replay_payload_size(*policy_bytes, *roster_bytes)?;
+                blobs.push(if let Some(transaction) = transaction {
+                    tx.query_row("SELECT receipt,policy_ciphertext,roster_ciphertext FROM managed_companion_receipts WHERE identity_pubkey=?1 AND transaction_id=?2", params![account,transaction], |row| Ok((row.get::<_, String>(0)?,row.get::<_, Vec<u8>>(1)?,row.get::<_, Vec<u8>>(2)?)))
+                        .map_err(ApiError::from).and_then(|(json,policy_ciphertext,roster_ciphertext)| Ok(super::ManagedCutBlob::Managed { receipt: serde_json::from_str(&json).map_err(|_| ApiError::internal("Invalid stored managed receipt"))?, policy_ciphertext,roster_ciphertext }))?
+                } else {
+                    let ciphertext = tx.query_row("SELECT ciphertext FROM blobs WHERE identity_pubkey=?1 AND id=?2 AND seq=?3", params![account,id,seq], |row| row.get(0))?;
+                    super::ManagedCutBlob::Ordinary { id: id.clone(),seq: *seq,ciphertext }
+                });
+            }
+            let page = local.replay.page(claims, blobs, metadata.len() > 1)?;
+            tx.commit()?;
+            Ok(page)
+        }).await
     }
 
     async fn delete_identity(&self, identity_pubkey: &str, revoke: bool) -> ApiResult<DeletedIdentity> {

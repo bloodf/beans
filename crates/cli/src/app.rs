@@ -58,6 +58,7 @@ pub struct State {
     pub bots: Vec<Bot>,
     pub chats: Vec<Chat>,
     pub routines: Vec<Routine>,
+    pub workflows: Vec<WorkflowRecord>,
     pub auto_review: AutoReview,
     pub paused: bool,
     pub policy_clock: u64,
@@ -254,14 +255,14 @@ impl App {
         if config.home.join("forget-in-progress.json").try_exists()? {
             anyhow::bail!("Account forget is incomplete; finish local cleanup before reopening this home");
         }
-        config.ensure_home()?;
+        let admission = config.ensure_home_admission()?;
         let settings = Settings::load(&config);
         let identity: Option<IdentityFile> = config::read_json_strict(&config.identity_path())?;
         let machine: Option<MachineFile> = config::read_json_strict(&config.machine_path())?;
         let credentials = Credentials::load(&config);
         let plugins = crate::plugins::Store::load(&config)?;
         let marketplace = crate::marketplace::Updates::load(&config);
-        let store = LocalStore::open(&config.database_path())?;
+        let store = LocalStore::open_with_admission(&config.database_path(), admission.as_ref(), false)?;
         let memory_config = crate::memory_service::load(&store, machine.as_ref().and_then(|m| m.dek().ok()))?;
         store.recover_memory_queue()?;
         let mut state = store.load_state()?;
@@ -334,7 +335,8 @@ impl App {
         crate::marketplace::enable(&app);
         crate::catalog::enable(&app);
         // Normalize and persist the in-memory view before background work begins.
-        app.save_state_now();
+        let snapshot = { app.state.lock().map_err(|_| anyhow::anyhow!("Startup state mutex is poisoned"))?.clone() };
+        app.store.save_state(&snapshot)?;
         Ok(app)
     }
 
@@ -508,6 +510,16 @@ impl App {
             return Err("The plugin account changed; start again.".into());
         }
         Ok(guard)
+    }
+
+    /// The closure must not acquire `state`: membership remains locked through publication.
+    pub(crate) fn with_plugin_actor<T>(&self, expected: Option<u64>, actors: &[Option<&str>], publish: impl FnOnce(u64) -> Result<T, String>) -> Result<T, String> {
+        let lifecycle = self.plugin_admission(expected)?;
+        let state = self.state.lock().unwrap();
+        if actors.iter().flatten().any(|id| !state.listed_machines.contains_key(*id)) {
+            return Err("Request requires a paired Device".into());
+        }
+        publish(lifecycle.get().0)
     }
 
     // MARK: - Keys
@@ -732,6 +744,7 @@ impl App {
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
                 routines: state.routines.clone(),
+                workflows: state.workflows.clone(),
                 auto_review: state.auto_review.clone(),
                 paused: state.paused,
                 policy_clock: state.policy_clock,
@@ -1312,6 +1325,7 @@ impl App {
 
             state.bots.retain(|bot| bot.id != id);
             state.routines.retain(|routine| routine.bot_id != id);
+            state.workflows.retain(|workflow| workflow.bot_id != id);
             let version = self.next_policy_version(&mut state);
             state.deleted_bot_versions.insert(id.to_string(), version.clone());
             state.capability_versions.remove(id);
@@ -1578,6 +1592,57 @@ impl App {
         Ok(())
     }
 
+    // MARK: - Workflows
+
+    /// A bot's saved workflows, oldest first.
+    pub fn workflows_of(&self, bot_id: &str) -> Vec<WorkflowRecord> {
+        let mut workflows: Vec<WorkflowRecord> = self.state.lock().unwrap().workflows.iter().filter(|w| w.bot_id == bot_id).cloned().collect();
+        workflows.sort_by(|a, b| a.created_at.partial_cmp(&b.created_at).unwrap_or(std::cmp::Ordering::Equal));
+        workflows
+    }
+
+    /// Adds a saved workflow and publishes the roster. `workflow::create` checks it first.
+    pub fn insert_workflow(&self, workflow: WorkflowRecord) -> anyhow::Result<WorkflowRecord> {
+        let _edit = self.roster_edit.lock().unwrap();
+        if self.bot(&workflow.bot_id).is_none() {
+            anyhow::bail!("Unknown bot");
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.workflows.iter().any(|w| w.id == workflow.id) {
+                anyhow::bail!("Workflow id already exists");
+            }
+            // The bounds are checked here, under the same lock that admits the record, and
+            // before it is pushed: a create checked only against its own snapshot would let
+            // two creates take the last slot together, and let a full roster grow past what
+            // `workflow::admit` will accept back from the relay.
+            let held = state.workflows.iter().filter(|w| w.bot_id == workflow.bot_id).count();
+            if held >= crate::workflow::MAX_PER_BOT {
+                anyhow::bail!("A bot keeps at most {} workflows. Delete one first.", crate::workflow::MAX_PER_BOT);
+            }
+            if state.workflows.len() >= crate::workflow::MAX_TOTAL {
+                anyhow::bail!("This account keeps at most {} workflows. Delete one first.", crate::workflow::MAX_TOTAL);
+            }
+            state.workflows.push(workflow.clone());
+        }
+        self.roster_changed(true);
+        Ok(workflow)
+    }
+
+    pub fn delete_workflow(&self, id: &str) -> anyhow::Result<()> {
+        let _edit = self.roster_edit.lock().unwrap();
+        {
+            let mut state = self.state.lock().unwrap();
+            let before = state.workflows.len();
+            state.workflows.retain(|w| w.id != id);
+            if state.workflows.len() == before {
+                anyhow::bail!("Unknown workflow");
+            }
+        }
+        self.roster_changed(true);
+        Ok(())
+    }
+
     /// Routines as the apps see them: the stored fields plus the schedule in words, when the
     /// next run is due (or the next check, for a routine with one), and whether a run is going
     /// on right now.
@@ -1604,24 +1669,41 @@ impl App {
 
     /// Clears a chat's unread count. Read on this Device (`upload`), it clears on every other
     /// one through a `ClearUnread` blob.
-    pub fn mark_read(&self, chat_id: &str, upload: bool) {
-        let changed = {
-            let mut state = self.state.lock().unwrap();
-            match state.chats.iter_mut().find(|c| c.meta.id == chat_id) {
-                Some(chat) if chat.unread_count > 0 => {
-                    chat.unread_count = 0;
-                    true
-                }
-                _ => false,
-            }
+    pub fn mark_read(&self, chat_id: &str, upload: bool) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let Some(index) = state.chats.iter().position(|chat| chat.meta.id == chat_id && chat.unread_count > 0) else {
+            return Ok(());
         };
-        if changed {
-            self.save_state();
+        if !upload {
+            // Incoming reads retain the existing mutation and bulk-page save semantics.
+            // Their receipt/cursor replay durability is not established by this boundary.
+            state.chats[index].unread_count = 0;
+            drop(state);
+            let saved = if self.bulk_sync.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                let snapshot = self.state.lock().unwrap().clone();
+                self.store.save_state(&snapshot)
+            };
             self.emit(self.roster_summary());
-            if upload {
-                self.push_chat_op(&ChatBlob::ClearUnread { chat_id: chat_id.to_string() });
-            }
+            return saved;
         }
+        let dek = self.dek().ok_or_else(|| anyhow::anyhow!("Account key unavailable"))?;
+        let op = ChatBlob::ClearUnread { chat_id: chat_id.to_string() };
+        let item = OutboxItem {
+            id: uuid::Uuid::new_v4().to_string(), kind: "chat".into(), recipient: None,
+            ciphertext: crate::crypto::encrypt_json(&dek, "chat", &op)?,
+            slot: Some(op.slot()), group: Some(op.group()),
+        };
+        let mut snapshot = state.clone();
+        snapshot.chats[index].unread_count = 0;
+        remember_applied(&mut snapshot, &item.id);
+        self.store.queue_outbox_with_state(&item, &snapshot)?;
+        *state = snapshot;
+        drop(state);
+        self.outbox_notify.notify_waiters();
+        self.emit(self.roster_summary());
+        Ok(())
     }
 
     // MARK: - Messages
@@ -1750,6 +1832,7 @@ impl App {
         let updated = {
             let mut state = self.state.lock().unwrap();
             let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
+            let first = chat.usage.is_none();
             let entry = chat.usage.get_or_insert_with(ChatUsage::default);
             entry.context_tokens = beans_agent::estimate::context_tokens(usage);
             entry.context_window = context_window;
@@ -1757,6 +1840,7 @@ impl App {
             entry.output_tokens += usage.output;
             entry.cache_read_tokens += usage.cache_read;
             entry.cost_usd += usage.cost.total;
+            entry.cost_known = Some((first || entry.cost_known == Some(true)) && usage.cost.known == Some(true));
             entry.turns += 1;
             entry.model = model.to_string();
             entry.updated_at = crate::config::now_secs();
@@ -1774,11 +1858,13 @@ impl App {
         let updated = {
             let mut state = self.state.lock().unwrap();
             let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
+            let first = chat.usage.is_none();
             let entry = chat.usage.get_or_insert_with(ChatUsage::default);
             entry.input_tokens += usage.input + usage.cache_read + usage.cache_write;
             entry.output_tokens += usage.output;
             entry.cache_read_tokens += usage.cache_read;
             entry.cost_usd += usage.cost.total;
+            entry.cost_known = Some((first || entry.cost_known == Some(true)) && usage.cost.known == Some(true));
             entry.updated_at = crate::config::now_secs();
             entry.clone()
         };
@@ -2120,6 +2206,47 @@ mod tests {
         ScratchApp(app, home)
     }
 
+    #[test]
+    fn load_propagates_final_normalization_save_failure() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config { home: home.path().into(), port: 0 };
+        let initial = App::load(config.clone()).unwrap();
+        let mut seeded = initial.store.load_state().unwrap();
+        seeded.machine_blob_hash = Some("retained-startup-hash".into());
+        seeded.last_seq = 73;
+        initial.store.save_state(&seeded).unwrap();
+        drop(initial);
+
+        let db = rusqlite::Connection::open(config.database_path()).unwrap();
+        let metadata = |db: &rusqlite::Connection| {
+            db.query_row(
+                "SELECT auto_review_json, last_seq, roster_slot_seq, machine_blob_hash, credentials_uploaded, paused, policy_json FROM metadata WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?,
+                    row.get::<_, Option<String>>(3)?, row.get::<_, bool>(4)?, row.get::<_, bool>(5)?, row.get::<_, String>(6)?)),
+            ).unwrap()
+        };
+        let before = metadata(&db);
+        db.execute_batch(
+            "CREATE TRIGGER fail_final_normalization BEFORE UPDATE ON metadata
+             WHEN OLD.machine_blob_hash = 'retained-startup-hash' AND NEW.machine_blob_hash IS NULL
+             BEGIN SELECT RAISE(ABORT, 'final startup normalization failure'); END;"
+        ).unwrap();
+        // Only the final save writes the hash reset performed after recovery and retention.
+        let error = App::load(config.clone()).err().expect("final startup save must reject load");
+        assert!(format!("{error:#}").contains("final startup normalization failure"));
+        assert_eq!(metadata(&db), before, "failed final save must preserve every durable metadata field and JSON byte");
+
+        db.execute_batch("DROP TRIGGER fail_final_normalization;").unwrap();
+        let loaded = App::load(config).unwrap();
+        let persisted = loaded.store.load_state().unwrap();
+        assert_eq!(persisted.machine_blob_hash, None);
+        assert_eq!(persisted.last_seq, 73);
+        let mut expected = before;
+        expected.3 = None;
+        assert_eq!(metadata(&db), expected, "successful final save changes only the startup hash");
+    }
+
     fn bot(id: &str) -> Bot {
         Bot {
             id: id.into(),
@@ -2138,6 +2265,107 @@ mod tests {
             capabilities: Default::default(),
             created_at: 1.0,
         }
+    }
+
+    fn workflow_record(bot_id: &str, index: usize) -> WorkflowRecord {
+        WorkflowRecord {
+            id: format!("wf-{bot_id}-{index}"),
+            bot_id: bot_id.into(),
+            name: format!("Workflow {index}"),
+            definition: serde_json::json!({ "steps": [] }),
+            created_at: index as f64,
+        }
+    }
+
+    /// A roster at the total bound refuses the record and touches nothing. The bound is checked
+    /// where the record is admitted, so this is the case a snapshot-only create misses.
+    #[test]
+    fn a_roster_at_the_total_bound_refuses_the_create_and_writes_nothing() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().bots.push(bot("b1"));
+        let held = {
+            let mut state = app.state.lock().unwrap();
+            for index in 0..crate::workflow::MAX_TOTAL {
+                state.workflows.push(workflow_record("b1", index));
+            }
+            app.store.save_state(&state).unwrap();
+            state.workflows.len()
+        };
+        let outbox_before = app.store.outbox().unwrap().len();
+
+        let error = app.insert_workflow(workflow_record("b1", crate::workflow::MAX_TOTAL)).unwrap_err();
+        assert!(format!("{error:#}").contains("at most"), "a full roster must say why: {error:#}");
+
+        assert_eq!(app.state.lock().unwrap().workflows.len(), held);
+        assert_eq!(app.store.load_state().unwrap().workflows.len(), held, "a refused create wrote to the store");
+        assert_eq!(app.store.outbox().unwrap().len(), outbox_before, "a refused create queued an outbox item");
+        assert_eq!(app.workflows_of("b1").len(), crate::workflow::MAX_TOTAL);
+    }
+
+    /// The per-bot bound is refused the same way, and the total is nowhere near.
+    #[test]
+    fn a_bot_at_its_own_bound_refuses_the_create_and_writes_nothing() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().bots.push(bot("b1"));
+        let held = {
+            let mut state = app.state.lock().unwrap();
+            for index in 0..crate::workflow::MAX_PER_BOT {
+                state.workflows.push(workflow_record("b1", index));
+            }
+            state.workflows.len()
+        };
+        let outbox_before = app.store.outbox().unwrap().len();
+
+        let error = app.insert_workflow(workflow_record("b1", crate::workflow::MAX_PER_BOT)).unwrap_err();
+        assert!(format!("{error:#}").contains("at most"), "a full bot must say why: {error:#}");
+
+        assert_eq!(app.state.lock().unwrap().workflows.len(), held, "a refused create changed the held records");
+        assert_eq!(app.store.load_state().unwrap().workflows.len(), 0, "a refused create wrote to the store");
+        assert_eq!(app.store.outbox().unwrap().len(), outbox_before, "a refused create queued an outbox item");
+    }
+
+    /// Two creates taking the last slot together: exactly one wins. The bound is read under the
+    /// lock that admits the record, so the loser sees the winner's record and is refused. A
+    /// create that sized itself against a snapshot taken before the lock would let both in and
+    /// leave a bot with `MAX_PER_BOT + 1`.
+    #[test]
+    fn two_creates_taking_the_last_slot_leave_exactly_one() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().bots.push(bot("b1"));
+        let mut state = app.state.lock().unwrap();
+        for index in 0..crate::workflow::MAX_PER_BOT - 1 {
+            state.workflows.push(workflow_record("b1", index));
+        }
+        drop(state);
+
+        // The two threads race for the single remaining slot; either may take it.
+        let admitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let refused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let workers: Vec<_> = (0..2).map(|attempt| {
+            let app = Arc::clone(app);
+            let admitted = Arc::clone(&admitted);
+            let refused = Arc::clone(&refused);
+            std::thread::spawn(move || {
+                if app.insert_workflow(workflow_record("b1", crate::workflow::MAX_PER_BOT - 1 + attempt)).is_ok() {
+                    admitted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                } else {
+                    refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        }).collect();
+        for worker in workers { worker.join().unwrap(); }
+
+        assert_eq!(admitted.load(std::sync::atomic::Ordering::SeqCst), 1, "both creates took the last slot");
+        assert_eq!(refused.load(std::sync::atomic::Ordering::SeqCst), 1, "the losing create was not refused");
+        let held = app.workflows_of("b1").len();
+        assert_eq!(held, crate::workflow::MAX_PER_BOT, "a bot kept more than its bound");
+        assert_eq!(app.state.lock().unwrap().workflows.len(), crate::workflow::MAX_PER_BOT, "one record survived for one slot");
     }
 
     fn chat(id: &str, kind: &str, bot_ids: &[&str], owner: Option<&str>) -> Chat {
@@ -2186,6 +2414,62 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn mark_read_commits_unread_and_encrypted_outbox_or_returns_error() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let dek = [31; 32];
+        *app.machine.lock().unwrap() = Some(MachineFile {
+            format: config::Format::BeansV2,
+            machine_secret: keys::b64(&[17; 32]),
+            identity_pubkey: String::new(), content_pubkey: String::new(),
+            account_dek: keys::b64(&dek), name: "synthetic".into(), os: "ios".into(),
+            os_version: String::new(), model: String::new(), registered: false,
+            relay_url: None, created_at: 1,
+        });
+        let mut unread = chat("read", "dm", &[], None);
+        unread.unread_count = 3;
+        app.state.lock().unwrap().chats.push(unread);
+        app.store.save_state(&app.state.lock().unwrap()).unwrap();
+        let params = json!({"chat_id": "read"});
+        assert_eq!(crate::api::dispatch(app, "chats.mark_read", params.clone()).await.unwrap(), Value::Null);
+        assert_eq!(app.store.load_state().unwrap().chats[0].unread_count, 0);
+        let queued = app.store.outbox().unwrap();
+        assert_eq!(queued.len(), 1);
+        assert!(matches!(crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &queued[0].ciphertext).unwrap(),
+            ChatBlob::ClearUnread { chat_id } if chat_id == "read"));
+        assert_eq!(queued[0].slot, Some(ChatBlob::ClearUnread { chat_id: "read".into() }.slot()));
+        let receipt = app.store.load_state().unwrap().applied_blob_ids;
+        assert!(receipt.contains(&queued[0].id));
+        crate::api::dispatch(app, "chats.mark_read", params.clone()).await.unwrap();
+        assert_eq!(app.store.outbox().unwrap()[0].id, queued[0].id);
+        assert_eq!(app.store.load_state().unwrap().applied_blob_ids, receipt);
+
+        let db = rusqlite::Connection::open(app.config.database_path()).unwrap();
+        for (table, operation) in [("metadata", "INSERT"), ("outbox", "UPDATE")] {
+            app.state.lock().unwrap().chats[0].unread_count = 3;
+            app.store.save_state(&app.state.lock().unwrap()).unwrap();
+            db.execute_batch(&format!("CREATE TRIGGER fail_read BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, 'synthetic read failure'); END;")).unwrap();
+            let mut events = app.events.subscribe();
+            assert!(crate::api::dispatch(app, "chats.mark_read", params.clone()).await.is_err(), "{table} failure must reject API success");
+            assert_eq!(app.chat("read").unwrap().unread_count, 3);
+            assert_eq!(app.store.load_state().unwrap().chats[0].unread_count, 3);
+            assert_eq!(app.store.load_state().unwrap().applied_blob_ids, receipt);
+            assert_eq!(app.store.outbox().unwrap()[0].id, queued[0].id);
+            assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+            db.execute_batch("DROP TRIGGER fail_read;").unwrap();
+        }
+        crate::api::dispatch(app, "chats.mark_read", params.clone()).await.unwrap();
+        let committed = app.store.outbox().unwrap();
+        assert_eq!(committed.len(), 1);
+        assert_ne!(committed[0].id, queued[0].id);
+        crate::api::dispatch(app, "chats.mark_read", params).await.unwrap();
+        assert_eq!(app.store.outbox().unwrap()[0].id, committed[0].id);
+        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(reloaded.chat("read").unwrap().unread_count, 0);
+        assert_eq!(reloaded.store.outbox().unwrap()[0].id, committed[0].id);
+    }
+
     #[test]
     fn closing_a_sign_in_page_stops_only_its_own_wait() {
         let scratch = scratch_app();
@@ -2215,6 +2499,92 @@ mod tests {
         }
         assert!(!config.database_path().exists());
         assert!(!home.path().join("format.json").exists());
+    }
+
+    #[cfg(feature = "runner")]
+    #[test]
+    fn chat_cost_distinguishes_absent_zero_priced_and_mixed() {
+        use beans_agent::models::{ModelInfo, Rates, ThinkingMode};
+        use beans_agent::Usage;
+
+        let mut info = ModelInfo {
+            id: "fixture".into(), name: "Fixture".into(), provider: "fixture".into(),
+            context_window: 4096, max_output: 1024, reasoning: false, images: false,
+            rates: None, tiers: Vec::new(), thinking: ThinkingMode::Effort,
+            levels: Vec::new(), wire: None,
+        };
+        let mut absent = Usage { input: 1_000_000, output: 500_000, total_tokens: 1_500_000, ..Usage::default() };
+        absent.cost = info.cost_of(&absent);
+        let mut zero_call = Usage::default();
+        zero_call.cost = info.cost_of(&zero_call);
+        let mut free = absent.clone();
+        info.rates = Some(Rates { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 });
+        free.cost = info.cost_of(&free);
+        let mut priced = absent.clone();
+        info.rates = Some(Rates { input: 2.0, output: 4.0, cache_read: 0.0, cache_write: 0.0 });
+        priced.cost = info.cost_of(&priced);
+        assert_eq!((absent.cost.total, absent.cost.known), (0.0, Some(false)));
+        assert_eq!((free.cost.total, free.cost.known), (0.0, Some(true)));
+        assert_eq!((priced.cost.total, priced.cost.known), (4.0, Some(true)));
+        for unknown in [&absent, &zero_call, &Usage::default()] {
+            let mut aggregate = Usage::default();
+            aggregate.add(unknown);
+            aggregate.add(&priced);
+            assert_eq!((aggregate.cost.total, aggregate.cost.known), (4.0, Some(false)));
+            let mut reverse = Usage::default();
+            reverse.add(&priced);
+            reverse.add(unknown);
+            assert_eq!((reverse.cost.total, reverse.cost.known), (4.0, Some(false)));
+        }
+        let mut known = Usage::default();
+        known.add(&free);
+        known.add(&priced);
+        assert_eq!((known.cost.total, known.cost.known), (4.0, Some(true)));
+
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        for (id, first, side, subtotal, complete) in [
+            ("absent", &absent, None, 0.0, false),
+            ("free", &free, None, 0.0, true),
+            ("priced", &priced, None, 4.0, true),
+            ("mixed", &priced, Some(&absent), 4.0, false),
+            ("reverse", &absent, Some(&priced), 4.0, false),
+            ("zero-call", &zero_call, Some(&priced), 4.0, false),
+        ] {
+            app.state.lock().expect("test state lock").chats.push(chat(id, "dm", &[], None));
+            app.record_usage(id, "fixture", first, 4096);
+            let before = app.chat(id).unwrap().usage.unwrap();
+            if let Some(side) = side { app.add_side_usage(id, side); }
+            let usage = app.chat(id).unwrap().usage.unwrap();
+            assert_eq!((usage.cost_usd, usage.cost_known), (subtotal, Some(complete)));
+            assert_eq!((usage.context_tokens, usage.context_window, usage.turns, &usage.model),
+                (before.context_tokens, before.context_window, 1, &before.model));
+            let snapshot = app.snapshot();
+            let wire = snapshot["chats"].as_array().unwrap().iter().find(|row| row["id"] == id).unwrap();
+            assert_eq!(wire["usage"]["cost_usd"], json!(subtotal));
+            assert_eq!(wire["usage"]["cost_known"], json!(complete));
+        }
+        app.state.lock().expect("test state lock").chats.push(chat("side-first", "dm", &[], None));
+        app.add_side_usage("side-first", &free);
+        assert_eq!(app.chat("side-first").unwrap().usage.unwrap().cost_known, Some(true));
+        app.record_usage("side-first", "fixture", &absent, 4096);
+        assert_eq!(app.chat("side-first").unwrap().usage.unwrap().cost_known, Some(false));
+        let old: ChatUsage = serde_json::from_value(json!({
+            "context_tokens": 0, "context_window": 0, "input_tokens": 0,
+            "output_tokens": 0, "cache_read_tokens": 0, "cost_usd": 3.0,
+            "turns": 0, "model": "fixture", "updated_at": 0.0
+        })).unwrap();
+        let mut old_chat = chat("historical", "dm", &[], None);
+        old_chat.usage = Some(old);
+        app.state.lock().expect("test state lock").chats.push(old_chat);
+        app.add_side_usage("historical", &priced);
+        let historical = app.chat("historical").unwrap().usage.unwrap();
+        assert_eq!((historical.cost_usd, historical.cost_known), (7.0, Some(false)));
+        app.save_state_now();
+        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        for id in ["absent", "free", "priced", "mixed", "reverse", "zero-call", "side-first", "historical"] {
+            assert_eq!(reloaded.chat(id).unwrap().usage, app.chat(id).unwrap().usage);
+        }
     }
 
     #[test]

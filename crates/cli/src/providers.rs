@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use beans_agent::models::{ModelInfo, Rates, ThinkingMode, Wire};
+use beans_agent::models::{ModelInfo, ThinkingMode, Wire};
 use beans_agent::providers::anthropic::ANTHROPIC_BASE_URL;
 use beans_agent::providers::{
     AnthropicProvider, ChatGptProvider, ChatGptTokens, GrokProvider, GrokTokenSource, GrokTokens, OpenAiCompatProvider,
@@ -94,7 +94,7 @@ pub fn supports_vision(app: &App, kind: &str, model: Option<&str>) -> bool {
         let credentials = app.credentials.lock().unwrap();
         let Some(provider) = credentials.custom.get(kind) else { return false };
         let model = model.filter(|m| !m.trim().is_empty()).or_else(|| provider.models.first().map(|m| m.id.as_str()));
-        return model.is_some_and(|model| provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.images).unwrap_or(false));
+        return model.is_some_and(|model| provider.effective_capabilities(provider.models.iter().find(|entry| entry.id == model)).images.unwrap_or(false));
     }
     built_in_vision(kind, model)
 }
@@ -317,11 +317,12 @@ fn opencode_provider(
 /// gave, with what is known about the model.
 fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking: Option<ThinkingLevel>) -> Arc<dyn Provider> {
     let info = Arc::new(custom_model_info(kind, provider, model));
+    let capabilities = provider.effective_capabilities(provider.models.iter().find(|entry| entry.id == model));
     match provider.api {
         CustomApi::ChatCompletions => {
             let mut adapter = OpenAiCompatProvider::new(kind, &provider.base_url, &provider.api_key, model).without_redirects().with_thinking(thinking);
             adapter.reasoning_effort_none = true;
-            adapter.supports_tools = provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.tools).unwrap_or(true);
+            adapter.supports_tools = capabilities.tools.unwrap_or(true);
             adapter.supports_images = info.images;
             adapter.info = Some(info);
             // OpenAI's own field; servers such as Gemini's refuse a request with one they lack.
@@ -330,7 +331,7 @@ fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking:
         }
         CustomApi::Responses => {
             let mut adapter = OpenAiResponsesProvider::new(kind, &provider.base_url, &provider.api_key, model).without_redirects().with_thinking(thinking);
-            adapter.supports_tools = provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.tools).unwrap_or(true);
+            adapter.supports_tools = capabilities.tools.unwrap_or(true);
             adapter.prompt_cache_key = false;
             adapter.supports_images = info.images;
             adapter.info = Some(info);
@@ -338,7 +339,7 @@ fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking:
         }
         CustomApi::Messages => {
             let mut adapter = AnthropicProvider::new(kind, &provider.base_url, &provider.api_key, model).without_redirects().with_thinking(thinking);
-            adapter.supports_tools = provider.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.tools).unwrap_or(true);
+            adapter.supports_tools = capabilities.tools.unwrap_or(true);
             adapter.supports_images = info.images;
             adapter.cache = false;
             adapter.max_tokens = if info.max_output > 0 { info.max_output.min(32_000) } else { 16_384 };
@@ -353,6 +354,7 @@ fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking:
 /// Custom capabilities come only from this connection, never a similarly named catalog model.
 fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> ModelInfo {
     let listed = provider.models.iter().find(|entry| entry.id == model);
+    let capabilities = provider.effective_capabilities(listed);
     let thinking = if provider.api == CustomApi::Messages {
         match listed.and_then(|entry| entry.thinking_format.as_deref()) {
             Some("claude-adaptive") => ThinkingMode::Adaptive,
@@ -363,11 +365,11 @@ fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> Mode
         id: model.to_string(),
         name: listed.and_then(|entry| entry.name.clone()).unwrap_or_else(|| model.to_string()),
         provider: kind.to_string(),
-        context_window: listed.and_then(|entry| entry.context_window).unwrap_or(0),
+        context_window: capabilities.context_window.map(std::num::NonZeroU64::get).unwrap_or(0),
         max_output: listed.and_then(|entry| entry.max_output).unwrap_or(0),
         reasoning: listed.and_then(|entry| entry.reasoning).unwrap_or(false),
-        images: listed.and_then(|entry| entry.images).unwrap_or(false),
-        rates: Rates { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 },
+        images: capabilities.images.unwrap_or(false),
+        rates: None,
         tiers: Vec::new(),
         thinking,
         levels: listed.map(|entry| provider.levels(entry)).unwrap_or_default(),
@@ -487,7 +489,7 @@ mod tests {
     }
 
     fn add_custom(app: &App, kind: &str, api: CustomApi, models: Vec<CustomModel>) {
-        let provider = CustomProvider { name: "Lab".into(), api, base_url: "http://127.0.0.1:9/v1".into(), api_key: String::new(), models, created_at: 1, integration: None };
+        let provider = CustomProvider { name: "Lab".into(), api, base_url: "http://127.0.0.1:9/v1".into(), api_key: String::new(), models, created_at: 1, integration: None, capabilities: None };
         app.credentials.lock().unwrap().custom.insert(kind.into(), provider);
     }
 
@@ -526,6 +528,22 @@ mod tests {
         assert!(provider_for(app, "custom:gateway", Some("no-tools"), None).is_ok(), "tool-free models.ask and reviews can construct this adapter");
     }
 
+    #[tokio::test]
+    async fn connection_declarations_override_discovery_without_dropping_tools() {
+        use futures::StreamExt;
+        use beans_agent::AssistantEvent;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        add_custom(app, "custom:declared", CustomApi::ChatCompletions, vec![CustomModel { images: Some(false), tools: Some(true), context_window: Some(1024), ..model("alias") }]);
+        app.credentials.lock().unwrap().custom.get_mut("custom:declared").unwrap().capabilities = Some(crate::credentials::CustomCapabilities { context_window: std::num::NonZeroU64::new(8192), images: Some(true), tools: Some(false) });
+        let adapter = provider_for(app, "custom:declared", Some("alias"), None).unwrap();
+        assert!(supports_vision(app, "custom:declared", Some("alias")));
+        assert_eq!(adapter.model_info().unwrap().context_window, 8192);
+        let request = ModelRequest { system_prompt: String::new(), messages: Vec::new(), tools: vec![beans_agent::ToolSpec { name: "read".into(), description: "fixture".into(), parameters: serde_json::json!({"type":"object"}) }], cache_points: Vec::new(), max_tokens: None, options: Default::default() };
+        let events: Vec<_> = adapter.stream(request, CancellationToken::new()).await.collect().await;
+        assert!(matches!(&events[0], AssistantEvent::Error { message, aborted: false } if message.contains("does not support tools")));
+    }
+
     #[test]
     fn custom_providers_run_their_first_model_with_what_is_known_of_it() {
         let scratch = scratch_app();
@@ -542,7 +560,7 @@ mod tests {
         // A familiar model ID is not a capability declaration.
         let known = provider_for(app, "custom:vision-lab", Some("anthropic/claude-sonnet-5"), None).unwrap();
         let info = known.model_info().unwrap();
-        assert_eq!((info.context_window, info.images, info.rates.input), (0, false, 0.0));
+        assert_eq!((info.context_window, info.images, info.rates), (0, false, None));
 
         // Nothing advertised: no window, text only, no guessed thinking.
         let unknown = provider_for(app, "custom:vision-lab", Some("mystery"), Some(ThinkingLevel::Max)).unwrap();
@@ -655,7 +673,7 @@ mod tests {
         for (api, path, body, line) in cases {
             let (root, server) = answer_once(body);
             let kind = format!("custom:keyless-{}", path.len());
-            let provider = CustomProvider { name: "Keyless".into(), api, base_url: format!("{root}{path}"), api_key: String::new(), models: vec![model("m")], created_at: 1, integration: None };
+            let provider = CustomProvider { name: "Keyless".into(), api, base_url: format!("{root}{path}"), api_key: String::new(), models: vec![model("m")], created_at: 1, integration: None, capabilities: None };
             app.credentials.lock().unwrap().custom.insert(kind.clone(), provider);
             let mut stream = provider_for(app, &kind, None, None).unwrap().stream(request(), CancellationToken::new()).await;
             while stream.next().await.is_some() {}
@@ -703,7 +721,7 @@ mod tests {
             for capability in [None, Some(false), Some(true)] {
                 let (root, server) = answer_once(fixture);
                 let listed = CustomModel { id: "claude-opus-5".into(), images: capability, reasoning: capability, tools: capability, thinking_format: Some(format.into()), thinking_can_disable: Some(true), max_output: Some(4096), ..Default::default() };
-                let provider = CustomProvider { name: "Neutral".into(), api, base_url: format!("{root}{suffix}"), api_key: "fixture-key".into(), models: vec![listed], created_at: 1, integration: None };
+                let provider = CustomProvider { name: "Neutral".into(), api, base_url: format!("{root}{suffix}"), api_key: "fixture-key".into(), models: vec![listed], created_at: 1, integration: None, capabilities: None };
                 let adapter = custom_provider("custom:neutral", &provider, "claude-opus-5", Some(ThinkingLevel::Medium));
                 let request = ModelRequest {
                     system_prompt: "fixture system".into(),
@@ -754,7 +772,7 @@ mod tests {
                 }
                 assert!(body.get("prompt_cache_key").is_none());
             }
-            let provider = CustomProvider { name: "Neutral".into(), api, base_url: "http://127.0.0.1:9".into(), api_key: String::new(), models: vec![CustomModel { tools: Some(false), ..model("no-tools") }], created_at: 1, integration: None };
+            let provider = CustomProvider { name: "Neutral".into(), api, base_url: "http://127.0.0.1:9".into(), api_key: String::new(), models: vec![CustomModel { tools: Some(false), ..model("no-tools") }], created_at: 1, integration: None, capabilities: None };
             let request = ModelRequest { system_prompt: String::new(), messages: Vec::new(), tools: vec![beans_agent::ToolSpec { name: "read".into(), description: "fixture".into(), parameters: serde_json::json!({"type":"object"}) }], cache_points: Vec::new(), max_tokens: None, options: Default::default() };
             let events: Vec<_> = custom_provider("custom:neutral", &provider, "no-tools", None).stream(request, CancellationToken::new()).await.collect().await;
             assert!(matches!(&events[0], AssistantEvent::Error { message, aborted: false } if message.contains("does not support tools")));
@@ -777,7 +795,7 @@ mod tests {
                 socket.read(&mut request).unwrap();
                 write!(socket,"HTTP/1.1 307 Temporary Redirect\r\nLocation: {destination}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             });
-            let provider = CustomProvider { name:"Neutral".into(),api,base_url:root,api_key:"fixture-key".into(),models:vec![model("alias")],created_at:1,integration:None };
+            let provider = CustomProvider { name:"Neutral".into(),api,base_url:root,api_key:"fixture-key".into(),models:vec![model("alias")],created_at:1,integration:None,capabilities:None };
             let request = ModelRequest { system_prompt:String::new(),messages:Vec::new(),tools:Vec::new(),cache_points:Vec::new(),max_tokens:Some(32),options:Default::default() };
             let events:Vec<_> = custom_provider("custom:neutral",&provider,"alias",None).stream(request,CancellationToken::new()).await.collect().await;
             server.join().unwrap();

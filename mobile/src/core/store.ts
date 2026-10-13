@@ -8,6 +8,7 @@ import { useShallow } from "zustand/react/shallow";
 import { runsInTerminal, type AutoReview, type Bot, type Chat, type ChatMeta, type ChatUsage, type Device, type Message, type ProviderModel, type ProviderStatus, type RelayProblem, type Routine } from "./model";
 import { t } from "../i18n";
 import { savePrefs } from "./prefs";
+import { clearComposerDrafts, invalidateComposerSends, removeComposerDraft } from "./composerDraft";
 
 export interface Running {
   chatId: string;
@@ -122,6 +123,10 @@ function empty(): Omit<StoreState, "ready" | "dictation_lang" | "appActive" | "a
 }
 
 export const useStore = create<StoreState>()(() => ({ ...empty(), ready: false, appActive: false, activeSince: 0 }));
+useStore.subscribe((state, previous) => {
+  if (state.identityId !== previous.identityId || state.deviceId !== previous.deviceId
+    || state.relayUrl !== previous.relayUrl || state.paired !== previous.paired) invalidateComposerSends();
+});
 
 /// Applies a change to the phone's own prefs and saves them.
 export function mutate(update: (s: StoreState) => Partial<StoreState>) {
@@ -131,6 +136,7 @@ export function mutate(update: (s: StoreState) => Partial<StoreState>) {
 
 /// Back to unpaired: everything the core told us goes; the phone's prefs stay.
 export function resetStore() {
+  clearComposerDrafts();
   useStore.setState({ ...empty() });
 }
 
@@ -311,7 +317,11 @@ export function removeMessage(chatId: string, messageId: string) {
   }));
 }
 
-export function removeChat(chatId: string) {
+export function removeChat(chatId: string, discardDraft = true) {
+  if (discardDraft) {
+    const source = useStore.getState();
+    removeComposerDraft(source.identityId, source.relayUrl, chatId);
+  }
   useStore.setState((s) => ({
     chats: s.chats.filter((c) => c.id !== chatId),
     statuses: omit(s.statuses, chatId),
@@ -325,13 +335,40 @@ export function setChatUsage(chatId: string, usage: ChatUsage) {
   useStore.setState((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? { ...c, usage } : c)) }));
 }
 
-/// The chat is read here; the core clears it everywhere.
+// In-flight entries are generation tokens: any account or foreground transition revokes them,
+// including a change away and back before the native request completes.
+const pendingReads = new Map<string, object>();
+useStore.subscribe((s, previous) => {
+  if (s.paired !== previous.paired || s.identityId !== previous.identityId
+    || s.deviceId !== previous.deviceId || s.relayUrl !== previous.relayUrl
+    || s.appActive !== previous.appActive || s.activeSince !== previous.activeSince) pendingReads.clear();
+});
+
+/// Clear locally only after persistence succeeds; failures leave the unread count available.
 export function markRead(chatId: string) {
-  if (!useStore.getState().appActive) return;
+  const s = useStore.getState();
+  if (!s.appActive || !s.paired || !s.identityId || !s.deviceId) return;
   const chat = chatById(chatId);
-  if (!chat || chat.unread_count === 0) return;
-  useStore.setState((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? { ...c, unread_count: 0 } : c)) }));
-  void import("../../modules/beans-core").then(({ request }) => request("chats.mark_read", { chat_id: chatId }).catch(() => {}));
+  if (!chat || chat.unread_count === 0 || pendingReads.has(chatId)) return;
+  const token = {};
+  pendingReads.set(chatId, token);
+  void (async () => {
+    try {
+      // Literal require uses the bundled bridge, without requesting a production Metro chunk.
+      const { request } = require("../../modules/beans-core") as typeof import("../../modules/beans-core");
+      await request("chats.mark_read", { chat_id: chatId });
+      if (pendingReads.get(chatId) !== token) return;
+      pendingReads.delete(chatId);
+      useStore.setState((current) => ({
+        // A newer roster or message owns its unread state; an old completion cannot clear it.
+        chats: current.chats.map((c) => (c === chat ? { ...c, unread_count: 0 } : c)),
+      }));
+    } catch {
+      // No optimistic clear or store update: a failed write stays unread without retry recursion.
+    } finally {
+      if (pendingReads.get(chatId) === token) pendingReads.delete(chatId);
+    }
+  })();
 }
 
 export function markFile(id: string, uri: string) {

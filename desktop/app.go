@@ -198,9 +198,13 @@ func (a *appDelegate) stopWaiting() {
 
 func (a *appDelegate) connectionTransition(state string) uint64 {
 	native.store.Fence()
+	native.resetDiagnostics()
 	native.suspendMemoryForms()
 	if native.avatars != nil {
 		native.avatars.reset(native.store.Epoch)
+		if native.activity != nil {
+			native.activity.reset()
+		}
 	}
 	if native.memory != nil {
 		_ = native.memory.reset(native.store.Epoch)

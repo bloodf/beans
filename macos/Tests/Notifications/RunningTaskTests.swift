@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Beans
 
@@ -62,5 +63,69 @@ final class RunningTaskTests: XCTestCase {
         for state in [CommandRun.State.exited, .failed, .stopped] {
             XCTAssertFalse(row(isRunning: true, state: state).runsInForeground)
         }
+    }
+
+    @MainActor
+    func testBlindRunningCardReservesSecureInputAndRefusesEndedOrSessionlessCards() throws {
+        _ = NSApplication.shared
+        var run = CommandRun(sessionID: "bash-card-check", command: "echo pick; read -r NAME </dev/tty", state: .running, handedOver: true)
+        let cell = CommandCellView()
+        func configure() {
+            cell.configure(run: run, messageID: "card-check", botName: "Scout", avatar: nil, groupStart: true)
+            cell.frame = NSRect(x: 0, y: 0, width: 480, height: CommandCellView.height(for: run, rowWidth: 480, indent: ChatMetrics.horizontalInset) + ChatMetrics.groupTopPadding)
+            cell.layoutSubtreeIfNeeded()
+        }
+        configure()
+        let secure = try XCTUnwrap(cell.subviews.compactMap { $0 as? NSSecureTextField }.first)
+        let send = try XCTUnwrap(cell.subviews.compactMap { $0 as? NSButton }.first { $0.action == NSSelectorFromString("send:") })
+        XCTAssertFalse(secure.isHidden)
+        XCTAssertFalse(send.isHidden)
+        XCTAssertGreaterThan(secure.frame.width, 0)
+        XCTAssertGreaterThan(send.frame.width, 0)
+        XCTAssertFalse(secure.frame.intersects(send.frame))
+        XCTAssertTrue(cell.bounds.contains(secure.frame))
+        XCTAssertTrue(cell.bounds.contains(send.frame))
+        var dispatched = false
+        cell.onSend = { _ in dispatched = true }
+        for state in [CommandRun.State.exited, .failed, .stopped] {
+            run.state = state
+            configure()
+            XCTAssertTrue(secure.isHidden)
+            XCTAssertTrue(send.isHidden)
+            _ = cell.perform(NSSelectorFromString("send:"), with: send)
+        }
+        run.state = .running
+        run.sessionID = nil // Pipe-mode Runner has no terminal session.
+        configure()
+        XCTAssertTrue(secure.isHidden)
+        XCTAssertTrue(send.isHidden)
+        _ = cell.perform(NSSelectorFromString("send:"), with: send)
+        XCTAssertFalse(dispatched)
+    }
+
+    @MainActor
+    func testBlindInputFailureKeepsDraftWithoutReflectingErrorAndSuccessClearsIt() async throws {
+        _ = NSApplication.shared
+        let run = CommandRun(sessionID: "bash-card-check", command: "read -r NAME </dev/tty", state: .running, handedOver: true)
+        let cell = CommandCellView()
+        cell.configure(run: run, messageID: "card-check", botName: "Scout", avatar: nil, groupStart: true)
+        let secure = try XCTUnwrap(cell.subviews.compactMap { $0 as? NSSecureTextField }.first)
+        let send = try XCTUnwrap(cell.subviews.compactMap { $0 as? NSButton }.first { $0.action == NSSelectorFromString("send:") })
+        let draft = "noncredential-card-sentinel"
+        secure.stringValue = draft
+        cell.onSend = { _ in throw NSError(domain: "card-check", code: 1, userInfo: [NSLocalizedDescriptionKey: draft]) }
+        _ = cell.perform(NSSelectorFromString("send:"), with: send)
+        for _ in 0..<100 where !send.isEnabled { await Task.yield() }
+        XCTAssertTrue(send.isEnabled)
+        XCTAssertEqual(secure.stringValue, draft)
+        for label in cell.subviews.compactMap({ $0 as? NSTextField }) where label !== secure {
+            XCTAssertFalse(label.stringValue.contains(draft))
+            XCTAssertFalse(label.toolTip?.contains(draft) ?? false)
+        }
+        cell.onSend = { text in XCTAssertEqual(text, draft) }
+        _ = cell.perform(NSSelectorFromString("send:"), with: send)
+        for _ in 0..<100 where !send.isEnabled { await Task.yield() }
+        XCTAssertTrue(send.isEnabled)
+        XCTAssertEqual(secure.stringValue, "")
     }
 }

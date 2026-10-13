@@ -4,11 +4,10 @@ import AppKit
 /// Auto-review asks to run it: who wants to, the command on one line in a code block that shows
 /// the whole command on click, why, and Allow once, Always allow (with the rule it adds), and
 /// Deny. Once the bot handed the running command over: Stop at the end of the title's line, the
-/// command, and its last lines in a code block of their own that scrolls; at a question, a
-/// field to answer in, which hides what is typed unless the question is a yes or no, with Send.
-/// What the user types goes to the command and nowhere else: the CLI writes it to the terminal
-/// and keeps nothing. In a group the card sits in the bubbles' column, the bot's avatar beside
-/// its bottom edge.
+/// command, and its last lines in a code block of their own that scrolls; a live session offers
+/// explicit input, hidden unless the question is yes or no. Input uses `bash.stdin`, not chat;
+/// the CLI writes it locally or seals it to the Runner without plaintext chat retention.
+/// In a group the card sits in the bubbles' column, the bot's avatar beside its bottom edge.
 final class CommandCellView: TranscriptCellView {
     static let identifier = NSUserInterfaceItemIdentifier("CommandCell")
 
@@ -46,7 +45,7 @@ final class CommandCellView: TranscriptCellView {
     private static func note(_ run: CommandRun) -> String? {
         switch run.state {
         case .asking: run.rule.map { L("Always allow adds the rule “%@”.", $0) }
-        case .waiting where run.sessionID != nil: L("What you type goes straight to the command, not into the chat.")
+        case .running where run.takesInput, .waiting where run.takesInput: L("What you type goes straight to the command, not into the chat.")
         default: nil
         }
     }
@@ -120,7 +119,7 @@ final class CommandCellView: TranscriptCellView {
                 buttonsY = bottom + 9
                 bottom += 9 + Self.controlHeight
             }
-            if run.state == .waiting, run.sessionID != nil {
+            if run.takesInput {
                 answerY = bottom + 9
                 bottom += 9 + Self.controlHeight
             }
@@ -255,7 +254,10 @@ final class CommandCellView: TranscriptCellView {
         title.stringValue = Self.title(for: run, botName: botName)
         title.toolTip = run.command
         caption.stringValue = Self.caption(run) ?? ""
-        let asking = run.prompt ?? L("Type your answer")
+        let asking = run.prompt ?? L("Send input")
+        secretField.placeholderString = asking
+        plainField.placeholderString = asking
+        sendButton.title = run.state == .running ? L("Send input") : L("Send")
         secretField.setAccessibilityLabel(asking)
         plainField.setAccessibilityLabel(asking)
         updateNote()
@@ -264,7 +266,7 @@ final class CommandCellView: TranscriptCellView {
     }
 
     private func updateControls() {
-        let answering = run?.state == .waiting && run?.sessionID != nil
+        let answering = run?.takesInput ?? false
         let yesOrNo = run?.asksYesOrNo ?? false
         secretField.isHidden = !answering || yesOrNo
         plainField.isHidden = !answering || !yesOrNo
@@ -324,7 +326,7 @@ final class CommandCellView: TranscriptCellView {
                 try await onSend(text)
                 field.stringValue = ""
             } catch {
-                show(error: error.localizedDescription)
+                show(error: L("Could not send input"))
             }
         }
     }

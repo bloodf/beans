@@ -798,11 +798,8 @@ textarea::placeholder {
   animation: breathe 1.2s ease-in-out infinite alternate;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .presence-dot.active {
-    animation: none;
-  }
-}
+/* The Reduce Motion block for this file sits after every rule it stops, at the end of
+   Overlays, so equal specificity still resolves to `animation: none`. */
 
 @keyframes breathe {
   from {
@@ -990,6 +987,30 @@ textarea::placeholder {
   max-height: 388px;
   overflow: auto;
   padding: 14px;
+}
+
+/* Reduce Motion stops the movement; every element stays and keeps its state. This block
+   follows the rules it stops so equal specificity still resolves to `animation: none`. */
+@media (prefers-reduced-motion: reduce) {
+  .presence-dot.active {
+    animation: none;
+  }
+
+  .spinner {
+    animation: none;
+  }
+
+  .sheet-scrim {
+    animation: none;
+  }
+
+  .sheet-frame {
+    animation: none;
+  }
+
+  .popover {
+    animation: none;
+  }
 }
 
 .page-menu-scrim {

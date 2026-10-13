@@ -124,8 +124,9 @@ export function DayRow({ at }: { at: number }) {
   );
 }
 
-/// Swiping a bubble this far to the left makes the draft a reply to it.
+/// Swiping a bubble this far to the right makes the draft a reply to it.
 const REPLY_SWIPE = 56;
+const BACK_EDGE = 28;
 
 /// Who wrote a quoted message, as a reply's quote names them.
 export function quoteAuthorName(author: Author, bots: Map<string, Bot>): string {
@@ -134,10 +135,9 @@ export function quoteAuthorName(author: Author, bots: Map<string, Bot>): string 
   return "Beans";
 }
 
-/// A message that follows a leftward swipe, with a reply arrow fading in behind it; let go past
-/// `REPLY_SWIPE` and the draft answers it. Vertical drags stay with the transcript.
-function SwipeToReply({ onReply, children }: { onReply?: () => void; children: React.ReactNode }) {
-  const p = usePalette();
+/// Only the bubble owns the detector; the whole row follows its rightward drag.
+/// Edge and leftward drags remain navigation's, vertical drags the transcript's.
+function useSwipeToReply(onReply?: () => void) {
   const offset = useSharedValue(0);
   const armed = useRef(false);
   const pan = useMemo(
@@ -145,18 +145,22 @@ function SwipeToReply({ onReply, children }: { onReply?: () => void; children: R
       Gesture.Pan()
         .runOnJS(true)
         .enabled(!!onReply)
-        .activeOffsetX([-14, 14])
+        .activeOffsetX(14)
+        .failOffsetX(-10)
         .failOffsetY([-10, 10])
+        .onTouchesDown((event, manager) => {
+          if ((event.allTouches[0]?.absoluteX ?? 0) < BACK_EDGE) manager.fail();
+        })
         .onUpdate((event) => {
-          offset.value = Math.min(0, Math.max(-REPLY_SWIPE * 1.4, event.translationX));
-          const past = offset.value <= -REPLY_SWIPE;
+          offset.value = Math.max(0, Math.min(REPLY_SWIPE * 1.4, event.translationX));
+          const past = offset.value >= REPLY_SWIPE;
           if (past !== armed.current) {
             armed.current = past;
             if (past) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
           }
         })
-        .onEnd(() => {
-          if (armed.current) onReply?.();
+        .onEnd((_event, success) => {
+          if (success && armed.current) onReply?.();
         })
         .onFinalize(() => {
           armed.current = false;
@@ -166,22 +170,13 @@ function SwipeToReply({ onReply, children }: { onReply?: () => void; children: R
   );
   const follow = useAnimatedStyle(() => ({ transform: [{ translateX: offset.value }] }));
   const arrow = useAnimatedStyle(() => {
-    const progress = Math.min(1, -offset.value / REPLY_SWIPE);
+    const progress = Math.min(1, offset.value / REPLY_SWIPE);
     return { opacity: progress, transform: [{ scale: 0.6 + 0.4 * progress }] };
   });
-  return (
-    <GestureDetector gesture={pan}>
-      <View>
-        <Animated.View style={[styles.replyArrow, arrow]} pointerEvents="none">
-          <Symbol name="arrowshape.turn.up.left.fill" size={16} color={p.secondaryLabel} />
-        </Animated.View>
-        <Animated.View style={follow}>{children}</Animated.View>
-      </View>
-    </GestureDetector>
-  );
+  return { pan, follow, arrow };
 }
 
-/// `onReply` makes the draft a reply to this message (a swipe to the left); `onQuotePress` brings
+/// `onReply` makes the draft a reply to this message (a swipe to the right); `onQuotePress` brings
 /// the message a reply answers into view; `flashing` pulses the bubble once it is there.
 export function MessageRow({
   row,
@@ -221,8 +216,13 @@ export function MessageRow({
   const columnWidth = Math.min(Math.floor(paneWidth * 0.8), BUBBLE_COLUMN_MAX);
   const attachmentWidth = columnWidth - 26 - (showsAvatar ? AVATAR + GUTTER : 0);
   const quoteName = quote ? quoteAuthorName(quote.author, bots) : "";
+  const swipe = useSwipeToReply(onReply);
   return (
-    <SwipeToReply onReply={onReply}>
+    <View>
+    <Animated.View style={[styles.replyArrow, swipe.arrow]} pointerEvents="none">
+      <Symbol name="arrowshape.turn.up.left.fill" size={16} color={p.secondaryLabel} />
+    </Animated.View>
+    <Animated.View style={swipe.follow}>
     <View style={[styles.messageRow, { paddingTop: groupStart ? 14 : 3 }, isYou ? styles.messageRowYou : styles.messageRowBot]}>
       {showsAvatar && <View style={{ width: AVATAR + GUTTER, alignSelf: "flex-end" }}>{groupEnd && <BotAvatar bot={bot} chatId={message.chat_id} size={AVATAR} />}</View>}
       <View style={[styles.bubbleColumn, { maxWidth: columnWidth }, isYou && styles.bubbleColumnYou]}>
@@ -245,6 +245,7 @@ export function MessageRow({
             </Text>
           </Pressable>
         )}
+        <GestureDetector gesture={swipe.pan}>
         <Animated.View
           style={[
             styles.bubble,
@@ -261,6 +262,7 @@ export function MessageRow({
             </View>
           )}
         </Animated.View>
+        </GestureDetector>
         {held && (
           <Pressable
             onPress={() => engine.sendNow(message.chat_id, message.id).catch((error) => Alert.alert(t("Could not send now"), error instanceof Error ? error.message : String(error)))}
@@ -274,7 +276,8 @@ export function MessageRow({
         )}
       </View>
     </View>
-    </SwipeToReply>
+    </Animated.View>
+    </View>
   );
 }
 
@@ -740,7 +743,7 @@ const styles = StyleSheet.create({
   quoteYou: { alignSelf: "flex-end" },
   quoteText: { flexShrink: 1, fontSize: 12 },
   quoteName: { fontWeight: "600" },
-  replyArrow: { position: "absolute", right: 18, top: 0, bottom: 0, justifyContent: "center" },
+  replyArrow: { position: "absolute", left: 18, top: 0, bottom: 0, justifyContent: "center" },
   // Held for the bot's next step: the bubble waits, dimmed, over Send now.
   held: { opacity: 0.55 },
   sendNow: { alignSelf: "flex-end", marginTop: 4, marginRight: 6 },

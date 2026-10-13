@@ -1089,5 +1089,12 @@ async fn doctor(app: &std::sync::Arc<App>, json: bool) {
     ok("mcp.json", mcp["file_error"] == false && mcp["problems"] == 0, format!("{} servers, {} configuration problems, file error: {}", mcp["servers"], mcp["problems"], mcp["file_error"]));
     println!("• versions: {}", report["versions"]);
     println!("• Runners: presence only, not admission readiness\n{}", report["runners"]);
+    let host = &report["computer_host"];
+    println!("• Computer host: {} (injected evidence only; no host probe)", host["overall"].as_str().unwrap());
+    for check in host["checks"].as_array().unwrap() {
+        println!("  {} {}: {}", check["status"].as_str().unwrap(), check["id"].as_str().unwrap(), check["evidence"].as_str().unwrap());
+        if let Some(remediation) = check["remediation"].as_str() { println!("    {remediation}"); }
+    }
+    println!("  Capacity: {}", host["capacity"]);
     println!("Review before sharing; report discloses relay host/port. Nothing is uploaded.");
 }

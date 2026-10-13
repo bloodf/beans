@@ -12,8 +12,9 @@ fn assert_private(value: &Value, home: &std::path::Path) {
     assert!(!text.contains("PRIVATE_MARKER"), "{text}");
     assert!(!text.contains(home.to_str().unwrap()), "{text}");
     let keys: Vec<_> = value.as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(keys, ["home", "mcp_json", "plugins", "port", "providers", "relay", "runners", "schema_version", "this_device", "versions"]);
+    assert_eq!(keys, ["computer_host", "home", "mcp_json", "plugins", "port", "providers", "relay", "runners", "schema_version", "this_device", "versions"]);
     for (field, allowed) in [
+        ("computer_host", vec!["capacity", "checks", "overall", "schema_version"]),
         ("home", vec!["exists"]), ("port", vec!["free"]),
         ("versions", vec!["core", "relay_protocol"]),
         ("this_device", vec!["has_identity", "is_runner", "os"]),
@@ -27,6 +28,7 @@ fn assert_private(value: &Value, home: &std::path::Path) {
         (&value["providers"]["built_in"], vec!["configured", "kind"]),
         (&value["plugins"]["entries"], vec!["slot", "state"]),
         (&value["runners"], vec!["is_this_device", "os", "presence", "version"]),
+        (&value["computer_host"]["checks"], vec!["evidence", "id", "remediation", "status"]),
     ] {
         for row in rows.as_array().unwrap() {
             assert_eq!(row.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(), allowed);

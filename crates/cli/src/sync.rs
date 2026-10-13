@@ -2319,10 +2319,11 @@ mod tests {
         assert!(merged.workflows.iter().any(|w| w.id == "kept"), "a live bot lost its workflow");
     }
 
-    /// A bot deleted while its upload sat in the outbox takes its workflows with it. That
-    /// outbox item was written before the deletion and no remote roster has been observed, so
-    /// the rebase runs its pre-baseline path and merges nothing: the tombstone filter is the
-    /// only thing standing between the deleted bot's record and what gets uploaded.
+    /// A bot deleted while its upload sat in the outbox takes its workflows with it. The
+    /// outbox item was written before the deletion, and queueing the next roster puts its
+    /// baseline back, so the rebase runs the merge branch: `merge_rosters` still sees b2 in
+    /// the queued bot set and keeps its record, and the tombstone filter after the merge is
+    /// what drops it before the roster is encrypted and uploaded.
     #[test]
     fn a_deleted_bots_workflow_is_dropped_from_an_outbox_written_before_the_delete() {
         use crate::model::WorkflowRecord;

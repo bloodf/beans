@@ -85,7 +85,7 @@ export async function stageLocalBuild(input: string, profile: Profile, revision:
     if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw new Error("Local artifact must be a nonempty ZIP-format APK/AAB/IPA");
     const native = await inspect(snapshot.path, profile);
     if (native?.identifier !== "ai.amoena.beans" || native.version !== version || !/^[1-9]\d*$/.test(native.buildNumber) || Number(native.buildNumber) > 2_100_000_000) {
-      throw new Error("Local binary differs from the release identity, version or EAS-allocated build number");
+      throw new Error("Local binary differs from the release identity or version, or its build number is not a positive integer at most 2100000000");
     }
     const name = `Beans-${version}${profile === "testflight" ? "-store" : ""}.${profiles[profile].extension}`;
     await mkdir(directory, { recursive: true });

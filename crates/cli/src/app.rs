@@ -1612,6 +1612,17 @@ impl App {
             if state.workflows.iter().any(|w| w.id == workflow.id) {
                 anyhow::bail!("Workflow id already exists");
             }
+            // The bounds are checked here, under the same lock that admits the record, and
+            // before it is pushed: a create checked only against its own snapshot would let
+            // two creates take the last slot together, and let a full roster grow past what
+            // `workflow::admit` will accept back from the relay.
+            let held = state.workflows.iter().filter(|w| w.bot_id == workflow.bot_id).count();
+            if held >= crate::workflow::MAX_PER_BOT {
+                anyhow::bail!("A bot keeps at most {} workflows. Delete one first.", crate::workflow::MAX_PER_BOT);
+            }
+            if state.workflows.len() >= crate::workflow::MAX_TOTAL {
+                anyhow::bail!("This account keeps at most {} workflows. Delete one first.", crate::workflow::MAX_TOTAL);
+            }
             state.workflows.push(workflow.clone());
         }
         self.roster_changed(true);

@@ -1280,9 +1280,6 @@ fn merge_ids(remote: &mut Vec<String>, base: &[String], local: &[String]) {
 // The queued snapshot describes intent relative to the last roster this Device observed.
 // Compare fields, not whole entities: remote changes to other fields remain intact.
 fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob) -> RosterBlob {
-    // Bound incoming workflow records before they merge, persist or upload again.
-    let bot_ids = remote.bots.iter().chain(&queued.bots).map(|bot| bot.id.clone()).collect();
-    remote.workflows = crate::workflow::admit(std::mem::take(&mut remote.workflows), &base.workflows, &bot_ids);
     macro_rules! merge_entities {
         ($field:ident, $($member:ident),+ $(,)?) => {
             for old in &base.$field {
@@ -1328,6 +1325,12 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
             remote.auto_review.rules.push(local.clone());
         }
     }
+    // The workflows are bounded last, against the bot set this merged roster actually has.
+    // Admitting before the merges could size the roster against bots a tombstone or a queued
+    // deletion was about to take out, leaving records whose bot is gone and letting a
+    // tombstoned bot's workflow ride back out on the next pull.
+    let bot_ids = remote.bots.iter().chain(&queued.bots).map(|bot| bot.id.clone()).collect();
+    remote.workflows = crate::workflow::admit(remote.workflows, &base.workflows, &bot_ids);
     remote
 }
 
@@ -1385,6 +1388,11 @@ fn rebase_queued_roster(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
     queued.policy_capabilities = state.policy_capabilities.clone();
     queued.deleted_bot_versions = state.deleted_bot_versions.clone();
     queued.bots.retain(|bot| !state.deleted_bot_versions.contains_key(&bot.id));
+    // The same tombstone takes the bot's workflows with it. Merging bounds them against the
+    // bot set the merge produced, and this is the policy filter that runs after it, so a
+    // deleted bot's workflow would otherwise stay in what gets encrypted and uploaded.
+    let live_bots = queued.bots.iter().map(|bot| bot.id.clone()).collect::<std::collections::HashSet<_>>();
+    queued.workflows.retain(|workflow| live_bots.contains(&workflow.bot_id));
     for bot in &mut queued.bots {
         if let Some(capabilities) = state.policy_capabilities.get(&bot.id) { bot.capabilities = capabilities.clone(); }
     }

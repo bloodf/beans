@@ -661,7 +661,10 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let mut file = options.open(&tmp)?;
     #[cfg(test)]
     run_after_private_tmp_created(&tmp);
-    if let Err(error) = file.write_all(bytes).and_then(|()| std::fs::rename(&tmp, path)) {
+    let written = file.write_all(bytes);
+    // Close the handle before the rename: Windows refuses to rename or remove an open file.
+    drop(file);
+    if let Err(error) = written.and_then(|()| std::fs::rename(&tmp, path)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(error.into());
     }
@@ -675,7 +678,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn replace_after_private_tmp_created(replace: impl FnOnce(&Path) + 'static) {
     AFTER_PRIVATE_TMP_CREATED.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(replace));

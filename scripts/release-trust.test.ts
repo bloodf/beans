@@ -35,7 +35,9 @@ test("test-only signed APK accepts explicit pin and rejects signer, identity, ha
     }
     const bytes = await apk("ai.amoena.beans", "valid"), wrongIdentity = await apk("ai.amoena.beans.dev", "wrong-identity");
     await verifyEasBinary(bytes, "github", version, "42", policy);
-    await expect(verifyEasBinary(bytes, "github", version, "42")).rejects.toThrow("policy unavailable");
+    // Unconfigured policy keeps native identity inspection without signer admission; a foreign profile policy still refuses.
+    await verifyEasBinary(bytes, "github", version, "42");
+    await expect(verifyEasBinary(bytes, "github", version, "42", { profile: "production", uploadSignerSha256: "0".repeat(64), rotation: "none" })).rejects.toThrow("policy unavailable");
     const wrongSigner: PublicTrustPolicy = { ...policy, signerSha256: ["0".repeat(64)] };
     await expect(verifyEasBinary(bytes, "github", version, "42", wrongSigner)).rejects.toThrow("signer differs");
     await expect(verifyEasBinary(wrongIdentity, "github", version, "42", policy)).rejects.toThrow("native identity");
@@ -53,13 +55,13 @@ test("test-only signed APK accepts explicit pin and rejects signer, identity, ha
     let queried = false;
     const query = async () => { queried = true; return [build]; };
     const git = (args: string[]) => ({ exitCode: 0, stdout: Buffer.from(args.includes("rev-parse") ? revision : "") }) as any;
-    await expect(runEasRelease(["build", "github", revision, join(root, "no-policy")], query, git)).rejects.toThrow("policy unavailable");
-    expect(queried).toBe(false);
     const oldToken = process.env.EXPO_TOKEN, oldOwner = process.env.BEANS_EXPO_OWNER;
     process.env.EXPO_TOKEN = "fixture-only"; process.env.BEANS_EXPO_OWNER = "fixture-only";
     try {
       await runEasRelease(["build", "github", revision, join(root, "caller-positive"), "--public-trust-policy", policyFile], query, git);
       expect(JSON.parse(await readFile(join(root, "caller-positive", "eas-github.json"), "utf8")).sha256).toBe(sha(bytes));
+      await runEasRelease(["build", "github", revision, join(root, "no-policy")], query, git);
+      expect(JSON.parse(await readFile(join(root, "no-policy", "eas-github.json"), "utf8")).sha256).toBe(sha(bytes));
     } finally {
       if (oldToken === undefined) delete process.env.EXPO_TOKEN; else process.env.EXPO_TOKEN = oldToken;
       if (oldOwner === undefined) delete process.env.BEANS_EXPO_OWNER; else process.env.BEANS_EXPO_OWNER = oldOwner;

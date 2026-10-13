@@ -8,7 +8,7 @@ import { readVersion, ROOT } from "./app.ts";
 import { archiveFixture } from "./release-archive-fixture.ts";
 const paths: string[] = [];
 afterEach(async () => { await Promise.all(paths.map((path) => rm(path, { recursive: true, force: true }))); });
-test("all-platform CLI preflight rejects missing public policy before loading private credentials", async () => {
+test("all-platform CLI preflight reports unconfigured trust policy without refusing and refuses a configured invalid policy", async () => {
   const path = await mkdtemp(join(tmpdir(), "beans-release-preflight-")); paths.push(path);
   await mkdir(join(path, "scripts"));
   await mkdir(join(path, "updates"));
@@ -18,11 +18,19 @@ test("all-platform CLI preflight rejects missing public policy before loading pr
   await copyFile(join(ROOT, "updates", "public-key.txt"), join(path, "updates", "public-key.txt"));
   await writeFile(join(path, "package.json"), JSON.stringify({ version: "1.0.13" }, null, 2));
   await writeFile(join(path, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\nPending changes.\n");
-  const result = Bun.spawnSync([process.execPath, join(path, "scripts", "release-github.ts"), "check", "beans-v1.0.13", "all"], {
+  const check = (args: string[]) => Bun.spawnSync([process.execPath, join(path, "scripts", "release-github.ts"), "check", "beans-v1.0.13", "all", ...args], {
     cwd: path, env: { ...process.env, BEANS_UPDATE_PRIVATE_KEY: "" },
   });
-  expect(result.exitCode).not.toBe(0);
-  expect(result.stderr.toString()).toContain("public trust policy unavailable");
+  const unconfigured = check([]);
+  expect(unconfigured.exitCode).not.toBe(0);
+  expect(unconfigured.stderr.toString()).toContain("trust policy not configured: github, production, testflight");
+  expect(unconfigured.stderr.toString()).toContain("CHANGELOG.md requires notes");
+  expect(unconfigured.stderr.toString()).not.toContain("trust policy unavailable");
+  await writeFile(join(path, "invalid-policy.json"), JSON.stringify({ github: { profile: "github", rotation: "later", signerSha256: [] } }));
+  const configured = check(["--public-trust-policy", join(path, "invalid-policy.json")]);
+  expect(configured.exitCode).not.toBe(0);
+  expect(configured.stderr.toString()).toContain("Invalid APK current-signer policy");
+  expect(configured.stderr.toString()).not.toContain("CHANGELOG.md requires notes");
 });
 async function server() {
   const path = await mkdtemp(join(tmpdir(), "beans-release-fixture-")); paths.push(path);

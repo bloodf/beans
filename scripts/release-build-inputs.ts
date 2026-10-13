@@ -44,7 +44,9 @@ export function validatePublicTrustPolicy(value: unknown, profile: MobileRelease
   return policy;
 }
 
-export function preflightMobileTrust(profile: MobileReleaseProfile, value: unknown): PublicTrustPolicy {
+// An absent policy keeps the policy-free release path: native identity inspection without signer admission.
+export function preflightMobileTrust(profile: MobileReleaseProfile, value: unknown): PublicTrustPolicy | undefined {
+  if (value === undefined) { console.warn(`trust policy not configured: ${profile}`); return undefined; }
   const policy = validatePublicTrustPolicy(value, profile);
   if (profile === "testflight") throw new Error("IPA cryptographic trust verification unsupported; all-platform publication blocked");
   for (const tool of profile === "github" ? ["unzip", "aapt2", "apksigner", "java"] : ["unzip", "bundletool", "jarsigner", "keytool", "java"]) {
@@ -55,9 +57,11 @@ export function preflightMobileTrust(profile: MobileReleaseProfile, value: unkno
 
 export function preflightReleaseTrust(scope: "server" | "all", policies: PublicTrustPolicies): void {
   if (scope === "server") return;
-  for (const profile of ["github", "production", "testflight"] as const) validatePublicTrustPolicy(policies[profile], profile);
-  // No all-platform build/sign/publication starts while required IPA is unsupported.
-  preflightMobileTrust("testflight", policies.testflight);
+  const unconfigured = (["github", "production", "testflight"] as const).filter(profile => policies[profile] === undefined);
+  for (const profile of ["github", "production"] as const) if (policies[profile] !== undefined) validatePublicTrustPolicy(policies[profile], profile);
+  // A configured IPA policy cannot be verified: no all-platform build/sign/publication starts.
+  if (policies.testflight !== undefined) preflightMobileTrust("testflight", policies.testflight);
+  if (unconfigured.length) console.warn(`trust policy not configured: ${unconfigured.join(", ")}`);
 }
 
 export async function publicTrustArguments(args: string[]): Promise<{ args: string[]; policies: PublicTrustPolicies }> {
@@ -150,9 +154,11 @@ export function inspectMobileBinary(path: string, profile: MobileReleaseProfile,
     const packages = badging.split("\n").filter(line => line.startsWith("package:"));
     const identity = packages[0]?.match(/^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'(?:\s|$)/);
     if (packages.length !== 1 || !identity || identity[1] !== "ai.amoena.beans" || identity[2] !== number || identity[3] !== version) throw new Error("APK native identity differs from release");
-    const signatures = inspect(["apksigner", "verify", "--verbose", "--print-certs", path]);
-    const approved = validatePublicTrustPolicy(policy, profile) as Extract<PublicTrustPolicy, { profile: "github" }>;
-    approveSigners(apkCurrentSigners(signatures), approved.signerSha256);
+    if (policy !== undefined) {
+      const signatures = inspect(["apksigner", "verify", "--verbose", "--print-certs", path]);
+      const approved = validatePublicTrustPolicy(policy, profile) as Extract<PublicTrustPolicy, { profile: "github" }>;
+      approveSigners(apkCurrentSigners(signatures), approved.signerSha256);
+    }
   } else if (profile === "production") {
     if (!entries.includes("base/manifest/AndroidManifest.xml")) throw new Error("AAB base module manifest missing");
     // bundletool decodes the actual protobuf base manifest; aapt2 does not inspect AABs.
@@ -161,11 +167,13 @@ export function inspectMobileBinary(path: string, profile: MobileReleaseProfile,
     const signatures = inspect(["jarsigner", "-J-Duser.language=en", "-J-Duser.country=US", "-verify", "-verbose", "-certs", path]);
     // jarsigner can exit zero for unsigned archives. It is not an approved-signer gate.
     if (!signatures.includes("jar verified.") || signatures.includes("unsigned entries")) throw new Error("AAB signature verification failed");
-    const approved = validatePublicTrustPolicy(policy, profile) as Extract<PublicTrustPolicy, { profile: "production" }>;
-    // keytool reads the JAR signer, not an arbitrary unsigned certificate member.
-    // Multiple signers or certificate chains are unsupported rather than guessed.
-    const certificates = inspect(["keytool", "-printcert", "-rfc", "-jarfile", path]).match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
-    approveSigners(certificates.map(pem => new X509Certificate(pem).fingerprint256.replaceAll(":", "").toLowerCase()), [approved.uploadSignerSha256]);
+    if (policy !== undefined) {
+      const approved = validatePublicTrustPolicy(policy, profile) as Extract<PublicTrustPolicy, { profile: "production" }>;
+      // keytool reads the JAR signer, not an arbitrary unsigned certificate member.
+      // Multiple signers or certificate chains are unsupported rather than guessed.
+      const certificates = inspect(["keytool", "-printcert", "-rfc", "-jarfile", path]).match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? [];
+      approveSigners(certificates.map(pem => new X509Certificate(pem).fingerprint256.replaceAll(":", "").toLowerCase()), [approved.uploadSignerSha256]);
+    }
   } else {
     const apps = entries.filter(name => /^Payload\/[^/]+\.app\/Info\.plist$/.test(name));
     if (apps.length !== 1) throw new Error("IPA main app manifest missing or ambiguous");
@@ -192,5 +200,5 @@ export function inspectMobileBinary(path: string, profile: MobileReleaseProfile,
       }
     } finally { rmSync(temporary, { recursive: true, force: true }); }
   }
-  if (profile === "testflight") throw new Error("IPA cryptographic trust verification unsupported; all-platform publication blocked");
+  if (profile === "testflight" && policy !== undefined) throw new Error("IPA cryptographic trust verification unsupported; all-platform publication blocked");
 }

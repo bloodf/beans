@@ -2274,7 +2274,11 @@ mod tests {
             }
         }
         assert_eq!(remote.workflows.len(), crate::workflow::MAX_TOTAL, "the remote roster starts at the bound");
-        let queued = RosterBlob { workflows: vec![workflow("queued-new", "b01")], ..base.clone() };
+        // The queued roster still holds the base's record: three-way merge drops a base record the
+        // queued side no longer has, so a queued side that omitted it would be read as a delete.
+        let queued = RosterBlob {
+            workflows: vec![workflow("held", "b00"), workflow("queued-new", "b01")], ..base.clone()
+        };
 
         let merged = merge_rosters(remote, &base, &queued).workflows;
         assert!(merged.len() <= crate::workflow::MAX_TOTAL, "the merge grew past the bound: {}", merged.len());

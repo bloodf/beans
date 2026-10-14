@@ -1,6 +1,6 @@
 import type { FlashListRef } from "@shopify/flash-list";
 import { AvatarFlashList } from "../../../src/ui/AvatarFlashList";
-import { composerExtra } from "../../../src/ui/composerInset";
+import { composerExtra as computeComposerExtra } from "../../../src/ui/composerInset";
 import { LinearGradient } from "expo-linear-gradient";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useHeaderHeight } from "expo-router/react-navigation";
@@ -141,7 +141,7 @@ export default function ChatScreen() {
   const focusGrowth = useRef(FOCUS_GROWTH_GUESS);
   const compactAtKeyboardStart = useRef(false);
   const publishComposerExtra = useCallback(() => {
-    const extra = composerExtra(composerActual.current, composerCompact.current, focusGrowth.current);
+    const extra = computeComposerExtra(composerActual.current, composerCompact.current, focusGrowth.current);
     if (extra !== null) composerExtraTarget.value = extra;
   }, [composerExtraTarget]);
   const keyboardMoving = useSharedValue(false);

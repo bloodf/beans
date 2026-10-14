@@ -1,6 +1,6 @@
 # Computer display
 
-Discovery decision for #35, not implemented. Current facts inspected at `755ecf123564abd8ef8c9657e04e4d9b3be7d7a2`: `crates/relay/src/routes.rs` exposes sync/blob/file routes, not display; `hub.rs` queues four data-less nudges. Existing limits above are not a video channel. `crates/cli/src/requests.rs` authenticates signed, recipient-bound requests against current paired membership; [Identity](identity.md) describes Device signing/box keys. [AppKit](macos-app.md), [desktop](desktop-app.md) and [phone](phone-app.md) describe actual viewer hosts, not existing remote viewers. Everything below is proposed unless explicitly labeled measured.
+Discovery decision for #35, not implemented. Current facts inspected at `755ecf123564abd8ef8c9657e04e4d9b3be7d7a2`: `crates/relay/src/routes.rs` exposes sync/blob/file routes, not display; `hub.rs` queues four data-less nudges. Existing [Relay](relay.md) limits are not a video channel. `crates/cli/src/requests.rs` authenticates signed, recipient-bound requests against current paired membership; [Identity](identity.md) describes Device signing/box keys. [AppKit](macos-app.md), [desktop](desktop-app.md) and [phone](phone-app.md) describe actual viewer hosts, not existing remote viewers. Everything below is proposed unless explicitly labeled measured.
 
 ### Decision and boundaries
 

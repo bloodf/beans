@@ -216,11 +216,25 @@ test("production Engine and Composer preserve omission and validate exact admitt
     expect(draft.text).toBe("\u0085 submitted \u0085");
     expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages).toEqual([]);
   }
+  for (const mentions of [null, "bot-scout", {}, ["bot-scout", 7], [null]]) {
+    tap(find(node => node.props.accessibilityLabel === "Send")!);
+    resolve({ result: { message: { ...message, body: { ...message.body, mentions } } } }); await flush();
+    expect(draft.text).toBe("\u0085 submitted \u0085");
+    expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages).toEqual([]);
+  }
   tap(find(node => node.props.accessibilityLabel === "Send")!); resolve({ result: { message } }); await flush();
   expect(input().props.value).toBe("");
   expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages[0].id).toBe("msg-admitted");
   expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages[0].created_at).toBe(1791550000.125);
   expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages[0].promoted_at).toBe(1791550000.875);
+  for (const mentions of [undefined, [], ["bot-scout"]]) {
+    editComposerDraft(draft, { text: "@Scout help" }); render();
+    const admitted = { ...message, body: { ...message.body, text: "@Scout help", mentions } };
+    tap(find(node => node.props.accessibilityLabel === "Send")!);
+    resolve({ result: { message: admitted } }); await flush();
+    expect(draft.text).toBe("");
+    expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages[0].body).toEqual(JSON.parse(JSON.stringify(admitted.body)));
+  }
   editComposerDraft(draft, { text: "submitted" }); render();
   tap(find(node => node.props.accessibilityLabel === "Send")!);
   input().props.onChangeText("newer edit"); resolve({ result: { message } }); await flush();

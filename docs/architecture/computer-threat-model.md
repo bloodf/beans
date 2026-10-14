@@ -1,6 +1,6 @@
 # Computer threat model
 
-Threat model for the planned per-bean computer: a VM on a Runner that holds a bean's browser, shell, files and screen. This doc is [issue #31](https://github.com/bloodf/beans/issues/31) `p0-threat-model`, an architecture-only walkthrough. It is design input, not acceptance. Nothing here is verified on a host or VM, and #31 is not closed by it.
+Threat model for the planned per-bean computer: a Runner VM holding a bean's browser, shell, files and screen. [Issue #31](https://github.com/bloodf/beans/issues/31) `p0-threat-model` remains architecture-only design input, not host/VM acceptance or issue closure.
 
 ## Implemented now and planned
 

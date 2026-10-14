@@ -106,6 +106,7 @@ function scopedArtifact(name: string, version: string, core: string, scope: Rele
 
 export async function buildReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server", policies: PublicTrustPolicies = {}): Promise<ReleaseManifest> {
   scope = releaseScope(scope);
+  preflightReleaseTrust(scope, policies);
   const version = releaseVersion(tag);
   if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error("Release revision must be the exact40-character tag commit");
   const entries = await readdir(directory, { withFileTypes: true });

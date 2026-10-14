@@ -23,7 +23,7 @@ test("official bundletool AAB accepts distinct upload pin and rejects unsigned a
     preflightMobileTrust("production", policy);
     const manifest = join(root, "AndroidManifest.xml"), proto = join(root, "proto.apk"), module = join(root, "module"), base = join(root, "base.zip"), signed = join(root, "signed-test-only.aab");
     await writeFile(manifest, `<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="ai.amoena.beans" android:versionCode="43" android:versionName="${version}"><uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34"/><application android:hasCode="false"/></manifest>`);
-    run(["aapt2", "link", "--proto-format", "-I", "/Users/heitor/Library/Android/sdk/platforms/android-34/android.jar", "--manifest", manifest, "-o", proto]);
+    run(["aapt2", "link", "--proto-format", "-I", join(process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT ?? "", "platforms/android-34/android.jar"), "--manifest", manifest, "-o", proto]);
     await mkdir(join(module, "manifest"), { recursive: true });
     await writeFile(join(module, "manifest", "AndroidManifest.xml"), run(["unzip", "-p", proto, "AndroidManifest.xml"]));
     await writeFile(join(module, "resources.pb"), run(["unzip", "-p", proto, "resources.pb"]));

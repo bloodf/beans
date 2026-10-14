@@ -10,7 +10,7 @@ import { archiveFixture } from "./release-archive-fixture.ts";
 const revision = "a".repeat(40);
 const project = "11111111-1111-4111-8111-111111111111";
 const build = { id: "22222222-2222-4222-8222-222222222222", status: "FINISHED", platform: "ANDROID", appIdentifier: "ai.amoena.beans", distribution: "STORE", buildProfile: "github", gitCommitHash: revision, appVersion: "1.0.11", appBuildVersion: "42", app: { id: project }, artifacts: { buildUrl: "https://artifacts.eascdn.net/build.apk" } };
-test("valid ZIP transport never authorizes missing native modules or successful staging", async () => {
+test("missing public policy rejects staging and cloud calls before transport or credentials", async () => {
   const directory = await mkdtemp(join(tmpdir(), "beans-eas-test-"));
   const previous = process.env.BEANS_EXPO_PROJECT_ID;
   process.env.BEANS_EXPO_PROJECT_ID = project;
@@ -18,7 +18,7 @@ test("valid ZIP transport never authorizes missing native modules or successful 
   const fetcher = spyOn(globalThis, "fetch").mockImplementation(async () => new Response(payload) as any);
   try {
     for (const [profile, platform, suffix] of [["github", "ANDROID", ".apk"], ["production", "ANDROID", ".aab"], ["testflight", "IOS", "-store.ipa"]] as const) {
-      await expect(stageEasBuild({ ...build, appVersion: readVersion(), platform, buildProfile: profile }, profile, revision, directory)).rejects.toThrow(/manifest|module/);
+      await expect(stageEasBuild({ ...build, appVersion: readVersion(), platform, buildProfile: profile }, profile, revision, directory)).rejects.toThrow("policy unavailable");
       expect(await Bun.file(join(directory, `eas-${profile}.json`)).exists()).toBe(false);
       expect(await Bun.file(join(directory, `Beans-${readVersion()}${suffix}`)).exists()).toBe(false);
     }
@@ -30,11 +30,11 @@ test("valid ZIP transport never authorizes missing native modules or successful 
       const git = (args: string[]) => ({ exitCode: 0, stdout: Buffer.from(args.includes("rev-parse") ? revision : "") }) as any;
       let queried = false;
       const query = async () => { queried = true; return []; };
-      await expect(runEasRelease(["build", "github", revision, directory], query, git)).rejects.toThrow("exactly one completed EAS build");
-      expect(queried).toBe(true);
+      await expect(runEasRelease(["build", "github", revision, directory], query, git)).rejects.toThrow("policy unavailable");
+      expect(queried).toBe(false);
       await expect(runEasRelease(["bad"], async () => [], git)).rejects.toThrow("usage");
       delete process.env.EXPO_TOKEN;
-      await expect(runEasRelease(["build", "github", revision, directory], async () => [], git)).rejects.toThrow("EXPO_TOKEN");
+      await expect(runEasRelease(["build", "github", revision, directory], async () => [], git)).rejects.toThrow("policy unavailable");
     } finally {
       if (oldToken === undefined) delete process.env.EXPO_TOKEN; else process.env.EXPO_TOKEN = oldToken;
       if (oldOwner === undefined) delete process.env.BEANS_EXPO_OWNER; else process.env.BEANS_EXPO_OWNER = oldOwner;

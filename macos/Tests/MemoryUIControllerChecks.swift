@@ -148,6 +148,26 @@ private func check(_ condition: Bool, _ message: String) { if !condition { fatal
             check(window.makeFirstResponder(query) && query.currentEditor() != nil, "translated query cannot receive keyboard focus")
             check(localized.capture.title == "记录今后已完成的对话文本", "capture translation unavailable: \(localized.capture.title)")
             check(localized.capture.accessibilityTitle() == localized.capture.title, "translated capture loses its accessibility title")
+            let localizedAdvanced = MemoryAdvancedViewController(service: api, botID: "bot", backend: .openViking, capabilities: try JSONDecoder().decode(MemoryServiceCapabilities.self, from: Data("{\"advanced\":[\"sessions\",\"resources\",\"tasks\"],\"advanced_actions\":{\"sessions\":[\"list\",\"create\"],\"resources\":[\"list\"],\"tasks\":[\"list\"]}}".utf8)))
+            localizedAdvanced.loadViewIfNeeded()
+            let featureMenu = localizedAdvanced.controls(in: localizedAdvanced.view).compactMap { $0 as? NSPopUpButton }.first { $0.accessibilityLabel() == "已协商功能" }!
+            check(featureMenu.itemTitles == ["会话", "资源", "任务"], "negotiated feature menu falls back to English")
+            localizedAdvanced.select(feature: .sessions, action: "list")
+            check(try localizedAdvanced.command().action == "list", "localized menu changes the negotiated wire action")
+            let localizedConnection = MemoryConnectionViewController(service: api, saved: nil, embeddings: [], bots: [("bot", "Fixture")])
+            localizedConnection.loadViewIfNeeded(); localizedConnection.backendMenu.selectItem(at: 1)
+            NSApplication.shared.sendAction(localizedConnection.backendMenu.action!, to: localizedConnection.backendMenu.target, from: localizedConnection.backendMenu)
+            let bindingLabels = localizedConnection.controls(in: localizedConnection.view).compactMap { $0.accessibilityLabel() }
+            check(["授权模式", "账户标识", "用户标识"].allSatisfy(bindingLabels.contains), "OpenViking binding fields fall back to English")
+            localized.showError(MemoryUIError.invalidInput)
+            check(localized.errorLabel.stringValue == "记忆输入无效", "native validation error falls back to English")
+            localized.showError(MemoryServiceDraftError.plaintextConsentRequired)
+            check(localized.errorLabel.stringValue == "需要明文传输授权", "native consent error falls back to English")
+            localized.showError(MemorySetupError.approvalExpired)
+            check(localized.errorLabel.stringValue == "批准已过期", "native setup error falls back to English")
+            let serviceEntry = MemoryActionButton("Memory Service…")
+            check(serviceEntry.title == "记忆服务…", "local editor service entry falls back to English")
+            print("PASS: negotiated Chinese feature menus preserve wire actions; OpenViking binding labels, service entry and native error surfaces are translated")
             window.makeFirstResponder(nil)
             if let output = ProcessInfo.processInfo.environment["BEANS_MEMORY_UI_IMAGE"],
                let bitmap = localized.view.bitmapImageRepForCachingDisplay(in: localized.view.bounds) {

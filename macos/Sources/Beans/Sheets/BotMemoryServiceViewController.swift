@@ -257,7 +257,7 @@ final class BotMemoryServiceViewController: MemoryFormViewController {
         run { [self] in
             let preferences = try await service.getPreferences(botID: botID), list = try await service.listConnections()
             guard let connection = list.connections.first(where: { $0.id == preferences.connectionID }) else { throw MemoryUIError.staleTarget }
-            guard await confirm(clear ? "Clear this bot's service bank?" : "Delete this service document?", details: L("Bot %@; connection %@ (%@), revision %llu · %@; deletion epoch %llu. Target: %@. This fences queued writes; pending cleanup does not mean erasure. Service backups and Lance history may retain data.", botID, connection.name, connection.id, connection.revision.counter, connection.revision.deviceID, preferences.deletionEpoch, document ?? "whole bot bank")) else { return }
+            guard await confirm(clear ? "Clear this bot's service bank?" : "Delete this service document?", details: L("Bot %@; connection %@ (%@), revision %llu · %@; deletion epoch %llu. Target: %@. This fences queued writes; pending cleanup does not mean erasure. Service backups and Lance history may retain data.", botID, connection.name, connection.id, connection.revision.counter, connection.revision.deviceID, preferences.deletionEpoch, document ?? L("whole bot bank"))) else { return }
             var parameters: [String: Any] = ["bot_id": botID, "confirm": true, "connection_revision": try JSONSerialization.jsonObject(with: JSONEncoder().encode(connection.revision)), "deletion_epoch": preferences.deletionEpoch]
             if let document { parameters["document_id"] = document }
             authorityRecovered = false

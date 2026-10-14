@@ -75,7 +75,7 @@ final class MemoryEmbeddingViewController: MemoryFormViewController {
                 if profile.endpoint?.hasPrefix("http:") == true {
                     guard await confirm("Save an insecure embedding endpoint?", details: L("Exact endpoint %@. Memory text and authentication cross plaintext HTTP when this profile is used. The connection also requires explicit insecure-HTTP approval.", profile.endpoint!)) else { return }
                 }
-                guard await confirm("Save this vector-space profile?", details: L("Profile %@, model %@, revision %@, dimensions %d. Exact endpoint: %@. Secret action: %@. Verify the selected secret belongs to this target. Existing indexes are not re-embedded or migrated by this action. Remote API processing can incur costs; local mode clears any API key. No fallback or download is enabled.", profileID, profile.model, profile.revision, Int(profile.dimensions), profile.endpoint ?? "local CPU", String(describing: patch))) else { return }
+                guard await confirm("Save this vector-space profile?", details: L("Profile %@, model %@, revision %@, dimensions %d. Exact endpoint: %@. Secret action: %@. Verify the selected secret belongs to this target. Existing indexes are not re-embedded or migrated by this action. Remote API processing can incur costs; local mode clears any API key. No fallback or download is enabled.", profileID, profile.model, profile.revision, Int(profile.dimensions), profile.endpoint ?? L("local CPU"), String(describing: patch))) else { return }
                 try await service.saveEmbedding(id: profileID, profile: profile, secret: patch)
                 finishSave()
             }

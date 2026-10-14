@@ -1,7 +1,9 @@
 //! HTTP client for the relay. Signs identity-level requests, authenticates machines with the
 //! challenge, and moves ciphertext.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -274,7 +276,7 @@ impl SyncSocket {
             tokio::pin!(changed);
             changed.as_mut().enable();
             {
-                let mut heard = self.shared.heard.lock().unwrap();
+                let mut heard = self.shared.heard.lock();
                 let signals = std::mem::take(&mut heard.signals);
                 if signals != Signals::default() {
                     return Ok(signals);
@@ -303,7 +305,7 @@ impl Drop for SyncSocket {
 /// Reads the socket until it ends, answering pings as they come.
 async fn read_socket(mut stream: SocketStream, shared: Arc<SocketShared>) {
     let ended = read_until_end(&mut stream, &shared).await;
-    shared.heard.lock().unwrap().ended = Some(ended);
+    shared.heard.lock().ended = Some(ended);
     shared.changed.notify_one();
 }
 
@@ -333,21 +335,27 @@ async fn read_until_end(stream: &mut SocketStream, shared: &SocketShared) -> Str
         };
         due = tokio::time::Instant::now() + SOCKET_SILENCE;
         let signal = match message {
-            Message::Text(text) => serde_json::from_str::<Value>(&text).ok().and_then(|v| v["type"].as_str().map(str::to_string)),
+            Message::Text(text) => serde_json::from_str::<Value>(&text).ok().and_then(|v| match v["type"].as_str() {
+                Some("blobs") => Some(false),
+                Some("machines") => Some(true),
+                _ => None,
+            }),
             // The pong has to be flushed by hand when nothing else is written.
             Message::Ping(_) => {
-                if let Err(error) = stream.flush().await {
-                    return socket_error(error).message;
+                match tokio::time::timeout_at(due, stream.flush()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => return socket_error(error).message,
+                    Err(_) => return "the sync socket took no pong".into(),
                 }
                 None
             }
             Message::Close(_) => return "the relay closed the sync socket".into(),
             _ => None,
         };
-        let mut heard = shared.heard.lock().unwrap();
-        match signal.as_deref() {
-            Some("blobs") => heard.signals.blobs = true,
-            Some("machines") => heard.signals.machines = true,
+        let mut heard = shared.heard.lock();
+        match signal {
+            Some(false) => heard.signals.blobs = true,
+            Some(true) => heard.signals.machines = true,
             _ => continue,
         }
         drop(heard);
@@ -413,7 +421,7 @@ impl RelayClient {
     }
 
     fn http(&self) -> reqwest::Client {
-        self.http.lock().unwrap().clone()
+        self.http.lock().clone()
     }
 
     /// Requests from here on open new connections. A phone's pooled ones may have died while
@@ -421,13 +429,13 @@ impl RelayClient {
     /// a request sent on one of those waits out its whole timeout.
     pub fn reset_connections(&self) {
         match Self::http_client() {
-            Ok(http) => *self.http.lock().unwrap() = http,
+            Ok(http) => *self.http.lock() = http,
             Err(error) => tracing::warn!(%error, "building the relay client"),
         }
     }
 
     pub fn forget_token(&self) {
-        *self.token.lock().unwrap() = None;
+        *self.token.lock() = None;
     }
 
     async fn check(response: reqwest::Response) -> RelayResult<Value> {
@@ -513,12 +521,12 @@ impl RelayClient {
         .await?;
         let token = verified["token"].as_str().ok_or_else(|| RelayError { status: None, message: "no token".into() })?.to_string();
         let expires_at = verified["expires_at"].as_i64().unwrap_or(now_unix() + 600);
-        *self.token.lock().unwrap() = Some((token.clone(), expires_at));
+        *self.token.lock() = Some((token.clone(), expires_at));
         Ok(token)
     }
 
     pub async fn token(&self, url: &str, machine: &Machine) -> RelayResult<String> {
-        if let Some((token, expires_at)) = self.token.lock().unwrap().clone() {
+        if let Some((token, expires_at)) = self.token.lock().clone() {
             if expires_at - 60 > now_unix() {
                 return Ok(token);
             }
@@ -880,19 +888,36 @@ mod tests {
                 }
             })
             .await;
-            assert!(waited.is_ok(), "pong {ponged}, probe {probed}");
+            assert!(waited.is_ok() && ponged && probed, "pong {ponged}, probe {probed}");
             socket.close(None).await.unwrap();
         });
 
         let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync")).await.unwrap();
         let mut socket = SyncSocket::start(stream);
         // The round is busy and reads no signal until the relay has said all it had to.
-        while !socket.shared.heard.lock().unwrap().signals.machines {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !socket.shared.heard.lock().signals.machines {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("the reader did not consume the machine signal");
         socket.probe();
         assert_eq!(socket.next().await.unwrap(), Signals { blobs: true, machines: true });
         relay.await.unwrap();
-        assert!(socket.next().await.is_err());
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(5), socket.next()).await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn dropping_the_socket_disconnects_while_no_round_is_waiting() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let relay = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut stream = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await.unwrap()
+        });
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync")).await.unwrap();
+        let socket = SyncSocket::start(stream);
+        drop(socket);
+        assert!(!matches!(relay.await.unwrap(), Some(Ok(_))));
     }
 }

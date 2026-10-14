@@ -68,12 +68,9 @@ impl Hub {
         went_offline
     }
 
-    /// A blob landed. One sealed to a machine concerns that machine alone. The machine that wrote
-    /// it is not told: it pulls after writing, and a Runner in a turn writes a blob a second.
-    pub fn blobs(&self, identity_pubkey: &str, recipient_machine_pubkey: Option<&str>, sender_machine_pubkey: Option<&str>) {
-        self.signal(identity_pubkey, Signal::Blobs, |c| {
-            recipient_machine_pubkey.is_none_or(|m| m == c.machine_pubkey) && sender_machine_pubkey != Some(c.machine_pubkey.as_str())
-        });
+    /// A blob landed. One sealed to a machine concerns that machine alone.
+    pub fn blobs(&self, identity_pubkey: &str, recipient_machine_pubkey: Option<&str>) {
+        self.signal(identity_pubkey, Signal::Blobs, |c| recipient_machine_pubkey.is_none_or(|m| m == c.machine_pubkey));
     }
 
     pub fn machines(&self, identity_pubkey: &str) {
@@ -143,22 +140,24 @@ mod tests {
         let mut mac = hub.join("identity", "mac");
         let mut phone = hub.join("identity", "phone");
         let mut stranger = hub.join("other", "mac");
-        hub.blobs("identity", Some("mac"), Some("phone"));
+        hub.blobs("identity", Some("mac"));
         assert_eq!(mac.signals.try_recv().ok(), Some(Signal::Blobs));
         assert!(phone.signals.try_recv().is_err());
-        hub.blobs("identity", None, None);
+        hub.blobs("identity", None);
         assert_eq!(phone.signals.try_recv().ok(), Some(Signal::Blobs));
         assert_eq!(mac.signals.try_recv().ok(), Some(Signal::Blobs));
         assert!(stranger.signals.try_recv().is_err());
     }
 
     #[test]
-    fn the_writer_of_a_blob_is_not_signalled() {
+    fn the_writer_and_its_other_socket_observe_the_write() {
         let hub = Hub::default();
         let mut mac = hub.join("identity", "mac");
+        let mut second = hub.join("identity", "mac");
         let mut phone = hub.join("identity", "phone");
-        hub.blobs("identity", None, Some("mac"));
-        assert!(mac.signals.try_recv().is_err());
+        hub.blobs("identity", None);
+        assert_eq!(mac.signals.try_recv().ok(), Some(Signal::Blobs));
+        assert_eq!(second.signals.try_recv().ok(), Some(Signal::Blobs));
         assert_eq!(phone.signals.try_recv().ok(), Some(Signal::Blobs));
     }
 

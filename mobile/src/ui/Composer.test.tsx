@@ -301,5 +301,5 @@ test("effectful Composer revokes permission ABA and resets recording on owner ch
 if (process.env.BEANS_COMPOSER_TOUCH_SMOKE === "1") {
   console.log(JSON.stringify(checkComposerTouchOwnership()));
 } else {
-  test("production attachment touch avoids pill focus while ordinary pill taps preserve draft", checkComposerTouchOwnership);
+  test("production attachment touch avoids pill focus while ordinary pill taps preserve draft", () => { checkComposerTouchOwnership(); });
 }

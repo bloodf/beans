@@ -791,12 +791,10 @@ export default function ChatScreen() {
   const revealQuoted = useCallback((messageID: string) => {
     const index = rowsRef.current.findIndex((row) => row.type === "message" && row.message.id === messageID);
     if (index < 0) return;
-    following.current = false;
-    beginDrag();
     listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.4 });
     setFlashId(messageID);
     setTimeout(() => setFlashId((current) => (current === messageID ? null : current)), 1400);
-  }, [beginDrag]);
+  }, []);
 
   /// The whole message behind a "Messaged ◉ Name" marker, as a sheet.
   const openMarker = useCallback(

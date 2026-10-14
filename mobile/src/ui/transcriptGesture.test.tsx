@@ -112,4 +112,4 @@ export function gestureConsumerScenario() {
 }
 
 if (process.env.BEANS_GESTURE_SMOKE === "1") console.log(JSON.stringify(gestureConsumerScenario()));
-else test("bubble reply accepts right swipe and rejects edge, whitespace, retreat and native cancellation", gestureConsumerScenario);
+else test("bubble reply accepts right swipe and rejects edge, whitespace, retreat and native cancellation", () => { gestureConsumerScenario(); });

@@ -135,7 +135,7 @@ These trace each story through the model on paper. They are architecture-only ev
 3. Host network services (Runner loopback, relay, other hosts): denied by default-deny and the explicit host/private/link-local/metadata block (#66).
 4. Credentials: the guest holds only a scoped token (#44, #33); there is no DEK, credentials blob or relay storage to read.
 5. Hypervisor: the supervisor is the only holder of libvirt privilege and exposes no public endpoint (#36).
-6. Outcome: file access is stopped at the first control. The remaining path is a hypervisor escape, accepted as residual (see below).
+6. Proposed outcome: if controls hold, host-file access is blocked; hypervisor escape remains a residual risk (see below).
 
 ### 2. Rogue paired Device sends input
 

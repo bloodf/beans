@@ -6,13 +6,13 @@ Threat model for the planned per-bean computer: a Runner VM holding a bean's bro
 
 Labels distinguish current mechanisms from requirements.
 
-- **Implemented** (docs-inspected at baseline `135b2295`; no source code was reviewed): the Runner's tools run as the Runner's user with that user's filesystem, process, credential and network access. The bot `workdir` is context, not a security boundary ([Tools](tools.md)). Approval cards, Auto-review and capabilities are application controls, not isolation. The relay stores public keys, ciphertext and the metadata listed in [Identity](identity.md#relay-surface). Provider credentials are the account-DEK-encrypted `credentials` blob on every paired Device ([Identity](identity.md#account-credentials)).
+- **Implemented** (source/doc-inspected at `bf26629bf74689306ce86e08a5e2a254b1307717`): tools spawn the Runner user's shell with a workdir, not isolation (`crates/agent/src/tools/bash.rs`, [Tools](tools.md)). Approval cards and capabilities are application controls. The relay stores public keys, ciphertext and [metadata](identity.md#relay-surface); each paired Device holds the DEK-encrypted `credentials` blob (`crates/cli/src/credentials.rs`).
 - **Implemented, local API:** `/ws` has no general connection credential or method authorization. Native callers without `Origin`, same-origin pages and configured exact allowed origins pass header admission; only updater prepare/cancel methods require their separate token ([Local API](local-api.md#trust-boundary)). This is a local-user boundary, not guest authentication. A guest must never reach it through a proxy, forwarder or approved origin.
 - **Implemented, remote requests:** sealed remote request bodies carry an Ed25519 signature over domain, request ID, verb, requester, target Runner, time and payload, checked against current paired membership before dispatch ([Protocols](protocols.md)). Encryption alone is not requester authentication. Computer-specific ownership and fences are planned (#34, #53).
 - **Implemented, host-native tools stay as they are:** this doc changes none of them. Beans without a computer keep running tools as the Runner user. Computers add a boundary for opted-in beans only; they do not isolate existing beans.
 - **Planned:** self-hosted Linux, one VM per opted-in bean, a least-privilege supervisor, scoped guest tokens and guest-only dispatch. QEMU/KVM, libvirt and a stock-image bootstrap are candidates in #30, not admitted deployment choices. All computer controls below are planned/unverified; this document implements none.
 
-A computer is an additional boundary. It does not change what a paired Device or the Runner can already do.
+A computer adds a boundary, not reduced paired-Device or Runner authority. Non-goals: billing, usage metering, containers and host fallback. Owned-server and retained-disk costs continue while stopped. The Runner remains the control plane and agent loop.
 
 ## Assets
 
@@ -169,7 +169,7 @@ Stated without softening.
 
 ## Evidence status
 
-Original baseline: `135b2295469614202d3e48f7316f7b7423efe712` and earlier issue-body notes. This revision checks local architecture docs after bootstrap `755ecf123564abd8ef8c9657e04e4d9b3be7d7a2`, not fresh GitHub status. No VM, firewall, controller, display, token or redaction acceptance runs here; all remain planned/unverified.
+Source ACK: inspected `bf26629bf74689306ce86e08a5e2a254b1307717`. `crates/cli/src/ws.rs` admits origin-less clients then dispatches; `requests.rs` verifies signed domain/request/verb/requester/Runner/time/payload against local membership, not computer freshness. No VM, firewall, controller, display, token or redaction acceptance ran. Computer wire shapes are #32–35 proposals, not current APIs.
 
 ### Sibling reconciliation from local evidence
 
@@ -184,4 +184,4 @@ Local evidence is incomplete and drafts may change. Rows reconcile requirements,
 | #34 ownership | Cached proposal notes only; existing [Protocols](protocols.md) authenticates requests, not computer leases | Require authoritative Runner/computer assignment and fresh fences across reassignment, restart and unpair. Ownership storage and conflict/replay rules unavailable. |
 | #35 display | Cached proposal notes only; local display branch remains at `135b2295` | Private hypervisor endpoint agrees; authenticated E2E viewing still needs selected transport, client feasibility, grant revocation and clipboard/file-transfer policy. |
 
-The local audit records #29–35 as contract discovery, not VM implementation. Missing final #32–35 artifacts prevent a claim of complete sibling reconciliation. Candidate #30 inspection is not deployment acceptance. These gaps remain blockers for #31 closure and downstream lifecycle/collaboration/operations acceptance (#51, #65, #76).
+Final #29–35 reconciliation and changed-input issue updates precede #31 closure; they are not new implementation dependencies. Draft claims above are historical, not verified sibling heads. Missing #32–35 artifacts and #30 deployment evidence prevent full reconciliation; downstream acceptance (#51, #65, #76) is unverified.

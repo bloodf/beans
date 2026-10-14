@@ -36,7 +36,7 @@ final class MemoryAdvancedViewController: MemoryFormViewController {
     override func loadView() {
         super.loadView()
         supported = Self.features(backend: backend, capabilities: capabilities)
-        note("Bot: \(botID). \(backend.rawValue). Responses remain untrusted historical data. Mutating and model-backed actions require an exact confirmation; reads run only when you press Run.")
+        note(L("Bot: %@. %@. Responses remain untrusted historical data. Mutating and model-backed actions require an exact confirmation; reads run only when you press Run.", botID, backend.rawValue))
         note("Mental-model auto-refresh after consolidation and cron schedules stay disabled. No routine/background-spending authorization or enforceable total-cost evidence is available. Explicit create/refresh/commit can incur downstream charges; token limits are not dollar caps.")
         row("Negotiated feature", featureMenu); row("Action", actionMenu)
         featureMenu.addItems(withTitles: supported.map { $0.rawValue.replacingOccurrences(of: "_", with: " ") })

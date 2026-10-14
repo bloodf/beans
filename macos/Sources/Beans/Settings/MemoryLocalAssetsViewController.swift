@@ -17,7 +17,7 @@ final class MemoryLocalAssetsViewController: MemoryFormViewController {
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
     override func loadView() {
         super.loadView()
-        note("Profile: \(profile.id). Model: \(profile.model), revision: \(profile.modelRevision). Save a local CPU profile with matching model/tokenizer hashes first. Paths refer to the selected Runner, not necessarily this Mac.")
+        note(L("Profile: %@. Model: %@, revision: %@. Save a local CPU profile with matching model/tokenizer hashes first. Paths refer to the selected Runner, not necessarily this Mac.", profile.id, profile.model, profile.modelRevision))
         row("Selected Runner", runnerMenu)
         for kind in [MemoryAssetKind.runtime, .model, .tokenizer] {
             heading(kind.rawValue.capitalized)

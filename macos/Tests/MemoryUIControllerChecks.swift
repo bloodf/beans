@@ -1,6 +1,10 @@
 import AppKit
 
-func L(_ text: String, _ arguments: CVarArg...) -> String { arguments.isEmpty ? text : String(format: text, arguments: arguments) }
+private var fixtureLanguageBundle: Bundle?
+func L(_ text: String, _ arguments: CVarArg...) -> String {
+    let translated = fixtureLanguageBundle?.localizedString(forKey: text, value: text, table: nil) ?? text
+    return arguments.isEmpty ? translated : String(format: translated, arguments: arguments)
+}
 enum Theme { enum Font { static let caption = NSFont.systemFont(ofSize: 11); static let body = NSFont.systemFont(ofSize: 13) } }
 struct Bot { let id: String, name: String, runnerID: String }
 struct Device { enum Status { case online, pairing, offline }; let id: String, name: String }
@@ -128,6 +132,31 @@ private func check(_ condition: Bool, _ message: String) { if !condition { fatal
                 check(controller.formColumn.frame.width <= controller.formScroll.contentSize.width + 1, "form scroll width overflow")
                 window.contentViewController = nil
             }
+        }
+        if let resources = ProcessInfo.processInfo.environment["BEANS_MEMORY_UI_RESOURCES"] {
+            fixtureLanguageBundle = Bundle(path: resources + "/zh-Hans.lproj")
+            check(fixtureLanguageBundle != nil, "Chinese fixture resources unavailable")
+            let localized = BotMemoryServiceViewController(botID: "bot", name: "Fixture", runnerID: "runner", service: api, setup: setup, currentRunner: { "runner" })
+            localized.loadViewIfNeeded()
+            let window = NSWindow(contentViewController: localized)
+            window.setContentSize(localized.view.fittingSize)
+            window.contentView?.layoutSubtreeIfNeeded()
+            let controls = localized.controls(in: localized.view)
+            check(localized.reflectButton.title == "Hindsight 原生反思…" && !localized.reflectButton.isHidden && !localized.reflectButton.isEnabled, "unsupported reflection loses translated discoverability")
+            check(controls.compactMap { $0 as? NSButton }.contains { $0.title == "打开已协商的服务商控制…" && !$0.isHidden && !$0.isEnabled }, "unsupported provider controls lose translated discoverability")
+            let query = controls.compactMap { $0 as? NSTextField }.first { $0.accessibilityLabel() == "搜索 / 反思查询" }!
+            check(window.makeFirstResponder(query) && query.currentEditor() != nil, "translated query cannot receive keyboard focus")
+            check(localized.capture.title == "记录今后已完成的对话文本", "capture translation unavailable: \(localized.capture.title)")
+            check(localized.capture.accessibilityTitle() == localized.capture.title, "translated capture loses its accessibility title")
+            window.makeFirstResponder(nil)
+            if let output = ProcessInfo.processInfo.environment["BEANS_MEMORY_UI_IMAGE"],
+               let bitmap = localized.view.bitmapImageRepForCachingDisplay(in: localized.view.bounds) {
+                localized.view.cacheDisplay(in: localized.view.bounds, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: output))
+            }
+            window.contentViewController = nil
+            fixtureLanguageBundle = nil
+            print("PASS: Simplified Chinese native memory labels, disabled discoverability, keyboard editing focus and accessibility titles")
         }
         print("PASS: guarded native drafts, failure recovery, exact secrets, capability/consent gates, typed OpenViking, light/dark scroll sizing")
         // AppKit's shared application can keep an async command-line main alive after all

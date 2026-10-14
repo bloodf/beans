@@ -40,7 +40,7 @@ final class BotMemoryServiceViewController: MemoryFormViewController {
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
     override func loadView() {
         super.loadView()
-        note("Bot: \(botID) · assigned Runner: \(runnerID). Bank scope is derived from the account key and stable bot ID; rename/provider changes retain scope. Namespaces are logical isolation, not server authorization.")
+        note(L("Bot: %@ · assigned Runner: %@. Bank scope is derived from the account key and stable bot ID; rename/provider changes retain scope. Namespaces are logical isolation, not server authorization.", botID, runnerID))
         heading("Connection and consent")
         row("Account memory connection", connectionMenu)
         connectionMenu.addItem(withTitle: L("Disabled — local memory only")); connectionMenu.target = self; connectionMenu.action = #selector(connectionChanged)

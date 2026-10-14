@@ -16,7 +16,9 @@ const measure = (text: string, width: number, body: number, code: number) => {
 native.measure = measure;
 mock.module("expo-modules-core", () => ({ requireNativeModule: () => native, requireNativeViewManager: () => "MarkdownView" }));
 mock.module("react", () => ({ useMemo: (compute: () => unknown) => compute() }));
-mock.module("react/jsx-runtime", () => ({ jsx: (type: unknown, props: unknown) => ({ type, props }), jsxs: (type: unknown, props: unknown) => ({ type, props }) }));
+const jsx = (type: unknown, props: unknown) => ({ type, props });
+mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
+mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx }));
 mock.module("react-native", () => ({
   Platform: { get OS() { return platform; } },
   useWindowDimensions: () => ({ width: 400, height: 800, scale: 2, fontScale }),

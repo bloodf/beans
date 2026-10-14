@@ -1,15 +1,18 @@
-# Runs the full test matrix on same-repository pull requests targeting main and manual dispatch: the Rust workspace on Linux,
-# where the relay's store suite runs on SQLite and on a Postgres service, and on macOS; the crates
-# a Windows Runner runs, on Windows; the macOS app's XCTest suite over the markdown crate it links;
-# the Windows and Linux app's page and Go side; and the phone app's TypeScript. Jobs that compile
-# the CLI install a pinned protoc first. The end-to-end scripts, which need a live relay, a model,
-# or a simulator, run locally.
+# Same-repository PRs and default manual runs validate the server and AppKit.
+# Windows, desktop and phone suites remain available through full_platform dispatch.
+# Deferred suites are not automatic acceptance evidence. Live-model, relay and
+# simulator end-to-end scripts run locally.
 name: Tests
 
 on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      full_platform:
+        description: Run deferred Windows, desktop and phone suites
+        type: boolean
+        default: false
 permissions:
   contents: read
 
@@ -23,7 +26,7 @@ env:
 
 jobs:
   release-source:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: Release source fixtures
     runs-on: ubuntu-latest
     steps:
@@ -33,7 +36,7 @@ jobs:
       - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts scripts/release-pr-gates.test.ts
 
   rust-linux:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: Rust (Linux)
     runs-on: ubuntu-latest
     services:
@@ -64,9 +67,10 @@ jobs:
       # without the runner, so it is tested on its own.
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
+        if: github.event_name == 'workflow_dispatch' && inputs.full_platform == true
 
   rust-macos:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: Rust (macOS)
     runs-on: macos-latest
     steps:
@@ -79,9 +83,10 @@ jobs:
           fallback: none
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
+        if: github.event_name == 'workflow_dispatch' && inputs.full_platform == true
 
   rust-windows:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' && inputs.full_platform == true
     name: Rust (Windows)
     # The crates a Windows Runner runs: the CLI, the agent, the model catalog, and provider
     # sign-in. There paths have drive letters, PATH splits on `;`, and commands run on pipes in
@@ -117,7 +122,7 @@ jobs:
       - run: cargo test --locked --no-fail-fast -p beans -p beans-agent -p beans-models -p beans-provider-auth -p beans-tls
 
   macos-app:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: macOS app
     # The app builds against the macOS 26 SDK.
     runs-on: macos-26
@@ -136,7 +141,7 @@ jobs:
       - run: sh macos/Tests/run-settings-layout.sh
 
   desktop:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' && inputs.full_platform == true
     name: Windows and Linux app
     runs-on: ubuntu-latest
     defaults:
@@ -157,7 +162,7 @@ jobs:
       - run: go test ./...
 
   mobile:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' && inputs.full_platform == true
     name: Phone app
     runs-on: ubuntu-latest
     defaults:

@@ -4,13 +4,13 @@ Threat model for the planned per-bean computer: a VM on a Runner that holds a be
 
 ## Implemented now and planned
 
-Two kinds of statement share this doc. Read the labels.
+Labels distinguish current mechanisms from requirements.
 
 - **Implemented** (docs-inspected at baseline `135b2295`; no source code was reviewed): the Runner's tools run as the Runner's user with that user's filesystem, process, credential and network access. The bot `workdir` is context, not a security boundary ([Tools](tools.md)). Approval cards, Auto-review and capabilities are application controls, not isolation. The relay stores public keys, ciphertext and the metadata listed in [Identity](identity.md#relay-surface). Provider credentials are the account-DEK-encrypted `credentials` blob on every paired Device ([Identity](identity.md#account-credentials)).
-- **Implemented, local API:** the `/ws` socket has no per-connection credential, no per-method authorization and no sandbox. Any local process that connects without an `Origin` can call every method, including secret-bearing and destructive ones, and a page from the CLI's own `localhost` or `127.0.0.1` origin passes the `Origin` check ([Local API](local-api.md)). The boundary is the local user account. `Host` and `Origin` are not authentication, and a guest must never be treated as authenticated by either.
+- **Implemented, local API:** `/ws` has no general connection credential or method authorization. Native callers without `Origin`, same-origin pages and configured exact allowed origins pass header admission; only updater prepare/cancel methods require their separate token ([Local API](local-api.md#trust-boundary)). This is a local-user boundary, not guest authentication. A guest must never reach it through a proxy, forwarder or approved origin.
 - **Implemented, remote requests:** sealed remote request bodies carry an Ed25519 signature over domain, request ID, verb, requester, target Runner, time and payload, checked against current paired membership before dispatch ([Protocols](protocols.md)). Encryption alone is not requester authentication. Computer-specific ownership and fences are planned (#34, #53).
 - **Implemented, host-native tools stay as they are:** this doc changes none of them. Beans without a computer keep running tools as the Runner user. Computers add a boundary for opted-in beans only; they do not isolate existing beans.
-- **Planned** (every requirement below marked `planned`): self-hosted Linux, one VM per opted-in bean, a least-privilege supervisor, scoped guest tokens, guest-only tool dispatch. Candidate hypervisor design (QEMU/KVM under libvirt) is unverified, pending #29 and #30. All VM claims here are `planned/unverified, pending live evidence`. No code for them exists.
+- **Planned:** self-hosted Linux, one VM per opted-in bean, a least-privilege supervisor, scoped guest tokens and guest-only dispatch. QEMU/KVM, libvirt and a stock-image bootstrap are candidates in #30, not admitted deployment choices. All computer controls below are planned/unverified; this document implements none.
 
 A computer is an additional boundary. It does not change what a paired Device or the Runner can already do.
 
@@ -43,6 +43,15 @@ A computer is an additional boundary. It does not change what a paired Device or
 ## Planned requirements
 
 Each requirement names its owning issue as `key #number`. All are `planned`.
+
+### Admission and authority failures
+
+- Missing KVM, measured capacity, verified image/bootstrap provenance or enforceable isolation blocks start and guest dispatch (#29, #30, #39, #43). A passing probe is not proof of isolation. No container, software-emulation or host-tool fallback is authorized.
+- Ready requires observed domain state, verified network policy and an authenticated controller bound to the current computer/start generation; a successful hypervisor command or guest-reported readiness is insufficient (#32, #33, #40). Unknown state, controller loss or failed enforcement suspends dispatch and display admission while preserving disks.
+- Controller messages are bounded attacker input: reject malformed/unsupported envelopes, excess payloads, unknown operations and computer/start/token mismatches before effects. Tokens authorize only named guest operations, never host paths, supervisor commands or account APIs. Recheck revocation and scope at execution, including queued work (#33, #44, #45).
+- Ownership changes, unpairing, Pause, expiry and restart invalidate old grants and queued input. Replayed, duplicated, delayed or reordered commands must not produce a second effect or revive an old owner. Unavailable current authority refuses effects; an encrypted blob or valid signature alone does not establish freshness (#32, #34, #53, #67).
+- Display viewing and input are separate grants. Each stream binds account, computer, Runner, requesting Device and current generation; reconnect requires current membership and fresh admission. A view grant cannot authorize input, file transfer or clipboard. Denied/expired viewers receive no new frames; local screenshot copies cannot be recalled (#34, #35, #52, #61).
+- Stop revokes tool/input grants before requesting shutdown and observes shut-off under a deadline. Timeout is blocked/error, not success. Force termination requires explicit data-loss confirmation; stop retains disks but cannot promise RAM or crash-consistent writes. Cold restart rejects saved-state tokens and fences; both regular and one-shot autostart must remain disabled (#30, #32, #40).
 
 ### Separation between beans
 
@@ -98,26 +107,22 @@ Each requirement names its owning issue as `key #number`. All are `planned`.
 
 ## Trust boundaries
 
-Every row is a boundary. "Evidence" is what exists now: `architecture-only` is this walkthrough; `pending host acceptance` means no VM or host test has run.
+Each row describes a planned boundary, not a passed test. Evidence for every row is this paper walkthrough; host/VM acceptance remains pending.
 
-| Boundary and threat | Control and owning issue | Residual risk | Evidence |
-| --- | --- | --- | --- |
-| Guest to host filesystem: compromised guest reads or writes host files | No mounts, no passthrough, refused at start: #43 `lifecycle-isolation-baseline`; supervisor least privilege: #36 `lifecycle-supervisor` | Hypervisor or device-model escape reaches the host as the QEMU process user | architecture-only; pending host acceptance |
-| Guest to host services: guest reaches the unauthenticated Runner local API, relay, metadata, LAN via gateway, proxy or forwarder | Default-deny, host/private/link-local/metadata denied: #66 `ops-network-restrictions`, #43 | Misconfigured approved egress; DNS or covert channels over approved destinations | architecture-only; pending host acceptance |
-| Guest to peer guest: lateral movement or data theft | Per-bean domain, disk, segment; peers denied: #37 `lifecycle-disk-provisioning`, #43, #66 | Shared host kernel, KVM and CPU side channels | architecture-only; pending host acceptance |
-| Guest to account secrets: guest asks for DEK, credentials, relay storage | Scoped per-start token only: #44 `lifecycle-token-baseline`, #33 `p0-guest-controller`; bootstrap allowlist: #38 `lifecycle-guest-bootstrap` | Scoped token abuse within its lifetime and scope; a user pasting a secret into the guest | architecture-only; pending host acceptance |
-| Stale or leaked guest token | Expiry per start, revocation, rotation: #44, #67 `ops-secret-rotation` | Window between leak and revocation | architecture-only; pending host acceptance |
-| Runner dispatch: computer tool silently runs on the host | Guest-only nested dispatch, no inherited host paths or fallback; separate admission for host-effecting plugins and post-approval authority rechecks: #45 `lifecycle-guest-dispatch` | Bugs in routing; host tools for beans without a computer remain as documented in [Tools](tools.md) | architecture-only; pending host acceptance |
-| Hypervisor control surface: remote libvirt, VNC or controller access | One supervisor, no public endpoints: #36, #52 `collab-display-capture` | Host administrators and local root can still reach libvirt | architecture-only; pending host acceptance |
-| Screen to model: prompt injection from page or guest text | Guest text grants no authority; separately authorized Runner effects require trusted admission: #61 `collab-sensitive-input`, #45 | Model can still be misled and misuse independently approved capabilities | architecture-only; pending host acceptance |
-| Secrets in screen, prompts, traces, logs | Typed-secret handling and screen redaction: #61; diagnostics exclusion: #73 `ops-diagnostics` | Redaction misses unlabelled secrets; a secret shown on screen to the model | architecture-only; pending host acceptance |
-| Rogue or contending Device input | Input fencing and contention rules: #53 `collab-input-fencing`, #57 `collab-contention`, #54 `collab-take-control` | A paired Device is account-trusted and can do far more than send input | architecture-only; pending host acceptance |
-| Display and input transport: network attacker, relay operator | Authenticated, end-to-end transport to paired Devices: #35 `p0-display-transport`, #52; ownership and status blobs: #34 `p0-protocol-ownership` | Relay sees metadata, timing and traffic volume; availability attacks | architecture-only; pending host acceptance |
-| Host co-tenant reads disks or controller socket | Runner-user-only files and sockets, supervisor privilege: #36, #37 | A same-user process or root on the host is not defended against | architecture-only; pending host acceptance |
-| Disk, CPU, RAM exhaustion by one guest | Limits and admission queue: #39 `lifecycle-capacity-queue`, #68 `ops-disk-quota` | Host-level contention before limits bite | architecture-only; pending host acceptance |
-| Crash or reboot leaves orphan domains or wrong state | Reconcile: #40 `lifecycle-status-reconcile`, #71 `ops-reboot-recovery`; fault tests: #75 `ops-failure-injection` | Data on a corrupted disk | architecture-only; pending host acceptance |
-| Image, backup and update path | Provenance #30 `p0-hypervisor-provenance`, updates #70 `ops-image-updates`, backup #69 `ops-backup-restore` | Compromised upstream image; stolen owner-controlled backup | architecture-only; pending host acceptance |
-| Destruction by mistake or by an attacker with Device access | Confirmed reset and delete: #74 `ops-reset-delete` | A paired Device can still confirm | architecture-only; pending host acceptance |
+| Boundary | Required control / owner | Residual risk |
+| --- | --- | --- |
+| Guest → host files/services | No mounts/passthrough; verified default-deny network including indirect paths; least-privilege supervisor (#36, #43, #66) | Hypervisor escape; misconfigured approved egress |
+| Guest → peer | Separate domain, disk and network segment (#37, #43, #66) | Shared kernel/KVM/CPU side channels; legacy host tools |
+| Guest → account secrets | Scoped per-start token; no DEK, provider blob or relay material (#33, #38, #44, #67) | Token abuse before revocation; pasted secrets |
+| Tool → Runner | Guest-only nested dispatch and fresh authority checks; no host fallback (#45) | Routing bugs; non-computer beans remain host-native |
+| Host → hypervisor | Restricted supervisor socket/domain allowlist; no public control/display endpoint (#36, #35, #52) | Host root and same-user processes |
+| Guest text/pixels → model | No authority from output; withheld uncertain frames and sensitive-field redaction (#45, #61) | Prompt injection within approved scope; missed pixel secrets |
+| Human input → guest | Exclusive owner and current fence at Runner/controller (#32, #53, #54, #57) | Malicious account-trusted Device |
+| Device ↔ display/input | Authenticated E2E transport and per-stream admission (#34, #35, #52) | Metadata, availability attacks, retained frames |
+| Guest → host resources | Measured admission and CPU/RAM/disk limits (#29, #39, #68) | Host contention before limits bite |
+| Crash → lifecycle state | Reconcile without deletion; revoke stale grants (#40, #71, #75) | Corrupt disks and incomplete writes |
+| Image/update/backup → guest data | Verified provenance, data-preserving rollback, owner-controlled backup (#30, #69, #70) | Compromised publisher; stolen backup |
+| Reset/delete → persistent data | Specific informed confirmation (#74) | Authorized Device can still destroy data |
 
 ## Attack walkthroughs
 
@@ -164,8 +169,19 @@ Stated without softening.
 
 ## Evidence status
 
-- **Baseline:** `135b2295469614202d3e48f7316f7b7423efe712`.
-- **Present:** this document, built from [Tools](tools.md), [Identity](identity.md) and [Relay](relay.md) at `135b2295`, and the issue bodies named in the tables, read for the key mappings.
-- **Absent:** every VM, network, supervisor, token and redaction claim above is `planned/unverified, pending live evidence`. No host probe, VM start or red-team run has occurred. Acceptance remains pending host acceptance in #51 `lifecycle-integration` and #76 `ops-integration`.
-- **Sibling reconciliation (issue bodies and comments only):** #29, #30, #32, #33, #34 and #35 are open and every one is a proposal. No decision is recorded on controller transport, display transport, ownership storage, lease timing, hypervisor or guest image. This doc states the requirements those issues must meet, not choices they have made. The one cross-issue input it relies on is common to all six: guests get only scoped capabilities and never the master key, the full credentials blob, relay material or host mounts. #32 and #33 propose the input-owner epoch enforced at both Runner dispatch and the guest controller; #33 proposes no controller endpoint reachable off-host; #35 proposes the hypervisor display is never public. No conflict with this doc was found. Sibling drafts are not cited as decided, and the issues' older line references need re-verifying before they are cited.
-- #31 also requires reconciling the other P0 outputs (#29, #30, #32, #33, #34, #35) before closing. Only the current issue-body proposals are reconciled above; the final chosen sibling outputs must be rechecked before #31 closes.
+Original baseline: `135b2295469614202d3e48f7316f7b7423efe712` and earlier issue-body notes. This revision checks local architecture docs after bootstrap `755ecf123564abd8ef8c9657e04e4d9b3be7d7a2`, not fresh GitHub status. No VM, firewall, controller, display, token or redaction acceptance runs here; all remain planned/unverified.
+
+### Sibling reconciliation from local evidence
+
+Local evidence is incomplete and drafts may change. Rows reconcile requirements, not completed sibling outputs; none authorizes provisioning.
+
+| Issue | Available local evidence | Reconciled boundary / unresolved acceptance |
+| --- | --- | --- |
+| #29 host probe | Probe draft and diagnostics contract; cached review of PR #339 at `4251c11b` reports missing collection wiring and measured host matrix | Typed/synthetic capacity is not host readiness. Require actual KVM access and measured sizing; three-host evidence remains absent. |
+| #30 provenance | Local PR #341 draft: candidate stock cloud image plus pinned bootstrap, QEMU/KVM/libvirt; signatures, package/image inventory and live cycle incomplete | Provenance gates start; no host fallback. Stop observes shut-off, destroy warns of data loss, cold start discards saved state, both autostart modes disabled. No accepted deployment pin or verified image. |
+| #32 lifecycle | Cached proposal notes only; local lifecycle branch remains at `135b2295` | Input epoch at Runner and controller agrees with this contract. Final state machine, stop deadlines, crash transitions and lease timing unavailable; reconciliation pending. |
+| #33 controller | Cached proposal notes only: scoped capabilities, input epoch, no off-host controller endpoint | Require current-start authentication, bounded messages and no host authority. Concrete channel, schema, token lifetime/revocation and replay handling unavailable. |
+| #34 ownership | Cached proposal notes only; existing [Protocols](protocols.md) authenticates requests, not computer leases | Require authoritative Runner/computer assignment and fresh fences across reassignment, restart and unpair. Ownership storage and conflict/replay rules unavailable. |
+| #35 display | Cached proposal notes only; local display branch remains at `135b2295` | Private hypervisor endpoint agrees; authenticated E2E viewing still needs selected transport, client feasibility, grant revocation and clipboard/file-transfer policy. |
+
+The local audit records #29–35 as contract discovery, not VM implementation. Missing final #32–35 artifacts prevent a claim of complete sibling reconciliation. Candidate #30 inspection is not deployment acceptance. These gaps remain blockers for #31 closure and downstream lifecycle/collaboration/operations acceptance (#51, #65, #76).

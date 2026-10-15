@@ -2,7 +2,7 @@ import { createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { L } from "../../l10n";
 import { store, errorText } from "../../model/store";
-import { MEMORY_ADVANCED_ACTIONS, MEMORY_OPERATION_LABELS, MEMORY_STATUS_LABELS, MemoryPreferencesDraft, MemoryServiceAPI, MemoryServiceViewState, memoryVectorEditBody, secretPatch, supportsMemoryAction, supportsMemoryAdvancedAction, type MemoryBackend, type MemoryConnectionEdit, type MemoryConnectionOptions, type MemoryConnectionView, type MemoryConnectionsView, type MemoryHealth, type MemoryOperations, type MemoryPreferencesView, type MemoryAdvancedFeature } from "../../model/memoryService";
+import { MEMORY_ADVANCED_ACTIONS, MemoryPreferencesDraft, MemoryServiceAPI, MemoryServiceViewState, memoryVectorEditBody, secretPatch, supportsMemoryAction, supportsMemoryAdvancedAction, type MemoryBackend, type MemoryConnectionEdit, type MemoryConnectionOptions, type MemoryConnectionView, type MemoryConnectionsView, type MemoryHealth, type MemoryOperationState, type MemoryOperations, type MemoryPreferencesView, type MemoryAdvancedFeature } from "../../model/memoryService";
 import { Button, PopUpButton, Switch, TextArea, TextField } from "../controls";
 import { alert, presentSheet, Sheet } from "../overlay";
 import { MemorySetupControls, presentLocalEmbeddingSetup } from "./memorySetup";
@@ -22,6 +22,25 @@ function blockedConnectionText(connection: MemoryConnectionView): string {
   return connection.reason === "lancedb_cloud_transport_unavailable"
     ? L("LanceDB Cloud transport is unavailable. Runner-local Lance remains supported.")
     : L("This memory connection is blocked.");
+}
+
+function memoryHealthLabel(status: MemoryHealth["status"]): string {
+  switch (status) {
+    case "ready": return L("Ready");
+    case "degraded": return L("Degraded");
+    case "setup_required": return L("Setup required");
+  }
+}
+
+function memoryOperationLabel(state: MemoryOperationState): string {
+  switch (state) {
+    case "queued": return L("Queued, not stored");
+    case "submitted": return L("Submitted, not stored");
+    case "processing": return L("Processing, not stored");
+    case "completed": return L("Stored");
+    case "failed": return L("Failed, not stored");
+    case "delivery_unknown": return L("Delivery unknown, not confirmed stored");
+  }
 }
 
 export function MemoryConnectionsSheet(props: { api: MemoryServiceAPI; dismiss: () => void }) {
@@ -292,8 +311,8 @@ export function BotMemoryServiceSheet(props: { bot: { id: string; name: string }
       <p class="memory-note">{L("Unattended capture is unavailable: there is no enforceable service-side total-cost policy. No background spending consent is assumed.")}</p>
       <section class="memory-section"><h3>{L("Recall limits")}</h3><For each={([ ["timeout_ms", "Timeout (ms)"], ["max_bytes", "Response bytes"], ["max_results", "Results"], ["max_context_chars", "Context characters"] ] as const)}>{([key, label]) => <MemoryField label={L(label)}><TextField value={String(d().recallBudget[key])} label={L(label)} onInput={(v) => changed((draft) => { draft.recallBudget[key] = Number(v); })} /></MemoryField>}</For></section>
     </fieldset>; }}</Show>
-    <Show when={health()}>{(h) => <section class="memory-section"><h3>{L("Saved service status")}</h3><div class="memory-note">{connection()?.name}</div><div role="status">{L(MEMORY_STATUS_LABELS[h().status])}{h().reason ? ` · ${h().reason}` : ""}{h().deletion_pending ? ` · ${L("Deletion pending—not verified erased")}` : ""}</div><MemoryServiceActions bot={props.bot} health={h()} connection={connection()} preferences={saved()} onChanged={refreshStatus} onBusy={(value) => { if (alive) setBusy(value); }} working={busy()} deletionReady={deletionReady()} beginDeletion={beginDeletion} recordDeletionEpoch={recordDeletionEpoch} /></section>}</Show>
-    <Show when={operations()}>{(delivery) => <section class="memory-section"><h3>{L("Deliveries")}</h3><For each={delivery().operations}>{(op) => <div class="memory-list-row"><div><span>{op.document_id}</span><div class="memory-note">{L(MEMORY_OPERATION_LABELS[op.state])}{op.error_code ? ` · ${op.error_code}` : ""}</div></div><div class="memory-inline-actions"><Show when={health()?.capabilities.operation_status}><Button disabled={busy()} onClick={() => void operationAction(op.id, "status")}>{L("Check")}</Button></Show><Show when={health()?.capabilities.cancel_operation && op.state !== "completed" && op.state !== "failed"}><Button disabled={busy()} onClick={() => void operationAction(op.id, "cancel")}>{L("Cancel…")}</Button></Show></div></div>}</For><Show when={delivery().deletion?.pending}><p class="memory-note">{L("Cleanup remains pending. Backups and Lance history may retain data.")}</p></Show></section>}</Show>
+    <Show when={health()}>{(h) => <section class="memory-section"><h3>{L("Saved service status")}</h3><div class="memory-note">{connection()?.name}</div><div role="status">{memoryHealthLabel(h().status)}{h().reason ? ` · ${h().reason}` : ""}{h().deletion_pending ? ` · ${L("Deletion pending—not verified erased")}` : ""}</div><MemoryServiceActions bot={props.bot} health={h()} connection={connection()} preferences={saved()} onChanged={refreshStatus} onBusy={(value) => { if (alive) setBusy(value); }} working={busy()} deletionReady={deletionReady()} beginDeletion={beginDeletion} recordDeletionEpoch={recordDeletionEpoch} /></section>}</Show>
+    <Show when={operations()}>{(delivery) => <section class="memory-section"><h3>{L("Deliveries")}</h3><For each={delivery().operations}>{(op) => <div class="memory-list-row"><div><span>{op.document_id}</span><div class="memory-note">{memoryOperationLabel(op.state)}{op.error_code ? ` · ${op.error_code}` : ""}</div></div><div class="memory-inline-actions"><Show when={health()?.capabilities.operation_status}><Button disabled={busy()} onClick={() => void operationAction(op.id, "status")}>{L("Check")}</Button></Show><Show when={health()?.capabilities.cancel_operation && op.state !== "completed" && op.state !== "failed"}><Button disabled={busy()} onClick={() => void operationAction(op.id, "cancel")}>{L("Cancel…")}</Button></Show></div></div>}</For><Show when={delivery().deletion?.pending}><p class="memory-note">{L("Cleanup remains pending. Backups and Lance history may retain data.")}</p></Show></section>}</Show>
     <Show when={!deletionReady() && draft()}><div role="status" class="memory-note">{L("Deletion actions are locked until authoritative preferences refresh succeeds.")}</div><Button disabled={busy()} onClick={() => void refreshAuthoritative()}>{L("Refresh authoritative status")}</Button></Show>
     <Show when={connection()}>{(c) => <MemorySetupControls bot={props.bot} connection={c()} onChanged={refreshStatus} />}</Show>
   </Sheet>;

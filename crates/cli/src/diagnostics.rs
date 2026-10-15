@@ -115,5 +115,134 @@ pub async fn report(app: &Arc<App>) -> Value {
         "home": {"exists": app.config.home.is_dir()},
         "port": {"free": std::net::TcpListener::bind(("127.0.0.1", app.config.port)).is_ok()},
         "relay": relay, "providers": providers, "plugins": plugins, "mcp_json": mcp_json, "runners": runners,
+        "computer_host": computer_host_report(&HostObservations::default()),
     })
+}
+
+/// Measured per-guest requirements and explicit Runner reserves; no default sizing.
+#[derive(Clone, Copy)]
+pub struct CapacityBudget {
+    pub guest_ram_mib: u64,
+    pub guest_disk_mib: u64,
+    pub guest_vcpus: u64,
+    pub runner_reserved_ram_mib: u64,
+    pub runner_reserved_disk_mib: u64,
+    pub runner_reserved_cpus: u64,
+    pub ram_headroom_percent: u8,
+}
+
+/// Typed integration boundary for the separate host probe; no paths or raw output.
+#[derive(Default)]
+pub struct HostObservations {
+    pub kvm_device_present: Option<bool>,
+    pub kvm_device_accessible: Option<bool>,
+    pub free_ram_mib: Option<u64>,
+    pub free_disk_mib: Option<u64>,
+    pub host_cpus: Option<u64>,
+    pub budget: Option<CapacityBudget>,
+}
+
+fn computer_check(id: &str, observed: Option<bool>, evidence: [&str; 2], remediation: &str) -> Value {
+    let (status, evidence, remediation) = match observed {
+        Some(true) => ("pass", evidence[0], None),
+        Some(false) => ("fail", evidence[1], Some(remediation)),
+        None => ("warn", "not observed", Some("Supply complete host observations and measured guest budgets: guest RAM, disk and vCPUs must be positive; RAM headroom must be 0 through 100 percent.")),
+    };
+    json!({"id": id, "status": status, "evidence": evidence, "remediation": remediation})
+}
+
+/// Pure KVM prerequisite and sizing evaluation. It performs no I/O or provisioning.
+pub fn computer_host_report(observed: &HostObservations) -> Value {
+    let fits = match (observed.budget, observed.free_ram_mib, observed.free_disk_mib, observed.host_cpus) {
+        (Some(b), Some(ram), Some(disk), Some(cpus)) if b.guest_ram_mib > 0 && b.guest_disk_mib > 0 && b.guest_vcpus > 0 && b.ram_headroom_percent <= 100 => {
+            let ram = (ram.saturating_sub(b.runner_reserved_ram_mib) as u128 * (100 - b.ram_headroom_percent) as u128 / 100 / b.guest_ram_mib as u128) as u64;
+            let disk = disk.saturating_sub(b.runner_reserved_disk_mib) / b.guest_disk_mib;
+            let cpu = cpus.saturating_sub(b.runner_reserved_cpus) / b.guest_vcpus;
+            Some([ram, disk, cpu])
+        }
+        _ => None,
+    };
+    let guests = fits.map(|fits| *fits.iter().min().unwrap());
+    let checks = [
+        computer_check("kvm_device_present", observed.kvm_device_present, ["/dev/kvm present", "/dev/kvm absent"], "Use a Linux host that exposes /dev/kvm; request KVM support from the VPS provider or enable virtualization in firmware."),
+        computer_check("kvm_device_access", observed.kvm_device_accessible, ["Runner user can open /dev/kvm", "Runner user cannot open /dev/kvm"], "Grant the Runner user access through the group owning /dev/kvm, then restart its login session; do not elevate Beans."),
+        computer_check("capacity", guests.map(|n| n > 0), ["At least one guest fits the supplied measured budgets", "No guest fits after Runner reserves and RAM headroom"], "Free RAM or disk, or use a host with more capacity; retain the measured guest budgets and Runner reserves."),
+    ];
+    let overall = if checks.iter().any(|c| c["status"] == "fail") { "not_ready" } else if checks.iter().any(|c| c["status"] == "warn") { "unknown" } else { "ready" };
+    let capacity = json!({"guests": guests.filter(|_| overall == "ready"), "ram": fits.map(|n| n[0]), "disk": fits.map(|n| n[1]), "cpu": fits.map(|n| n[2])});
+    json!({"schema_version": 1, "overall": overall, "checks": checks, "capacity": capacity})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn measured() -> HostObservations {
+        HostObservations {
+            kvm_device_present: Some(true), kvm_device_accessible: Some(true),
+            free_ram_mib: Some(32768), free_disk_mib: Some(500000), host_cpus: Some(16),
+            budget: Some(CapacityBudget {
+                guest_ram_mib: 4096, guest_disk_mib: 40960, guest_vcpus: 4,
+                runner_reserved_ram_mib: 4096, runner_reserved_disk_mib: 50000,
+                runner_reserved_cpus: 2, ram_headroom_percent: 10,
+            }),
+        }
+    }
+
+    #[test]
+    fn computer_host_contract() {
+        let ready = computer_host_report(&measured());
+        assert_eq!(ready["overall"], "ready");
+        assert_eq!(ready["capacity"], json!({"guests": 3, "ram": 6, "disk": 10, "cpu": 3}));
+        assert_eq!(ready["checks"].as_array().unwrap().len(), 3);
+        assert!(ready["checks"].as_array().unwrap().iter().all(|c| c["status"] == "pass" && c["remediation"].is_null()));
+        let unknown = computer_host_report(&HostObservations::default());
+        assert_eq!(unknown["overall"], "unknown");
+        assert!(unknown["capacity"]["guests"].is_null());
+        assert!(unknown["checks"].as_array().unwrap().iter().all(|c| c["status"] == "warn" && c["remediation"].is_string()));
+        for input in [
+            HostObservations { kvm_device_present: Some(false), ..measured() },
+            HostObservations { kvm_device_accessible: Some(false), ..measured() },
+            HostObservations { free_ram_mib: Some(0), ..measured() },
+            HostObservations { free_disk_mib: Some(0), ..measured() },
+            HostObservations { host_cpus: Some(0), ..measured() },
+        ] {
+            let report = computer_host_report(&input);
+            assert_eq!(report["overall"], "not_ready");
+            assert!(report["capacity"]["guests"].is_null());
+            for check in report["checks"].as_array().unwrap().iter().filter(|c| c["status"] == "fail") {
+                assert!(check["remediation"].is_string());
+                let text = check["remediation"].as_str().unwrap();
+                assert!(!text.contains("container") && !text.contains("fallback") && !text.contains("host execution"));
+            }
+        }
+        let budget = measured().budget.unwrap();
+        for invalid in [
+            CapacityBudget { guest_ram_mib: 0, ..budget }, CapacityBudget { guest_disk_mib: 0, ..budget },
+            CapacityBudget { guest_vcpus: 0, ..budget }, CapacityBudget { ram_headroom_percent: 101, ..budget },
+        ] {
+            let report = computer_host_report(&HostObservations { budget: Some(invalid), ..measured() });
+            assert_eq!(report["overall"], "unknown");
+            assert_eq!(report["checks"][2]["status"], "warn");
+        }
+        for missing in [
+            HostObservations { budget: None, ..measured() }, HostObservations { host_cpus: None, ..measured() },
+            HostObservations { free_ram_mib: None, ..measured() }, HostObservations { free_disk_mib: None, ..measured() },
+            HostObservations { kvm_device_present: None, ..measured() }, HostObservations { kvm_device_accessible: None, ..measured() },
+        ] {
+            assert_eq!(computer_host_report(&missing)["overall"], "unknown");
+        }
+        let headroom = computer_host_report(&HostObservations { budget: Some(CapacityBudget { ram_headroom_percent: 100, ..budget }), ..measured() });
+        assert_eq!(headroom["overall"], "not_ready");
+        let reserve = computer_host_report(&HostObservations { budget: Some(CapacityBudget { runner_reserved_ram_mib: u64::MAX, ..budget }), ..measured() });
+        assert_eq!(reserve["capacity"]["ram"], 0);
+        let maximum = computer_host_report(&HostObservations {
+            free_ram_mib: Some(u64::MAX), free_disk_mib: Some(u64::MAX), host_cpus: Some(u64::MAX),
+            budget: Some(CapacityBudget { guest_ram_mib: 1, guest_disk_mib: 1, guest_vcpus: 1,
+                runner_reserved_ram_mib: 0, runner_reserved_disk_mib: 0, runner_reserved_cpus: 0, ram_headroom_percent: 0 }),
+            ..measured()
+        });
+        assert_eq!(maximum["capacity"]["guests"], json!(u64::MAX));
+        assert_eq!(computer_host_report(&measured()), ready);
+    }
 }

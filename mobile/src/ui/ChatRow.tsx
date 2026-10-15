@@ -20,8 +20,9 @@ export const ChatRow = memo(function ChatRow({ chat, bots, title, working, respo
   const p = usePalette();
   const members = chat.bot_ids.map((id) => bots.get(id)).filter((b): b is Bot => !!b);
   const unread = chat.unread_count;
+  const accessibilityLabel = [title, chat.is_pinned ? t("Pinned") : "", stamp(new Date(lastActivity(chat) * 1000)), responding ? t("Working…") : preview(chat, bots), unread > 0 ? t("{count} unread", { count: unread }) : ""].filter(Boolean).join(", ");
   return (
-    <Pressable onPress={onPress} onLongPress={onLongPress} style={({ pressed }) => [styles.row, { backgroundColor: pressed || selected ? p.fill : "transparent" }]}>
+    <Pressable accessible accessibilityRole="button" accessibilityState={selected === undefined ? undefined : { selected }} accessibilityLabel={accessibilityLabel} onPress={onPress} onLongPress={onLongPress} style={({ pressed }) => [styles.row, { backgroundColor: pressed || selected ? p.fill : "transparent" }]}>
       <AvatarCluster bots={members} chatId={chat.id} size={50} working={working} />
       <View style={styles.text}>
         <View style={styles.titleLine}>
@@ -50,7 +51,7 @@ export const ChatRow = memo(function ChatRow({ chat, bots, title, working, respo
             </Text>
           )}
           {unread > 0 && (
-            <View style={[styles.badge, { backgroundColor: p.tertiaryLabel }]} accessibilityLabel={t("{count} unread", { count: unread })}>
+            <View style={[styles.badge, { backgroundColor: p.tertiaryLabel }]}>
               <Text style={styles.badgeText}>{unread > 999 ? "999+" : unread}</Text>
             </View>
           )}

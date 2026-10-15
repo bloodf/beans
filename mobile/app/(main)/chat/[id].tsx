@@ -1,5 +1,6 @@
 import type { FlashListRef } from "@shopify/flash-list";
 import { AvatarFlashList } from "../../../src/ui/AvatarFlashList";
+import { composerExtra as computeComposerExtra } from "../../../src/ui/composerInset";
 import { LinearGradient } from "expo-linear-gradient";
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useHeaderHeight } from "expo-router/react-navigation";
@@ -140,12 +141,8 @@ export default function ChatScreen() {
   const focusGrowth = useRef(FOCUS_GROWTH_GUESS);
   const compactAtKeyboardStart = useRef(false);
   const publishComposerExtra = useCallback(() => {
-    const actual = composerActual.current;
-    const compact = composerCompact.current;
-    const expanded = actual > compact + 1;
-    composerExtraTarget.value = expanded
-      ? actual
-      : compact + focusGrowth.current;
+    const extra = computeComposerExtra(composerActual.current, composerCompact.current, focusGrowth.current);
+    if (extra !== null) composerExtraTarget.value = extra;
   }, [composerExtraTarget]);
   const keyboardMoving = useSharedValue(false);
   // Sending hides the keyboard; once it is down, an anchored message is put back under the

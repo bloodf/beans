@@ -13,6 +13,7 @@ import { Symbol } from "../../src/ui/Symbol";
 import { usePalette } from "../../src/ui/theme";
 import { deviceSymbol } from "../../src/ui/devices";
 import { CloseToolbar } from "../../src/ui/navigation";
+import { chatUsageRows } from "../../src/ui/chatUsage";
 
 export default function ChatInfoScreen() {
   useLanguage();
@@ -212,6 +213,12 @@ export default function ChatInfoScreen() {
               }}
             />
           )}
+        </Section>
+      )}
+
+      {chat.usage && (
+        <Section>
+          {chatUsageRows(chat.usage).map((row) => <Row key={row.title} {...row} subtitleLines={3} />)}
         </Section>
       )}
 

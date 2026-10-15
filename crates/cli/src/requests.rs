@@ -123,6 +123,7 @@ async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
         "skills.discovery" => crate::skill_discovery::serve_as(app, body.clone(), &request.requested_by).await,
         "skills.library.preview" | "skills.library.import" | "skills.library.uninstall" => crate::skill_library::serve_as(app, &request.verb, body.clone(), &request.requested_by).await,
         "skills.library.compare" => crate::skill_library::serve_as(app, &request.verb, body.clone(), &request.requested_by).await,
+        "skills.library.keep_both" => crate::skill_library::serve_as(app, &request.verb, body.clone(), &request.requested_by).await,
         #[cfg(feature = "provider-auth")]
         "providers.custom.preview" | "providers.custom.save" | "providers.custom.refresh" => {
             let requester = app.device(&request.requested_by).filter(|device| !device.box_pubkey.is_empty()).ok_or("Provider request requires a paired Device")?;
@@ -167,6 +168,90 @@ mod skill_discovery_tests;
 #[cfg(all(test, feature = "runner", target_os = "linux"))]
 #[path = "skill_library_test.rs"]
 mod skill_library_tests;
+
+#[cfg(all(test, feature = "runner", target_os = "linux"))]
+#[test]
+fn signed_library_keep_both_preserves_edited_original() {
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let home = std::env::temp_dir().join(format!("beans-keep-both-{}",uuid::Uuid::new_v4()));
+        let _cleanup = Cleanup(home.clone());
+        let app = App::load(crate::config::Config { home:home.clone(),port:0 }).unwrap();
+        crate::identity::create(&app,Some("Synthetic Runner".into())).unwrap();
+        let runner = app.this_device_id().unwrap();
+        let phone = crate::keys::Machine::generate();
+        {
+            let mut state = app.state.lock().unwrap();
+            state.devices.push(crate::model::Device { id:phone.pubkey(),os:"ios".into(),box_pubkey:phone.box_pubkey(),..Default::default() });
+            state.listed_machines.insert(phone.pubkey(),1);
+            state.listed_machines.insert(runner.clone(),1);
+            state.devices.iter_mut().find(|device| device.id == runner).unwrap().os = "linux".into();
+        }
+        let make = |verb: &str, body: Value| {
+            let mut request = Request { id:format!("synthetic-{}",uuid::Uuid::new_v4()),verb:verb.into(),
+                requested_by:phone.pubkey(),body:body.clone(),created_at:now_secs() };
+            request.body = json!({"payload":body,"signature":phone.sign(&request_bytes(&request,&runner,&body).unwrap())});
+            request
+        };
+        let source = home.join("selected-source");
+        std::fs::create_dir(&source).unwrap();
+        let skill = b"---\nname: Duplicate name\ndescription: Inactive fixture\n---\nPRIVATE_BODY\n";
+        std::fs::write(source.join("SKILL.md"),skill).unwrap();
+        std::fs::write(source.join("resource"),b"source-v1").unwrap();
+        let preview = || make("skills.library.preview",json!({"version":1,"runner_id":runner,"root":source}));
+        let approval = answer(&app,&preview()).await.unwrap();
+        let imported = answer(&app,&make("skills.library.import",json!({"version":1,"runner_id":runner,"token":approval["token"],"confirmed":true}))).await.unwrap();
+        let original = imported["managed_id"].as_str().unwrap();
+        let owned = home.join("skill-library");
+        let original_root = owned.join(original);
+        std::fs::write(original_root.join("content/resource"),b"EDITED_ORIGINAL_SENTINEL").unwrap();
+        let manifest = std::fs::read(original_root.join("manifest.json")).unwrap();
+        std::fs::write(source.join("resource"),b"source-v2").unwrap();
+        let approval = answer(&app,&preview()).await.unwrap();
+        let body = |confirmed| json!({"version":1,"runner_id":runner,"managed_id":original,"token":approval["token"],"confirmed":confirmed});
+        assert_eq!(answer(&app,&make("skills.library.keep_both",body(false))).await.unwrap_err(),"skill_library_confirmation_required");
+        let mut forged = make("skills.library.keep_both",body(true));
+        forged.body["payload"]["managed_id"] = json!("0".repeat(32));
+        assert_eq!(answer(&app,&forged).await.unwrap_err(),"Invalid request signature");
+        assert_eq!(std::fs::read_dir(&owned).unwrap().map(|entry| entry.unwrap().file_name()).collect::<Vec<_>>(),vec![std::ffi::OsString::from(original)]);
+        let result = answer(&app,&make("skills.library.keep_both",body(true))).await.unwrap();
+        let new_id = result["managed_id"].as_str().unwrap();
+        assert_ne!(new_id,original);
+        assert_eq!(result["original_managed_id"],original);
+        assert_eq!(result["source_label"],"selected-source");
+        assert_eq!(result["summary"]["name"],imported["summary"]["name"]);
+        let library = beans_agent::harness::skill_library::SkillLibrary::open(&owned).unwrap();
+        assert!(library.validated_inventory(original).is_err(),"edited original should fail immutable inventory validation");
+        let new_inventory = library.validated_inventory(new_id).unwrap();
+        assert_eq!(new_inventory,library.preview_source(&source).unwrap());
+        use sha2::{Digest,Sha256};
+        let mut files: Vec<_> = new_inventory.files.iter().collect();
+        files.sort_unstable_by(|a,b| a.path.cmp(&b.path));
+        let identity: Vec<_> = files.iter().map(|file| (&file.path,file.bytes,&file.sha256)).collect();
+        assert_eq!(result["digest"],format!("{:x}",Sha256::digest(serde_json::to_vec(&identity).unwrap())));
+        assert_eq!(std::fs::read(owned.join(new_id).join("content/resource")).unwrap(),b"source-v2");
+        assert_eq!(std::fs::read(original_root.join("content/resource")).unwrap(),b"EDITED_ORIGINAL_SENTINEL");
+        assert_eq!(std::fs::read(original_root.join("content/SKILL.md")).unwrap(),skill);
+        assert_eq!(std::fs::read(original_root.join("manifest.json")).unwrap(),manifest);
+        assert_eq!(answer(&app,&make("skills.library.keep_both",body(true))).await.unwrap_err(),"skill_library_approval_not_found");
+        let stale = answer(&app,&preview()).await.unwrap();
+        std::fs::write(source.join("resource"),b"changed-after-approval").unwrap();
+        let rejected = json!({"version":1,"runner_id":runner,"managed_id":original,"token":stale["token"],"confirmed":true});
+        assert_eq!(answer(&app,&make("skills.library.keep_both",rejected.clone())).await.unwrap_err(),"skill_library_source_changed");
+        assert_eq!(answer(&app,&make("skills.library.keep_both",rejected)).await.unwrap_err(),"skill_library_approval_not_found");
+        let mut ids: Vec<_> = std::fs::read_dir(&owned).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        ids.sort();
+        let mut expected = vec![std::ffi::OsString::from(original),std::ffi::OsString::from(new_id)];
+        expected.sort();
+        assert_eq!(ids,expected);
+        assert_eq!(std::fs::read(original_root.join("content/resource")).unwrap(),b"EDITED_ORIGINAL_SENTINEL");
+        assert_eq!(std::fs::read(original_root.join("manifest.json")).unwrap(),manifest);
+        assert!(!result.to_string().contains("PRIVATE_BODY"));
+        assert!(!result.to_string().contains(home.to_str().unwrap()));
+    });
+}
 
 #[cfg(all(test, feature = "runner", target_os = "linux"))]
 #[test]

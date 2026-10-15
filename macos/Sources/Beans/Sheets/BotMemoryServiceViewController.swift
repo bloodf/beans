@@ -40,7 +40,7 @@ final class BotMemoryServiceViewController: MemoryFormViewController {
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
     override func loadView() {
         super.loadView()
-        note("Bot: \(botID) · assigned Runner: \(runnerID). Bank scope is derived from the account key and stable bot ID; rename/provider changes retain scope. Namespaces are logical isolation, not server authorization.")
+        note(L("Bot: %@ · assigned Runner: %@. Bank scope is derived from the account key and stable bot ID; rename/provider changes retain scope. Namespaces are logical isolation, not server authorization.", botID, runnerID))
         heading("Connection and consent")
         row("Account memory connection", connectionMenu)
         connectionMenu.addItem(withTitle: L("Disabled — local memory only")); connectionMenu.target = self; connectionMenu.action = #selector(connectionChanged)
@@ -126,11 +126,10 @@ final class BotMemoryServiceViewController: MemoryFormViewController {
         if selected?.availability == .blocked { health = nil }
         let caps = health?.capabilities ?? .init()
         retainButton.isEnabled = caps.supports(.retain); recallButton?.isEnabled = caps.supports(.recall)
-        reflectButton.isEnabled = caps.supports(.reflect); reflectButton.isHidden = !caps.supports(.reflect)
+        reflectButton.isEnabled = caps.supports(.reflect)
         inspectButton?.isEnabled = caps.supports(.inspect); deleteButton?.isEnabled = caps.supports(.deleteDocument)
         clearButton?.isEnabled = caps.supports(.clear)
         advancedButton?.isEnabled = MemoryAdvancedViewController.features(backend: currentConnection?.backend, capabilities: caps).isEmpty == false
-        advancedButton?.isHidden = advancedButton?.isEnabled != true
         statusButton?.isEnabled = selectedOperation != nil && caps.supports(.operationStatus)
         cancelOperationButton?.isEnabled = selectedOperation != nil && caps.supports(.cancelOperation)
         retryButton?.isEnabled = selectedOperation.map { caps.supports(.retain) && ($0.state == .failed || ($0.state == .deliveryUnknown && caps.idempotentRetain)) } ?? false
@@ -258,7 +257,7 @@ final class BotMemoryServiceViewController: MemoryFormViewController {
         run { [self] in
             let preferences = try await service.getPreferences(botID: botID), list = try await service.listConnections()
             guard let connection = list.connections.first(where: { $0.id == preferences.connectionID }) else { throw MemoryUIError.staleTarget }
-            guard await confirm(clear ? "Clear this bot's service bank?" : "Delete this service document?", details: L("Bot %@; connection %@ (%@), revision %llu · %@; deletion epoch %llu. Target: %@. This fences queued writes; pending cleanup does not mean erasure. Service backups and Lance history may retain data.", botID, connection.name, connection.id, connection.revision.counter, connection.revision.deviceID, preferences.deletionEpoch, document ?? "whole bot bank")) else { return }
+            guard await confirm(clear ? "Clear this bot's service bank?" : "Delete this service document?", details: L("Bot %@; connection %@ (%@), revision %llu · %@; deletion epoch %llu. Target: %@. This fences queued writes; pending cleanup does not mean erasure. Service backups and Lance history may retain data.", botID, connection.name, connection.id, connection.revision.counter, connection.revision.deviceID, preferences.deletionEpoch, document ?? L("whole bot bank"))) else { return }
             var parameters: [String: Any] = ["bot_id": botID, "confirm": true, "connection_revision": try JSONSerialization.jsonObject(with: JSONEncoder().encode(connection.revision)), "deletion_epoch": preferences.deletionEpoch]
             if let document { parameters["document_id"] = document }
             authorityRecovered = false

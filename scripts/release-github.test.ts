@@ -1,5 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,21 +6,28 @@ import { buildReleaseManifest } from "./release-github.ts";
 import { readVersion, ROOT } from "./app.ts";
 const paths: string[] = [];
 afterEach(async () => { await Promise.all(paths.map((path) => rm(path, { recursive: true, force: true }))); });
-test("all-platform CLI preflight rejects missing notes before loading private credentials", async () => {
+test("all-platform CLI refuses absent or invalid public trust before changelog and key access", async () => {
   const path = await mkdtemp(join(tmpdir(), "beans-release-preflight-")); paths.push(path);
   await mkdir(join(path, "scripts"));
   await mkdir(join(path, "updates"));
-  for (const name of ["app.ts", "changelog.ts", "release-signing.ts", "release-github.ts"]) {
+  for (const name of ["app.ts", "changelog.ts", "release-signing.ts", "release-github.ts", "release-eas.ts", "release-build-inputs.ts"]) {
     await copyFile(join(ROOT, "scripts", name), join(path, "scripts", name));
   }
   await copyFile(join(ROOT, "updates", "public-key.txt"), join(path, "updates", "public-key.txt"));
   await writeFile(join(path, "package.json"), JSON.stringify({ version: "1.0.13" }, null, 2));
   await writeFile(join(path, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\nPending changes.\n");
-  const result = Bun.spawnSync([process.execPath, join(path, "scripts", "release-github.ts"), "check", "beans-v1.0.13", "all"], {
+  const check = (args: string[]) => Bun.spawnSync([process.execPath, join(path, "scripts", "release-github.ts"), "check", "beans-v1.0.13", "all", ...args], {
     cwd: path, env: { ...process.env, BEANS_UPDATE_PRIVATE_KEY: "" },
   });
-  expect(result.exitCode).not.toBe(0);
-  expect(result.stderr.toString()).toContain("CHANGELOG.md requires notes for 1.0.13");
+  const unconfigured = check([]);
+  expect(unconfigured.exitCode).not.toBe(0);
+  expect(unconfigured.stderr.toString()).toContain("trust policy unavailable for github");
+  expect(unconfigured.stderr.toString()).not.toContain("CHANGELOG.md requires notes");
+  await writeFile(join(path, "invalid-policy.json"), JSON.stringify({ github: { profile: "github", rotation: "later", signerSha256: [] } }));
+  const configured = check(["--public-trust-policy", join(path, "invalid-policy.json")]);
+  expect(configured.exitCode).not.toBe(0);
+  expect(configured.stderr.toString()).toContain("Invalid APK current-signer policy");
+  expect(configured.stderr.toString()).not.toContain("CHANGELOG.md requires notes");
 });
 async function server() {
   const path = await mkdtemp(join(tmpdir(), "beans-release-fixture-")); paths.push(path);
@@ -30,32 +36,14 @@ async function server() {
 }
 const tag = `beans-v${readVersion()}`;
 const revision = "a".repeat(40);
-test("complete all inventory requires hash-bound EAS store provenance", async () => {
+test("all-platform finalization cannot inspect or sign inventory without public authority", async () => {
   const path = await server();
-  const v = readVersion();
-  const names = [`Beans-${v}.zip`, `Beans-${v}.dmg`, "appcast.xml", `Beans-${v}.apk`, `Beans-${v}.aab`, `Beans-${v}-store.ipa`, `Beans Setup ${v}.exe`, `beans_${v}_amd64.deb`, `beans_${v}_arm64.deb`, "install-linux-amd64.sh", "install-linux-arm64.sh", ...["windows-amd64", "linux-amd64", "linux-arm64"].flatMap((p) => [`update-${p}.json`, `beans-${v}-${p}.tar.gz`])];
-  for (const name of names) await writeFile(join(path, name), "fixture");
-  const sha = createHash("sha256").update("fixture").digest("hex");
-  for (const suffix of ["macos-aarch64.tar.gz", "linux-aarch64.tar.gz", "linux-x86_64.tar.gz", "windows-x86_64.zip"]) {
-    const name = `beans-cli-${suffix}`;
-    await writeFile(join(path, name), "fixture");
-    await writeFile(join(path, `${name}.sha256`), `${sha}  ${name}\n`);
-  }
-  for (const [index, profile] of ["github", "production", "testflight"].entries()) {
-    const artifact = `Beans-${v}${profile === "github" ? ".apk" : profile === "production" ? ".aab" : "-store.ipa"}`;
-    await writeFile(join(path, `eas-${profile}.json`), JSON.stringify({ schema: 1, version: v, revision, profile, artifact, size: 7, sha256: sha, project: "11111111-1111-4111-8111-111111111111", buildId: `${index + 2}2222222-2222-4222-8222-222222222222`, buildNumber: String(40 + index), platform: profile === "testflight" ? "IOS" : "ANDROID" }));
-  }
-  const result = await buildReleaseManifest(tag, revision, path, "all");
-  expect(result.artifacts.find((a) => a.name.endsWith("-store.ipa"))?.component).toBe("ios-store");
-  expect(result.artifacts.some((a) => a.component === "ios")).toBe(false);
-  expect(result).toEqual(await buildReleaseManifest(tag, revision, path, "all"));
-  await writeFile(join(path, `Beans-${v}.aab`), "changed");
-  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("provenance");
+  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("trust policy unavailable for github");
 });
 test("server inventory is deterministic and cannot finalize all", async () => {
   const path = await server();
   expect(await buildReleaseManifest(tag, revision, path)).toEqual(await buildReleaseManifest(tag, revision, path));
-  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("incomplete");
+  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("policy unavailable");
 });
 test("tag, revision, scope and unknown assets fail closed", async () => {
   const path = await server();

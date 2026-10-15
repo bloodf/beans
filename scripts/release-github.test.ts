@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stageLocalBuild } from "./release-eas.ts";
 import { buildReleaseManifest } from "./release-github.ts";
 import { readVersion, ROOT } from "./app.ts";
 const paths: string[] = [];
@@ -30,10 +31,11 @@ async function server() {
 }
 const tag = `beans-v${readVersion()}`;
 const revision = "a".repeat(40);
-test("complete all inventory requires hash-bound EAS store provenance", async () => {
+// Everything in an all-scope inventory except the three mobile binaries and their provenance.
+async function inventory() {
   const path = await server();
   const v = readVersion();
-  const names = [`Beans-${v}.zip`, `Beans-${v}.dmg`, "appcast.xml", `Beans-${v}.apk`, `Beans-${v}.aab`, `Beans-${v}-store.ipa`, `Beans Setup ${v}.exe`, `beans_${v}_amd64.deb`, `beans_${v}_arm64.deb`, "install-linux-amd64.sh", "install-linux-arm64.sh", ...["windows-amd64", "linux-amd64", "linux-arm64"].flatMap((p) => [`update-${p}.json`, `beans-${v}-${p}.tar.gz`])];
+  const names = [`Beans-${v}.zip`, `Beans-${v}.dmg`, "appcast.xml", `Beans Setup ${v}.exe`, `beans_${v}_amd64.deb`, `beans_${v}_arm64.deb`, "install-linux-amd64.sh", "install-linux-arm64.sh", ...["windows-amd64", "linux-amd64", "linux-arm64"].flatMap((p) => [`update-${p}.json`, `beans-${v}-${p}.tar.gz`])];
   for (const name of names) await writeFile(join(path, name), "fixture");
   const sha = createHash("sha256").update("fixture").digest("hex");
   for (const suffix of ["macos-aarch64.tar.gz", "linux-aarch64.tar.gz", "linux-x86_64.tar.gz", "windows-x86_64.zip"]) {
@@ -41,8 +43,15 @@ test("complete all inventory requires hash-bound EAS store provenance", async ()
     await writeFile(join(path, name), "fixture");
     await writeFile(join(path, `${name}.sha256`), `${sha}  ${name}\n`);
   }
+  return path;
+}
+test("complete all inventory requires hash-bound EAS store provenance", async () => {
+  const path = await inventory();
+  const v = readVersion();
+  const sha = createHash("sha256").update("fixture").digest("hex");
   for (const [index, profile] of ["github", "production", "testflight"].entries()) {
     const artifact = `Beans-${v}${profile === "github" ? ".apk" : profile === "production" ? ".aab" : "-store.ipa"}`;
+    await writeFile(join(path, artifact), "fixture");
     await writeFile(join(path, `eas-${profile}.json`), JSON.stringify({ schema: 1, version: v, revision, profile, artifact, size: 7, sha256: sha, project: "11111111-1111-4111-8111-111111111111", buildId: `${index + 2}2222222-2222-4222-8222-222222222222`, buildNumber: String(40 + index), platform: profile === "testflight" ? "IOS" : "ANDROID" }));
   }
   const result = await buildReleaseManifest(tag, revision, path, "all");
@@ -51,6 +60,58 @@ test("complete all inventory requires hash-bound EAS store provenance", async ()
   expect(result).toEqual(await buildReleaseManifest(tag, revision, path, "all"));
   await writeFile(join(path, `Beans-${v}.aab`), "changed");
   await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("provenance");
+});
+test("local exact-source pipeline: stage with production code, finalize only through a binary verifier", async () => {
+  const path = await inventory();
+  const v = readVersion();
+  const project = "11111111-1111-4111-8111-111111111111";
+  const previous = process.env.BEANS_EXPO_PROJECT_ID;
+  process.env.BEANS_EXPO_PROJECT_ID = project;
+  const source = await mkdtemp(join(tmpdir(), "beans-local-source-")); paths.push(source);
+  const numbers = { github: "50", production: "51", testflight: "52" } as const;
+  const inspect = async (_: string, profile: "github" | "production" | "testflight") => ({ identifier: "ai.amoena.beans", version: v, buildNumber: numbers[profile] });
+  try {
+    for (const profile of ["github", "production", "testflight"] as const) {
+      const input = join(source, profile);
+      await writeFile(input, new Uint8Array([0x50, 0x4b, 3, 4, profile.length]));
+      // Replacing the original after the inspector ran must not change what is staged or hashed.
+      await stageLocalBuild(input, profile, revision, path, async (snapshot, kind) => {
+        const result = await inspect(snapshot, kind);
+        await writeFile(input, new Uint8Array([0x50, 0x4b, 3, 4, 99]));
+        return result;
+      });
+      const staged = new Uint8Array(await Bun.file(join(path, `Beans-${v}${profile === "testflight" ? "-store.ipa" : profile === "production" ? ".aab" : ".apk"}`)).arrayBuffer());
+      expect(staged).toEqual(new Uint8Array([0x50, 0x4b, 3, 4, profile.length]));
+    }
+  } finally { if (previous === undefined) delete process.env.BEANS_EXPO_PROJECT_ID; else process.env.BEANS_EXPO_PROJECT_ID = previous; }
+  const proofFile = (profile: string) => join(path, `eas-${profile}.json`);
+  const originals = Object.fromEntries(await Promise.all(["github", "production", "testflight"].map(async (profile) => [profile, await Bun.file(proofFile(profile)).json()])));
+  expect(originals.github.buildId).toBeUndefined();
+  // The trusted-binary gate (#275) is a required seam: no verifier, no local acceptance.
+  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("#275");
+  const calls: string[] = [];
+  const verify = async (_: Uint8Array, profile: string, version: string, number: string) => { calls.push(`${profile}:${version}:${number}`); };
+  const manifest = await buildReleaseManifest(tag, revision, path, "all", verify);
+  expect(calls).toEqual([`github:${v}:50`, `production:${v}:51`, `testflight:${v}:52`]);
+  expect(manifest.artifacts.filter((a) => a.component === "provenance")).toHaveLength(3);
+  await expect(buildReleaseManifest(tag, revision, path, "all", async () => { throw new Error("signer differs"); })).rejects.toThrow("signer differs");
+  const refusals: [string, (proof: any) => any][] = [
+    ["unknown kind", (p) => ({ ...p, kind: "cloud" })],
+    ["fabricated build id", (p) => ({ ...p, buildId: "22222222-2222-4222-8222-222222222222" })],
+    ["duplicate platform number", (p) => ({ ...p, buildNumber: "51" })],
+    ["zero number", (p) => ({ ...p, buildNumber: "0" })],
+    ["other revision", (p) => ({ ...p, revision: "b".repeat(40) })],
+    ["wrong hash", (p) => ({ ...p, sha256: "0".repeat(64) })],
+    ["wrong platform", (p) => ({ ...p, platform: "IOS" })],
+    ["no project", (p) => ({ ...p, project: "" })],
+  ];
+  for (const [name, mutate] of refusals) {
+    await writeFile(proofFile("github"), JSON.stringify(mutate(originals.github)));
+    await expect(buildReleaseManifest(tag, revision, path, "all", verify), name).rejects.toThrow("Invalid EAS artifact provenance");
+    await writeFile(proofFile("github"), JSON.stringify(originals.github));
+  }
+  await writeFile(join(path, `Beans-${v}.apk`), "changed");
+  await expect(buildReleaseManifest(tag, revision, path, "all", verify)).rejects.toThrow("provenance");
 });
 test("server inventory is deterministic and cannot finalize all", async () => {
   const path = await server();

@@ -24,6 +24,7 @@ test("submission verifies signed provenance and bytes before testing-only upload
       const artifact = `Beans-${v}${platform === "android" ? ".aab" : "-store.ipa"}`;
       const proof = { schema: 1, revision, version: v, project, buildId: "22222222-2222-4222-8222-222222222222", buildNumber: "42", profile, artifact, size: binary.length, sha256: sha(binary) };
       const proofBytes = Buffer.from(JSON.stringify(proof));
+      const localProof = Buffer.from(JSON.stringify({ ...proof, kind: "local-exact-source", buildId: undefined }));
       const manifest = Buffer.from(JSON.stringify({ schema: 1, revision, version: v, artifacts: [{ name: `eas-${profile}.json`, size: proofBytes.length, sha256: sha(proofBytes) }, { name: artifact, size: binary.length, sha256: sha(binary) }] }));
       const originalConfig = await Bun.file(join(mobile, "eas.json")).text();
       await mkdir(join(mobile, ".credentials"));
@@ -52,6 +53,22 @@ test("submission verifies signed provenance and bytes before testing-only upload
         }
         throw new Error("Unexpected fixture command");
       };
+      // A local build has no EAS record to view: refuse before any credential exists or any EAS call.
+      const localRunner = async (args: string[]) => {
+        if (args.includes("download")) {
+          const dest = args[args.indexOf("--dir") + 1];
+          const manifest = Buffer.from(JSON.stringify({ schema: 1, revision, version: v, artifacts: [{ name: `eas-${profile}.json`, size: localProof.length, sha256: sha(localProof) }, { name: artifact, size: binary.length, sha256: sha(binary) }] }));
+          await writeFile(join(dest, "beans-update.json"), manifest);
+          await writeFile(join(dest, "beans-update.json.sig"), sign(null, manifest, privateKey).toString("base64"));
+          await writeFile(join(dest, `eas-${profile}.json`), localProof);
+          return "";
+        }
+        expect(args[1]).not.toBe("build:view");
+        return runner(args);
+      };
+      await expect(submitEas([`beans-v${v}`, platform], localRunner, async () => trust, async () => binary, mobile)).rejects.toThrow("no EAS build record");
+      expect(submitted).toBe(false);
+      expect(await Bun.file(join(mobile, "eas.json")).text()).toBe(originalConfig);
       await submitEas([`beans-v${v}`, platform], runner, async () => trust, async () => binary, mobile);
       expect(submitted).toBe(true);
       expect(await Bun.file(join(mobile, "eas.json")).text()).toBe(originalConfig);

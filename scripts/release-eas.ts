@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readVersion, ROOT } from "./app.ts";
+import { snapshotArtifact } from "./release-native-identity.ts";
 
 const profiles = { github: { platform: "ANDROID", extension: "apk", component: "android" }, production: { platform: "ANDROID", extension: "aab", component: "android-store" }, testflight: { platform: "IOS", extension: "ipa", component: "ios-store" } } as const;
 type Profile = keyof typeof profiles;
@@ -66,6 +68,49 @@ export async function stageEasBuild(build: any, profile: Profile, revision: stri
   // URLs can carry download tokens; provenance records identifiers and hashes, never URLs.
   const provenance = { schema: 1, revision, version: readVersion(), project, buildId: build.id, buildNumber: build.appBuildVersion, profile, platform: build.platform, artifact: name, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
   await writeFile(join(directory, `eas-${profile}.json`), `${JSON.stringify(provenance)}\n`, { flag: "wx" });
+}
+// Local exact-source builds (`eas build --local`) still draw their number from EAS remote versions,
+// but EAS records no build for them: the proof has no buildId and the number is read from the binary.
+export type NativeIdentity = { identifier: string; version: string; buildNumber: string };
+export type InspectNative = (path: string, profile: Profile) => Promise<NativeIdentity>;
+export async function stageLocalBuild(input: string, profile: Profile, revision: string, directory: string, inspect: InspectNative) {
+  const project = process.env.BEANS_EXPO_PROJECT_ID ?? "";
+  const version = readVersion();
+  if (!Object.hasOwn(profiles, profile) || !uuid.test(project) || !/^[a-f0-9]{40}$/.test(revision)) throw new Error("Invalid EAS release identity");
+  // One admitted snapshot: the inspector sees the private copy, and the artifact and proof hash are
+  // written from the same retained bytes, so replacing `input` afterwards changes neither.
+  const snapshot = snapshotArtifact(input);
+  try {
+    const bytes = snapshot.bytes;
+    if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw new Error("Local artifact must be a nonempty ZIP-format APK/AAB/IPA");
+    const native = await inspect(snapshot.path, profile);
+    if (native?.identifier !== "ai.amoena.beans" || native.version !== version || !/^[1-9]\d*$/.test(native.buildNumber) || Number(native.buildNumber) > 2_100_000_000) {
+      throw new Error("Local binary differs from the release identity or version, or its build number is not a positive integer at most 2100000000");
+    }
+    const name = `Beans-${version}${profile === "testflight" ? "-store" : ""}.${profiles[profile].extension}`;
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, name), bytes, { flag: "wx" });
+    const provenance = { schema: 1, kind: "local-exact-source", revision, version, project, profile, platform: profiles[profile].platform, buildNumber: native.buildNumber, artifact: name, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+    await writeFile(join(directory, `eas-${profile}.json`), `${JSON.stringify(provenance)}\n`, { flag: "wx" });
+  } finally { snapshot.dispose(); }
+}
+export async function runLocalEasRelease(args: string[], inspect: InspectNative, run = (args: string[], cwd: string) => Bun.spawnSync(args, { cwd, stdout: "inherit", stderr: "inherit" }), git = (args: string[]) => Bun.spawnSync(args, { cwd: ROOT })) {
+  const [profile, revision, directory, ...extra] = args;
+  if (!Object.hasOwn(profiles, profile) || !revision || !directory || extra.length) throw new Error("usage: <github|production|testflight> <revision> <directory>");
+  if (!process.env.EXPO_TOKEN || !process.env.BEANS_EXPO_OWNER || !uuid.test(process.env.BEANS_EXPO_PROJECT_ID ?? "")) throw new Error("EXPO_TOKEN, BEANS_EXPO_OWNER and linked BEANS_EXPO_PROJECT_ID are required");
+  if (profile === "testflight" && !/^[A-Z0-9]{10}$/.test(process.env.BEANS_APPLE_TEAM_ID ?? "")) throw new Error("BEANS_APPLE_TEAM_ID is required for a local store IPA");
+  const head = git(["git", "rev-parse", "HEAD"]);
+  const dirty = git(["git", "status", "--porcelain", "--untracked-files=no"]);
+  if (head.exitCode || dirty.exitCode || head.stdout.toString().trim() !== revision || dirty.stdout.length) throw new Error("EAS release requires clean exact-revision checkout");
+  const typedProfile = profile as Profile;
+  const scratch = await mkdtemp(join(tmpdir(), "beans-local-build-"));
+  try {
+    const output = join(scratch, `build.${profiles[typedProfile].extension}`);
+    // No BUILD_NUMBER, no --json/--wait: EAS stays the build-number authority and no build record exists.
+    const built = run(["eas", "build", "--local", "--platform", profiles[typedProfile].platform.toLowerCase(), "--profile", profile, "--non-interactive", "--output", output], join(ROOT, "mobile"));
+    if (built.exitCode !== 0) throw new Error("Local EAS build failed; no release readiness is published");
+    await stageLocalBuild(output, typedProfile, revision, resolve(directory), inspect);
+  } finally { await rm(scratch, { recursive: true, force: true }); }
 }
 export async function runEasRelease(args: string[], query = eas, git = (args: string[]) => Bun.spawnSync(args, { cwd: ROOT })) {
   const [command, profile, revision, directory, buildId, ...extra] = args;

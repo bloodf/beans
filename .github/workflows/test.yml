@@ -153,6 +153,8 @@ jobs:
       # src/mygo.ts, the page's bindings to the Go side, is generated and never committed.
       - run: bun run generate
       - run: bun run typecheck
+      - name: Install Chromium for desktop browser checks
+        run: bun ./node_modules/playwright/cli.js install --with-deps chromium
       - run: bun run test
       - run: go test ./...
 

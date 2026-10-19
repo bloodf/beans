@@ -6,7 +6,7 @@ import AppKit
 /// not list. The CLI checks the server again before saving, and the provider reaches every
 /// paired Device encrypted with the account key.
 final class CustomProviderViewController: SheetViewController {
-    private enum Listing: Equatable {
+    enum Listing: Equatable {
         case needsURL
         case loading
         case listed
@@ -41,6 +41,7 @@ final class CustomProviderViewController: SheetViewController {
     private let imagesPopup = NSPopUpButton()
     private let toolsPopup = NSPopUpButton()
     private let checkButton = NSButton()
+    private let connectionErrorLabel = Build.label("", font: Theme.Font.caption, color: .systemRed, lines: 0)
     private var runners: [Device] = []
     private var runnerID: String? { runners.indices.contains(runnerPopup.indexOfSelectedItem) ? runners[runnerPopup.indexOfSelectedItem].id : nil }
     private var capabilities: CustomCapabilities {
@@ -102,7 +103,7 @@ final class CustomProviderViewController: SheetViewController {
         }
     }
 
-    private init(existing: ProviderCredential?, preset: CustomProviderPreset?, apiKey: String, onSave: @escaping (ProviderCredential.Kind) -> Void) {
+    init(existing: ProviderCredential?, preset: CustomProviderPreset?, apiKey: String, onSave: @escaping (ProviderCredential.Kind) -> Void) {
         kind = existing?.kind
         saveKind = existing?.kind ?? .custom("custom:setup-" + UUID().uuidString.lowercased())
         integration = existing?.integration
@@ -210,6 +211,9 @@ final class CustomProviderViewController: SheetViewController {
         checkButton.target = self
         checkButton.action = #selector(checkConnection)
         contentStack.addArrangedSubview(checkButton)
+        connectionErrorLabel.isHidden = true
+        contentStack.addArrangedSubview(connectionErrorLabel)
+        connectionErrorLabel.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
         if kind != nil { contentStack.addArrangedSubview(NSButton(title: L("Refresh Models"), target: self, action: #selector(refreshModels))) }
         contentStack.addArrangedSubview(Build.label(L("Port suggestions only: 11434 or 1234. Enter your server’s exact URL; Beans never scans ports."), font: Theme.Font.caption, color: .secondaryLabelColor, lines: 0))
         contentStack.addArrangedSubview(Build.label(L("Loopback belongs to the selected Runner. For another host, use its reachable address and check bind address, firewall and proxy bypass. Do not expose an unauthenticated server publicly."), font: Theme.Font.caption, color: .secondaryLabelColor, lines: 0))
@@ -254,6 +258,13 @@ final class CustomProviderViewController: SheetViewController {
         } else {
             keyField.focus()
         }
+    }
+
+    override func fitSheetToContent() {
+        // AppKit keeps the previous preference as a fitting minimum. Clear it so a
+        // hidden connection error does not leave its old height in the form rows.
+        preferredContentSize = .zero
+        super.fitSheetToContent()
     }
 
     @objc private func customizeModels() {
@@ -386,11 +397,19 @@ final class CustomProviderViewController: SheetViewController {
         updateControls()
     }
 
-    private func show(_ state: Listing) {
+    func show(_ state: Listing) {
         listing = state
+        if case .failed(let error) = state {
+            connectionErrorLabel.stringValue = error
+            connectionErrorLabel.isHidden = false
+        } else {
+            connectionErrorLabel.stringValue = ""
+            connectionErrorLabel.isHidden = true
+        }
         if state == .loading { listingSpinner.startAnimation(nil) } else { listingSpinner.stopAnimation(nil) }
         updateOverlay()
         updateControls()
+        if view.window != nil { fitSheetToContent() }
     }
 
     private func reloadEntries() {

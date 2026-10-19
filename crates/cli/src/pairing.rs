@@ -334,6 +334,7 @@ mod publication_tests {
         use axum::{routing::{get, post}, Json, Router};
         for transition in ["none", "forget", "create"] {
             let home = std::env::temp_dir().join(format!("beans-join-fence-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&home).unwrap();
             let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
             let identity = crate::keys::Identity::generate();
             let ephemeral = crypto_box::SecretKey::generate(&mut rand::rngs::OsRng);

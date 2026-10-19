@@ -66,7 +66,7 @@ fn recall_is_deduplicated_bounded_and_explicitly_untrusted() {
 
 struct Scratch(std::path::PathBuf);
 impl Scratch {
-    fn new() -> Self { Self(std::env::temp_dir().join(format!("beans-memory-core-{}",uuid::Uuid::new_v4()))) }
+    fn new() -> Self { Self(tempfile::tempdir().unwrap().keep()) }
     fn store(&self) -> beans::local_store::LocalStore { beans::local_store::LocalStore::open(&self.0.join("local.sqlite3")).unwrap() }
 }
 impl Drop for Scratch { fn drop(&mut self) { let _=std::fs::remove_dir_all(&self.0); } }

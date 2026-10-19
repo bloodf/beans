@@ -222,7 +222,7 @@ export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 export const MAX_ATTACHMENTS = 10;
 
 export type Body =
-  | { kind: "text"; text: string; attachments?: Attachment[]; reply_to?: ReplyTo | null }
+  | { kind: "text"; text: string; attachments?: Attachment[]; mentions?: string[]; reply_to?: ReplyTo | null }
   | {
       kind: "tool";
       name: string;

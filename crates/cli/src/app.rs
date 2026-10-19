@@ -361,8 +361,12 @@ impl App {
     }
 
     pub(crate) fn queue_local_task(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        self.queue_local_task_at(job, None)
+    }
+
+    pub(crate) fn queue_local_task_at(&self, job: &Job, incarnation: Option<u64>) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         let _policy = self.roster_edit.lock().unwrap();
-        let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        let _lifecycle = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
         self.queue_local_task_locked(job)
     }
 

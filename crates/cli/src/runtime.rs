@@ -117,7 +117,7 @@ fn submit_user_message(app: &Arc<App>, chat_id: &str, text: &str, message_id: Op
     } else if let Some(bot)=members.first() {
         let mut job=user_turn_job(app,chat_id,&bot.id,&message.id);
         if let Some((_,setup))=setup {job.setup=Some(setup);}
-        start_turn(app,job,admission);
+        start_turn_at(app,job,admission,Some(incarnation));
     }
     Ok(message)
 }
@@ -358,6 +358,8 @@ fn abandon_room_tasks(app: &App, tasks: &[(Job, crate::local_store::TaskLease)])
 /// and takes over at the next member boundary. `admission` counts the room as running here
 /// until it ends.
 fn start_room(app: Arc<App>, chat_id: String, trigger: String, members: Vec<Bot>, admission: Admission, tasks: Vec<(Job,crate::local_store::TaskLease)>, incarnation:u64) {
+    let guarded_app=app.clone();
+    let Ok(_guard)=guarded_app.plugin_admission(Some(incarnation)) else { return };
     if members.is_empty() {
         abandon_room_tasks(&app, &tasks);
         return;
@@ -518,17 +520,24 @@ async fn remote_turn_started(
         expect_result(app, &job.id)
     };
     let job_id = job.id.clone();
-    let outcome = if cancel.is_cancelled() {
-        TurnOutcome::Skipped
+    let (outcome, local_started) = if cancel.is_cancelled() {
+        (TurnOutcome::Skipped, false)
     } else {
-        match dispatch_job(app, job) {
-            Dispatch::Sent => wait_for_result(result, REMOTE_TURN_TIMEOUT, &cancel).await,
-            Dispatch::Ran | Dispatch::Deferred => TurnOutcome::Skipped,
+        match dispatch_job_at(app, job, incarnation) {
+            Dispatch::Sent => (wait_for_result(result, REMOTE_TURN_TIMEOUT, &cancel).await, false),
+            Dispatch::Ran => (TurnOutcome::Skipped, true),
+            Dispatch::Deferred => (TurnOutcome::Skipped, false),
         }
     };
     let Ok(_guard) = app.plugin_admission(Some(incarnation)) else { return TurnOutcome::Skipped };
     app.pending_results.lock().unwrap().remove(&job_id);
-    finish_job(app, &job_id);
+    if local_started {
+        // The local worker now owns this running registration. Retire only the
+        // former remote wait; its worker removes the local row when it settles.
+        if let Err(error) = app.store.remove_sent_job(&job_id) { tracing::error!(%error, %job_id, "dropping a rerouted remote job"); }
+    } else {
+        finish_job(app, &job_id);
+    }
     outcome
 }
 
@@ -614,23 +623,27 @@ pub fn deliver_job_result(app: &Arc<App>, result: JobResult) {
 /// wait for the result tracked here. `admission` counts the turn as running here until it ends
 /// (`update_control`).
 pub fn start_turn(app: &Arc<App>, job: Job, admission: Admission) {
-    if app.is_paused() { app.notice(&job.chat_id, "Account paused. Resume to run bots."); return; }
-    let Some(bot) = app.bot(&job.bot_id) else { return };
-    if app.this_device_id().as_deref() == Some(bot.runner_id.as_str()) {
-        spawn_local_job(app.clone(), job, None, admission);
+    start_turn_at(app,job,admission,None);
+}
+
+fn start_turn_at(app: &Arc<App>, job: Job, admission: Admission, expected: Option<u64>) {
+    let (incarnation, bot, local) = {
+        let Ok(guard) = app.plugin_admission(expected) else { return };
+        if app.is_paused() { app.notice(&job.chat_id, "Account paused. Resume to run bots."); return; }
+        let Some(bot) = app.bot(&job.bot_id) else { return };
+        let local = app.this_device_id().as_deref() == Some(bot.runner_id.as_str());
+        (guard.get().0, bot, local)
+    };
+    if local {
+        match app.queue_local_task_at(&job, Some(incarnation)) {
+            Ok(Some(lease)) => spawn_admitted_local_job(app.clone(), job, None, admission, lease),
+            Ok(None) => {},
+            Err(error) => tracing::error!(%error, "Local task admission refused"),
+        }
     } else {
-        let Ok(guard) = app.plugin_admission(None) else { return };
-        let incarnation = guard.get().0;
+        let Ok(_guard) = app.plugin_admission(Some(incarnation)) else { return };
         let cancel = CancellationToken::new();
-        begin_job(
-            app,
-            &job.id,
-            &job.chat_id,
-            &job.bot_id,
-            job.routine_id.clone(),
-            Some(bot.runner_id),
-            cancel.clone(),
-        );
+        begin_job(app, &job.id, &job.chat_id, &job.bot_id, job.routine_id.clone(), Some(bot.runner_id), cancel.clone());
         let app = app.clone();
         tokio::spawn(async move {
             let _admission = admission;
@@ -650,15 +663,26 @@ pub enum Dispatch {
 
 /// Runs the job here when the bot's Runner is this Device; otherwise seals it to that Runner.
 pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
+    let incarnation = match app.plugin_admission(None) { Ok(guard) => guard.get().0, Err(_) => return Dispatch::Deferred };
+    dispatch_job_at(app, job, incarnation)
+}
+
+fn dispatch_job_at(app: &Arc<App>, job: Job, incarnation: u64) -> Dispatch {
+    let guard = match app.plugin_admission(Some(incarnation)) { Ok(guard) => guard, Err(_) => return Dispatch::Deferred };
     if app.is_paused() {
         app.notice(&job.chat_id, "Account paused. Resume to run bots.");
         return Dispatch::Deferred;
     }
     let Some(bot) = app.bot(&job.bot_id) else { return Dispatch::Deferred };
     if app.this_device_id().as_deref() == Some(bot.runner_id.as_str()) {
-        // The caller's admission still counts, so this run continues it.
-        spawn_local_job(app.clone(), job, None, app.update.hold());
-        return Dispatch::Ran;
+        // Release lifecycle before the queue takes roster→lifecycle, retaining
+        // the original incarnation across that gap instead of recapturing it.
+        drop(guard);
+        return match app.queue_local_task_at(&job, Some(incarnation)) {
+            Ok(Some(lease)) => if try_spawn_admitted_local_job(app.clone(), job, None, app.update.hold(), lease) { Dispatch::Ran } else { Dispatch::Deferred },
+            Ok(None) => Dispatch::Deferred,
+            Err(error) => { tracing::error!(%error, "Local rerouted task admission refused"); Dispatch::Deferred },
+        };
     }
     match app.device(&bot.runner_id) {
         Some(runner) if !runner.box_pubkey.is_empty() => match crate::crypto::seal_json(&runner.box_pubkey, &job) {
@@ -699,9 +723,14 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, 
 }
 
 pub(crate) fn spawn_admitted_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, admission: Admission, lease: crate::local_store::TaskLease) {
+    try_spawn_admitted_local_job(app,job,remote_blob_id,admission,lease);
+}
+
+/// True only when the local worker took ownership of the running registration.
+fn try_spawn_admitted_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, admission: Admission, lease: crate::local_store::TaskLease) -> bool {
     let incarnation = lease.incarnation;
     let guarded_app = app.clone();
-    let Ok(_lifecycle) = guarded_app.plugin_admission(Some(incarnation)) else { return };
+    let Ok(_lifecycle) = guarded_app.plugin_admission(Some(incarnation)) else { return false };
     let cleanup = remote_blob_id.as_ref().and_then(|_| crate::sync::BlobCleanup::capture(&app));
     if app.is_paused() {
         abandon_queued_task(&app, &lease);
@@ -716,7 +745,7 @@ pub(crate) fn spawn_admitted_local_job(app: Arc<App>, job: Job, remote_blob_id: 
                 }
             });
         }
-        return;
+        return false;
     }
     let cancel = CancellationToken::new();
     begin_job(
@@ -745,6 +774,7 @@ pub(crate) fn spawn_admitted_local_job(app: Arc<App>, job: Job, remote_blob_id: 
             report_outcome(&app, &job, outcome);
         }
     });
+    true
 }
 
 /// Runs a member job inside an active room. The room already holds the chat lock.
@@ -1301,6 +1331,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_reroute_preserves_local_running_registration() {
+        let scratch=scratch_app();let app=&scratch.0;
+        crate::identity::create(app,Some("Reroute Runner".into())).unwrap();
+        let mut runner_bot=bot("bot","Rerouted bot");runner_bot.runner_id=app.this_device_id().unwrap();
+        let mut chat=empty_chat("chat");chat.meta.bot_ids.push("bot".into());
+        app.state.lock().unwrap().bots.push(runner_bot);app.state.lock().unwrap().chats.push(chat);
+        let job=user_turn_job(app,"chat","bot","trigger");
+        let incarnation=app.plugin_admission(None).unwrap().get().0;
+        begin_job(app,&job.id,&job.chat_id,&job.bot_id,None,Some("previous-runner".into()),CancellationToken::new());
+        assert!(app.store.sent_jobs().unwrap().iter().any(|row|row.id==job.id));
+        let lock=app.chat_lock("chat");let held=lock.lock().await;
+        assert_eq!(remote_turn_started(app,job.clone(),CancellationToken::new(),incarnation).await,TurnOutcome::Skipped);
+        assert!(app.running_jobs.lock().unwrap().get(&job.id).is_some_and(|row|row.runner_id.is_none()));
+        assert!(!app.pending_results.lock().unwrap().contains_key(&job.id));
+        assert!(!app.store.sent_jobs().unwrap().iter().any(|row|row.id==job.id));
+        app.cancel_job(&job.id);drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(2),async{
+            while app.running_jobs.lock().unwrap().contains_key(&job.id){tokio::task::yield_now().await;}
+        }).await.unwrap();
+        let lease=app.task_history_execution(&job.id).unwrap().unwrap();
+        assert_eq!(app.store.task_state(&lease).unwrap(),Some(crate::local_store::TaskState::Interrupted));
+    }
+
+    #[tokio::test]
     async fn stale_job_cleanup_preserves_replacement_with_same_id() {
         let scratch=scratch_app();let app=&scratch.0;
         crate::identity::create(app,Some("Old Runner".into())).unwrap();
@@ -1309,6 +1363,23 @@ mod tests {
         app.forget_identity().unwrap();
         crate::identity::create(app,Some("Replacement Runner".into())).unwrap();
         let replacement=app.task_lease(&job).unwrap();
+        let remote=crate::keys::Machine::generate();
+        let mut replacement_bot=bot("bot","Replacement bot");replacement_bot.runner_id=remote.pubkey();
+        let mut chat=empty_chat("chat");chat.meta.bot_ids.push("bot".into());
+        app.state.lock().unwrap().bots.push(replacement_bot);
+        app.state.lock().unwrap().chats.push(chat);
+        app.state.lock().unwrap().devices.push(Device{id:remote.pubkey(),box_pubkey:remote.box_pubkey(),..Default::default()});
+        let outbox=app.store.outbox().unwrap().len();
+        assert!(matches!(dispatch_job_at(app,job.clone(),lease.incarnation),Dispatch::Deferred));
+        assert_eq!(app.store.outbox().unwrap().len(),outbox,"valid remote target must not receive stale-account envelope");
+        let running=app.running_jobs.lock().unwrap().len();
+        start_turn_at(app,job.clone(),app.update.hold(),Some(lease.incarnation));
+        start_room(app.clone(),"chat".into(),"trigger".into(),vec![app.bot("bot").unwrap()],app.update.hold(),Vec::new(),lease.incarnation);
+        assert_eq!(app.running_jobs.lock().unwrap().len(),running,"stale submission cannot register replacement-account work");
+        let local=app.this_device_id().unwrap();
+        app.state.lock().unwrap().bots.iter_mut().find(|bot|bot.id=="bot").unwrap().runner_id=local;
+        assert!(app.queue_local_task_at(&job,Some(lease.incarnation)).is_err());
+        assert!(app.queue_local_task_at(&job,Some(replacement.incarnation)).unwrap().is_some(),"same-ID intent is admissible in replacement account");
         begin_job(app,&job.id,&job.chat_id,&job.bot_id,None,None,CancellationToken::new());
         let result=run_job_started(app,job.clone(),CancellationToken::new(),lease.clone()).await;
         assert_eq!(result,TurnOutcome::Skipped);
@@ -1340,7 +1411,7 @@ mod tests {
 
         let (paused_job, paused_lease) = app.mint_local_intent(user_turn_job(app, "chat", "bot", "paused-trigger"), None).unwrap();
         app.state.lock().unwrap().paused = true;
-        spawn_admitted_local_job(app.clone(), paused_job.clone(), None, app.update.hold(), paused_lease.clone());
+        assert!(!try_spawn_admitted_local_job(app.clone(), paused_job.clone(), None, app.update.hold(), paused_lease.clone()), "paused admission must not report ownership of a local registration");
         assert_eq!(app.store.task_state(&paused_lease).unwrap(), Some(crate::local_store::TaskState::Interrupted));
         assert!(!app.running_jobs.lock().unwrap().contains_key(&paused_job.id));
         app.state.lock().unwrap().paused = false;

@@ -263,6 +263,7 @@ mod tests {
 
     fn scratch_app() -> (Arc<App>, std::path::PathBuf) {
         let home = std::env::temp_dir().join(format!("beans-update-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         (App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap(), home)
     }
 

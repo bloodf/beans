@@ -1635,6 +1635,12 @@ mod tests {
         ScratchApp(app, home)
     }
 
+    fn scratch_owner() -> ScratchApp {
+        let home = std::env::temp_dir().join(format!("beans-sync-owner-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
+        ScratchApp(App::load_owner(Config { home: home.clone(), port: 0 }).unwrap(), home)
+    }
+
     fn policy_cut_fixture(log: &[serde_json::Value], query: &std::collections::HashMap<String,String>) -> serde_json::Value {
         use serde_json::json;
         let since = query["since"].parse::<i64>().unwrap();
@@ -3645,8 +3651,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_lease_holds_the_cursor_before_the_first_job_and_releasing_it_resumes_in_order() {
+    async fn migrated_owner_denies_legacy_jobs_without_stalling_chat_or_results() {
         let scratch = scratch_app();
+        crate::identity::create(&scratch.0, Some("Runner".into())).unwrap();
+        let job = queued_turn(&scratch.0);
+        scratch.0.save_state_now();
+        let app = App::load_owner(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert!(app.legacy_execution_closed().unwrap());
+        let machine = app.machine_file().unwrap();
+        app.state.lock().unwrap().last_seq = 1;
+        app.store.insert_sent_job(&crate::app::SentJob { id: "remote-legacy".into(), chat_id: job.chat_id.clone(),
+            bot_id: job.bot_id.clone(), routine_id: None, runner_id: "other-runner".into(), sent_at: crate::config::now_secs() }).unwrap();
+        crate::runtime::resume_sent_jobs(&app);
+        let mut events = app.events.subscribe();
+        let message = Message::new(&job.chat_id, Author::System, Body::text("After denied legacy work"));
+        let result = JobResult { job_id: "remote-legacy".into(), chat_id: job.chat_id.clone(), bot_id: job.bot_id.clone(), outcome: "sent".into() };
+        let page = vec![
+            addressed_blob(&app, 2, "job", "legacy-envelope", &job),
+            account_blob(&app, 3, "chat", "later-chat", &ChatBlob::Upsert { message: message.clone() }),
+            addressed_blob(&app, 4, "job_result", "legacy-result", &result),
+        ];
+        // Denial must be durable before the envelope can be consumed.
+        app.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER reject_denial BEFORE INSERT ON task_fences BEGIN SELECT RAISE(ABORT,'synthetic denial failure'); END;").unwrap();
+        assert!(apply_pull_page(&app, &machine, page.clone()).is_err());
+        assert_eq!(app.state.lock().unwrap().last_seq, 1);
+        assert!(app.message(&job.chat_id, &message.id).is_none());
+        app.store.connection.lock().unwrap().execute_batch("DROP TRIGGER reject_denial;").unwrap();
+        assert!(!apply_pull_page(&app, &machine, page).unwrap());
+        wait_for_job_finished(&mut events, "remote-legacy").await;
+        assert_eq!(app.state.lock().unwrap().last_seq, 4);
+        assert_eq!(app.message(&job.chat_id, &message.id).unwrap().body, message.body);
+        assert!(app.store.sent_jobs().unwrap().is_empty());
+        assert!(!app.running_turns().iter().any(|turn| turn["job_id"] == job.id));
+        let lease = app.task_lease(&job).unwrap();
+        assert_eq!(app.store.task_state(&lease).unwrap(), None);
+        let fences: i64 = app.store.connection.lock().unwrap().query_row("SELECT count(*) FROM task_fences WHERE account_epoch=?1 AND task_id=?2", rusqlite::params![lease.account_epoch, job.id], |row| row.get(0)).unwrap();
+        assert_eq!(fences, 1, "the refused Job has a permanent account fence");
+        assert!(app.queue_local_task(&job).unwrap().is_none(), "a replay never reopens intent");
+    }
+
+    #[tokio::test]
+    async fn a_lease_holds_the_cursor_before_the_first_job_and_releasing_it_resumes_in_order() {
+        let scratch = scratch_owner();
         let app = &scratch.0;
         crate::identity::create(app, Some("Runner".into())).unwrap();
         let job = queued_turn(app);
@@ -3711,7 +3757,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_held_first_sync_keeps_the_cursor_at_zero_and_saves_what_it_applied() {
-        let scratch = scratch_app();
+        let mut scratch = scratch_owner();
         let app = &scratch.0;
         crate::identity::create(app, Some("Runner".into())).unwrap();
         let job = queued_turn(app);
@@ -3734,7 +3780,12 @@ mod tests {
         assert!(!app.running_turns().iter().any(|turn| turn["job_id"] == job.id));
         assert_eq!(app.state.lock().unwrap().last_seq, 0, "a held first sync does not claim the log");
 
-        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        // A reader can inspect the committed snapshot, but only a replacement owner
+        // can resume execution after the old App and its update lease are dropped.
+        let reader = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let old_owner = std::mem::replace(&mut scratch.0, reader);
+        drop(old_owner);
+        let reloaded = App::load_owner(Config { home: scratch.1.clone(), port: 0 }).unwrap();
         assert_eq!(reloaded.device(&paired.pubkey()).unwrap().name, "Paired laptop", "the applied Device metadata survives restart");
         assert_eq!(reloaded.state.lock().unwrap().last_seq, 0);
         // Restart drops the lease. Replay on the reopened Device must still admit the held job.
@@ -3754,7 +3805,7 @@ mod tests {
 
     #[tokio::test]
     async fn while_held_only_a_running_jobs_cancel_is_applied_and_the_cursor_stays() {
-        let scratch = scratch_app();
+        let scratch = scratch_owner();
         let app = &scratch.0;
         crate::identity::create(app, Some("Runner".into())).unwrap();
         let job = queued_turn(app);
@@ -3804,7 +3855,7 @@ mod tests {
 
     #[tokio::test]
     async fn while_held_a_remote_turn_this_device_waits_on_still_ends() {
-        let scratch = scratch_app();
+        let scratch = scratch_owner();
         let app = &scratch.0;
         crate::identity::create(app, Some("Runner".into())).unwrap();
         let job = queued_turn(app);

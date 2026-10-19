@@ -19,4 +19,3 @@ export function memoryOperationLabel(state: MemoryOperationState): string {
     case "delivery_unknown": return L("Delivery unknown, not confirmed stored");
   }
 }
-

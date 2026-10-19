@@ -93,6 +93,7 @@ impl Drop for ScratchApp {
 
 fn scratch_app() -> ScratchApp {
     let home = std::env::temp_dir().join(format!("beans-provider-auth-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&home).unwrap();
     ScratchApp(App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap(), home)
 }
 

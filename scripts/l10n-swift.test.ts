@@ -40,3 +40,17 @@ test("escaped quotes and newlines belong to the literal label", () => {
   const source = String.raw`note("Say \"hello\"\nnow"); row("Private path", file("not a key"));`;
   expect([...memorySwiftKeys(source, path)]).toEqual(['Say "hello"\nnow', "Private path"]);
 });
+
+
+test("nested comments and quoted source samples never count as calls", () => {
+  const source = String.raw`/* outer /* inner */ note("Not used") */
+    let sample = """note("Also unused")"""
+    let raw = #"note("Raw unused")"#
+    note("Used")`;
+  expect([...memorySwiftKeys(source, path)]).toEqual(["Used"]);
+});
+
+test("parentheses around a condition do not hide either label branch", () => {
+  expect([...memorySwiftKeys('note((enabled) ? "Shown A" : ("Shown B"))', path)])
+    .toEqual(["Shown A", "Shown B"]);
+});

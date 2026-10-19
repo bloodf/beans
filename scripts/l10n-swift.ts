@@ -1,5 +1,48 @@
 // Additional finite key expressions used by the native memory form helpers.
 // This does not infer arbitrary Swift variables or count every string in a file.
+// Keep offsets stable while distinguishing executable calls from comments and strings.
+function swiftSource(source: string): { text: string; code: string } {
+  const text = source.split(""); const code = source.split("");
+  const blank = (from: number, to: number, comment = false) => {
+    for (let j = from; j < to; j++) { code[j] = " "; if (comment) text[j] = " "; }
+  };
+  for (let i = 0; i < source.length;) {
+    const start = i;
+    if (source.startsWith("//", i)) {
+      const end = source.indexOf("\n", i); i = end < 0 ? source.length : end;
+      blank(start, i, true);
+    } else if (source.startsWith("/*", i)) {
+      let depth = 1; i += 2;
+      while (i < source.length && depth) {
+        if (source.startsWith("/*", i)) { depth++; i += 2; }
+        else if (source.startsWith("*/", i)) { depth--; i += 2; }
+        else i++;
+      }
+      blank(start, i, true);
+    } else {
+      const opening = /^(#*)("""|")/.exec(source.slice(i));
+      if (!opening) { i++; continue; }
+      const hashes = opening[1]!; const close = opening[2]! + hashes;
+      i += opening[0].length;
+      while (i < source.length) {
+        if (source.startsWith("\\" + hashes, i)) { i += 2 + hashes.length; continue; }
+        if (source.startsWith(close, i)) { i += close.length; break; }
+        i++;
+      }
+      blank(start, Math.min(i, source.length));
+    }
+  }
+  return { text: text.join(""), code: code.join("") };
+}
+function fullyParenthesized(value: string): boolean {
+  if (!value.startsWith("(") || !value.endsWith(")")) return false;
+  const { code } = swiftSource(value); let depth = 0;
+  for (let i = 0; i < code.length; i++) {
+    if (code[i] === "(") depth++;
+    else if (code[i] === ")" && --depth === 0) return i === code.length - 1;
+  }
+  return false;
+}
 function parts(source: string, delimiter: string): string[] {
   const result: string[] = []; let start = 0, depth = 0, ternary = 0, quoted = false, escaped = false;
   for (let i = 0; i < source.length; i++) {
@@ -16,7 +59,7 @@ function parts(source: string, delimiter: string): string[] {
 }
 function literals(expression: string): string[] {
   const value = expression.trim();
-  if (value.startsWith("(") && value.endsWith(")")) return literals(value.slice(1, -1));
+  if (fullyParenthesized(value)) return literals(value.slice(1, -1));
   if (/^"(?:[^"\\]|\\.)*"$/.test(value)) {
     if (value.includes("\\(")) return []; // runtime interpolation is not a finite key
     return [value.slice(1, -1).replace(/\\([ntr"\\])/g, (_, c) => (({ n: "\n", t: "\t", r: "\r" } as Record<string, string>)[c] ?? c))];
@@ -42,10 +85,10 @@ export function memorySwiftKeys(source: string, path: string): Set<string> {
     "Settings/MemoryBotSetupViewController.swift", "Settings/MemorySettingsViewController.swift",
     "Sheets/MemoryAdvancedViewController.swift", "Sheets/BotMemoryServiceViewController.swift",
   ]).has(path);
-  // Strip comments without removing strings, so commented-out calls stay unused.
-  source = source.replace(/"(?:[^"\\]|\\.)*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, token => token.startsWith('"') ? token : " ".repeat(token.length));
+  const parsed = swiftSource(source);
+  source = parsed.text;
   const call = /\b(L|MemoryActionButton|heading|note|row|text|popup|toggle|confirm|optionRow|addRow|addText|Field)\s*\(/g;
-  for (const match of source.matchAll(call)) {
+  for (const match of parsed.code.matchAll(call)) {
     const name = match[1]!;
     if (name !== "MemoryActionButton" && !memoryForm) continue;
     const start = match.index! + match[0].length;

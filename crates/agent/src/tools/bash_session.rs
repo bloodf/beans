@@ -1372,6 +1372,7 @@ mod tests {
         assert_eq!(t.bash.parameters()["properties"]["background"]["type"], "boolean");
         assert!(BashTool::new(std::env::temp_dir()).parameters()["properties"].get("background").is_none(), "not on pipes");
         let command = "echo listening; while true; do echo tick; sleep 0.1; done";
+        crate::login_shell::environment().await;
         let started = std::time::Instant::now();
         let running = call(&t.bash, json!({"command": command, "background": true})).await.unwrap();
         let elapsed = started.elapsed();

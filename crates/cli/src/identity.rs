@@ -45,6 +45,7 @@ pub fn create(app: &Arc<App>, device_name: Option<String>) -> anyhow::Result<Vec
         *state = Default::default();
     }
     app.store.clear()?;
+    app.initialize_created_task_account()?;
     if let Some(device) = app.local_device() {
         upsert_device(&mut app.state.lock().unwrap().devices, device);
     }
@@ -137,11 +138,35 @@ pub async fn restore(app: &Arc<App>, phrase: &str, device_name: Option<String>) 
 mod publication_tests {
     use super::*;
 
+    #[test]
+    fn fresh_owner_identity_keeps_its_authority_before_first_work_across_restart() {
+        let home = tempfile::tempdir().unwrap();
+        let config = crate::config::Config { home: home.path().into(), port: 0 };
+        let owner = App::load_owner(config.clone()).unwrap();
+        create(&owner, Some("Fresh Runner".into())).unwrap();
+        let epoch = owner.store.current_task_account_epoch().unwrap().expect("fresh identity authority commits before any work");
+        assert!(!owner.legacy_execution_closed().unwrap());
+        drop(owner);
+        let reopened = App::load_owner(config).unwrap();
+        assert_eq!(reopened.store.current_task_account_epoch().unwrap(), Some(epoch));
+        assert!(!reopened.legacy_execution_closed().unwrap());
+
+        let reader_home = tempfile::tempdir().unwrap();
+        let reader_config = crate::config::Config { home: reader_home.path().into(), port: 0 };
+        let reader = App::load(reader_config.clone()).unwrap();
+        create(&reader, Some("Device view".into())).unwrap();
+        assert_eq!(reader.store.current_task_account_epoch().unwrap(), None, "a reader cannot mint execution authority");
+        drop(reader);
+        let owner = App::load_owner(reader_config).unwrap();
+        assert!(owner.legacy_execution_closed().unwrap(), "an unproved existing account remains closed");
+    }
+
     #[tokio::test]
     async fn restore_publication_rejects_forget_and_competing_create() {
         use axum::{routing::{get, post}, Json, Router};
         for transition in ["none", "forget", "create"] {
             let home = std::env::temp_dir().join(format!("beans-restore-fence-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&home).unwrap();
             let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
             let identity = Identity::generate();
             let sealed = crate::crypto::seal_json(&identity.content_pubkey(), &keys::KeyRecord {
@@ -191,6 +216,7 @@ mod publication_tests {
     #[test]
     fn create_waits_for_reset_publication_boundary() {
         let home = std::env::temp_dir().join(format!("beans-create-fence-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         create(&app, Some("Synthetic A".into())).unwrap();
         let guard = app.plugin_lifecycle.lock();

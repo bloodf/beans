@@ -405,7 +405,7 @@ pub async fn template(app: &Arc<App>, id: &str) -> Result<(BotTemplate, Vec<Setu
 /// A bot just added from `template`, with its direct chat: its routines, added paused, and a
 /// first turn in which it greets the user and sets itself up, as Grok Bot's template import
 /// does. `greeting` is the user's first message, worded by the app in the user's language.
-pub fn welcome(app: &Arc<App>, bot: &Bot, chat_id: &str, template: &BotTemplate, plugins: Vec<SetupPlugin>, greeting: Option<String>, admission: crate::update_control::Admission) {
+pub fn welcome(app: &Arc<App>, bot: &Bot, chat_id: &str, template: &BotTemplate, plugins: Vec<SetupPlugin>, greeting: Option<String>, admission: crate::update_control::Admission) -> anyhow::Result<()> {
     let mut routines = Vec::new();
     for routine in &template.routines {
         match crate::routines::create(app, &bot.id, &routine.name, &routine.schedule, &routine.prompt, None, false) {
@@ -415,7 +415,8 @@ pub fn welcome(app: &Arc<App>, bot: &Bot, chat_id: &str, template: &BotTemplate,
     }
     let setup = TemplateSetup { template: template.name.clone(), plugins, routines, memory: template.memory.clone() };
     let greeting = greeting.filter(|g| !g.trim().is_empty()).unwrap_or_else(|| format!("Hi {}, introduce yourself.", bot.name));
-    crate::runtime::greet_new_bot(app, chat_id, &bot.id, &greeting, setup, admission);
+    crate::runtime::greet_new_bot(app, chat_id, &bot.id, &greeting, setup, admission)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -477,6 +478,7 @@ mod tests {
     #[test]
     fn cache_is_bound_to_feed_and_only_newer_indexes_win() {
         let home = std::env::temp_dir().join(format!("beans-marketplace-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let config = Config { home: home.clone(), port: 0 };
         config.ensure_home().unwrap();
         let mut cached: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
@@ -504,6 +506,7 @@ mod tests {
     #[test]
     fn newer_index_replaces_old_entries_and_older_one_cannot_downgrade() {
         let home = std::env::temp_dir().join(format!("beans-marketplace-version-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         let mut newer: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
         newer["updated"] = Value::from("2999-01-01T00:00:00Z");
@@ -540,7 +543,8 @@ mod tests {
     #[tokio::test]
     async fn a_bot_added_from_a_template_starts_with_paused_routines_and_a_greeting() {
         let home = std::env::temp_dir().join(format!("beans-marketplace-{}", uuid::Uuid::new_v4()));
-        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        let app = App::load_owner(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Workbench".into())).unwrap();
         let runner_id = app.this_device_id().unwrap();
         let params = serde_json::json!({ "template_id": "pr-reviewer", "runner_id": runner_id, "greeting": "Hi PR Reviewer, introduce yourself." });

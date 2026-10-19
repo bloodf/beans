@@ -83,8 +83,10 @@ impl SetupAuthority {
         self.commit(app,cancel,||Ok(()))
     }
 }
-fn publish<T>(app: &App, authority: Option<&SetupAuthority>, cancel: &CancellationToken,
+fn publish<T>(app: &App, access: &TurnAccess, authority: Option<&SetupAuthority>, cancel: &CancellationToken,
     action: impl FnOnce() -> Result<T, MemoryError>) -> Result<T, MemoryError> {
+    let _guard = app.plugin_admission(Some(access.incarnation)).map_err(|_|MemoryError::new("identity_changed"))?;
+    recheck(app,access,false,cancel)?;
     match authority { Some(authority)=>authority.commit(app,cancel,action), None=>action() }
 }
 fn profile(app: &App, id: &str) -> Result<(Revision, EmbeddingProfile), MemoryError> {
@@ -133,11 +135,11 @@ async fn initialize_inner(app: &Arc<App>, access: &TurnAccess, cancel: Cancellat
     match connection.backend {
         BackendKind::Hindsight => {
             let backend=super::backends::hindsight::Hindsight::connect(&connection,&access.scope,cancel.clone()).await?;
-            recheck(app,access,false,&cancel)?;publish(app,authority,&cancel,||{app.memory_runtime.register(access.scope.clone(),Arc::new(backend));Ok(())})?;
+            recheck(app,access,false,&cancel)?;publish(app,access,authority,&cancel,||{app.memory_runtime.register(access.scope.clone(),Arc::new(backend));Ok(())})?;
         },
         BackendKind::OpenViking => {
             let backend=super::backends::openviking::OpenViking::connect(&connection,&access.scope,cancel.clone()).await?;
-            recheck(app,access,false,&cancel)?;publish(app,authority,&cancel,||{app.memory_runtime.register(access.scope.clone(),Arc::new(backend));Ok(())})?;
+            recheck(app,access,false,&cancel)?;publish(app,access,authority,&cancel,||{app.memory_runtime.register(access.scope.clone(),Arc::new(backend));Ok(())})?;
         },
         #[cfg(feature="memory-pgvector")]
         BackendKind::Pgvector => {
@@ -149,7 +151,7 @@ async fn initialize_inner(app: &Arc<App>, access: &TurnAccess, cancel: Cancellat
             if let Some(role)=role { config=config.with_user(role)?; }
             let backend=Arc::new(PgvectorBackend::connect(config,access.scope.clone(),Some(embedding),cancel.clone()).await?);
             recheck(app,access,false,&cancel)?;
-            publish(app,authority,&cancel,||{
+            publish(app,access,authority,&cancel,||{
                 app.memory_runtime.setup.pgvector.lock().insert(access.scope.namespace.clone(),backend.clone());
                 app.memory_runtime.register(access.scope.clone(),backend);Ok(())
             })?;
@@ -168,7 +170,7 @@ async fn initialize_inner(app: &Arc<App>, access: &TurnAccess, cancel: Cancellat
             };
             let backend=Arc::new(LanceBackend::open(binding,access.scope.clone(),space,Some(embedding),false,cancel.clone()).await?);
             recheck(app,access,false,&cancel)?;
-            publish(app,authority,&cancel,||{
+            publish(app,access,authority,&cancel,||{
                 app.memory_runtime.setup.lance.lock().insert(access.scope.namespace.clone(),backend.clone());
                 app.memory_runtime.register(access.scope.clone(),backend);Ok(())
             })?;
@@ -386,9 +388,36 @@ fn validate_binding(profile:&EmbeddingProfile,binding:&LocalBinding)->Result<(),
 mod authority_tests {
     use super::*;
 
+    #[test]
+    fn forgotten_incarnation_cannot_publish_an_initialized_adapter() {
+        let home=tempfile::tempdir().unwrap();
+        let app=App::load(crate::config::Config{home:home.path().to_owned(),port:0}).unwrap();
+        crate::identity::create(&app,Some("Adapter A".into())).unwrap();
+        let bot=app.state.lock().unwrap().bots[0].id.clone();
+        let device=app.this_device_id().unwrap();
+        {
+            let mut config=app.memory_config.lock();
+            let connection=serde_json::from_value(json!({"backend":"hindsight","name":"fixture"})).unwrap();
+            config.set_connection("c",Some(connection),&device).unwrap();
+            config.set_bot(&bot,BotMemory{connection_id:Some("c".into()),..Default::default()},&device).unwrap();
+        }
+        let access=admit(&app,&bot,false,&CancellationToken::new()).unwrap();
+        let state=app.state.lock().unwrap().clone();let machine=app.machine_file().unwrap();let config=app.memory_config.lock().clone();
+        recheck(&app,&access,false,&CancellationToken::new()).unwrap();
+        app.forget_identity().unwrap();
+        *app.machine.lock().unwrap()=Some(machine);*app.state.lock().unwrap()=state;*app.memory_config.lock()=config;
+        let published=std::cell::Cell::new(false);
+        assert_eq!(publish(&app,&access,None,&CancellationToken::new(),||{published.set(true);Ok(())}).unwrap_err().code,"identity_changed");
+        assert!(!published.get());
+        let fresh=admit(&app,&bot,false,&CancellationToken::new()).unwrap();
+        publish(&app,&fresh,None,&CancellationToken::new(),||{published.set(true);Ok(())}).unwrap();
+        assert!(published.get());
+    }
+
     #[tokio::test]
     async fn revocation_before_publication_and_paired_positive() {
         let home=std::env::temp_dir().join(format!("beans-setup-authority-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app=App::load(crate::config::Config{home:home.clone(),port:0}).unwrap();
         crate::identity::create(&app,Some("Fixture Runner".into())).unwrap();
         let actor=crate::keys::Machine::generate().pubkey();

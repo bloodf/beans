@@ -3210,6 +3210,7 @@ mod tests {
 
     fn scratch_app() -> ScratchApp {
         let home = std::env::temp_dir().join(format!("beans-runtime-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
     }
@@ -3770,7 +3771,9 @@ mod tests {
 
     /// Chef in a DM, running on this Device.
     fn chef_in_a_dm() -> (ScratchApp, Bot) {
-        let scratch = scratch_app();
+        let home = std::env::temp_dir().join(format!("beans-turn-owner-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
+        let scratch = ScratchApp(App::load_owner(crate::config::Config { home: home.clone(), port: 0 }).unwrap(), home);
         crate::identity::create(&scratch.0, Some("Runner".into())).unwrap();
         let mut chef = bot("b1", "Chef");
         chef.runner_id = scratch.0.this_device_id().unwrap();

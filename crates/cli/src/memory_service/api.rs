@@ -234,6 +234,7 @@ pub async fn serve(app: &Arc<App>, method: &str, params: Value) -> Result<Value,
     let cancel = CancellationToken::new();
     let bot_id = params["bot_id"].as_str().ok_or("missing_bot_id")?.to_owned();
     if method == "memory.operations.list" {
+        let _guard = app.plugin_admission(None)?;
         let bot=app.bot(&bot_id).ok_or("bot_deleted")?;
         if app.this_device_id().as_deref()!=Some(&bot.runner_id) { return Err("runner_changed".into()); }
         let _: BotId = decode(params)?;
@@ -272,7 +273,12 @@ pub async fn serve(app: &Arc<App>, method: &str, params: Value) -> Result<Value,
         "memory.service.recall" | "memory.service.reflect" => {
             let p: Query = decode(params)?;
             debug_assert_eq!(p.bot_id, access.bot_id);
-            let budget = app.memory_config.lock().bots[&access.bot_id].value.as_ref().unwrap().recall_budget.clone();
+            let budget = {
+                let _guard = app.plugin_admission(Some(access.incarnation))?;
+                d::recheck(app,&access,false,&cancel).map_err(|e|e.code)?;
+                app.memory_config.lock().bots.get(&access.bot_id).and_then(|record|record.value.as_ref())
+                    .ok_or("memory_not_configured")?.recall_budget.clone()
+            };
             if method.ends_with("recall") { BackendRequest::Recall { query: p.query, budget } } else { BackendRequest::Reflect { query: p.query, budget } }
         },
         "memory.service.retain" => {

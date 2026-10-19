@@ -605,6 +605,7 @@ pub fn install(app: &Arc<App>, manifest: Manifest, source: &str) -> Result<Plugi
 /// Removes a plugin, its secrets, and its folder; every bot on this Runner loses it. A server
 /// from `mcp.json` leaves that file.
 pub fn uninstall(app: &Arc<App>, id: &str) -> Result<(), String> {
+    let _edit = app.roster_edit.lock().unwrap();
     let _admission = app.plugin_admission(None)?;
     if app.plugins.lock().unwrap().get(id).is_some_and(|plugin| plugin.source == mcp_json::SOURCE) {
         return Err("That plugin is managed in mcp.json.".into());
@@ -631,7 +632,7 @@ pub fn uninstall(app: &Arc<App>, id: &str) -> Result<(), String> {
     let mut auto_review = app.auto_review();
     if auto_review.rules.iter().any(|r| r.tool.as_deref().is_some_and(|t| t.starts_with(&prefix))) {
         auto_review.rules.retain(|r| !r.tool.as_deref().is_some_and(|t| t.starts_with(&prefix)));
-        app.set_auto_review(auto_review);
+        app.set_auto_review_locked(auto_review);
     }
     announce(app);
     Ok(())
@@ -886,6 +887,7 @@ pub async fn serve_request(app: &Arc<App>, verb: &str, body: &Value, requested_b
             Ok(Value::Null)
         }
         "plugins.variables" => {
+            let _guard = app.plugin_admission(None)?;
             let variables: BTreeMap<String, String> = serde_json::from_value(body["variables"].clone()).map_err(|e| format!("variables: {e}"))?;
             let status = set_variables(app, &plugin_id()?, &variables)?;
             // A pasted token stands in for the sign-in the cards ask for.
@@ -989,6 +991,7 @@ mod tests {
 
     fn scratch_app() -> ScratchApp {
         let home = std::env::temp_dir().join(format!("beans-plugins-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
     }

@@ -53,6 +53,7 @@ pub struct TurnAccess {
     pub group_capture: bool, pub capture_cap: u32,
     calls: Arc<Mutex<(u32, u32)>>,
     pub(crate) turn_id: Option<String>,
+    pub(crate) incarnation: u64,
 }
 impl TurnAccess {
     pub fn charge(&self, retain: bool) -> Result<(), MemoryError> {
@@ -63,6 +64,7 @@ impl TurnAccess {
 }
 /// Snapshot before any turn work/await. Enabling capture later cannot manufacture admission.
 pub fn admit(app: &App, bot_id: &str, group: bool, cancel: &CancellationToken) -> Result<TurnAccess, MemoryError> {
+    let guard = app.plugin_admission(None).map_err(|_| MemoryError::new("identity_changed"))?;
     check_bot(app, bot_id, cancel)?;
     let machine = app.machine_file().ok_or_else(|| MemoryError::new("identity_required"))?;
     let config = app.memory_config.lock();
@@ -72,7 +74,7 @@ pub fn admit(app: &App, bot_id: &str, group: bool, cancel: &CancellationToken) -
     Ok(TurnAccess { bot_id: bot_id.into(), scope: MemoryScope { namespace: namespace(&machine.identity_pubkey, bot_id)?,
         connection_id: id.clone(), connection_revision: connection.revision.clone(), deletion_epoch: preferences.deletion_epoch },
         consent_revision: (preferences.capture_conversation && (!group || preferences.capture_group_text)).then(|| preferences.consent_revision.clone()),
-        group_capture: group, capture_cap: preferences.max_capture_deliveries_per_turn, calls: Arc::new(Mutex::new((0, 0))), turn_id: None })
+        group_capture: group, capture_cap: preferences.max_capture_deliveries_per_turn, calls: Arc::new(Mutex::new((0, 0))), turn_id: None, incarnation: guard.get().0 })
 }
 fn check_bot(app: &App, bot_id: &str, cancel: &CancellationToken) -> Result<(), MemoryError> {
     if cancel.is_cancelled() { return Err(MemoryError::new("cancelled")); }
@@ -82,6 +84,7 @@ fn check_bot(app: &App, bot_id: &str, cancel: &CancellationToken) -> Result<(), 
     Ok(())
 }
 pub fn recheck(app: &App, access: &TurnAccess, capture: bool, cancel: &CancellationToken) -> Result<(), MemoryError> {
+    let _guard = app.plugin_admission(Some(access.incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
     check_bot(app, &access.bot_id, cancel)?;
     let account = app.machine_file().ok_or_else(|| MemoryError::new("identity_required"))?;
     if namespace(&account.identity_pubkey, &access.bot_id)? != access.scope.namespace { return Err(MemoryError::new("identity_changed")); }
@@ -159,6 +162,8 @@ pub async fn execute(app: &Arc<App>, access: &TurnAccess, request: BackendReques
 async fn execute_charged(app: &Arc<App>, access: &TurnAccess, request: BackendRequest,
     cancel: CancellationToken, capture: bool, started: Option<&AtomicBool>) -> Result<BackendResponse, MemoryError> {
     validate_request(&request)?;
+    let (backend, timeout_ms, max_bytes, child, id) = {
+    let _guard = app.plugin_admission(Some(access.incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
     recheck(app, access, capture, &cancel)?;
     let backend = app.memory_runtime.backend(&access.scope)?;
     if !backend.capabilities().supports(&request) { return Err(MemoryError::new("unsupported_capability")); }
@@ -172,6 +177,8 @@ async fn execute_charged(app: &Arc<App>, access: &TurnAccess, request: BackendRe
     let id = uuid::Uuid::new_v4().to_string();
     app.memory_runtime.active.lock().insert(id.clone(), (access.bot_id.clone(), access.scope.clone(),
         capture.then(|| access.consent_revision.clone()).flatten(), child.clone()));
+    (backend, timeout_ms, max_bytes, child, id)
+    };
     let _active = Active { runtime: &app.memory_runtime, id };
     let future = async {
         if let Some(started) = started { started.store(true,Ordering::Release); }
@@ -190,6 +197,7 @@ async fn execute_charged(app: &Arc<App>, access: &TurnAccess, request: BackendRe
         }
     };
     let response = response?;
+    let _guard = app.plugin_admission(Some(access.incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
     recheck(app, access, capture, &cancel)?;
     if serde_json::to_vec(&response).map_err(|_| MemoryError::new("invalid_response"))?.len() > max_bytes {
         return Err(MemoryError::new("response_too_large"));
@@ -204,13 +212,17 @@ pub async fn automatic_recall(app: &Arc<App>, access: &TurnAccess, query: &str, 
     let query = query.chars().take(4096).collect();
     match execute(app, access, BackendRequest::Recall { query, budget: preferences.recall_budget.clone() }, cancel, false).await {
         Ok(response) => evidence_notes(&response.evidence, &preferences.recall_budget),
-        Err(_) => { app.memory_changed(Some(&access.bot_id), "degraded"); None },
+        Err(_) => {
+            if let Ok(_guard) = app.plugin_admission(Some(access.incarnation)) { app.memory_changed(Some(&access.bot_id), "degraded"); }
+            None
+        },
     }
 }
 
 pub fn enqueue(app: &App, access: &TurnAccess, text: &str, sources: Vec<Source>, capture: bool,
     request_id: Option<&str>, cancel: &CancellationToken) -> Result<Delivery, MemoryError> {
     let _edit = app.roster_edit.lock().unwrap();
+    let _guard = app.plugin_admission(Some(access.incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
     recheck(app, access, capture, cancel)?;
     let config = app.memory_config.lock();
     // Keep config lock through enqueue: consent/disconnect and frozen intent are serialized.
@@ -232,10 +244,13 @@ pub fn enqueue(app: &App, access: &TurnAccess, text: &str, sources: Vec<Source>,
 }
 fn access_for_delivery(access: &TurnAccess, d: &Delivery) -> TurnAccess {
     TurnAccess { bot_id: d.bot_id.clone(), scope: d.scope.clone(), consent_revision: d.consent_revision.clone(),
-        group_capture: access.group_capture, capture_cap: access.capture_cap, calls: access.calls.clone(), turn_id:access.turn_id.clone() }
+        group_capture: access.group_capture, capture_cap: access.capture_cap, calls: access.calls.clone(), turn_id:access.turn_id.clone(), incarnation: access.incarnation }
 }
 pub async fn deliver(app: &Arc<App>, access: &TurnAccess, id: &str, retry: bool, cancel: CancellationToken) -> Result<Value, MemoryError> {
     let lock = app.memory_runtime.lock(&access.scope.namespace); let _serial = lock.lock().await;
+    let (before, scoped, capture, submitted) = {
+    let _guard = app.plugin_admission(Some(access.incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
+    recheck(app, access, false, &cancel)?;
     let before = app.store.memory_delivery(&access.bot_id, id)?;
     let scoped = access_for_delivery(access, &before);
     let capture = before.consent_revision.is_some();
@@ -255,8 +270,11 @@ pub async fn deliver(app: &Arc<App>, access: &TurnAccess, id: &str, retry: bool,
     recheck(app, &scoped, capture, &cancel)?;
     let mut submitted = before.clone(); submitted.state = OperationState::Submitted; submitted.error_code = None;
     if !app.store.transition_memory(&before, &submitted)? { return Err(MemoryError::new("operation_busy")); }
+    (before, scoped, capture, submitted)
+    };
     let started=AtomicBool::new(false);
     let response = execute_charged(app, &scoped, BackendRequest::Retain { document: before.document.clone() }, cancel, capture, Some(&started)).await;
+    let _guard = app.plugin_admission(Some(access.incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
     let mut after = submitted.clone();
     match response {
         Ok(response) => {
@@ -288,6 +306,8 @@ pub async fn poll(app: &Arc<App>, access: &TurnAccess, id: &str, cancel_operatio
     let before = app.store.memory_delivery(&access.bot_id, id)?;
     if before.scope != access.scope { return Err(MemoryError::new("operation_scope_changed")); }
     if matches!(before.state, OperationState::Queued | OperationState::Failed) && cancel_operation {
+        let _guard = app.plugin_admission(Some(access.incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
+        recheck(app,access,false,&cancel)?;
         let mut after = before.clone(); after.state = OperationState::Failed; after.error_code = Some("cancelled".into());
         app.store.transition_memory(&before, &after)?; return Ok(delivery_summary(&after));
     }
@@ -295,6 +315,7 @@ pub async fn poll(app: &Arc<App>, access: &TurnAccess, id: &str, cancel_operatio
     // Fenced old work may only be inspected/cancelled using its old bound scope, not retained again.
     let request = if cancel_operation { BackendRequest::CancelOperation { operation_id } } else { BackendRequest::OperationStatus { operation_id } };
     let response = execute(app, access, request, cancel, false).await?;
+    let _guard = app.plugin_admission(Some(access.incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
     let mut after = before.clone();
     if let Some(operation) = response.operation {
         after.state = operation.state;
@@ -313,7 +334,7 @@ pub async fn delete(app: &Arc<App>, bot_id: &str, document_id: Option<String>, e
     if old.scope.connection_revision != expected || old.scope.deletion_epoch != epoch { return Err(MemoryError::new("stale_confirmation")); }
     if let Some(fence) = app.store.memory_fence(bot_id)?.filter(|f|f.pending) {
         if fence.scope != old.scope || fence.document_id != document_id { return Err(MemoryError::new("deletion_pending")); }
-        return finish_delete(app,&fence,cancel).await;
+        return finish_delete(app,&fence,old.incarnation,cancel).await;
     }
     let capabilities = app.memory_runtime.backend(&old.scope)?.capabilities();
     if (document_id.is_some() && !capabilities.delete_document) || (document_id.is_none() && !capabilities.clear) {
@@ -321,6 +342,7 @@ pub async fn delete(app: &Arc<App>, bot_id: &str, document_id: Option<String>, e
     }
     let fence = {
         let _edit = app.roster_edit.lock().unwrap();
+        let _guard = app.plugin_admission(Some(old.incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
         recheck(app, &old, false, &cancel)?;
         let mut current = app.memory_config.lock(); let mut next = current.clone();
         let mut b = next.bots.get(bot_id).and_then(|r| r.value.clone()).ok_or_else(|| MemoryError::new("memory_not_configured"))?;
@@ -330,10 +352,13 @@ pub async fn delete(app: &Arc<App>, bot_id: &str, document_id: Option<String>, e
         let fence = DeletionFence { bot_id: bot_id.into(), scope, document_id, request_id: uuid::Uuid::new_v4().to_string(), pending: true, operation_id: None };
         app.persist_memory(&next, true, Some(&fence))?; *current = next; fence
     };
-    finish_delete(app, &fence, cancel).await
+    finish_delete(app, &fence, old.incarnation, cancel).await
 }
-pub async fn finish_delete(app: &Arc<App>, fence: &DeletionFence, cancel: CancellationToken) -> Result<Value, MemoryError> {
-    let access = admit(app, &fence.bot_id, false, &cancel)?;
+async fn finish_delete(app: &Arc<App>, fence: &DeletionFence, incarnation: u64, cancel: CancellationToken) -> Result<Value, MemoryError> {
+    let access = {
+        let _guard = app.plugin_admission(Some(incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
+        admit(app, &fence.bot_id, false, &cancel)?
+    };
     if access.scope != fence.scope { return Err(MemoryError::new("authority_changed")); }
     let lock = app.memory_runtime.lock(&fence.scope.namespace); let _serial = lock.lock().await;
     // Unknown/lost or async submissions cannot be proved quiescent by a local mutex.
@@ -345,6 +370,7 @@ pub async fn finish_delete(app: &Arc<App>, fence: &DeletionFence, cancel: Cancel
     }
     if let Some(operation_id) = &fence.operation_id {
         let response = execute(app,&access,BackendRequest::OperationStatus{operation_id:operation_id.clone()},cancel,false).await?;
+        let _guard = app.plugin_admission(Some(access.incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
         let completed = response.operation.as_ref().is_some_and(|o|o.state==OperationState::Completed);
         let mut after=fence.clone();after.pending=!completed;
         app.store.update_memory_fence(fence,&after)?;
@@ -355,6 +381,7 @@ pub async fn finish_delete(app: &Arc<App>, fence: &DeletionFence, cancel: Cancel
         None => BackendRequest::Clear { request_id: fence.request_id.clone() },
     };
     let response = execute(app, &access, request, cancel, false).await?;
+    let _guard = app.plugin_admission(Some(access.incarnation)).map_err(|_| MemoryError::new("identity_changed"))?;
     let mut after = fence.clone();
     after.pending = response.operation.as_ref().is_some_and(|o| o.state != OperationState::Completed);
     after.operation_id = response.operation.map(|o| o.id);

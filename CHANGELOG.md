@@ -6,6 +6,22 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Consumed requests from revoked Devices are removed from the relay without publishing a response or applying their effects.
+
+- Paused accounts continue to save outgoing chat messages and attachments without admitting or starting bot work.
+
+- Signed requests, delayed provider discovery, task completions and relay authentication retain their original account admission across waits, preventing publication into a replacement account after Forget. Plugin/MCP policy cleanup uses the same roster-before-lifecycle lock order as incoming sync.
+
+- Non-executing Devices durably reject misrouted task envelopes without stalling sync or granting execution authority; identity-scoped denial survives later Runner startup.
+
+- Fresh Runner identity creation persists its task epoch before the first job, so restarting does not misclassify the new account as a legacy store.
+
+- Update-expiry timers no longer retain a stopped Runner or delay reopening its execution owner.
+
+- Cancelled or superseded queued tasks leave terminal history immediately, preserving replay fences and allowing explicit review without restarting the Runner.
+
+- Durable task startup retains storage admission through execution-owner recovery and rejects unknown future task schemas without downgrading them.
+
 - Fresh Beans accounts use `beans-v2`, isolated v2 homes and ports 4874/4875, mandatory protocol-5/format capability, versioned backup phrases and pairing links; incompatible old storage and phrases are rejected without migration or reset.
 - New releases use Beans-only asset/package names and retain the existing Ed25519 anchor and immutable historical manifests. Update eligibility requires fresh-format relay health and supported protocol floors before Runner replacement.
 - Production Grok OAuth is disabled before callback/network access pending a verified Beans contract; existing provider, avatar and memory mechanisms remain unchanged.

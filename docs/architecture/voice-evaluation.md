@@ -106,4 +106,4 @@ Release bounds are not invented from source inspection. Agree numerical first-au
 
 ## Integration hold
 
-The serialized Subjects index belongs to Main. This branch supplies only this new document and the exact index row in its delivery receipt. `bun run check:docs` must be rerun after Main adds that row. Independent review, remaining platform/dependency license pins and live evidence are explicit blockers to declaring the evaluation gate complete; no source code or provider configuration changes accompany this document.
+This branch includes the voice evaluation and its Subjects index row. `bun run check:docs` validates their size and links; rerun it after composition with a newer main. Independent review, remaining platform/dependency license pins and live evidence are explicit blockers to declaring the evaluation gate complete; no source code or provider configuration changes accompany this document.

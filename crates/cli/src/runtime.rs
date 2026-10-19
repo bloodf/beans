@@ -339,6 +339,11 @@ fn finish_job(app: &App, job_id: &str) {
     app.local_turns_changed();
 }
 
+fn finish_job_for_incarnation(app: &App, job_id: &str, incarnation: u64) {
+    let Ok(_guard) = app.plugin_admission(Some(incarnation)) else { return };
+    finish_job(app, job_id);
+}
+
 fn abandon_queued_task(app: &App, lease: &crate::local_store::TaskLease) {
     if let Err(error) = app.abandon_queued_task(lease) {
         tracing::error!(%error, "Queued task cleanup failed; durable history remains unresolved");
@@ -396,7 +401,7 @@ async fn run_room(
     let _guard = lock.lock().await;
     if has_newer_user_message(&app, &chat_id, &trigger) {
         abandon_room_tasks(&app, &tasks);
-        finish_job(&app, &room_id);
+        finish_job_for_incarnation(&app, &room_id, incarnation);
         return;
     }
 
@@ -454,7 +459,7 @@ async fn run_room(
     }
 
     abandon_room_tasks(&app, &tasks);
-    finish_job(&app, &room_id);
+    finish_job_for_incarnation(&app, &room_id, incarnation);
 }
 
 /// Messages in the chat that `bot_id` did not write itself.
@@ -473,7 +478,7 @@ async fn run_member_turn(app: &Arc<App>, job: Job, room_cancel: &CancellationTok
         };
         return run_admitted_job_here(app, job, room_cancel.child_token(), lease).await;
     }
-    remote_turn(app, job, bot.runner_id, room_cancel.child_token()).await
+    remote_turn(app, job, bot.runner_id, room_cancel.child_token(), incarnation).await
 }
 
 /// Seals a job to the bot's Runner and waits for its `job_result`. The job counts as running
@@ -483,7 +488,10 @@ async fn remote_turn(
     job: Job,
     runner_id: String,
     cancel: CancellationToken,
+    incarnation: u64,
 ) -> TurnOutcome {
+    {
+    let Ok(_guard) = app.plugin_admission(Some(incarnation)) else { return TurnOutcome::Skipped };
     begin_job(
         app,
         &job.id,
@@ -493,7 +501,8 @@ async fn remote_turn(
         Some(runner_id),
         cancel.clone(),
     );
-    remote_turn_started(app, job, cancel).await
+    }
+    remote_turn_started(app, job, cancel, incarnation).await
 }
 
 /// A remote turn whose running record already exists. `start_turn` registers synchronously so
@@ -502,8 +511,12 @@ async fn remote_turn_started(
     app: &Arc<App>,
     job: Job,
     cancel: CancellationToken,
+    incarnation: u64,
 ) -> TurnOutcome {
-    let result = expect_result(app, &job.id);
+    let result = {
+        let Ok(_guard) = app.plugin_admission(Some(incarnation)) else { return TurnOutcome::Skipped };
+        expect_result(app, &job.id)
+    };
     let job_id = job.id.clone();
     let outcome = if cancel.is_cancelled() {
         TurnOutcome::Skipped
@@ -513,6 +526,7 @@ async fn remote_turn_started(
             Dispatch::Ran | Dispatch::Deferred => TurnOutcome::Skipped,
         }
     };
+    let Ok(_guard) = app.plugin_admission(Some(incarnation)) else { return TurnOutcome::Skipped };
     app.pending_results.lock().unwrap().remove(&job_id);
     finish_job(app, &job_id);
     outcome
@@ -545,6 +559,8 @@ async fn wait_for_result(
 /// since the first pull may carry a result that landed meanwhile. A group exchange this Device
 /// was running does not resume; only the member turn in flight shows.
 pub fn resume_sent_jobs(app: &Arc<App>) {
+    let Ok(guard) = app.plugin_admission(None) else { return };
+    let incarnation = guard.get().0;
     let jobs = match app.store.sent_jobs() {
         Ok(jobs) => jobs,
         Err(error) => {
@@ -577,6 +593,7 @@ pub fn resume_sent_jobs(app: &Arc<App>) {
         let app = app.clone();
         tokio::spawn(async move {
             wait_for_result(result, std::time::Duration::from_secs_f64(left), &cancel).await;
+            let Ok(_guard) = app.plugin_admission(Some(incarnation)) else { return };
             app.pending_results.lock().unwrap().remove(&job.id);
             finish_job(&app, &job.id);
         });
@@ -602,6 +619,8 @@ pub fn start_turn(app: &Arc<App>, job: Job, admission: Admission) {
     if app.this_device_id().as_deref() == Some(bot.runner_id.as_str()) {
         spawn_local_job(app.clone(), job, None, admission);
     } else {
+        let Ok(guard) = app.plugin_admission(None) else { return };
+        let incarnation = guard.get().0;
         let cancel = CancellationToken::new();
         begin_job(
             app,
@@ -615,7 +634,7 @@ pub fn start_turn(app: &Arc<App>, job: Job, admission: Admission) {
         let app = app.clone();
         tokio::spawn(async move {
             let _admission = admission;
-            remote_turn_started(&app, job, cancel).await;
+            remote_turn_started(&app, job, cancel, incarnation).await;
         });
     }
 }
@@ -730,6 +749,8 @@ pub(crate) fn spawn_admitted_local_job(app: Arc<App>, job: Job, remote_blob_id: 
 
 /// Runs a member job inside an active room. The room already holds the chat lock.
 async fn run_admitted_job_here(app: &Arc<App>, job: Job, cancel: CancellationToken, lease: crate::local_store::TaskLease) -> TurnOutcome {
+    {
+    let Ok(_guard) = app.plugin_admission(Some(lease.incarnation)) else { return TurnOutcome::Skipped };
     begin_job(
         app,
         &job.id,
@@ -739,6 +760,7 @@ async fn run_admitted_job_here(app: &Arc<App>, job: Job, cancel: CancellationTok
         None,
         cancel.clone(),
     );
+    }
     run_job_started(app, job, cancel, lease).await
 }
 
@@ -746,8 +768,8 @@ async fn run_admitted_job_here(app: &Arc<App>, job: Job, cancel: CancellationTok
 async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken, lease: crate::local_store::TaskLease) -> TurnOutcome {
     match app.start_local_task(&lease) {
         Ok(true) => {},
-        Ok(false) => { abandon_queued_task(app, &lease); finish_job(app, &job.id); return TurnOutcome::Skipped; },
-        Err(error) => { tracing::error!(%error, "Task start refused"); abandon_queued_task(app, &lease); finish_job(app, &job.id); return TurnOutcome::Skipped; },
+        Ok(false) => { abandon_queued_task(app, &lease); finish_job_for_incarnation(app, &job.id, lease.incarnation); return TurnOutcome::Skipped; },
+        Err(error) => { tracing::error!(%error, "Task start refused"); abandon_queued_task(app, &lease); finish_job_for_incarnation(app, &job.id, lease.incarnation); return TurnOutcome::Skipped; },
     }
     #[cfg(feature = "runner")]
     let outcome = if cancel.is_cancelled()
@@ -773,7 +795,7 @@ async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken, le
         Ok(false) => TurnOutcome::Skipped,
         Err(error) => { tracing::error!(%error, "Task outcome persistence failed"); TurnOutcome::Skipped },
     };
-    finish_job(app, &job.id);
+    finish_job_for_incarnation(app, &job.id, lease.incarnation);
     outcome
 }
 
@@ -1276,6 +1298,25 @@ mod tests {
         let heard: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok()).collect();
         assert!(!heard.iter().any(|event| matches!(event, Event::RosterChanged { .. })));
         assert!(heard.iter().any(|event| matches!(event, Event::JobStarted { job_id, .. } if job_id == "mac-job")));
+    }
+
+    #[tokio::test]
+    async fn stale_job_cleanup_preserves_replacement_with_same_id() {
+        let scratch=scratch_app();let app=&scratch.0;
+        crate::identity::create(app,Some("Old Runner".into())).unwrap();
+        let job=user_turn_job(app,"chat","bot","trigger");
+        let lease=app.task_lease(&job).unwrap();
+        app.forget_identity().unwrap();
+        crate::identity::create(app,Some("Replacement Runner".into())).unwrap();
+        let replacement=app.task_lease(&job).unwrap();
+        begin_job(app,&job.id,&job.chat_id,&job.bot_id,None,None,CancellationToken::new());
+        let result=run_job_started(app,job.clone(),CancellationToken::new(),lease.clone()).await;
+        assert_eq!(result,TurnOutcome::Skipped);
+        assert!(app.running_jobs.lock().unwrap().contains_key(&job.id));
+        finish_job_for_incarnation(app,&job.id,lease.incarnation);
+        assert!(app.running_jobs.lock().unwrap().contains_key(&job.id));
+        finish_job_for_incarnation(app,&job.id,replacement.incarnation);
+        assert!(!app.running_jobs.lock().unwrap().contains_key(&job.id));
     }
 
     #[tokio::test]

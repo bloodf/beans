@@ -38,11 +38,13 @@ async fn prepare_cli() {
     // cold measurement stays visible and precedes, rather than extends, readiness deadlines.
     eprintln!("CLI executable preflight (outside readiness deadline): {elapsed:?}");
 }
-struct Home(std::path::PathBuf);
+struct Home(std::path::PathBuf, tempfile::TempDir);
 
 impl Home {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("beans-ready-{}", uuid::Uuid::new_v4())))
+        // Keep the home absent for creation/help assertions, beneath an owned parent.
+        let parent = tempfile::tempdir().unwrap();
+        Self(parent.path().join("home"), parent)
     }
 
     fn serve(&self, port: u16) -> Command {

@@ -573,6 +573,22 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             routines::run_now(app, &string(&params, "id")?)?;
             Ok(Value::Null)
         }
+        // Saved workflows live in the roster beside routines. A definition grants nothing and
+        // nothing here runs one.
+        "workflows.create" => {
+            let record = crate::workflow::create(app, &string(&params, "bot_id")?, &string(&params, "name")?, params["definition"].clone())?;
+            Ok(json!({ "workflow": crate::workflow::out(app, &record) }))
+        }
+        "workflows.list" => {
+            let bot_id = opt_string(&params, "bot_id");
+            let all = app.state.lock().unwrap().workflows.clone();
+            let listed: Vec<Value> = all.iter().filter(|w| bot_id.as_deref().is_none_or(|id| w.bot_id == id)).map(|w| crate::workflow::out(app, w)).collect();
+            Ok(json!({ "workflows": listed }))
+        }
+        "workflows.delete" => {
+            app.delete_workflow(&string(&params, "id")?).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
         "routines.describe" => routines::describe(&string(&params, "schedule")?),
 
         // The marketplace: plugins, each with the Runners that have it, and bots to add from a

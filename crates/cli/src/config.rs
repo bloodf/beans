@@ -647,10 +647,49 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
-    set_private(&tmp)?;
-    std::fs::rename(&tmp, path)?;
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    // The temporary file is private from the first byte, never reused, and never a symlink target.
+    // ponytail: a stale temporary from a killed process refuses this write until it is removed;
+    // sweep old ones by age if that ever surfaces.
+    let mut file = options.open(&tmp)?;
+    #[cfg(test)]
+    run_after_private_tmp_created(&tmp);
+    let written = file.write_all(bytes);
+    // Close the handle before the rename: Windows refuses to rename or remove an open file.
+    drop(file);
+    if let Err(error) = written.and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
+    }
     Ok(())
+}
+
+/// Observes the private temporary between its creation and its first byte.
+#[cfg(test)]
+thread_local! {
+    static AFTER_PRIVATE_TMP_CREATED: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn replace_after_private_tmp_created(replace: impl FnOnce(&Path) + 'static) {
+    AFTER_PRIVATE_TMP_CREATED.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(replace));
+    });
+}
+
+#[cfg(test)]
+fn run_after_private_tmp_created(tmp: &Path) {
+    AFTER_PRIVATE_TMP_CREATED.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() { hook(tmp); }
+    });
 }
 
 #[cfg(unix)]
@@ -681,6 +720,28 @@ pub fn now_unix() -> i64 {
 #[cfg(test)]
 mod format_tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn a_private_write_is_private_before_its_first_byte() {
+        use std::os::unix::fs::MetadataExt;
+        thread_local! {
+            static MODE_AT_CREATION: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+        }
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("credentials.json");
+        replace_after_private_tmp_created(|temporary| {
+            // The temporary is already created and holds no secret byte yet.
+            assert_eq!(std::fs::symlink_metadata(temporary).unwrap().len(), 0);
+            let mode = std::fs::symlink_metadata(temporary).unwrap().mode() & 0o777;
+            MODE_AT_CREATION.with(|cell| cell.set(Some(mode)));
+        });
+        write_private(&path, br#"{"access_token":"not-a-secret"}"#).unwrap();
+        assert_eq!(MODE_AT_CREATION.with(|cell| cell.get()), Some(0o600));
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"access_token":"not-a-secret"}"#);
+        assert!(!path.is_symlink());
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
+    }
 
     #[test]
     #[cfg(unix)]

@@ -1149,6 +1149,7 @@ fn apply_policy(app: &Arc<App>, policy: PolicyBlob) {
                     removed_bots.push(id.clone());
                     state.bots.retain(|bot| bot.id != id);
                     state.routines.retain(|routine| routine.bot_id != id);
+                    state.workflows.retain(|workflow| workflow.bot_id != id);
                     for chat in &mut state.chats {
                         if chat.meta.bot_ids.iter().any(|member| member == &id) {
                             if !chat.meta.is_group() { removed.push(chat.meta.id.clone()); continue; }
@@ -1309,6 +1310,7 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
     }
     merge_entities!(routines, bot_id, name, prompt, schedule, is_enabled, enabled_at,
         last_run_at, last_outcome, paused_reason, check);
+    merge_entities!(workflows, bot_id, name, definition);
     if queued.auto_review.is_enabled != base.auto_review.is_enabled {
         remote.auto_review.is_enabled = queued.auto_review.is_enabled;
     }
@@ -1323,6 +1325,12 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
             remote.auto_review.rules.push(local.clone());
         }
     }
+    // The workflows are bounded last, against the bot set this merged roster actually has.
+    // Admitting before the merges could size the roster against bots a tombstone or a queued
+    // deletion was about to take out, leaving records whose bot is gone and letting a
+    // tombstoned bot's workflow ride back out on the next pull.
+    let bot_ids = remote.bots.iter().chain(&queued.bots).map(|bot| bot.id.clone()).collect();
+    remote.workflows = crate::workflow::admit(remote.workflows, &base.workflows, &bot_ids);
     remote
 }
 
@@ -1341,6 +1349,7 @@ fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob) -> Ros
     accept_creations!(bots);
     accept_creations!(chats);
     accept_creations!(routines);
+    accept_creations!(workflows);
     base
 }
 
@@ -1379,6 +1388,11 @@ fn rebase_queued_roster(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
     queued.policy_capabilities = state.policy_capabilities.clone();
     queued.deleted_bot_versions = state.deleted_bot_versions.clone();
     queued.bots.retain(|bot| !state.deleted_bot_versions.contains_key(&bot.id));
+    // The same tombstone takes the bot's workflows with it. Merging bounds them against the
+    // bot set the merge produced, and this is the policy filter that runs after it, so a
+    // deleted bot's workflow would otherwise stay in what gets encrypted and uploaded.
+    let live_bots = queued.bots.iter().map(|bot| bot.id.clone()).collect::<std::collections::HashSet<_>>();
+    queued.workflows.retain(|workflow| live_bots.contains(&workflow.bot_id));
     for bot in &mut queued.bots {
         if let Some(capabilities) = state.policy_capabilities.get(&bot.id) { bot.capabilities = capabilities.clone(); }
     }
@@ -1474,10 +1488,14 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
             if chat.owner_bot_id.as_ref().is_some_and(|id| !chat.bot_ids.contains(id)) { chat.owner_bot_id = chat.bot_ids.first().cloned(); }
         }
         roster.routines.retain(|routine| !state.deleted_bot_versions.contains_key(&routine.bot_id));
+        roster.workflows.retain(|workflow| !state.deleted_bot_versions.contains_key(&workflow.bot_id));
         let removed_bots: Vec<String> = before.into_iter().filter(|id| !roster.bots.iter().any(|bot| bot.id == *id)).collect();
         let kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
         state.bots = roster.bots;
         state.routines = roster.routines;
+        let bot_ids = state.bots.iter().map(|bot| bot.id.clone()).collect();
+        let admitted = crate::workflow::admit(std::mem::take(&mut roster.workflows), &state.workflows, &bot_ids);
+        state.workflows = admitted;
         state.auto_review = roster.auto_review;
         let incoming_ids: Vec<String> = roster.chats.iter().map(|c| c.id.clone()).collect();
         let removed: Vec<String> = state.chats.iter().filter(|c| !incoming_ids.contains(&c.meta.id)
@@ -1608,6 +1626,7 @@ mod tests {
 
     fn scratch_app() -> ScratchApp {
         let home = std::env::temp_dir().join(format!("beans-sync-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
     }
@@ -2078,6 +2097,270 @@ mod tests {
         let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
         assert_eq!(serde_json::to_value(restarted.bot("bot").unwrap()).unwrap()["look"], latest);
         assert_eq!(restarted.store.queued_roster().unwrap().unwrap().ciphertext, encrypted.ciphertext);
+    }
+
+    #[test]
+    fn workflows_two_devices_merge_per_bot_and_keep_a_foreign_schema_byte_for_byte() {
+        use crate::model::WorkflowRecord;
+        use serde_json::json;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let workflow = |id: &str, bot: &str, definition: serde_json::Value| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition, created_at: 1.0,
+        };
+        let this = app.this_device_id().unwrap();
+        let manifest = crate::plugins::Manifest::parse(&json!({ "id": "linear", "name": "Linear", "servers": { "api": { "type": "stdio", "command": "false" } } })).unwrap();
+        crate::plugins::install(app, manifest, "inline").unwrap();
+        let catalog = app.config.plugins_dir().join("linear").join("catalog.json");
+        crate::config::write_json_private(&catalog, &json!({ "servers": { "api": { "tools": [{ "name": "list_issues", "inputSchema": { "type": "object" } }] } } })).unwrap();
+        let valid = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "Summarize", "tools": ["linear__list_issues"] }] });
+        let foreign = json!({ "version": 2, "revision": "r9", "steps": [{ "prompt": "x", "future": [1, { "a": null }] }], "extra": true });
+        let huge = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "y".repeat(crate::workflow::MAX_DEFINITION_BYTES + 1) }] });
+        let local_bot = |id: &str| Bot { runner_id: this.clone(), ..bot(id) };
+        let mut base = RosterBlob { bots: vec![local_bot("b1"), local_bot("b2")], ..Default::default() };
+        base.workflows = vec![workflow("old", "b2", valid.clone())];
+        app.store.observe_roster(1, &base).unwrap();
+        apply_roster(app, base.clone());
+
+        // This Device saves one for b1 and drops "old" while offline; the other Device
+        // saved a newer-schema one for b1 and renamed "old".
+        let mut local = base.clone();
+        local.workflows = vec![workflow("mine", "b1", valid.clone())];
+        let mut remote = base.clone();
+        remote.workflows = vec![workflow("old", "b2", valid.clone()), workflow("theirs", "b1", foreign.clone()), workflow("huge", "b1", huge)];
+        remote.workflows[0].name = "renamed".into();
+
+        let merged = merge_rosters(remote, &base, &local);
+        let ids: Vec<&str> = merged.workflows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["theirs", "mine"], "the local drop of \"old\" wins; both creations survive; the oversize one is not taken");
+        assert_eq!(merged.workflows[0].definition, foreign, "a foreign schema is carried byte for byte");
+
+        let granted = app.state.lock().unwrap().bots.iter().map(|b| b.capabilities.clone()).collect::<Vec<_>>();
+        apply_roster(app, merged);
+        assert_eq!(app.workflows_of("b1").len(), 2);
+        assert!(app.workflows_of("b2").is_empty());
+        let listed = |app: &Arc<App>| app.workflows_of("b1").iter().map(|w| (w.id.clone(), crate::workflow::out(app, w))).collect::<Vec<_>>();
+        let shown = listed(app);
+        let state = |id: &str| shown.iter().find(|(wid, _)| wid == id).unwrap().1["state"].clone();
+        assert_eq!(state("theirs"), "unavailable", "the foreign schema is invalid here, kept as is");
+        assert_eq!(state("mine"), "valid", "its tool is the catalog's own identifier and the bot may use it");
+        assert_eq!(app.state.lock().unwrap().bots.iter().map(|b| b.capabilities.clone()).collect::<Vec<_>>(), granted, "grants do not change");
+        app.state.lock().unwrap().bots.iter_mut().find(|b| b.id == "b1").unwrap().capabilities.plugins = Some(Vec::new());
+        let revoked = listed(app);
+        assert_eq!(revoked.iter().find(|(id, _)| id == "mine").unwrap().1["state"], "unavailable", "a revoked plugin makes it unavailable, not gone");
+        assert_eq!(app.workflows_of("b1").len(), 2);
+
+        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(restarted.workflows_of("b1").iter().find(|w| w.id == "theirs").unwrap().definition, foreign);
+        assert_eq!(restarted.state.lock().unwrap().bots.len(), 2);
+    }
+
+    #[test]
+    fn workflows_inbound_over_bounds_keep_the_last_accepted_and_lose_nothing_else() {
+        use crate::model::WorkflowRecord;
+        use serde_json::json;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let workflow = |id: &str, definition: serde_json::Value| WorkflowRecord {
+            id: id.into(), bot_id: "b1".into(), name: id.into(), definition, created_at: 1.0,
+        };
+        let small = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "Summarize" }] });
+        let huge = json!({ "version": 9, "blob": "x".repeat(crate::workflow::MAX_DEFINITION_BYTES + 1) });
+        let mut base = RosterBlob { bots: vec![bot("b1")], ..Default::default() };
+        base.workflows = vec![workflow("kept", small.clone())];
+        app.store.observe_roster(1, &base).unwrap();
+        apply_roster(app, base.clone());
+        assert_eq!(app.workflows_of("b1").len(), 1);
+
+        // Another Device sends an oversize replacement for "kept", an oversize new one, a
+        // newer-schema one inside the bounds, and an ordinary rename of the bot.
+        let newer = json!({ "version": 2, "revision": "r2", "steps": [], "future": { "a": [1] } });
+        let mut remote = base.clone();
+        remote.bots[0].name = "Renamed".into();
+        remote.workflows = vec![workflow("kept", huge.clone()), workflow("big-new", huge), workflow("newer", newer.clone())];
+        apply_roster(app, remote);
+
+        let held = app.workflows_of("b1");
+        let ids: Vec<&str> = held.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["kept", "newer"], "the oversize new record is skipped; nothing else is lost");
+        assert_eq!(held[0].definition, small, "the last accepted definition stays");
+        assert_eq!(held[1].definition, newer, "a bounded newer schema is kept as it arrived");
+        assert_eq!(app.bot("b1").unwrap().name, "Renamed", "the rest of the roster applied");
+
+        let shown: Vec<serde_json::Value> = held.iter().map(|w| crate::workflow::out(app, w)).collect();
+        assert_eq!(shown[1]["state"], "unavailable");
+        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(restarted.workflows_of("b1"), held, "what was kept is what reloads");
+    }
+
+    #[test]
+    fn workflows_inbound_bot_ids_duplicates_and_quotas_merge_deterministically() {
+        use crate::model::WorkflowRecord;
+        use serde_json::json;
+        let definition = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] });
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition: definition.clone(), created_at: 1.0,
+        };
+        let held = workflow("held", "b0");
+        let mut base = RosterBlob { bots: (0..14).map(|i| bot(&format!("b{i}"))).collect(), ..Default::default() };
+        base.workflows = vec![held.clone()];
+        let local = base.clone();
+
+        // 14 bots with 20 each is 280: over the total of 256. Plus an oversize bot id, a bot
+        // that is not in the roster, two records sharing one id, and a 21st for bot b1.
+        let mut incoming: Vec<WorkflowRecord> = vec![held.clone()];
+        for i in 0..14 {
+            for n in 0..20 {
+                incoming.push(workflow(&format!("w-{i:02}-{n:02}"), &format!("b{i}")));
+            }
+        }
+        incoming.push(workflow("w-01-extra", "b1"));
+        incoming.push(workflow("long-bot", &"b".repeat(65)));
+        incoming.push(workflow("ghost", "deleted-bot"));
+        incoming.push(workflow("twin", "b2"));
+        incoming.push(WorkflowRecord { name: "other".into(), ..workflow("twin", "b3") });
+        let merge = |incoming: &[WorkflowRecord]| {
+            let mut remote = base.clone();
+            remote.workflows = incoming.to_vec();
+            merge_rosters(remote, &base, &local).workflows
+        };
+        let merged = merge(&incoming);
+        let ids = |records: &[WorkflowRecord]| { let mut ids: Vec<String> = records.iter().map(|w| w.id.clone()).collect(); ids.sort(); ids };
+        assert_eq!(merged.len(), crate::workflow::MAX_TOTAL, "the total is capped, not the roster");
+        assert!(merged.iter().any(|w| w.id == "held"), "a held record keeps its place under the quota");
+        for gone in ["w-01-extra", "long-bot", "ghost", "twin"] {
+            assert!(!merged.iter().any(|w| w.id == gone), "{gone} is not taken");
+        }
+        for i in 0..14 {
+            let count = merged.iter().filter(|w| w.bot_id == format!("b{i}")).count();
+            assert!(count <= crate::workflow::MAX_PER_BOT, "b{i}: {count}");
+        }
+        // The same set in the opposite order gives the same result.
+        let mut reversed = incoming.clone();
+        reversed.reverse();
+        assert_eq!(ids(&merge(&reversed)), ids(&merged), "quota and duplicate handling do not depend on order");
+        // A duplicate id keeps what is held under it, and a held record is never replaced by a
+        // record for a bot the roster no longer has.
+        let mut clash = held.clone();
+        clash.bot_id = "deleted-bot".into();
+        assert_eq!(merge(&[clash.clone(), clash]), vec![held.clone()]);
+        assert!(merge(&[workflow("held", "deleted-bot")]).iter().all(|w| w.bot_id == "b0"));
+    }
+
+    /// The final bound is decided against the bot set the merged roster actually has. A remote
+    /// roster at the total bound plus one queued record must end at the bound, with the record
+    /// this Device holds keeping its place.
+    #[test]
+    fn a_full_remote_roster_and_a_queued_record_end_at_the_bound_without_resurrecting() {
+        use crate::model::WorkflowRecord;
+        let definition = serde_json::json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] });
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition: definition.clone(), created_at: 1.0,
+        };
+        let mut base = RosterBlob { bots: (0..13).map(|i| bot(&format!("b{i:02}"))).collect(), ..Default::default() };
+        base.workflows = vec![workflow("held", "b00")];
+
+        // The remote roster arrives already at the bound, and a queued local record is waiting.
+        let mut remote = base.clone();
+        for i in 0..13 {
+            for n in 0..crate::workflow::MAX_PER_BOT {
+                if remote.workflows.len() < crate::workflow::MAX_TOTAL {
+                    remote.workflows.push(workflow(&format!("r-{i:02}-{n:02}"), &format!("b{i:02}")));
+                }
+            }
+        }
+        assert_eq!(remote.workflows.len(), crate::workflow::MAX_TOTAL, "the remote roster starts at the bound");
+        // The queued roster still holds the base's record: three-way merge drops a base record the
+        // queued side no longer has, so a queued side that omitted it would be read as a delete.
+        let queued = RosterBlob {
+            workflows: vec![workflow("held", "b00"), workflow("queued-new", "b01")], ..base.clone()
+        };
+
+        let merged = merge_rosters(remote, &base, &queued).workflows;
+        assert!(merged.len() <= crate::workflow::MAX_TOTAL, "the merge grew past the bound: {}", merged.len());
+        assert!(merged.iter().any(|w| w.id == "held"), "a held record lost its place under the bound");
+        // Every record that entered at the bound has a bot, and the two records that belong to this
+        // Device's own side of the merge are the ones that can be present. `queued-new` is a new
+        // record like the `r-` ones, and `admit` takes the over-quota slice in id order, so it
+        // sorts ahead of them and takes a slot that a `r-` record gives up instead.
+        for record in &merged {
+            assert!(!record.bot_id.is_empty() && (record.id.starts_with("r-") || record.id == "held" || record.id == "queued-new"),
+                "an unexpected record survived: {}", record.id);
+        }
+        for bot in ["b00", "b01"] {
+            let count = merged.iter().filter(|w| w.bot_id == bot).count();
+            assert!(count <= crate::workflow::MAX_PER_BOT, "{bot} kept {count} records");
+        }
+    }
+
+    /// A bot deleted on this Device takes its workflows out of what the merge would otherwise
+    /// hand on. The roster merge keeps records for a bot the base no longer lists only when the
+    /// bot is still in the roster; the deletion path is the rebase filter, so this checks the
+    /// merge does not hand a deleted bot's record back before that filter runs.
+    #[test]
+    fn a_deleted_bots_workflow_is_absent_from_the_merged_roster() {
+        use crate::model::WorkflowRecord;
+        let definition = serde_json::json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] });
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition: definition.clone(), created_at: 1.0,
+        };
+        let mut base = RosterBlob { bots: vec![bot("b1"), bot("b2")], ..Default::default() };
+        base.workflows = vec![workflow("kept", "b1"), workflow("doomed", "b2")];
+
+        // The bot was deleted on this Device, so the queued roster and the remote roster both
+        // left it out; only the remote roster still carries its workflow.
+        let mut queued = base.clone();
+        queued.bots.retain(|bot| bot.id != "b2");
+        queued.workflows.retain(|w| w.id != "doomed");
+        let mut remote = base.clone();
+        remote.bots.retain(|bot| bot.id != "b2");
+        remote.workflows = vec![workflow("kept", "b1"), workflow("doomed", "b2")];
+
+        let merged = merge_rosters(remote, &base, &queued);
+        assert!(merged.bots.iter().all(|bot| bot.id != "b2"), "the deleted bot came back");
+        assert!(!merged.workflows.iter().any(|w| w.id == "doomed"),
+            "a deleted bot's workflow is still in the merged roster");
+        assert!(merged.workflows.iter().any(|w| w.id == "kept"), "a live bot lost its workflow");
+    }
+
+    /// A bot deleted while its upload sat in the outbox takes its workflows with it. The
+    /// outbox item was written before the deletion, and queueing the next roster puts its
+    /// baseline back, so the rebase runs the merge branch: `merge_rosters` still sees b2 in
+    /// the queued bot set and keeps its record, and the tombstone filter after the merge is
+    /// what drops it before the roster is encrypted and uploaded.
+    #[test]
+    fn a_deleted_bots_workflow_is_dropped_from_an_outbox_written_before_the_delete() {
+        use crate::model::WorkflowRecord;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), created_at: 1.0,
+            definition: serde_json::json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] }),
+        };
+
+        let mut held = roster(bot("b1"));
+        held.bots.push(bot("b2"));
+        held.workflows = vec![workflow("kept", "b1"), workflow("doomed", "b2")];
+        apply_roster(app, held);
+        app.push_roster();
+        let pending = app.store.queued_roster().unwrap().unwrap();
+        let uploaded: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &pending.ciphertext).unwrap();
+        assert!(uploaded.workflows.iter().any(|w| w.id == "doomed"), "the outbox item no longer holds the record to drop");
+
+        app.delete_bot("b2").unwrap();
+        rebase_queued_roster(app, &app.machine_file().unwrap(), pending).unwrap();
+
+        let published = app.store.queued_roster().unwrap().unwrap();
+        let roster: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &published.ciphertext).unwrap();
+        assert!(!roster.workflows.iter().any(|w| w.id == "doomed"), "a deleted bot's workflow survived the rebase");
+        assert!(roster.workflows.iter().any(|w| w.id == "kept"), "a live bot lost its workflow");
     }
 
     fn policy(device: &str, counter: u64, paused: Option<bool>, capabilities: Option<Capabilities>) -> PolicyBlob {

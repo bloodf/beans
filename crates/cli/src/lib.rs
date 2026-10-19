@@ -51,6 +51,7 @@ pub mod local_store;
 #[cfg(feature = "runner")]
 pub mod turns;
 pub mod update_control;
+pub mod workflow;
 #[cfg(feature = "cli")]
 pub mod serve;
 pub(crate) mod serve_owner;

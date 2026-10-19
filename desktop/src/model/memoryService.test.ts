@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { MemoryPreferencesDraft, MemoryServiceAPI, MemoryServiceViewState, connectionRequest, memoryVectorEditBody, readMemoryConnections, readMemoryHealth, readMemoryOperations, secretPatch, supportsMemoryAction, supportsMemoryAdvancedAction, type MemoryPreferences, type MemoryPreferencesView, type MemoryRequest } from "./memoryService";
+import { MemoryPreferencesDraft, MemoryServiceAPI, MemoryServiceViewState, MEMORY_OPERATION_LABELS, MEMORY_STATUS_LABELS, connectionRequest, memoryVectorEditBody, readMemoryConnections, readMemoryHealth, readMemoryOperations, secretPatch, supportsMemoryAction, supportsMemoryAdvancedAction, type MemoryPreferences, type MemoryPreferencesView, type MemoryRequest } from "./memoryService";
 
 const baseline = (): MemoryPreferences => ({
   connection_id: null, auto_recall: false, capture_conversation: false, capture_group_text: false,
@@ -206,4 +206,11 @@ test("masked availability distinguishes blocked Cloud from eligible local Lance 
   expect(() => readMemoryConnections(listing({ ...base, availability: "ready", reason: null }))).toThrow("invalid_memory_reply");
   expect(() => readMemoryConnections(listing(base))).toThrow("invalid_memory_reply");
   expect(readMemoryHealth({ status: "setup_required", capabilities: {}, deletion_pending: false, reason: "lancedb_cloud_transport_unavailable" })).toEqual({ status: "setup_required", capabilities: { advanced: [] }, deletion_pending: false, reason: "lancedb_cloud_transport_unavailable" });
+});
+
+test("status and delivery labels are distinct and only completed reads as stored", () => {
+  const status = Object.values(MEMORY_STATUS_LABELS), states = Object.values(MEMORY_OPERATION_LABELS);
+  expect(new Set(status).size).toBe(3);
+  expect(new Set(states).size).toBe(6);
+  expect(Object.entries(MEMORY_OPERATION_LABELS).filter(([, label]) => label === "Stored").map(([state]) => state)).toEqual(["completed"]);
 });

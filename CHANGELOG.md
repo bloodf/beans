@@ -6,6 +6,8 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Cancelled or superseded queued tasks leave terminal history immediately, preserving replay fences and allowing explicit review without restarting the Runner.
+
 - Durable task startup retains storage admission through execution-owner recovery and rejects unknown future task schemas without downgrading them.
 
 - Fresh Beans accounts use `beans-v2`, isolated v2 homes and ports 4874/4875, mandatory protocol-5/format capability, versioned backup phrases and pairing links; incompatible old storage and phrases are rejected without migration or reset.

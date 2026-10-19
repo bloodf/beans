@@ -362,6 +362,15 @@ impl LocalStore {
         })
     }
 
+    /// The worker has relinquished this exact queued execution; replay remains fenced.
+    pub(crate) fn abandon_queued_task(&self, lease: &TaskLease) -> anyhow::Result<bool> {
+        self.safety(|tx| {
+            check_authority_tx(tx, lease)?;
+            Ok(tx.execute("UPDATE local_tasks SET cancel_requested=1,state=CASE WHEN EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=local_tasks.account_epoch AND r.task_id=local_tasks.task_id) THEN 'needs_review' ELSE 'interrupted' END WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND state='queued'",
+                params![lease.account_epoch, lease.task_id, lease.owner_epoch, lease.execution_id])? == 1)
+        })
+    }
+
     pub(crate) fn finish_task(&self, lease: &TaskLease, interrupted: bool) -> anyhow::Result<bool> {
         self.safety(|tx| {
             check_authority_tx(tx, lease)?;
@@ -2213,6 +2222,57 @@ mod tests {
         let (cancelled,new_job) = task_fixture(store,"job-cancel-first");
         store.cancel_tasks(&cancelled.account_epoch,Some(&new_job.id),None,None).unwrap();
         assert!(!store.queue_task(&cancelled,&new_job).unwrap());
+    }
+
+    #[test]
+    fn abandoned_queued_task_is_resolvable_without_recovery_and_keeps_fence() {
+        let scratch = scratch();
+        let store = &scratch.0;
+        let (lease, mut job) = task_fixture(store, "job-abandoned");
+        job.routine_id = Some("routine-test".into());
+        assert!(store.queue_task(&lease, &job).unwrap());
+        let mut stale = lease.clone();
+        stale.execution_id = "different-execution".into();
+        assert!(!store.abandon_queued_task(&stale).unwrap());
+        assert_eq!(store.task_state(&lease).unwrap(), Some(TaskState::Queued));
+        store.cancel_tasks(&lease.account_epoch, Some(&job.id), None, None).unwrap();
+        assert!(!store.start_task(&lease).unwrap());
+        assert!(store.abandon_queued_task(&lease).unwrap());
+        assert_eq!(store.task_state(&lease).unwrap(), Some(TaskState::Interrupted));
+        assert!(store.routine_needs_review(&lease.account_epoch, "routine-test").unwrap());
+        assert!(store.resolve_task(&lease, 1).unwrap());
+        store.safety(|tx| {
+            assert!(!schedule_unresolved_tx(tx, &lease.account_epoch, "routine-test")?);
+            Ok(())
+        }).unwrap();
+        assert!(!store.queue_task(&lease, &job).unwrap());
+        assert!(!store.abandon_queued_task(&lease).unwrap());
+        let (running, job) = task_fixture(store, "job-running");
+        assert!(store.queue_task(&running, &job).unwrap());
+        assert!(store.start_task(&running).unwrap());
+        assert!(!store.abandon_queued_task(&running).unwrap());
+        assert_eq!(store.task_state(&running).unwrap(), Some(TaskState::Running));
+
+        let (uncertain, mut job) = task_fixture(store, "job-uncertain");
+        job.routine_id = Some("routine-uncertain".into());
+        assert!(store.queue_task(&uncertain, &job).unwrap());
+        store.connection.lock().unwrap().execute(
+            "INSERT INTO task_effect_receipts VALUES(?1,?2,?3,?4,'attempt-uncertain','receipt-uncertain','unknown')",
+            params![uncertain.account_epoch, uncertain.task_id, uncertain.owner_epoch, uncertain.execution_id],
+        ).unwrap();
+        assert!(store.abandon_queued_task(&uncertain).unwrap());
+        assert_eq!(store.task_state(&uncertain).unwrap(), Some(TaskState::NeedsReview));
+        assert!(store.resolve_task(&uncertain, 1).unwrap());
+        store.safety(|tx| {
+            assert!(schedule_unresolved_tx(tx, &uncertain.account_epoch, "routine-uncertain")?);
+            let receipt: (String, String, String, String) = tx.query_row(
+                "SELECT owner_epoch,execution_id,attempt_id,state FROM task_effect_receipts WHERE account_epoch=?1 AND receipt_id='receipt-uncertain'",
+                [&uncertain.account_epoch], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            assert_eq!(receipt, (uncertain.owner_epoch.clone(), uncertain.execution_id.clone(), "attempt-uncertain".into(), "unknown".into()));
+            Ok(())
+        }).unwrap();
+        assert!(!store.queue_task(&uncertain, &job).unwrap());
     }
 
     #[test]

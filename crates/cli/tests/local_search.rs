@@ -13,7 +13,7 @@ async fn search(app: &std::sync::Arc<App>, query: &str) -> Value {
 
 #[tokio::test]
 async fn local_search_projects_files_and_survives_reopen_and_deletion() {
-    let scratch = Scratch(std::env::temp_dir().join(format!("beans-search-{}", uuid::Uuid::new_v4())));
+    let scratch = Scratch(tempfile::tempdir().unwrap().keep());
     let config = Config { home: scratch.0.clone(), port: 0 };
     let app = App::load(config.clone()).unwrap();
     identity::create(&app, Some("Search fixture".into())).unwrap();

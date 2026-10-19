@@ -140,6 +140,7 @@ mod tests {
     #[tokio::test]
     async fn models_ask_checks_its_arguments_and_its_provider() {
         let home = std::env::temp_dir().join(format!("beans-scripts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         assert!(ModelsAsk::new(&app, "chat", "unknown").is_none(), "a provider with no small model has no models.ask()");
         let ask = ModelsAsk::new(&app, "chat", "deepseek").unwrap();

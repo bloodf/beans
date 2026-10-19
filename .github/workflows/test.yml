@@ -1,4 +1,4 @@
-# Runs the full test matrix on same-repository release/** pull requests targeting main: the Rust workspace on Linux,
+# Runs the full test matrix on same-repository pull requests targeting main and manual dispatch: the Rust workspace on Linux,
 # where the relay's store suite runs on SQLite and on a Postgres service, and on macOS; the crates
 # a Windows Runner runs, on Windows; the macOS app's XCTest suite over the markdown crate it links;
 # the Windows and Linux app's page and Go side; and the phone app's TypeScript. Jobs that compile
@@ -9,6 +9,7 @@ name: Tests
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
 permissions:
   contents: read
 
@@ -22,7 +23,7 @@ env:
 
 jobs:
   release-source:
-    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Release source fixtures
     runs-on: ubuntu-latest
     steps:
@@ -32,7 +33,7 @@ jobs:
       - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts scripts/release-pr-gates.test.ts
 
   rust-linux:
-    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (Linux)
     runs-on: ubuntu-latest
     services:
@@ -61,11 +62,17 @@ jobs:
           fallback: none
       # Cargo unifies features across the packages of one run, and the phone core takes beans
       # without the runner, so it is tested on its own.
+      - name: Build real relay for revocation fixture
+        run: |
+          cargo build --locked -p beans-relay --bin beans-relay
+          relay="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, pathlib, sys; print(pathlib.Path(json.load(sys.stdin)["target_directory"]) / "debug" / "beans-relay")')"
+          test -x "$relay"
+          printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
 
   rust-macos:
-    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (macOS)
     runs-on: macos-latest
     steps:
@@ -76,11 +83,17 @@ jobs:
         with:
           tool: protoc@3.36.2
           fallback: none
+      - name: Build real relay for revocation fixture
+        run: |
+          cargo build --locked -p beans-relay --bin beans-relay
+          relay="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, pathlib, sys; print(pathlib.Path(json.load(sys.stdin)["target_directory"]) / "debug" / "beans-relay")')"
+          test -x "$relay"
+          printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
 
   rust-windows:
-    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (Windows)
     # The crates a Windows Runner runs: the CLI, the agent, the model catalog, and provider
     # sign-in. There paths have drive letters, PATH splits on `;`, and commands run on pipes in
@@ -100,11 +113,23 @@ jobs:
         with:
           tool: protoc@3.36.2
           fallback: none
+      - name: Build real relay for revocation fixture
+        shell: pwsh
+        run: |
+          cargo build --locked -p beans-relay --bin beans-relay
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $metadataJson = cargo metadata --locked --no-deps --format-version 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $metadata = $metadataJson | ConvertFrom-Json
+          $relay = Join-Path $metadata.target_directory 'debug/beans-relay.exe'
+          if (-not (Test-Path -LiteralPath $relay -PathType Leaf)) { throw "Built relay executable not found: $relay" }
+          $relay = (Resolve-Path -LiteralPath $relay).Path
+          "BEANS_REVOCATION_RELAY_BIN=$relay" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       # Every suite runs, so one failing on Windows does not hide the others.
       - run: cargo test --locked --no-fail-fast -p beans -p beans-agent -p beans-models -p beans-provider-auth -p beans-tls
 
   macos-app:
-    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: macOS app
     # The app builds against the macOS 26 SDK.
     runs-on: macos-26
@@ -123,7 +148,7 @@ jobs:
       - run: sh macos/Tests/run-settings-layout.sh
 
   desktop:
-    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Windows and Linux app
     runs-on: ubuntu-latest
     defaults:
@@ -140,11 +165,13 @@ jobs:
       # src/mygo.ts, the page's bindings to the Go side, is generated and never committed.
       - run: bun run generate
       - run: bun run typecheck
+      - name: Install Chromium for desktop browser checks
+        run: bun ./node_modules/playwright/cli.js install --with-deps chromium
       - run: bun run test
-      - run: go test ./...
+      - run: go test -count=1 ./...
 
   mobile:
-    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Phone app
     runs-on: ubuntu-latest
     defaults:

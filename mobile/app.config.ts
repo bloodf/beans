@@ -114,6 +114,7 @@ export default (): ExpoConfig => {
       "./plugins/with-android-release-signing",
       "./plugins/with-android-locale-defaults",
       "./plugins/with-android-push-config",
+      ["./plugins/with-android-updates", { enabled: !development && process.env.EAS_BUILD_PROFILE === "github" }],
       "./plugins/with-ios-release-signing",
       "expo-web-browser",
     ],

@@ -12,11 +12,22 @@ import uniffi.beans_mobile.EventListener
 /// then one request at a time and a stream of events.
 class BeansCoreModule : Module() {
   private var core: Core? = null
+  private val updater by lazy { Updater(requireNotNull(appContext.reactContext)) { downloaded, total ->
+    sendEvent("updateProgress", mapOf("downloaded" to downloaded, "total" to total))
+  } }
 
   override fun definition() = ModuleDefinition {
     Name("BeansCore")
 
-    Events("event")
+    Events("event", "updateProgress")
+    Function("updateCapability") { updater.capability() }
+    Function("updateResult") { updater.result() }
+    AsyncFunction("checkUpdate").Coroutine { withContext(Dispatchers.IO) { updater.check() } }
+    AsyncFunction("installUpdate").Coroutine { id: String ->
+      val activity = requireNotNull(appContext.currentActivity)
+      withContext(Dispatchers.IO) { updater.install(id, activity) }
+    }
+    Function("cancelUpdate") { updater.cancel() }
 
     Function("start") { home: String, name: String, os: String, osVersion: String, model: String ->
       if (core == null) {
@@ -54,6 +65,7 @@ class BeansCoreModule : Module() {
 
     OnActivityEntersBackground {
       PushService.inFront = false
+      updater.cancel()
     }
   }
 

@@ -544,7 +544,7 @@ mod tests {
     async fn a_bot_added_from_a_template_starts_with_paused_routines_and_a_greeting() {
         let home = std::env::temp_dir().join(format!("beans-marketplace-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&home).unwrap();
-        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        let app = App::load_owner(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Workbench".into())).unwrap();
         let runner_id = app.this_device_id().unwrap();
         let params = serde_json::json!({ "template_id": "pr-reviewer", "runner_id": runner_id, "greeting": "Hi PR Reviewer, introduce yourself." });

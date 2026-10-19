@@ -3207,7 +3207,11 @@ mod tests {
         app.upsert_message(foreign_card, true);
         app.save_state_now();
 
-        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let reader = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        reader.close_orphan_proposals().unwrap();
+        assert!(matches!(reader.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"), "a non-owner must not recover a Runner's proposal");
+        drop(reader);
+        let reloaded = App::load_owner(Config { home: scratch.1.clone(), port: 0 }).unwrap();
         reloaded.close_orphan_proposals().unwrap();
         assert!(matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "dismissed"));
         assert!(matches!(reloaded.message("chat", "other-permission").unwrap().body, Body::Permission { decision, .. } if decision == "pending"));

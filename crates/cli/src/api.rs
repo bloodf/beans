@@ -118,6 +118,9 @@ fn store_avatar(app: &Arc<App>, avatar: Option<Option<crate::files::OutgoingFile
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Value, String> {
     match method {
+        "skills.discovery" => crate::skill_discovery::dispatch(app, params).await,
+        "skills.library.preview" | "skills.library.import" | "skills.library.uninstall" => crate::skill_library::dispatch(app, method, params).await,
+        "skills.library.compare" => crate::skill_library::dispatch(app, method, params).await,
         method if method.starts_with("memory.") && !matches!(method, "memory.read" | "memory.write") =>
             crate::memory_service::api::dispatch(app, method, params).await,
         "hello" => Ok(json!({
@@ -592,6 +595,22 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "routines.reauthorize" => {
             let routine = routines::reauthorize(app, &string(&params, "id")?)?;
             Ok(json!({ "routine": app.routine_out(&routine) }))
+        }
+        // Saved workflows live in the roster beside routines. A definition grants nothing and
+        // nothing here runs one.
+        "workflows.create" => {
+            let record = crate::workflow::create(app, &string(&params, "bot_id")?, &string(&params, "name")?, params["definition"].clone())?;
+            Ok(json!({ "workflow": crate::workflow::out(app, &record) }))
+        }
+        "workflows.list" => {
+            let bot_id = opt_string(&params, "bot_id");
+            let all = app.state.lock().unwrap().workflows.clone();
+            let listed: Vec<Value> = all.iter().filter(|w| bot_id.as_deref().is_none_or(|id| w.bot_id == id)).map(|w| crate::workflow::out(app, w)).collect();
+            Ok(json!({ "workflows": listed }))
+        }
+        "workflows.delete" => {
+            app.delete_workflow(&string(&params, "id")?).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
         }
         "routines.describe" => routines::describe(&string(&params, "schedule")?),
 

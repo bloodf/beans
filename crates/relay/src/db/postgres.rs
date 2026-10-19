@@ -117,7 +117,15 @@ const SCHEMA: &str = "
 /// version 1 is `SCHEMA`, version `n + 2` is `MIGRATIONS[n]`. A deploy runs the old process
 /// beside the new one, so a step only adds (a table, a nullable column, an index). Append;
 /// never edit a step that has shipped.
-const MIGRATIONS: &[&str] = &[];
+const MANAGED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS managed_companion_receipts (
+    identity_pubkey TEXT NOT NULL, transaction_id TEXT NOT NULL, receipt TEXT NOT NULL,
+    policy_ciphertext BYTEA NOT NULL, roster_ciphertext BYTEA NOT NULL,
+    policy_id TEXT NOT NULL, roster_id TEXT NOT NULL,
+    roster_seq BIGINT NOT NULL, size BIGINT NOT NULL,
+    PRIMARY KEY(identity_pubkey, transaction_id), UNIQUE(identity_pubkey, roster_seq),
+    UNIQUE(identity_pubkey, policy_id), UNIQUE(identity_pubkey, roster_id));
+    CREATE TABLE IF NOT EXISTS managed_replay_context(identity_pubkey TEXT PRIMARY KEY, nonce TEXT NOT NULL);";
+const MIGRATIONS: &[&str] = &[MANAGED_SCHEMA];
 
 /// Applies the steps this database has not had. DDL locks whole tables, and the process this
 /// one replaces is writing to them meanwhile, so a step runs once and not at every start, and
@@ -217,6 +225,8 @@ pub struct Postgres {
     /// This process, in `relay_instances` and `relay_sockets`.
     instance: String,
     host: String,
+    /// Retains this process's authenticated replay session alongside its listener.
+    local: Arc<Local>,
 }
 
 /// TLS for `sslmode=require` and `prefer`, with the provider named: the build links both ring
@@ -272,7 +282,7 @@ impl Postgres {
         client.execute("SELECT pg_advisory_unlock($1)", &[&SCHEMA_LOCK]).await?;
         made?;
 
-        let store = Postgres { pool, instance: uuid::Uuid::new_v4().to_string(), host };
+        let store = Postgres { pool, instance: uuid::Uuid::new_v4().to_string(), host, local: local.clone() };
         store.beat(&client).await?;
         drop(client);
         // A `NOTIFY` reaches only the sessions listening when it is sent, so the store opens once
@@ -556,7 +566,7 @@ impl Store for Postgres {
             .await?;
         }
         tx.execute("DELETE FROM challenges WHERE machine_pubkey IN (SELECT machine_pubkey FROM machines WHERE identity_pubkey = $1)", &[&identity_pubkey]).await?;
-        for table in ["push_tokens", "pairings", "blobs", "deleted_groups", "sequences", "usage", "machines"] {
+        for table in ["managed_replay_context", "managed_companion_receipts", "push_tokens", "pairings", "blobs", "deleted_groups", "sequences", "usage", "machines"] {
             tx.execute(&format!("DELETE FROM {table} WHERE identity_pubkey = $1"), &[&identity_pubkey]).await?;
         }
         tx.execute("DELETE FROM identities WHERE pubkey = $1", &[&identity_pubkey]).await?;
@@ -581,7 +591,7 @@ impl Store for Postgres {
     }
 
     async fn recount_usage(&self) -> ApiResult<u64> {
-        const ACTUAL: &str = "(SELECT COALESCE(SUM(size), 0)::BIGINT FROM blobs WHERE blobs.identity_pubkey = usage.identity_pubkey)";
+        const ACTUAL: &str = "((SELECT COALESCE(SUM(size), 0)::BIGINT FROM blobs WHERE blobs.identity_pubkey = usage.identity_pubkey) + (SELECT COALESCE(SUM(size), 0)::BIGINT FROM managed_companion_receipts WHERE managed_companion_receipts.identity_pubkey = usage.identity_pubkey))";
         let mut client = self.client().await?;
         // Found without a lock, so a write in flight may show up here; each is settled under
         // the identity's lock, where the comparison is exact.
@@ -671,6 +681,9 @@ impl Store for Postgres {
 
     async fn precheck_blob(&self, identity_pubkey: &str, id: &str, group: Option<&str>, size: i64, quota_bytes: u64) -> ApiResult<Option<Inserted>> {
         let client = self.client().await?;
+        if client.query_opt("SELECT 1 FROM managed_companion_receipts WHERE identity_pubkey=$1 AND (policy_id=$2 OR roster_id=$2)", &[&identity_pubkey,&id]).await?.is_some() {
+            return Err(ApiError::conflict("Managed blob requires original companion retry"));
+        }
         if let Some(row) = client.query_opt("SELECT seq FROM blobs WHERE id = $1 AND identity_pubkey = $2", &[&id, &identity_pubkey]).await? {
             return Ok(Some(Inserted { seq: row.get(0), existing: true }));
         }
@@ -698,11 +711,17 @@ impl Store for Postgres {
         let mut client = self.client().await?;
         let tx = client.transaction().await?;
         lock_identity(&tx, identity_pubkey).await?;
+        if tx.query_opt("SELECT 1 FROM managed_companion_receipts WHERE identity_pubkey=$1 AND (policy_id=$2 OR roster_id=$2)", &[identity_pubkey,id]).await?.is_some() {
+            return Err(ApiError::conflict("Managed blob requires original companion retry"));
+        }
         if let Some(recipient) = recipient_machine_pubkey {
             let owner = tx.query_opt("SELECT identity_pubkey FROM machines WHERE machine_pubkey = $1", &[recipient]).await?;
             if owner.map(|row| row.get::<_, String>(0)).as_ref() != Some(identity_pubkey) {
                 return Err(ApiError::bad_request("Recipient is not a machine of this identity"));
             }
+        }
+        if kind == "managed_skill_policy" || (kind == "policy" && (slot.is_some() || group.is_some() || recipient_machine_pubkey.is_some())) {
+            return Err(ApiError::bad_request("Policy requires unaddressed unslotted envelope; managed policy requires companion"));
         }
         if let Some(row) = tx.query_opt("SELECT seq FROM blobs WHERE id = $1 AND identity_pubkey = $2", &[id, identity_pubkey]).await? {
             return Ok(Inserted { seq: row.get(0), existing: true });
@@ -730,7 +749,7 @@ impl Store for Postgres {
                 let floor = if slot.keep_first { first } else { 0 };
                 let freed: i64 = tx
                     .query_one(
-                        "WITH gone AS (DELETE FROM blobs WHERE identity_pubkey = $1 AND slot = $2 AND seq > $3 RETURNING size)
+                        "WITH gone AS (DELETE FROM blobs WHERE identity_pubkey = $1 AND slot = $2 AND seq > $3 AND kind NOT IN ('policy','managed_skill_policy') RETURNING size)
                          SELECT COALESCE(SUM(size), 0)::BIGINT FROM gone",
                         &[identity_pubkey, &slot.name, &floor],
                     )
@@ -767,6 +786,126 @@ impl Store for Postgres {
         .await?;
         tx.commit().await?;
         Ok(Inserted { seq, existing: false })
+    }
+
+    async fn commit_managed_companion(&self, request: super::ManagedCompanion, quota_bytes: u64) -> ApiResult<super::ManagedReceipt> {
+        let mut receipt = request.receipt(0, 0)?;
+        let account = &request.account_id;
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        lock_identity(&tx, account).await?;
+        tx.batch_execute("SET LOCAL synchronous_commit = on").await?;
+        let synchronous: String = tx.query_one("SHOW synchronous_commit", &[]).await?.get(0);
+        if synchronous != "on" { return Err(ApiError::internal("Managed commit requires synchronous_commit=on")); }
+        if let Some(row) = tx.query_opt("SELECT receipt,policy_ciphertext,roster_ciphertext FROM managed_companion_receipts WHERE identity_pubkey=$1 AND transaction_id=$2", &[account, &request.transaction_id]).await? {
+            let previous: super::ManagedReceipt = serde_json::from_str(row.get::<_, &str>(0)).map_err(|_| ApiError::internal("Invalid stored managed receipt"))?;
+            if previous.request_sha256 != receipt.request_sha256 { return Err(ApiError::conflict("Managed transaction identity reused")); }
+            if row.get::<_, Vec<u8>>(1) != request.policy_ciphertext || row.get::<_, Vec<u8>>(2) != request.roster_ciphertext {
+                return Err(ApiError::conflict("Managed transaction ciphertext changed"));
+            }
+            return Ok(previous);
+        }
+        if tx.query_opt("SELECT 1 FROM identities WHERE pubkey=$1", &[account]).await?.is_none() {
+            return Err(ApiError::not_found("Identity not found"));
+        }
+        if let Some(checkpoint) = &request.checkpoint_transaction_id {
+            if tx.query_opt("SELECT 1 FROM managed_companion_receipts WHERE identity_pubkey=$1 AND transaction_id=$2", &[account,checkpoint]).await?.is_none() {
+                return Err(ApiError::conflict("Unknown managed checkpoint"));
+            }
+        }
+        let actual: i64 = tx.query_one("SELECT COALESCE(MAX(seq),0) FROM blobs WHERE identity_pubkey=$1 AND slot='roster' AND kind='roster'", &[account]).await?.get(0);
+        if actual != request.expected_slot_seq { return Err(ApiError::conflict("Roster slot changed")); }
+        for id in [&request.policy_id, &request.roster_id] {
+            if tx.query_opt("SELECT 1 FROM blobs WHERE identity_pubkey=$1 AND id=$2", &[account,id]).await?.is_some() {
+                return Err(ApiError::conflict("Managed blob identity reused"));
+            }
+            if tx.query_opt("SELECT 1 FROM managed_companion_receipts WHERE identity_pubkey=$1 AND (policy_id=$2 OR roster_id=$2)", &[account,id]).await?.is_some() {
+                return Err(ApiError::conflict("Managed blob identity reused"));
+            }
+        }
+        let head: i64 = tx.query_opt("SELECT seq FROM sequences WHERE identity_pubkey=$1", &[account]).await?.map(|row| row.get(0)).unwrap_or(0);
+        receipt.policy_seq = head.checked_add(1).ok_or_else(|| ApiError::conflict("Sequence exhausted"))?;
+        receipt.roster_seq = head.checked_add(2).ok_or_else(|| ApiError::conflict("Sequence exhausted"))?;
+        let json = serde_json::to_string(&receipt).map_err(|_| ApiError::internal("Receipt serialization failed"))?;
+        let history_size = receipt.policy_ciphertext_len + receipt.roster_ciphertext_len + json.len() as i64;
+        let capacity = tx.query_one("SELECT COUNT(*),COALESCE(SUM(size),0)::BIGINT FROM managed_companion_receipts WHERE identity_pubkey=$1", &[account]).await?;
+        super::managed_capacity(capacity.get(0), capacity.get(1), history_size, json.len())?;
+        let freed: i64 = tx.query_one("WITH gone AS (DELETE FROM blobs WHERE identity_pubkey=$1 AND slot='roster' RETURNING size) SELECT COALESCE(SUM(size),0)::BIGINT FROM gone", &[account]).await?.get(0);
+        give_back(&tx, account, freed).await?;
+        let used: i64 = tx.query_opt("SELECT bytes FROM usage WHERE identity_pubkey=$1", &[account]).await?.map(|row| row.get(0)).unwrap_or(0);
+        let charge = history_size + receipt.policy_ciphertext_len + receipt.roster_ciphertext_len;
+        let total = used.checked_add(charge).ok_or_else(|| ApiError::too_large("Storage quota exceeded"))?;
+        if quota_bytes > 0 && total as u64 > quota_bytes { return Err(ApiError::too_large("Storage quota exceeded")); }
+        for (id, kind, seq, ciphertext, slot) in [
+            (&request.policy_id, "managed_skill_policy", receipt.policy_seq, &request.policy_ciphertext, None),
+            (&request.roster_id, "roster", receipt.roster_seq, &request.roster_ciphertext, Some("roster")),
+        ] {
+            tx.execute("INSERT INTO blobs(identity_pubkey,id,kind,seq,ciphertext,size,created_at,slot) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", &[account,id,&kind,&seq,ciphertext,&(ciphertext.len() as i64),&now(),&slot]).await?;
+        }
+        tx.execute("INSERT INTO managed_companion_receipts(identity_pubkey,transaction_id,receipt,policy_ciphertext,roster_ciphertext,roster_seq,size,policy_id,roster_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)", &[account,&request.transaction_id,&json,&request.policy_ciphertext,&request.roster_ciphertext,&receipt.roster_seq,&history_size,&request.policy_id,&request.roster_id]).await?;
+        tx.execute("INSERT INTO sequences(identity_pubkey,seq) VALUES ($1,$2) ON CONFLICT(identity_pubkey) DO UPDATE SET seq=EXCLUDED.seq", &[account,&receipt.roster_seq]).await?;
+        tx.execute("INSERT INTO usage(identity_pubkey,bytes) VALUES ($1,$2) ON CONFLICT(identity_pubkey) DO UPDATE SET bytes=EXCLUDED.bytes", &[account,&total]).await?;
+        tx.commit().await?;
+        Ok(receipt)
+    }
+
+    async fn managed_receipt(&self, account_id: &str, transaction_id: &str) -> ApiResult<Option<super::ManagedReceipt>> {
+        self.client().await?.query_opt("SELECT receipt FROM managed_companion_receipts WHERE identity_pubkey=$1 AND transaction_id=$2", &[&account_id,&transaction_id]).await?
+            .map(|row| serde_json::from_str(row.get::<_, &str>(0)).map_err(|_| ApiError::internal("Invalid stored managed receipt"))).transpose()
+    }
+
+    async fn reset_managed_replay_context(&self, account_id: &str) -> ApiResult<()> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        lock_identity(&tx, account_id).await?;
+        tx.batch_execute("SET LOCAL synchronous_commit = on").await?;
+        tx.execute("INSERT INTO managed_replay_context(identity_pubkey,nonce) SELECT pubkey,$2 FROM identities WHERE pubkey=$1 ON CONFLICT(identity_pubkey) DO UPDATE SET nonce=EXCLUDED.nonce", &[&account_id,&uuid::Uuid::new_v4().to_string()]).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn managed_cut(&self, account_id: &str, context: &str, cut_token: &str, through: i64, since: i64, limit: i64) -> ApiResult<super::ManagedCut> {
+        super::validate_managed_cut(limit)?;
+        let mut client = self.client().await?;
+        let setup = client.transaction().await?;
+        lock_identity(&setup, account_id).await?;
+        setup.batch_execute("SET LOCAL synchronous_commit = on").await?;
+        if setup.query_one("SHOW synchronous_commit", &[]).await?.get::<_, String>(0) != "on" { return Err(ApiError::internal("Replay incarnation requires durable commit")); }
+        if setup.query_opt("SELECT 1 FROM identities WHERE pubkey=$1", &[&account_id]).await?.is_none() {
+            return Err(ApiError::conflict("Replay account context unavailable"));
+        }
+        setup.execute("INSERT INTO managed_replay_context(identity_pubkey,nonce) VALUES ($1,$2) ON CONFLICT(identity_pubkey) DO NOTHING", &[&account_id,&uuid::Uuid::new_v4().to_string()]).await?;
+        setup.commit().await?;
+        let tx = client.build_transaction().isolation_level(tokio_postgres::IsolationLevel::RepeatableRead).read_only(true).start().await?;
+        let incarnation: String = tx.query_opt("SELECT nonce FROM managed_replay_context WHERE identity_pubkey=$1", &[&account_id]).await?.ok_or_else(|| ApiError::conflict("Replay context reset"))?.get(0);
+        let head: i64 = tx.query_opt("SELECT seq FROM sequences WHERE identity_pubkey=$1", &[&account_id]).await?.map(|row| row.get(0)).unwrap_or(0);
+        let claims = self.local.replay.claims(account_id, &incarnation, context, cut_token, through, since, head)?;
+        let totals = tx.query_one("SELECT COUNT(*),COALESCE(SUM(size),0)::BIGINT,COALESCE(SUM(bad),0)::BIGINT FROM (
+            SELECT seq,size,CASE WHEN slot IS NOT NULL OR group_id IS NOT NULL OR recipient_machine_pubkey IS NOT NULL THEN 1 ELSE 0 END AS bad FROM blobs WHERE identity_pubkey=$1 AND kind='policy'
+            UNION ALL SELECT roster_seq,octet_length(policy_ciphertext),0 FROM managed_companion_receipts WHERE identity_pubkey=$1
+            ) AS sizes WHERE seq<=$2", &[&account_id,&claims.through]).await?;
+        if totals.get::<_, i64>(0) > 1_048_576 || totals.get::<_, i64>(1) > 1024 * 1024 * 1024 || totals.get::<_, i64>(2) > 0 { return Err(ApiError::too_large("Replay history invalid or exceeds finite bounds")); }
+        let metadata = tx.query("SELECT seq,id,policy_bytes,roster_bytes,transaction_id FROM (
+            SELECT b.seq,b.id,octet_length(b.ciphertext)::BIGINT AS policy_bytes,0::BIGINT AS roster_bytes,NULL::TEXT AS transaction_id FROM blobs b WHERE b.identity_pubkey=$1 AND b.kind='policy' AND b.slot IS NULL AND b.group_id IS NULL AND b.recipient_machine_pubkey IS NULL
+            UNION ALL SELECT r.roster_seq-1,r.policy_id,octet_length(r.policy_ciphertext)::BIGINT,octet_length(r.roster_ciphertext)::BIGINT,r.transaction_id FROM managed_companion_receipts r WHERE r.identity_pubkey=$1
+            ) AS history WHERE seq>$2 AND seq<=$3 ORDER BY seq LIMIT 2", &[&account_id,&since,&claims.through]).await?;
+        let mut blobs = Vec::new();
+        if let Some(metadata) = metadata.first() {
+            super::validate_replay_payload_size(metadata.get(2), metadata.get(3))?;
+            let transaction: Option<String> = metadata.get(4);
+            blobs.push(if let Some(transaction) = transaction {
+                let row = tx.query_one("SELECT receipt,policy_ciphertext,roster_ciphertext FROM managed_companion_receipts WHERE identity_pubkey=$1 AND transaction_id=$2", &[&account_id,&transaction]).await?;
+                super::ManagedCutBlob::Managed { receipt: serde_json::from_str(row.get::<_, &str>(0)).map_err(|_| ApiError::internal("Invalid stored managed receipt"))?, policy_ciphertext: row.get(1),roster_ciphertext: row.get(2) }
+            } else {
+                let id: String = metadata.get(1);
+                let seq: i64 = metadata.get(0);
+                let row = tx.query_one("SELECT ciphertext FROM blobs WHERE identity_pubkey=$1 AND id=$2 AND seq=$3", &[&account_id,&id,&seq]).await?;
+                super::ManagedCutBlob::Ordinary { id,seq,ciphertext: row.get(0) }
+            });
+        }
+        let page = self.local.replay.page(claims, blobs, metadata.len() > 1)?;
+        tx.commit().await?;
+        Ok(page)
     }
 
     async fn blobs_since(&self, identity_pubkey: &str, machine_pubkey: &str, since: i64, kinds: &[String], limit: i64, max_bytes: i64) -> ApiResult<(Vec<BlobRow>, i64)> {
@@ -837,7 +976,7 @@ impl Store for Postgres {
         let mut client = self.client().await?;
         let tx = client.transaction().await?;
         lock_identity(&tx, identity_pubkey).await?;
-        let Some(row) = tx.query_opt("DELETE FROM blobs WHERE id = $1 AND identity_pubkey = $2 AND kind NOT IN ('roster', 'policy', 'memory_config') RETURNING size, kind", &[&id, &identity_pubkey]).await? else {
+        let Some(row) = tx.query_opt("DELETE FROM blobs WHERE id = $1 AND identity_pubkey = $2 AND kind NOT IN ('roster', 'policy', 'managed_skill_policy', 'memory_config') RETURNING size, kind", &[&id, &identity_pubkey]).await? else {
             return Ok(None);
         };
         give_back(&tx, identity_pubkey, row.get(0)).await?;
@@ -854,7 +993,7 @@ impl Store for Postgres {
             &[&identity_pubkey, &group, &now()],
         )
         .await?;
-        let rows = tx.query("DELETE FROM blobs WHERE identity_pubkey = $1 AND group_id = $2 RETURNING id, kind, size", &[&identity_pubkey, &group]).await?;
+        let rows = tx.query("DELETE FROM blobs WHERE identity_pubkey = $1 AND group_id = $2 AND kind NOT IN ('policy','managed_skill_policy') RETURNING id, kind, size", &[&identity_pubkey, &group]).await?;
         give_back(&tx, identity_pubkey, rows.iter().map(|row| row.get::<_, i64>(2)).sum()).await?;
         tx.commit().await?;
         Ok(rows.iter().filter(|row| row.get::<_, String>(1) == "file").map(|row| row.get(0)).collect())

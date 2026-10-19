@@ -39,6 +39,7 @@ import Animated, {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SoftScrollEdgeView } from "../../../modules/beans-core/SoftScrollEdgeView";
 import { chatTitle, engine } from "../../../src/core/engine";
+import { composerDraft, editComposerDraft } from "../../../src/core/composerDraft";
 import { canBeQuoted, isLive, type Bot, type Message } from "../../../src/core/model";
 import {
   useBotMap,
@@ -101,6 +102,20 @@ export default function ChatScreen() {
   const isWorking = useIsWorking(id);
   const hasTasks = useRunningTasks(id).length > 0;
   const status = useStore((s) => s.statuses[id] ?? null);
+  const identityId = useStore(s => s.identityId);
+  const relayUrl = useStore(s => s.relayUrl);
+  const deviceId = useStore(s => s.deviceId);
+  const paired = useStore(s => s.paired);
+  const sendPresentation = useRef({ active: true, id });
+  useEffect(() => {
+    const owner = { active: true, id };
+    sendPresentation.current = owner;
+    const unsubscribe = useStore.subscribe((state, previous) => {
+      if (state.identityId !== previous.identityId || state.relayUrl !== previous.relayUrl
+        || state.deviceId !== previous.deviceId || state.paired !== previous.paired) owner.active = false;
+    });
+    return () => { owner.active = false; unsubscribe(); };
+  }, [id, identityId, relayUrl, deviceId, paired]);
   const listRef = useRef<FlashListRef<Row>>(null);
   // The composer floats over the transcript and rides the keyboard (KeyboardFoot). The
   // list is never resized: the chat scroll view keeps a bottom inset for the composer and adds
@@ -691,15 +706,14 @@ export default function ChatScreen() {
   const answeringRun = answering?.body.kind === "tool" ? answering.body.run : undefined;
 
   /// The message the draft answers, from a swipe on its bubble; another chat starts without one.
-  const [replying, setReplying] = useState<{ messageID: string; name: string; text: string } | null>(null);
-  useEffect(() => setReplying(null), [id]);
+  const replyDraft = composerDraft(identityId, relayUrl, id);
   const startReply = useCallback(
     (message: Message) => {
       if (message.body.kind !== "text") return;
       const words = quoteText(message.body.text) || (message.body.attachments ?? []).map((file) => file.name).join(", ");
-      setReplying({ messageID: message.id, name: quoteAuthorName(message.author, bots), text: words });
+      editComposerDraft(replyDraft, { reply: { messageID: message.id, name: quoteAuthorName(message.author, bots), text: words } });
     },
-    [bots],
+    [bots, replyDraft],
   );
   /// The message a reply's quote names, brought into view with its bubble pulsing. One on a page
   /// not loaded yet stays where it is.
@@ -970,22 +984,20 @@ export default function ChatScreen() {
           }}
         >
           <Composer
+            chatId={id}
             members={members}
             isGroup={isGroup}
             placeholder={placeholder}
-            reply={replying}
-            onCancelReply={() => setReplying(null)}
-            onSend={(text, files, mentions) => {
+            onSend={async (text, files, mentions, replyTo) => {
               // The anchor is measured against the screen without the keyboard.
               void KeyboardController.dismiss();
               // Before the message reaches the list: FlashList notes "near the end" on a commit
               // made while its catch-up is on, and scrolls to the end on the change after it.
               setAnchored(true);
-              const replyTo = replying?.messageID;
-              setReplying(null);
-              const sent = engine
-                .sendMessage(id, text, files, mentions, replyTo)
-                .then((message) => {
+              const presentation = sendPresentation.current;
+              try {
+                const message = await engine.sendMessage(id, text, files, mentions, replyTo);
+                if (!presentation.active || sendPresentation.current !== presentation) return true;
                   stopSettling();
                   anchorKey.current = message.id;
                   anchorTarget.current = null;
@@ -993,14 +1005,16 @@ export default function ChatScreen() {
                   anchorLifted.current = false;
                   anchorSpaced.current = false;
                   syncInsetTop();
-                });
-              sent.catch((error) => {
+                return true;
+              } catch (error) {
+                if (!presentation.active || sendPresentation.current !== presentation) return false;
                 if (!anchorKey.current) releaseAnchor();
                 Alert.alert(
                   t("Could not send"),
                   error instanceof Error ? error.message : String(error),
                 );
-              });
+                return false;
+              }
             }}
           />
         </KeyboardFoot>

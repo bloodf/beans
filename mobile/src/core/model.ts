@@ -222,7 +222,7 @@ export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 export const MAX_ATTACHMENTS = 10;
 
 export type Body =
-  | { kind: "text"; text: string; attachments?: Attachment[]; reply_to?: ReplyTo | null }
+  | { kind: "text"; text: string; attachments?: Attachment[]; mentions?: string[]; reply_to?: ReplyTo | null }
   | {
       kind: "tool";
       name: string;
@@ -384,6 +384,7 @@ export interface ChatUsage {
   output_tokens: number;
   cache_read_tokens: number;
   cost_usd: number;
+  cost_known?: boolean | null;
   turns: number;
   model: string;
   updated_at: number;

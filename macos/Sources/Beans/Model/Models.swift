@@ -1155,6 +1155,7 @@ struct ChatUsage: Hashable {
     var outputTokens: Int
     var cacheReadTokens: Int
     var costUSD: Double
+    var costKnown: Bool? = nil
     var turns: Int
     var model: String
 
@@ -1168,7 +1169,8 @@ struct ChatUsage: Hashable {
     /// "$0.42 · 18 turns"
     var spendSummary: String {
         let dollars = costUSD < 0.01 && costUSD > 0 ? "<$0.01" : String(format: "$%.2f", costUSD)
-        return turns == 1 ? L("%@ · %d turn", dollars, turns) : L("%@ · %d turns", dollars, turns)
+        let cost = costKnown == true ? dollars : costUSD > 0 ? L("%@ known subtotal · total unknown", dollars) : L("Unknown cost")
+        return turns == 1 ? L("%@ · %d turn", cost, turns) : L("%@ · %d turns", cost, turns)
     }
 }
 

@@ -510,17 +510,37 @@ impl LocalStore {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
         let config = crate::config::Config { home: parent.into(), port: 0 };
-        config.validate_home()?;
-        if path.exists() {
-            crate::config::validate_database(path)?;
+        let admission = config.ensure_home_admission()?;
+        Self::open_with_admission(path, admission.as_ref(), false)
+    }
+
+    /// Deliberate staged scratch entry; ordinary App callers retain legacy admission.
+    pub fn open_staged(path: &Path) -> anyhow::Result<Self> {
+        let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let config = crate::config::Config { home: parent.into(), port: 0 };
+        let admission = config.staged_storage_admission()?;
+        Self::open_with_admission(path, Some(&admission), true)
+    }
+
+    pub(crate) fn open_with_admission(path: &Path, admission: Option<&crate::config::StorageAdmission>, staged: bool) -> anyhow::Result<Self> {
+        let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let config = crate::config::Config { home: parent.into(), port: 0 };
+        #[cfg(unix)]
+        admission.ok_or_else(|| anyhow::anyhow!("Storage admission guard is required"))?.validate_target(parent)?;
+        if staged {
+            admission.ok_or_else(|| anyhow::anyhow!("Staged admission guard is required"))?.revalidate_staged()?;
+        } else {
+            config.validate_home()?;
+            if let Some(admission) = admission { admission.revalidate_legacy()?; }
         }
-        config.ensure_home()?;
+        if path.exists() { crate::config::validate_database(path)?; }
         let connection =
             Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         // Classify before CREATE IF NOT EXISTS can conceal a partial current schema.
         let version:i64=connection.pragma_query_value(None,"user_version",|r|r.get(0))?;
         let tables:std::collections::HashSet<String>=connection.prepare("SELECT name FROM sqlite_master WHERE type='table'")?
             .query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        anyhow::ensure!((0..=3).contains(&version), "Unsupported future task schema version");
         let current=["task_authority","task_fences","local_tasks","task_invocations","task_effect_receipts","routine_check_commits","task_safety_version"];
         let task_count=current.iter().filter(|name|tables.contains(**name)).count();
         if version==3 {
@@ -537,9 +557,9 @@ impl LocalStore {
             anyhow::ensure!(task_count==current.len(),"Partial task safety schema");
         }
         connection.pragma_update(None, "application_id", crate::config::SQLITE_APPLICATION_ID)?;
+        connection.pragma_update(None, "synchronous", 2)?;
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = FULL;
              PRAGMA fullfsync = ON;
              PRAGMA checkpoint_fullfsync = ON;
              PRAGMA foreign_keys = ON;
@@ -571,6 +591,11 @@ impl LocalStore {
                  json     TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS routines (
+                 id       TEXT PRIMARY KEY NOT NULL,
+                 position INTEGER NOT NULL,
+                 json     TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS workflows (
                  id       TEXT PRIMARY KEY NOT NULL,
                  position INTEGER NOT NULL,
                  json     TEXT NOT NULL
@@ -757,6 +782,7 @@ impl LocalStore {
             bots: load_json_table(&connection, "bots")?,
             chats: load_json_table(&connection, "chats")?,
             routines: load_json_table(&connection, "routines")?,
+            workflows: load_json_table(&connection, "workflows")?,
             auto_review,
             paused,
             policy_clock: policy.policy_clock,
@@ -1726,6 +1752,7 @@ impl LocalStore {
             "bots",
             "chats",
             "routines",
+            "workflows",
             "group_deletes",
             "blob_deletes",
             "device_seen",
@@ -1826,6 +1853,15 @@ fn save_state_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
             .routines
             .iter()
             .map(|routine| (routine.id.clone(), serde_json::to_string(routine)))
+            .collect::<Vec<_>>(),
+    )?;
+    sync_json_table(
+        tx,
+        "workflows",
+        state
+            .workflows
+            .iter()
+            .map(|workflow| (workflow.id.clone(), serde_json::to_string(workflow)))
             .collect::<Vec<_>>(),
     )?;
     sync_ordered_ids(tx, "group_deletes", &state.group_deletes)?;
@@ -2269,6 +2305,20 @@ mod tests {
         store.connection.lock().unwrap().execute_batch("DROP TABLE task_authority; DROP TABLE task_fences; DROP TABLE local_tasks; DROP TABLE task_invocations; DROP TABLE task_effect_receipts; DROP TABLE routine_check_commits; DROP TABLE task_safety_version;").unwrap();
         drop(store);
         assert!(LocalStore::open(&path).is_err());
+    }
+
+    #[test]
+    fn future_task_schema_is_refused_without_downgrade() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("beans.sqlite3");
+        let store = LocalStore::open(&path).unwrap();
+        store.recover_task_owner("owner-test").unwrap();
+        store.connection.lock().unwrap().execute_batch("PRAGMA user_version=4;").unwrap();
+        drop(store);
+        assert!(LocalStore::open(&path).is_err());
+        let connection = Connection::open(&path).unwrap();
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, 4, "an older core must not silently downgrade a future safety schema");
     }
 
     #[test]

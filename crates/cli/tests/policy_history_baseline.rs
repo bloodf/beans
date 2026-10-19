@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("beans-policy-history-{}", uuid::Uuid::new_v4())))
+        Self(tempfile::tempdir().unwrap().keep())
     }
     fn load(&self) -> Arc<App> {
         App::load(Config { home: self.0.clone(), port: 0 }).unwrap()

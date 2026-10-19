@@ -7,6 +7,7 @@ fn signed_discovery_rechecks_revocation_after_scan() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
     runtime.block_on(async {
         let home = std::env::temp_dir().join(format!("beans-discovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         let root = home.join("selected");
         std::fs::create_dir_all(&root).unwrap();

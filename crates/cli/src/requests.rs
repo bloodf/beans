@@ -95,9 +95,10 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String, running: crate::u
     tokio::spawn(REQUEST_AUTHORITY.scope(authority, async move {
         let _running = running;
         let result = answer_verified(&app, &request).await;
-        if publish_answer(&app, &request, result).is_ok() {
-            if let Some(cleanup) = cleanup { cleanup.delete(&app, &blob_id).await; }
-        }
+        let _ = publish_answer(&app, &request, result);
+        // Revoked requesters receive no response, but their consumed envelope must
+        // still leave the relay. Cleanup independently retains the original account.
+        if let Some(cleanup) = cleanup { cleanup.delete(&app, &blob_id).await; }
     }));
 }
 

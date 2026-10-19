@@ -6,6 +6,8 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Consumed requests from revoked Devices are removed from the relay without publishing a response or applying their effects.
+
 - Paused accounts continue to save outgoing chat messages and attachments without admitting or starting bot work.
 
 - Signed requests, delayed provider discovery, task completions and relay authentication retain their original account admission across waits, preventing publication into a replacement account after Forget. Plugin/MCP policy cleanup uses the same roster-before-lifecycle lock order as incoming sync.

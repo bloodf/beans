@@ -1023,6 +1023,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paused_submissions_store_data_without_tasks_fences_or_steering() {
+        let scratch=scratch_app(); let app=&scratch.0;
+        crate::identity::create(app,Some("Synthetic Runner".into())).unwrap();
+        let mut runner=bot("bot","Synthetic Bot"); runner.runner_id=app.this_device_id().unwrap();
+        app.state.lock().unwrap().bots.push(runner);
+        let mut chat=empty_chat("chat"); chat.meta.bot_ids.push("bot".into());
+        app.state.lock().unwrap().chats.push(chat);
+        let source=app.config.home.join("source"); std::fs::write(&source,b"saved while paused").unwrap();
+        #[cfg(feature="runner")]
+        let queue=beans_agent::AgentMessageQueue::new(beans_agent::QueueMode::All);
+        #[cfg(feature="runner")]
+        app.register_steering_queue("chat","active",queue.clone());
+        app.set_paused(true);
+        for group in [false,true] {
+            app.state.lock().unwrap().chats.iter_mut().find(|chat|chat.meta.id=="chat").unwrap().meta.kind=if group {"group"} else {"dm"}.into();
+            assert_eq!(app.chat("chat").unwrap().meta.is_group(),group);
+            let id=if group {"paused-group-file"} else {"paused-dm-file"};
+            let file=crate::files::OutgoingFile{path:source.to_string_lossy().into(),id:Some(id.into()),name:None,mime:None,width:None,height:None};
+            let before=app.store.outbox().unwrap().iter().filter(|item|item.kind=="chat").count();
+            let message=send_user_message(app.clone(),"chat","saved while paused",None,vec![file],Vec::new(),None).unwrap();
+            assert_eq!(app.message("chat",&message.id).unwrap().body,message.body);
+            assert!(matches!(&message.body,Body::Text{attachments,..} if attachments.len()==1 && attachments[0].id==id));
+            assert_eq!(std::fs::read(crate::files::local_path(app,id)).unwrap(),b"saved while paused");
+            assert!(app.store.outbox().unwrap().iter().any(|item|item.kind=="file" && item.id==id));
+            assert_eq!(app.store.outbox().unwrap().iter().filter(|item|item.kind=="chat").count(),before+1);
+        }
+        app.state.lock().unwrap().chats.iter_mut().find(|chat|chat.meta.id=="chat").unwrap().meta.kind="dm".into();
+        let before=app.store.outbox().unwrap().iter().filter(|item|item.kind=="chat").count();
+        let greeting=greet_new_bot(app,"chat","bot","saved greeting",TemplateSetup::default(),app.update.try_admit().unwrap()).unwrap();
+        assert_eq!(app.message("chat",&greeting.id).unwrap().body,greeting.body);
+        assert_eq!(app.messages("chat").len(),3);
+        assert_eq!(app.store.outbox().unwrap().iter().filter(|item|item.kind=="chat").count(),before+1);
+        let connection=app.store.connection.lock().unwrap();
+        for table in ["local_tasks","task_fences"] {
+            let count:i64=connection.query_row(&format!("SELECT count(*) FROM {table}"),[],|row|row.get(0)).unwrap();
+            assert_eq!(count,0,"paused submissions must create no {table}");
+        }
+        drop(connection);
+        assert!(app.running_jobs.lock().unwrap().is_empty());
+        assert!(app.store.sent_jobs().unwrap().is_empty());
+        #[cfg(feature="runner")]
+        assert!(queue.drain().is_empty(),"paused messages must not steer an existing turn");
+    }
+
+    #[tokio::test]
     async fn local_submission_refusals_preserve_files_transcript_outbox_and_steering() {
         let scratch=scratch_app(); let app=&scratch.0;
         crate::identity::create(app,Some("Synthetic Runner".into())).unwrap();
@@ -1038,26 +1083,11 @@ mod tests {
         let queue=beans_agent::AgentMessageQueue::new(beans_agent::QueueMode::All);
         #[cfg(feature="runner")]
         app.register_steering_queue("chat","active",queue.clone());
-        app.set_paused(true);
-        let before=app.store.outbox().unwrap();
-        assert!(send_user_message(app.clone(),"chat","rejected paused",None,vec![file.clone()],Vec::new(),None).is_err());
-        assert!(app.messages("chat").is_empty());
-        assert_eq!(std::fs::read(&destination).unwrap(),b"old");
-        assert_eq!(app.store.outbox().unwrap().iter().map(|i|(&i.id,&i.ciphertext)).collect::<Vec<_>>(),before.iter().map(|i|(&i.id,&i.ciphertext)).collect::<Vec<_>>());
-        #[cfg(feature="runner")]
-        assert!(queue.drain().is_empty());
-        app.state.lock().unwrap().chats[0].meta.kind="group".into();
-        assert!(send_user_message(app.clone(),"chat","rejected paused group",None,vec![file.clone()],Vec::new(),None).is_err());
-        app.state.lock().unwrap().chats[0].meta.kind="dm".into();
-        assert!(greet_new_bot(app,"chat","bot","rejected paused greeting",TemplateSetup::default(),app.update.try_admit().unwrap()).is_err());
-        assert!(app.messages("chat").is_empty());
-        assert_eq!(std::fs::read(&destination).unwrap(),b"old");
-        #[cfg(feature="runner")]
-        assert!(queue.drain().is_empty());
         app.set_paused(false);
         app.store.connection.lock().unwrap().execute_batch("CREATE TEMP TRIGGER reject_submission BEFORE INSERT ON local_tasks BEGIN SELECT RAISE(ABORT,'injected task insert failure'); END;").unwrap();
         for group in [false,true] {
-            app.state.lock().unwrap().chats[0].meta.kind=if group {"group"} else {"dm"}.into();
+            app.state.lock().unwrap().chats.iter_mut().find(|chat|chat.meta.id=="chat").unwrap().meta.kind=if group {"group"} else {"dm"}.into();
+            assert_eq!(app.chat("chat").unwrap().meta.is_group(),group);
             let before=app.store.outbox().unwrap();
             assert!(send_user_message(app.clone(),"chat","rejected storage",None,vec![file.clone()],Vec::new(),None).is_err());
             assert!(app.messages("chat").is_empty());
@@ -1066,7 +1096,7 @@ mod tests {
             #[cfg(feature="runner")]
             assert!(queue.drain().is_empty());
         }
-        app.state.lock().unwrap().chats[0].meta.kind="dm".into();
+        app.state.lock().unwrap().chats.iter_mut().find(|chat|chat.meta.id=="chat").unwrap().meta.kind="dm".into();
         let setup=TemplateSetup{template:"Synthetic".into(),..TemplateSetup::default()};
         assert!(greet_new_bot(app,"chat","bot","rejected greeting",setup,app.update.try_admit().unwrap()).is_err());
         assert!(app.messages("chat").is_empty());

@@ -339,11 +339,22 @@ fn finish_job(app: &App, job_id: &str) {
     app.local_turns_changed();
 }
 
+fn abandon_queued_task(app: &App, lease: &crate::local_store::TaskLease) {
+    if let Err(error) = app.abandon_queued_task(lease) {
+        tracing::error!(%error, "Queued task cleanup failed; durable history remains unresolved");
+    }
+}
+
+fn abandon_room_tasks(app: &App, tasks: &[(Job, crate::local_store::TaskLease)]) {
+    for (_, lease) in tasks { abandon_queued_task(app, lease); }
+}
+
 /// Registers a room before it waits for the chat lock. A later message is admitted behind it
 /// and takes over at the next member boundary. `admission` counts the room as running here
 /// until it ends.
 fn start_room(app: Arc<App>, chat_id: String, trigger: String, members: Vec<Bot>, admission: Admission, tasks: Vec<(Job,crate::local_store::TaskLease)>, incarnation:u64) {
     if members.is_empty() {
+        abandon_room_tasks(&app, &tasks);
         return;
     }
     let room_id = format!("room-{}", uuid::Uuid::new_v4());
@@ -384,6 +395,7 @@ async fn run_room(
     let lock = app.chat_lock(&chat_id);
     let _guard = lock.lock().await;
     if has_newer_user_message(&app, &chat_id, &trigger) {
+        abandon_room_tasks(&app, &tasks);
         finish_job(&app, &room_id);
         return;
     }
@@ -441,6 +453,7 @@ async fn run_room(
         }
     }
 
+    abandon_room_tasks(&app, &tasks);
     finish_job(&app, &room_id);
 }
 
@@ -668,6 +681,7 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, 
 
 pub(crate) fn spawn_admitted_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, admission: Admission, lease: crate::local_store::TaskLease) {
     if app.is_paused() {
+        abandon_queued_task(&app, &lease);
         app.notice(&job.chat_id, "Account paused. Resume to run bots.");
         if let Some(id) = remote_blob_id {
             let app = app.clone();
@@ -725,8 +739,8 @@ async fn run_admitted_job_here(app: &Arc<App>, job: Job, cancel: CancellationTok
 async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken, lease: crate::local_store::TaskLease) -> TurnOutcome {
     match app.start_local_task(&lease) {
         Ok(true) => {},
-        Ok(false) => { finish_job(app, &job.id); return TurnOutcome::Skipped; },
-        Err(error) => { tracing::error!(%error, "Task start refused"); finish_job(app, &job.id); return TurnOutcome::Skipped; },
+        Ok(false) => { abandon_queued_task(app, &lease); finish_job(app, &job.id); return TurnOutcome::Skipped; },
+        Err(error) => { tracing::error!(%error, "Task start refused"); abandon_queued_task(app, &lease); finish_job(app, &job.id); return TurnOutcome::Skipped; },
     }
     #[cfg(feature = "runner")]
     let outcome = if cancel.is_cancelled()
@@ -1255,6 +1269,44 @@ mod tests {
         let heard: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok()).collect();
         assert!(!heard.iter().any(|event| matches!(event, Event::RosterChanged { .. })));
         assert!(heard.iter().any(|event| matches!(event, Event::JobStarted { job_id, .. } if job_id == "mac-job")));
+    }
+
+    #[tokio::test]
+    async fn cancelled_and_superseded_admissions_leave_terminal_history() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Synthetic Runner".into())).unwrap();
+        let mut runner_bot = bot("bot", "Synthetic Bot");
+        runner_bot.runner_id = app.this_device_id().unwrap();
+        let mut chat = empty_chat("chat");
+        chat.meta.bot_ids.push("bot".into());
+        app.state.lock().unwrap().bots.push(runner_bot.clone());
+        app.state.lock().unwrap().chats.push(chat);
+        let (job, lease) = app.mint_local_intent(user_turn_job(app, "chat", "bot", "trigger"), None).unwrap();
+        app.cancel_job(&job.id);
+        let outcome = run_admitted_job_here(app, job.clone(), CancellationToken::new(), lease.clone()).await;
+        assert_eq!(outcome, TurnOutcome::Skipped);
+        assert_eq!(app.store.task_state(&lease).unwrap(), Some(crate::local_store::TaskState::Interrupted));
+        assert!(app.task_history_execution(&job.id).unwrap().is_some());
+        assert!(app.queue_local_task(&job).unwrap().is_none());
+
+        let (paused_job, paused_lease) = app.mint_local_intent(user_turn_job(app, "chat", "bot", "paused-trigger"), None).unwrap();
+        app.state.lock().unwrap().paused = true;
+        spawn_admitted_local_job(app.clone(), paused_job.clone(), None, app.update.hold(), paused_lease.clone());
+        assert_eq!(app.store.task_state(&paused_lease).unwrap(), Some(crate::local_store::TaskState::Interrupted));
+        assert!(!app.running_jobs.lock().unwrap().contains_key(&paused_job.id));
+        app.state.lock().unwrap().paused = false;
+        assert!(app.queue_local_task(&paused_job).unwrap().is_none());
+
+        let trigger = Message::new("chat", Author::You, Body::Text { text: "first".into(), attachments: Vec::new(), mentions: Vec::new(), reply_to: None });
+        app.upsert_message(trigger.clone(), false);
+        let (job, lease) = app.mint_local_intent(user_turn_job(app, "chat", "bot", &trigger.id), None).unwrap();
+        let later = Message::new("chat", Author::You, Body::Text { text: "replacement".into(), attachments: Vec::new(), mentions: Vec::new(), reply_to: None });
+        app.upsert_message(later, false);
+        let incarnation = lease.incarnation;
+        run_room(app.clone(), "chat".into(), trigger.id, vec![runner_bot], "room-test".into(), CancellationToken::new(), incarnation, vec![(job.clone(), lease.clone())]).await;
+        assert_eq!(app.store.task_state(&lease).unwrap(), Some(crate::local_store::TaskState::Interrupted));
+        assert!(app.queue_local_task(&job).unwrap().is_none());
     }
 
     #[tokio::test]

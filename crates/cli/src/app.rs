@@ -361,6 +361,12 @@ impl App {
         self.store.start_task(lease)
     }
 
+    pub(crate) fn abandon_queued_task(&self, lease: &crate::local_store::TaskLease) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(), "Task cleanup requires execution ownership");
+        self.store.abandon_queued_task(lease)
+    }
+
     pub(crate) fn finish_local_task(&self, lease: &crate::local_store::TaskLease, interrupted: bool) -> anyhow::Result<bool> {
         let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
         self.store.finish_task(lease, interrupted)

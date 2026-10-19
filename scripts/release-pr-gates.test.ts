@@ -70,3 +70,19 @@ test("catalog uses PR base or main for dispatch in both fetch and comparison", (
     expect(base).toBe(`origin/${expected}`);
   }
 });
+
+
+test("every Rust aggregate receives a prebuilt real relay for the revocation fixture", () => {
+  const jobs = workflows.find(({ file }) => file === "test.yml")!.workflow.jobs;
+  for (const name of ["rust-linux", "rust-macos", "rust-windows"]) {
+    const steps = jobs[name].steps as { run?: string; if?: string }[];
+    const build = steps.findIndex((step) => step.run?.includes("cargo build --locked -p beans-relay --bin beans-relay"));
+    const aggregate = steps.findIndex((step) => step.run?.includes("cargo test --locked"));
+    expect(build, `${name}: build relay before tests`).toBeGreaterThanOrEqual(0);
+    expect(build).toBeLessThan(aggregate);
+    expect(steps[build].if).toBeUndefined();
+    expect(steps[build].run).toContain("BEANS_REVOCATION_RELAY_BIN=");
+    expect(steps[build].run).toContain("GITHUB_ENV");
+    expect(steps[build].run).toContain("cargo metadata --locked --no-deps --format-version 1");
+  }
+});

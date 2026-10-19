@@ -6,6 +6,8 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Skills mounted checks follow the shared browser-consumer module names while retaining all assertions and driver source binding.
+
 - Mounted skills verification freezes imported images, handles canonical temporary paths and Bun workspace dependencies, and retains module-load diagnostics without relaxing executed-script byte checks.
 
 - Desktop skill comparisons use the Runner's UTF-8 path order and separate 256-file source and managed-copy limits, so valid disjoint inventories remain inspectable.

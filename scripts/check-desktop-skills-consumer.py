@@ -213,8 +213,8 @@ def run_browser(base, frozen):
             coverage = session.send("Profiler.takePreciseCoverage")["result"]
             active = {entry["url"] for entry in coverage if any(
                 span["count"] > 0 for function in entry["functions"] for span in function["ranges"])}
-            required = {"desktop/src/ui/sheets/skillsMountedCheck.ts", "desktop/src/ui/sheets/skillDiscovery.test.tsx",
-                        "desktop/src/ui/sheets/skillLibrary.test.tsx", "desktop/src/ui/sheets/skillDiscovery.tsx",
+            required = {"desktop/src/ui/sheets/skillsMountedCheck.ts", "desktop/src/ui/sheets/skillDiscovery.browser.tsx",
+                        "desktop/src/ui/sheets/skillLibrary.browser.tsx", "desktop/src/ui/sheets/skillDiscovery.tsx",
                         "desktop/src/model/reactive.ts", "desktop/src/model/store.ts", "desktop/src/l10n/zh.ts"}
             seen = {assets[url]["source"] for url, _ in executed if url in active}
             if required - seen or base + PAGE not in assets:

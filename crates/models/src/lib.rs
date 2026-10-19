@@ -96,7 +96,7 @@ pub struct ModelInfo {
     pub max_output: u64,
     pub reasoning: bool,
     pub images: bool,
-    pub rates: Rates,
+    pub rates: Option<Rates>,
     pub tiers: Vec<CostTier>,
     pub thinking: ThinkingMode,
     pub levels: Vec<ThinkingLevel>,
@@ -107,7 +107,7 @@ impl ModelInfo {
     /// What a response cost, at the tier its input size lands in.
     pub fn cost_of(&self, usage: &Usage) -> Cost {
         let input_tokens = usage.input + usage.cache_read + usage.cache_write;
-        let mut rates = self.rates;
+        let Some(mut rates) = self.rates else { return Cost { known: Some(false), ..Cost::default() } };
         let mut matched = None;
         for tier in &self.tiers {
             if input_tokens > tier.input_tokens_above && matched.is_none_or(|t| tier.input_tokens_above > t) {
@@ -120,7 +120,7 @@ impl ModelInfo {
         let output = per(rates.output, usage.output);
         let cache_read = per(rates.cache_read, usage.cache_read);
         let cache_write = per(rates.cache_write, usage.cache_write);
-        Cost { input, output, cache_read, cache_write, total: input + output + cache_read + cache_write }
+        Cost { input, output, cache_read, cache_write, total: input + output + cache_read + cache_write, known: Some(true) }
     }
 
     /// The level this model runs at when asked for `level`: itself when supported, else the

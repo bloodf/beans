@@ -1165,6 +1165,7 @@ export interface ChatUsage {
   outputTokens: number;
   cacheReadTokens: number;
   costUSD: number;
+  costKnown?: boolean;
   turns: number;
   model: string;
 }
@@ -1179,7 +1180,8 @@ export function contextSummary(usage: ChatUsage): string {
 /** "$0.42 · 18 turns" */
 export function spendSummary(usage: ChatUsage): string {
   const dollars = usage.costUSD < 0.01 && usage.costUSD > 0 ? "<$0.01" : `$${usage.costUSD.toFixed(2)}`;
-  return usage.turns === 1 ? L("%@ · %d turn", dollars, usage.turns) : L("%@ · %d turns", dollars, usage.turns);
+  const cost = usage.costKnown === true ? dollars : usage.costUSD > 0 ? L("%@ known subtotal · total unknown", dollars) : L("Unknown cost");
+  return usage.turns === 1 ? L("%@ · %d turn", cost, usage.turns) : L("%@ · %d turns", cost, usage.turns);
 }
 
 // MARK: - Settings

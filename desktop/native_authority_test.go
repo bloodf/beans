@@ -12,6 +12,7 @@ import (
 
 	"github.com/bloodf/beans/desktop/model"
 	"github.com/coder/websocket"
+	"github.com/egoist/mygo/ui"
 )
 
 func TestNativeHostReconnectAdmission(t *testing.T) {
@@ -126,5 +127,47 @@ func TestNativeClosedWindowDraftsBlockQuitAndInstall(t *testing.T) {
 		if err := (&desktopUpdateLease{}).guardPages(context.Background()); err == nil {
 			t.Fatal("lease bypassed closed-window draft")
 		}
+	}
+}
+
+func TestNativeFirstFrameSelectedSidebar(t *testing.T) {
+	n := &nativeDesktop{store: model.NewNativeStore()}
+	session := model.NewSession(func(bool) {}, n.event)
+	old := session.Connect()
+	session.Disconnect()
+	current := session.Connect()
+	snapshot := json.RawMessage(`{"has_identity":true,"identity_id":"fixture","chats":[{"id":"selected","title":"Selected fixture","messages":[{"id":"one","author":{"kind":"you"},"body":{"kind":"text","text":"SELECTED TRANSCRIPT"},"state":{"kind":"complete"}}]},{"id":"second","title":"Second fixture","messages":[{"id":"two","author":{"kind":"you"},"body":{"kind":"text","text":"SECOND TRANSCRIPT"},"state":{"kind":"complete"}}]}]}`)
+	if err := session.Bootstrap(current, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	first := ui.NewTester(n.view, 1100, 760)
+	if !first.HasText("SELECTED TRANSCRIPT") || first.HasText("SECOND TRANSCRIPT") {
+		t.Fatal("first transcript disagrees with admitted selection")
+	}
+	r, ok := first.Find("Selected fixture")
+	if !ok {
+		t.Fatal("missing first sidebar row")
+	}
+	image := first.Image()
+	selectedColor := image.RGBAAt(int(r.X+5), int(r.Y+r.H/2))
+	n.store.Selected = "second"
+	second := ui.NewTester(n.view, 1100, 760)
+	r2, ok := second.Find("Selected fixture")
+	if !ok {
+		t.Fatal("missing distinct sidebar row")
+	}
+	unselectedColor := second.Image().RGBAAt(int(r2.X+5), int(r2.Y+r2.H/2))
+	if selectedColor == unselectedColor {
+		t.Fatal("first-frame sidebar does not visually mark selected chat")
+	}
+	if !second.HasText("SECOND TRANSCRIPT") || second.HasText("SELECTED TRANSCRIPT") {
+		t.Fatal("second selection transcript mismatch")
+	}
+	if err := session.Bootstrap(old, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	second.Frame()
+	if n.store.Selected != "second" || !second.HasText("SECOND TRANSCRIPT") {
+		t.Fatal("stale bootstrap replaced selection/transcript")
 	}
 }

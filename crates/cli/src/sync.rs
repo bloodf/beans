@@ -199,10 +199,9 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
             }
             return Err(conflict);
         }
-        if queued_roster.is_some() {
-            if let Some(current) = app.store.queued_roster().map_err(|error| RelayError { status: None, message: error.to_string() })? {
-                rebase_queued_roster(app, &machine_file, current)?;
-            }
+        // The pull can itself queue a policy projection before receiving the full roster.
+        if let Some(current) = app.store.queued_roster().map_err(|error| RelayError { status: None, message: error.to_string() })? {
+            rebase_queued_roster(app, &machine_file, current)?;
         }
         #[cfg(feature = "runner")]
         app.close_orphan_proposals().map_err(|error| RelayError { status: None, message: error.to_string() })?;
@@ -279,6 +278,7 @@ enum FirstSync {
 }
 
 async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<FirstSync, RelayError> {
+    app.relay.inspect_policy_replay(url, token, &machine_file.identity_pubkey).await?;
     // The relay keeps the latest roster alone, so the chats have their names and bots before
     // their messages land.
     let (mut since, mut head) = (0, None);
@@ -321,7 +321,7 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
             Err(error) => return Err(error),
         };
         for blob in slots.iter().flat_map(|slot| &slot.blobs) {
-            apply_blob(app, machine_file, blob);
+            apply_incoming_blob(app, machine_file, blob, true)?;
         }
         let before = slots.first().map(|slot| slot.place).filter(|_| has_more);
         if let Err(error) = app.store.set_history_before(&chat_id, before) {
@@ -412,14 +412,25 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
             }
             return Ok(());
         }
-        // A page this long is a backlog (a fresh pair replays the history): apply it quietly
-        // and tell the app once, instead of one event and one state write per message.
+        let held = apply_pull_page(app, machine_file, blobs)?;
+        // Releasing or expiring the lease wakes the session loop, which pulls from here again.
+        if held {
+            return pull_controls(app, url, token, machine_file).await;
+        }
+    }
+}
+
+// Keep page application synchronous: decrypt and commit before advancing past a read mark.
+fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
+    blobs: Vec<BlobIn>) -> Result<bool, RelayError> {
+        // A backlog publishes one snapshot instead of one event per message.
         let bulk = blobs.len() >= BULK_BLOBS;
         app.bulk_sync.store(bulk, Ordering::Relaxed);
         // A backlog's messages reach the app with its snapshot, and a turn's end must come
         // after the messages it ended with, so its results wait for that snapshot.
         let mut results = Vec::new();
         let mut held = false;
+        let applied = (|| -> Result<(), RelayError> {
         for blob in blobs {
             let seq = blob.seq;
             let is_roster = blob.kind == "roster";
@@ -438,7 +449,11 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
             if bulk && blob.kind == "job_result" {
                 results.push(blob);
             } else {
-                apply_incoming_blob(app, machine_file, &blob, true)?;
+                if blob.kind == "chat" {
+                    apply_chat_blob(app, machine_file, &blob, true, true)?;
+                } else {
+                    apply_incoming_blob(app, machine_file, &blob, true)?;
+                }
             }
             drop(admission);
             let mut state = app.state.lock().unwrap();
@@ -447,6 +462,8 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
             }
             state.last_seq = state.last_seq.max(seq);
         }
+        Ok(())
+        })();
         app.bulk_sync.store(false, Ordering::Relaxed);
         app.save_state_now();
         if bulk {
@@ -456,11 +473,8 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
         for blob in results {
             apply_blob(app, machine_file, &blob);
         }
-        // Releasing or expiring the lease wakes the session loop, which pulls from here again.
-        if held {
-            return pull_controls(app, url, token, machine_file).await;
-        }
-    }
+        applied?;
+        Ok(held)
 }
 
 /// While the cursor waits before an envelope an update holds back, running work still hears
@@ -470,6 +484,7 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
 /// stays unrecorded on the relay for the main pull to take in order. The cursor stays put.
 async fn pull_controls(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<(), RelayError> {
     let Ok(machine) = machine_file.machine() else { return Ok(()) };
+    app.relay.inspect_policy_replay(url, token, &machine_file.identity_pubkey).await?;
     let mut since = app.state.lock().unwrap().last_seq;
     loop {
         let (blobs, _) = app.relay.list_blobs(url, token, since, "policy,memory_config,job_cancel,job_result,request,response").await?;
@@ -904,6 +919,9 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
         if remember { remember_applied(&mut app.state.lock().unwrap(), &blob.id); }
         return Ok(());
     }
+    if blob.kind == "chat" {
+        return apply_chat_blob(app, machine_file, blob, remember, false);
+    }
     if blob.kind == "memory_config" {
         let _edit = app.roster_edit.lock().unwrap();
         if remember && app.state.lock().unwrap().applied_blob_ids.contains(&blob.id) { return Ok(()); }
@@ -993,9 +1011,9 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
 }
 
 pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
-    if matches!(blob.kind.as_str(), "roster" | "memory_config" | "job") {
+    if matches!(blob.kind.as_str(), "roster" | "memory_config" | "chat" | "job") {
         if let Err(error) = apply_incoming_blob(app, machine_file, blob, true) {
-            tracing::warn!(%error, "applying roster blob");
+            tracing::warn!(%error, "applying incoming blob");
         }
         return;
     }
@@ -1024,9 +1042,10 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Ok(policy) => apply_policy(app, policy),
             Err(error) => tracing::warn!(%error, "policy blob"),
         },
-        "chat" => match crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &ciphertext) {
-            Ok(op) => apply_chat_op(app, op),
-            Err(error) => tracing::warn!(%error, "chat blob"),
+        "chat" => {
+            if let Err(error) = apply_chat_blob(app, machine_file, blob, false, false) {
+                tracing::warn!(%error, "applying chat blob");
+            }
         },
         "machine" => match crate::crypto::decrypt_json::<MachineBlob>(&dek, "machine", &ciphertext) {
             Ok(MachineBlob { device, turns }) => {
@@ -1134,6 +1153,7 @@ fn apply_policy(app: &Arc<App>, policy: PolicyBlob) {
                     removed_bots.push(id.clone());
                     state.bots.retain(|bot| bot.id != id);
                     state.routines.retain(|routine| routine.bot_id != id);
+                    state.workflows.retain(|workflow| workflow.bot_id != id);
                     for chat in &mut state.chats {
                         if chat.meta.bot_ids.iter().any(|member| member == &id) {
                             if !chat.meta.is_group() { removed.push(chat.meta.id.clone()); continue; }
@@ -1294,6 +1314,7 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
     }
     merge_entities!(routines, bot_id, name, prompt, schedule, is_enabled, enabled_at,
         last_run_at, last_outcome, paused_reason, check);
+    merge_entities!(workflows, bot_id, name, definition);
     if queued.auto_review.is_enabled != base.auto_review.is_enabled {
         remote.auto_review.is_enabled = queued.auto_review.is_enabled;
     }
@@ -1308,6 +1329,12 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
             remote.auto_review.rules.push(local.clone());
         }
     }
+    // The workflows are bounded last, against the bot set this merged roster actually has.
+    // Admitting before the merges could size the roster against bots a tombstone or a queued
+    // deletion was about to take out, leaving records whose bot is gone and letting a
+    // tombstoned bot's workflow ride back out on the next pull.
+    let bot_ids = remote.bots.iter().chain(&queued.bots).map(|bot| bot.id.clone()).collect();
+    remote.workflows = crate::workflow::admit(remote.workflows, &base.workflows, &bot_ids);
     remote
 }
 
@@ -1326,6 +1353,7 @@ fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob) -> Ros
     accept_creations!(bots);
     accept_creations!(chats);
     accept_creations!(routines);
+    accept_creations!(workflows);
     base
 }
 
@@ -1364,6 +1392,11 @@ fn rebase_queued_roster(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
     queued.policy_capabilities = state.policy_capabilities.clone();
     queued.deleted_bot_versions = state.deleted_bot_versions.clone();
     queued.bots.retain(|bot| !state.deleted_bot_versions.contains_key(&bot.id));
+    // The same tombstone takes the bot's workflows with it. Merging bounds them against the
+    // bot set the merge produced, and this is the policy filter that runs after it, so a
+    // deleted bot's workflow would otherwise stay in what gets encrypted and uploaded.
+    let live_bots = queued.bots.iter().map(|bot| bot.id.clone()).collect::<std::collections::HashSet<_>>();
+    queued.workflows.retain(|workflow| live_bots.contains(&workflow.bot_id));
     for bot in &mut queued.bots {
         if let Some(capabilities) = state.policy_capabilities.get(&bot.id) { bot.capabilities = capabilities.clone(); }
     }
@@ -1459,10 +1492,14 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
             if chat.owner_bot_id.as_ref().is_some_and(|id| !chat.bot_ids.contains(id)) { chat.owner_bot_id = chat.bot_ids.first().cloned(); }
         }
         roster.routines.retain(|routine| !state.deleted_bot_versions.contains_key(&routine.bot_id));
+        roster.workflows.retain(|workflow| !state.deleted_bot_versions.contains_key(&workflow.bot_id));
         let removed_bots: Vec<String> = before.into_iter().filter(|id| !roster.bots.iter().any(|bot| bot.id == *id)).collect();
         let kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
         state.bots = roster.bots;
         state.routines = roster.routines;
+        let bot_ids = state.bots.iter().map(|bot| bot.id.clone()).collect();
+        let admitted = crate::workflow::admit(std::mem::take(&mut roster.workflows), &state.workflows, &bot_ids);
+        state.workflows = admitted;
         state.auto_review = roster.auto_review;
         let incoming_ids: Vec<String> = roster.chats.iter().map(|c| c.id.clone()).collect();
         let removed: Vec<String> = state.chats.iter().filter(|c| !incoming_ids.contains(&c.meta.id)
@@ -1497,6 +1534,44 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
     app.roster_changed(normalized_descriptions || kept_checks || corrected);
 }
 
+fn apply_chat_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn,
+    remember: bool, advance_cursor: bool) -> Result<(), RelayError> {
+    // Decrypt before taking the state lock or opening the SQLite transaction.
+    let decoded = unb64(&blob.ciphertext).and_then(|ciphertext| {
+        let dek = machine_file.dek()?;
+        crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &ciphertext)
+    });
+    if let Ok(ChatBlob::ClearUnread { chat_id }) = &decoded {
+        let mut state = app.state.lock().unwrap();
+        if remember && state.applied_blob_ids.contains(&blob.id) { return Ok(()); }
+        let mut staged = state.clone();
+        let changed = staged.chats.iter_mut().find(|chat| chat.meta.id == *chat_id)
+            .is_some_and(|chat| {
+                let changed = chat.unread_count > 0;
+                chat.unread_count = 0;
+                changed
+            });
+        if remember { remember_applied(&mut staged, &blob.id); }
+        if advance_cursor { staged.last_seq = staged.last_seq.max(blob.seq); }
+        app.store.save_state(&staged).map_err(local_relay_error)?;
+        *state = staged;
+        drop(state);
+        if changed { app.emit(app.roster_summary()); }
+        return Ok(());
+    }
+    // Other chat operations retain their existing receipt and application semantics.
+    if remember {
+        let mut state = app.state.lock().unwrap();
+        if state.applied_blob_ids.contains(&blob.id) { return Ok(()); }
+        remember_applied(&mut state, &blob.id);
+    }
+    match decoded {
+        Ok(op) => apply_chat_op(app, op),
+        Err(error) => tracing::warn!(%error, "chat blob"),
+    }
+    Ok(())
+}
+
 fn apply_chat_op(app: &Arc<App>, op: ChatBlob) {
     match op {
         ChatBlob::Upsert { message } => {
@@ -1523,11 +1598,7 @@ fn apply_chat_op(app: &Arc<App>, op: ChatBlob) {
             }
         }
         ChatBlob::Remove { chat_id, message_id } => app.remove_message(&chat_id, &message_id, false),
-        ChatBlob::ClearUnread { chat_id } => {
-            if let Err(error) = app.mark_read(&chat_id, false) {
-                tracing::error!(%error, "saving incoming read state");
-            }
-        }
+        ChatBlob::ClearUnread { .. } => unreachable!("read marks commit with their incoming envelope"),
     }
 }
 
@@ -1559,8 +1630,332 @@ mod tests {
 
     fn scratch_app() -> ScratchApp {
         let home = std::env::temp_dir().join(format!("beans-sync-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    fn policy_cut_fixture(log: &[serde_json::Value], query: &std::collections::HashMap<String,String>) -> serde_json::Value {
+        use serde_json::json;
+        let since = query["since"].parse::<i64>().unwrap();
+        let through = query.get("through").map(|value| value.parse::<i64>().unwrap())
+            .unwrap_or_else(|| log.iter().filter_map(|blob| blob["seq"].as_i64()).max().unwrap_or(0));
+        let mut rows = log.iter().filter(|blob| blob["kind"] == "policy"
+            && blob["seq"].as_i64().unwrap() > since && blob["seq"].as_i64().unwrap() <= through);
+        let first = rows.next();
+        let done = rows.next().is_none();
+        let blobs: Vec<_> = first.into_iter().map(|blob| json!({"subtype":"ordinary","id":blob["id"],
+            "seq":blob["seq"],"ciphertext":crate::keys::unb64(blob["ciphertext"].as_str().unwrap()).unwrap()})).collect();
+        json!({"schema_version":1,"context":"fixture:session","cut_token":"opaque",
+            "through":through,"next_since":if done { through } else { first.unwrap()["seq"].as_i64().unwrap() },
+            "done":done,"blobs":blobs})
+    }
+
+    #[tokio::test]
+    async fn managed_policy_reader_refuses_invalid_cuts_without_activation() {
+        use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
+        use serde_json::{json, Value};
+        use sha2::{Digest, Sha256};
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let machine = crate::keys::MachineFile {
+            format: crate::config::Format::BeansV2, machine_secret: crate::keys::b64(&[17; 32]),
+            identity_pubkey: "account".into(), content_pubkey: String::new(),
+            account_dek: crate::keys::b64(&[31; 32]), name: "synthetic".into(), os: "ios".into(),
+            os_version: String::new(), model: String::new(), registered: false, relay_url: None, created_at: 1,
+        };
+        let policy = vec![1u8, 2, 3];
+        let roster = vec![4u8, 5, 6];
+        let ph = format!("{:x}", Sha256::digest(&policy));
+        let rh = format!("{:x}", Sha256::digest(&roster));
+        let commitment = json!(["beans-managed-skill-commit",1,"account","transaction",0,
+            ["policy",3,ph,"managed_skill_policy",null,null,null],
+            ["roster",3,rh,"roster","roster",null,null],null]);
+        let receipt = json!({"schema_version":1,"account_id":"account","transaction_id":"transaction",
+            "request_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&commitment).unwrap())),
+            "expected_slot_seq":0,"policy_id":"policy","policy_ciphertext_len":3,"policy_sha256":ph,"policy_seq":1,
+            "roster_id":"roster","roster_ciphertext_len":3,"roster_sha256":rh,"roster_seq":2,"checkpoint_transaction_id":null});
+        let complete = json!({"schema_version":1,"context":"incarnation:session","cut_token":"opaque",
+            "through":2,"next_since":2,"done":true,"blobs":[{"subtype":"managed","receipt":receipt,
+                "policy_ciphertext":policy,"roster_ciphertext":roster}]});
+        let rejected_pause = json!({"id":"must-not-apply","kind":"policy","recipient_machine_pubkey":null,
+            "seq":1,"created_at":1,"ciphertext":crate::keys::b64(&crate::crypto::encrypt_json(
+                &[31;32],"policy",&PolicyBlob { paused:Some(true),bot_id:None,capabilities:None,removed:false,
+                    version:PolicyVersion { counter:9,device_id:"remote".into() } }).unwrap())});
+        async fn list(HttpState(values): HttpState<Arc<(Value,Value,Value)>>,
+            Query(query): Query<std::collections::HashMap<String,String>>) -> Json<Value> {
+            if query.contains_key("receipt_transaction_id") { return Json(values.1.clone()); }
+            if query.contains_key("policy_replay") {
+                return Json(if values.0.is_array() {
+                    values.0[usize::from(query.contains_key("cut_token"))].clone()
+                } else { values.0.clone() });
+            }
+            Json(values.2.clone())
+        }
+        let mut partial = complete.clone(); partial["through"] = json!(1); partial["next_since"] = json!(1);
+        let mut mismatch = complete.clone(); mismatch["blobs"][0]["policy_ciphertext"] = json!([9,2,3]);
+        let mut wrong_receipt = receipt.clone(); wrong_receipt["account_id"] = json!("other-account");
+        let mut unsupported = complete.clone(); unsupported["schema_version"] = json!(2);
+        let mut prefix = complete.clone(); prefix["through"] = json!(3);
+        prefix["done"] = json!(false);
+        let tail = json!({"schema_version":1,"context":"incarnation:session","cut_token":"next",
+            "through":3,"next_since":3,"done":true,"blobs":[]});
+        let mut stale = tail.clone(); stale["context"] = json!("replacement:session");
+        let downgrade = json!({"blobs":[],"seq":3});
+        for (page, lookup, accepted) in [(partial,receipt.clone(),false),(mismatch,receipt.clone(),false),
+            (complete.clone(),wrong_receipt,false),(unsupported,receipt.clone(),false),
+            (json!([prefix.clone(),stale]),receipt.clone(),false),
+            (json!([prefix.clone(),downgrade]),receipt.clone(),false),
+            (json!([prefix,tail]),receipt.clone(),true),(complete,receipt,true)] {
+            let legacy = if accepted { json!({"blobs":[],"seq":0}) }
+                else { json!({"blobs":[rejected_pause.clone()],"seq":1}) };
+            let server = Router::new().route("/v1/blobs",get(list)).with_state(Arc::new((page,lookup,legacy)));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}",listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener,server).await.unwrap() });
+            let projection = |state: &crate::app::State| (
+                state.last_seq, state.roster_slot_seq, state.paused, state.policy_clock,
+                state.pause_version.clone(), state.capability_versions.clone(), state.policy_capabilities.clone(),
+                state.deleted_bot_versions.clone(), state.bots.clone(), state.applied_blob_ids.clone());
+            let before = projection(&app.state.lock().unwrap());
+            let durable = projection(&app.store.load_state().unwrap());
+            assert_eq!(pull_controls(app,&url,"synthetic",&machine).await.is_ok(),accepted);
+            assert_eq!(first_sync_quietly(app,&url,"synthetic",&machine).await.is_ok(),accepted);
+            assert_eq!(projection(&app.state.lock().unwrap()),before);
+            assert_eq!(projection(&app.store.load_state().unwrap()),durable);
+            task.abort();
+            let _ = task.await;
+        }
+
+        // A protocol-5 relay ignores the optional query and returns its ordinary page.
+        // Both callers must still apply the encrypted Pause, never managed authority.
+        async fn legacy_list(HttpState(blob): HttpState<Value>,
+            Query(query): Query<std::collections::HashMap<String,String>>) -> Json<Value> {
+            let since = query["since"].parse::<i64>().unwrap();
+            Json(json!({"blobs":if since == 0 { vec![blob] } else { vec![] },"seq":1}))
+        }
+        for controls in [true,false] {
+            let scratch = scratch_app();
+            let app = &scratch.0;
+            crate::identity::create(app,Some("Legacy Device".into())).unwrap();
+            let machine = app.machine_file().unwrap();
+            let pause = PolicyBlob { paused:Some(true),bot_id:None,capabilities:None,removed:false,
+                version:PolicyVersion { counter:7,device_id:"legacy-device".into() } };
+            let blob = json!({"id":"legacy-pause","kind":"policy","recipient_machine_pubkey":null,
+                "seq":1,"created_at":1,"ciphertext":crate::keys::b64(
+                    &crate::crypto::encrypt_json(&app.dek().unwrap(),"policy",&pause).unwrap())});
+            let server = Router::new().route("/v1/blobs",get(legacy_list))
+                .route("/v1/groups/{group}/blobs",get(|| async { Json(json!({"slots":[],"has_more":false})) }))
+                .with_state(blob);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}",listener.local_addr().unwrap());
+            let task = tokio::spawn(async move { axum::serve(listener,server).await.unwrap() });
+            assert!(!app.is_paused());
+            if controls { pull_controls(app,&url,"synthetic",&machine).await.unwrap(); }
+            else { first_sync_quietly(app,&url,"synthetic",&machine).await.unwrap(); }
+            let state = app.state.lock().unwrap();
+            assert!(state.paused);
+            assert_eq!(state.pause_version,pause.version);
+            assert_eq!(state.last_seq,if controls { 0 } else { 1 });
+            assert_eq!(state.roster_slot_seq,0);
+            drop(state);
+            assert!(app.store.load_state().unwrap().paused);
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn incoming_read_page_commits_or_retries_without_consuming_receipt() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let dek = [31; 32];
+        let machine = crate::keys::MachineFile {
+            format: crate::config::Format::BeansV2,
+            machine_secret: crate::keys::b64(&[17; 32]),
+            identity_pubkey: String::new(), content_pubkey: String::new(),
+            account_dek: crate::keys::b64(&dek), name: "synthetic".into(), os: "ios".into(),
+            os_version: String::new(), model: String::new(), registered: false,
+            relay_url: None, created_at: 1,
+        };
+        let envelope = |id: String, seq, op: ChatBlob| BlobIn {
+            id, kind: "chat".into(), recipient_machine_pubkey: None,
+            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&dek, "chat", &op).unwrap()),
+            seq, created_at: 1,
+        };
+        {
+            let mut state = app.state.lock().unwrap();
+            state.last_seq = 10;
+            state.chats.push(Chat {
+                meta: ChatMeta { id: "read".into(), kind: "dm".into(), title: None,
+                    bot_ids: vec![], owner_bot_id: None, description: None, is_pinned: false, created_at: 1.0 },
+                unread_count: 3, usage: None, compactions: vec![],
+            });
+            app.store.save_state(&state).unwrap();
+        }
+        // Valid encrypted input succeeds before any failure injection.
+        let positive = envelope("positive-read".into(), 11, ChatBlob::ClearUnread { chat_id: "read".into() });
+        apply_pull_page(app, &machine, vec![positive]).unwrap();
+        let committed = app.store.load_state().unwrap();
+        assert_eq!(committed.chats[0].unread_count, 0);
+        assert_eq!(committed.last_seq, 11);
+        assert!(committed.applied_blob_ids.contains(&"positive-read".into()));
+        let db = rusqlite::Connection::open(app.config.database_path()).unwrap();
+        for (case, table) in [("single", "metadata"), ("bulk-chats", "chats"), ("bulk-receipt", "applied_blobs")] {
+            app.state.lock().unwrap().chats[0].unread_count = 3;
+            app.store.save_state(&app.state.lock().unwrap()).unwrap();
+            let baseline = app.store.load_state().unwrap();
+            let read_seq = baseline.last_seq + 2;
+            let read_id = format!("{case}-read");
+            let page = || {
+                let mut blobs = vec![
+                    envelope(format!("{case}-accepted"), read_seq - 1,
+                        ChatBlob::Remove { chat_id: "read".into(), message_id: "already-absent".into() }),
+                    envelope(read_id.clone(), read_seq, ChatBlob::ClearUnread { chat_id: "read".into() }),
+                ];
+                if case != "single" {
+                    for index in 1..BULK_BLOBS {
+                        blobs.push(envelope(format!("{case}-later-{index}"), read_seq + index as i64,
+                            ChatBlob::Remove { chat_id: "read".into(), message_id: format!("absent-{index}") }));
+                    }
+                }
+                blobs
+            };
+            let condition = match table {
+                "metadata" => format!("NEW.last_seq >= {read_seq}"),
+                "chats" => "json_extract(NEW.json, '$.unread_count') = 0".into(),
+                _ => format!("NEW.id = '{read_id}'"),
+            };
+            db.execute_batch(&format!("CREATE TRIGGER fail_incoming_read BEFORE INSERT ON {table} WHEN {condition} BEGIN SELECT RAISE(ABORT, 'synthetic incoming failure'); END;")).unwrap();
+            let mut events = app.events.subscribe();
+            let error = apply_pull_page(app, &machine, page()).unwrap_err();
+            assert!(error.message.contains("synthetic incoming failure"));
+            assert!(!app.bulk_sync.load(Ordering::Relaxed));
+            assert_eq!(app.chat("read").unwrap().unread_count, 3);
+            let mut accepted_receipts = baseline.applied_blob_ids.clone();
+            accepted_receipts.push(format!("{case}-accepted"));
+            assert_eq!(app.state.lock().unwrap().last_seq, read_seq - 1);
+            assert_eq!(app.state.lock().unwrap().applied_blob_ids, accepted_receipts);
+            let retained = app.store.load_state().unwrap();
+            assert_eq!(retained.chats[0].unread_count, 3);
+            assert_eq!(retained.last_seq, read_seq - 1);
+            assert_eq!(retained.applied_blob_ids, accepted_receipts);
+            let rejected_reload = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+            assert_eq!(rejected_reload.chat("read").unwrap().unread_count, 3);
+            assert_eq!(rejected_reload.state.lock().unwrap().last_seq, read_seq - 1);
+            assert_eq!(rejected_reload.state.lock().unwrap().applied_blob_ids, accepted_receipts);
+            drop(rejected_reload);
+            assert!(!std::iter::from_fn(|| events.try_recv().ok()).any(|event|
+                matches!(event, Event::RosterChanged { .. })));
+            db.execute_batch("DROP TRIGGER fail_incoming_read;").unwrap();
+            apply_pull_page(app, &machine, page()).unwrap();
+            let saved = app.store.load_state().unwrap();
+            assert_eq!(saved.chats[0].unread_count, 0);
+            assert_eq!(saved.last_seq, read_seq + if case != "single" { BULK_BLOBS as i64 - 1 } else { 0 });
+            assert!(saved.applied_blob_ids.contains(&read_id));
+            let cleared_reload = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+            assert_eq!(cleared_reload.chat("read").unwrap().unread_count, 0);
+            assert_eq!(cleared_reload.state.lock().unwrap().last_seq, saved.last_seq);
+            assert_eq!(cleared_reload.state.lock().unwrap().applied_blob_ids, saved.applied_blob_ids);
+            drop(cleared_reload);
+            // A duplicate cannot clear messages that became unread after this receipt.
+            app.state.lock().unwrap().chats[0].unread_count = 2;
+            app.store.save_state(&app.state.lock().unwrap()).unwrap();
+            apply_pull_page(app, &machine, page()).unwrap();
+            assert_eq!(app.chat("read").unwrap().unread_count, 2);
+            let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+            assert_eq!(reloaded.chat("read").unwrap().unread_count, 2);
+            assert_eq!(reloaded.state.lock().unwrap().last_seq, saved.last_seq);
+            assert_eq!(reloaded.state.lock().unwrap().applied_blob_ids, saved.applied_blob_ids);
+        }
+        assert!(app.store.outbox().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn first_sync_policy_projection_preserves_remote_bots_when_uploaded() {
+        use axum::{extract::{Query, State as HttpState, WebSocketUpgrade}, routing::{get, post}, Json, Router};
+        use serde_json::{json, Value};
+        use tokio::sync::Notify;
+
+        struct RelayFixture {
+            blobs: Vec<Value>,
+            published: std::sync::Mutex<Option<Value>>,
+            uploaded: Notify,
+        }
+        async fn list(HttpState(fixture): HttpState<Arc<RelayFixture>>,
+            Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&fixture.blobs, &query)); }
+            let since: i64 = query["since"].parse().unwrap();
+            let kinds: Vec<&str> = query["kinds"].split(',').collect();
+            Json(json!({"blobs": fixture.blobs.iter().filter(|blob|
+                blob["seq"].as_i64().unwrap() > since
+                    && kinds.contains(&blob["kind"].as_str().unwrap())).collect::<Vec<_>>(), "seq": 2}))
+        }
+        async fn upload(HttpState(fixture): HttpState<Arc<RelayFixture>>, Json(body): Json<Value>) -> Json<Value> {
+            if body["kind"] == "roster" {
+                *fixture.published.lock().unwrap() = Some(body);
+                fixture.uploaded.notify_one();
+            }
+            Json(json!({"seq": 3}))
+        }
+        async fn socket(upgrade: WebSocketUpgrade) -> axum::response::Response {
+            upgrade.on_upgrade(|mut socket| async move {
+                while socket.recv().await.is_some() {}
+            })
+        }
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Joining Device".into())).unwrap();
+        app.machine.lock().unwrap().as_mut().unwrap().registered = true;
+        app.store.clear().unwrap();
+        *app.state.lock().unwrap() = Default::default();
+        app.save_state();
+        assert!(app.store.queued_roster().unwrap().is_none());
+
+        let mut remote = roster(bot("remote-bot"));
+        let capabilities = crate::model::Capabilities { shell: false, write: false, plugins: Some(Vec::new()) };
+        let version = crate::model::PolicyVersion { counter: 1, device_id: "remote-device".into() };
+        remote.bots[0].capabilities = capabilities.clone();
+        remote.capability_versions.insert("remote-bot".into(), version.clone());
+        remote.policy_capabilities.insert("remote-bot".into(), capabilities.clone());
+        remote.policy_clock = 1;
+        remote.chats.push(ChatMeta { id: "remote-chat".into(), kind: "dm".into(), title: None,
+            bot_ids: vec!["remote-bot".into()], owner_bot_id: Some("remote-bot".into()),
+            description: None, is_pinned: false, created_at: 1.0 });
+        let policy = PolicyBlob { paused: None, bot_id: Some("remote-bot".into()),
+            capabilities: Some(capabilities), removed: false, version };
+        let dek = app.dek().unwrap();
+        let fixture = Arc::new(RelayFixture {
+            blobs: vec![
+                json!({"id":"policy-before-roster","kind":"policy","recipient_machine_pubkey":null,
+                    "ciphertext":crate::keys::b64(&crate::crypto::encrypt_json(&dek,"policy",&policy).unwrap()),"seq":1,"created_at":1}),
+                json!({"id":"remote-roster","kind":"roster","recipient_machine_pubkey":null,
+                    "ciphertext":crate::keys::b64(&crate::crypto::encrypt_json(&dek,"roster",&remote).unwrap()),"seq":2,"created_at":2}),
+            ], published: std::sync::Mutex::new(None), uploaded: Notify::new(),
+        });
+        let server = Router::new()
+            .route("/v1/health", get(|| async { Json(json!({"ok":true,"service":"beans-relay","format":"beans-v2","protocol":crate::relay::PROTOCOL,"min_protocol":crate::relay::PROTOCOL,"min_roster_protocol":crate::relay::PROTOCOL,"memory_config_version":1})) }))
+            .route("/v1/auth/challenge", post(|| async { Json(json!({"nonce":"test-nonce"})) }))
+            .route("/v1/auth/verify", post(|| async { Json(json!({"token":"test-token"})) }))
+            .route("/v1/sync", get(socket))
+            .route("/v1/blobs", get(list).put(upload))
+            .route("/v1/groups/{group}/blobs", get(|| async { Json(json!({"slots":[],"has_more":false})) }))
+            .with_state(fixture.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        app.set_relay_url(Some(format!("http://{}", listener.local_addr().unwrap()))).unwrap();
+        let server_task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let syncing = tokio::spawn({ let app = app.clone(); async move { session(&app, &mut 0).await } });
+        let arrived = tokio::time::timeout(Duration::from_secs(10), fixture.uploaded.notified()).await;
+        syncing.abort();
+        server_task.abort();
+        arrived.expect("first sync never published its policy projection");
+        let published = fixture.published.lock().unwrap().clone().unwrap();
+        let projected: RosterBlob = crate::crypto::decrypt_json(&dek, "roster",
+            &crate::keys::unb64(published["ciphertext"].as_str().unwrap()).unwrap()).unwrap();
+        assert!(projected.bots.iter().any(|bot| bot.id == "remote-bot"), "first join erased the remote bot");
+        assert!(projected.chats.iter().any(|chat| chat.id == "remote-chat"), "first join erased the remote chat");
+        assert_eq!(published["expected_slot_seq"], 2);
     }
 
     #[tokio::test]
@@ -1706,6 +2101,270 @@ mod tests {
         let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
         assert_eq!(serde_json::to_value(restarted.bot("bot").unwrap()).unwrap()["look"], latest);
         assert_eq!(restarted.store.queued_roster().unwrap().unwrap().ciphertext, encrypted.ciphertext);
+    }
+
+    #[test]
+    fn workflows_two_devices_merge_per_bot_and_keep_a_foreign_schema_byte_for_byte() {
+        use crate::model::WorkflowRecord;
+        use serde_json::json;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let workflow = |id: &str, bot: &str, definition: serde_json::Value| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition, created_at: 1.0,
+        };
+        let this = app.this_device_id().unwrap();
+        let manifest = crate::plugins::Manifest::parse(&json!({ "id": "linear", "name": "Linear", "servers": { "api": { "type": "stdio", "command": "false" } } })).unwrap();
+        crate::plugins::install(app, manifest, "inline").unwrap();
+        let catalog = app.config.plugins_dir().join("linear").join("catalog.json");
+        crate::config::write_json_private(&catalog, &json!({ "servers": { "api": { "tools": [{ "name": "list_issues", "inputSchema": { "type": "object" } }] } } })).unwrap();
+        let valid = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "Summarize", "tools": ["linear__list_issues"] }] });
+        let foreign = json!({ "version": 2, "revision": "r9", "steps": [{ "prompt": "x", "future": [1, { "a": null }] }], "extra": true });
+        let huge = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "y".repeat(crate::workflow::MAX_DEFINITION_BYTES + 1) }] });
+        let local_bot = |id: &str| Bot { runner_id: this.clone(), ..bot(id) };
+        let mut base = RosterBlob { bots: vec![local_bot("b1"), local_bot("b2")], ..Default::default() };
+        base.workflows = vec![workflow("old", "b2", valid.clone())];
+        app.store.observe_roster(1, &base).unwrap();
+        apply_roster(app, base.clone());
+
+        // This Device saves one for b1 and drops "old" while offline; the other Device
+        // saved a newer-schema one for b1 and renamed "old".
+        let mut local = base.clone();
+        local.workflows = vec![workflow("mine", "b1", valid.clone())];
+        let mut remote = base.clone();
+        remote.workflows = vec![workflow("old", "b2", valid.clone()), workflow("theirs", "b1", foreign.clone()), workflow("huge", "b1", huge)];
+        remote.workflows[0].name = "renamed".into();
+
+        let merged = merge_rosters(remote, &base, &local);
+        let ids: Vec<&str> = merged.workflows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["theirs", "mine"], "the local drop of \"old\" wins; both creations survive; the oversize one is not taken");
+        assert_eq!(merged.workflows[0].definition, foreign, "a foreign schema is carried byte for byte");
+
+        let granted = app.state.lock().unwrap().bots.iter().map(|b| b.capabilities.clone()).collect::<Vec<_>>();
+        apply_roster(app, merged);
+        assert_eq!(app.workflows_of("b1").len(), 2);
+        assert!(app.workflows_of("b2").is_empty());
+        let listed = |app: &Arc<App>| app.workflows_of("b1").iter().map(|w| (w.id.clone(), crate::workflow::out(app, w))).collect::<Vec<_>>();
+        let shown = listed(app);
+        let state = |id: &str| shown.iter().find(|(wid, _)| wid == id).unwrap().1["state"].clone();
+        assert_eq!(state("theirs"), "unavailable", "the foreign schema is invalid here, kept as is");
+        assert_eq!(state("mine"), "valid", "its tool is the catalog's own identifier and the bot may use it");
+        assert_eq!(app.state.lock().unwrap().bots.iter().map(|b| b.capabilities.clone()).collect::<Vec<_>>(), granted, "grants do not change");
+        app.state.lock().unwrap().bots.iter_mut().find(|b| b.id == "b1").unwrap().capabilities.plugins = Some(Vec::new());
+        let revoked = listed(app);
+        assert_eq!(revoked.iter().find(|(id, _)| id == "mine").unwrap().1["state"], "unavailable", "a revoked plugin makes it unavailable, not gone");
+        assert_eq!(app.workflows_of("b1").len(), 2);
+
+        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(restarted.workflows_of("b1").iter().find(|w| w.id == "theirs").unwrap().definition, foreign);
+        assert_eq!(restarted.state.lock().unwrap().bots.len(), 2);
+    }
+
+    #[test]
+    fn workflows_inbound_over_bounds_keep_the_last_accepted_and_lose_nothing_else() {
+        use crate::model::WorkflowRecord;
+        use serde_json::json;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let workflow = |id: &str, definition: serde_json::Value| WorkflowRecord {
+            id: id.into(), bot_id: "b1".into(), name: id.into(), definition, created_at: 1.0,
+        };
+        let small = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "Summarize" }] });
+        let huge = json!({ "version": 9, "blob": "x".repeat(crate::workflow::MAX_DEFINITION_BYTES + 1) });
+        let mut base = RosterBlob { bots: vec![bot("b1")], ..Default::default() };
+        base.workflows = vec![workflow("kept", small.clone())];
+        app.store.observe_roster(1, &base).unwrap();
+        apply_roster(app, base.clone());
+        assert_eq!(app.workflows_of("b1").len(), 1);
+
+        // Another Device sends an oversize replacement for "kept", an oversize new one, a
+        // newer-schema one inside the bounds, and an ordinary rename of the bot.
+        let newer = json!({ "version": 2, "revision": "r2", "steps": [], "future": { "a": [1] } });
+        let mut remote = base.clone();
+        remote.bots[0].name = "Renamed".into();
+        remote.workflows = vec![workflow("kept", huge.clone()), workflow("big-new", huge), workflow("newer", newer.clone())];
+        apply_roster(app, remote);
+
+        let held = app.workflows_of("b1");
+        let ids: Vec<&str> = held.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["kept", "newer"], "the oversize new record is skipped; nothing else is lost");
+        assert_eq!(held[0].definition, small, "the last accepted definition stays");
+        assert_eq!(held[1].definition, newer, "a bounded newer schema is kept as it arrived");
+        assert_eq!(app.bot("b1").unwrap().name, "Renamed", "the rest of the roster applied");
+
+        let shown: Vec<serde_json::Value> = held.iter().map(|w| crate::workflow::out(app, w)).collect();
+        assert_eq!(shown[1]["state"], "unavailable");
+        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(restarted.workflows_of("b1"), held, "what was kept is what reloads");
+    }
+
+    #[test]
+    fn workflows_inbound_bot_ids_duplicates_and_quotas_merge_deterministically() {
+        use crate::model::WorkflowRecord;
+        use serde_json::json;
+        let definition = json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] });
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition: definition.clone(), created_at: 1.0,
+        };
+        let held = workflow("held", "b0");
+        let mut base = RosterBlob { bots: (0..14).map(|i| bot(&format!("b{i}"))).collect(), ..Default::default() };
+        base.workflows = vec![held.clone()];
+        let local = base.clone();
+
+        // 14 bots with 20 each is 280: over the total of 256. Plus an oversize bot id, a bot
+        // that is not in the roster, two records sharing one id, and a 21st for bot b1.
+        let mut incoming: Vec<WorkflowRecord> = vec![held.clone()];
+        for i in 0..14 {
+            for n in 0..20 {
+                incoming.push(workflow(&format!("w-{i:02}-{n:02}"), &format!("b{i}")));
+            }
+        }
+        incoming.push(workflow("w-01-extra", "b1"));
+        incoming.push(workflow("long-bot", &"b".repeat(65)));
+        incoming.push(workflow("ghost", "deleted-bot"));
+        incoming.push(workflow("twin", "b2"));
+        incoming.push(WorkflowRecord { name: "other".into(), ..workflow("twin", "b3") });
+        let merge = |incoming: &[WorkflowRecord]| {
+            let mut remote = base.clone();
+            remote.workflows = incoming.to_vec();
+            merge_rosters(remote, &base, &local).workflows
+        };
+        let merged = merge(&incoming);
+        let ids = |records: &[WorkflowRecord]| { let mut ids: Vec<String> = records.iter().map(|w| w.id.clone()).collect(); ids.sort(); ids };
+        assert_eq!(merged.len(), crate::workflow::MAX_TOTAL, "the total is capped, not the roster");
+        assert!(merged.iter().any(|w| w.id == "held"), "a held record keeps its place under the quota");
+        for gone in ["w-01-extra", "long-bot", "ghost", "twin"] {
+            assert!(!merged.iter().any(|w| w.id == gone), "{gone} is not taken");
+        }
+        for i in 0..14 {
+            let count = merged.iter().filter(|w| w.bot_id == format!("b{i}")).count();
+            assert!(count <= crate::workflow::MAX_PER_BOT, "b{i}: {count}");
+        }
+        // The same set in the opposite order gives the same result.
+        let mut reversed = incoming.clone();
+        reversed.reverse();
+        assert_eq!(ids(&merge(&reversed)), ids(&merged), "quota and duplicate handling do not depend on order");
+        // A duplicate id keeps what is held under it, and a held record is never replaced by a
+        // record for a bot the roster no longer has.
+        let mut clash = held.clone();
+        clash.bot_id = "deleted-bot".into();
+        assert_eq!(merge(&[clash.clone(), clash]), vec![held.clone()]);
+        assert!(merge(&[workflow("held", "deleted-bot")]).iter().all(|w| w.bot_id == "b0"));
+    }
+
+    /// The final bound is decided against the bot set the merged roster actually has. A remote
+    /// roster at the total bound plus one queued record must end at the bound, with the record
+    /// this Device holds keeping its place.
+    #[test]
+    fn a_full_remote_roster_and_a_queued_record_end_at_the_bound_without_resurrecting() {
+        use crate::model::WorkflowRecord;
+        let definition = serde_json::json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] });
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition: definition.clone(), created_at: 1.0,
+        };
+        let mut base = RosterBlob { bots: (0..13).map(|i| bot(&format!("b{i:02}"))).collect(), ..Default::default() };
+        base.workflows = vec![workflow("held", "b00")];
+
+        // The remote roster arrives already at the bound, and a queued local record is waiting.
+        let mut remote = base.clone();
+        for i in 0..13 {
+            for n in 0..crate::workflow::MAX_PER_BOT {
+                if remote.workflows.len() < crate::workflow::MAX_TOTAL {
+                    remote.workflows.push(workflow(&format!("r-{i:02}-{n:02}"), &format!("b{i:02}")));
+                }
+            }
+        }
+        assert_eq!(remote.workflows.len(), crate::workflow::MAX_TOTAL, "the remote roster starts at the bound");
+        // The queued roster still holds the base's record: three-way merge drops a base record the
+        // queued side no longer has, so a queued side that omitted it would be read as a delete.
+        let queued = RosterBlob {
+            workflows: vec![workflow("held", "b00"), workflow("queued-new", "b01")], ..base.clone()
+        };
+
+        let merged = merge_rosters(remote, &base, &queued).workflows;
+        assert!(merged.len() <= crate::workflow::MAX_TOTAL, "the merge grew past the bound: {}", merged.len());
+        assert!(merged.iter().any(|w| w.id == "held"), "a held record lost its place under the bound");
+        // Every record that entered at the bound has a bot, and the two records that belong to this
+        // Device's own side of the merge are the ones that can be present. `queued-new` is a new
+        // record like the `r-` ones, and `admit` takes the over-quota slice in id order, so it
+        // sorts ahead of them and takes a slot that a `r-` record gives up instead.
+        for record in &merged {
+            assert!(!record.bot_id.is_empty() && (record.id.starts_with("r-") || record.id == "held" || record.id == "queued-new"),
+                "an unexpected record survived: {}", record.id);
+        }
+        for bot in ["b00", "b01"] {
+            let count = merged.iter().filter(|w| w.bot_id == bot).count();
+            assert!(count <= crate::workflow::MAX_PER_BOT, "{bot} kept {count} records");
+        }
+    }
+
+    /// A bot deleted on this Device takes its workflows out of what the merge would otherwise
+    /// hand on. The roster merge keeps records for a bot the base no longer lists only when the
+    /// bot is still in the roster; the deletion path is the rebase filter, so this checks the
+    /// merge does not hand a deleted bot's record back before that filter runs.
+    #[test]
+    fn a_deleted_bots_workflow_is_absent_from_the_merged_roster() {
+        use crate::model::WorkflowRecord;
+        let definition = serde_json::json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] });
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), definition: definition.clone(), created_at: 1.0,
+        };
+        let mut base = RosterBlob { bots: vec![bot("b1"), bot("b2")], ..Default::default() };
+        base.workflows = vec![workflow("kept", "b1"), workflow("doomed", "b2")];
+
+        // The bot was deleted on this Device, so the queued roster and the remote roster both
+        // left it out; only the remote roster still carries its workflow.
+        let mut queued = base.clone();
+        queued.bots.retain(|bot| bot.id != "b2");
+        queued.workflows.retain(|w| w.id != "doomed");
+        let mut remote = base.clone();
+        remote.bots.retain(|bot| bot.id != "b2");
+        remote.workflows = vec![workflow("kept", "b1"), workflow("doomed", "b2")];
+
+        let merged = merge_rosters(remote, &base, &queued);
+        assert!(merged.bots.iter().all(|bot| bot.id != "b2"), "the deleted bot came back");
+        assert!(!merged.workflows.iter().any(|w| w.id == "doomed"),
+            "a deleted bot's workflow is still in the merged roster");
+        assert!(merged.workflows.iter().any(|w| w.id == "kept"), "a live bot lost its workflow");
+    }
+
+    /// A bot deleted while its upload sat in the outbox takes its workflows with it. The
+    /// outbox item was written before the deletion, and queueing the next roster puts its
+    /// baseline back, so the rebase runs the merge branch: `merge_rosters` still sees b2 in
+    /// the queued bot set and keeps its record, and the tombstone filter after the merge is
+    /// what drops it before the roster is encrypted and uploaded.
+    #[test]
+    fn a_deleted_bots_workflow_is_dropped_from_an_outbox_written_before_the_delete() {
+        use crate::model::WorkflowRecord;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        let workflow = |id: &str, bot: &str| WorkflowRecord {
+            id: id.into(), bot_id: bot.into(), name: id.into(), created_at: 1.0,
+            definition: serde_json::json!({ "version": 1, "revision": "r1", "steps": [{ "prompt": "x" }] }),
+        };
+
+        let mut held = roster(bot("b1"));
+        held.bots.push(bot("b2"));
+        held.workflows = vec![workflow("kept", "b1"), workflow("doomed", "b2")];
+        apply_roster(app, held);
+        app.push_roster();
+        let pending = app.store.queued_roster().unwrap().unwrap();
+        let uploaded: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &pending.ciphertext).unwrap();
+        assert!(uploaded.workflows.iter().any(|w| w.id == "doomed"), "the outbox item no longer holds the record to drop");
+
+        app.delete_bot("b2").unwrap();
+        rebase_queued_roster(app, &app.machine_file().unwrap(), pending).unwrap();
+
+        let published = app.store.queued_roster().unwrap().unwrap();
+        let roster: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &published.ciphertext).unwrap();
+        assert!(!roster.workflows.iter().any(|w| w.id == "doomed"), "a deleted bot's workflow survived the rebase");
+        assert!(roster.workflows.iter().any(|w| w.id == "kept"), "a live bot lost its workflow");
     }
 
     fn policy(device: &str, counter: u64, paused: Option<bool>, capabilities: Option<Capabilities>) -> PolicyBlob {
@@ -2095,6 +2754,7 @@ mod tests {
         }
         async fn list(HttpState(slot): HttpState<Arc<Mutex<RelaySlot>>>, Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
             let slot = slot.lock().await;
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             let since: i64 = query["since"].parse().unwrap();
             let blobs: Vec<Value> = slot.roster.iter().filter(|blob| blob["seq"].as_i64().unwrap() > since).cloned().collect();
             Json(json!({ "blobs": blobs, "seq": slot.seq }))
@@ -2208,6 +2868,7 @@ mod tests {
             writes: Arc<AtomicUsize>,
         }
         async fn list(HttpState(relay): HttpState<Relay>, Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             let blobs = if query["kinds"] == "roster" { vec![relay.roster] } else { vec![] };
             Json(json!({"blobs": blobs, "seq": 8}))
         }
@@ -2350,6 +3011,7 @@ mod tests {
         }
         async fn list(HttpState(slot): HttpState<Arc<Mutex<(i64, Option<Value>)>>>, Query(query): Query<std::collections::HashMap<String,String>>) -> Json<Value> {
             let slot = slot.lock().await;
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             Json(json!({"blobs":slot.1.iter().filter(|blob| blob["seq"].as_i64().unwrap() > query["since"].parse::<i64>().unwrap()).cloned().collect::<Vec<_>>(),"seq":slot.0}))
         }
         for case in ["removals", "additions", "legacy"] {
@@ -2427,6 +3089,7 @@ mod tests {
         }
         async fn list(HttpState(slot): HttpState<Arc<Mutex<(i64, Option<Value>)>>>, Query(query): Query<std::collections::HashMap<String,String>>) -> Json<Value> {
             let slot = slot.lock().await;
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             Json(json!({"blobs":slot.1.iter().filter(|blob| blob["seq"].as_i64().unwrap() > query["since"].parse::<i64>().unwrap()).cloned().collect::<Vec<_>>(),"seq":slot.0}))
         }
         let slot = Arc::new(Mutex::new((0, None)));
@@ -2544,6 +3207,7 @@ mod tests {
         struct PullGate { blob: Value, entered: Notify, release: Notify }
         async fn list(HttpState(gate): HttpState<Arc<PullGate>>,
             Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             gate.entered.notify_one();
             gate.release.notified().await;
             let since: i64 = query["since"].parse().unwrap();
@@ -2663,6 +3327,7 @@ mod tests {
         }
         async fn list(HttpState(slot): HttpState<Arc<Mutex<LostReply>>>, Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
             let slot = slot.lock().await;
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
             let since: i64 = query["since"].parse().unwrap();
             Json(json!({"blobs": if since == 0 { slot.roster.iter().cloned().collect::<Vec<_>>() } else { Vec::new() }, "seq":1}))
         }
@@ -2920,6 +3585,7 @@ mod tests {
         use serde_json::{json, Value};
 
         async fn list(HttpState(log): HttpState<Arc<Vec<Value>>>, Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&log, &query)); }
             let since: i64 = query["since"].parse().unwrap();
             let kinds: Vec<&str> = query["kinds"].split(',').collect();
             let head = log.iter().map(|blob| blob["seq"].as_i64().unwrap()).max().unwrap_or(0);

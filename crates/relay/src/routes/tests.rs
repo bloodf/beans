@@ -112,6 +112,50 @@ impl Drop for Relay {
     }
 }
 
+#[tokio::test]
+async fn managed_policy_transport_preserves_cut_and_account_boundaries() {
+    let relay = Relay::start(0).await;
+    let request = db::ManagedCompanion { account_id: relay.identity.clone(), transaction_id: "transaction".into(), expected_slot_seq: 0,
+        policy_id: "managed-policy".into(), policy_ciphertext: vec![1,2], roster_id: "managed-roster".into(), roster_ciphertext: vec![3,4], checkpoint_transaction_id: None };
+    let receipt = relay.state.db.commit_managed_companion(request, 0).await.unwrap();
+    relay.state.db.insert_blob(db::NewBlob { identity_pubkey: relay.identity.clone(), id: "ordinary-policy".into(), kind: "policy".into(), recipient_machine_pubkey: None, slot: None, expected_slot_seq: None, group: None, payload: db::Payload::Inline(vec![5]) }, 0).await.unwrap();
+    let url = format!("{}/v1/blobs", relay.url);
+    let first = relay.http.get(&url).bearer_auth(&relay.token).query(&[("policy_replay","1"),("since","0"),("limit","1")]).send().await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: db::ManagedCut = first.json().await.unwrap();
+    assert!(!first.done);
+    assert_eq!(first.next_since, receipt.roster_seq);
+    match &first.blobs[0] { db::ManagedCutBlob::Managed { receipt: returned, policy_ciphertext, roster_ciphertext } => { assert_eq!(returned, &receipt); assert_eq!(policy_ciphertext, &[1,2]); assert_eq!(roster_ciphertext, &[3,4]); }, _ => panic!("Missing managed linkage") }
+    let continuation = [("policy_replay", "1".to_string()),("since",first.next_since.to_string()),("context",first.context.clone()),("cut_token",first.cut_token.clone()),("through",first.through.to_string())];
+    let tail = relay.http.get(&url).bearer_auth(&relay.token).query(&continuation).send().await.unwrap();
+    assert_eq!(tail.status(), StatusCode::OK);
+    let tail: db::ManagedCut = tail.json().await.unwrap();
+    assert!(tail.done);
+    assert_eq!(tail.next_since, first.through);
+    match &tail.blobs[0] { db::ManagedCutBlob::Ordinary { id,ciphertext,.. } => { assert_eq!(id,"ordinary-policy"); assert_eq!(ciphertext,&[5]); }, _ => panic!("Ordinary policy omitted") }
+    let returned = relay.http.get(&url).bearer_auth(&relay.token).query(&[("policy_replay","1"),("receipt_transaction_id","transaction")]).send().await.unwrap();
+    assert_eq!(returned.status(),StatusCode::OK);
+    assert_eq!(returned.json::<db::ManagedReceipt>().await.unwrap(),receipt);
+    relay.state.db.register_identity("other", "content", "other-machine", "box", "attestation").await.unwrap();
+    let other = issue_token(&relay.state.secret,"other","other-machine").0;
+    assert_eq!(relay.http.get(&url).bearer_auth(&other).query(&continuation).send().await.unwrap().status(),StatusCode::CONFLICT);
+    assert_eq!(relay.http.get(&url).bearer_auth(&other).query(&[("policy_replay","1"),("receipt_transaction_id","transaction")]).send().await.unwrap().status(),StatusCode::NOT_FOUND);
+    relay.state.db.reset_managed_replay_context(&relay.identity).await.unwrap();
+    assert_eq!(relay.http.get(&url).bearer_auth(&relay.token).query(&continuation).send().await.unwrap().status(),StatusCode::CONFLICT);
+    for query in ["policy_replay=1&limit=1025", "policy_replay=1&through=1", "policy_replay=1&policy_replay=1", "policy_replay=1&account_id=other"] {
+        assert_eq!(relay.http.get(format!("{url}?{query}")).bearer_auth(&relay.token).send().await.unwrap().status(),StatusCode::BAD_REQUEST);
+    }
+    let generic: Value = relay.http.get(&url).bearer_auth(&relay.token).send().await.unwrap().json().await.unwrap();
+    assert!(generic.get("seq").is_some());
+    assert!(generic.get("cut_token").is_none());
+    let large = Relay::start(0).await;
+    large.state.db.insert_blob(db::NewBlob { identity_pubkey: large.identity.clone(), id: "large-policy".into(), kind: "policy".into(), recipient_machine_pubkey: None, slot: None, expected_slot_seq: None, group: None, payload: db::Payload::Inline(vec![255; 3 * 1024 * 1024]) }, 0).await.unwrap();
+    assert_eq!(large.http.get(format!("{}/v1/blobs?policy_replay=1",large.url)).bearer_auth(&large.token).send().await.unwrap().status(),StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(relay.http.get(format!("{url}?policy_replay=1")).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
+    relay.state.db.revoke_machine(&relay.identity,&relay.machine).await.unwrap();
+    assert_eq!(relay.http.get(&url).bearer_auth(&relay.token).query(&[("policy_replay","1")]).send().await.unwrap().status(),StatusCode::GONE);
+}
+
 fn file(id: &str, group: Option<&str>, ciphertext: Vec<u8>) -> OutboxItem {
     OutboxItem {
         id: id.into(),

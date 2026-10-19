@@ -1,10 +1,6 @@
 # CLI (runtime)
 
-`crates/cli`, binary `beans`. Local websocket for the app. Files live under the private data directory: `~/.beans-v2/` by default and for standalone Beans, `~/.beans-dev-v2/` when launched by the Windows/Linux development app, or the explicit `--home` / `BEANS_HOME`. The macOS Beans bundles set `~/.beans-v2/` (port `4874`) and `~/.beans-dev-v2/` (port `4875`) respectively. It contains `identity.json` (master secret, identity devices only), `machine.json` (machine secret, identity and content public keys, account DEK, `name`, `os`), `credentials.json` (the account’s providers, as last merged), `settings.json` (relay URL), `beans.sqlite3` (WAL-mode plaintext local state), and `files/<attachment id>` (attachment bytes, sent from here or fetched from the relay). SQLite holds devices, bots, chat metadata, routines, Auto-review, usage, compactions, sync bookkeeping, messages, the durable relay outbox, the jobs this Device has asked other Runners to do, and pending plugin actions.
-
-The home also holds private `mcp.json`, source-bound `catalog.json` and `marketplace.json` caches, and `plugins/`. JSON/database files are mode 0600 inside the mode-0700 home; SQLite keeps its WAL/SHM companions there. The retained updater's `update.json` is not read or mutated while CLI self-update is disabled.
-
-Storage validates the `beans-v2` marker before creation, permissions, deletion, recovery or SQLite setup. Explicit old/unmarked populated homes reject without modifying bytes, and malformed account records never become an empty identity. Direct database opens and mobile push decryption enforce the same boundary; see [fresh Beans format](identity.md#fresh-beans-format). Existing `.beans` / `.beans-dev` accounts are not migrated or reused.
+Local storage, account format admission, staged scratch preload and mutable startup persistence are described in [Local storage and startup admission](storage-admission.md).
 
 
 Commands:
@@ -38,6 +34,17 @@ Local user submissions commit transcript, encrypted outbox and exact first-turn 
 
 Future routine ticks require explicit local `routines.reauthorize` authority under the current execution owner. Creation, editing and resume do not authorize automatic execution. Exact revision and unique occurrence admission share the durable staged check/task transaction; missed occurrences are skipped, not caught up. Pause, Runner, membership or definition changes revoke schedule admission. Pending or unknown matching intent blocks reauthorization. See [Local task authority](tasks.md#routine-checks-and-retention).
 
+The staged `history164_types` module provides closed history event and producer validation, bounded list/export response codecs, and canonical authenticated cursors. Its HMAC helpers borrow an existing purpose key and host-supplied account namespace, distinguishing `LocalTaskEpoch` from `ImportedAccount` without creating task authority. Response validation binds the cursor to the filter, watermark, last-scanned position and captured host context. This pure module is not connected to live history handlers or SQL storage and performs no filesystem export.
+
+The Windows Rust verification job builds the real relay with `cargo build --locked -p beans-relay --bin beans-relay` before its selected-package tests. It resolves `debug/beans-relay.exe` under Cargo metadata's `target_directory`, checks that the executable exists, and exports its absolute path as `BEANS_REVOCATION_RELAY_BIN` through `GITHUB_ENV`. This respects `CARGO_TARGET_DIR` and supplies the revocation fixture's scratch relay without building inside the fixture or excluding Windows coverage.
+
+## Serve shutdown
+
+`beans serve` starts work it does not own: sync, routines, the plugin and MCP starts, the marketplace check, the login-shell environment, the model refresh and the local websocket, plus per-request handlers inside it. Before any of them start, `serve::run` records each of those boundaries as work with no known end, so the process never claims it knows when their writing stops. Only the startup model-catalog check is owned: `catalog::check_in_background_owned` holds a permit for it, and the drain joins that permit.
+
+A shutdown — SIGTERM, SIGINT, SIGHUP, or the app that started the CLI going away — stops the commands bots left running in their terminals, cancels the turns in flight, and joins owned work, all under one deadline (10 s). Then the process ends exactly as it did before: a signal still ends it by that signal, and a parent that went away still exits 0. Refusing a final flush changes nothing about how the process ends, only that nothing is written at the end.
+
+This is a bounded drain, not quiescence. Work with no known end is still running when the process ends, untracked interiors (a plugin's MCP server, a plugin's sign-in, the login-shell cache) are untouched, and a turn stopped mid-flight stays as it was recorded: a job sent to another Runner whose wait is cancelled loses its row and is not replayed. Tracking those boundaries is later work, and until it lands no shutdown writes a final state.
 
 ## Diagnostics report
 

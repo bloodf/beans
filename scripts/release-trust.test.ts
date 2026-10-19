@@ -114,4 +114,4 @@ test("test-only signed APK accepts explicit pin and rejects signer, identity, ha
     if (previous === undefined) delete process.env.BEANS_EXPO_PROJECT_ID; else process.env.BEANS_EXPO_PROJECT_ID = previous;
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 60_000);

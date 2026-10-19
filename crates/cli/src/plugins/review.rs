@@ -436,6 +436,7 @@ mod tests {
         use crate::model::{CommandRun, Device};
 
         let home = std::env::temp_dir().join(format!("beans-review-request-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         app.state.lock().unwrap().devices.push(Device {
             id: "runner".into(), name: "MacBook Air".into(), model: String::new(), os: "macos".into(), os_version: String::new(),

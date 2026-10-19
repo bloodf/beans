@@ -30,6 +30,10 @@ Installation, standalone services and Runner admission drain are described in [C
 
 The staged `history164_types` module provides closed history event and producer validation, bounded list/export response codecs, and canonical authenticated cursors. Its HMAC helpers borrow an existing purpose key and host-supplied account namespace, distinguishing `LocalTaskEpoch` from `ImportedAccount` without creating task authority. Response validation binds the cursor to the filter, watermark, last-scanned position and captured host context. This pure module is not connected to live history handlers or SQL storage and performs no filesystem export.
 
+The staged `decision` module validates typed decisions and explicit capability facts without dispatch. See [Staged typed decisions](providers.md#staged-typed-decisions) for its current wire profile, rejection taxonomy and integration limits.
+
+The Windows Rust verification job builds the real relay with `cargo build --locked -p beans-relay --bin beans-relay` before its selected-package tests. It resolves `debug/beans-relay.exe` under Cargo metadata's `target_directory`, checks that the executable exists, and exports its absolute path as `BEANS_REVOCATION_RELAY_BIN` through `GITHUB_ENV`. This respects `CARGO_TARGET_DIR` and supplies the revocation fixture's scratch relay without building inside the fixture or excluding Windows coverage.
+
 ## Serve shutdown
 
 `beans serve` starts work it does not own: sync, routines, the plugin and MCP starts, the marketplace check, the login-shell environment, the model refresh and the local websocket, plus per-request handlers inside it. Before any of them start, `serve::run` records each of those boundaries as work with no known end, so the process never claims it knows when their writing stops. Only the startup model-catalog check is owned: `catalog::check_in_background_owned` holds a permit for it, and the drain joins that permit.

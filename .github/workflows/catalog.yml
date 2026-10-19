@@ -8,18 +8,21 @@ name: Catalog
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  check:
-    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
+  catalog:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    env:
+      CATALOG_BASE_REF: ${{ github.base_ref || 'main' }}
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-      - run: git fetch --depth=1 origin "+refs/heads/$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+      - run: git fetch --depth=1 origin "+refs/heads/$CATALOG_BASE_REF:refs/remotes/origin/$CATALOG_BASE_REF"
       - run: bun run check:catalog
         env:
-          CATALOG_BASE: origin/${{ github.base_ref }}
+          CATALOG_BASE: origin/${{ env.CATALOG_BASE_REF }}

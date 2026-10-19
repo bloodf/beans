@@ -30,7 +30,37 @@ jobs:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts scripts/release-pr-gates.test.ts
+      - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts scripts/release-pr-gates.test.ts scripts/release-archive.test.ts scripts/release-binary-assurance.test.ts scripts/release-ipa-claims.test.ts
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          cmdline-tools-version: '12266719'
+          packages: 'build-tools;34.0.0 platforms;android-34'
+      - name: Expose pinned Android fixture tools
+        run: |
+          test -x "$JAVA_HOME/bin/java"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/aapt2"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          test -f "$ANDROID_HOME/platforms/android-34/android.jar"
+          echo "$ANDROID_HOME/build-tools/34.0.0" >> "$GITHUB_PATH"
+      - name: Install checksum-pinned bundletool for generated fixtures
+        run: |
+          fixture_tools="$RUNNER_TEMP/beans-release-fixture-tools"
+          mkdir -p "$fixture_tools"
+          curl --fail --location --retry 3 --output "$fixture_tools/bundletool.jar" https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar
+          echo "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29  $fixture_tools/bundletool.jar" | sha256sum --check --strict
+          cat > "$fixture_tools/bundletool" <<'SH'
+          #!/bin/sh
+          exec java -jar "$(dirname "$0")/bundletool.jar" "$@"
+          SH
+          chmod +x "$fixture_tools/bundletool"
+          echo "$fixture_tools" >> "$GITHUB_PATH"
+      - name: Verify generated Android fixture signatures and refusals
+        run: bun test scripts/release-trust.test.ts scripts/release-aab-trust.test.ts
 
   rust-linux:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
@@ -62,6 +92,12 @@ jobs:
           fallback: none
       # Cargo unifies features across the packages of one run, and the phone core takes beans
       # without the runner, so it is tested on its own.
+      - name: Build real relay for revocation fixture
+        run: |
+          cargo build --locked -p beans-relay --bin beans-relay
+          relay="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, pathlib, sys; print(pathlib.Path(json.load(sys.stdin)["target_directory"]) / "debug" / "beans-relay")')"
+          test -x "$relay"
+          printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
 
@@ -77,6 +113,12 @@ jobs:
         with:
           tool: protoc@3.36.2
           fallback: none
+      - name: Build real relay for revocation fixture
+        run: |
+          cargo build --locked -p beans-relay --bin beans-relay
+          relay="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, pathlib, sys; print(pathlib.Path(json.load(sys.stdin)["target_directory"]) / "debug" / "beans-relay")')"
+          test -x "$relay"
+          printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
 
@@ -126,6 +168,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
+      - name: Require native Apple fixture tools
+        run: test -x /usr/bin/codesign && test -x /usr/bin/plutil && command -v zip && command -v unzip
+      - name: Reject unsigned IPA with native Apple tools
+        run: bun test scripts/release-ipa-integrity.test.ts
       # The markdown crate's static library, xcframework, and Swift bindings, as `bun run dev`
       # builds them into macos/Libraries and macos/Sources/BeansMarkdown.
       - name: Build the markdown crate for Swift
@@ -153,8 +199,10 @@ jobs:
       # src/mygo.ts, the page's bindings to the Go side, is generated and never committed.
       - run: bun run generate
       - run: bun run typecheck
+      - name: Install Chromium for desktop browser checks
+        run: bun ./node_modules/playwright/cli.js install --with-deps chromium
       - run: bun run test
-      - run: go test ./...
+      - run: go test -count=1 ./...
 
   mobile:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository

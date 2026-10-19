@@ -102,6 +102,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `routines.create` | `bot_id`, `name`, `schedule`, `prompt?`, `enabled?` | `routine` |
 | `routines.update` | `id`, `name?`, `schedule?`, `prompt?`, `enabled?` | `routine` |
 | `routines.delete`, `routines.run` | `id` | `null` |
+| `workflows.create`, `workflows.list`, `workflows.delete` | see [Saved workflows](bots.md#saved-workflows) | `{ workflow }`, `{ workflows }`, `null` |
 | `routines.describe` | `schedule` | `schedule`, `text`, `next_run_at` |
 | `auto_review.set` | `is_enabled?`, `rules?` | `auto_review` |
 

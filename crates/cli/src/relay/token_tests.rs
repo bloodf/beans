@@ -6,6 +6,7 @@ use tokio::sync::Notify;
 #[derive(Default)]
 struct AuthState {
     calls: AtomicUsize,
+    health_calls: AtomicUsize,
     // Only the first verification waits; later requests can complete while it is suspended.
     pause_first: bool,
     entered: Notify,
@@ -26,7 +27,9 @@ impl AuthServer {
     async fn start(pause_first: bool) -> Self {
         let state = Arc::new(AuthState { pause_first, ..Default::default() });
         let router = Router::new()
-            .route("/v1/health", get(|| async { Json(json!({
+            .route("/v1/health", get(|State(state): State<Arc<AuthState>>| async move {
+                state.health_calls.fetch_add(1, Ordering::SeqCst);
+                Json(json!({
                 "ok": true, "service": "beans-relay", "format": "beans-v2",
                 "protocol": PROTOCOL, "min_protocol": PROTOCOL,
                 "min_roster_protocol": MIN_ROSTER_PROTOCOL, "memory_config_version": 1
@@ -124,4 +127,20 @@ async fn namespace_round_trip_rejects_original_authentication() {
     assert!(pending.await.unwrap().is_err(), "returning to the original namespace must not revive its old admission");
     assert_eq!(client.token(&server.url, &original).await.unwrap(), fresh);
     assert_eq!(server.state.calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn captured_context_cannot_start_authentication_after_forget() {
+    let server = AuthServer::start(false).await;
+    let client = RelayClient::new().unwrap();
+    let original = Machine::generate();
+    let context = client.token_context(&server.url, &original);
+    client.forget_token();
+    let replacement = Machine::generate();
+    let fresh = client.token(&server.url, &replacement).await.unwrap();
+    assert!(client.token_for_context(&context, &original).await.is_err());
+    assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 1, "stale admission must send no HTTP");
+    assert_eq!(server.state.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(client.token(&server.url, &replacement).await.unwrap(), fresh);
+    assert_eq!(server.state.calls.load(Ordering::SeqCst), 1, "stale admission must not evict the replacement bearer");
 }

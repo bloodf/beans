@@ -324,6 +324,13 @@ struct TokenCache {
     bearer: Option<(String, i64)>,
 }
 
+/// Authentication admission captured while the caller still holds its account lifecycle guard.
+#[derive(Clone)]
+pub(crate) struct TokenContext {
+    namespace: (String, String),
+    generation: u64,
+}
+
 impl TokenCache {
     fn invalidate(&mut self) {
         self.generation = self.generation.checked_add(1).expect("relay token generation exhausted");
@@ -435,9 +442,8 @@ impl RelayClient {
     }
 
     pub async fn authenticate(&self, url: &str, machine: &Machine) -> RelayResult<String> {
-        let namespace = (url.to_owned(), machine.pubkey());
-        let generation = self.token.lock().unwrap().select(&namespace);
-        self.authenticate_for(url, machine, namespace, generation).await
+        let context = self.token_context(url, machine);
+        self.authenticate_for(url, machine, context.namespace, context.generation).await
     }
 
     async fn authenticate_for(&self, url: &str, machine: &Machine, namespace: (String, String), generation: u64) -> RelayResult<String> {
@@ -474,19 +480,33 @@ impl RelayClient {
         Ok(token)
     }
 
-    pub async fn token(&self, url: &str, machine: &Machine) -> RelayResult<String> {
+    /// Capture under the originating account's lifecycle guard before spawning async work.
+    pub(crate) fn token_context(&self, url: &str, machine: &Machine) -> TokenContext {
         let namespace = (url.to_owned(), machine.pubkey());
-        let generation = {
-            let mut cache = self.token.lock().unwrap();
-            let generation = cache.select(&namespace);
+        let generation = self.token.lock().unwrap().select(&namespace);
+        TokenContext { namespace, generation }
+    }
+
+    /// Uses an existing admission without selecting (or reviving) its namespace.
+    pub(crate) async fn token_for_context(&self, context: &TokenContext, machine: &Machine) -> RelayResult<String> {
+        {
+            let cache = self.token.lock().unwrap();
+            if cache.generation != context.generation || cache.namespace.as_ref() != Some(&context.namespace)
+                || machine.pubkey() != context.namespace.1 {
+                return Err(RelayError { status: None, message: "relay authentication context changed".into() });
+            }
             if let Some((token, expires_at)) = &cache.bearer {
                 if expires_at.saturating_sub(60) > now_unix() {
                     return Ok(token.clone());
                 }
             }
-            generation
-        };
-        self.authenticate_for(url, machine, namespace, generation).await
+        }
+        self.authenticate_for(&context.namespace.0, machine, context.namespace.clone(), context.generation).await
+    }
+
+    pub async fn token(&self, url: &str, machine: &Machine) -> RelayResult<String> {
+        let context = self.token_context(url, machine);
+        self.token_for_context(&context, machine).await
     }
 
     pub async fn put_blob(&self, url: &str, token: &str, item: crate::app::OutboxItem, expected_slot_seq: i64) -> RelayResult<i64> {

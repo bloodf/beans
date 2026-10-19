@@ -34,6 +34,7 @@ export async function submitEas(args: string[], commandRunner = command, publicK
   const entry = manifest.artifacts.find((asset: any) => asset.name === names[2]);
   if (!entry || entry.size !== proofBytes.length || entry.sha256 !== createHash("sha256").update(proofBytes).digest("hex")) throw new Error("EAS provenance differs from signed release");
   const proof = JSON.parse(Buffer.from(proofBytes).toString());
+  if (proof.kind !== undefined) throw new Error("Local exact-source builds have no EAS build record and cannot be submitted");
   const build = JSON.parse(await commandRunner(["eas", "build:view", proof.buildId, "--json"], mobileDirectory));
   validateEasBuild(build, profile, revision, readVersion(), process.env.BEANS_EXPO_PROJECT_ID);
   if (proof.buildNumber !== build.appBuildVersion || proof.profile !== profile || proof.project !== build.app.id) throw new Error("EAS build differs from signed provenance");

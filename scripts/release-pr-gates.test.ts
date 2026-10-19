@@ -70,3 +70,37 @@ test("catalog uses PR base or main for dispatch in both fetch and comparison", (
     expect(base).toBe(`origin/${expected}`);
   }
 });
+
+
+test("every Rust aggregate receives a prebuilt real relay for the revocation fixture", () => {
+  const jobs = workflows.find(({ file }) => file === "test.yml")!.workflow.jobs;
+  for (const name of ["rust-linux", "rust-macos", "rust-windows"]) {
+    const steps = jobs[name].steps as { run?: string; if?: string }[];
+    const build = steps.findIndex((step) => step.run?.includes("cargo build --locked -p beans-relay --bin beans-relay"));
+    const aggregate = steps.findIndex((step) => step.run?.includes("cargo test --locked"));
+    expect(build, `${name}: build relay before tests`).toBeGreaterThanOrEqual(0);
+    expect(build).toBeLessThan(aggregate);
+    expect(steps[build].if).toBeUndefined();
+    expect(steps[build].run).toContain("BEANS_REVOCATION_RELAY_BIN=");
+    expect(steps[build].run).toContain("GITHUB_ENV");
+    expect(steps[build].run).toContain("cargo metadata --locked --no-deps --format-version 1");
+  }
+});
+
+test("every release regression executes unconditionally in a hosted fixture gate", async () => {
+  const jobs = workflows.find(({ file }) => file === "test.yml")!.workflow.jobs;
+  const files = [...new Bun.Glob("release*.test.ts").scanSync(join(ROOT, "scripts")), "submit-eas.test.ts", "protoc-workflows.test.ts"];
+  for (const file of files) {
+    const invocations = Object.values(jobs).flatMap((job: any) => job.steps.filter((step: any) =>
+      typeof step.run === "string" && step.run.split(/\s+/).includes(`scripts/${file}`)
+    ).map((step: any) => ({ job, step })));
+    expect(invocations.length, `${file}: hosted invocation`).toBe(1);
+    for (const { job, step } of invocations) {
+      expect(job["continue-on-error"]).toBeUndefined();
+      expect(step.if).toBeUndefined();
+      expect(step["continue-on-error"]).toBeUndefined();
+      expect(step.run).toMatch(/^bun test /);
+      expect(step.run).not.toMatch(/\|\||;|--todo|--test-name-pattern/);
+    }
+  }
+});

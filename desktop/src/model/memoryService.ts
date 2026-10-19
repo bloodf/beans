@@ -313,6 +313,10 @@ export function readMemoryOperations(value: unknown): MemoryOperations {
   };
 }
 
+/** Plain-language labels for wire states; only `completed` reads as stored. */
+export const MEMORY_STATUS_LABELS: Record<MemoryHealth["status"], string> = { ready: "Ready", degraded: "Degraded", setup_required: "Setup required" };
+export const MEMORY_OPERATION_LABELS: Record<MemoryOperationState, string> = { queued: "Queued, not stored", submitted: "Submitted, not stored", processing: "Processing, not stored", completed: "Stored", failed: "Failed, not stored", delivery_unknown: "Delivery unknown, not confirmed stored" };
+
 /** Authoritative status may advance independently of a user's unsaved preference draft. */
 export class MemoryServiceViewState {
   readonly draft: MemoryPreferencesDraft;

@@ -1,4 +1,4 @@
-# Checks the docs on same-repository release/** pull requests targeting main: each architecture doc within its budget,
+# Checks the docs on same-repository pull requests targeting main and manual dispatch: each architecture doc within its budget,
 # every subject listed in ARCHITECTURE.md, and every relative link and #heading resolving.
 # scripts/check-docs.ts is the check; `bun run check:docs` runs it locally.
 name: Docs
@@ -6,13 +6,14 @@ name: Docs
 on:
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  check:
-    if: github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.head_ref, 'release/')
+  docs:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

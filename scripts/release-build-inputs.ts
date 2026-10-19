@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
+import { inspectIpaSignedClaims } from "./release-ipa-claims.ts";
 
 export function hostLibrary(platform: string): string {
   if (platform === "darwin") return "libbeans_mobile.dylib";
@@ -187,8 +188,15 @@ export function inspectMobileBinary(path: string, profile: MobileReleaseProfile,
     try {
       // The archive has already passed bounded path/type/CRC inspection.
       inspect(["unzip", "-qq", path, "-d", temporary]);
-      for (const member of [extensions[0], apps[0]]) {
-        inspect(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", "--deep", join(temporary, member.slice(0, -"/Info.plist".length))]);
+      for (const [member, identifier] of [[extensions[0], "ai.amoena.beans.notify"], [apps[0], "ai.amoena.beans"]]) {
+        const target = join(temporary, member.slice(0, -"/Info.plist".length));
+        inspect(["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", "--deep", target]);
+        // Display uses the default architecture. These claims do not establish
+        // all-slice identity or Apple/profile authorization; the gate stays shut.
+        const entitlements = inspect(["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", target], 64 * 1024);
+        const decoded = Bun.spawnSync(["/usr/bin/plutil", "-convert", "json", "-o", "-", "-"], { stdin: Buffer.from(entitlements), stdout: "pipe", stderr: "pipe", timeout: 30_000, maxBuffer: 64 * 1024 });
+        if (decoded.exitCode !== 0) throw new Error("IPA signed entitlement claims decode failed");
+        inspectIpaSignedClaims(decoded.stdout.toString(), identifier, (approved as Extract<PublicTrustPolicy, { profile: "testflight" }>).teamId);
       }
     } finally { rmSync(temporary, { recursive: true, force: true }); }
   }

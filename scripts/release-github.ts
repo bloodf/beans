@@ -143,19 +143,19 @@ export async function buildReleaseManifest(tag: string, revision: string, direct
       const local = proof.kind === "local-exact-source";
       const platform = profile === "testflight" ? "IOS" : "ANDROID";
       // A local build has no EAS build record, so it carries no buildId; a cloud proof must carry a distinct one.
-      const identity = local ? proof.buildId === undefined && !numbers.has(`${platform}:${proof.buildNumber}`)
+      const identity = local ? proof.buildId === undefined
         : proof.kind === undefined && /^[a-f0-9-]{36}$/i.test(proof.buildId ?? "") && !identities.has(proof.buildId);
       if (proof.schema !== 1 || proof.revision !== revision || proof.version !== version || proof.profile !== profile ||
           proof.artifact !== name || proof.sha256 !== artifact.sha256 || proof.size !== artifact.size ||
-          !/^[a-f0-9-]{36}$/i.test(proof.project ?? "") || !identity ||
+          !/^[a-f0-9-]{36}$/i.test(proof.project ?? "") || !identity || numbers.has(`${platform}:${proof.buildNumber}`) ||
           !/^[1-9]\d*$/.test(proof.buildNumber ?? "") || Number(proof.buildNumber) > 2_100_000_000 || proof.platform !== platform) {
         throw new Error(`Invalid EAS artifact provenance: ${profile}`);
       }
       if (local) {
         if (!verifyLocal) throw new Error(`Local exact-source ${profile} binary requires the trusted-binary verifier (#275)`);
         await verifyLocal(new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer()), profile, version, proof.buildNumber);
-        numbers.add(`${platform}:${proof.buildNumber}`);
       } else identities.add(proof.buildId);
+      numbers.add(`${platform}:${proof.buildNumber}`);
     }
   }
   return { schema: 1, version, revision, protocol: await releaseProtocol(), artifacts };

@@ -117,6 +117,7 @@ describe("local exact-source provenance", () => {
           ["wrong version", () => runLocalEasRelease(["github", revision, bad], identity({ version: "0.0.1" }), builder, git())],
           ["zero number", () => runLocalEasRelease(["github", revision, bad], identity({ buildNumber: "0" }), builder, git())],
           ["huge number", () => runLocalEasRelease(["github", revision, bad], identity({ buildNumber: "2100000001" }), builder, git())],
+          ["untracked input", () => runLocalEasRelease(["github", revision, bad], identity(), builder, (args) => { if (args.includes("status")) expect(args).toContain("--untracked-files=all"); return git(revision, "?? extra.ts")(args); })],
           ["dirty tree", () => runLocalEasRelease(["github", revision, bad], identity(), builder, git(revision, "M x"))],
           ["other HEAD", () => runLocalEasRelease(["github", revision, bad], identity(), builder, git("b".repeat(40)))],
           ["build failure", () => runLocalEasRelease(["github", revision, bad], identity(), () => ({ exitCode: 1 }) as any, git())],

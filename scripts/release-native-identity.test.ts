@@ -3,18 +3,15 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { readNativeIdentity } from "./release-native-identity.ts";
 import { stageLocalBuild } from "./release-eas.ts";
 import { ROOT, readVersion } from "./app.ts";
 import { archiveFixture } from "./release-archive-fixture.ts";
 import { inspectReleaseArchive } from "./release-build-inputs.ts";
 
-// One pipeline over public test-only artifacts: two repo APK fixtures (hash-pinned) read by the real
-// aapt2, and IPAs zipped here and read by the real unzip/plutil. Metadata only: no signer, team or
-// entitlement trust, no execution of artifact content, no AAB fixture exists so none is claimed.
-const fixtures = process.env.BEANS_PUBLIC_APK_FIXTURES ?? resolve(ROOT, "../../artifacts/issue253-trust-positive");
-const pinned = { "valid-test-only.apk": "46c3d5752513e1a6b0d9bb8c9e97d1b7f2085da7be993ef62fc759886f917ab8", "wrong-identity-test-only.apk": "be6c50011e80596093af6c1e6f5e7b551e5025b3270104c2aa917b8480c67016" };
+// Real metadata-only APKs are generated with the installed Android tools; no private historical
+// artifact directory or signing identity is needed. IPA metadata uses the real unzip/plutil.
 const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT ?? join(homedir(), "Library/Android/sdk");
 const buildTools = existsSync(join(sdk, "build-tools")) ? Bun.spawnSync(["ls", join(sdk, "build-tools")]).stdout.toString().trim().split("\n").filter(Boolean).sort().map(v => join(sdk, "build-tools", v)).find(d => existsSync(join(d, "aapt2"))) : undefined;
 const env = { PATH: `${buildTools ? `${buildTools}:` : ""}/usr/bin:/bin` };
@@ -55,7 +52,7 @@ test("native identity reader: real public APK metadata, real IPA plists, every m
     process.env.BEANS_EXPO_PROJECT_ID = "11111111-1111-4111-8111-111111111111";
     try {
       const out = join(dir, "staged");
-      await stageLocalBuild(ipa, "testflight", "a".repeat(40), out, async (p, q) => readNativeIdentity(p, q, env));
+      await stageLocalBuild(ipa, "testflight", "a".repeat(40), out);
       const proof = await Bun.file(join(out, "eas-testflight.json")).json();
       expect(proof).toMatchObject({ kind: "local-exact-source", buildNumber: "42", version: readVersion() });
       expect(proof.buildId).toBeUndefined();
@@ -64,14 +61,15 @@ test("native identity reader: real public APK metadata, real IPA plists, every m
       await expect(stageLocalBuild(other, "testflight", "a".repeat(40), join(dir, "other"), async (p, q) => readNativeIdentity(p, q, env))).rejects.toThrow("differs from the release identity");
       expect(existsSync(join(dir, "other", "eas-testflight.json"))).toBe(false);
     } finally { if (old === undefined) delete process.env.BEANS_EXPO_PROJECT_ID; else process.env.BEANS_EXPO_PROJECT_ID = old; }
-    // Real aapt2 on the public test-only APKs. Missing tool or fixtures fail the test: a skip is not a pass.
+    // Generate real APKs using aapt2. These are metadata fixtures, never signer approval.
     if (!buildTools) throw new Error("aapt2 not found: install Android build-tools or set ANDROID_HOME");
-    for (const [name, digest] of Object.entries(pinned)) {
-      if (!existsSync(join(fixtures, name))) throw new Error(`Public APK fixture missing: ${name} (set BEANS_PUBLIC_APK_FIXTURES)`);
-      expect(createHash("sha256").update(await Bun.file(join(fixtures, name)).bytes()).digest("hex")).toBe(digest);
+    for (const identifier of ["ai.amoena.beans", "ai.amoena.beans.dev"]) {
+      const manifest = join(dir, `${identifier}.xml`), apk = join(dir, `${identifier}.apk`);
+      await writeFile(manifest, `<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="${identifier}" android:versionCode="42" android:versionName="1.0.14"><uses-sdk android:minSdkVersion="24"/><application android:hasCode="false"/></manifest>`);
+      const built = Bun.spawnSync([join(buildTools, "aapt2"), "link", "-I", join(sdk, "platforms/android-34/android.jar"), "--manifest", manifest, "-o", apk], { stdout: "pipe", stderr: "pipe" });
+      expect(built.exitCode, built.stderr.toString()).toBe(0);
+      expect(readNativeIdentity(apk, "github", env)).toEqual({ identifier, version: "1.0.14", buildNumber: "42" });
     }
-    expect(readNativeIdentity(join(fixtures, "valid-test-only.apk"), "github", env)).toEqual({ identifier: "ai.amoena.beans", version: "1.0.14", buildNumber: "42" });
-    expect(readNativeIdentity(join(fixtures, "wrong-identity-test-only.apk"), "github", env)).toEqual({ identifier: "ai.amoena.beans.dev", version: "1.0.14", buildNumber: "42" });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -227,5 +225,19 @@ test.skipIf(process.platform === "win32")("a FIFO without a writer is refused fa
     expect(JSON.parse(stdout.trim().split("\n").pop()!)).toEqual({ snapshot: "refused", reader: "refused", staged: "refused", inspected: false });
     expect(existsSync(marker)).toBe(false);
     expect(existsSync(out)).toBe(false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+
+test("native metadata tools do not inherit credentials or runtime injection variables", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "beans-native-env-"));
+  try {
+    const bin = join(dir, "bin"); await mkdir(bin);
+    for (const tool of ["unzip", "aapt2"]) {
+      await writeFile(join(bin, tool), `#!/bin/sh\n[ -z "$EXPO_TOKEN$NODE_OPTIONS$JAVA_TOOL_OPTIONS$LD_PRELOAD$DYLD_INSERT_LIBRARIES" ] || exit 9\n${tool === "aapt2" ? "printf \"package: name='ai.amoena.beans' versionCode='42' versionName='1.0.14'\\n\"" : "exit 0"}\n`);
+      await chmod(join(bin, tool), 0o755);
+    }
+    const apk = join(dir, "a.apk"); await writeFile(apk, archiveFixture("AndroidManifest.xml", "x"));
+    expect(readNativeIdentity(apk, "github", { PATH: bin, EXPO_TOKEN: "secret-fixture", NODE_OPTIONS: "injection", JAVA_TOOL_OPTIONS: "injection", LD_PRELOAD: "injection", DYLD_INSERT_LIBRARIES: "injection" }).identifier).toBe("ai.amoena.beans");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

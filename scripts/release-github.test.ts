@@ -110,6 +110,13 @@ test("local exact-source pipeline: stage with production code, finalize only thr
     await expect(buildReleaseManifest(tag, revision, path, "all", verify), name).rejects.toThrow("Invalid EAS artifact provenance");
     await writeFile(proofFile("github"), JSON.stringify(originals.github));
   }
+  // Mixed cloud/local proofs must share the same platform number namespace in either order.
+  for (const cloudProfile of ["github", "production"] as const) {
+    const other = cloudProfile === "github" ? "production" : "github";
+    await writeFile(proofFile(cloudProfile), JSON.stringify({ ...originals[cloudProfile], kind: undefined, buildId: "22222222-2222-4222-8222-222222222222", buildNumber: originals[other].buildNumber }));
+    await expect(buildReleaseManifest(tag, revision, path, "all", verify)).rejects.toThrow("Invalid EAS artifact provenance");
+    await writeFile(proofFile(cloudProfile), JSON.stringify(originals[cloudProfile]));
+  }
   await writeFile(join(path, `Beans-${v}.apk`), "changed");
   await expect(buildReleaseManifest(tag, revision, path, "all", verify)).rejects.toThrow("provenance");
 });

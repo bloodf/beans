@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readVersion, ROOT } from "./app.ts";
-import { snapshotArtifact } from "./release-native-identity.ts";
+import { readNativeSnapshot, snapshotArtifact } from "./release-native-identity.ts";
 
 const profiles = { github: { platform: "ANDROID", extension: "apk", component: "android" }, production: { platform: "ANDROID", extension: "aab", component: "android-store" }, testflight: { platform: "IOS", extension: "ipa", component: "ios-store" } } as const;
 type Profile = keyof typeof profiles;
@@ -73,7 +73,7 @@ export async function stageEasBuild(build: any, profile: Profile, revision: stri
 // but EAS records no build for them: the proof has no buildId and the number is read from the binary.
 export type NativeIdentity = { identifier: string; version: string; buildNumber: string };
 export type InspectNative = (path: string, profile: Profile) => Promise<NativeIdentity>;
-export async function stageLocalBuild(input: string, profile: Profile, revision: string, directory: string, inspect: InspectNative) {
+export async function stageLocalBuild(input: string, profile: Profile, revision: string, directory: string, inspect?: InspectNative) {
   const project = process.env.BEANS_EXPO_PROJECT_ID ?? "";
   const version = readVersion();
   if (!Object.hasOwn(profiles, profile) || !uuid.test(project) || !/^[a-f0-9]{40}$/.test(revision)) throw new Error("Invalid EAS release identity");
@@ -83,7 +83,7 @@ export async function stageLocalBuild(input: string, profile: Profile, revision:
   try {
     const bytes = snapshot.bytes;
     if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw new Error("Local artifact must be a nonempty ZIP-format APK/AAB/IPA");
-    const native = await inspect(snapshot.path, profile);
+    const native = await (inspect ? inspect(snapshot.path, profile) : readNativeSnapshot(snapshot, profile));
     if (native?.identifier !== "ai.amoena.beans" || native.version !== version || !/^[1-9]\d*$/.test(native.buildNumber) || Number(native.buildNumber) > 2_100_000_000) {
       throw new Error("Local binary differs from the release identity or version, or its build number is not a positive integer at most 2100000000");
     }
@@ -94,13 +94,13 @@ export async function stageLocalBuild(input: string, profile: Profile, revision:
     await writeFile(join(directory, `eas-${profile}.json`), `${JSON.stringify(provenance)}\n`, { flag: "wx" });
   } finally { snapshot.dispose(); }
 }
-export async function runLocalEasRelease(args: string[], inspect: InspectNative, run = (args: string[], cwd: string) => Bun.spawnSync(args, { cwd, stdout: "inherit", stderr: "inherit" }), git = (args: string[]) => Bun.spawnSync(args, { cwd: ROOT })) {
+export async function runLocalEasRelease(args: string[], inspect: InspectNative | undefined = undefined, run = (args: string[], cwd: string) => Bun.spawnSync(args, { cwd, stdout: "inherit", stderr: "inherit" }), git = (args: string[]) => Bun.spawnSync(args, { cwd: ROOT })) {
   const [profile, revision, directory, ...extra] = args;
   if (!Object.hasOwn(profiles, profile) || !revision || !directory || extra.length) throw new Error("usage: <github|production|testflight> <revision> <directory>");
   if (!process.env.EXPO_TOKEN || !process.env.BEANS_EXPO_OWNER || !uuid.test(process.env.BEANS_EXPO_PROJECT_ID ?? "")) throw new Error("EXPO_TOKEN, BEANS_EXPO_OWNER and linked BEANS_EXPO_PROJECT_ID are required");
   if (profile === "testflight" && !/^[A-Z0-9]{10}$/.test(process.env.BEANS_APPLE_TEAM_ID ?? "")) throw new Error("BEANS_APPLE_TEAM_ID is required for a local store IPA");
   const head = git(["git", "rev-parse", "HEAD"]);
-  const dirty = git(["git", "status", "--porcelain", "--untracked-files=no"]);
+  const dirty = git(["git", "status", "--porcelain", "--untracked-files=all"]);
   if (head.exitCode || dirty.exitCode || head.stdout.toString().trim() !== revision || dirty.stdout.length) throw new Error("EAS release requires clean exact-revision checkout");
   const typedProfile = profile as Profile;
   const scratch = await mkdtemp(join(tmpdir(), "beans-local-build-"));
@@ -117,7 +117,7 @@ export async function runEasRelease(args: string[], query = eas, git = (args: st
   if (command !== "build" || !(profile in profiles) || !revision || !directory || extra.length) throw new Error("usage: release-eas.ts build <github|production|testflight> <revision> <directory> [retry-build-id]");
   if (!process.env.EXPO_TOKEN || !process.env.BEANS_EXPO_OWNER || !uuid.test(process.env.BEANS_EXPO_PROJECT_ID ?? "")) throw new Error("EXPO_TOKEN, BEANS_EXPO_OWNER and linked BEANS_EXPO_PROJECT_ID are required");
   const head = git(["git", "rev-parse", "HEAD"]);
-  const dirty = git(["git", "status", "--porcelain", "--untracked-files=no"]);
+  const dirty = git(["git", "status", "--porcelain", "--untracked-files=all"]);
   if (head.exitCode || dirty.exitCode || head.stdout.toString().trim() !== revision || dirty.stdout.length) throw new Error("EAS release requires clean exact-revision checkout");
   const typedProfile = profile as Profile;
   const builds = buildId ? [await query(["build:view", buildId, "--json"])] : await query(["build", "--platform", profiles[typedProfile].platform.toLowerCase(), "--profile", profile, "--non-interactive", "--wait", "--json"]);

@@ -6,6 +6,8 @@ Feature changes run relevant checks locally before integration: the affected Rus
 
 [Tests](../../.github/workflows/test.yml) runs the full platform matrix, [Docs](../../.github/workflows/docs.yml) checks architecture budgets and links, and [Catalog](../../.github/workflows/catalog.yml) checks model catalog and marketplace index update timestamps. Jobs accept any same-repository PR head branch; fork PRs are skipped, including fork branches named `release/**`. Manual dispatch does not require a PR. Catalog fetches the PR base branch, falling back to `main` on manual dispatch. Docs and Catalog use distinct `docs` and `catalog` check names. `scripts/release-pr-gates.test.ts` checks triggers, job admission and catalog base selection locally.
 
+Each Rust test job builds the real relay first and exports its executable path through `BEANS_REVOCATION_RELAY_BIN`. The revocation integration fixture starts that binary against isolated temporary storage; it never builds inside the test or uses a live relay. Linux also exercises the relay store against its temporary PostgreSQL service. Local aggregate runs must supply the same prebuilt executable, and PostgreSQL coverage requires `BEANS_RELAY_TEST_POSTGRES`.
+
 Release publication and mobile submission remain manual-only. E2E scripts remain manual/local and are not added to these validation workflows.
 
 ## Source and readiness

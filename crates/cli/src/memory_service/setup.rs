@@ -389,6 +389,7 @@ mod authority_tests {
     #[tokio::test]
     async fn revocation_before_publication_and_paired_positive() {
         let home=std::env::temp_dir().join(format!("beans-setup-authority-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app=App::load(crate::config::Config{home:home.clone(),port:0}).unwrap();
         crate::identity::create(&app,Some("Fixture Runner".into())).unwrap();
         let actor=crate::keys::Machine::generate().pubkey();

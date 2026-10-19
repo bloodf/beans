@@ -13,8 +13,9 @@ import { inspectReleaseArchive } from "./release-build-inputs.ts";
 // Real metadata-only APKs are generated with the installed Android tools; no private historical
 // artifact directory or signing identity is needed. IPA metadata uses the real unzip/plutil.
 const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT ?? join(homedir(), "Library/Android/sdk");
-const buildTools = existsSync(join(sdk, "build-tools")) ? Bun.spawnSync(["ls", join(sdk, "build-tools")]).stdout.toString().trim().split("\n").filter(Boolean).sort().map(v => join(sdk, "build-tools", v)).find(d => existsSync(join(d, "aapt2"))) : undefined;
-const env = { PATH: `${buildTools ? `${buildTools}:` : ""}/usr/bin:/bin` };
+const buildTools = join(sdk, "build-tools", "34.0.0");
+if (!existsSync(join(buildTools, "aapt2"))) throw new Error("aapt2 fixture prerequisite missing: Android build-tools 34.0.0");
+const env = { PATH: `${buildTools}:/usr/bin:/bin` };
 const plist = (id: string, version = "1.0.14", build = "42") => `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${id}</string><key>CFBundleShortVersionString</key><string>${version}</string><key>CFBundleVersion</key><string>${build}</string></dict></plist>`;
 async function zipped(directory: string, name: string, files: Record<string, string>) {
   const root = await mkdtemp(join(directory, "src-"));
@@ -62,7 +63,6 @@ test("native identity reader: real public APK metadata, real IPA plists, every m
       expect(existsSync(join(dir, "other", "eas-testflight.json"))).toBe(false);
     } finally { if (old === undefined) delete process.env.BEANS_EXPO_PROJECT_ID; else process.env.BEANS_EXPO_PROJECT_ID = old; }
     // Generate real APKs using aapt2. These are metadata fixtures, never signer approval.
-    if (!buildTools) throw new Error("aapt2 not found: install Android build-tools or set ANDROID_HOME");
     for (const identifier of ["ai.amoena.beans", "ai.amoena.beans.dev"]) {
       const manifest = join(dir, `${identifier}.xml`), apk = join(dir, `${identifier}.apk`);
       await writeFile(manifest, `<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="${identifier}" android:versionCode="42" android:versionName="1.0.14"><uses-sdk android:minSdkVersion="24"/><application android:hasCode="false"/></manifest>`);

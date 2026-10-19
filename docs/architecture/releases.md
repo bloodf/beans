@@ -8,7 +8,7 @@ Feature changes run relevant checks locally before integration: the affected Rus
 
 Each Rust test job builds the real relay first and exports its executable path through `BEANS_REVOCATION_RELAY_BIN`. The revocation integration fixture starts that binary against isolated temporary storage; it never builds inside the test or uses a live relay. Linux also exercises the relay store against its temporary PostgreSQL service. Local aggregate runs must supply the same prebuilt executable, and PostgreSQL coverage requires `BEANS_RELAY_TEST_POSTGRES`.
 
-Release publication and mobile submission remain manual-only. E2E scripts remain manual/local and are not added to these validation workflows.
+Hosted release gates cover every release regression; their admission tests reject missing or conditional fixture invocations. Release publication and mobile submission remain manual-only. E2E scripts remain manual/local and are not added to these validation workflows.
 
 ## Source and readiness
 

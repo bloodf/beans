@@ -1,8 +1,8 @@
-// Mounted consumer checks for the skills surfaces. Served by `scripts/check-desktop-skills-consumer.ts`,
+// Mounted consumer checks for the skills surfaces. Served by `scripts/check-desktop-skills-consumer.py`,
 // which opens this page in a real browser and fails on any error. Each check renders the shipped sheet
 // against a synthetic transport: only the mounted production consumer is under test, never a copy of it.
-import { checkSkillCompareConsumer, checkSkillKeepBothConsumer, checkSkillLibraryConsumer } from "./skillLibrary.test";
-import { checkSkillDiscoveryConsumer } from "./skillDiscovery.test";
+import { checkSkillCompareConsumer, checkSkillKeepBothConsumer, checkSkillLibraryConsumer } from "./skillLibrary.browser";
+import { checkSkillDiscoveryConsumer } from "./skillDiscovery.browser";
 
 declare global { interface Window { __result?: unknown; __error?: string } }
 

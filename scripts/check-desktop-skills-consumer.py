@@ -51,7 +51,7 @@ def source_binding() -> dict:
     modules = [
         "src/ui/sheets/skillsMountedCheck.ts",
         "src/ui/sheets/skillDiscovery.tsx",
-        "src/ui/sheets/skillLibrary.test.tsx",
+        "src/ui/sheets/skillLibrary.browser.tsx",
         "src/model/store.ts",
         "src/l10n/zh.ts",
     ]

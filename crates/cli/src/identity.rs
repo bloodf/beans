@@ -142,6 +142,7 @@ mod publication_tests {
         use axum::{routing::{get, post}, Json, Router};
         for transition in ["none", "forget", "create"] {
             let home = std::env::temp_dir().join(format!("beans-restore-fence-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&home).unwrap();
             let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
             let identity = Identity::generate();
             let sealed = crate::crypto::seal_json(&identity.content_pubkey(), &keys::KeyRecord {
@@ -191,6 +192,7 @@ mod publication_tests {
     #[test]
     fn create_waits_for_reset_publication_boundary() {
         let home = std::env::temp_dir().join(format!("beans-create-fence-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         create(&app, Some("Synthetic A".into())).unwrap();
         let guard = app.plugin_lifecycle.lock();

@@ -106,3 +106,25 @@ test("the current composer and updater share drafts, pending sends and reply-onl
   expect(reply.invalidated).toBe(true);
   expect(hasUpdateDrafts()).toBe(false);
 });
+
+
+test("discard and forget publish the post-removal snapshot while a send is pending", async () => {
+  const { composerDraft, editComposerDraft, submitComposerDraft } = await import("./composerDraft");
+  const { subscribeComposerDrafts, forgetComposerDrafts } = await import("./updateDrafts");
+  for (const clear of [() => discardComposerDraft(key), forgetComposerDrafts]) {
+    const draft = composerDraft("account", "relay", "chat");
+    editComposerDraft(draft, { text: "pending" });
+    let finish!: (value: boolean) => void;
+    const sending = submitComposerDraft(draft, () => new Promise<boolean>(done => { finish = done; }));
+    let retained = retainedComposerDrafts();
+    const unsubscribe = subscribeComposerDrafts(() => { retained = retainedComposerDrafts(); });
+    try {
+      clear();
+      expect(retained).toEqual([]);
+      expect(hasUpdateDrafts()).toBe(false);
+      finish(true); await sending;
+      expect(retained).toEqual([]);
+      expect(hasUpdateDrafts()).toBe(false);
+    } finally { unsubscribe(); }
+  }
+});

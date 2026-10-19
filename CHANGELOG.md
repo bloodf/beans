@@ -6,6 +6,8 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Android update installation guards share the current composer draft state, including replies, pending sends and dictation; explicit draft deletion updates recovery previews immediately.
+
 - Production GitHub Android builds include bounded signed Beans release discovery, consent-bound APK verification and a system-confirmed installer. Play/iOS/Dev stay excluded; installed package signing identity supplies compatibility evidence. Settings provides daily checks, Later and exact-version Skip; unsent composer drafts block installation. Native installed-upgrade acceptance remains separate.
 - Android signed-update parsing rejects duplicate JSON keys, nesting beyond 32 levels and coerced numeric authority fields; consent binds exact readiness bytes as well as APK identity and digest. Android below API 28 remains ineligible.
 - Android update cancellation disconnects metadata/APK transport and enforces a total operation deadline, including slow responses. Composer drafts retain recoverable chat ownership across unmount/remount instead of leaving orphaned update blockers.

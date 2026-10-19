@@ -478,6 +478,7 @@ mod tests {
     #[test]
     fn cache_is_bound_to_feed_and_only_newer_indexes_win() {
         let home = std::env::temp_dir().join(format!("beans-marketplace-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let config = Config { home: home.clone(), port: 0 };
         config.ensure_home().unwrap();
         let mut cached: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
@@ -505,6 +506,7 @@ mod tests {
     #[test]
     fn newer_index_replaces_old_entries_and_older_one_cannot_downgrade() {
         let home = std::env::temp_dir().join(format!("beans-marketplace-version-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         let mut newer: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
         newer["updated"] = Value::from("2999-01-01T00:00:00Z");
@@ -541,6 +543,7 @@ mod tests {
     #[tokio::test]
     async fn a_bot_added_from_a_template_starts_with_paused_routines_and_a_greeting() {
         let home = std::env::temp_dir().join(format!("beans-marketplace-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Workbench".into())).unwrap();
         let runner_id = app.this_device_id().unwrap();

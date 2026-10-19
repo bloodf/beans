@@ -384,6 +384,7 @@ mod tests {
     fn attachment_image_uses_decoded_type_and_size_bounds() {
         use base64::Engine;
         let home = std::env::temp_dir().join(format!("beans-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         let image = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(2600, 100, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 60])));
         let mut png = Vec::new();

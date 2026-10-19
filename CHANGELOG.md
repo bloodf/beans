@@ -6,6 +6,8 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Signed requests, delayed provider discovery, task completions and relay authentication retain their original account admission across waits, preventing publication into a replacement account after Forget. Plugin/MCP policy cleanup uses the same roster-before-lifecycle lock order as incoming sync.
+
 - Non-executing Devices durably reject misrouted task envelopes without stalling sync or granting execution authority; identity-scoped denial survives later Runner startup.
 
 - Fresh Runner identity creation persists its task epoch before the first job, so restarting does not misclassify the new account as a legacy store.

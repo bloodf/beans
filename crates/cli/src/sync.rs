@@ -902,13 +902,29 @@ fn online(state: &crate::app::State, id: &str) -> bool {
     state.device_online.contains(id)
 }
 
-pub async fn delete_remote_blob(app: &Arc<App>, id: &str) {
-    let (Some(url), Some(machine)) = (app.relay_url(), app.machine_file().and_then(|m| m.machine().ok())) else { return };
-    if let Ok(token) = app.relay.token(&url, &machine).await {
-        if let Err(error) = app.relay.delete_blob(&url, &token, id).await {
-            tracing::debug!(%error, id, "deleting consumed job blob");
+/// Cleanup retains the original account and relay, rather than recapturing them
+/// when a spawned request finally completes. No lifecycle lock spans HTTP awaits.
+pub(crate) struct BlobCleanup { incarnation: u64, url: String, machine: crate::keys::Machine, token_context: crate::relay::TokenContext }
+impl BlobCleanup {
+    pub(crate) fn capture(app: &App) -> Option<Self> {
+        let guard = app.plugin_admission(None).ok()?;
+        let url = app.relay_url()?;
+        let machine = app.machine_file()?.machine().ok()?;
+        let token_context = app.relay.token_context(&url, &machine);
+        Some(Self { incarnation: guard.get().0, url, machine, token_context })
+    }
+    pub(crate) async fn delete(self, app: &App, id: &str) {
+        if app.plugin_admission(Some(self.incarnation)).is_err() { return; }
+        if let Ok(token) = app.relay.token_for_context(&self.token_context, &self.machine).await {
+            if app.plugin_admission(Some(self.incarnation)).is_err() { return; }
+            if let Err(error) = app.relay.delete_blob(&self.url, &token, id).await {
+                tracing::debug!(%error, id, "deleting consumed job blob");
+            }
         }
     }
+}
+pub async fn delete_remote_blob(app: &Arc<App>, id: &str) {
+    if let Some(cleanup) = BlobCleanup::capture(app) { cleanup.delete(app, id).await; }
 }
 
 // MARK: - Applying blobs
@@ -1110,7 +1126,9 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
                     app.cancel_job(&cancel.job_id);
                     let app = app.clone();
                     let blob_id = blob.id.clone();
-                    tokio::spawn(async move { delete_remote_blob(&app, &blob_id).await });
+                    if let Some(cleanup) = BlobCleanup::capture(&app) {
+                        tokio::spawn(async move { cleanup.delete(&app, &blob_id).await });
+                    }
                 }
                 Err(error) => tracing::warn!(%error, "job cancellation envelope"),
             }
@@ -1122,7 +1140,9 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
                     crate::runtime::deliver_job_result(app, result);
                     let app = app.clone();
                     let blob_id = blob.id.clone();
-                    tokio::spawn(async move { delete_remote_blob(&app, &blob_id).await });
+                    if let Some(cleanup) = BlobCleanup::capture(&app) {
+                        tokio::spawn(async move { cleanup.delete(&app, &blob_id).await });
+                    }
                 }
                 Err(error) => tracing::warn!(%error, "job result envelope"),
             }
@@ -1808,6 +1828,7 @@ mod tests {
             os_version: String::new(), model: String::new(), registered: false,
             relay_url: None, created_at: 1,
         };
+        *app.machine.lock().unwrap() = Some(machine.clone());
         let envelope = |id: String, seq, op: ChatBlob| BlobIn {
             id, kind: "chat".into(), recipient_machine_pubkey: None,
             ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&dek, "chat", &op).unwrap()),

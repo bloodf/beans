@@ -691,7 +691,7 @@ impl App {
     pub(crate) fn plugin_admission(&self, expected: Option<u64>) -> Result<parking_lot::ReentrantMutexGuard<'_, std::cell::Cell<(u64, bool)>>, String> {
         let guard = self.plugin_lifecycle.lock();
         let (incarnation, closed) = guard.get();
-        if closed || expected.is_some_and(|expected| expected != incarnation) {
+        if closed || expected.is_some_and(|expected| expected != incarnation) || !crate::requests::admission_matches(self, incarnation) {
             return Err("The plugin account changed; start again.".into());
         }
         Ok(guard)
@@ -1347,6 +1347,11 @@ impl App {
     /// Replaces the Auto-review setting and publishes the roster.
     pub fn set_auto_review(&self, auto_review: AutoReview) {
         let _edit = self.roster_edit.lock().unwrap();
+        self.set_auto_review_locked(auto_review);
+    }
+
+    /// Caller retains roster_edit; plugin callers take roster before lifecycle.
+    pub(crate) fn set_auto_review_locked(&self, auto_review: AutoReview) {
         self.state.lock().unwrap().auto_review = auto_review;
         self.roster_changed(true);
     }
@@ -1766,6 +1771,16 @@ impl App {
     /// Changes a routine and publishes the roster.
     pub fn update_routine(&self, id: &str, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
         let _edit = self.roster_edit.lock().unwrap();
+        self.update_routine_locked(id, None, update)
+    }
+
+    pub(crate) fn update_routine_for_incarnation(&self, id: &str, incarnation: u64, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+        let _edit = self.roster_edit.lock().unwrap();
+        self.update_routine_locked(id, Some(incarnation), update)
+    }
+
+    fn update_routine_locked(&self, id: &str, incarnation: Option<u64>, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+        let _guard = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
         let routine = {
             let mut state = self.state.lock().unwrap();
             let index=state.routines.iter().position(|r|r.id==id).ok_or_else(||anyhow::anyhow!("Unknown routine"))?;

@@ -680,13 +680,18 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, 
 }
 
 pub(crate) fn spawn_admitted_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, admission: Admission, lease: crate::local_store::TaskLease) {
+    let incarnation = lease.incarnation;
+    let guarded_app = app.clone();
+    let Ok(_lifecycle) = guarded_app.plugin_admission(Some(incarnation)) else { return };
+    let cleanup = remote_blob_id.as_ref().and_then(|_| crate::sync::BlobCleanup::capture(&app));
     if app.is_paused() {
         abandon_queued_task(&app, &lease);
         app.notice(&job.chat_id, "Account paused. Resume to run bots.");
         if let Some(id) = remote_blob_id {
             let app = app.clone();
             tokio::spawn(async move {
-                crate::sync::delete_remote_blob(&app, &id).await;
+                if let Some(cleanup) = cleanup { cleanup.delete(&app, &id).await; }
+                let Ok(_guard) = app.plugin_admission(Some(incarnation)) else { return };
                 if app.this_device_id().as_deref() != Some(job.requested_by.as_str()) {
                     report_outcome(&app, &job, TurnOutcome::Skipped);
                 }
@@ -710,11 +715,13 @@ pub(crate) fn spawn_admitted_local_job(app: Arc<App>, job: Job, remote_blob_id: 
         let _guard = lock.lock().await;
         let outcome = run_job_started(&app, job.clone(), cancel, lease).await;
         if let Some(id) = &job.routine_id {
-            crate::routines::finished(&app, id, outcome);
+            let label = match outcome { TurnOutcome::Sent => "sent", TurnOutcome::Pass => "pass", TurnOutcome::Skipped => "error" };
+            let _ = app.update_routine_for_incarnation(id, incarnation, |routine| routine.last_outcome = Some(label.into()));
         }
         if let Some(id) = remote_blob_id {
-            crate::sync::delete_remote_blob(&app, &id).await;
+            if let Some(cleanup) = cleanup { cleanup.delete(&app, &id).await; }
         }
+        let Ok(_guard) = app.plugin_admission(Some(incarnation)) else { return };
         if app.this_device_id().as_deref() != Some(job.requested_by.as_str()) {
             report_outcome(&app, &job, outcome);
         }

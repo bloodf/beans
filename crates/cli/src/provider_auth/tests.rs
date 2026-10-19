@@ -673,3 +673,59 @@ async fn guided_create_delete_during_discovery_preserves_tombstone() {
     assert_eq!(format!("{:?}", *app.state.lock().unwrap()), state);
     assert_eq!(outbox_snapshot(), outbox);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discovery_completion_cannot_publish_into_a_replacement_account() {
+    for refresh in [false, true] {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Original account".into())).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let root = format!("http://{}", listener.local_addr().unwrap());
+        if refresh {
+            let mut credentials = app.credentials.lock().unwrap();
+            credentials.custom.insert("custom:held".into(), CustomProvider {
+                name: "Held".into(), api: CustomApi::Responses, base_url: root.clone(),
+                api_key: "old-account-key".into(), models: vec![CustomModel { id: "original".into(), ..Default::default() }],
+                created_at: 1, integration: None, capabilities: None,
+            });
+            credentials.touch("custom:held");
+            credentials.save(&app.config).unwrap();
+        }
+        let prior_credentials = app.credentials.lock().unwrap().clone();
+        let (requested, received) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).unwrap();
+            requested.send(()).unwrap();
+            proceed.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            let body = json!({ "data": [{ "id": "stale-discovery" }] }).to_string();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        let pending_app = app.clone();
+        let pending = tokio::spawn(async move {
+            if refresh { refresh_custom_models(&pending_app).await.map(|_| ()) }
+            else { connect_custom(&pending_app, input("Held", "responses", &root, &[])).await.map(|_| ()) }
+        });
+        received.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        app.forget_identity().unwrap();
+        crate::identity::create(app, Some("Replacement account".into())).unwrap();
+        // Even an identical provider/revision in the new account is not authority
+        // for the old refresh to publish its discovery result.
+        *app.credentials.lock().unwrap() = prior_credentials;
+        app.credentials.lock().unwrap().save(&app.config).unwrap();
+        let before = serde_json::to_value(&*app.credentials.lock().unwrap()).unwrap();
+        let disk = std::fs::read(app.config.credentials_path()).unwrap();
+        let outbox = app.store.outbox().unwrap().into_iter().map(|item| (item.id, item.kind, item.ciphertext)).collect::<Vec<_>>();
+        release.send(()).unwrap();
+        let error = pending.await.unwrap().unwrap_err();
+        assert!(error.contains("account changed"), "{error}");
+        server.join().unwrap();
+        assert_eq!(serde_json::to_value(&*app.credentials.lock().unwrap()).unwrap(), before);
+        assert_eq!(std::fs::read(app.config.credentials_path()).unwrap(), disk);
+        assert_eq!(app.store.outbox().unwrap().into_iter().map(|item| (item.id, item.kind, item.ciphertext)).collect::<Vec<_>>(), outbox);
+    }
+}

@@ -20,7 +20,7 @@ swiftc -parse-as-library -swift-version 5 -D BEANS_MEMORY_UI_STANDALONE \
   "$root/macos/Tests/MemoryUIControllerChecks.swift" \
   "$root/macos/Tests/MemoryUIFlows.swift" \
   -o "$output/memory-ui"
-"$output/memory-ui" "$@"
+BEANS_MEMORY_UI_RESOURCES="$root/macos/Resources" "$output/memory-ui" "$@"
 for fixture in MemoryServiceDraft MemorySetupDraft MemoryUIPreviewExpiry; do
   printf 'Compiling Foundation fixture: %s\n' "$fixture"
   swiftc -parse-as-library -swift-version 5 \

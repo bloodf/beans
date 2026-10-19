@@ -32,11 +32,11 @@ final class MemoryEmbeddingViewController: MemoryFormViewController {
         addRow("API key", view: secret, to: apiColumn)
         addForm(localColumn)
         for (key, label, value) in [
-            ("model_sha256", "Model SHA-256", ""), ("tokenizer_sha256", "Tokenizer SHA-256", ""),
-            ("max_tokens", "Maximum tokenizer tokens", ""), ("input_ids", "Input IDs tensor", ""),
-            ("attention_mask", "Attention mask tensor", ""), ("token_type_ids", "Token type IDs tensor (optional)", ""),
-            ("output", "Output tensor", ""), ("pad_id", "Padding token ID", ""),
-            ("pad_type_id", "Padding type ID", ""), ("pad_token", "Padding token — exact text", ""),
+            ("model_sha256", L("Model SHA-256"), ""), ("tokenizer_sha256", L("Tokenizer SHA-256"), ""),
+            ("max_tokens", L("Maximum tokenizer tokens"), ""), ("input_ids", L("Input IDs tensor"), ""),
+            ("attention_mask", L("Attention mask tensor"), ""), ("token_type_ids", L("Token type IDs tensor (optional)"), ""),
+            ("output", L("Output tensor"), ""), ("pad_id", L("Padding token ID"), ""),
+            ("pad_type_id", L("Padding type ID"), ""), ("pad_token", L("Padding token — exact text"), ""),
         ] { fields[key] = addText(label, value: value, to: localColumn) }
         pooling = NSPopUpButton(); pooling.addItems(withTitles: ["mean", "cls", "pooled"]); addRow("Pooling", view: pooling, to: localColumn)
         specialTokens = NSButton(checkboxWithTitle: L("Add special tokens (per tokenizer contract)"), target: nil, action: nil)
@@ -75,7 +75,7 @@ final class MemoryEmbeddingViewController: MemoryFormViewController {
                 if profile.endpoint?.hasPrefix("http:") == true {
                     guard await confirm("Save an insecure embedding endpoint?", details: L("Exact endpoint %@. Memory text and authentication cross plaintext HTTP when this profile is used. The connection also requires explicit insecure-HTTP approval.", profile.endpoint!)) else { return }
                 }
-                guard await confirm("Save this vector-space profile?", details: L("Profile %@, model %@, revision %@, dimensions %d. Exact endpoint: %@. Secret action: %@. Verify the selected secret belongs to this target. Existing indexes are not re-embedded or migrated by this action. Remote API processing can incur costs; local mode clears any API key. No fallback or download is enabled.", profileID, profile.model, profile.revision, Int(profile.dimensions), profile.endpoint ?? "local CPU", String(describing: patch))) else { return }
+                guard await confirm("Save this vector-space profile?", details: L("Profile %@, model %@, revision %@, dimensions %d. Exact endpoint: %@. Secret action: %@. Verify the selected secret belongs to this target. Existing indexes are not re-embedded or migrated by this action. Remote API processing can incur costs; local mode clears any API key. No fallback or download is enabled.", profileID, profile.model, profile.revision, Int(profile.dimensions), profile.endpoint ?? L("local CPU"), String(describing: patch))) else { return }
                 try await service.saveEmbedding(id: profileID, profile: profile, secret: patch)
                 finishSave()
             }

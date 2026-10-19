@@ -17,7 +17,7 @@ final class MemoryLocalAssetsViewController: MemoryFormViewController {
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
     override func loadView() {
         super.loadView()
-        note("Profile: \(profile.id). Model: \(profile.model), revision: \(profile.modelRevision). Save a local CPU profile with matching model/tokenizer hashes first. Paths refer to the selected Runner, not necessarily this Mac.")
+        note(L("Profile: %@. Model: %@, revision: %@. Save a local CPU profile with matching model/tokenizer hashes first. Paths refer to the selected Runner, not necessarily this Mac.", profile.id, profile.model, profile.modelRevision))
         row("Selected Runner", runnerMenu)
         for kind in [MemoryAssetKind.runtime, .model, .tokenizer] {
             heading(kind.rawValue.capitalized)
@@ -97,7 +97,7 @@ private final class MemoryAssetForm: NSStackView {
         self.kind = kind; super.init(frame: .zero)
         orientation = .vertical; alignment = .leading; spacing = 7; translatesAutoresizingMaskIntoConstraints = false
         source.addItems(withTitles: [L("Supplied absolute path on Runner"), L("Explicit HTTPS download")])
-        for (label, view) in [("Source", source as NSView), ("Exact path / URL", location), ("License", license), ("Exact byte count", bytes), ("Full lowercase SHA-256", hashField)] {
+        for (label, view) in [(L("Source"), source as NSView), (L("Exact path / URL"), location), (L("License"), license), (L("Exact byte count"), bytes), (L("Full lowercase SHA-256"), hashField)] {
             let stack = Build.stack([Build.label(L(label), font: .systemFont(ofSize: 12)), view], spacing: 4)
             view.translatesAutoresizingMaskIntoConstraints = false; view.setAccessibilityLabel("\(kind.rawValue) \(L(label))")
             addArrangedSubview(stack); stack.widthAnchor.constraint(equalTo: widthAnchor).isActive = true

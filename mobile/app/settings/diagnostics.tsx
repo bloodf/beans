@@ -18,12 +18,28 @@ function sameAuthority(a: ReturnType<typeof authority>, b: ReturnType<typeof aut
 }
 type Review = { json: string; host: string | null; authority: ReturnType<typeof authority>; generation: number };
 
+type DiagnosticsStatus = '' | 'Generating report…' | 'Review this report before sharing.' | 'This report schema is not supported. Update Beans.' | 'The diagnostics report is invalid.' | 'Could not generate the diagnostics report.' | 'Report copied.' | 'Could not copy the report.' | 'Could not share the report.';
+
+function statusLabel(status: DiagnosticsStatus) {
+  switch (status) {
+    case 'Generating report…': return t('Generating report…');
+    case 'Review this report before sharing.': return t('Review this report before sharing.');
+    case 'This report schema is not supported. Update Beans.': return t('This report schema is not supported. Update Beans.');
+    case 'The diagnostics report is invalid.': return t('The diagnostics report is invalid.');
+    case 'Could not generate the diagnostics report.': return t('Could not generate the diagnostics report.');
+    case 'Report copied.': return t('Report copied.');
+    case 'Could not copy the report.': return t('Could not copy the report.');
+    case 'Could not share the report.': return t('Could not share the report.');
+    case '': return t('Generate a report to review sanitized setup evidence.');
+  }
+}
+
 export default function DiagnosticsScreen() {
   useLanguage();
   const p = usePalette();
   const [review, setReview] = useState<Review>();
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState('');
+  const [status, setStatus] = useState<DiagnosticsStatus>('');
   const focused = useRef(false), generation = useRef(0), pending = useRef(false);
   const revoke = useCallback(() => {
     generation.current++;
@@ -92,7 +108,7 @@ export default function DiagnosticsScreen() {
       </Section>
       <Section footer={t('Relay host and port are disclosed, including private hosts. Providers are configured-only, plugins are cached setup-only, and Runners show presence, not work readiness. A busy port does not prove service failure.')}>
         <View style={{ padding: 16 }}>
-          <Text accessibilityLiveRegion="polite" style={{ color: p.label }}>{status ? t(status) : t('Generate a report to review sanitized setup evidence.')}</Text>
+          <Text accessibilityLiveRegion="polite" style={{ color: p.label }}>{statusLabel(status)}</Text>
           {review && <Text style={{ color: p.secondaryLabel, marginTop: 12 }}>{review.host
             ? t('Disclosed relay host/port: {host}', { host: review.host }) : t('No relay host is disclosed.')}</Text>}
         </View>

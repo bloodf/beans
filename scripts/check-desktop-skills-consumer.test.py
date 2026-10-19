@@ -21,8 +21,9 @@ with tempfile.TemporaryDirectory() as directory:
     (root / "desktop/src").mkdir(parents=True)
     source = root / "desktop/src/runner.ts"
     source.write_text("export const result = 1;\n")
+    (root / "desktop/src/icon.png").write_bytes(b"PNG_FIXTURE")
     subprocess.run(["git", "-C", directory, "add", "."], check=True)
-    subprocess.run(["git", "-C", directory, "commit", "-qm", "fixture"], check=True)
+    subprocess.run(["git", "-C", directory, "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"], check=True)
     clean = driver.source_binding(root)
     assert clean["files"]["desktop/src/runner.ts"]["tracked"]
     assert not clean["files"]["desktop/src/runner.ts"]["dirty"]
@@ -36,6 +37,7 @@ with tempfile.TemporaryDirectory() as directory:
         driver.freeze_sources(root, Path(destination), dirty)
         frozen = Path(destination) / "desktop/src/runner.ts"
         assert frozen.read_bytes() == source.read_bytes()
+        assert (Path(destination) / "desktop/src/icon.png").read_bytes() == b"PNG_FIXTURE"
         encoded = base64.b64encode(json.dumps({"sourcesContent": [frozen.read_text()]}).encode())
         transformed = b"transformed();\n//# sourceMappingURL=data:application/json;base64," + encoded
         driver.validate_source_map(transformed, frozen)
@@ -61,6 +63,40 @@ with tempfile.TemporaryDirectory() as directory:
             pass
         else:
             raise AssertionError("changed sources must fail closed")
+
+# Bun stores shared workspace dependencies under the root node_modules/.bun tree.
+# Runtime dependency modules are recorded by executed-byte binding, not treated as owned sources.
+with tempfile.TemporaryDirectory() as destination:
+    base = "http://localhost:123"
+    dependency = driver.ROOT / "node_modules/.bun/vite/node_modules/vite/dist/client/env.mjs"
+    assert driver.owned_source(f"{base}/@fs{dependency}", base, Path(destination)) is None
+    for external in [driver.ROOT / "packages/beans-blobatar/src/index.ts", driver.DESKTOP / "src/model/store.ts"]:
+        try:
+            driver.owned_source(f"{base}/@fs{external}", base, Path(destination))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("unfrozen owned workspace sources must fail closed")
+
+with tempfile.TemporaryDirectory() as destination:
+    frozen = Path(destination).resolve()
+    asset = frozen / "desktop/src/icon.png"
+    asset.parent.mkdir(parents=True)
+    asset.write_bytes(b"PNG_FIXTURE")
+    base = "http://localhost:123"
+    url = base + "/src/icon.png"
+    driver.validate_owned_asset(b"PNG_FIXTURE", asset, url, base, frozen)
+    driver.validate_owned_asset(b'export default "/src/icon.png"', asset, url + "?import", base, frozen)
+    driver.validate_owned_asset(b'export default "/src/icon.png"\n//# sourceMappingURL=data:application/json;base64,e30=', asset, url + "?import", base, frozen)
+    for body, request in [(b"stale", url), (b'export default "/src/other.png"', url + "?import"),
+                          (b'export default "//src/icon.png"', url + "?import"),
+                          (b'export default "/src/icon.png"; malicious()', url + "?import")]:
+        try:
+            driver.validate_owned_asset(body, asset, request, base, frozen)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("unbound assets or executable wrappers must fail closed")
 
 assets = {"http://localhost:123/src/runner.ts": {"body": b"export const result = 2;\n", "sha256": "recorded"}}
 assert driver.bind_executed(assets, [("http://localhost:123/src/runner.ts", "export const result = 2;\n")])

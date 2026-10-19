@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DESKTOP = ROOT / "desktop"
 PAGE = "/src/ui/sheets/skillsMountedCheck.html"
 TIMEOUT_SECONDS = 120
+ASSET_SUFFIXES = {".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".woff", ".woff2", ".ico"}
 EXCLUDED = {"node_modules", ".git", ".mygo", "build", "dist", "resources", "__pycache__"}
 
 
@@ -44,7 +45,7 @@ def source_binding(root=ROOT):
                 if (Path(current) / name).is_symlink():
                     raise RuntimeError(f"owned source directory symlink refused: {name}")
             for name in sorted(names):
-                if name.startswith(".") or Path(name).suffix not in {".ts", ".tsx", ".js", ".mjs", ".cjs", ".html", ".css", ".json", ".svg"}:
+                if name.startswith(".") or Path(name).suffix not in ({".ts", ".tsx", ".js", ".mjs", ".cjs", ".html", ".css", ".json"} | ASSET_SUFFIXES):
                     continue
                 if Path(name).suffix == ".json" and name not in {"package.json", "tsconfig.json"}:
                     continue
@@ -99,7 +100,8 @@ def owned_source(url, base, frozen):
         return None
     else:
         candidate = (frozen / "desktop" / path.lstrip("/")).resolve()
-    if candidate.is_relative_to((DESKTOP / "node_modules").resolve()):
+    if any(candidate.is_relative_to(directory.resolve()) for directory in
+           (DESKTOP / "node_modules", ROOT / "node_modules")):
         return None
     if not candidate.is_relative_to(frozen.resolve()):
         raise RuntimeError(f"owned module outside frozen tree: {url}")
@@ -113,6 +115,21 @@ def validate_source_map(body, source):
     mapping = json.loads(base64.b64decode(matches[0], validate=True))
     if source.read_bytes().decode("utf-8") not in mapping.get("sourcesContent", []):
         raise RuntimeError(f"transformed source map does not bind frozen bytes: {source}")
+
+
+def validate_owned_asset(body, source, url, base, frozen):
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query, keep_blank_values=True)
+    if "import" in query or "url" in query:
+        # Vite asset imports contain only a URL export, never arbitrary executable code.
+        wrapper = re.sub(rb"\n//# sourceMappingURL=data:application/json[^,\n]*;base64,[A-Za-z0-9+/=]+\s*$", b"", body)
+        match = re.fullmatch(rb'export default ("(?:[^"\\]|\\.)*")\s*;?\s*', wrapper)
+        if not match:
+            raise RuntimeError(f"invalid asset URL module: {source}")
+        target = json.loads(match[1])
+        if not target.startswith("/") or target.startswith("//") or owned_source(base + target, base, frozen) != source:
+            raise RuntimeError(f"asset URL does not bind frozen path: {source}")
+    elif body != source.read_bytes():
+        raise RuntimeError(f"served asset does not bind frozen bytes: {source}")
 
 
 def free_port():
@@ -162,7 +179,9 @@ def run_browser(base, frozen):
                     if url in assets and assets[url]["body"] != body:
                         raise RuntimeError(f"asset changed during execution: {url}")
                     source = owned_source(url, base, frozen)
-                    if source and source.suffix != ".html":
+                    if source and source.suffix in ASSET_SUFFIXES:
+                        validate_owned_asset(body, source, url, base, frozen)
+                    elif source and source.suffix != ".html":
                         validate_source_map(body, source)
                     assets[url] = {"body": body, "sha256": hashlib.sha256(body).hexdigest(),
                                    "source": source.relative_to(frozen).as_posix() if source else None}
@@ -180,8 +199,13 @@ def run_browser(base, frozen):
             session.send("Profiler.startPreciseCoverage", {"callCount": True, "detailed": True})
             session.send("Network.setCacheDisabled", {"cacheDisabled": True})
             session.on("Debugger.scriptParsed", lambda event: scripts.append(event) if event.get("url") else None)
-            page.goto(base + PAGE, wait_until="load")
-            page.wait_for_function("window.__result !== undefined || window.__error !== undefined", timeout=60000)
+            try:
+                page.goto(base + PAGE, wait_until="load")
+                if errors:
+                    raise RuntimeError("asset loading failed")
+                page.wait_for_function("window.__result !== undefined || window.__error !== undefined", timeout=60000)
+            except Exception as error:
+                return {"result": None, "error": "; ".join([*errors, str(error)]), "console": console}
             result, error = page.evaluate("[window.__result ?? null, window.__error ?? null]")
             executed = [(event["url"], session.send("Debugger.getScriptSource", {"scriptId": event["scriptId"]})["scriptSource"])
                         for event in scripts]
@@ -216,7 +240,7 @@ def main():
         binding = source_binding()
         receipt["source"] = binding
         with tempfile.TemporaryDirectory(prefix="beans-skills-binding-") as directory:
-            frozen = Path(directory)
+            frozen = Path(directory).resolve()
             freeze_sources(ROOT, frozen, binding)
             (frozen / "desktop/node_modules").symlink_to(DESKTOP / "node_modules", target_is_directory=True)
             port = free_port()
@@ -233,7 +257,7 @@ def main():
                 vite.terminate()
                 vite.wait(timeout=30)
     except Exception as error:
-        receipt["error"] = str(error)
+        receipt["error"] = "; ".join(filter(None, [receipt.get("error"), str(error)]))
     print(json.dumps(receipt, indent=2))
     return 1 if receipt["error"] else 0
 

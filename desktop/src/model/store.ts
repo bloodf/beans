@@ -229,7 +229,7 @@ function decodeSkillLibrary(value: unknown, action: "preview" | "import" | "unin
   };
   const id = (value: unknown): string => { const s = text(value, 32); return /^[0-9a-f]{32}$/.test(s) ? s : invalid(); };
   // A relative file label, as the Runner reports it: no controls, backslash, colon, empty or
-  // traversing segment, at most five segments, and bounded to 256 changed paths per side.
+  // traversing segment, at most five segments, and bounded to 256 source-side and 256 managed-side changed paths.
   const changed = (value: unknown): string[] => {
     if (!Array.isArray(value) || value.length > 256) return invalid();
     const labels = value.map((entry) => {
@@ -237,8 +237,13 @@ function decodeSkillLibrary(value: unknown, action: "preview" | "import" | "unin
       if (!label || /[\\:]/u.test(label) || label.split("/").some((part) => !part || part === "." || part === "..") || label.split("/").length > 5) return invalid();
       return label;
     });
-    const sorted = [...labels].sort();
-    if (labels.some((label, index) => label !== sorted[index]) || new Set(labels).size !== labels.length) return invalid();
+    const encoder = new TextEncoder();
+    if (labels.some((label, index) => {
+      if (index === 0) return false;
+      const previous = encoder.encode(labels[index - 1]), current = encoder.encode(label);
+      const difference = previous.findIndex((byte, i) => i >= current.length || byte !== current[i]);
+      return difference < 0 ? previous.length >= current.length : difference >= current.length || previous[difference]! > current[difference]!;
+    })) return invalid();
     return labels;
   };
   const summary = (value: unknown): SkillLibrarySummary => {
@@ -252,7 +257,7 @@ function decodeSkillLibrary(value: unknown, action: "preview" | "import" | "unin
   if (action === "compare") {
     const managed = id(r.managed_id), added = changed(r.added), removed = changed(r.removed), differing = changed(r.changed);
     const overlaps = (a: string[], b: string[]) => a.some((label) => b.includes(label));
-    if (overlaps(added, removed) || overlaps(added, differing) || overlaps(removed, differing)) return invalid();
+    if (added.length + differing.length > 256 || removed.length + differing.length > 256 || overlaps(added, removed) || overlaps(added, differing) || overlaps(removed, differing)) return invalid();
     return { version: 1, runner_id: runnerID, managed_id: managed, added, removed, changed: differing };
   }
   if (action === "preview") {

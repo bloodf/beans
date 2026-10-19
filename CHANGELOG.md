@@ -6,6 +6,8 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Update-expiry timers no longer retain a stopped Runner or delay reopening its execution owner.
+
 - Cancelled or superseded queued tasks leave terminal history immediately, preserving replay fences and allowing explicit review without restarting the Runner.
 
 - Durable task startup retains storage admission through execution-owner recovery and rejects unknown future task schemas without downgrading them.

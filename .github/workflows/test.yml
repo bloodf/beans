@@ -62,6 +62,12 @@ jobs:
           fallback: none
       # Cargo unifies features across the packages of one run, and the phone core takes beans
       # without the runner, so it is tested on its own.
+      - name: Build real relay for revocation fixture
+        run: |
+          cargo build --locked -p beans-relay --bin beans-relay
+          relay="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, pathlib, sys; print(pathlib.Path(json.load(sys.stdin)["target_directory"]) / "debug" / "beans-relay")')"
+          test -x "$relay"
+          printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
 
@@ -77,6 +83,12 @@ jobs:
         with:
           tool: protoc@3.36.2
           fallback: none
+      - name: Build real relay for revocation fixture
+        run: |
+          cargo build --locked -p beans-relay --bin beans-relay
+          relay="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, pathlib, sys; print(pathlib.Path(json.load(sys.stdin)["target_directory"]) / "debug" / "beans-relay")')"
+          test -x "$relay"
+          printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
 

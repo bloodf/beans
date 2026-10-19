@@ -4,8 +4,6 @@ Threat model for the planned per-bean computer: a Runner VM holding a bean's bro
 
 ## Implemented now and planned
 
-Labels distinguish current mechanisms from requirements.
-
 - **Implemented** (source/doc-inspected at `bf26629bf74689306ce86e08a5e2a254b1307717`): tools spawn the Runner user's shell with a workdir, not isolation (`crates/agent/src/tools/bash.rs`, [Tools](tools.md)). Approval cards and capabilities are application controls. The relay stores public keys, ciphertext and [metadata](identity.md#relay-surface); each paired Device holds the DEK-encrypted `credentials` blob (`crates/cli/src/credentials.rs`).
 - **Implemented, local API:** `/ws` has no general connection credential or method authorization. Native callers without `Origin`, same-origin pages and configured exact allowed origins pass header admission; only updater prepare/cancel methods require their separate token ([Local API](local-api.md#trust-boundary)). This is a local-user boundary, not guest authentication. A guest must never reach it through a proxy, forwarder or approved origin.
 - **Implemented, remote requests:** sealed remote request bodies carry an Ed25519 signature over domain, request ID, verb, requester, target Runner, time and payload, checked against current paired membership before dispatch ([Protocols](protocols.md)). Encryption alone is not requester authentication. Computer-specific ownership and fences are planned (#34, #53).
@@ -142,7 +140,7 @@ These trace each story through the model on paper. They are architecture-only ev
 1. A paired Device is attacker-controlled, for example stolen. It already holds the DEK and credentials blob.
 2. A genuine paired Device passes the existing signed-request and membership check, so signatures do not stop it. Input contention: the attacker must hold the fence token to type into the guest; while a human or the bean holds input it is refused (#53, #57). Take Control is explicit and visible (#54).
 3. Revocation: the owner unpairs the Device ([Identity](identity.md#unpairing-a-device)); the relay refuses it for good. Unpair stops future relay access; it does not erase blobs or secrets the Device already holds. Rotating guest tokens revokes its guest-side scope (#67).
-4. Outcome: fencing stops simultaneous input, not an authorized account holder's ordinary actions. Account credential exposure from a rogue paired Device is unchanged by computers and is accepted account trust, not solved here.
+4. Proposed outcome: fencing stops simultaneous input, not an authorized account holder's ordinary actions. Account credential exposure from a rogue paired Device is unchanged by computers and is accepted account trust, not solved here.
 
 ### 3. Page text instructs the model to leak credentials
 
@@ -151,11 +149,9 @@ These trace each story through the model on paper. They are architecture-only ev
 3. Credentials: the model's host-side secrets are not in the guest, and the guest token cannot read the credentials blob (#44, #33).
 4. Egress: the destination must be in the owner's approved set; host and private ranges are denied (#66).
 5. Typed secrets are not copied by default and known sensitive fields are redacted (#61, #73). A secret shown elsewhere on screen is not guaranteed removed: an uncertain frame is withheld from the model until the owner explicitly releases it (#61). Limits stand: pixel redaction has no guarantee.
-6. Outcome: the injection can still misuse approved guest capabilities. Nested host-tool paths are unavailable (#45); any separately authorized Runner effect needs independent trusted admission. Guest output itself grants no credential or host authority.
+6. Proposed outcome: the injection can still misuse approved guest capabilities. Nested host-tool paths are unavailable (#45); any separately authorized Runner effect needs independent trusted admission. Guest output itself grants no credential or host authority.
 
 ## Residual risks
-
-Stated without softening.
 
 - **Guest escape.** A QEMU, KVM or kernel bug can let a guest run code on the host as the hypervisor process user. Hardening reduces blast radius (#36, #43); it does not remove the risk. The VM is a stronger boundary than a bot `workdir`, not a guaranteed sandbox.
 - **Host root.** Anyone with root on the Runner host can read every disk, token and the supervisor's privileges. Nothing here protects a bean from its host operator.
@@ -173,7 +169,7 @@ Source ACK: inspected `bf26629bf74689306ce86e08a5e2a254b1307717`. `crates/cli/sr
 
 ### Sibling reconciliation from local evidence
 
-Local evidence is incomplete and drafts may change. Rows reconcile requirements, not completed sibling outputs; none authorizes provisioning.
+Draft evidence reconciles requirements, not provisioning acceptance.
 
 | Issue | Available local evidence | Reconciled boundary / unresolved acceptance |
 | --- | --- | --- |
@@ -181,7 +177,7 @@ Local evidence is incomplete and drafts may change. Rows reconcile requirements,
 | #30 provenance | Local PR #341 draft: candidate stock cloud image plus pinned bootstrap, QEMU/KVM/libvirt; signatures, package/image inventory and live cycle incomplete | Provenance gates start; no host fallback. Stop observes shut-off, destroy warns of data loss, cold start discards saved state, both autostart modes disabled. No accepted deployment pin or verified image. |
 | #32 lifecycle | Cached proposal notes only; local lifecycle branch remains at `135b2295` | Input epoch at Runner and controller agrees with this contract. Final state machine, stop deadlines, crash transitions and lease timing unavailable; reconciliation pending. |
 | #33 controller | Cached proposal notes only: scoped capabilities, input epoch, no off-host controller endpoint | Require current-start authentication, bounded messages and no host authority. Concrete channel, schema, token lifetime/revocation and replay handling unavailable. |
-| #34 ownership | Cached proposal notes only; existing [Protocols](protocols.md) authenticates requests, not computer leases | Require authoritative Runner/computer assignment and fresh fences across reassignment, restart and unpair. Ownership storage and conflict/replay rules unavailable. |
-| #35 display | Cached proposal notes only; local display branch remains at `135b2295` | Private hypervisor endpoint agrees; authenticated E2E viewing still needs selected transport, client feasibility, grant revocation and clipboard/file-transfer policy. |
+| #34 ownership | [PR #370](https://github.com/bloodf/beans/pull/370), published draft `be840adf`: encrypted roster/config, signed async admission and revocation proposals | Authority, generation and policy bind effects; mandatory protocol floor, resource limits and freshness thresholds remain unreconciled. This is no runtime proof. |
+| #35 display | [PR #369](https://github.com/bloodf/beans/pull/369), published draft `c439a5ab`: E2E WebSocket/JPEG, separate view/control grants and private hypervisor endpoint | Wire proposal and synthetic framing evidence exist; crypto review, guest/viewer feasibility, live revocation and congestion acceptance remain open. |
 
-Final #29–35 reconciliation and changed-input issue updates precede #31 closure; they are not new implementation dependencies. Draft claims above are historical, not verified sibling heads. Missing #32–35 artifacts and #30 deployment evidence prevent full reconciliation; downstream acceptance (#51, #65, #76) is unverified.
+Before #31 closure reconcile final #29–35 outputs and update changed downstream inputs. This is not an implementation dependency. #32/#33 outputs, #34/#35 owner reconciliation, #30 deployment and downstream acceptance (#51, #65, #76) remain unverified. Draft pins above are historical review evidence.

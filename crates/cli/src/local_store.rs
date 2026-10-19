@@ -322,6 +322,32 @@ impl LocalStore {
         })
     }
 
+    /// A non-executing Device may durably refuse an envelope without creating authority.
+    pub(crate) fn quarantine_task_envelope(&self, identity: &str, task: &str) -> anyhow::Result<()> {
+        structural_id(identity)?;
+        structural_id(task)?;
+        self.safety(|tx| {
+            tx.execute("INSERT OR IGNORE INTO task_rejected_envelopes VALUES(?1,?2)", params![identity,task])?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn queue_task_for_identity(&self, lease: &TaskLease, job: &crate::model::Job, identity: &str) -> anyhow::Result<bool> {
+        structural_id(identity)?;
+        self.safety(|tx| {
+            check_authority_tx(tx, lease)?;
+            structural_id(&job.id)?;
+            anyhow::ensure!(lease.task_id == job.id, "Task identity differs from Job.id");
+            let rejected: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM task_rejected_envelopes WHERE account_identity=?1 AND task_id=?2)", params![identity,job.id], |row| row.get(0))?;
+            if rejected {
+                tx.execute("INSERT OR IGNORE INTO task_fences VALUES(?1,?2)", params![lease.account_epoch,lease.task_id])?;
+                return Ok(false);
+            }
+            queue_task_tx(tx, lease, job, false)
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn queue_task(&self, lease: &TaskLease, job: &crate::model::Job) -> anyhow::Result<bool> {
         self.safety(|tx| queue_task_tx(tx, lease, job, false))
     }
@@ -486,13 +512,16 @@ impl LocalStore {
         let version:i64=connection.pragma_query_value(None,"user_version",|r|r.get(0))?;
         let tables:std::collections::HashSet<String>=connection.prepare("SELECT name FROM sqlite_master WHERE type='table'")?
             .query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
-        anyhow::ensure!((0..=3).contains(&version), "Unsupported future task schema version");
+        anyhow::ensure!((0..=4).contains(&version), "Unsupported future task schema version");
+        if version==4 {
+            anyhow::ensure!(tables.contains("task_rejected_envelopes"), "Task rejection safety schema is incomplete");
+        }
         let current=["task_authority","task_fences","local_tasks","task_invocations","task_effect_receipts","routine_check_commits","task_safety_version"];
         let task_count=current.iter().filter(|name|tables.contains(**name)).count();
-        if version==3 {
+        if version>=3 {
             anyhow::ensure!(tables.contains("routine_schedule_authority") && tables.contains("routine_schedule_occurrences"),"Schedule safety schema is incomplete");
         }
-        if version==2 || version==3 {
+        if version>=2 {
             anyhow::ensure!(task_count==current.len(),"Current task schema is incomplete; restoring missing safety tables is forbidden");
         } else if !tables.is_empty() && task_count==0 {
             anyhow::ensure!(version==1,"Unsupported predecessor schema version");
@@ -647,6 +676,8 @@ impl LocalStore {
                  id INTEGER PRIMARY KEY CHECK(id=1), account_epoch TEXT NOT NULL,
                  owner_epoch TEXT NOT NULL, closed INTEGER NOT NULL CHECK(closed IN (0,1)), admission_floor REAL);
              CREATE TABLE IF NOT EXISTS task_safety_version(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL CHECK(version=1));
+             CREATE TABLE IF NOT EXISTS task_rejected_envelopes (
+                 account_identity TEXT NOT NULL, task_id TEXT NOT NULL, PRIMARY KEY(account_identity,task_id));
              CREATE TABLE IF NOT EXISTS task_fences (
                  account_epoch TEXT NOT NULL, task_id TEXT NOT NULL, PRIMARY KEY(account_epoch,task_id));
              CREATE TABLE IF NOT EXISTS local_tasks (
@@ -677,7 +708,7 @@ impl LocalStore {
              CREATE TABLE IF NOT EXISTS routine_schedule_occurrences (
                  account_epoch TEXT NOT NULL, routine_id TEXT NOT NULL, revision TEXT NOT NULL,
                  occurrence INTEGER NOT NULL, PRIMARY KEY(account_epoch,routine_id,revision,occurrence));
-             PRAGMA user_version = 3;",
+             PRAGMA user_version = 4;",
         )?;
         if !connection.prepare("SELECT paused FROM metadata").is_ok() {
             connection.execute("ALTER TABLE metadata ADD COLUMN paused INTEGER NOT NULL DEFAULT 0", [])?;
@@ -1676,6 +1707,7 @@ impl LocalStore {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
         for table in [
+            "task_rejected_envelopes",
             "task_authority",
             "task_safety_version",
             "task_fences",
@@ -2305,17 +2337,77 @@ mod tests {
     }
 
     #[test]
+    fn schema_three_upgrade_preserves_task_fences_and_adds_empty_quarantine() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("beans.sqlite3");
+        let store = LocalStore::open(&path).unwrap();
+        let (lease, job) = task_fixture(&store, "prior-fence");
+        assert!(store.queue_task(&lease, &job).unwrap());
+        store.connection.lock().unwrap().execute_batch("DROP TABLE task_rejected_envelopes; PRAGMA user_version=3;").unwrap();
+        drop(store);
+        let upgraded = LocalStore::open(&path).unwrap();
+        assert!(!upgraded.queue_task(&lease, &job).unwrap());
+        let count: i64 = upgraded.connection.lock().unwrap().query_row("SELECT count(*) FROM task_rejected_envelopes", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn missing_quarantine_schema_is_refused_without_reconstruction() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("beans.sqlite3");
+        let store = LocalStore::open(&path).unwrap();
+        store.connection.lock().unwrap().execute_batch("DROP TABLE task_rejected_envelopes;").unwrap();
+        drop(store);
+        assert!(LocalStore::open(&path).is_err());
+        let connection = Connection::open(path).unwrap();
+        let count: i64 = connection.query_row("SELECT count(*) FROM sqlite_master WHERE name='task_rejected_envelopes'", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn quarantine_and_owner_admission_serialize_without_duplicate_execution() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("beans.sqlite3");
+        let store = LocalStore::open(&path).unwrap();
+        let (lease, job) = task_fixture(&store, "racing-envelope");
+        let reader = LocalStore::open(&path).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let other = barrier.clone();
+        let reject = std::thread::spawn(move || {
+            other.wait();
+            reader.quarantine_task_envelope("account-identity", "racing-envelope").unwrap();
+        });
+        barrier.wait();
+        let admitted = store.queue_task_for_identity(&lease, &job, "account-identity").unwrap();
+        reject.join().unwrap();
+        assert_eq!(store.task_state(&lease).unwrap().is_some(), admitted, "a later refusal cannot rewrite already committed admission");
+        assert!(!store.queue_task_for_identity(&lease, &job, "account-identity").unwrap());
+        let (first, first_job) = task_fixture(&store, "owner-first");
+        assert!(store.queue_task_for_identity(&first, &first_job, "account-identity").unwrap());
+        store.quarantine_task_envelope("account-identity", &first_job.id).unwrap();
+        assert_eq!(store.task_state(&first).unwrap(), Some(TaskState::Queued));
+        assert!(!store.queue_task_for_identity(&first, &first_job, "account-identity").unwrap());
+        let (denied, job) = task_fixture(&store, "rejection-first");
+        store.quarantine_task_envelope("account-identity", &job.id).unwrap();
+        assert!(!store.queue_task_for_identity(&denied, &job, "account-identity").unwrap());
+        assert_eq!(store.task_state(&denied).unwrap(), None);
+        store.retain_chats(&[]).unwrap();
+        store.prune_tasks(i64::MAX).unwrap();
+        assert!(!store.queue_task_for_identity(&denied, &job, "account-identity").unwrap());
+    }
+
+    #[test]
     fn future_task_schema_is_refused_without_downgrade() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("beans.sqlite3");
         let store = LocalStore::open(&path).unwrap();
         store.recover_task_owner("owner-test").unwrap();
-        store.connection.lock().unwrap().execute_batch("PRAGMA user_version=4;").unwrap();
+        store.connection.lock().unwrap().execute_batch("PRAGMA user_version=5;").unwrap();
         drop(store);
         assert!(LocalStore::open(&path).is_err());
         let connection = Connection::open(&path).unwrap();
         let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-        assert_eq!(version, 4, "an older core must not silently downgrade a future safety schema");
+        assert_eq!(version, 5, "an older core must not silently downgrade a future safety schema");
     }
 
     #[test]

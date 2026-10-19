@@ -259,6 +259,7 @@ async fn first_sync(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
     // A held first sync keeps `last_seq` at 0 but did apply the roster, credentials and policy
     // before the envelope it stopped at: those are written and shown now, not lost to a restart.
     if matches!(synced, Ok(FirstSync::Done | FirstSync::Held)) {
+        let _account = sync_account_guard(app, machine_file)?;
         app.save_state_now();
         app.emit(Event::Snapshot(app.snapshot()));
     }
@@ -303,6 +304,7 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
             apply_incoming_blob(app, machine_file, blob, true)?;
             drop(admission);
             if blob.kind == "roster" {
+                let _account = sync_account_guard(app, machine_file)?;
                 let mut state = app.state.lock().unwrap();
                 state.roster_slot_seq = state.roster_slot_seq.max(blob.seq);
             }
@@ -311,7 +313,7 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
     }
     // The credentials are here, so onboarding can tell whether the account has a provider
     // without waiting for every chat.
-    mark_account_pulled(app, machine_file);
+    { let _account = sync_account_guard(app, machine_file)?; mark_account_pulled(app, machine_file); }
     let chats: Vec<String> = app.state.lock().unwrap().chats.iter().map(|chat| chat.meta.id.clone()).collect();
     for chat_id in chats {
         let page = app.relay.group_page(url, token, &crate::model::relay_name(&chat_id), None, FIRST_SYNC_MESSAGES).await;
@@ -324,7 +326,8 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
             apply_incoming_blob(app, machine_file, blob, true)?;
         }
         let before = slots.first().map(|slot| slot.place).filter(|_| has_more);
-        if let Err(error) = app.store.set_history_before(&chat_id, before) {
+        let history_result = { let _account = sync_account_guard(app, machine_file)?; app.store.set_history_before(&chat_id, before) };
+        if let Err(error) = history_result {
             tracing::error!(%error, %chat_id, "recording where the chat begins");
         }
         // A page ends early at its byte budget; a bot's turn wants the whole count.
@@ -333,6 +336,7 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
             here += older_messages_from(app, url, token, machine_file, &chat_id).await?.max(1);
         }
     }
+    let _account = sync_account_guard(app, machine_file)?;
     app.state.lock().unwrap().last_seq = head.unwrap_or(0);
     Ok(FirstSync::Done)
 }
@@ -355,6 +359,7 @@ async fn older_messages_from(app: &Arc<App>, url: &str, token: &str, machine_fil
     let local = |error: anyhow::Error| RelayError { status: None, message: error.to_string() };
     let Some(before) = app.store.history_before(chat_id).map_err(local)? else { return Ok(0) };
     let (slots, has_more) = app.relay.group_page(url, token, &crate::model::relay_name(chat_id), Some(before), OLDER_PAGE).await?;
+    let _account = sync_account_guard(app, machine_file)?;
     let dek = machine_file.dek().map_err(local)?;
     // A slot's last blob is the message as it stands. A removal or a read mark is nothing to
     // show, and a read mark from back then must not clear what is unread now.
@@ -404,6 +409,7 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
             }
         }
         if blobs.is_empty() {
+            let _account = sync_account_guard(app, machine_file)?;
             // Caught up, the replay of a relay that cannot page a chat included.
             mark_account_pulled(app, machine_file);
             app.state.lock().unwrap().caught_up = true;
@@ -456,6 +462,7 @@ fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
                 }
             }
             drop(admission);
+            let _account = sync_account_guard(app, machine_file)?;
             let mut state = app.state.lock().unwrap();
             if is_roster {
                 state.roster_slot_seq = state.roster_slot_seq.max(seq);
@@ -465,11 +472,13 @@ fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
         Ok(())
         })();
         app.bulk_sync.store(false, Ordering::Relaxed);
+        let _account = sync_account_guard(app, machine_file)?;
         app.save_state_now();
         if bulk {
             app.emit(Event::Snapshot(app.snapshot()));
             app.turns_changed();
         }
+        drop(_account);
         for blob in results {
             apply_blob(app, machine_file, &blob);
         }
@@ -904,6 +913,12 @@ pub async fn delete_remote_blob(app: &Arc<App>, id: &str) {
 
 // MARK: - Applying blobs
 
+fn sync_account_guard<'a>(app: &'a App, expected: &crate::keys::MachineFile) -> Result<parking_lot::ReentrantMutexGuard<'a, std::cell::Cell<(u64, bool)>>, RelayError> {
+    let guard = app.plugin_admission(None).map_err(|message| RelayError { status: None, message })?;
+    app.check_sync_account(expected).map_err(local_relay_error)?;
+    Ok(guard)
+}
+
 fn local_relay_error(error: anyhow::Error) -> RelayError {
     RelayError { status: None, message: error.to_string() }
 }
@@ -913,17 +928,29 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
     if blob.kind == "job" {
         let machine = machine_file.machine().map_err(local_relay_error)?;
         let job: Job = crate::crypto::unseal_json(&machine.box_secret, &unb64(&blob.ciphertext).map_err(local_relay_error)?).map_err(local_relay_error)?;
-        if let Some(lease) = app.queue_local_task(&job).map_err(local_relay_error)? {
+        if let Some(lease) = app.receive_task_envelope(&job, machine_file, remember.then_some(blob.id.as_str())).map_err(local_relay_error)? {
             crate::runtime::spawn_admitted_local_job(app.clone(), job, Some(blob.id.clone()), app.update.hold(), lease);
         }
-        if remember { remember_applied(&mut app.state.lock().unwrap(), &blob.id); }
         return Ok(());
     }
     if blob.kind == "chat" {
         return apply_chat_blob(app, machine_file, blob, remember, false);
     }
+    if blob.kind == "policy" {
+        let _edit = app.roster_edit.lock().unwrap();
+        let _account = sync_account_guard(app, machine_file)?;
+        if remember && app.state.lock().unwrap().applied_blob_ids.contains(&blob.id) { return Ok(()); }
+        let decoded = machine_file.dek().and_then(|dek| unb64(&blob.ciphertext).and_then(|bytes| crate::crypto::decrypt_json::<PolicyBlob>(&dek, "policy", &bytes)));
+        match decoded {
+            Ok(policy) => apply_policy_locked(app, policy),
+            Err(error) => tracing::warn!(%error, "policy blob"),
+        }
+        if remember { remember_applied(&mut app.state.lock().unwrap(), &blob.id); }
+        return Ok(());
+    }
     if blob.kind == "memory_config" {
         let _edit = app.roster_edit.lock().unwrap();
+        let _account = sync_account_guard(app, machine_file)?;
         if remember && app.state.lock().unwrap().applied_blob_ids.contains(&blob.id) { return Ok(()); }
         let dek = machine_file.dek().map_err(local_relay_error)?;
         let config = crate::crypto::decrypt_json::<crate::memory_service::config::MemoryConfig>(
@@ -933,11 +960,13 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
         return Ok(());
     }
     if blob.kind != "roster" {
+        let _account = sync_account_guard(app, machine_file)?;
         if remember { apply_blob(app, machine_file, blob); }
         else { apply_blob_contents(app, machine_file, blob); }
         return Ok(());
     }
     let _edit = app.roster_edit.lock().unwrap();
+    let _account = sync_account_guard(app, machine_file)?;
     let already_applied = app.state.lock().unwrap().applied_blob_ids.contains(&blob.id);
     if remember && already_applied && app.store.roster_baseline("observed").map_err(local_relay_error)?
         .is_some_and(|(seq, _)| seq >= blob.seq) { return Ok(()); }
@@ -1011,12 +1040,13 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
 }
 
 pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
-    if matches!(blob.kind.as_str(), "roster" | "memory_config" | "chat" | "job") {
+    if matches!(blob.kind.as_str(), "roster" | "memory_config" | "chat" | "job" | "policy") {
         if let Err(error) = apply_incoming_blob(app, machine_file, blob, true) {
             tracing::warn!(%error, "applying incoming blob");
         }
         return;
     }
+    let Ok(_account) = sync_account_guard(app, machine_file) else { return };
     let already = {
         let mut state = app.state.lock().unwrap();
         if state.applied_blob_ids.iter().any(|id| id == &blob.id) {
@@ -1031,22 +1061,15 @@ pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob:
 
 /// Applies a blob whether or not it was applied before, and leaves no record of it.
 fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
+    if matches!(blob.kind.as_str(), "roster" | "memory_config" | "chat" | "job" | "policy") {
+        if let Err(error) = apply_incoming_blob(app, machine_file, blob, false) { tracing::warn!(%error, "applying incoming blob"); }
+        return;
+    }
+    let Ok(_account) = sync_account_guard(app, machine_file) else { return };
     let Ok(ciphertext) = unb64(&blob.ciphertext) else { return };
     let Ok(dek) = machine_file.dek() else { return };
 
     match blob.kind.as_str() {
-        "roster" => {
-            // Roster application uses apply_incoming_blob to validate under roster_edit.
-        },
-        "policy" => match crate::crypto::decrypt_json::<PolicyBlob>(&dek, "policy", &ciphertext) {
-            Ok(policy) => apply_policy(app, policy),
-            Err(error) => tracing::warn!(%error, "policy blob"),
-        },
-        "chat" => {
-            if let Err(error) = apply_chat_blob(app, machine_file, blob, false, false) {
-                tracing::warn!(%error, "applying chat blob");
-            }
-        },
         "machine" => match crate::crypto::decrypt_json::<MachineBlob>(&dek, "machine", &ciphertext) {
             Ok(MachineBlob { device, turns }) => {
                 if app.this_device_id().as_deref() == Some(device.id.as_str()) {
@@ -1080,11 +1103,6 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Ok(credentials) => app.apply_credentials(&credentials),
             Err(error) => tracing::warn!(%error, "credentials blob"),
         },
-        "job" => {
-            if let Err(error) = apply_incoming_blob(app,machine_file,blob,false) {
-                tracing::error!(%error, "Task envelope admission refused");
-            }
-        }
         "job_cancel" => {
             let Ok(machine) = machine_file.machine() else { return };
             match crate::crypto::unseal_json::<JobCancel>(&machine.box_secret, &ciphertext) {
@@ -1127,8 +1145,13 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
     }
 }
 
+#[cfg(test)]
 fn apply_policy(app: &Arc<App>, policy: PolicyBlob) {
     let _edit = app.roster_edit.lock().unwrap();
+    apply_policy_locked(app, policy);
+}
+
+fn apply_policy_locked(app: &Arc<App>, policy: PolicyBlob) {
     if policy.version.counter == 0 || policy.version.device_id.is_empty() { return; }
     let mut roster_changed = false;
     let mut removed = Vec::new();
@@ -1536,6 +1559,7 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
 
 fn apply_chat_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn,
     remember: bool, advance_cursor: bool) -> Result<(), RelayError> {
+    let _account = sync_account_guard(app, machine_file)?;
     // Decrypt before taking the state lock or opening the SQLite transaction.
     let decoded = unb64(&blob.ciphertext).and_then(|ciphertext| {
         let dek = machine_file.dek()?;
@@ -3648,6 +3672,119 @@ mod tests {
                 }
             }
         }).await.expect("the cancelled turn should finish");
+    }
+
+    #[tokio::test]
+    async fn nonowner_quarantine_preserves_sync_without_creating_execution_authority() {
+        for initialized in [false, true] {
+            let mut scratch = if initialized { scratch_owner() } else { scratch_app() };
+            crate::identity::create(&scratch.0, Some("Device".into())).unwrap();
+            let job = queued_turn(&scratch.0);
+            scratch.0.save_state_now();
+            let config = Config { home: scratch.1.clone(), port: 0 };
+            if initialized {
+                let reader = App::load(config.clone()).unwrap();
+                drop(std::mem::replace(&mut scratch.0, reader));
+            }
+            let app = &scratch.0;
+            let before_epoch = app.store.current_task_account_epoch().unwrap();
+            assert_eq!(before_epoch.is_some(), initialized);
+            let machine = app.machine_file().unwrap();
+            app.state.lock().unwrap().last_seq = 1;
+            app.store.insert_sent_job(&crate::app::SentJob { id: "reader-wait".into(), chat_id: job.chat_id.clone(), bot_id: job.bot_id.clone(), routine_id: None, runner_id: "other-runner".into(), sent_at: crate::config::now_secs() }).unwrap();
+            crate::runtime::resume_sent_jobs(app);
+            let mut events = app.events.subscribe();
+            let message = Message::new(&job.chat_id, Author::System, Body::text("Reader continues"));
+            let result = JobResult { job_id: "reader-wait".into(), chat_id: job.chat_id.clone(), bot_id: job.bot_id.clone(), outcome: "sent".into() };
+            let page = vec![addressed_blob(app, 2, "job", "reader-reject", &job),
+                account_blob(app, 3, "chat", "reader-chat", &ChatBlob::Upsert { message: message.clone() }),
+                addressed_blob(app, 4, "job_result", "reader-result", &result)];
+            app.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER reject_quarantine BEFORE INSERT ON task_rejected_envelopes BEGIN SELECT RAISE(ABORT,'synthetic rejection'); END;").unwrap();
+            assert!(apply_pull_page(app, &machine, page.clone()).is_err());
+            assert_eq!(app.state.lock().unwrap().last_seq, 1);
+            assert!(!app.state.lock().unwrap().applied_blob_ids.iter().any(|id| id == "reader-reject"));
+            app.store.connection.lock().unwrap().execute_batch("DROP TRIGGER reject_quarantine;").unwrap();
+            // A durable refusal can replay after a crash before cursor publication.
+            apply_incoming_blob(app, &machine, &page[0], false).unwrap();
+            assert_eq!(app.state.lock().unwrap().last_seq, 1);
+            assert!(!apply_pull_page(app, &machine, page).unwrap());
+            wait_for_job_finished(&mut events, "reader-wait").await;
+            assert_eq!(app.state.lock().unwrap().last_seq, 4);
+            assert_eq!(app.message(&job.chat_id, &message.id).unwrap().body, message.body);
+            assert_eq!(app.store.current_task_account_epoch().unwrap(), before_epoch, "no reader authority mutation");
+            assert!(!app.running_turns().iter().any(|turn| turn["job_id"] == job.id));
+            let tasks: i64 = app.store.connection.lock().unwrap().query_row("SELECT count(*) FROM local_tasks", [], |row| row.get(0)).unwrap();
+            assert_eq!(tasks, 0);
+            app.store.prune_tasks(i64::MAX).unwrap();
+            let owner = App::load_owner(config).unwrap();
+            assert_eq!(owner.legacy_execution_closed().unwrap(), !initialized);
+            assert!(owner.queue_local_task(&job).unwrap().is_none(), "rejected envelopes cannot gain authority on later owner startup");
+            assert_eq!(owner.store.task_state(&owner.task_lease(&job).unwrap()).unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_nonjob_pages_cannot_mutate_a_replacement_account() {
+        let scratch = scratch_owner();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Old account".into())).unwrap();
+        let job = queued_turn(app);
+        let old_machine = app.machine_file().unwrap();
+        let old_message = Message::new("old-chat-only", Author::System, Body::text("Old account data"));
+        let mut credentials = crate::credentials::Credentials::default();
+        credentials.deepseek = Some(crate::credentials::ApiKeyCredential { api_key: "synthetic-old-account-key".into(), base_url: None, connected_at: 1 });
+        credentials.changed_at.insert("deepseek".into(), 1_000_000_000_000.0);
+        let roster = RosterBlob { bots: vec![app.bot(&job.bot_id).unwrap()], paused: true, ..Default::default() };
+        let policy = PolicyBlob { paused: Some(true), bot_id: None, capabilities: None, removed: false, version: PolicyVersion { counter: 100, device_id: "old-device".into() } };
+        let result = JobResult { job_id: "reused-wait".into(), chat_id: job.chat_id.clone(), bot_id: job.bot_id.clone(), outcome: "sent".into() };
+        let blobs = vec![
+            account_blob(app, 9, "chat", "stale-chat", &ChatBlob::Upsert { message: old_message.clone() }),
+            account_blob(app, 9, "credentials", "stale-credentials", &credentials),
+            account_blob(app, 9, "roster", "stale-roster", &roster),
+            account_blob(app, 9, "policy", "stale-policy", &policy),
+            addressed_blob(app, 9, "job_result", "stale-result", &result),
+        ];
+        app.forget_identity().unwrap();
+        crate::identity::create(app, Some("New account".into())).unwrap();
+        let (send, mut receive) = tokio::sync::oneshot::channel();
+        app.pending_results.lock().unwrap().insert("reused-wait".into(), send);
+        for blob in &blobs {
+            assert!(apply_pull_page(app, &old_machine, vec![blob.clone()]).is_err(), "{} must reject before mutation", blob.kind);
+            assert_eq!(app.state.lock().unwrap().last_seq, 0);
+            assert!(!app.state.lock().unwrap().applied_blob_ids.contains(&blob.id));
+            assert!(app.message("old-chat-only", &old_message.id).is_none());
+            assert!(app.bot(&job.bot_id).is_none());
+            assert!(app.credentials.lock().unwrap().deepseek.is_none());
+            assert!(!app.is_paused());
+        }
+        // The deferred bulk-result route rechecks the context independently.
+        apply_blob(app, &old_machine, blobs.last().unwrap());
+        assert!(matches!(receive.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+        app.pending_results.lock().unwrap().remove("reused-wait");
+    }
+
+    #[tokio::test]
+    async fn rejected_envelopes_and_stale_sessions_cannot_poison_a_replacement_account() {
+        let scratch = scratch_owner();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Old Runner".into())).unwrap();
+        let old_job = queued_turn(app);
+        let old_machine = app.machine_file().unwrap();
+        let stale = addressed_blob(app, 9, "job", "stale-envelope", &old_job);
+        app.store.quarantine_task_envelope(&old_machine.identity_pubkey, &old_job.id).unwrap();
+        app.forget_identity().unwrap();
+        let count: i64 = app.store.connection.lock().unwrap().query_row("SELECT count(*) FROM task_rejected_envelopes", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+        crate::identity::create(app, Some("Replacement Runner".into())).unwrap();
+        let replacement = queued_turn(app);
+        assert_eq!(old_job.id, replacement.id);
+        assert!(app.receive_task_envelope(&old_job, &old_machine, Some("stale-envelope")).is_err(), "a job decrypted before reset cannot publish after it");
+        assert!(apply_pull_page(app, &old_machine, vec![stale]).is_err());
+        assert_eq!(app.state.lock().unwrap().last_seq, 0);
+        assert!(!app.state.lock().unwrap().applied_blob_ids.iter().any(|id| id == "stale-envelope"));
+        // Even a durable old-identity row cannot reject a same-id new-account job.
+        app.store.quarantine_task_envelope(&old_machine.identity_pubkey, &old_job.id).unwrap();
+        assert!(app.queue_local_task(&replacement).unwrap().is_some());
     }
 
     #[tokio::test]

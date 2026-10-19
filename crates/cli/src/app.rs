@@ -266,6 +266,13 @@ impl App {
     pub fn is_execution_owner(&self) -> bool { self.execution_owner.is_some() }
     pub fn legacy_execution_closed(&self) -> anyhow::Result<bool> { self.store.legacy_execution_closed() }
 
+    /// Called only after explicit fresh identity creation clears its account store.
+    /// The caller retains plugin_admission; a Device reader never creates authority.
+    pub(crate) fn initialize_created_task_account(&self) -> anyhow::Result<()> {
+        if self.is_execution_owner() { self.store.task_account_epoch(&self.execution_epoch)?; }
+        Ok(())
+    }
+
     pub fn task_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(self.is_execution_owner(), "Only the execution owner reads an active lease");
@@ -331,15 +338,42 @@ impl App {
         }
         Ok(())
     }
+    /// Received Jobs retain the session's account and Device binding across decryption.
+    pub(crate) fn receive_task_envelope(&self, job: &Job, expected: &crate::keys::MachineFile, remember: Option<&str>) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        self.check_sync_account(expected)?;
+        let lease = if self.is_execution_owner() {
+            self.queue_local_task_locked(job)?
+        } else {
+            self.store.quarantine_task_envelope(&expected.identity_pubkey, &job.id)?;
+            None
+        };
+        if let Some(id) = remember { remember_applied(&mut self.state.lock().unwrap(), id); }
+        Ok(lease)
+    }
+
+    /// Caller holds the lifecycle boundary through the associated mutation/publication.
+    pub(crate) fn check_sync_account(&self, expected: &crate::keys::MachineFile) -> anyhow::Result<()> {
+        let current = self.machine_file().ok_or_else(|| anyhow::anyhow!("Sync account changed"))?;
+        anyhow::ensure!(current.identity_pubkey == expected.identity_pubkey && current.machine_secret == expected.machine_secret, "Sync account changed");
+        Ok(())
+    }
+
     pub(crate) fn queue_local_task(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         let _policy = self.roster_edit.lock().unwrap();
         let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        self.queue_local_task_locked(job)
+    }
+
+    fn queue_local_task_locked(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         self.check_local_job(job)?;
         let lease = self.task_lease(job)?;
         if let Some(id) = &job.routine_id {
             anyhow::ensure!(!self.store.routine_needs_review(&lease.account_epoch,id)?, "Routine has unresolved work requiring review");
         }
-        Ok(self.store.queue_task(&lease, job)?.then_some(lease))
+        let identity = self.machine_file().ok_or_else(|| anyhow::anyhow!("Device has no account"))?.identity_pubkey;
+        Ok(self.store.queue_task_for_identity(&lease, job, &identity)?.then_some(lease))
     }
 
     /// A local user submission creates a new identity, never authorizes a supplied Job id.

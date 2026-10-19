@@ -1,7 +1,7 @@
 import { expect, mock, test } from "bun:test";
 import type { Chat } from "../core/model";
 
-// Mount the production components through the existing native-tag fixture pattern.
+// Invoke production components through the existing native-tag fixture pattern.
 // Native focus order and VoiceOver/TalkBack announcements still require device proof.
 type Node = { type: any; props: any };
 const jsx = (type: any, props: any): Node => typeof type === "function" ? type(props) : { type, props };
@@ -41,10 +41,10 @@ function find(node: any, type: string): Node | undefined {
 }
 const chat: Chat = {
   id: "chat", kind: "group", bot_ids: [], is_pinned: false, created_at: 1, unread_count: 1000,
-  messages: [{ id: "message", chat_id: "chat", author: { kind: "you" }, body: { kind: "text", text: "Latest message" }, state: { kind: "sent" }, created_at: 2 }],
+  messages: [{ id: "message", chat_id: "chat", author: { kind: "you" }, body: { kind: "text", text: "Latest message" }, state: { kind: "complete" }, created_at: 2 }],
 };
 
-test("mounted chat rows expose one localized button label and preserve selection, unread and responding semantics", () => {
+test("chat row props expose one localized button label and preserve selection, unread and responding semantics", () => {
   try {
     for (const language of ["en", "zh"] as const) {
       setAppLanguage(language);
@@ -78,7 +78,7 @@ test("mounted chat rows expose one localized button label and preserve selection
   } finally { setAppLanguage("en"); }
 });
 
-test("mounted sidebar search retains its localized name with empty and nonempty input and preserves clear", () => {
+test("sidebar search props retain its localized name with empty and nonempty input and preserves clear", () => {
   try {
     for (const language of ["en", "zh"] as const) {
       setAppLanguage(language);

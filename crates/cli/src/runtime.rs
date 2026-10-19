@@ -1039,7 +1039,7 @@ mod tests {
         for group in [false,true] {
             app.state.lock().unwrap().chats.iter_mut().find(|chat|chat.meta.id=="chat").unwrap().meta.kind=if group {"group"} else {"dm"}.into();
             assert_eq!(app.chat("chat").unwrap().meta.is_group(),group);
-            let id=if group {"paused-group-file"} else {"paused-dm-file"};
+            let id=if group {"att-paused-group-file"} else {"att-paused-dm-file"};
             let file=crate::files::OutgoingFile{path:source.to_string_lossy().into(),id:Some(id.into()),name:None,mime:None,width:None,height:None};
             let before=app.store.outbox().unwrap().iter().filter(|item|item.kind=="chat").count();
             let message=send_user_message(app.clone(),"chat","saved while paused",None,vec![file],Vec::new(),None).unwrap();

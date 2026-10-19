@@ -1,8 +1,9 @@
 import { createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { L } from "../../l10n";
+import { memoryHealthLabel, memoryOperationLabel } from "../memoryLabels";
 import { store, errorText } from "../../model/store";
-import { MEMORY_ADVANCED_ACTIONS, MemoryPreferencesDraft, MemoryServiceAPI, MemoryServiceViewState, memoryVectorEditBody, secretPatch, supportsMemoryAction, supportsMemoryAdvancedAction, type MemoryBackend, type MemoryConnectionEdit, type MemoryConnectionOptions, type MemoryConnectionView, type MemoryConnectionsView, type MemoryHealth, type MemoryOperationState, type MemoryOperations, type MemoryPreferencesView, type MemoryAdvancedFeature } from "../../model/memoryService";
+import { MEMORY_ADVANCED_ACTIONS, MemoryPreferencesDraft, MemoryServiceAPI, MemoryServiceViewState, memoryVectorEditBody, secretPatch, supportsMemoryAction, supportsMemoryAdvancedAction, type MemoryBackend, type MemoryConnectionEdit, type MemoryConnectionOptions, type MemoryConnectionView, type MemoryConnectionsView, type MemoryHealth, type MemoryOperations, type MemoryPreferencesView, type MemoryAdvancedFeature } from "../../model/memoryService";
 import { Button, PopUpButton, Switch, TextArea, TextField } from "../controls";
 import { alert, presentSheet, Sheet } from "../overlay";
 import { MemorySetupControls, presentLocalEmbeddingSetup } from "./memorySetup";
@@ -22,25 +23,6 @@ function blockedConnectionText(connection: MemoryConnectionView): string {
   return connection.reason === "lancedb_cloud_transport_unavailable"
     ? L("LanceDB Cloud transport is unavailable. Runner-local Lance remains supported.")
     : L("This memory connection is blocked.");
-}
-
-function memoryHealthLabel(status: MemoryHealth["status"]): string {
-  switch (status) {
-    case "ready": return L("Ready");
-    case "degraded": return L("Degraded");
-    case "setup_required": return L("Setup required");
-  }
-}
-
-function memoryOperationLabel(state: MemoryOperationState): string {
-  switch (state) {
-    case "queued": return L("Queued, not stored");
-    case "submitted": return L("Submitted, not stored");
-    case "processing": return L("Processing, not stored");
-    case "completed": return L("Stored");
-    case "failed": return L("Failed, not stored");
-    case "delivery_unknown": return L("Delivery unknown, not confirmed stored");
-  }
 }
 
 export function MemoryConnectionsSheet(props: { api: MemoryServiceAPI; dismiss: () => void }) {

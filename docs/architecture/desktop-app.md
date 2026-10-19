@@ -15,7 +15,7 @@ Solid drafts retain one owner per account identity and chat across chat selectio
 
 The opt-in native memory panel includes embedding-profile Add/Edit/Remove controls with complete API/local-CPU vector-space inputs and explicit secret changes. Profile drafts share memory mutation admission, pending/error retention and account-keyed recovery; the working full client remains the default.
 
-Memory sheets translate health and delivery states at render time through literal `L("…")` calls in the shared sheet consumer, so the localization check sees every used key. Only `completed` reads as stored; queued, submitted, processing and failed explicitly say not stored, and delivery-unknown says storage is unconfirmed in English and Simplified Chinese.
+Memory sheets translate health and delivery states at render time through literal `L("…")` calls in `src/ui/memoryLabels.ts`, used by the shared sheet consumer, so the localization check sees every used key. Only `completed` reads as stored; queued, submitted, processing and failed explicitly say not stored, and delivery-unknown says storage is unconfirmed in English and Simplified Chinese.
 
 The native panel also offers each bot's MEMORY.md editor through existing Runner-routed calls, explicit hash-bound Save and confirmed conflict recovery. File size is bounded independently of the per-turn loading budget; note intent shares native close/quit guards and account-separated recovery.
 

@@ -10,7 +10,7 @@ test("all-platform CLI refuses absent or invalid public trust before changelog a
   const path = await mkdtemp(join(tmpdir(), "beans-release-preflight-")); paths.push(path);
   await mkdir(join(path, "scripts"));
   await mkdir(join(path, "updates"));
-  for (const name of ["app.ts", "changelog.ts", "release-signing.ts", "release-github.ts", "release-eas.ts", "release-build-inputs.ts"]) {
+  for (const name of ["app.ts", "changelog.ts", "release-signing.ts", "release-github.ts", "release-eas.ts", "release-build-inputs.ts", "release-ipa-claims.ts"]) {
     await copyFile(join(ROOT, "scripts", name), join(path, "scripts", name));
   }
   await copyFile(join(ROOT, "updates", "public-key.txt"), join(path, "updates", "public-key.txt"));

@@ -170,6 +170,7 @@ mod tests {
     #[test]
     fn cache_rejects_foreign_origin_and_invalid_content() {
         let home = std::env::temp_dir().join(format!("beans-catalog-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let config = Config { home: home.clone(), port: 0 };
         let mut later: Value = serde_json::from_str(beans_models::BUNDLED).unwrap();
         later["updated"] = Value::from("2999-01-01T00:00:00Z");
@@ -219,6 +220,7 @@ mod tests {
             }
         });
         let home = std::env::temp_dir().join(format!("beans-catalog-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         app.settings.lock().unwrap().relay_url = Some(base.clone());
         enable(&app);

@@ -15,5 +15,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "vite.config.ts", "mygo.config.ts"]
+  "include": ["src", "vite.config.ts", "mygo.config.ts", "test-browser.ts"]
 }

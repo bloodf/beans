@@ -71,3 +71,7 @@ Push API (`push.rs`): a phone registers where its pushes go with `PUT /v1/push/t
 Clients select `BEANS_RELAY_URL`, saved settings, the paired Device URL, the development LAN relay, then an explicitly supplied `BEANS_DEFAULT_RELAY_URL`. Release packaging embeds that optional operator value as `BeansRelayURL`; absent configuration means no production relay preset. No foreign relay or guessed hostname is substituted. Without a relay the CLI works on one Device alone. Development (`BEANS_DEV=1`) runs `0.0.0.0:8787` and uses this computer’s LAN IP for pairing, with APNs topic `ai.amoena.beans.dev`.
 
 A CLI holds one sync socket (`sync::session`). It requires protocol-5/`beans-v2` compatibility and supported effective floors before opening the socket, pulling ciphertext and reconciling policy actions with queued offline roster edits. The relay’s minimum cannot fall below 5 and it cannot read encrypted roster or policy values. After catching up, the CLI waits on socket and outbox: `blobs` prompts a pull, `machines` a fresh machine list, and a queued blob a pull before upload. A wake (`App::wake_sync`: phone foreground or pull to refresh) also pings the socket and replaces pooled HTTP connections that may have died while suspended.
+
+## Proposed computer display transport
+
+Discovery-only #35 display/session transport is specified in [Computer display](computer-display.md). This is not an implemented relay route; existing sync and storage mechanisms above remain unchanged.

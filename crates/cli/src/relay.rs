@@ -313,12 +313,43 @@ const FILE_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 pub struct RelayClient {
     /// Replaced by `reset_connections`, and its pooled connections with it.
     http: Mutex<reqwest::Client>,
-    token: Mutex<Option<(String, i64)>>,
+    token: Mutex<TokenCache>,
+}
+
+/// One active relay/Device namespace. Switching away and back must invalidate old work too.
+#[derive(Default)]
+struct TokenCache {
+    generation: u64,
+    namespace: Option<(String, String)>,
+    bearer: Option<(String, i64)>,
+}
+
+/// Authentication admission captured while the caller still holds its account lifecycle guard.
+#[derive(Clone)]
+pub(crate) struct TokenContext {
+    namespace: (String, String),
+    generation: u64,
+}
+
+impl TokenCache {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.checked_add(1).expect("relay token generation exhausted");
+        self.namespace = None;
+        self.bearer = None;
+    }
+
+    fn select(&mut self, namespace: &(String, String)) -> u64 {
+        if self.namespace.as_ref() != Some(namespace) {
+            self.invalidate();
+            self.namespace = Some(namespace.clone());
+        }
+        self.generation
+    }
 }
 
 impl RelayClient {
     pub fn new() -> anyhow::Result<Self> {
-        Ok(RelayClient { http: Mutex::new(Self::http_client()?), token: Mutex::new(None) })
+        Ok(RelayClient { http: Mutex::new(Self::http_client()?), token: Mutex::new(TokenCache::default()) })
     }
 
     /// The relay's own client: what it says about this build goes to the relay and never to
@@ -349,7 +380,7 @@ impl RelayClient {
     }
 
     pub fn forget_token(&self) {
-        *self.token.lock().unwrap() = None;
+        self.token.lock().unwrap().invalidate();
     }
 
     async fn check(response: reqwest::Response) -> RelayResult<Value> {
@@ -411,6 +442,12 @@ impl RelayClient {
     }
 
     pub async fn authenticate(&self, url: &str, machine: &Machine) -> RelayResult<String> {
+        let context = self.token_context(url, machine);
+        self.authenticate_for(url, machine, context.namespace, context.generation).await
+    }
+
+    async fn authenticate_for(&self, url: &str, machine: &Machine, namespace: (String, String), generation: u64) -> RelayResult<String> {
+        // No cache guard spans network I/O. Completion must still belong to its admission.
         self.health(url).await?;
         let challenge = Self::check(
             self.http()
@@ -435,17 +472,41 @@ impl RelayClient {
         .await?;
         let token = verified["token"].as_str().ok_or_else(|| RelayError { status: None, message: "no token".into() })?.to_string();
         let expires_at = verified["expires_at"].as_i64().unwrap_or(now_unix() + 600);
-        *self.token.lock().unwrap() = Some((token.clone(), expires_at));
+        let mut cache = self.token.lock().unwrap();
+        if cache.generation != generation || cache.namespace.as_ref() != Some(&namespace) {
+            return Err(RelayError { status: None, message: "relay authentication context changed".into() });
+        }
+        cache.bearer = Some((token.clone(), expires_at));
         Ok(token)
     }
 
-    pub async fn token(&self, url: &str, machine: &Machine) -> RelayResult<String> {
-        if let Some((token, expires_at)) = self.token.lock().unwrap().clone() {
-            if expires_at - 60 > now_unix() {
-                return Ok(token);
+    /// Capture under the originating account's lifecycle guard before spawning async work.
+    pub(crate) fn token_context(&self, url: &str, machine: &Machine) -> TokenContext {
+        let namespace = (url.to_owned(), machine.pubkey());
+        let generation = self.token.lock().unwrap().select(&namespace);
+        TokenContext { namespace, generation }
+    }
+
+    /// Uses an existing admission without selecting (or reviving) its namespace.
+    pub(crate) async fn token_for_context(&self, context: &TokenContext, machine: &Machine) -> RelayResult<String> {
+        {
+            let cache = self.token.lock().unwrap();
+            if cache.generation != context.generation || cache.namespace.as_ref() != Some(&context.namespace)
+                || machine.pubkey() != context.namespace.1 {
+                return Err(RelayError { status: None, message: "relay authentication context changed".into() });
+            }
+            if let Some((token, expires_at)) = &cache.bearer {
+                if expires_at.saturating_sub(60) > now_unix() {
+                    return Ok(token.clone());
+                }
             }
         }
-        self.authenticate(url, machine).await
+        self.authenticate_for(&context.namespace.0, machine, context.namespace.clone(), context.generation).await
+    }
+
+    pub async fn token(&self, url: &str, machine: &Machine) -> RelayResult<String> {
+        let context = self.token_context(url, machine);
+        self.token_for_context(&context, machine).await
     }
 
     pub async fn put_blob(&self, url: &str, token: &str, item: crate::app::OutboxItem, expected_slot_seq: i64) -> RelayResult<i64> {
@@ -765,3 +826,7 @@ fn decode_optional(value: &Value) -> RelayResult<Option<Vec<u8>>> {
         None => Ok(None),
     }
 }
+
+#[cfg(all(test, feature = "server"))]
+#[path = "relay/token_tests.rs"]
+mod token_tests;

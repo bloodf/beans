@@ -1011,6 +1011,9 @@ mod tests {
         assert_eq!((checked.found.as_deref(), checked.error.as_deref()), (Some("notes.txt is here"), None), "{}", checked.result);
         assert_eq!(checked.report(), Some(CheckReport { found: "notes.txt is here".into(), error: None }));
         let dm = app.dm_with("b1", None).unwrap();
+        assert!(!app.store.codemode_values(&dm.meta.id, "b1").unwrap().contains_key("runs"), "a staged check does not consume values");
+        let committed = check_now(app, &watch, &CancellationToken::new()).await;
+        assert_eq!(committed, checked, "explicit execution commits the same check result");
         assert_eq!(app.store.codemode_values(&dm.meta.id, "b1").unwrap()["runs"], serde_json::json!(1));
 
         let writes = edit(app, &watch.id, None, None, None, Some("await tools.write({ path: 'x.txt', content: 'y' });")).unwrap();

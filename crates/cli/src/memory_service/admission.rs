@@ -45,6 +45,7 @@ impl LocalStore {
 }
 pub fn admit_turn(app:&App,job:&Job,cancel:&CancellationToken)->Result<Option<TurnAccess>,MemoryError>{
     let _edit=app.roster_edit.lock().unwrap();
+    let _guard=app.plugin_admission(None).map_err(|_|MemoryError::new("identity_changed"))?;
     let record=if let Some(record)=app.store.memory_admission(&job.id)?{record}else{
         let group=app.chat(&job.chat_id).is_some_and(|c|c.meta.is_group());
         let access=match dispatch::admit(app,&job.bot_id,group,cancel){Ok(a)=>Some(a),Err(e)if matches!(e.code.as_str(),"memory_not_configured"|"connection_disconnected")=>None,Err(e)=>return Err(e)};

@@ -6,6 +6,18 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Consumed requests from revoked Devices are removed from the relay without publishing a response or applying their effects.
+
+- Paused accounts continue to save outgoing chat messages and attachments without admitting or starting bot work.
+
+- Signed requests, delayed provider discovery, task completions and relay authentication retain their original account admission across waits, preventing publication into a replacement account after Forget. Plugin/MCP policy cleanup uses the same roster-before-lifecycle lock order as incoming sync.
+
+- Non-executing Devices durably reject misrouted task envelopes without stalling sync or granting execution authority; identity-scoped denial survives later Runner startup.
+
+- Fresh Runner identity creation persists its task epoch before the first job, so restarting does not misclassify the new account as a legacy store.
+
+- Update-expiry timers no longer retain a stopped Runner or delay reopening its execution owner.
+
 - Cancelled or superseded queued tasks leave terminal history immediately, preserving replay fences and allowing explicit review without restarting the Runner.
 
 - Durable task startup retains storage admission through execution-owner recovery and rejects unknown future task schemas without downgrading them.

@@ -77,8 +77,11 @@ pub async fn capture_completed(app:&Arc<App>,access:&TurnAccess,chat_id:&str,tri
         sources.push(Source{chat_id:chat_id.into(),message_id:id.into(),speaker});
     }
     if sources.is_empty(){return;}
-    match dispatch::enqueue(app,access,&text,sources,true,None,&cancel){
-        Ok(delivery)=>{if dispatch::deliver(app,access,&delivery.id,false,cancel).await.is_err(){app.memory_changed(Some(&access.bot_id),"capture_pending");}},
-        Err(_)=>app.memory_changed(Some(&access.bot_id),"capture_not_admitted"),
+    let status = match dispatch::enqueue(app,access,&text,sources,true,None,&cancel){
+        Ok(delivery)=>dispatch::deliver(app,access,&delivery.id,false,cancel).await.err().map(|_|"capture_pending"),
+        Err(_)=>Some("capture_not_admitted"),
+    };
+    if let Some(status)=status {
+        if let Ok(_guard)=app.plugin_admission(Some(access.incarnation)) { app.memory_changed(Some(&access.bot_id),status); }
     }
 }

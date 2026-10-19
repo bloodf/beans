@@ -266,6 +266,13 @@ impl App {
     pub fn is_execution_owner(&self) -> bool { self.execution_owner.is_some() }
     pub fn legacy_execution_closed(&self) -> anyhow::Result<bool> { self.store.legacy_execution_closed() }
 
+    /// Called only after explicit fresh identity creation clears its account store.
+    /// The caller retains plugin_admission; a Device reader never creates authority.
+    pub(crate) fn initialize_created_task_account(&self) -> anyhow::Result<()> {
+        if self.is_execution_owner() { self.store.task_account_epoch(&self.execution_epoch)?; }
+        Ok(())
+    }
+
     pub fn task_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(self.is_execution_owner(), "Only the execution owner reads an active lease");
@@ -336,15 +343,46 @@ impl App {
         }
         Ok(())
     }
-    pub(crate) fn queue_local_task(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+    /// Received Jobs retain the session's account and Device binding across decryption.
+    pub(crate) fn receive_task_envelope(&self, job: &Job, expected: &crate::keys::MachineFile, remember: Option<&str>) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         let _policy = self.roster_edit.lock().unwrap();
         let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        self.check_sync_account(expected)?;
+        let lease = if self.is_execution_owner() {
+            self.queue_local_task_locked(job)?
+        } else {
+            self.store.quarantine_task_envelope(&expected.identity_pubkey, &job.id)?;
+            None
+        };
+        if let Some(id) = remember { remember_applied(&mut self.state.lock().unwrap(), id); }
+        Ok(lease)
+    }
+
+    /// Caller holds the lifecycle boundary through the associated mutation/publication.
+    pub(crate) fn check_sync_account(&self, expected: &crate::keys::MachineFile) -> anyhow::Result<()> {
+        let current = self.machine_file().ok_or_else(|| anyhow::anyhow!("Sync account changed"))?;
+        anyhow::ensure!(current.identity_pubkey == expected.identity_pubkey && current.machine_secret == expected.machine_secret, "Sync account changed");
+        Ok(())
+    }
+
+    pub(crate) fn queue_local_task(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        self.queue_local_task_at(job, None)
+    }
+
+    pub(crate) fn queue_local_task_at(&self, job: &Job, incarnation: Option<u64>) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
+        self.queue_local_task_locked(job)
+    }
+
+    fn queue_local_task_locked(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         self.check_local_job(job)?;
         let lease = self.task_lease(job)?;
         if let Some(id) = &job.routine_id {
             anyhow::ensure!(!self.store.routine_needs_review(&lease.account_epoch,id)?, "Routine has unresolved work requiring review");
         }
-        Ok(self.store.queue_task(&lease, job)?.then_some(lease))
+        let identity = self.machine_file().ok_or_else(|| anyhow::anyhow!("Device has no account"))?.identity_pubkey;
+        Ok(self.store.queue_task_for_identity(&lease, job, &identity)?.then_some(lease))
     }
 
     /// A local user submission creates a new identity, never authorizes a supplied Job id.
@@ -662,7 +700,7 @@ impl App {
     pub(crate) fn plugin_admission(&self, expected: Option<u64>) -> Result<parking_lot::ReentrantMutexGuard<'_, std::cell::Cell<(u64, bool)>>, String> {
         let guard = self.plugin_lifecycle.lock();
         let (incarnation, closed) = guard.get();
-        if closed || expected.is_some_and(|expected| expected != incarnation) {
+        if closed || expected.is_some_and(|expected| expected != incarnation) || !crate::requests::admission_matches(self, incarnation) {
             return Err("The plugin account changed; start again.".into());
         }
         Ok(guard)
@@ -1318,6 +1356,11 @@ impl App {
     /// Replaces the Auto-review setting and publishes the roster.
     pub fn set_auto_review(&self, auto_review: AutoReview) {
         let _edit = self.roster_edit.lock().unwrap();
+        self.set_auto_review_locked(auto_review);
+    }
+
+    /// Caller retains roster_edit; plugin callers take roster before lifecycle.
+    pub(crate) fn set_auto_review_locked(&self, auto_review: AutoReview) {
         self.state.lock().unwrap().auto_review = auto_review;
         self.roster_changed(true);
     }
@@ -1737,6 +1780,16 @@ impl App {
     /// Changes a routine and publishes the roster.
     pub fn update_routine(&self, id: &str, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
         let _edit = self.roster_edit.lock().unwrap();
+        self.update_routine_locked(id, None, update)
+    }
+
+    pub(crate) fn update_routine_for_incarnation(&self, id: &str, incarnation: u64, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+        let _edit = self.roster_edit.lock().unwrap();
+        self.update_routine_locked(id, Some(incarnation), update)
+    }
+
+    fn update_routine_locked(&self, id: &str, incarnation: Option<u64>, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+        let _guard = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
         let routine = {
             let mut state = self.state.lock().unwrap();
             let index=state.routines.iter().position(|r|r.id==id).ok_or_else(||anyhow::anyhow!("Unknown routine"))?;
@@ -3296,7 +3349,11 @@ mod tests {
         app.upsert_message(foreign_card, true);
         app.save_state_now();
 
-        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let reader = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        reader.close_orphan_proposals().unwrap();
+        assert!(matches!(reader.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"), "a non-owner must not recover a Runner's proposal");
+        drop(reader);
+        let reloaded = App::load_owner(Config { home: scratch.1.clone(), port: 0 }).unwrap();
         reloaded.close_orphan_proposals().unwrap();
         assert!(matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "dismissed"));
         assert!(matches!(reloaded.message("chat", "other-permission").unwrap().body, Body::Permission { decision, .. } if decision == "pending"));

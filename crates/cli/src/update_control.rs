@@ -105,11 +105,11 @@ impl Control {
         if !extended {
             tracing::info!(seconds = ttl.as_secs(), "update lease taken; new work waits while running work finishes");
         }
-        let expiring = app.clone();
+        let expiring = Arc::downgrade(app);
         let lease = id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(ttl).await;
-            expiring.update.expire(&expiring, &lease);
+            if let Some(app) = expiring.upgrade() { app.update.expire(&app, &lease); }
         });
         let mut status = self.status(app);
         status["lease_id"] = id.into();
@@ -313,6 +313,20 @@ mod tests {
         }
         assert_eq!(violations.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(control.gate.lock().active, 0, "every dropped admission is uncounted");
+    }
+
+    #[tokio::test]
+    async fn expiry_timer_does_not_retain_a_stopped_execution_owner() {
+        let home = tempfile::tempdir().unwrap();
+        let config = crate::config::Config { home: home.path().to_path_buf(), port: 0 };
+        let app = App::load_owner(config.clone()).unwrap();
+        app.update.prepare(&app, MIN_LEASE);
+        let stopped = Arc::downgrade(&app);
+        drop(app);
+        assert!(stopped.upgrade().is_none(), "the expiry notification owns no Runner lifetime");
+        let replacement = App::load_owner(config).unwrap();
+        assert_eq!(replacement.update.status(&replacement)["prepared"], false);
+        assert!(replacement.update.try_admit().is_some());
     }
 
     #[tokio::test]

@@ -229,7 +229,7 @@ function decodeSkillLibrary(value: unknown, action: "preview" | "import" | "unin
   };
   const id = (value: unknown): string => { const s = text(value, 32); return /^[0-9a-f]{32}$/.test(s) ? s : invalid(); };
   // A relative file label, as the Runner reports it: no controls, backslash, colon, empty or
-  // traversing segment, at most five segments, and bounded to 256 changed paths in total.
+  // traversing segment, at most five segments, and bounded to 256 source-side and 256 managed-side changed paths.
   const changed = (value: unknown): string[] => {
     if (!Array.isArray(value) || value.length > 256) return invalid();
     const labels = value.map((entry) => {
@@ -257,7 +257,7 @@ function decodeSkillLibrary(value: unknown, action: "preview" | "import" | "unin
   if (action === "compare") {
     const managed = id(r.managed_id), added = changed(r.added), removed = changed(r.removed), differing = changed(r.changed);
     const overlaps = (a: string[], b: string[]) => a.some((label) => b.includes(label));
-    if (added.length + removed.length + differing.length > 256 || overlaps(added, removed) || overlaps(added, differing) || overlaps(removed, differing)) return invalid();
+    if (added.length + differing.length > 256 || removed.length + differing.length > 256 || overlaps(added, removed) || overlaps(added, differing) || overlaps(removed, differing)) return invalid();
     return { version: 1, runner_id: runnerID, managed_id: managed, added, removed, changed: differing };
   }
   if (action === "preview") {

@@ -37,14 +37,14 @@ function readOnly(calls: ReturnType<typeof consumer>["calls"]) {
   expect(calls).toEqual([{ method: "skills.library.compare", params: { version: 1, runner_id: runnerID, root, managed_id: managedID } }]);
 }
 
-test("Compare accepts 256 combined labels but refuses 257 without retry or mutation", async () => {
-  for (const counts of [[86, 85, 85], [256, 0, 0], [0, 256, 0], [0, 0, 256]]) {
+test("Compare bounds each inventory to 256 labels without rejecting disjoint inventories", async () => {
+  for (const counts of [[86, 85, 85], [86, 86, 85], [256, 256, 0], [1, 1, 255], [256, 0, 0], [0, 256, 0], [0, 0, 256]]) {
     const value = { ...reply, added: labels("a", counts[0]!), removed: labels("r", counts[1]!), changed: labels("c", counts[2]!) };
     const { store, calls } = consumer(value);
     expect(await store.compareSkillLibrary(runnerID, root, managedID)).toEqual(value);
     readOnly(calls);
   }
-  for (const counts of [[86, 86, 85], [257, 0, 0], [0, 257, 0], [0, 0, 257]]) {
+  for (const counts of [[172, 0, 85], [0, 172, 85], [1, 0, 256], [0, 1, 256], [257, 0, 0], [0, 257, 0], [0, 0, 257]]) {
     const { store, calls } = consumer({ ...reply, added: labels("a", counts[0]!), removed: labels("r", counts[1]!), changed: labels("c", counts[2]!) });
     await expect(store.compareSkillLibrary(runnerID, root, managedID)).rejects.toThrow();
     readOnly(calls);

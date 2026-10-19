@@ -72,14 +72,14 @@ fn submit_user_message(app: &Arc<App>, chat_id: &str, text: &str, message_id: Op
     let policy=app.roster_edit.lock().unwrap();
     let lifecycle=app.plugin_admission(None).map_err(anyhow::Error::msg)?;
     let incarnation=lifecycle.get().0;
-    anyhow::ensure!(!app.is_paused(), "Account paused. Resume to run bots.");
+    let paused=app.is_paused();
     let chat=app.chat(chat_id).ok_or_else(||anyhow::anyhow!("Unknown chat"))?;
     let replied_bot=reply_to.as_ref().and_then(|r|match &r.author {Author::Bot{bot_id}=>Some(bot_id.as_str()),_=>None});
     let members=if chat.meta.is_group() {turn_order(&chat.meta,app,&mentions,replied_bot)} else {chat.meta.bot_ids.first().and_then(|id|app.bot(id)).into_iter().collect()};
     let mut message=Message::new(chat_id,Author::You,Body::Text{text:text.into(),attachments:Vec::new(),mentions,reply_to});
     if let Some(id)=message_id.filter(|id|!id.is_empty()) {message.id=id;}
     let mut tasks=Vec::new();
-    for bot in &members {
+    for bot in members.iter().filter(|_| !paused) {
         if app.this_device_id().as_deref()==Some(bot.runner_id.as_str()) {
             let mut job=user_turn_job(app,chat_id,&bot.id,&message.id);
             if chat.meta.is_group() {job.kind="room_turn".into();job.round=1;}
@@ -107,6 +107,8 @@ fn submit_user_message(app: &Arc<App>, chat_id: &str, text: &str, message_id: Op
     app.publish_committed_message(message.clone(),result,false);
     app.outbox_notify.notify_waiters();
     drop(order);
+    // Pause stops execution, not chat storage. Do not steer an existing turn either.
+    if paused { return Ok(message); }
     #[cfg(feature="runner")]
     crate::turns::hear_user_message(app,&message);
     drop(lifecycle); drop(policy);

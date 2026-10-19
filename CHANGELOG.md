@@ -6,7 +6,7 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
-- Local mobile provenance rejects untracked source changes and duplicate cloud/local platform build numbers; native metadata tools inspect the retained snapshot without inherited credentials.
+- Local mobile provenance rejects untracked source changes and duplicate cloud/local platform build numbers; native metadata tools inspect the retained snapshot without inherited credentials, with generated APK/IPA regressions in hosted checks.
 
 - Fresh Beans accounts use `beans-v2`, isolated v2 homes and ports 4874/4875, mandatory protocol-5/format capability, versioned backup phrases and pairing links; incompatible old storage and phrases are rejected without migration or reset.
 - New releases use Beans-only asset/package names and retain the existing Ed25519 anchor and immutable historical manifests. Update eligibility requires fresh-format relay health and supported protocol floors before Runner replacement.

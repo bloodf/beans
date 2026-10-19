@@ -277,6 +277,8 @@ function MarketplaceSheet(props: { runnerID: string | null; width: number; heigh
     <div
       ref={(element) => (root = element)}
       class="sheet market"
+      // The sheet has no title of its own; its own name is what a screen reader announces.
+      aria-label={L("Marketplace")}
       style={{ width: `${props.width}px`, height: `${props.height}px` }}
       tabindex={-1}
       onKeyDown={(event) => {

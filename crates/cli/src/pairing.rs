@@ -245,6 +245,11 @@ pub fn abort(app: &Arc<App>) {
 }
 
 async fn join(app: &Arc<App>, pairing: (String, String, String, String), device_name: Option<String>) -> anyhow::Result<Value> {
+    let incarnation = {
+        let admission = app.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        if app.has_identity() { anyhow::bail!("This Device already has an identity."); }
+        admission.get().0
+    };
     let (relay_url, identity_pubkey, ek, nonce) = pairing;
     app.relay.health(&relay_url).await.map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -290,6 +295,8 @@ async fn join(app: &Arc<App>, pairing: (String, String, String, String), device_
         anyhow::bail!("The reply came from a different identity than the pairing string");
     }
     let dek = keys::unb64_32(&reply.account_dek)?;
+    let _admission = app.plugin_admission(Some(incarnation)).map_err(anyhow::Error::msg)?;
+    if app.has_identity() { anyhow::bail!("This Device already has an identity."); }
 
     let machine_file = MachineFile { format: crate::config::Format::BeansV2, machine_secret: keys::b64(&machine.secret),
     identity_pubkey: reply.identity_pubkey.clone(),
@@ -316,6 +323,73 @@ async fn join(app: &Arc<App>, pairing: (String, String, String, String), device_
     app.emit(Event::IdentityChanged { has_identity: true });
     app.emit(Event::Snapshot(app.snapshot()));
     Ok(json!({ "id": device.id, "name": device.name, "os": device.os, "identity_id": keys::identity_id(&reply.identity_pubkey) }))
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn join_publication_rejects_forget_and_competing_create() {
+        use axum::{routing::{get, post}, Json, Router};
+        for transition in ["none", "forget", "create"] {
+            let home = std::env::temp_dir().join(format!("beans-join-fence-{}", uuid::Uuid::new_v4()));
+            let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+            let identity = crate::keys::Identity::generate();
+            let ephemeral = crypto_box::SecretKey::generate(&mut rand::rngs::OsRng);
+            let ek = keys::b64(ephemeral.public_key().as_bytes());
+            let (arrived, waiting) = tokio::sync::oneshot::channel();
+            let (release, blocked) = tokio::sync::oneshot::channel();
+            let arrived = Arc::new(std::sync::Mutex::new(Some(arrived)));
+            let blocked = Arc::new(tokio::sync::Mutex::new(Some(blocked)));
+            let request = Arc::new(std::sync::Mutex::new(None::<PairRequest>));
+            let posted = request.clone();
+            let (pubkey, content) = (identity.pubkey(), identity.content_pubkey());
+            let router = Router::new()
+                .route("/v1/health", get(|| async { Json(json!({"ok":true,"service":"beans-relay","format":"beans-v2","protocol":5,"min_protocol":5,"min_roster_protocol":5,"memory_config_version":1})) }))
+                .route("/v1/pair/synthetic/request", post(move |Json(body): Json<Value>| {
+                    let posted = posted.clone();
+                    let secret = ephemeral.clone();
+                    async move {
+                        let bytes = keys::unb64(body["ciphertext"].as_str().unwrap()).unwrap();
+                        *posted.lock().unwrap() = Some(crate::crypto::unseal_json(&secret, &bytes).unwrap());
+                        Json(json!({}))
+                    }
+                }))
+                .route("/v1/pair/synthetic/reply", get(move || {
+                    let (arrived, blocked, request, pubkey, content) = (arrived.clone(), blocked.clone(), request.clone(), pubkey.clone(), content.clone());
+                    async move {
+                        arrived.lock().unwrap().take().unwrap().send(()).unwrap();
+                        blocked.lock().await.take().unwrap().await.unwrap();
+                        let request = request.lock().unwrap().take().unwrap();
+                        let reply = json!({"format":"beans-v2","identity_pubkey":pubkey,"content_pubkey":content,"account_dek":keys::b64(&[42;32]),"relay_url":"http://127.0.0.1:1"});
+                        let sealed = crate::crypto::seal_json(&request.box_pubkey, &reply).unwrap();
+                        Json(json!({"ciphertext":keys::b64(&sealed)}))
+                    }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let held = app.clone();
+            let joining = tokio::spawn(async move { join(&held, (url, identity.pubkey(), ek, "synthetic".into()), Some("Synthetic joined".into())).await });
+            waiting.await.unwrap();
+            let competing = match transition {
+                "forget" => { app.forget_identity().unwrap(); None },
+                "create" => { crate::identity::create(&app, Some("Synthetic replacement".into())).unwrap(); app.this_device_id() },
+                _ => None,
+            };
+            release.send(()).unwrap();
+            let result = joining.await.unwrap();
+            match transition {
+                "none" => { result.unwrap(); assert_eq!(app.machine_file().unwrap().name, "Synthetic joined"); },
+                "forget" => { assert!(result.is_err()); assert!(app.machine_file().is_none()); assert!(!app.config.machine_path().exists()); },
+                _ => { assert!(result.is_err()); assert_eq!(app.this_device_id(), competing); },
+            }
+            server.abort();
+            drop(app);
+            std::fs::remove_dir_all(home).unwrap();
+        }
+    }
 }
 
 #[cfg(test)]

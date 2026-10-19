@@ -1177,6 +1177,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn glm_abnormal_finish_errors_without_done_or_tool_execution() {
+        use crate::providers::OpenAiCompatProvider;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+        use std::time::Duration;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for reason in ["sensitive", "network_error", "model_context_window_exceeded", "tool_calls"] {
+                let failed = reason != "tool_calls";
+                let call = json!({"choices":[{"delta":{"tool_calls":[{
+                    "index":0,"id":"c1","type":"function",
+                    "function":{"name":"count","arguments":"{\"limit\":3}"}
+                }]},"finish_reason":null}]});
+                let terminal = json!({"choices":[{"delta":{},"finish_reason":reason}]});
+                let first = format!("data: {call}\n\ndata: {terminal}\n\ndata: [DONE]\n\n");
+                let final_reply = format!("data: {}\n\ndata: [DONE]\n\n", json!({
+                    "choices":[{"delta":{"content":"count complete"},"finish_reason":"stop"}]
+                }));
+                // One direct adapter call, then the actual loop; only the control continues.
+                let mut replies = vec![first.clone(), first];
+                if !failed { replies.push(final_reply); }
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let root = format!("http://{}", listener.local_addr().unwrap());
+                let server = tokio::spawn(async move {
+                    for reply in replies {
+                        let (socket, _) = listener.accept().await.unwrap();
+                        let mut socket = BufReader::new(socket);
+                        let mut line = String::new();
+                        socket.read_line(&mut line).await.unwrap();
+                        assert!(line.starts_with("POST /chat/completions "));
+                        let mut length = None;
+                        loop {
+                            line.clear();
+                            assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+                            if line == "\r\n" { break; }
+                            if let Some((name, value)) = line.split_once(':') {
+                                if name.eq_ignore_ascii_case("content-length") {
+                                    length = Some(value.trim().parse::<usize>().unwrap());
+                                }
+                            }
+                        }
+                        let length = length.expect("JSON request content length");
+                        assert!(length <= 64 * 1024);
+                        let mut body = vec![0; length];
+                        socket.read_exact(&mut body).await.unwrap();
+                        let body: Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(body["model"], "glm-4.7");
+                        assert_eq!(body["stream"], true);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                            reply.len()
+                        );
+                        socket.get_mut().write_all(response.as_bytes()).await.unwrap();
+                        socket.get_mut().shutdown().await.unwrap();
+                    }
+                });
+                let mut adapter = OpenAiCompatProvider::new("custom:glm-fixture", &root, "", "glm-4.7");
+                adapter.max_retries = 0;
+                let provider = Arc::new(adapter);
+                let tool = Arc::new(Counter { runs: Mutex::new(vec![]), cancel_on_run: None });
+                let request = ModelRequest {
+                    system_prompt: String::new(),
+                    messages: vec![LlmMessage::User(crate::types::UserMessage::text("go"))],
+                    tools: vec![tool.spec()], cache_points: vec![], max_tokens: None,
+                    options: Default::default(),
+                };
+                let events: Vec<_> = provider.stream(request, CancellationToken::new()).await.collect().await;
+                let expected = format!("Provider stopped with finish_reason: {reason}");
+                if failed {
+                    assert!(matches!(events.last(), Some(AssistantEvent::Error { message, aborted: false }) if message == &expected));
+                    assert!(!events.iter().any(|event| matches!(event, AssistantEvent::Done { .. })));
+                } else {
+                    assert!(matches!(events.last(), Some(AssistantEvent::Done { stop_reason: StopReason::ToolUse, .. })));
+                    assert!(!events.iter().any(|event| matches!(event, AssistantEvent::Error { .. })));
+                }
+                let (messages, _) = run(provider, vec![tool.clone()], Arc::new(NoHooks), CancellationToken::new()).await;
+                let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!("expected terminal assistant") };
+                if failed {
+                    assert_eq!(last.stop_reason, StopReason::Error);
+                    assert_eq!(last.error_message.as_deref(), Some(expected.as_str()));
+                    assert!(tool.runs.lock().unwrap().is_empty());
+                    assert!(tool_results(&messages).is_empty());
+                } else {
+                    assert_eq!(tool.runs.lock().unwrap().as_slice(), &[json!({"limit":3})]);
+                    assert_eq!(tool_results(&messages)[0].text(), "counted 3");
+                    assert_eq!(last.stop_reason, StopReason::Stop);
+                    assert_eq!(last.text(), "count complete");
+                }
+                server.await.unwrap();
+            }
+        }).await.expect("loopback GLM terminal regression timed out");
+    }
+
+    #[tokio::test]
     async fn cache_points_count_the_messages_the_model_gets() {
         let provider = Scripted::new("p", vec![Turn::Text("ok")]);
         let context = AgentContext {

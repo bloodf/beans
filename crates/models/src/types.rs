@@ -62,6 +62,9 @@ pub struct Cost {
     pub cache_read: f64,
     pub cache_write: f64,
     pub total: f64,
+    /// True only when all contributing calls have known rates. Missing means unknown.
+    #[serde(default)]
+    pub known: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -74,7 +77,7 @@ pub struct Usage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<u64>,
     pub total_tokens: u64,
-    /// What this usage cost, when the model's rates are known; zero otherwise.
+    /// Known dollar subtotal and whether it covers every contributing call.
     #[serde(default)]
     pub cost: Cost,
 }
@@ -82,6 +85,7 @@ pub struct Usage {
 impl Usage {
     /// Adds another usage's tokens and cost to this one.
     pub fn add(&mut self, other: &Usage) {
+        let empty = self == &Usage::default();
         self.input += other.input;
         self.output += other.output;
         self.cache_read += other.cache_read;
@@ -95,5 +99,10 @@ impl Usage {
         self.cost.cache_read += other.cost.cache_read;
         self.cost.cache_write += other.cost.cache_write;
         self.cost.total += other.cost.total;
+        self.cost.known = Some(if empty {
+            other.cost.known == Some(true)
+        } else {
+            self.cost.known == Some(true) && other.cost.known == Some(true)
+        });
     }
 }

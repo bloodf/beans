@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "purpose": "Synthetic corpus and independent scorer contract, not semantic retrieval quality. Artificial vectors and scripted remote replies do not measure backend quality.",
+  "vector_space": {"dimensions": 2, "distance": "cosine", "normalization": "none", "model": "synthetic-hand-assigned-v1"},
+  "scopes": [
+    {"id": "own", "bot_id": "atlas", "chat_id": "atlas-shared", "members": ["atlas", "rowan-bot"]},
+    {"id": "foreign-private", "bot_id": "foreign-bot", "chat_id": "foreign-private-chat", "members": ["foreign-bot"]}
+  ],
+  "documents": [
+    {"id": "drink", "scope": "own", "speaker": "user", "timestamp": "2026-01-01T12:00:00Z", "text": "Mira chooses chamomile instead of coffee at bedtime.", "vector": [1.0, 0.1]},
+    {"id": "travel", "scope": "own", "speaker": "user", "timestamp": "2026-01-02T12:00:00Z", "text": "The team's train leaves from Cedar Station on Friday.", "vector": [1.0, 0.2]},
+    {"id": "food", "scope": "own", "speaker": "user", "timestamp": "2026-01-03T12:00:00Z", "text": "Rowan avoids peanuts because of an allergy.", "vector": [1.0, 0.3]},
+    {"id": "language", "scope": "own", "speaker": "user", "timestamp": "2026-01-04T12:00:00Z", "text": "The Atlas bot answers in Portuguese.", "vector": [1.0, 0.4]},
+    {"id": "backup", "scope": "own", "speaker": "user", "timestamp": "2026-01-05T12:00:00Z", "text": "The archive backup runs every Sunday at noon.", "vector": [1.0, 0.5]},
+    {"id": "delivery", "scope": "own", "speaker": "user", "timestamp": "2026-01-06T12:00:00Z", "text": "Parcel deliveries go to the blue side entrance.", "vector": [1.0, 0.6]},
+    {"id": "garden", "scope": "own", "speaker": "user", "timestamp": "2026-01-07T12:00:00Z", "text": "The garden gate needs green paint before spring.", "vector": [1.0, 0.7]},
+    {"id": "snack", "scope": "own", "speaker": "user", "timestamp": "2026-01-08T12:00:00Z", "text": "The picnic snack basket holds apples and crackers.", "vector": [1.0, 0.8]},
+    {"id": "map", "scope": "own", "speaker": "user", "timestamp": "2026-01-09T12:00:00Z", "text": "Our hiking trip map marks a waterfall east of camp.", "vector": [1.0, 0.9]},
+    {"id": "printer", "scope": "own", "speaker": "user", "timestamp": "2026-01-10T12:00:00Z", "text": "The office printer receives recycled paper on Tuesday.", "vector": [1.0, 1.0]},
+    {"id": "clock", "scope": "own", "speaker": "user", "timestamp": "2026-01-11T12:00:00Z", "text": "The kitchen clock should use a fresh battery.", "vector": [1.0, 1.1]},
+    {"id": "shared-speaker", "scope": "own", "speaker": "rowan-bot", "timestamp": "2026-01-12T12:00:00Z", "text": "Rowan-bot tells the shared chat that the telescope is on the shelf.", "vector": [1.0, 1.2]},
+    {"id": "foreign-canary", "scope": "foreign-private", "speaker": "foreign-bot", "timestamp": "2026-01-13T12:00:00Z", "text": "FOREIGN_BOT_CANARY: Mira favors espresso before sleeping.", "vector": [1.0, -0.45]}
+  ],
+  "relevance_labels": [
+    {"query_id": "q-drink", "relevant_id": "drink", "reason": "Chamomile is Mira's bedtime beverage; the foreign espresso claim is outside Atlas's private scope."},
+    {"query_id": "q-travel", "relevant_id": "travel", "reason": "Cedar Station names the departure point of the rail trip, unlike the hiking map."},
+    {"query_id": "q-food", "relevant_id": "food", "reason": "The peanut allergy identifies Rowan's unsafe ingredient, not the picnic basket contents."},
+    {"query_id": "q-language", "relevant_id": "language", "reason": "Portuguese specifies Atlas's reply language, not another shared-chat speaker's statement."},
+    {"query_id": "q-backup", "relevant_id": "backup", "reason": "Sunday noon specifies the weekly archive backup, not another scheduled office event."},
+    {"query_id": "q-delivery", "relevant_id": "delivery", "reason": "The blue side entrance is the parcel destination, not the garden gate or printer."}
+  ],
+  "queries": [
+    {"id": "q-drink", "text": "Which beverage does Mira favor before sleeping?", "vector": [1.0, -0.2]},
+    {"id": "q-travel", "text": "Where does our rail trip start?", "vector": [1.0, -0.3]},
+    {"id": "q-food", "text": "What snack ingredient is unsafe for Rowan?", "vector": [1.0, -0.4]},
+    {"id": "q-language", "text": "Which language should Atlas use for replies?", "vector": [1.0, -0.5]},
+    {"id": "q-backup", "text": "When is the weekly archive copy scheduled?", "vector": [1.0, -0.6]},
+    {"id": "q-delivery", "text": "Which doorway receives shipped packages?", "vector": [1.0, -0.7]}
+  ],
+  "vector_orders": [
+    {"query_id": "q-drink", "ids": ["drink", "travel", "food", "language", "backup", "delivery", "garden", "snack", "map", "printer", "clock", "shared-speaker"]},
+    {"query_id": "q-travel", "ids": ["drink", "travel", "food", "language", "backup", "delivery", "garden", "snack", "map", "printer", "clock", "shared-speaker"]},
+    {"query_id": "q-food", "ids": ["drink", "travel", "food", "language", "backup", "delivery", "garden", "snack", "map", "printer", "clock", "shared-speaker"]},
+    {"query_id": "q-language", "ids": ["drink", "travel", "food", "language", "backup", "delivery", "garden", "snack", "map", "printer", "clock", "shared-speaker"]},
+    {"query_id": "q-backup", "ids": ["drink", "travel", "food", "language", "backup", "delivery", "garden", "snack", "map", "printer", "clock", "shared-speaker"]},
+    {"query_id": "q-delivery", "ids": ["drink", "travel", "food", "language", "backup", "delivery", "garden", "snack", "map", "printer", "clock", "shared-speaker"]}
+  ],
+  "scripted_remote_orders": [
+    {"query_id": "q-drink", "ids": ["drink", "garden", "snack", "map", "printer", "clock"]},
+    {"query_id": "q-travel", "ids": ["map", "garden", "snack", "printer", "travel", "clock"]},
+    {"query_id": "q-food", "ids": ["snack", "garden", "map", "printer", "clock", "food"]},
+    {"query_id": "q-language", "ids": ["shared-speaker", "garden", "snack", "map", "printer", "clock"]},
+    {"query_id": "q-backup", "ids": ["clock", "backup", "garden", "snack", "map", "printer"]},
+    {"query_id": "q-delivery", "ids": ["printer", "garden", "delivery", "snack", "map", "clock"]}
+  ],
+  "foreign_attempt": {"query_id": "q-drink", "ids": ["foreign-canary", "drink"], "expected": "reject_foreign_scope"}
+}

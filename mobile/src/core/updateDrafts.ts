@@ -1,3 +1,4 @@
+import { composerDraft, composerDrafts, editComposerDraft, clearComposerDrafts, removeComposerDraft, subscribeAllComposerDrafts } from "./composerDraft";
 import type { PickedFile } from "./engine";
 import type { Bot } from "./model";
 
@@ -8,8 +9,7 @@ export interface ComposerDraft {
   listening: boolean;
 }
 const empty: ComposerDraft = { text: "", attachments: [], mentions: [], listening: false };
-const drafts = new Map<string, ComposerDraft>();
-const listeners = new Set<() => void>();
+
 // A new object on re-admission fences callbacks captured before deletion/forget.
 const owners = new Map<string, object>();
 export function composerDraftKey(identity: string | null, relay: string | null, chat: string): string {
@@ -26,29 +26,29 @@ export function reconcileComposerDrafts(identity: string | null, relay: string |
 export function composerDraftGeneration(key: string): object | null { return owners.get(key) ?? null; }
 export function discardComposerDraft(key: string): void {
   owners.delete(key);
-  if (drafts.delete(key)) listeners.forEach(listener => listener());
+  const [identity, relay, chat] = JSON.parse(key);
+  removeComposerDraft(identity, relay, chat);
 }
 /** Only an authoritative forget clears every source retained in this process. */
 export function forgetComposerDrafts(): void {
   owners.clear();
-  drafts.clear();
-  listeners.forEach(listener => listener());
+  clearComposerDrafts();
 }
-export function retainedComposerDrafts(): readonly [string, ComposerDraft][] { return [...drafts.entries()]; }
-export function readComposerDraft(key: string): ComposerDraft { return drafts.get(key) ?? empty; }
+export function retainedComposerDrafts(): readonly [string, ComposerDraft][] { return [...composerDrafts.entries()].filter(([, draft]) => draft.text || draft.attachments.length || draft.reply || draft.pending || draft.recording).map(([key, draft]) => [key, { text: draft.text, attachments: draft.attachments, mentions: draft.mentions, listening: !!draft.recording }]); }
+export function readComposerDraft(key: string): ComposerDraft { const draft = composerDrafts.get(key); return draft ? { text: draft.text, attachments: draft.attachments, mentions: draft.mentions, listening: !!draft.recording } : empty; }
 export function writeComposerDraft(key: string, patch: Partial<ComposerDraft>, generation = composerDraftGeneration(key)): void {
   if (generation === null || owners.get(key) !== generation) return;
   const next = { ...readComposerDraft(key), ...patch };
   if (!next.text.trim()) next.mentions = [];
-  if (next.text.length || next.attachments.length || next.mentions.length || next.listening) drafts.set(key, next);
-  else drafts.delete(key);
-  listeners.forEach(listener => listener());
+  const [identity, relay, chat] = JSON.parse(key);
+  const draft = composerDraft(identity, relay, chat);
+  draft.recording = next.listening ? draft.recording ?? {} : null;
+  editComposerDraft(draft, { text: next.text, attachments: next.attachments, mentions: next.mentions });
 }
 export function subscribeComposerDrafts(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
+  return subscribeAllComposerDrafts(listener);
 }
 export function hasUpdateDrafts(): boolean {
-  for (const draft of drafts.values()) if (draft.text.trim() || draft.attachments.length || draft.listening) return true;
+  for (const draft of composerDrafts.values()) if (draft.text.trim() || draft.attachments.length || draft.reply || draft.pending || draft.recording || draft.permission) return true;
   return false;
 }

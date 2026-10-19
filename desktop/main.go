@@ -40,6 +40,11 @@ func main() {
 		}
 	})
 	mygo.App.OnBeforeQuit(func(event *mygo.QuitEvent) {
+		if err := nativeQuitAdmission(); err != nil {
+			event.PreventDefault()
+			native.show()
+			return
+		}
 		if updaterBeforeQuit(event) {
 			app.quitting = true
 		}

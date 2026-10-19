@@ -55,7 +55,7 @@ On Windows, bots run their commands in Git for Windows' bash, not WSL's, so inst
 | `beans self-update` | Reports unavailable in Beans; use the signed Beans update mechanism. |
 | `beans service install` | Runs `beans serve` in the background, now and at every login, and starts it again if it stops. `beans service uninstall` stops it; `beans service status` says whether it runs and where its log is. |
 | `beans status` | Prints this device's state as JSON: devices, bots, chats, providers. |
-| `beans doctor` | Checks the home folder, identity, port, relay, and `mcp.json`, and says what is wrong. |
+| `beans doctor [--json]` | Reports privacy-safe setup evidence: versions, relay health, configured credentials, cached plugin setup and Runner presence. `--json` exports the same report. It discloses relay host/port, not keys, names, paths or messages. If account loading fails, it exits nonzero with no report and a fixed error on stderr, omitting startup logs and private error details; check storage access and account format locally. Review before sharing; nothing is uploaded. Provider health is not checked. |
 
 ## MCP servers
 

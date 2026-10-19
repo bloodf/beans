@@ -13,7 +13,11 @@ use crate::provider_auth;
 use crate::{identity, pairing, requests, routines, runtime};
 
 fn string(params: &Value, key: &str) -> Result<String, String> {
-    params[key].as_str().map(str::to_string).filter(|s| !s.is_empty()).ok_or_else(|| format!("missing {key}"))
+    match &params[key] {
+        Value::String(text) if !text.is_empty() => Ok(text.clone()),
+        Value::Null | Value::String(_) => Err(format!("missing {key}")),
+        _ => Err(format!("{key} must be a string")),
+    }
 }
 
 fn opt_string(params: &Value, key: &str) -> Option<String> {
@@ -114,6 +118,9 @@ fn store_avatar(app: &Arc<App>, avatar: Option<Option<crate::files::OutgoingFile
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Value, String> {
     match method {
+        "skills.discovery" => crate::skill_discovery::dispatch(app, params).await,
+        "skills.library.preview" | "skills.library.import" | "skills.library.uninstall" => crate::skill_library::dispatch(app, method, params).await,
+        "skills.library.compare" => crate::skill_library::dispatch(app, method, params).await,
         method if method.starts_with("memory.") && !matches!(method, "memory.read" | "memory.write") =>
             crate::memory_service::api::dispatch(app, method, params).await,
         "hello" => Ok(json!({
@@ -126,6 +133,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             "relay_update_required": app.relay_update_required.load(std::sync::atomic::Ordering::Relaxed),
             "relay_error": app.relay_problem.lock().unwrap().clone(),
         })),
+        "diagnostics.report" => Ok(crate::diagnostics::report(app).await),
         // An app connecting checks for newer public catalogs, unless checked within the hour.
         "bootstrap" => {
             crate::catalog::check_in_background(app);
@@ -296,6 +304,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             // fetch the blob by the time it reads the profile.
             let capabilities = capabilities(&params)?;
             let look = look(&params)?;
+            app.bot(&id).ok_or("Unknown bot")?;
             let avatar = store_avatar(app, avatar_file(&params)?)?;
             let bot = app.update_bot(&id, |bot| {
                 if let Some(v) = opt_string(&params, "name") { bot.name = v; }
@@ -351,24 +360,30 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({ "chat": chat }))
         }
         "chats.send" => {
-            let files: Vec<crate::files::OutgoingFile> = serde_json::from_value(params["attachments"].clone()).unwrap_or_default();
-            let mut attachments = Vec::new();
-            for file in &files {
-                attachments.push(crate::files::store(app, file).map_err(|e| e.to_string())?);
+            // Every field is checked before the first file is copied. Absent and null mean "not given".
+            let chat_id = string(&params, "chat_id")?;
+            app.chat(&chat_id).ok_or("Unknown chat")?;
+            let optional = |key: &str| match params.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(text)) => Ok(Some(text.clone())),
+                Some(_) => Err(format!("{key} must be a string")),
+            };
+            let text = optional("text")?;
+            let (message_id, reply_to) = (optional("message_id")?, optional("reply_to")?);
+            // Fixed messages: a serde error could echo the offending value.
+            let files: Vec<crate::files::OutgoingFile> = match params.get("attachments") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(value) => serde_json::from_value(value.clone()).map_err(|_| "attachments must be an array of files")?,
+            };
+            let mentions: Vec<String> = match params.get("mentions") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(value) => serde_json::from_value(value.clone()).map_err(|_| "mentions must be an array of strings")?,
+            };
+            if text.is_none() && files.is_empty() {
+                return Err("missing text".into());
             }
-            let text = opt_string(&params, "text").unwrap_or_default();
-            let mentions: Vec<String> = serde_json::from_value(params["mentions"].clone()).unwrap_or_default();
-            let message =
-                runtime::send_user_message(
-                    app.clone(),
-                    &string(&params, "chat_id")?,
-                    &text,
-                    opt_string(&params, "message_id"),
-                    attachments,
-                    mentions,
-                    opt_string(&params, "reply_to"),
-                )
-                    .map_err(|e| e.to_string())?;
+            let message = runtime::send_user_message(app.clone(), &chat_id, &text.unwrap_or_default(), message_id, files, mentions, reply_to)
+                .map_err(|e| e.to_string())?;
             Ok(json!({ "message": message }))
         }
         "files.path" => {
@@ -495,55 +510,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "chats.search" => {
             let query = string(&params, "query")?;
             let limit = params["limit"].as_u64().unwrap_or(20).clamp(1, 50) as usize;
-            let terms = crate::local_store::search_terms(&query);
-            if terms.is_empty() {
-                return Ok(json!({ "chats": [], "messages": [] }));
-            }
-            let (chat_ids, chats) = {
-                let state = app.state.lock().unwrap();
-                let bots: std::collections::HashMap<&str, &Bot> =
-                    state.bots.iter().map(|bot| (bot.id.as_str(), bot)).collect();
-                let ids: std::collections::HashSet<String> =
-                    state.chats.iter().map(|chat| chat.meta.id.clone()).collect();
-                let chats = state
-                    .chats
-                    .iter()
-                    .filter_map(|chat| {
-                        let mut parts = chat.meta.title.clone().into_iter().collect::<Vec<_>>();
-                        for id in &chat.meta.bot_ids {
-                            if let Some(bot) = bots.get(id.as_str()) {
-                                parts.extend([bot.name.clone(), bot.description.clone()]);
-                            }
-                        }
-                        let text = parts.join(" ");
-                        crate::local_store::search_matches(&text, &terms).then(|| {
-                            json!({
-                                "chat_id": chat.meta.id,
-                                "snippet": crate::local_store::search_snippet(&text, &terms),
-                            })
-                        })
-                    })
-                    .take(limit)
-                    .collect::<Vec<_>>();
-                (ids, chats)
-            };
-            let messages: Vec<Value> = app
-                .store
-                .search_messages(&query, limit)
-                .map_err(|error| error.to_string())?
-                .into_iter()
-                .filter(|hit| chat_ids.contains(&hit.chat_id))
-                .map(|hit| {
-                    json!({
-                        "chat_id": hit.chat_id,
-                        "message_id": hit.message_id,
-                        "snippet": hit.snippet,
-                        "author": hit.author,
-                        "created_at": hit.created_at,
-                    })
-                })
-                .collect();
-            Ok(json!({ "chats": chats, "messages": messages }))
+            crate::search::query(app, &query, limit).map_err(|error| error.to_string())
         }
         // Older messages than the snapshot carried, a page at a time, oldest first.
         "chats.messages" => {
@@ -569,7 +536,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({ "messages": messages, "has_more": has_more }))
         }
         "chats.mark_read" => {
-            app.mark_read(&string(&params, "chat_id")?, true);
+            app.mark_read(&string(&params, "chat_id")?, true).map_err(|error| error.to_string())?;
             Ok(Value::Null)
         }
 
@@ -604,6 +571,22 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
         "routines.run" => {
             routines::run_now(app, &string(&params, "id")?)?;
+            Ok(Value::Null)
+        }
+        // Saved workflows live in the roster beside routines. A definition grants nothing and
+        // nothing here runs one.
+        "workflows.create" => {
+            let record = crate::workflow::create(app, &string(&params, "bot_id")?, &string(&params, "name")?, params["definition"].clone())?;
+            Ok(json!({ "workflow": crate::workflow::out(app, &record) }))
+        }
+        "workflows.list" => {
+            let bot_id = opt_string(&params, "bot_id");
+            let all = app.state.lock().unwrap().workflows.clone();
+            let listed: Vec<Value> = all.iter().filter(|w| bot_id.as_deref().is_none_or(|id| w.bot_id == id)).map(|w| crate::workflow::out(app, w)).collect();
+            Ok(json!({ "workflows": listed }))
+        }
+        "workflows.delete" => {
+            app.delete_workflow(&string(&params, "id")?).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "routines.describe" => routines::describe(&string(&params, "schedule")?),
@@ -816,11 +799,14 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         // The chat models a custom provider's server lists, for the model picker.
         #[cfg(feature = "provider-auth")]
         "providers.refresh" => {
+            if params.get("runner_id").is_some() { return provider_auth::guided_request(app, "providers.custom.refresh", params).await; }
             let updated = provider_auth::refresh_custom_models(app).await?;
             Ok(json!({ "updated": updated }))
         }
         #[cfg(feature = "provider-auth")]
         "providers.list_models" => {
+            if params.get("runner_id").is_some() { return provider_auth::guided_request(app, "providers.custom.preview", params).await; }
+            provider_auth::capability_input(&params)?;
             let str_param = |key: &str| params[key].as_str().unwrap_or_default().to_string();
             let listed = provider_auth::list_custom_models(app, &str_param("name"), &str_param("api"), &str_param("base_url"), &str_param("api_key"), opt_string(&params, "integration").as_deref()).await?;
             Ok(json!({ "listed": listed.is_some(), "models": listed.unwrap_or_default() }))
@@ -828,6 +814,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         // Adds a custom provider, or saves one with `kind`, once its server answers.
         #[cfg(feature = "provider-auth")]
         "providers.connect_custom" => {
+            if params.get("runner_id").is_some() { return provider_auth::guided_request(app, "providers.custom.save", params).await; }
             let input = provider_auth::CustomInput {
                 kind: opt_string(&params, "kind"),
                 integration: opt_string(&params, "integration"),
@@ -836,6 +823,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 base_url: params["base_url"].as_str().unwrap_or_default().to_string(),
                 api_key: params["api_key"].as_str().unwrap_or_default().to_string(),
                 models: params["models"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(),
+                capabilities: provider_auth::capability_input(&params)?,
             };
             let kind = provider_auth::connect_custom(app, input).await?;
             Ok(json!({ "kind": kind, "providers": app.credentials.lock().unwrap().statuses() }))

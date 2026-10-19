@@ -178,6 +178,7 @@ enum MainMenu {
         let menu = NSMenu()
         add(menu, L("Beans Help"), #selector(AppDelegate.showHelp(_:)), "?")
         add(menu, L("Architecture Notes"), #selector(AppDelegate.showArchitecture(_:)))
+        add(menu, L("Diagnostics…"), #selector(AppDelegate.showDiagnostics(_:)), "d", modifiers: [.command, .option, .shift])
         return menu
     }
 }

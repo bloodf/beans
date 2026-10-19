@@ -45,6 +45,17 @@ final class CommandPalette: NSObject {
         self.root = root
         super.init()
         buildPanel()
+        AppStore.shared.observe(self) { [weak self] event in
+            guard let self, self.isVisible, !self.field.stringValue.isEmpty else { return }
+            switch event {
+            case .snapshotReplaced, .rosterChanged, .chatsChanged, .chatChanged, .messageAdded, .messageChanged, .messageRemoved, .olderMessagesLoaded, .identityChanged:
+                self.searchResults = .empty
+                self.isSearching = true
+                self.reload()
+                self.searchMessages()
+            default: break
+            }
+        }
     }
 
     // MARK: - Showing
@@ -110,7 +121,7 @@ final class CommandPalette: NSObject {
         field.drawsBackground = false
         field.focusRingType = .none
         field.font = .systemFont(ofSize: 19)
-        field.placeholderString = L("Search actions, chats, messages, and settings")
+        field.placeholderString = L("Search actions, chats, messages, files, and settings")
         field.cell?.usesSingleLineMode = true
         field.cell?.isScrollable = true
         field.delegate = self
@@ -207,16 +218,25 @@ final class CommandPalette: NSObject {
     // MARK: - List
 
     private func reload() {
-        var matched = PaletteIndex.filter(sections, query: field.stringValue)
+        let searching = !field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        var matched = PaletteIndex.filter(searching ? sections.filter { $0.title != L("Chats") } : sections, query: field.stringValue)
         if !field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             merge(PaletteIndex.searchSections(searchResults, root: root, store: AppStore.shared), into: &matched)
+            let files = searchResults.files.compactMap { hit -> PaletteItem? in
+                guard let chat = AppStore.shared.chat(hit.chatId) else { return nil }
+                return PaletteItem(icon: .symbol("doc"), title: hit.name, subtitle: AppStore.shared.title(for: chat), isSearchOnly: true, chatID: chat.id) { [weak self] in
+                    self?.root.open(chat.id)
+                }
+            }
+            if !files.isEmpty { matched.append(PaletteSection(title: L("Files"), items: files)) }
+            if !searchResults.historyComplete { matched.append(PaletteSection(title: L("Search covers downloaded history only"), items: [])) }
         }
         rows = matched.flatMap { section in
             [.header(section.title)] + section.items.map { Row.item($0) }
         }
         tableView.reloadData()
         tableView.restingPointer = NSEvent.mouseLocation
-        emptyLabel.stringValue = isSearching ? L("Searching…") : L("No Results")
+        emptyLabel.stringValue = isSearching ? L("Searching…") : (!searchResults.historyComplete ? L("Search covers downloaded history only") : L("No Results"))
         emptyLabel.isHidden = !rows.isEmpty
         scrollView.isHidden = rows.isEmpty
         layoutPanel()
@@ -252,7 +272,7 @@ final class CommandPalette: NSObject {
             guard !Task.isCancelled,
                 query == self.field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             else { return }
-            self.searchResults = results ?? .empty
+            self.searchResults = results ?? Wire.SearchResults(chats: [], messages: [], files: [], historyComplete: false)
             self.isSearching = false
             self.reload()
         }

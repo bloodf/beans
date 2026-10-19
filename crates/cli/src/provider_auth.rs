@@ -180,6 +180,76 @@ fn save_api_key(app: &Arc<App>, kind: &str, key: &str, base_url: Option<String>)
     app.update_credentials(kind, update).map_err(|e| e.to_string())
 }
 
+/// Parse declarations before network or mutation; omitted keeps and null clears.
+pub fn capability_input(body: &Value) -> Result<Option<Option<crate::credentials::CustomCapabilities>>, String> {
+    body.get("capabilities").map(|value| serde_json::from_value(value.clone()).map_err(|_| "Capabilities need a positive integer context window and boolean or null image/tool choices".to_string())).transpose()
+}
+
+pub async fn guided_request(app: &Arc<App>, verb: &str, body: Value) -> Result<Value, String> {
+    capability_input(&body)?;
+    let id = body["runner_id"].as_str().filter(|id| !id.is_empty()).ok_or("Choose a Runner")?;
+    let runner = app.device(id).ok_or("Choose a paired Runner")?;
+    if !runner.is_runner() { return Err(format!("{} is not a Runner", runner.name)); }
+    let local = app.this_device_id().as_deref() == Some(id);
+    let mut result = if local { serve_guided(app, verb, &body).await } else {
+        crate::requests::ask_within(app, id, verb, body.clone(), std::time::Duration::from_secs(60)).await
+    }.map_err(|error| format!("{}: {error}", runner.name))?;
+    if !local && verb != "providers.custom.preview" {
+        let stamps: std::collections::BTreeMap<String, f64> = serde_json::from_value(result["stamps"].clone()).map_err(|_| "Invalid provider revision receipt")?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let received = { let credentials = app.credentials.lock().unwrap(); stamps.iter().all(|(kind, stamp)| credentials.changed_at.get(kind).is_some_and(|current| current >= stamp)) };
+            if received { break; }
+            if tokio::time::Instant::now() >= deadline { return Err(format!("{} saved the provider; encrypted credentials have not synced yet. Wait for sync before reopening.", runner.name)); }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    result["runner_name"] = serde_json::json!(runner.name);
+    if verb == "providers.custom.save" { result["providers"] = serde_json::json!(app.credentials.lock().unwrap().statuses()); }
+    Ok(result)
+}
+
+/// Credential bytes return through encrypted credential sync, never status replies.
+pub async fn serve_guided(app: &Arc<App>, verb: &str, body: &Value) -> Result<Value, String> {
+    serve_guided_as(app, verb, body, None).await
+}
+
+pub async fn serve_guided_as(app: &Arc<App>, verb: &str, body: &Value, authority: Option<(&str, &str)>) -> Result<Value, String> {
+    check_provider_authority(app, authority)?;
+    let this = app.this_device_id().ok_or("Pair a Runner first")?;
+    if body["runner_id"].as_str() != Some(this.as_str()) || !app.device(&this).is_some_and(|device| device.is_runner()) { return Err("Provider check must execute on the selected Runner".into()); }
+    let capabilities = capability_input(body)?;
+    let text = |key: &str| body[key].as_str().unwrap_or_default().to_string();
+    match verb {
+        "providers.custom.preview" => {
+            let listed = list_custom_models(app, &text("name"), &text("api"), &text("base_url"), &text("api_key"), body["integration"].as_str()).await?;
+            Ok(serde_json::json!({ "listed": listed.is_some(), "models": listed.unwrap_or_default() }))
+        }
+        "providers.custom.save" => {
+            let kind = connect_custom_as(app, CustomInput {
+                kind: body["kind"].as_str().map(str::to_string), integration: body["integration"].as_str().map(str::to_string), name: text("name"), api: text("api"), base_url: text("base_url"), api_key: text("api_key"),
+                models: body["models"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(), capabilities,
+            }, authority).await?;
+            let stamps = std::collections::BTreeMap::from([(kind.clone(), app.credentials.lock().unwrap().changed_at[&kind])]);
+            Ok(serde_json::json!({ "kind": kind, "stamps": stamps }))
+        }
+        "providers.custom.refresh" => {
+            let updated = refresh_custom_models_for(app, body["kind"].as_str(), authority).await?;
+            let credentials = app.credentials.lock().unwrap();
+            let stamps: std::collections::BTreeMap<_, _> = credentials.changed_at.iter().filter(|(kind, _)| credentials.custom.contains_key(*kind) && body["kind"].as_str().is_none_or(|selected| selected == kind.as_str())).collect();
+            Ok(serde_json::json!({ "updated": updated, "stamps": stamps }))
+        }
+        _ => Err("Unknown custom-provider request".into()),
+    }
+}
+
+fn check_provider_authority(app: &App, authority: Option<(&str, &str)>) -> Result<(), String> {
+    if let Some((id, box_key)) = authority {
+        if !app.device(id).is_some_and(|device| device.box_pubkey == box_key) { return Err("Provider requester was revoked or changed".into()); }
+    }
+    Ok(())
+}
+
 /// What the user typed for a custom provider.
 #[derive(Debug, Default)]
 pub struct CustomInput {
@@ -192,6 +262,8 @@ pub struct CustomInput {
     pub api_key: String,
     /// Model ids in the user's order. Empty takes every model the server lists.
     pub models: Vec<String>,
+    /// Omitted keeps declarations; null clears them; an object replaces them.
+    pub capabilities: Option<Option<crate::credentials::CustomCapabilities>>,
 }
 
 /// Checks a custom provider's server and saves the provider for the account, answering with
@@ -199,7 +271,15 @@ pub struct CustomInput {
 /// output cap, and whether it sees images; a server without one still works with the model ids
 /// the user gave.
 pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String, String> {
-    let snapshot = input.kind.as_ref().and_then(|kind| app.credentials.lock().expect("credentials lock").custom.get(kind).cloned());
+    connect_custom_as(app, input, None).await
+}
+
+async fn connect_custom_as(app: &Arc<App>, input: CustomInput, authority: Option<(&str, &str)>) -> Result<String, String> {
+    check_provider_authority(app, authority)?;
+    let (snapshot, revision) = {
+        let credentials = app.credentials.lock().expect("credentials lock");
+        (input.kind.as_ref().and_then(|kind| credentials.custom.get(kind).cloned()), input.kind.as_ref().and_then(|kind| credentials.changed_at.get(kind).copied()))
+    };
     let requested_integration = CustomIntegration::parse(input.integration.as_deref())?;
     let integration = requested_integration.or_else(|| snapshot.as_ref().and_then(|provider| provider.integration));
     let name = input.name.trim().to_string();
@@ -228,6 +308,18 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
         let taken = PROVIDER_KINDS.iter().any(|kind| credentials.label(kind).eq_ignore_ascii_case(&name));
         if taken {
             return Err(format!("A provider named {name} exists already"));
+        }
+    }
+    // A guided add uses a client-stable UUID kind. Exact replay returns the committed
+    // provider without another HTTP check; a changed intent edits that same identity.
+    if input.kind.as_ref().is_some_and(|kind| kind.starts_with("custom:setup-")) {
+        if let Some(saved) = &snapshot {
+            let capabilities = input.capabilities.unwrap_or(saved.capabilities);
+            if saved.name == name && saved.api == api && saved.base_url == base_url && saved.api_key == api_key && saved.integration == integration && saved.capabilities == capabilities && (ids.is_empty() || saved.models.iter().map(|model| &model.id).eq(ids.iter())) {
+                return Ok(input.kind.unwrap());
+            }
+        } else if revision.is_some() {
+            return Err("This provider was deleted. Open a new setup draft.".into());
         }
     }
 
@@ -260,14 +352,20 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
         }).collect()
     };
 
+    check_provider_authority(app, authority)?;
+    let authority_guard = authority.map(|_| app.state.lock().unwrap());
+    if let (Some((id, box_key)), Some(state)) = (authority, authority_guard.as_ref()) {
+        if !state.devices.iter().any(|device| device.id == id && device.box_pubkey == box_key) { return Err("Provider requester was revoked or changed".into()); }
+    }
     let kind = {
         let mut credentials = app.credentials.lock().expect("credentials lock");
         let kind = input.kind.clone().unwrap_or_else(|| custom_kind(&credentials, &name));
         let created_at = credentials.custom.get(&kind).map(|provider| provider.created_at).unwrap_or_else(config::now_unix);
-        if input.kind.is_some() && credentials.custom.get(&kind) != snapshot.as_ref() {
+        if input.kind.is_some() && (credentials.custom.get(&kind) != snapshot.as_ref() || credentials.changed_at.get(&kind).copied() != revision) {
             return Err("The provider changed while connecting. Open it again.".into());
         }
-        let provider = CustomProvider { name, api, base_url, api_key, models, created_at, integration };
+        let capabilities = input.capabilities.unwrap_or_else(|| snapshot.as_ref().and_then(|provider| provider.capabilities));
+        let provider = CustomProvider { name, api, base_url, api_key, models, created_at, integration, capabilities };
         let mut next = credentials.clone();
         next.custom.insert(kind.clone(), provider);
         next.touch(&kind);
@@ -275,6 +373,7 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
         *credentials = next;
         kind
     };
+    drop(authority_guard);
     app.push_credentials();
     app.emit(app.roster_summary());
     Ok(kind)
@@ -296,13 +395,18 @@ pub async fn list_custom_models(_app: &Arc<App>, name: &str, api: &str, base_url
 /// that provider has not changed meanwhile; no response is allowed to restore a deleted or
 /// edited provider. Only actual model changes are stamped, saved and synced.
 pub async fn refresh_custom_models(app: &Arc<App>) -> Result<usize, String> {
+    refresh_custom_models_for(app, None, None).await
+}
+
+async fn refresh_custom_models_for(app: &Arc<App>, selected: Option<&str>, authority: Option<(&str, &str)>) -> Result<usize, String> {
     let providers: Vec<(String, CustomProvider, Option<f64>)> = {
         let credentials = app.credentials.lock().unwrap();
-        credentials.custom.iter().map(|(kind, provider)| (kind.clone(), provider.clone(), credentials.changed_at.get(kind).copied())).collect()
+        credentials.custom.iter().filter(|(kind, _)| selected.is_none_or(|selected| selected == kind.as_str())).map(|(kind, provider)| (kind.clone(), provider.clone(), credentials.changed_at.get(kind).copied())).collect()
     };
     let mut changed = 0;
     let mut failed = None;
     for (kind, snapshot, stamp) in providers {
+        check_provider_authority(app, authority)?;
         let discovery = match integration_root(snapshot.api, &snapshot.base_url, snapshot.integration) {
             Ok(root) => list_models(&snapshot.name, snapshot.api, &root, &snapshot.api_key).await,
             Err(error) => Err(error),
@@ -316,6 +420,11 @@ pub async fn refresh_custom_models(app: &Arc<App>) -> Result<usize, String> {
             }
         };
         let models = listed.into_iter().filter(|(not_chat, _)| !not_chat).map(|(_, model)| model).collect();
+        check_provider_authority(app, authority)?;
+        let authority_guard = authority.map(|_| app.state.lock().unwrap());
+        if let (Some((id, box_key)), Some(state)) = (authority, authority_guard.as_ref()) {
+            if !state.devices.iter().any(|device| device.id == id && device.box_pubkey == box_key) { return Err("Provider requester was revoked or changed".into()); }
+        }
         let mut credentials = app.credentials.lock().unwrap();
         if credentials.changed_at.get(&kind).copied() != stamp {
             continue;
@@ -337,6 +446,7 @@ pub async fn refresh_custom_models(app: &Arc<App>) -> Result<usize, String> {
                 return Err("Could not save refreshed models".into());
             }
             drop(credentials);
+            drop(authority_guard);
             app.push_credentials();
             app.emit(app.roster_summary());
             changed += 1;
@@ -405,7 +515,7 @@ async fn list_models(name: &str, api: CustomApi, root: &str, api_key: &str) -> R
             }
         };
         request = request.timeout(deadline.saturating_duration_since(tokio::time::Instant::now()));
-        let response = request.send().await.map_err(|_| format!("{name} unreachable. Check the URL on this Device."))?;
+        let response = request.send().await.map_err(|_| format!("{name} unreachable. Check the exact base URL and port, server running and bind address, firewall, and proxy bypass on the selected Runner."))?;
         match response.status() {
             reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED if page == 0 => return Ok(None),
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => return Err(if api_key.is_empty() { format!("{name} needs an API key") } else { format!("{name} rejected that key") }),

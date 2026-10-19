@@ -36,13 +36,16 @@ pub async fn ask_within(app: &Arc<App>, runner_id: &str, verb: &str, body: Value
     if !app.device_is_online(runner_id) {
         return Err(format!("{} is offline.", runner.name));
     }
-    let request = Request {
+    let mut request = Request {
         id: format!("req-{}", uuid::Uuid::new_v4()),
         verb: verb.to_string(),
         requested_by: app.this_device_id().unwrap_or_default(),
         body,
         created_at: now_secs(),
     };
+    let machine = app.machine_file().ok_or("Pair this Device first")?.machine().map_err(|_| "Device signing key unavailable")?;
+    let payload = request_bytes(&request, runner_id, &request.body)?;
+    request.body = json!({"payload": request.body, "signature": machine.sign(&payload)});
     let ciphertext = crate::crypto::seal_json(&runner.box_pubkey, &request).map_err(|e| e.to_string())?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.pending_responses.lock().unwrap().insert(request.id.clone(), tx);
@@ -94,11 +97,38 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String, running: crate::u
 /// card a bot here is waiting on; the bash verbs type into, stop, or background a command here;
 /// Send now has a turn here read a message it holds. The separate self_update verbs
 /// remain fail-closed in Beans; update.status/prepare/cancel belong to local drain control.
+fn request_bytes(request: &Request, target: &str, body: &Value) -> Result<Vec<u8>, String> {
+    // Keep the existing provider wire contract; other verbs use a separate domain.
+    let domain = if matches!(request.verb.as_str(), "providers.custom.preview" | "providers.custom.save" | "providers.custom.refresh") {
+        "beans-provider-request-v1"
+    } else {
+        "beans-request-v1"
+    };
+    serde_json::to_vec(&(domain, &request.id, &request.verb, &request.requested_by, target, request.created_at, body)).map_err(|_| "Invalid signed request".into())
+}
+
 async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
-    let body = &request.body;
+    // Sealed boxes hide the payload but do not authenticate its claimed sender.
+    // Check current membership and signing authority before dispatching any verb.
+    let paired = app.state.lock().unwrap().listed_machines.contains_key(&request.requested_by);
+    if !paired { return Err("Request requires a paired Device".into()); }
+    let target = app.this_device_id().ok_or("Pair a Runner first")?;
+    let body = request.body.get("payload").ok_or("Unsigned request")?;
+    let signature = request.body["signature"].as_str().ok_or("Unsigned request")?;
+    let key = crate::keys::verifying_key(&request.requested_by).map_err(|_| "Invalid requester signing key")?;
+    let bytes = crate::keys::unb64(signature).map_err(|_| "Invalid request signature")?;
+    let signature = ed25519_dalek::Signature::from_slice(&bytes).map_err(|_| "Invalid request signature")?;
+    key.verify_strict(&request_bytes(request, &target, body)?, &signature).map_err(|_| "Invalid request signature")?;
     match request.verb.as_str() {
+        "skills.discovery" => crate::skill_discovery::serve_as(app, body.clone(), &request.requested_by).await,
+        "skills.library.preview" | "skills.library.import" | "skills.library.uninstall" => crate::skill_library::serve_as(app, &request.verb, body.clone(), &request.requested_by).await,
+        "skills.library.compare" => crate::skill_library::serve_as(app, &request.verb, body.clone(), &request.requested_by).await,
+        #[cfg(feature = "provider-auth")]
+        "providers.custom.preview" | "providers.custom.save" | "providers.custom.refresh" => {
+            let requester = app.device(&request.requested_by).filter(|device| !device.box_pubkey.is_empty()).ok_or("Provider request requires a paired Device")?;
+            crate::provider_auth::serve_guided_as(app, &request.verb, body, Some((&requester.id, &requester.box_pubkey))).await
+        }
         verb if crate::memory_service::api::is_setup_method(verb) => {
-            if app.device(&request.requested_by).is_none() { return Err("requester_unknown".into()); }
             crate::memory_service::api::serve_as(app,verb,body.clone(),&request.requested_by).await
         },
         verb if verb.starts_with("memory.service.") || verb.starts_with("memory.operations.") =>
@@ -130,6 +160,105 @@ async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     }
 }
 
+#[cfg(all(test, feature = "runner", target_os = "linux"))]
+#[path = "skill_discovery_test.rs"]
+mod skill_discovery_tests;
+
+#[cfg(all(test, feature = "runner", target_os = "linux"))]
+#[path = "skill_library_test.rs"]
+mod skill_library_tests;
+
+#[cfg(all(test, feature = "runner", target_os = "linux"))]
+#[test]
+fn signed_library_compare_is_readonly_and_root_bounded() {
+    use std::future::Future;
+    use std::task::Poll;
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
+    runtime.block_on(async {
+        let home = std::env::temp_dir().join(format!("beans-library-compare-{}", uuid::Uuid::new_v4()));
+        let _cleanup = Cleanup(home.clone());
+        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        crate::identity::create(&app, Some("Synthetic Runner".into())).unwrap();
+        let runner = app.this_device_id().unwrap();
+        let phone = crate::keys::Machine::generate();
+        {
+            let mut state = app.state.lock().unwrap();
+            state.devices.push(crate::model::Device { id: phone.pubkey(), name: "Synthetic phone".into(), os: "ios".into(), box_pubkey: phone.box_pubkey(), ..Default::default() });
+            state.listed_machines.insert(phone.pubkey(), 1);
+            state.listed_machines.insert(runner.clone(), 1);
+            state.devices.iter_mut().find(|d| d.id == runner).unwrap().os = "linux".into();
+        }
+        let source = home.join("synthetic-source");
+        std::fs::create_dir_all(source.join("resources")).unwrap();
+        let skill = b"---\nname: Compare fixture\ndescription: Inactive copy\n---\nNEVER_EXECUTE_OR_RETURN_BODY\n";
+        std::fs::write(source.join("SKILL.md"), skill).unwrap();
+        for (path, bytes) in [("changed", b"old"), ("removed", b"old"), ("same", b"old")] {
+            std::fs::write(source.join("resources").join(path), bytes).unwrap();
+        }
+        let make = |verb: &str, body: Value| {
+            let mut request = Request { id: format!("synthetic-{}", uuid::Uuid::new_v4()), verb: verb.into(), requested_by: phone.pubkey(), body: body.clone(), created_at: now_secs() };
+            request.body = json!({"payload":body,"signature":phone.sign(&request_bytes(&request, &runner, &body).unwrap())});
+            request
+        };
+        let compare_body = |id: &str| json!({"version":1,"runner_id":runner,"root":source,"managed_id":id});
+        assert_eq!(answer(&app, &make("skills.library.compare", compare_body(&"0".repeat(32)))).await.unwrap_err(), "skill_library_failed");
+        assert!(!home.join("skill-library").exists(), "Compare must not create a library");
+        let preview = answer(&app, &make("skills.library.preview", json!({"version":1,"runner_id":runner,"root":source}))).await.unwrap();
+        let imported = answer(&app, &make("skills.library.import", json!({"version":1,"runner_id":runner,"token":preview["token"],"confirmed":true}))).await.unwrap();
+        let id = imported["managed_id"].as_str().unwrap();
+        let owned = home.join("skill-library");
+        let bundle = owned.join(id);
+        let manifest = std::fs::read(bundle.join("manifest.json")).unwrap();
+        let expected = json!({"version":1,"runner_id":runner,"managed_id":id,"added":[],"removed":[],"changed":[]});
+        assert_eq!(answer(&app, &make("skills.library.compare", compare_body(id))).await.unwrap(), expected);
+        std::fs::write(source.join("resources/changed"), b"new").unwrap();
+        std::fs::remove_file(source.join("resources/removed")).unwrap();
+        std::fs::write(source.join("resources/added"), b"new").unwrap();
+        let expected = json!({"version":1,"runner_id":runner,"managed_id":id,"added":["resources/added"],"removed":["resources/removed"],"changed":["resources/changed"]});
+        let request = make("skills.library.compare", compare_body(id));
+        assert_eq!(answer(&app, &request).await.unwrap(), expected);
+        assert_eq!(crate::api::dispatch(&app, "skills.library.compare", compare_body(id)).await.unwrap(), expected);
+        let mut forged = request.clone();
+        forged.body["payload"]["managed_id"] = json!("0".repeat(32));
+        assert_eq!(answer(&app, &forged).await.unwrap_err(), "Invalid request signature");
+        let mut wrong_runner = compare_body(id);
+        wrong_runner["runner_id"] = json!(phone.pubkey());
+        assert_eq!(answer(&app, &make("skills.library.compare", wrong_runner)).await.unwrap_err(), "skill_library_authority_changed");
+        let mut invalid = compare_body(id);
+        invalid["managed_id"] = json!("../source");
+        assert_eq!(answer(&app, &make("skills.library.compare", invalid)).await.unwrap_err(), "invalid_skill_library_request");
+        std::os::unix::fs::symlink(source.join("resources/same"), source.join("resources/link")).unwrap();
+        assert_eq!(answer(&app, &request).await.unwrap_err(), "skill_library_failed");
+        std::fs::remove_file(source.join("resources/link")).unwrap();
+        std::fs::remove_file(bundle.join("content/resources/same")).unwrap();
+        std::os::unix::fs::symlink(source.join("resources/same"), bundle.join("content/resources/same")).unwrap();
+        assert_eq!(answer(&app, &request).await.unwrap_err(), "skill_library_failed");
+        std::fs::remove_file(bundle.join("content/resources/same")).unwrap();
+        std::fs::write(bundle.join("content/resources/same"), b"old").unwrap();
+        // Revoke actor while compare waits for its bounded blocking read.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || { started_tx.send(()).unwrap(); let _ = release_rx.recv(); });
+        started_rx.recv().unwrap();
+        let mut pending = Box::pin(answer(&app, &request));
+        std::future::poll_fn(|cx| { assert!(matches!(pending.as_mut().poll(cx), Poll::Pending)); Poll::Ready(()) }).await;
+        app.state.lock().unwrap().listed_machines.remove(&phone.pubkey());
+        release_tx.send(()).unwrap();
+        assert_eq!(pending.await.unwrap_err(), "skill_library_authority_changed");
+        blocker.await.unwrap();
+        assert_eq!(answer(&app, &request).await.unwrap_err(), "Request requires a paired Device");
+        assert_eq!(std::fs::read(bundle.join("manifest.json")).unwrap(), manifest);
+        assert_eq!(std::fs::read(bundle.join("content/SKILL.md")).unwrap(), skill);
+        for path in ["changed", "removed", "same"] {
+            assert_eq!(std::fs::read(bundle.join("content/resources").join(path)).unwrap(), b"old");
+        }
+        assert!(!bundle.join("content/resources/added").exists());
+        assert_eq!(std::fs::read_dir(&owned).unwrap().map(|entry| entry.unwrap().file_name()).collect::<Vec<_>>(), vec![std::ffi::OsString::from(id)]);
+    });
+}
+
 /// A bot's memory as this Runner has it: the index with its budget and the other files by name.
 pub fn memory_read(app: &Arc<App>, bot_id: &str) -> Result<Value, String> {
     let bot = local_bot(app, bot_id)?;
@@ -150,4 +279,59 @@ fn local_bot(app: &Arc<App>, bot_id: &str) -> Result<crate::model::Bot, String> 
         return Err(format!("{} runs on {runner}, not here.", bot.name));
     }
     Ok(bot)
+}
+
+#[cfg(all(test, feature = "provider-auth"))]
+mod custom_provider_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn phone_request_executes_catalog_http_only_on_selected_runner() {
+        use std::io::{Read, Write};
+        let home = std::env::temp_dir().join(format!("beans-guided-origin-{}", uuid::Uuid::new_v4()));
+        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        crate::identity::create(&app, Some("Fixture Runner".into())).unwrap();
+        let runner = app.this_device_id().unwrap();
+        let phone = crate::keys::Machine::generate();
+        let unrelated = crate::keys::Machine::generate();
+        app.state.lock().unwrap().devices.push(crate::model::Device { id: phone.pubkey(), name: "Fixture phone".into(), os: "ios".into(), box_pubkey: phone.box_pubkey(), ..Default::default() });
+        app.state.lock().unwrap().listed_machines.insert(phone.pubkey(), 1);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let root = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut socket, peer) = listener.accept().unwrap();
+            assert!(peer.ip().is_loopback());
+            let mut bytes = [0; 4096];
+            let size = socket.read(&mut bytes).unwrap();
+            let request = String::from_utf8_lossy(&bytes[..size]).into_owned();
+            let body = r#"{"data":[{"id":"runner-local-alias"}]}"#;
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            request
+        });
+        let mut request = Request { id: "fixture-preview".into(), verb: "providers.custom.preview".into(), requested_by: "foreign".into(), body: json!({"runner_id":runner,"api":"chat-completions","base_url":root}), created_at: now_secs() };
+        assert!(answer(&app, &request).await.unwrap_err().contains("paired Device"));
+        request.requested_by = phone.pubkey();
+        let unsigned = request.clone();
+        let signature = unrelated.sign(&request_bytes(&unsigned, &runner, &unsigned.body).unwrap());
+        request.body = json!({"payload": unsigned.body, "signature": signature});
+        let runner_keys = app.machine_file().unwrap().machine().unwrap();
+        let forged = crate::crypto::seal_json(&runner_keys.box_pubkey(), &request).unwrap();
+        let decoded: Request = crate::crypto::unseal_json(&runner_keys.box_secret, &forged).unwrap();
+        assert!(answer(&app, &decoded).await.unwrap_err().contains("Invalid request signature"));
+        assert!(answer(&app, &request).await.unwrap_err().contains("Invalid request signature"));
+        let signature = phone.sign(&request_bytes(&unsigned, &runner, &unsigned.body).unwrap());
+        request.body = json!({"payload": unsigned.body, "signature": signature});
+        app.state.lock().unwrap().devices.retain(|device| device.id != phone.pubkey());
+        app.state.lock().unwrap().listed_machines.remove(&phone.pubkey());
+        assert!(answer(&app, &request).await.unwrap_err().contains("paired Device"));
+        assert!(app.credentials.lock().unwrap().custom.is_empty());
+        app.state.lock().unwrap().devices.push(crate::model::Device { id: phone.pubkey(), name: "Fixture phone".into(), os: "ios".into(), box_pubkey: phone.box_pubkey(), ..Default::default() });
+        app.state.lock().unwrap().listed_machines.insert(phone.pubkey(), 1);
+        let result = answer(&app, &request).await.unwrap();
+        assert_eq!(result["models"][0]["id"], "runner-local-alias");
+        assert!(server.join().unwrap().starts_with("GET /v1/models "));
+        assert!(app.credentials.lock().unwrap().custom.is_empty());
+        drop(app);
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }

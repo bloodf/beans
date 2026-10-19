@@ -6,7 +6,7 @@ use usage::Subcommands;
 
 use beans::app::App;
 use beans::config::Config;
-use beans::{identity, keys, pairing, routines, runtime, sync, ws};
+use beans::{identity, keys, pairing, runtime, sync};
 
 #[derive(usage::Cli, Debug)]
 #[usage(bin = "beans", version, about = "Beans CLI: identity, local API, agent loop, relay sync", unknown_flags = "error")]
@@ -30,6 +30,10 @@ struct Cli {
 
 #[derive(Subcommands, Debug)]
 enum Command {
+    /// Explicit storage-only transition and admission of an empty marked scratch home.
+    StorageUpgrade {
+        scratch_home: PathBuf,
+    },
     /// Run the local API the app connects to.
     Serve {
         /// Exit when this process is gone. The app passes its own pid so a killed app never
@@ -88,7 +92,11 @@ enum Command {
     /// Show identity, Devices, bots, and relay state.
     Status,
     /// Check the local setup.
-    Doctor,
+    Doctor {
+        /// Export a privacy-safe report; includes the selected relay host and port.
+        #[usage(long)]
+        json: bool,
+    },
     /// Local update control of the running `beans serve`, for an operator's updater. Prepare and
     /// cancel read the token from the file BEANS_UPDATE_TOKEN_FILE names.
     Update {
@@ -298,38 +306,27 @@ async fn main() -> anyhow::Result<()> {
         Command::Update { command } => return update(config.port, command).await,
         Command::Service { command } => return service(&config, command).await,
         Command::SelfUpdate => anyhow::bail!("{}", beans::update::UNAVAILABLE),
+        Command::StorageUpgrade { scratch_home } => {
+            let _store = Config { home: scratch_home, port: 0 }.preload_staged_storage()?;
+            return Ok(());
+        }
         command => command,
     };
-    let app = App::load(config)?;
+    let app = if matches!(command, Command::Doctor { .. }) {
+        // Account admission stays fail-closed. Neither startup logs nor the error chain
+        // may escape into a shareable doctor transcript with private paths or values.
+        tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || App::load(config))
+            .map_err(|_| anyhow::anyhow!("Doctor could not load local account data; no report was produced. Check storage access and account format locally; private details are omitted."))?
+    } else {
+        App::load(config)?
+    };
 
     match command {
         Command::Serve { parent_pid, ready_stdout } => {
             app.close_orphan_proposals()?;
             beans::service::trim_log();
             beans::update::start(&app);
-            runtime::resume_sent_jobs(&app);
-            // A command a Beans that quit left waiting went with it; its row says so now.
-            {
-                let app = app.clone();
-                tokio::task::spawn_blocking(move || beans::shell::close_stale_rows(&app));
-            }
-            #[cfg(unix)]
-            tokio::spawn(stop_on_signal(app.clone()));
-            // Installed plugins follow the last verified marketplace index.
-            beans::plugins::refresh_installed(&app, &beans::marketplace::current(&app).plugins);
-            beans::plugins::mcp_json::start(&app);
-            beans::marketplace::check_in_background(&app);
-            beans::catalog::check_in_background(&app);
-            if let Some(pid) = parent_pid {
-                tokio::spawn(watch_parent(app.clone(), pid));
-            }
-            // Bots' commands and plugin servers start with it; read it while the rest starts.
-            tokio::spawn(beans_agent::login_shell::environment());
-            tokio::spawn(sync::run(app.clone()));
-            tokio::spawn(routines::run(app.clone()));
-            #[cfg(feature = "provider-auth")]
-            tokio::spawn(beans::app::refresh_models_periodically(app.clone()));
-            ws::serve(app, ready_stdout).await
+            beans::serve::run(app, parent_pid, ready_stdout).await
         }
         Command::Identity { command } => match command {
             IdentityCommand::New { name } => {
@@ -407,11 +404,12 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
             Ok(())
         }
-        Command::Doctor => {
-            doctor(&app).await;
+        Command::Doctor { json } => {
+            doctor(&app, json).await;
             Ok(())
         }
         Command::Update { .. } => unreachable!("handled before the data folder opens"),
+        Command::StorageUpgrade { .. } => unreachable!("handled before App initialization"),
     }
 }
 
@@ -1067,91 +1065,29 @@ async fn serve_call(port: u16, method: &str, params: &serde_json::Value) -> anyh
     anyhow::bail!("beans serve closed the connection")
 }
 
-/// Exits once the parent process is gone.
-async fn watch_parent(app: std::sync::Arc<App>, pid: u32) {
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if !process_alive(pid) {
-            tracing::info!(pid, "parent exited; stopping");
-            app.shell_sessions.shutdown(&app);
-            std::process::exit(0);
-        }
-    }
-}
-
-/// Quitting (the app stopping its CLI, Ctrl-C, a closed terminal) first stops the commands bots
-/// left running in their terminals, so none outlives Beans and their rows say so; then the
-/// signal ends the process as it would have.
-#[cfg(unix)]
-async fn stop_on_signal(app: std::sync::Arc<App>) {
-    use tokio::signal::unix::{signal, SignalKind};
-    let (Ok(mut terminate), Ok(mut interrupt), Ok(mut hangup)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt()), signal(SignalKind::hangup())) else {
-        return;
-    };
-    let number = tokio::select! {
-        _ = terminate.recv() => libc::SIGTERM,
-        _ = interrupt.recv() => libc::SIGINT,
-        _ = hangup.recv() => libc::SIGHUP,
-    };
-    app.shell_sessions.shutdown(&app);
-    unsafe {
-        libc::signal(number, libc::SIG_DFL);
-        libc::raise(number);
-    }
-}
-
-#[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
-    let signaled = unsafe { libc::kill(pid as i32, 0) } == 0;
-    signaled || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-/// A process handle is signaled once the process has exited.
-#[cfg(windows)]
-fn process_alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
-    unsafe {
-        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
-        if handle.is_null() {
-            return false;
-        }
-        let running = WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
-        CloseHandle(handle);
-        running
-    }
-}
-
 /// One sync pass so CLI-only flows upload what they queued.
 async fn flush_outbox_once(app: &std::sync::Arc<App>) {
     let sync = sync::run(app.clone());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(8), sync).await;
 }
 
-async fn doctor(app: &std::sync::Arc<App>) {
+async fn doctor(app: &std::sync::Arc<App>, json: bool) {
+    let report = beans::diagnostics::report(app).await;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report).expect("diagnostics JSON"));
+        return;
+    }
     let ok = |label: &str, good: bool, detail: String| println!("{} {label}: {detail}", if good { "✔" } else { "✘" });
-    ok("home", app.config.home.is_dir(), app.config.home.display().to_string());
-    ok("identity", app.has_identity(), if app.has_identity() { "present".into() } else { "run `beans identity new`".into() });
-    let port_free = std::net::TcpListener::bind(("127.0.0.1", app.config.port)).is_ok();
-    ok("port", port_free, if port_free { format!("{} free", app.config.port) } else { format!("{} busy (beans serve running?)", app.config.port) });
-    match app.relay_url() {
-        Some(url) => {
-            let reachable = app.relay.health(&url).await.is_ok();
-            ok("relay", reachable, if reachable { url } else { format!("{url} unreachable") });
-        }
-        None => ok("relay", false, "not configured (BEANS_RELAY_URL); single-Device mode".into()),
-    }
-    let credentials = app.credentials.lock().unwrap().connected_kinds();
-    ok("providers", !credentials.is_empty(), if credentials.is_empty() { "none connected".into() } else { credentials.join(", ") });
-    let (servers, problems, error) = {
-        let store = app.plugins.lock().unwrap();
-        let problems: Vec<String> = store.mcp.servers.iter().filter_map(|server| server.problem().map(|problem| format!("{}: {problem}", server.name))).collect();
-        (store.mcp.servers.len(), problems, store.mcp.error.clone())
-    };
-    let path = app.config.mcp_path().display().to_string();
-    match error {
-        Some(error) => ok("mcp.json", false, error),
-        None if problems.is_empty() => ok("mcp.json", true, format!("{servers} server{} in {path}", if servers == 1 { "" } else { "s" })),
-        None => ok("mcp.json", false, problems.join("; ")),
-    }
+    ok("home", report["home"]["exists"] == true, "directory present (path omitted)".into());
+    ok("identity", report["this_device"]["has_identity"] == true, if app.has_identity() { "present".into() } else { "run `beans identity new`".into() });
+    println!("• port: {}", if report["port"]["free"] == true { "free" } else { "busy (beans serve running?)" });
+    let relay = &report["relay"];
+    ok("relay", relay["reason"] == "none", format!("{}: {}{}", relay["host"].as_str().unwrap_or("host omitted"), relay["reason"].as_str().unwrap(), relay["http_status"].as_u64().map(|s| format!(" (HTTP {s})")).unwrap_or_default()));
+    println!("• providers: configured credentials only; health not checked\n{}", report["providers"]);
+    println!("• plugins: cached setup state, not a live probe\n{}", report["plugins"]);
+    let mcp = &report["mcp_json"];
+    ok("mcp.json", mcp["file_error"] == false && mcp["problems"] == 0, format!("{} servers, {} configuration problems, file error: {}", mcp["servers"], mcp["problems"], mcp["file_error"]));
+    println!("• versions: {}", report["versions"]);
+    println!("• Runners: presence only, not admission readiness\n{}", report["runners"]);
+    println!("Review before sharing; report discloses relay host/port. Nothing is uploaded.");
 }

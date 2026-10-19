@@ -20,6 +20,8 @@ pub struct ProviderStatus {
     pub api: Option<crate::credentials::CustomApi>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration: Option<crate::credentials::CustomIntegration>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crate::credentials::CustomCapabilities>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<StatusModel>,
 }
@@ -657,6 +659,9 @@ pub struct ChatUsage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cost_usd: f64,
+    /// Whether cost_usd is a complete total rather than a known subtotal.
+    #[serde(default)]
+    pub cost_known: Option<bool>,
     pub turns: u64,
     /// The model of the last turn.
     pub model: String,
@@ -759,6 +764,18 @@ pub struct PolicyBlob {
 }
 
 
+/// A saved workflow: a bot's definition kept as the raw JSON it was saved with, so a newer
+/// schema or field survives a round trip through an older Device untouched. Only the bot's
+/// Runner reads the definition (`crate::workflow`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowRecord {
+    pub id: String,
+    pub bot_id: String,
+    pub name: String,
+    pub definition: serde_json::Value,
+    pub created_at: f64,
+}
+
 /// `kind = roster`: bots, chat metadata, and routines. Latest wins.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
@@ -767,6 +784,8 @@ pub struct RosterBlob {
     pub chats: Vec<ChatMeta>,
     #[serde(default)]
     pub routines: Vec<Routine>,
+    #[serde(default)]
+    pub workflows: Vec<WorkflowRecord>,
     #[serde(default)]
     pub auto_review: AutoReview,
     #[serde(default)]

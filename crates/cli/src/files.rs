@@ -45,9 +45,32 @@ pub fn is_local(app: &App, id: &str) -> bool {
     local_path(app, id).is_file()
 }
 
-/// Copies a file into the store and returns its attachment record. The bytes are not uploaded
-/// here; `push_blob` does that once the message is ready.
+/// Stores one file through the same preparation boundary as a chat's attachment batch.
 pub fn store(app: &App, file: &OutgoingFile) -> anyhow::Result<Attachment> {
+    Ok(store_many(app, std::slice::from_ref(file))?.remove(0))
+}
+
+/// Prepare every source in a private staging directory before replacing any stored bytes.
+/// A source failure drops the staged batch, including writes reusing an existing attachment id.
+pub fn store_many(app: &App, files: &[OutgoingFile]) -> anyhow::Result<Vec<Attachment>> {
+    if files.is_empty() { return Ok(Vec::new()); }
+    let staging = tempfile::tempdir_in(&app.config.home)?;
+    let mut attachments = Vec::with_capacity(files.len());
+    for file in files {
+        attachments.push(store_at(staging.path(), file)?);
+    }
+    let dir = app.config.files_dir();
+    std::fs::create_dir_all(&dir)?;
+    crate::config::set_private(&dir)?;
+    // Duplicate ids retain the last file, as sequential storage did.
+    for entry in std::fs::read_dir(staging.path())? {
+        let entry = entry?;
+        std::fs::rename(entry.path(), dir.join(entry.file_name()))?;
+    }
+    Ok(attachments)
+}
+
+fn store_at(dir: &Path, file: &OutgoingFile) -> anyhow::Result<Attachment> {
     let source = Path::new(&file.path);
     let metadata = std::fs::metadata(source)?;
     if !metadata.is_file() {
@@ -68,7 +91,7 @@ pub fn store(app: &App, file: &OutgoingFile) -> anyhow::Result<Attachment> {
         .unwrap_or_else(|| "file".into());
     let mime = file.mime.clone().filter(|m| m.contains('/')).unwrap_or_else(|| mime_for(&name).to_string());
     let bytes = std::fs::read(source)?;
-    write_local(app, &id, &bytes)?;
+    write_at(dir, &id, &bytes)?;
     let (width, height) = match (file.width, file.height) {
         (Some(w), Some(h)) => (Some(w), Some(h)),
         _ if mime.starts_with("image/") => image_size(&bytes),
@@ -78,7 +101,10 @@ pub fn store(app: &App, file: &OutgoingFile) -> anyhow::Result<Attachment> {
 }
 
 fn write_local(app: &App, id: &str, bytes: &[u8]) -> anyhow::Result<()> {
-    let dir = app.config.files_dir();
+    write_at(&app.config.files_dir(), id, bytes)
+}
+
+fn write_at(dir: &Path, id: &str, bytes: &[u8]) -> anyhow::Result<()> {
     std::fs::create_dir_all(&dir)?;
     crate::config::set_private(&dir)?;
     let path = dir.join(id);

@@ -86,3 +86,23 @@ test("manual text clear releases stale mentions but preserves files and other dr
   expect(readComposerDraft(other).mentions).toEqual([]);
   expect(hasUpdateDrafts()).toBe(false);
 });
+
+
+test("the current composer and updater share drafts, pending sends and reply-only blockers", async () => {
+  const { composerDraft, editComposerDraft, submitComposerDraft } = await import("./composerDraft");
+  const draft = composerDraft("account", "relay", "chat");
+  editComposerDraft(draft, { text: "actual composer" });
+  expect(readComposerDraft(key).text).toBe("actual composer");
+  expect(hasUpdateDrafts()).toBe(true);
+  let resolve!: (value: boolean) => void;
+  const sending = submitComposerDraft(draft, () => new Promise<boolean>(done => { resolve = done; }));
+  expect(hasUpdateDrafts()).toBe(true);
+  resolve(true); await sending;
+  expect(hasUpdateDrafts()).toBe(false);
+  const reply = composerDraft("account", "relay", "chat");
+  editComposerDraft(reply, { reply: { messageID: "m", name: "Bot", text: "quoted" } });
+  expect(hasUpdateDrafts()).toBe(true);
+  discardComposerDraft(key);
+  expect(reply.invalidated).toBe(true);
+  expect(hasUpdateDrafts()).toBe(false);
+});

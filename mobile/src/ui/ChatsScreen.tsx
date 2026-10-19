@@ -48,42 +48,61 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
   const updateRequired = useStore((s) => s.relayUpdateRequired);
   const relayError = useStore((s) => s.relayError);
   const relayUrl = useStore((s) => s.relayUrl);
+  const deviceId = useStore(s => s.deviceId);
+  const paired = useStore(s => s.paired);
   const bots = useBotMap();
   const workingBots = useWorkingBotIds();
   const [query, setQuery] = useState("");
-  const [matches, setMatches] = useState<ChatSearchResults>({ chats: [], messages: [] });
+  const [matches, setMatches] = useState<ChatSearchResults>({ chats: [], messages: [], files: [], history_complete: true });
   const [searching, setSearching] = useState(false);
+  const [searchGeneration, setSearchGeneration] = useState(0);
+  const searchOwner = useRef<{ active: boolean; query: string } | null>(null);
 
   function updateQuery(value: string) {
     setQuery(value);
-    setMatches({ chats: [], messages: [] });
+    setMatches({ chats: [], messages: [], files: [], history_complete: true });
     setSearching(!!value.trim());
   }
 
   useEffect(() => {
     const value = query.trim();
-    if (!value) {
+    const source = useStore.getState();
+    if (!value || !source.paired || !source.identityId || !source.deviceId) {
       setSearching(false);
       return;
     }
-    let active = true;
+    const owner = { active: true, query: value };
+    searchOwner.current = owner;
+    // Observe every core authority transition, not only React's eventual render.
+    // Once revoked, this request/result owner cannot regain authority after ABA.
+    const unsubscribe = useStore.subscribe(state => {
+      if (owner.active && (state.identityId !== source.identityId || state.relayUrl !== source.relayUrl
+        || state.deviceId !== source.deviceId || state.paired !== source.paired)) {
+        owner.active = false;
+        setMatches({ chats: [], messages: [], files: [], history_complete: true });
+        setSearchGeneration(generation => generation + 1);
+      }
+    });
     setSearching(true);
+    setMatches({ chats: [], messages: [], files: [], history_complete: true });
     const timer = setTimeout(() => {
+      if (!owner.active) return;
       void engine
         .searchChats(value)
         .then((results) => {
-          if (active) setMatches(results);
+          if (owner.active) setMatches(results);
         })
-        .catch((error) => console.warn("searching chats", error instanceof Error ? error.message : error))
+        .catch(() => { if (owner.active) setMatches({ chats: [], messages: [], files: [], history_complete: false }); })
         .finally(() => {
-          if (active) setSearching(false);
+          if (owner.active) setSearching(false);
         });
     }, 140);
     return () => {
-      active = false;
+      owner.active = false;
+      unsubscribe();
       clearTimeout(timer);
     };
-  }, [query]);
+  }, [query, chats, bots, searchGeneration, identityId, deviceId, paired, relayUrl]);
 
   const items = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -93,15 +112,12 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
     return [...visible.filter((c) => c.is_pinned), ...visible.filter((c) => !c.is_pinned)];
   }, [chats, bots, query, language]);
 
+  const ownsSearch = !!searchOwner.current?.active && searchOwner.current.query === query.trim();
   const searchRows = useMemo(() => {
-    if (!query.trim()) return [];
+    if (!query.trim() || !ownsSearch) return [];
     const byId = new Map(chats.map((chat) => [chat.id, chat]));
     const seen = new Set<string>();
     const rows: SearchRow[] = [];
-    for (const chat of items) {
-      seen.add(chat.id);
-      rows.push({ key: `chat:${chat.id}`, kind: "chat", chat, snippet: preview(chat, bots) });
-    }
     for (const hit of matches.chats) {
       const chat = byId.get(hit.chat_id);
       if (!chat || seen.has(chat.id)) continue;
@@ -113,8 +129,13 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
       if (!chat) continue;
       rows.push({ key: `message:${hit.message_id}`, kind: "message", chat, snippet: hit.snippet, createdAt: hit.created_at });
     }
+    for (const hit of matches.files) {
+      const chat = byId.get(hit.chat_id);
+      if (!chat) continue;
+      rows.push({ key: `file:${hit.message_id}:${hit.attachment_id}`, kind: "file", chat, snippet: hit.name, createdAt: hit.created_at });
+    }
     return rows;
-  }, [chats, bots, items, matches, query, language]);
+  }, [chats, bots, items, matches, query, language, searchGeneration, ownsSearch]);
 
   const searchingText = query.trim();
   const data: (Chat | SearchRow)[] = searchingText ? searchRows : items;
@@ -162,6 +183,7 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
           { text: t("Discard"), style: "destructive", onPress: () => discardComposerDraft(key) },
         ])}><Text style={{ color: p.label }}>{t("Draft preview")}: {preview || t("Dictation stopped")}</Text><Text style={{ color: p.secondaryLabel }}>{t("Discard")}</Text></Pressable>;
       })}
+      {query.trim() && ownsSearch && !matches.history_complete ? <Text accessibilityRole="text" style={{ color: p.secondaryLabel }}>{t("Search covers downloaded history only")}</Text> : null}
             {floatingSearch ? null : (
         <Stack.SearchBar
           placeholder={t("Search")}
@@ -381,7 +403,7 @@ function MenuChatRow({ chat, bots, title, working, responding, selected, width: 
 
 type SearchRow = {
   key: string;
-  kind: "chat" | "message";
+  kind: "chat" | "message" | "file";
   chat: Chat;
   snippet: string;
   createdAt?: number;
@@ -393,7 +415,7 @@ function SearchResultRow({ item, bots, query, onPress }: { item: SearchRow; bots
   const members = item.chat.bot_ids.map((id) => bots.get(id)).filter((bot): bot is Bot => !!bot);
   const at = item.createdAt ?? lastActivity(item.chat);
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.searchRow, { backgroundColor: pressed ? p.fill : "transparent" }]}>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${t(item.kind === "file" ? "Files" : item.kind === "message" ? "Messages" : "Chats")}, ${chatTitle(item.chat)}, ${item.snippet}`} onPress={onPress} style={({ pressed }) => [styles.searchRow, { backgroundColor: pressed ? p.fill : "transparent" }]}>
       <AvatarCluster bots={members} chatId={item.chat.id} size={44} />
       <View style={styles.searchText}>
         <View style={styles.searchTitleLine}>
@@ -402,7 +424,7 @@ function SearchResultRow({ item, bots, query, onPress }: { item: SearchRow; bots
         </View>
         <HighlightedText text={item.snippet} query={query} style={[styles.searchSnippet, { color: p.secondaryLabel }]} numberOfLines={2} />
       </View>
-      {item.kind === "message" ? <Symbol name="text.bubble" size={13} color={p.tertiaryLabel} /> : null}
+      {item.kind !== "chat" ? <Text style={{ color: p.tertiaryLabel }}>{t(item.kind === "file" ? "Files" : "Messages")}</Text> : null}
     </Pressable>
   );
 }

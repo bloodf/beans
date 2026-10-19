@@ -6,6 +6,12 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Skills mounted checks follow the shared browser-consumer module names while retaining all assertions and driver source binding.
+
+- Mounted skills verification freezes imported images, handles canonical temporary paths and Bun workspace dependencies, and retains module-load diagnostics without relaxing executed-script byte checks.
+
+- Desktop skill comparisons use the Runner's UTF-8 path order and separate 256-file source and managed-copy limits, so valid disjoint inventories remain inspectable.
+
 - Fresh Beans accounts use `beans-v2`, isolated v2 homes and ports 4874/4875, mandatory protocol-5/format capability, versioned backup phrases and pairing links; incompatible old storage and phrases are rejected without migration or reset.
 - New releases use Beans-only asset/package names and retain the existing Ed25519 anchor and immutable historical manifests. Update eligibility requires fresh-format relay health and supported protocol floors before Runner replacement.
 - Production Grok OAuth is disabled before callback/network access pending a verified Beans contract; existing provider, avatar and memory mechanisms remain unchanged.

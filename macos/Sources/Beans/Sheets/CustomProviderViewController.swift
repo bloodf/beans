@@ -6,7 +6,7 @@ import AppKit
 /// not list. The CLI checks the server again before saving, and the provider reaches every
 /// paired Device encrypted with the account key.
 final class CustomProviderViewController: SheetViewController {
-    private enum Listing: Equatable {
+    enum Listing: Equatable {
         case needsURL
         case loading
         case listed
@@ -103,7 +103,7 @@ final class CustomProviderViewController: SheetViewController {
         }
     }
 
-    private init(existing: ProviderCredential?, preset: CustomProviderPreset?, apiKey: String, onSave: @escaping (ProviderCredential.Kind) -> Void) {
+    init(existing: ProviderCredential?, preset: CustomProviderPreset?, apiKey: String, onSave: @escaping (ProviderCredential.Kind) -> Void) {
         kind = existing?.kind
         saveKind = existing?.kind ?? .custom("custom:setup-" + UUID().uuidString.lowercased())
         integration = existing?.integration
@@ -260,6 +260,13 @@ final class CustomProviderViewController: SheetViewController {
         }
     }
 
+    override func fitSheetToContent() {
+        // AppKit keeps the previous preference as a fitting minimum. Clear it so a
+        // hidden connection error does not leave its old height in the form rows.
+        preferredContentSize = .zero
+        super.fitSheetToContent()
+    }
+
     @objc private func customizeModels() {
         if let section = contentStack.arrangedSubviews.first(where: { $0.identifier?.rawValue == "customizeModels" }) {
             section.isHidden.toggle()
@@ -390,7 +397,7 @@ final class CustomProviderViewController: SheetViewController {
         updateControls()
     }
 
-    private func show(_ state: Listing) {
+    func show(_ state: Listing) {
         listing = state
         if case .failed(let error) = state {
             connectionErrorLabel.stringValue = error

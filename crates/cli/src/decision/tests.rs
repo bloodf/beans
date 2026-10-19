@@ -777,11 +777,11 @@ fn a_duplicate_json_key_is_rejected_where_it_can_reach_a_struct() {
     // `Value` cannot see a duplicate. Into `DecisionRequest` it errors, and
     // Beans builds the request in code, so a duplicate never reaches
     // `validate` either way.
-    let body = r#"{"model":"jev-1.13.0","model":"jev-9.9.9","questions":{}}"#;
+    let body = r#"{"state":"ready","model":"jev-1.13.0","model":"jev-9.9.9","questions":{}}"#;
     let parsed: Value = serde_json::from_str(body).expect("parses");
     assert_eq!(parsed["model"], "jev-9.9.9", "an untyped parse is last-wins, not duplicate-safe");
-    assert!(
-        serde_json::from_str::<DecisionRequest>(body).is_err(),
-        "the typed parse must reject the duplicate"
-    );
+    let error = serde_json::from_str::<DecisionRequest>(body).unwrap_err();
+    assert!(error.to_string().contains("duplicate field `model`"), "{error}");
+    let unique = body.replace("\"model\":\"jev-1.13.0\",", "");
+    assert!(serde_json::from_str::<DecisionRequest>(&unique).is_ok(), "the fixture is otherwise valid");
 }

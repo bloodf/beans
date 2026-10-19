@@ -8,7 +8,7 @@ use beans::{app::App,config::Config,memory_service::{types::*,dispatch as d,queu
 struct Scratch { app:Arc<App>, home:std::path::PathBuf, bot:String }
 impl Scratch {
     fn new()->Self{
-        let home=std::env::temp_dir().join(format!("beans-memory-dispatch-{}",uuid::Uuid::new_v4()));
+        let home=tempfile::tempdir().unwrap().keep();
         let app=App::load(Config{home:home.clone(),port:0}).unwrap();
         beans::identity::create(&app,Some("fixture".into())).unwrap();
         let bot=app.state.lock().unwrap().bots[0].id.clone();

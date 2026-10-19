@@ -32,11 +32,11 @@ final class MemoryEmbeddingViewController: MemoryFormViewController {
         addRow("API key", view: secret, to: apiColumn)
         addForm(localColumn)
         for (key, label, value) in [
-            ("model_sha256", "Model SHA-256", ""), ("tokenizer_sha256", "Tokenizer SHA-256", ""),
-            ("max_tokens", "Maximum tokenizer tokens", ""), ("input_ids", "Input IDs tensor", ""),
-            ("attention_mask", "Attention mask tensor", ""), ("token_type_ids", "Token type IDs tensor (optional)", ""),
-            ("output", "Output tensor", ""), ("pad_id", "Padding token ID", ""),
-            ("pad_type_id", "Padding type ID", ""), ("pad_token", "Padding token — exact text", ""),
+            ("model_sha256", L("Model SHA-256"), ""), ("tokenizer_sha256", L("Tokenizer SHA-256"), ""),
+            ("max_tokens", L("Maximum tokenizer tokens"), ""), ("input_ids", L("Input IDs tensor"), ""),
+            ("attention_mask", L("Attention mask tensor"), ""), ("token_type_ids", L("Token type IDs tensor (optional)"), ""),
+            ("output", L("Output tensor"), ""), ("pad_id", L("Padding token ID"), ""),
+            ("pad_type_id", L("Padding type ID"), ""), ("pad_token", L("Padding token — exact text"), ""),
         ] { fields[key] = addText(label, value: value, to: localColumn) }
         pooling = NSPopUpButton(); pooling.addItems(withTitles: ["mean", "cls", "pooled"]); addRow("Pooling", view: pooling, to: localColumn)
         specialTokens = NSButton(checkboxWithTitle: L("Add special tokens (per tokenizer contract)"), target: nil, action: nil)

@@ -121,9 +121,9 @@ class MemoryFormViewController: SheetViewController {
     }
     func showError(_ error: Error) {
         // RPC errors may contain untrusted backend payloads. Show known local errors only.
-        if let local = error as? MemoryUIError { errorLabel.stringValue = L(local.errorDescription ?? "Memory request failed") }
-        else if let draft = error as? MemoryServiceDraftError { errorLabel.stringValue = L(draft.rawValue.replacingOccurrences(of: "_", with: " ")) }
-        else if let setup = error as? MemorySetupError { errorLabel.stringValue = L(setup.rawValue.replacingOccurrences(of: "_", with: " ")) }
+        if let local = error as? MemoryUIError { errorLabel.stringValue = local.errorDescription.map(memoryTokenLabel) ?? L("Memory request failed") }
+        else if let draft = error as? MemoryServiceDraftError { errorLabel.stringValue = memoryTokenLabel(draft.rawValue.replacingOccurrences(of: "_", with: " ")) }
+        else if let setup = error as? MemorySetupError { errorLabel.stringValue = memoryTokenLabel(setup.rawValue.replacingOccurrences(of: "_", with: " ")) }
         else { errorLabel.stringValue = L("Memory request failed. Check the connection or obtain a fresh preview, then try again. Your draft is preserved.") }
         NSAccessibility.post(element: errorLabel, notification: .valueChanged)
     }
@@ -182,5 +182,67 @@ final class MemoryResultViewController: SheetViewController {
         scroll.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
         scroll.heightAnchor.constraint(equalToConstant: 400).isActive = true
         setButtons(confirm: L("Done"), cancel: nil)
+    }
+}
+
+// Finite local error and negotiated action labels; wire values remain unchanged.
+func memoryTokenLabel(_ key: String) -> String {
+    switch key {
+    case "get": return L("get")
+    case "update": return L("update")
+    case "reset": return L("reset")
+    case "list": return L("list")
+    case "create": return L("create")
+    case "refresh": return L("refresh")
+    case "history": return L("history")
+    case "delete": return L("delete")
+    case "scopes": return L("scopes")
+    case "clear": return L("clear")
+    case "clear derived": return L("clear derived")
+    case "edit": return L("edit")
+    case "chunks": return L("chunks")
+    case "add message": return L("add message")
+    case "commit": return L("commit")
+    case "add": return L("add")
+    case "read": return L("read")
+    case "cancel": return L("cancel")
+    case "delete record": return L("delete record")
+    case "bank profile": return L("bank profile")
+    case "bank config": return L("bank config")
+    case "directives": return L("directives")
+    case "mental models": return L("mental models")
+    case "mental model history": return L("mental model history")
+    case "observations": return L("observations")
+    case "memory edit": return L("memory edit")
+    case "memory invalidate": return L("memory invalidate")
+    case "memory restore": return L("memory restore")
+    case "documents": return L("documents")
+    case "sessions": return L("sessions")
+    case "resources": return L("resources")
+    case "tasks": return L("tasks")
+    case "memory unavailable": return L("memory unavailable")
+    case "unsupported memory operation": return L("unsupported memory operation")
+    case "invalid memory input": return L("invalid memory input")
+    case "memory target changed": return L("memory target changed")
+    case "confirmation required": return L("confirmation required")
+    case "invalid memory reply": return L("invalid memory reply")
+    case "lancedb_cloud_transport_unavailable": return L("lancedb_cloud_transport_unavailable")
+    case "invalid secret": return L("invalid secret")
+    case "invalid budget": return L("invalid budget")
+    case "invalid capture cap": return L("invalid capture cap")
+    case "plaintext consent required": return L("plaintext consent required")
+    case "group consent required": return L("group consent required")
+    case "group capture requires conversation": return L("group capture requires conversation")
+    case "connection required": return L("connection required")
+    case "enforced spending policy required": return L("enforced spending policy required")
+    case "backend options mismatch": return L("backend options mismatch")
+    case "invalid setup reply": return L("invalid setup reply")
+    case "invalid asset plan": return L("invalid asset plan")
+    case "invalid asset source": return L("invalid asset source")
+    case "approval not found": return L("approval not found")
+    case "approval expired": return L("approval expired")
+    case "approval stale": return L("approval stale")
+    case "approval action mismatch": return L("approval action mismatch")
+    default: return L(key)
     }
 }

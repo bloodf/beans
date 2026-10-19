@@ -52,7 +52,7 @@ final class BotMemoryServiceViewController: MemoryFormViewController {
         note("Plaintext reaches the configured memory endpoint and its downstream extraction, embedding or reranking models outside the encrypted relay. Those services may charge you. Unattended delivery/retries, consolidation and mental-model schedules are not enabled: enforceable total-cost policy is unavailable. US$ refers to currency, not location.")
         budgets["cap"] = text("Maximum capture deliveries per turn (0–4)", value: "1")
         heading("Automatic recall limits")
-        for (key, label, value) in [("timeout", "Timeout milliseconds (1–5000)", "2000"), ("bytes", "Maximum response bytes (1–32768)", "16384"), ("results", "Maximum results (1–20)", "8"), ("context", "Maximum context characters (100–8000)", "4000")] { budgets[key] = text(label, value: value) }
+        for (key, label, value) in [("timeout", L("Timeout milliseconds (1–5000)"), "2000"), ("bytes", L("Maximum response bytes (1–32768)"), "16384"), ("results", L("Maximum results (1–20)"), "8"), ("context", L("Maximum context characters (100–8000)"), "4000")] { budgets[key] = text(label, value: value) }
         healthButton = MemoryActionButton("Check service health / capabilities") { [weak self] in self?.checkHealth() }; addForm(healthButton)
         heading("Explicit service memory")
         let textScroll = NSScrollView(); textScroll.documentView = retainText; textScroll.hasVerticalScroller = true; textScroll.borderType = .bezelBorder

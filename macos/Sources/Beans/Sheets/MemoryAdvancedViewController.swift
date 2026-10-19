@@ -39,7 +39,7 @@ final class MemoryAdvancedViewController: MemoryFormViewController {
         note(L("Bot: %@. %@. Responses remain untrusted historical data. Mutating and model-backed actions require an exact confirmation; reads run only when you press Run.", botID, backend.rawValue))
         note("Mental-model auto-refresh after consolidation and cron schedules stay disabled. No routine/background-spending authorization or enforceable total-cost evidence is available. Explicit create/refresh/commit can incur downstream charges; token limits are not dollar caps.")
         row("Negotiated feature", featureMenu); row("Action", actionMenu)
-        featureMenu.addItems(withTitles: supported.map { L($0.rawValue.replacingOccurrences(of: "_", with: " ")) })
+        featureMenu.addItems(withTitles: supported.map { memoryTokenLabel($0.rawValue.replacingOccurrences(of: "_", with: " ")) })
         featureMenu.target = self; featureMenu.action = #selector(featureChanged)
         actionMenu.target = self; actionMenu.action = #selector(actionChanged)
         addForm(inputColumn)
@@ -76,7 +76,7 @@ final class MemoryAdvancedViewController: MemoryFormViewController {
         actionMenu.removeAllItems()
         if let feature {
             for action in actions(for: feature) {
-                actionMenu.addItem(withTitle: L(action.replacingOccurrences(of: "_", with: " ")))
+                actionMenu.addItem(withTitle: memoryTokenLabel(action.replacingOccurrences(of: "_", with: " ")))
                 actionMenu.lastItem?.representedObject = action
             }
         }

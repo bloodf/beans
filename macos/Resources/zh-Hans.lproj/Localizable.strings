@@ -1287,3 +1287,11 @@
 "Could not export the report. Choose a writable destination and try again." = "无法导出报告。请选择可写入的位置后重试。";
 "Send input" = "发送输入";
 "Could not send input" = "无法发送输入";
+
+/* Exact protocol identifiers and provider name. */
+"none" = "none";
+"l2" = "l2";
+"cosine" = "cosine";
+"dot" = "dot";
+"euclidean" = "euclidean";
+"Hindsight" = "Hindsight";

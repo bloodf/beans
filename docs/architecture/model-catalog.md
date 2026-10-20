@@ -17,5 +17,7 @@ Allowed model wires are `chat-completions`, `messages`, and `responses`. Public 
 
 Incomplete discovery preserves an existing discovery issue and proposal instead of treating missing source coverage as an empty result. A fully verified run with no catalog changes closes an obsolete proposal.
 
+Incomplete runs still publish verified discovery candidates as issue comments, preserving the prior unresolved list; a new issue is created when verified candidates exist. Existing proposals receive an explicit unverified notice on incomplete no-change runs. The workflow runs the offline self-check before refreshing public metadata. The CLI requires review targets for every configured bundled provider. Its write policy rejects any invalid row rather than relying on the runtime reader to omit it; unsupported endpoint versions are reported, not silently skipped.
+
 `bun run sync:models --self-check` runs embedded offline fixtures for endpoint parsing, unsupported wire refusal reports, missing wire verification, pricing preservation, tier thresholds, review mappings, timestamps, schema version, and the feed size cap. It makes no network requests and writes no catalog.
 

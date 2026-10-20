@@ -24,6 +24,7 @@ jobs:
           ref: main
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
+      - run: bun run sync:models --self-check
       - run: bun run sync:models --report "$RUNNER_TEMP/report.md" --new "$RUNNER_TEMP/new.md"
       - if: always()
         run: |
@@ -54,8 +55,17 @@ jobs:
         run: |
           issue=$(gh issue list --state open --author 'app/github-actions' --search 'in:title' --json number,title --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
           if grep -Eq 'wire verification unavailable|discovery was not checked' "$RUNNER_TEMP/report.md"; then
+            {
+              echo 'Discovery is incomplete. Existing candidates remain unresolved; verified candidates from this run follow.'
+              echo
+              cat "$RUNNER_TEMP/new.md"
+              echo
+              cat "$RUNNER_TEMP/report.md"
+            } > "$RUNNER_TEMP/incomplete.md"
             if [[ -n "$issue" ]]; then
-              gh issue comment "$issue" --body-file "$RUNNER_TEMP/report.md"
+              gh issue comment "$issue" --body-file "$RUNNER_TEMP/incomplete.md"
+            elif [[ -s "$RUNNER_TEMP/new.md" ]]; then
+              gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/incomplete.md"
             fi
             exit 0
           fi
@@ -81,10 +91,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          incomplete=false
           if grep -Eq 'wire verification unavailable|discovery was not checked' "$RUNNER_TEMP/report.md"; then
-            exit 0
+            incomplete=true
           fi
           number=$(gh pr list --base main --head automation/models-sync --state open --json number --jq '.[0].number // empty')
+          if [[ -n "$number" && "$incomplete" == true ]]; then
+            gh pr comment "$number" --body 'Latest manual sync has incomplete source verification and produces no verified replacement. This prior proposal is unverified; do not treat it as current.'
+            exit 0
+          fi
           if [[ -n "$number" ]]; then
             gh pr close "$number" --comment 'The latest manual sync produces no catalog changes. Closing the obsolete proposal; see the run summary for discovery and verification notes.'
           fi

@@ -423,14 +423,43 @@ final class PluginsSettingsViewController: DevicePaneViewController {
 
 // MARK: - Devices
 
+/// Binds service replies to one appearance and online Runner selection.
+struct DeviceServiceStatusRequest {
+    private var target: Device.ID?
+    private var generation: UInt64 = 0
+    private var asked = false
+    private(set) var status: Wire.ServiceStatus?
+
+    mutating func invalidate() {
+        generation &+= 1
+        asked = false
+        status = nil
+    }
+
+    mutating func begin(for id: Device.ID?) -> UInt64? {
+        if target != id {
+            invalidate()
+            target = id
+        }
+        guard id != nil, !asked else { return nil }
+        asked = true
+        return generation
+    }
+
+    @discardableResult
+    mutating func complete(_ status: Wire.ServiceStatus?, generation: UInt64) -> Bool {
+        guard self.generation == generation, asked else { return false }
+        self.status = status
+        return true
+    }
+}
+
 /// The picked Device, its machine key, background service status, and Unpair.
 final class AboutDeviceSettingsViewController: DevicePaneViewController {
     private let header = DeviceHeaderView()
     private let machineSection = SectionView(title: L("Machine"))
     private let serviceNote = Build.label("", font: Theme.Font.caption, color: .tertiaryLabelColor, lines: 0)
-    private var service: Wire.ServiceStatus?
-    private var serviceAsked: Device.ID?
-    private var isAskingService = false
+    private var serviceRequest = DeviceServiceStatusRequest()
 
     override func viewDidLoad() {
         title = L("Devices")
@@ -442,13 +471,17 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
 
     override func viewWillAppear() {
         super.viewWillAppear()
-        guard !isAskingService else { return }
-        serviceAsked = nil
+        serviceRequest.invalidate()
         reload()
     }
 
     override func reload() {
-        guard let device else { return }
+        askService(device)
+        guard let device else {
+            serviceNote.isHidden = true
+            machineSection.setRows([])
+            return
+        }
         header.configure(device: device)
 
         // A machine that never said what it is has no system to show, only why it is listed.
@@ -468,8 +501,7 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
             KeyValueRow(
                 key: L("Role"),
                 value: device.isRunner ? L("Runner · runs bots with its own credentials") : L("Device · never runs bots")))
-        askService(device)
-        let service = device.isRunner && device.status == .online ? service : nil
+        let service = serviceRequest.status
         if let service {
             rows.append(KeyValueRow(
                 key: L("Background service"),
@@ -499,19 +531,13 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
         machineSection.setRows(rows)
     }
 
-    /// Fetches an online Runner's service status once per Device shown.
-    private func askService(_ device: Device) {
-        guard serviceAsked != device.id else { return }
-        service = nil
-        guard device.isRunner, device.status == .online else { return }
-        serviceAsked = device.id
-        isAskingService = true
+    /// Refetches after reconnecting or changing selection; stale replies cannot update the pane.
+    private func askService(_ device: Device?) {
+        let id = device.flatMap { $0.isRunner && $0.status == .online ? $0.id : nil }
+        guard let generation = serviceRequest.begin(for: id), let id else { return }
         Task { @MainActor [weak self] in
-            let status = try? await self?.store.serviceStatus(device.id)
-            guard let self else { return }
-            self.isAskingService = false
-            guard self.serviceAsked == device.id else { return }
-            self.service = status
+            let status = try? await self?.store.serviceStatus(id)
+            guard let self, self.serviceRequest.complete(status, generation: generation) else { return }
             self.reload()
         }
     }

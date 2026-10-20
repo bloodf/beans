@@ -42,7 +42,7 @@ pub use models::ModelInfo;
 pub use retry::{is_context_overflow, is_retryable_error, RetryPolicy};
 pub use provider::{AssistantEvent, AssistantEventStream, ModelRequest, Provider, ToolSpec};
 pub use request::{RequestHooks, RequestOptions, RequestOptionsPatch, ResponseInfo};
-pub use tool::{DirectRunner, Tool, ToolError, ToolOutcome, ToolResult, ToolRunner, ToolUpdateFn};
+pub use tool::{DirectRunner, ExecutionScope, Tool, ToolError, ToolOutcome, ToolResult, ToolRunner, ToolUpdateFn};
 pub use types::{
     AgentEvent, AgentMessage, AssistantMessage, AssistantPart, ContentPart, Cost, LlmMessage, StopReason,
     ThinkingLevel, ToolCall, ToolResultMessage, Usage, UserMessage,

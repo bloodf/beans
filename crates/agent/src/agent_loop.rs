@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::provider::{AssistantAccumulator, AssistantEvent, ModelRequest, Provider};
 use crate::schema::validate_tool_arguments;
-use crate::tool::{Tool, ToolOutcome, ToolResult, ToolRunner};
+use crate::tool::{cleanup_diagnostic, fold_cleanup, ExecutionScope, Tool, ToolOutcome, ToolResult, ToolRunner};
 use crate::types::{
     AgentEvent, AgentMessage, AssistantMessage, ContentPart, LlmMessage, StopReason, ToolCall,
     ToolResultMessage,
@@ -176,10 +176,8 @@ pub trait EventSink: Send + Sync {
     async fn on_event(&self, event: &AgentEvent);
 }
 
-/// How long a cancelled pre-execution hook may hold the loop. Executing tools receive one
-/// additional second so pipe-mode bash can finish its own total one-second cleanup deadline.
-/// This bounds waiting, not side effects or detached work. Event sinks and other hooks are not
-/// covered by this grace.
+/// How long a cancelled hook or execution future may hold the loop. Registered pipe workers
+/// are drained separately before completion; their cleanup deadline belongs to bash.
 pub const STOP_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
@@ -901,8 +899,12 @@ struct LoopRunner<'a> {
 
 #[async_trait]
 impl ToolRunner for LoopRunner<'_> {
-    async fn run(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken) -> ToolOutcome {
+    async fn run_scoped(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken, scope: &ExecutionScope) -> ToolOutcome {
         let tool_call = ToolCall { id: tool_call_id, name: tool.name().to_string(), arguments: args };
+        let scope = match scope.child(&cancel) {
+            Ok(scope) => scope,
+            Err(error) => return ToolOutcome { result: error_result(error), is_error: true, blocked: true },
+        };
         match prepare_call(tool, self.context, self.assistant, &tool_call, self.config, &cancel, Some(self.parent)).await {
             Preparation::Immediate { result, is_error, blocked } => ToolOutcome { result, is_error, blocked },
             Preparation::Prepared { tool, args } => {
@@ -910,16 +912,30 @@ impl ToolRunner for LoopRunner<'_> {
                     return ToolOutcome { result: error_result(reason), is_error: true, blocked: true };
                 }
                 let nested = LoopRunner { parent: &tool_call, ..*self };
-                let execution = tool.execute_with(&tool_call.id, args.clone(), cancel.clone(), Arc::new(|_| {}), &nested);
-                let grace = STOP_GRACE + Duration::from_secs(1);
-                let (result, is_error) = match unless_stuck(execution, &cancel, grace).await {
-                    Some(Ok(result)) => {
-                        let is_error = result.is_error;
-                        (result, is_error)
+                let outcome = {
+                    let execution = tool.execute_scoped(&tool_call.id, args.clone(), cancel.clone(), Arc::new(|_| {}), &nested, &scope);
+                    tokio::pin!(execution);
+                    tokio::select! {
+                        biased;
+                        result = &mut execution => Some(result),
+                        _ = stuck_after(&cancel, STOP_GRACE) => {
+                            scope.close_and_cancel();
+                            None
+                        }
                     }
-                    Some(Err(error)) => (error_result(error.0), true),
-                    None => (cut_off(grace), true),
                 };
+                #[cfg(test)]
+                if outcome.is_none() { scope.event("child_cutoff"); }
+                let completed = scope.drain().await;
+                let mut outcome = outcome.unwrap_or_else(|| Ok(cut_off(STOP_GRACE)));
+                fold_cleanup(&mut outcome, &completed);
+                let (mut result, is_error) = match outcome {
+                    Ok(result) => { let is_error = result.is_error; (result, is_error) }
+                    Err(error) => (error_result(error.0), true),
+                };
+                if result.text_content().starts_with("Cut off:") {
+                    result.content.push(ContentPart::text(cleanup_diagnostic(&completed)));
+                }
                 let finalized = finalize_executed(self.context, self.assistant, tool_call, args, result, is_error, self.config, Some(self.parent)).await;
                 ToolOutcome { result: finalized.result, is_error: finalized.is_error, blocked: false }
             }
@@ -978,29 +994,8 @@ async fn execute_prepared(
     let name = tool_call.name.clone();
     let call_args = tool_call.arguments.clone();
 
-    let execution = tool.execute_with(&call_id, args.clone(), cancel.clone(), on_update, tools);
-    tokio::pin!(execution);
-    // Do not race bash's own one-second cleanup with a one-second outer deadline. The extra
-    // second lets cleanup start and return its partial output, including through child calls.
-    let grace = STOP_GRACE + Duration::from_secs(1);
-    let stuck = stuck_after(cancel, grace);
-    tokio::pin!(stuck);
-
-    let outcome = loop {
-        tokio::select! {
-            biased;
-            result = &mut execution => break Some(result),
-            _ = &mut stuck => break None,
-            Some(partial) = update_rx.recv() => {
-                emit.send(AgentEvent::ToolExecutionUpdate {
-                    tool_call_id: call_id.clone(),
-                    tool_name: name.clone(),
-                    args: call_args.clone(),
-                    partial_result: partial,
-                }).await;
-            }
-        }
-    };
+    let scope = ExecutionScope::root(cancel);
+    let outcome = execute_in_scope(tool, &call_id, args, cancel, on_update, tools, &scope, &mut update_rx, emit, &name, &call_args).await;
 
     // Flush updates the tool sent right before it returned.
     while let Ok(partial) = update_rx.try_recv() {
@@ -1015,13 +1010,53 @@ async fn execute_prepared(
     }
 
     match outcome {
-        Some(Ok(result)) => {
+        Ok(result) => {
             let is_error = result.is_error;
             (result, is_error)
         }
-        Some(Err(error)) => (error_result(error.0), true),
-        None => (cut_off(grace), true),
+        Err(error) => (error_result(error.0), true),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_in_scope(
+    tool: &Arc<dyn Tool>, call_id: &str, args: &Value, cancel: &CancellationToken,
+    on_update: crate::tool::ToolUpdateFn, tools: &dyn ToolRunner, scope: &ExecutionScope,
+    update_rx: &mut mpsc::UnboundedReceiver<ToolResult>, emit: &Emitter<'_>, name: &str, call_args: &Value,
+) -> Result<ToolResult, crate::tool::ToolError> {
+    let outcome = {
+        let execution = tool.execute_scoped(call_id, args.clone(), cancel.clone(), on_update, tools, scope);
+        tokio::pin!(execution);
+        let stuck = stuck_after(cancel, STOP_GRACE);
+        tokio::pin!(stuck);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut execution => break Some(result),
+                _ = &mut stuck => {
+                    scope.close_and_cancel();
+                    break None;
+                }
+                Some(partial) = update_rx.recv() => {
+                    emit.send(AgentEvent::ToolExecutionUpdate {
+                        tool_call_id: call_id.into(), tool_name: name.into(), args: call_args.clone(), partial_result: partial,
+                    }).await;
+                }
+            }
+        }
+    };
+    #[cfg(test)]
+    if outcome.is_none() { scope.event("root_cutoff"); }
+    let cutoff = outcome.is_none();
+    let completed = scope.drain().await;
+    let mut result = outcome.unwrap_or_else(|| Ok(cut_off(STOP_GRACE)));
+    fold_cleanup(&mut result, &completed);
+    if cutoff {
+        if let Ok(result) = &mut result {
+            result.content.push(ContentPart::text(cleanup_diagnostic(&completed)));
+        }
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1763,7 +1798,7 @@ mod tests {
                     let tool: Arc<dyn Tool> = if check { counter.clone() } else { hangs };
                     let started = std::time::Instant::now();
                     let (messages, events) = tokio::time::timeout(Duration::from_secs(5), run_with(config, vec![tool], cancel)).await.expect("cancelled call released the loop");
-                    let grace = if check { STOP_GRACE } else { STOP_GRACE + Duration::from_secs(1) };
+                    let grace = STOP_GRACE;
                     assert!(started.elapsed() >= grace, "the call receives its grace");
                     let results = tool_results(&messages);
                     assert_eq!(results.len(), 1);
@@ -1865,13 +1900,237 @@ mod tests {
                 let result = results[0];
                 let text = result.text();
                 assert!(result.is_error);
-                assert!(text.contains("held") && text.contains("Command aborted"), "{text}");
-                assert!(text.contains("deadline reached") && text.contains("not undone"), "{text}");
-                assert!(!text.starts_with("Cut off:"), "bash completes its own cleanup");
+                if text.starts_with("Cut off:") {
+                    assert!(text.contains("Pipe cleanup: completed=1"), "{text}");
+                } else {
+                    assert!(text.contains("held") && text.contains("Command aborted"), "{text}");
+                    assert!(text.contains("deadline reached") && text.contains("not undone"), "{text}");
+                }
                 drop(held);
             }
         }
     }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    struct StuckSibling {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[async_trait]
+    impl Tool for StuckSibling {
+        fn name(&self) -> &str { "stuck" }
+        fn description(&self) -> &str { "stalls" }
+        fn parameters(&self) -> Value { json!({"type":"object","properties":{}}) }
+        async fn execute(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    struct HeldNestedPipe(std::path::PathBuf);
+
+    #[cfg(all(unix, feature = "codemode"))]
+    impl Drop for HeldNestedPipe {
+        fn drop(&mut self) {
+            if let Ok(pid) = std::fs::read_to_string(self.0.join("held.pid")) {
+                if let Ok(pid) = pid.trim().parse::<i32>() {
+                    if pid > 0 { unsafe { libc::kill(pid, libc::SIGKILL); } }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    struct ProbedScript {
+        tool: crate::codemode::CodemodeTool,
+        probe: Arc<crate::tool::LifecycleProbe>,
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[async_trait]
+    impl Tool for ProbedScript {
+        fn name(&self) -> &str { "codemode" }
+        fn description(&self) -> &str { self.tool.description() }
+        fn parameters(&self) -> Value { self.tool.parameters() }
+        async fn execute(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> { unreachable!() }
+        async fn execute_scoped(&self, id: &str, args: Value, cancel: CancellationToken, update: ToolUpdateFn, runner: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+            struct Disposed(Arc<crate::tool::LifecycleProbe>);
+            impl Drop for Disposed {
+                fn drop(&mut self) { let _ = self.0.events.send("parent_disposed"); }
+            }
+            let _disposed = Disposed(self.probe.clone());
+            let mut scope = scope.clone();
+            scope.probe = Some(self.probe.clone());
+            self.tool.execute_scoped(id, args, cancel, update, runner, &scope).await
+        }
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    struct NestedHooks {
+        review: bool,
+        entered: Arc<tokio::sync::Notify>,
+        queue: crate::AgentMessageQueue,
+        events: mpsc::UnboundedSender<&'static str>,
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[async_trait]
+    impl LoopHooks for NestedHooks {
+        async fn before_tool_call(&self, ctx: BeforeToolCallContext<'_>) -> Option<BeforeToolCallResult> {
+            if self.review && ctx.tool_call.name == "stuck" {
+                self.entered.notify_one();
+                std::future::pending().await
+            } else { None }
+        }
+        async fn steering_messages(&self) -> Vec<AgentMessage> {
+            let messages = self.queue.drain();
+            if !messages.is_empty() { let _ = self.events.send("promoted"); }
+            messages
+        }
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[tokio::test]
+    async fn real_nested_pipe_survives_parent_cutoff_and_stuck_sibling() {
+        for review in [false, true] {
+            for send_now in [false, true] {
+                let dir = std::env::temp_dir().join(format!("beans-nested-held-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let held = HeldNestedPipe(dir.clone());
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let catalog = crate::codemode::StaticCatalog::new(vec![
+                    Arc::new(crate::tools::BashTool::for_script(dir)),
+                    Arc::new(StuckSibling { entered: entered.clone() }),
+                ]);
+                let cancel = CancellationToken::new();
+                let (events, mut observed) = mpsc::unbounded_channel();
+                let probe = Arc::new(crate::tool::LifecycleProbe { events: events.clone(), release: tokio::sync::Semaphore::new(0), timeout_arm: None });
+                let tool: Arc<dyn Tool> = Arc::new(ProbedScript {
+                    tool: crate::codemode::CodemodeTool::new(Arc::new(catalog), Default::default()), probe: probe.clone(),
+                });
+                let queue = crate::AgentMessageQueue::new(crate::QueueMode::All);
+                let interrupt = StepInterrupt::new();
+                let code = r#"{"code":"await Promise.all([tools.bash({command:'set -m; sleep 30 & echo $! > held.pid; printf held; wait'}), tools.stuck({})]);"}"#;
+                let provider = Scripted::new("p", vec![Turn::Call { name: "codemode", args: code, stop: StopReason::ToolUse }, Turn::Text("shipping")]);
+                let hooks = Arc::new(NestedHooks { review, entered: entered.clone(), queue: queue.clone(), events });
+                let config = AgentLoopConfig::new(provider).with_hooks(hooks).with_interrupt(interrupt.clone());
+                let execution = run_with(config, vec![tool], cancel.clone());
+                tokio::pin!(execution);
+                let ready = async {
+                    entered.notified().await;
+                    while observed.recv().await != Some("pipe_ready") {}
+                };
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::select! { _ = &mut execution => panic!("completed before readiness"), _ = ready => {} }
+                }).await.expect("nested calls reached readiness");
+                if send_now {
+                    queue.push(AgentMessage::user("ship now"));
+                    assert!(interrupt.interrupt());
+                } else {
+                    cancel.cancel();
+                }
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        tokio::select! {
+                            _ = &mut execution => panic!("parent disposed active pipe cleanup"),
+                            event = observed.recv() => {
+                                assert_ne!(event, Some("promoted"));
+                                if event == Some("parent_disposed") { break; }
+                            },
+                        }
+                    }
+                }).await.expect("parent reached cutoff disposal");
+                assert!(futures::poll!(&mut execution).is_pending());
+                probe.release.add_permits(1);
+                let (messages, _) = tokio::time::timeout(Duration::from_secs(5), &mut execution).await.expect("root drained");
+                let mut finished = false;
+                while let Ok(event) = observed.try_recv() {
+                    if event == "cleanup_finished" { finished = true; }
+                    if event == "promoted" { assert!(finished, "promotion waits for cleanup"); }
+                }
+                assert!(finished);
+                let result = tool_results(&messages)[0];
+                assert!(result.is_error);
+                if result.text().starts_with("Cut off:") { assert!(result.text().contains("Pipe cleanup: completed=1")); }
+                if send_now {
+                    assert!(messages.iter().any(|message| matches!(message, AgentMessage::User(user) if user.content[0].as_text() == Some("ship now"))));
+                    assert!(matches!(messages.last(), Some(AgentMessage::Assistant(last)) if last.text() == "shipping"));
+                    assert!(!cancel.is_cancelled());
+                } else {
+                    assert!(matches!(messages.last(), Some(AgentMessage::Assistant(last)) if last.stop_reason == StopReason::Aborted));
+                }
+                drop(held);
+            }
+        }
+    }
+    #[cfg(all(unix, feature = "codemode"))]
+    struct ReturnGate(Arc<tokio::sync::Semaphore>);
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[async_trait]
+    impl crate::codemode::HostFunction for ReturnGate {
+        fn name(&self) -> &str { "gate" }
+        fn description(&self) -> &str { "fixture return gate" }
+        fn signature(&self) -> &str { "(): Promise<string>" }
+        async fn call(&self, _: Vec<Value>, _: &CancellationToken) -> Result<Value, String> {
+            self.0.acquire().await.expect("return gate").forget();
+            Ok(json!("ready"))
+        }
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[tokio::test]
+    async fn independent_script_completion_and_timeout_drain_after_wind_down() {
+        for timeout in [false, true] {
+            let dir = std::env::temp_dir().join(format!("beans-script-held-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let held = HeldNestedPipe(dir.clone());
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let catalog = crate::codemode::StaticCatalog::new(vec![Arc::new(crate::tools::BashTool::for_script(dir))]);
+            let tool = crate::codemode::CodemodeTool::new(Arc::new(catalog), Default::default()).with_functions(vec![Arc::new(ReturnGate(gate.clone()))]);
+            let cancel = CancellationToken::new();
+            let mut root = ExecutionScope::root(&cancel);
+            let (events, mut observed) = mpsc::unbounded_channel();
+            let arm = Arc::new(tokio::sync::Semaphore::new(0));
+            let probe = Arc::new(crate::tool::LifecycleProbe { events, release: tokio::sync::Semaphore::new(0), timeout_arm: Some(arm.clone()) });
+            root.probe = Some(probe.clone());
+            // Await a host-controlled gate before normal return, or let the real host timer end it.
+            let code = if timeout {
+                "// @options: {\"timeout_ms\": 2000}\nawait tools.bash({command:'set -m; sleep 30 & echo $! > held.pid; printf held; wait'});"
+            } else {
+                "tools.bash({command:'set -m; sleep 30 & echo $! > held.pid; printf held; wait'}); await gate(); return 'done';"
+            };
+            let execution = tool.execute_scoped("script", json!({"code":code}), cancel.clone(), Arc::new(|_| {}), &crate::tool::DirectRunner, &root);
+            tokio::pin!(execution);
+            let mut ready = false;
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    tokio::select! {
+                        _ = &mut execution => panic!("script returned before pipe acknowledgement"),
+                        event = observed.recv() => match event {
+                            Some("pipe_ready") => { ready = true; arm.add_permits(1); if !timeout { gate.add_permits(1); } }
+                            Some("wind_down_expired") => { assert!(ready); break; }
+                            _ => {}
+                        },
+                    }
+                }
+            }).await.expect("script reached wind-down barrier");
+            assert!(futures::poll!(&mut execution).is_pending());
+            probe.release.add_permits(1);
+            tokio::time::timeout(Duration::from_secs(5), &mut execution).await.expect("script drained").unwrap();
+            let completed = root.drain().await;
+            assert_eq!(completed.len(), 1);
+            let pipe = completed[0].1.as_ref().as_ref().unwrap();
+            assert_eq!(pipe.structured.as_ref().unwrap()["output"], "held");
+            assert!(pipe.text_content().contains("deadline reached"));
+            assert!(!cancel.is_cancelled());
+            drop(held);
+        }
+    }
+
 
     #[tokio::test]
     async fn an_abort_during_a_tool_ends_the_turn_without_another_call() {

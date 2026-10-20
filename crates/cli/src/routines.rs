@@ -519,7 +519,7 @@ struct CheckRunner {
 #[cfg(feature = "runner")]
 #[async_trait::async_trait]
 impl ToolRunner for CheckRunner {
-    async fn run(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken) -> ToolOutcome {
+    async fn run_scoped(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken, scope: &beans_agent::tool::ExecutionScope) -> ToolOutcome {
         if self.app.is_paused() || cancel.is_cancelled() {
             return ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text("Account paused.") }, is_error: true, blocked: true };
         }
@@ -533,7 +533,7 @@ impl ToolRunner for CheckRunner {
         if self.app.is_paused() || !allowed {
             return ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text("Account paused or tool access removed.") }, is_error: true, blocked: true };
         }
-        DirectRunner.run(tool, tool_call_id, args, cancel).await
+        DirectRunner.run_scoped(tool, tool_call_id, args, cancel, scope).await
     }
 }
 

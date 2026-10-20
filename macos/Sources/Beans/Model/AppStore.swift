@@ -80,10 +80,23 @@ final class AppStore {
     /// True when the CLI answers on localhost (mock: toggled from the Debug menu).
     private(set) var isConnected = false
     /// Service inspection replies belong to one admitted connection/account snapshot.
-    private var serviceStatusGeneration: UInt64 = 0
+    struct ServiceStatusContext: Equatable {
+        var admitted: Bool
+        var identityID: String?
+    }
+    struct ServiceStatusOwnership {
+        private var context: ServiceStatusContext?
+        private(set) var generation: UInt64 = 0
+
+        mutating func update(_ next: ServiceStatusContext, snapshot: Bool) {
+            if snapshot || context != next { generation &+= 1 }
+            context = next
+        }
+    }
+    private var serviceStatusOwnership = ServiceStatusOwnership()
     var serviceStatusOwner: UInt64? {
         guard isConnected, hasIdentity == true, (isMock || !isBootstrapping) else { return nil }
-        return serviceStatusGeneration
+        return serviceStatusOwnership.generation
     }
     /// The first connection is still loading. The window is visible throughout this phase.
     private(set) var isStarting = true
@@ -486,7 +499,13 @@ final class AppStore {
         guard !isApplyingBootstrap else { return }
         switch event {
         case .connectionChanged, .snapshotReplaced, .identityChanged:
-            serviceStatusGeneration &+= 1
+            let context = ServiceStatusContext(
+                admitted: isConnected && hasIdentity == true && (isMock || !isBootstrapping),
+                identityID: identityID)
+            // Bootstrap publishes three notifications for one admitted snapshot.
+            let snapshot: Bool
+            if case .snapshotReplaced = event { snapshot = true } else { snapshot = false }
+            serviceStatusOwnership.update(context, snapshot: snapshot)
         default: break
         }
         subscriptions.removeAll { $0.owner == nil }

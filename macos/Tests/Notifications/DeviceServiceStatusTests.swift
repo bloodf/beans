@@ -76,4 +76,22 @@ final class DeviceServiceStatusTests: XCTestCase {
         XCTAssertFalse(request.complete(.init(installed: true, running: true), generation: snapshot))
         XCTAssertEqual(request.status?.installed, false)
     }
+
+    func testBootstrapNotificationsShareOneOwnerAndReplacementRevokesIt() throws {
+        var ownership = AppStore.ServiceStatusOwnership()
+        var request = DeviceServiceStatusRequest()
+        let connected = AppStore.ServiceStatusContext(admitted: true, identityID: "account")
+        ownership.update(connected, snapshot: true)
+        request.updateOwner(ownership.generation)
+        let initial = try XCTUnwrap(request.begin(for: "A"))
+        for _ in 0..<2 {
+            ownership.update(connected, snapshot: false)
+            request.updateOwner(ownership.generation)
+            XCTAssertNil(request.begin(for: "A"))
+        }
+        ownership.update(connected, snapshot: true)
+        request.updateOwner(ownership.generation)
+        XCTAssertFalse(request.complete(.init(installed: true, running: true), generation: initial))
+        XCTAssertNotNil(request.begin(for: "A"))
+    }
 }

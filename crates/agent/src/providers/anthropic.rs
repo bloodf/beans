@@ -661,13 +661,12 @@ impl Provider for AnthropicProvider {
             return channel_stream(rx);
         }
         let mut body = self.body(&request);
+        let output_cap = body["max_tokens"].as_u64().expect("Messages payload has an output cap");
         let options = request.options.clone();
         options.before_payload(&mut body);
-        if let Some(cap) = request.max_tokens {
-            if !body["max_tokens"].as_u64().is_some_and(|tokens| tokens <= cap) {
-                let _ = tx.send(AssistantEvent::Error { message: "Request payload exceeds or removes the host output cap.".into(), aborted: false }).await;
-                return channel_stream(rx);
-            }
+        if !body["max_tokens"].as_u64().is_some_and(|tokens| tokens <= output_cap) {
+            let _ = tx.send(AssistantEvent::Error { message: "Request payload exceeds or removes the effective output cap.".into(), aborted: false }).await;
+            return channel_stream(rx);
         }
         if body["thinking"]["type"] == "enabled" {
             let budget = body["thinking"]["budget_tokens"].as_u64().unwrap_or(0);
@@ -967,7 +966,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn payload_hooks_cannot_raise_or_remove_the_host_output_cap() {
+    async fn payload_hooks_cannot_raise_or_remove_the_effective_output_cap() {
         struct Override(Value);
         #[async_trait]
         impl crate::request::RequestHooks for Override {
@@ -975,16 +974,22 @@ mod tests {
                 payload["max_tokens"] = self.0.clone();
             }
         }
-        for replacement in [json!(4096), Value::Null, json!("2048")] {
+        for (model_cap, host_cap, replacement) in [
+            (32_000, Some(2048), json!(4096)),
+            (32_000, Some(2048), Value::Null),
+            (32_000, Some(2048), json!("2048")),
+            (4096, None, json!(8192)),
+            (32_000, None, json!(65_536)),
+        ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
-            let mut provider = budget_provider(32_000);
+            let mut provider = budget_provider(model_cap);
             provider.base_url = format!("http://{}", listener.local_addr().unwrap());
             let mut request = request(Vec::new());
-            request.max_tokens = Some(2048);
+            request.max_tokens = host_cap;
             request.options = request.options.with_hooks(Arc::new(Override(replacement))).with_timeout(std::time::Duration::from_millis(100));
             let events: Vec<_> = provider.stream(request, CancellationToken::new()).await.collect().await;
-            assert!(matches!(&events[..], [AssistantEvent::Error { message, aborted: false }] if message.contains("host output cap")), "{events:?}");
+            assert!(matches!(&events[..], [AssistantEvent::Error { message, aborted: false }] if message.contains("effective output cap")), "{events:?}");
             assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
         }
     }

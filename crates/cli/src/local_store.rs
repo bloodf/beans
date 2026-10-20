@@ -113,6 +113,11 @@ impl LocalStore {
                  seq INTEGER NOT NULL,
                  json TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS device_names (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 position INTEGER NOT NULL,
+                 json TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS blob_deletes (
                  id       TEXT PRIMARY KEY NOT NULL,
                  position INTEGER NOT NULL
@@ -242,6 +247,7 @@ impl LocalStore {
         let policy: crate::model::RosterBlob = serde_json::from_str(&policy_json).context("decoding policy state")?;
         Ok(State {
             devices: load_json_table(&connection, "devices")?,
+            device_names: load_json_table::<(String, String)>(&connection, "device_names")?.into_iter().collect(),
             bots: load_json_table(&connection, "bots")?,
             chats: load_json_table(&connection, "chats")?,
             routines: load_json_table(&connection, "routines")?,
@@ -1280,6 +1286,7 @@ impl LocalStore {
             "outbox",
             "sent_jobs",
             "device_turns",
+            "device_names",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
@@ -1332,6 +1339,9 @@ pub(crate) fn queue_outbox_tx(tx: &Transaction<'_>, item: &OutboxItem) -> anyhow
 
 fn save_state_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
     save_metadata_tx(tx, state)?;
+    sync_json_table(tx, "device_names", state.device_names.iter()
+        .map(|(id, name)| (id.clone(), serde_json::to_string(&(id, name))))
+        .collect())?;
     sync_json_table(
         tx,
         "devices",

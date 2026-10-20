@@ -47,7 +47,12 @@ final class RoutineReliabilityTests: XCTestCase {
     func testScheduleNamesAnotherTimezoneOnly() throws {
         let here = try routine(#""is_enabled":true,"timezone":"\#(TimeZone.current.identifier)""#)
         XCTAssertEqual(here.scheduleSummary, here.scheduleText)
-        let elsewhere = TimeZone.current.identifier == "Pacific/Kiritimati" ? "Europe/London" : "Pacific/Kiritimati"
+        let now = Date()
+        let dates = [now, now.addingTimeInterval(182 * 86_400)]
+        let elsewhere = try XCTUnwrap(["Pacific/Kiritimati", "Europe/London"].first { identifier in
+            let zone = TimeZone(identifier: identifier)!
+            return dates.contains { zone.secondsFromGMT(for: $0) != TimeZone.current.secondsFromGMT(for: $0) }
+        })
         let away = try routine(#""is_enabled":true,"timezone":"\#(elsewhere)""#)
         XCTAssertEqual(away.scheduleSummary, L("%@ (%@ time)", away.scheduleText, elsewhere.split(separator: "/").last!.replacingOccurrences(of: "_", with: " ")))
         var interval = away

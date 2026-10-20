@@ -920,6 +920,11 @@ impl ToolRunner for LoopRunner<'_> {
                         result = &mut execution => Some(result),
                         _ = stuck_after(&cancel, STOP_GRACE) => {
                             scope.close_and_cancel();
+                            #[cfg(test)]
+                            {
+                                assert!(scope.child(&CancellationToken::new()).is_err(), "child admission closes before execution disposal");
+                                scope.event("child_admission_closed");
+                            }
                             None
                         }
                     }
@@ -1842,7 +1847,17 @@ mod tests {
         let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &parent };
         let cancel = CancellationToken::new();
         let tool = Arc::new(Hangs { stop: Some(cancel.clone()), interrupt: None });
-        let outcome = tokio::time::timeout(Duration::from_secs(5), runner.run(tool, "child".into(), json!({}), cancel)).await.expect("child released its caller");
+        let mut root = ExecutionScope::root(&cancel);
+        let (events, mut observed) = mpsc::unbounded_channel();
+        root.probe = Some(Arc::new(crate::tool::LifecycleProbe { events, release: tokio::sync::Semaphore::new(0), timeout_arm: None }));
+        let outcome = tokio::time::timeout(Duration::from_secs(5), runner.run_scoped(tool, "child".into(), json!({}), cancel, &root)).await.expect("child released its caller");
+        let mut admission_closed = false;
+        while let Ok(event) = observed.try_recv() {
+            if event == "child_admission_closed" { admission_closed = true; }
+            if event == "child_cutoff" { assert!(admission_closed); }
+        }
+        assert!(admission_closed);
+        root.drain().await;
         assert!(outcome.is_error && !outcome.blocked);
         assert!(outcome.result.text_content().starts_with("Cut off:"));
         assert_eq!(*hooks.0.lock().unwrap(), vec![true]);
@@ -1960,7 +1975,8 @@ mod tests {
             struct Disposed(Arc<crate::tool::LifecycleProbe>, ExecutionScope);
             impl Drop for Disposed {
                 fn drop(&mut self) {
-                    assert!(self.1.child(&CancellationToken::new()).is_err(), "admission closes before parent disposal");
+                    let closed = self.1.child(&CancellationToken::new()).is_err();
+                    let _ = self.0.events.send(if closed { "disposed_closed" } else { "disposed_open" });
                     let _ = self.0.events.send("parent_disposed");
                 }
             }
@@ -2035,14 +2051,17 @@ mod tests {
                 } else {
                     cancel.cancel();
                 }
+                let mut closed_at_disposal = false;
                 tokio::time::timeout(Duration::from_secs(5), async {
                     loop {
                         tokio::select! {
                             _ = &mut execution => panic!("parent disposed active pipe cleanup"),
                             event = observed.recv() => {
                                 assert_ne!(event, Some("promoted"));
+                                assert_ne!(event, Some("disposed_open"), "admission closes before disposal");
                                 assert_ne!(event, Some("cleanup_started"), "worker remains withheld through parent disposal");
-                                if event == Some("parent_disposed") { break; }
+                                if event == Some("disposed_closed") { closed_at_disposal = true; }
+                                if event == Some("parent_disposed") { assert!(closed_at_disposal); break; }
                             },
                         }
                     }

@@ -4144,9 +4144,18 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(2), waiting).await.expect("steering releases background output").unwrap();
         assert_eq!(result.details["session_id"], id);
         assert!(session.end().is_none() && app.shell_sessions.contains(&id));
-        let steered = materialize_steering_messages(app, &chef, &scratch.1, queue.drain()).await;
+        let pending = queue.drain();
+        assert!(app.message("chat", &message.id).unwrap().queued);
+        // The loop acknowledges the original custom message before context conversion.
+        for message in &pending {
+            turn.handle(AgentEvent::MessageStart { message: message.clone() });
+            turn.handle(AgentEvent::MessageEnd { message: message.clone() });
+        }
+        let steered = materialize_steering_messages(app, &chef, &scratch.1, pending).await;
         assert!(matches!(&steered[..], [AgentMessage::User(user)] if user.content[0].as_text() == Some("inspect something else")));
         assert!(!app.message("chat", &message.id).unwrap().queued);
+        assert!(app.message("chat", &message.id).unwrap().promoted_at.is_some());
+        assert!(app.take_steering_message("chat", &message.id), "replacement job observes the consumed message");
         app.shell_sessions.stop_chat("chat");
         assert!(session.end().is_none(), "chat Stop leaves background commands running");
         session.stop("Stopped");

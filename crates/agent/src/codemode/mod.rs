@@ -949,7 +949,7 @@ impl<'a> Run<'a> {
         if let Some(path) = full_output_path {
             details["full_output_path"] = json!(path);
         }
-        ScriptRun { result: ToolResult { content, details, structured: None, is_error: !ok, terminate }, returned }
+        ScriptRun { result: ToolResult { content, details, structured: None, is_error: !ok, terminate, ..ToolResult::default() }, returned }
     }
 }
 
@@ -960,6 +960,9 @@ fn script_reply(tool: &dyn Tool, outcome: &ToolOutcome) -> Reply {
     if outcome.blocked {
         let reason = outcome.result.text_content();
         return Reply::Stop { reason: if reason.trim().is_empty() { format!("{} was not allowed", tool.name()) } else { reason }, terminate: outcome.result.terminate };
+    }
+    if outcome.result.cleanup_uncertainty.is_some() {
+        return Reply::Throw("Tool cleanup completion is uncertain.".into());
     }
     if tool.output_schema().is_some() {
         if let Some(structured) = &outcome.result.structured {

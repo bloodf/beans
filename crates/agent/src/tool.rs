@@ -33,9 +33,26 @@ pub struct ToolResult {
     /// batch sets it.
     #[serde(default)]
     pub terminate: bool,
+    /// Runtime-only cleanup provenance, independent of tool output and hook error recovery.
+    #[serde(skip)]
+    pub cleanup_uncertainty: Option<(usize, String)>,
 }
 
 impl ToolResult {
+    pub(crate) fn take_cleanup_uncertainty(&mut self) -> Option<String> {
+        self.cleanup_uncertainty.take().map(|(index, diagnostic)| {
+            self.content.remove(index);
+            diagnostic
+        })
+    }
+
+    pub(crate) fn set_cleanup_uncertainty(&mut self, diagnostic: String) {
+        self.take_cleanup_uncertainty();
+        self.is_error = true;
+        self.cleanup_uncertainty = Some((self.content.len(), diagnostic.clone()));
+        self.content.push(ContentPart::text(diagnostic));
+    }
+
     pub fn text(text: impl Into<String>) -> Self {
         ToolResult { content: vec![ContentPart::text(text)], ..ToolResult::default() }
     }
@@ -81,7 +98,7 @@ impl PipeWorkerCompletion {
         }
     }
 
-    fn is_uncertain(&self) -> bool { matches!(self, Self::Uncertain) }
+    pub(crate) fn is_uncertain(&self) -> bool { matches!(self, Self::Uncertain) }
 }
 
 type Completion = Arc<PipeWorkerCompletion>;
@@ -275,8 +292,7 @@ pub(crate) fn fold_cleanup(result: &mut Result<ToolResult, ToolError>, completed
     let diagnostic = cleanup_diagnostic(completed);
     match result {
         Ok(result) => {
-            result.is_error = true;
-            result.content.push(ContentPart::text(diagnostic));
+            result.set_cleanup_uncertainty(diagnostic);
         }
         Err(error) => {
             if !error.0.contains(&diagnostic) {
@@ -318,8 +334,7 @@ pub trait ToolRunner: Send + Sync {
         let completed = scope.drain().await;
         if completed.iter().any(|(_, result)| result.is_uncertain()) {
             outcome.is_error = true;
-            outcome.result.is_error = true;
-            outcome.result.content.push(ContentPart::text(cleanup_diagnostic(&completed)));
+            outcome.result.set_cleanup_uncertainty(cleanup_diagnostic(&completed));
         }
         outcome
     }
@@ -347,13 +362,17 @@ impl ToolRunner for DirectRunner {
             Ok(scope) => scope,
             Err(error) => return ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text(error) }, is_error: true, blocked: true },
         };
-        let mut result = tool.execute_scoped(&tool_call_id, args, cancel, Arc::new(|_| {}), self, &scope).await;
+        let result = tool.execute_scoped(&tool_call_id, args, cancel, Arc::new(|_| {}), self, &scope).await;
         let completed = scope.drain().await;
-        fold_cleanup(&mut result, &completed);
-        match result {
+        let mut outcome = match result {
             Ok(result) => ToolOutcome { is_error: result.is_error, result, blocked: false },
             Err(error) => ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text(error.0) }, is_error: true, blocked: false },
+        };
+        if completed.iter().any(|(_, completion)| completion.is_uncertain()) {
+            outcome.is_error = true;
+            outcome.result.set_cleanup_uncertainty(cleanup_diagnostic(&completed));
         }
+        outcome
     }
 }
 

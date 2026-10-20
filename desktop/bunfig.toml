@@ -1,0 +1,12 @@
+[test]
+# These exported browser checks require the Solid Vite compiler and a mounted DOM.
+# Keep their URLs stable for browser runners; they do not register bun:test cases.
+pathIgnorePatterns = [
+  "**/src/ui/motion.test.tsx",
+  "**/src/ui/palette.test.tsx",
+  "**/src/ui/overlay.test.tsx",
+  "**/src/ui/sheets/skillDiscovery.test.tsx",
+  "**/src/ui/sheets/skillLibrary.test.tsx",
+  "**/src/ui/chat/cards.test.tsx",
+  "**/src/ui/chat/composer.test.tsx",
+]

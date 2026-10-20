@@ -1086,6 +1086,9 @@ impl LocalStore {
             )?;
         }
         save_metadata_tx(&tx, state)?;
+        sync_json_table(&tx, "device_names", state.device_names.iter()
+            .map(|(id, name)| (id.clone(), serde_json::to_string(&(id, name))))
+            .collect())?;
         sync_json_table(
             &tx,
             "devices",

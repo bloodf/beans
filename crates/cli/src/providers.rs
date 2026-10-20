@@ -46,6 +46,10 @@ impl Provider for OpenCodeHeaders {
         self.inner.model_info()
     }
 
+    fn default_max_output_tokens(&self) -> Option<u64> {
+        self.inner.default_max_output_tokens()
+    }
+
     async fn stream(&self, mut request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream {
         request.options.headers.insert("User-Agent".into(), USER_AGENT.into());
         if let Some(session_id) = request.options.session_id.clone() {

@@ -16,6 +16,8 @@ export function DeviceRename({ device }: { device: Device }) {
   const [dialog, setDialog] = useState<Attempt | null>(null);
   const authority = useStore(state => state);
   const text = useNativeState("");
+  // Native observable writes are scheduled; submission never reads back a pending preset.
+  const entered = useRef(device.name);
   const current = useRef<Attempt | null>(null);
   const selected = useRef(device.id);
   if (selected.current !== device.id) {
@@ -75,24 +77,25 @@ export function DeviceRename({ device }: { device: Device }) {
       ], "plain-text", device.name);
     } else {
       text.value = device.name;
+      entered.current = device.name;
       setDialog(attempt);
     }
   }
   return <>
     <Row title={t("Rename…")} detail={deviceName(device)} onPress={open} />
     {Platform.OS === "android" && dialog?.active && dialog.id === device.id ? (
-      <Host style={{ position: "absolute", width: 1, height: 1 }} pointerEvents="box-none">
+      <Host style={{ position: "absolute", top: 0, right: 0, bottom: 0, left: 0 }} pointerEvents="box-none">
         <AlertDialog onDismissRequest={() => cancel(dialog)}>
           <AlertDialog.Title><ComposeText>{t("Rename Device")}</ComposeText></AlertDialog.Title>
           <AlertDialog.Text>
             <Column verticalArrangement={{ spacedBy: 12 }} modifiers={[fillMaxWidth()]}>
             <ComposeText>{t("Every paired Device shows this name. Leave it blank to use the name the machine goes by.")}</ComposeText>
-            <OutlinedTextField value={text} autoFocus singleLine modifiers={[fillMaxWidth()]}>
+            <OutlinedTextField value={text} autoFocus singleLine onValueChange={value => { if (valid(dialog) && !dialog.submitted) entered.current = value; }} modifiers={[fillMaxWidth()]}>
               <OutlinedTextField.Placeholder><ComposeText>{device.machine_name || device.name}</ComposeText></OutlinedTextField.Placeholder>
             </OutlinedTextField>
             </Column>
           </AlertDialog.Text>
-          <AlertDialog.ConfirmButton><TextButton onClick={() => { void submit(dialog, text.value); }}><ComposeText>{t("Rename")}</ComposeText></TextButton></AlertDialog.ConfirmButton>
+          <AlertDialog.ConfirmButton><TextButton onClick={() => { void submit(dialog, entered.current); }}><ComposeText>{t("Rename")}</ComposeText></TextButton></AlertDialog.ConfirmButton>
           <AlertDialog.DismissButton><TextButton onClick={() => cancel(dialog)}><ComposeText>{t("Cancel")}</ComposeText></TextButton></AlertDialog.DismissButton>
         </AlertDialog>
       </Host>

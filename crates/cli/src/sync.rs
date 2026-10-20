@@ -297,7 +297,7 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
         for blob in &blobs {
             // While an update holds new work back, the first sync stops at an envelope that
             // starts work; `last_seq` stays 0, so the next pull starts it over (`update_control`).
-            let admission = if starts_work(app, blob) {
+            let admission = if starts_work(app, blob)? {
                 let Some(admission) = app.update.try_admit() else { return Ok(FirstSync::Held) };
                 Some(admission)
             } else {
@@ -442,7 +442,7 @@ fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
             // An envelope that starts work here waits on the relay while an update holds new
             // work back: the cursor stops before it, so it and everything after it come again
             // once the lease ends (`update_control`).
-            let admission = if starts_work(app, &blob) {
+            let admission = if starts_work(app, &blob)? {
                 let Some(admission) = app.update.try_admit() else {
                     held = true;
                     break;
@@ -521,12 +521,13 @@ async fn pull_controls(app: &Arc<App>, url: &str, token: &str, machine_file: &cr
 /// Whether an envelope starts work on this Runner: a job, or a request other than an answer to
 /// work already running here (a permission card, a command's input or Stop), which running work
 /// may be waiting on.
-fn starts_work(app: &App, blob: &BlobIn) -> bool {
-    match crate::envelope::inspect(app, blob) {
+fn starts_work(app: &App, blob: &BlobIn) -> Result<bool,RelayError> {
+    if crate::envelope::rejected_delivery(app,blob).map_err(local_relay_error)? {return Ok(false);}
+    Ok(match crate::envelope::inspect(app, blob) {
         Ok(opened) => opened.envelope.kind == "job" || (opened.envelope.kind == "request"
             && !continues_work(opened.envelope.body["verb"].as_str().unwrap_or(""))),
         Err(_) => false,
-    }
+    })
 }
 
 pub(crate) fn continues_work(verb: &str) -> bool {
@@ -1897,11 +1898,14 @@ mod tests {
                     "ciphertext":crate::keys::b64(&crate::crypto::encrypt_json(&dek,"roster",&remote).unwrap()),"seq":2,"created_at":2}),
             ], published: std::sync::Mutex::new(None), uploaded: Notify::new(),
         });
+        let local=app.machine_file().unwrap().machine().unwrap();
+        let membership=json!({"machines":[{"machine_pubkey":local.pubkey(),"box_pubkey":local.box_pubkey(),"created_at":1,"last_seen":crate::config::now_unix(),"online":true}],"now":crate::config::now_unix()});
         let server = Router::new()
             .route("/v1/health", get(|| async { Json(json!({"ok":true,"service":"beans-relay","format":"beans-v2","protocol":crate::relay::PROTOCOL,"min_protocol":crate::relay::PROTOCOL,"min_roster_protocol":crate::relay::PROTOCOL,"memory_config_version":1})) }))
             .route("/v1/auth/challenge", post(|| async { Json(json!({"nonce":"test-nonce"})) }))
             .route("/v1/auth/verify", post(|| async { Json(json!({"token":"test-token"})) }))
             .route("/v1/sync", get(socket))
+            .route("/v1/machines", get(move || {let membership=membership.clone();async move {Json(membership)}}))
             .route("/v1/blobs", get(list).put(upload))
             .route("/v1/groups/{group}/blobs", get(|| async { Json(json!({"slots":[],"has_more":false})) }))
             .with_state(fixture.clone());
@@ -2886,12 +2890,15 @@ mod tests {
             let remote_blob = json!({"id": "remote-roster", "kind": "roster", "recipient_machine_pubkey": null,
                 "ciphertext": crate::keys::b64(&crate::crypto::encrypt_json(&dek, "roster", &remote).unwrap()), "seq": 8, "created_at": 1});
             let relay = Relay { roster: remote_blob.clone(), upgrades: Arc::new(AtomicUsize::new(0)), writes: Arc::new(AtomicUsize::new(0)) };
+            let local_device=app.local_device().unwrap();
+            let membership=json!({"machines":[{"machine_pubkey":local_device.id,"box_pubkey":local_device.box_pubkey,"created_at":1,"last_seen":crate::config::now_unix(),"online":true}],"now":crate::config::now_unix()});
             let server = Router::new()
                 .route("/v1/health", get(|| async { Json(json!({"ok": true, "service": "beans-relay", "format": "beans-v2",
                     "protocol": 5, "min_protocol": 5, "min_roster_protocol": 5, "memory_config_version": 1})) }))
                 .route("/v1/auth/challenge", post(|| async { Json(json!({"nonce": "synthetic-challenge"})) }))
                 .route("/v1/auth/verify", post(|| async { Json(json!({"token": "synthetic-token"})) }))
                 .route("/v1/sync", get(upgrade))
+                .route("/v1/machines", get(move || {let membership=membership.clone();async move {Json(membership)}}))
                 .route("/v1/blobs", put(upload).get(list)).with_state(relay.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
@@ -4032,5 +4039,42 @@ mod tests {
         let incoming=account_blob(app,1,"machine","unknown-metadata",&metadata);apply_blob(app,&app.machine_file().unwrap(),&incoming);
         assert_eq!(app.device(&id).unwrap().box_pubkey,box_key);
         server.abort();
+    }
+    #[tokio::test]
+    async fn held_rejected_job_and_request_conflicts_allow_trailing_account_progress() {
+        for (kind,trailing_kind) in [("job","chat"),("request","chat"),("job","roster"),("request","roster")] {
+            let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();let job=queued_turn(app);
+            let sender=app.machine_file().unwrap().machine().unwrap();
+            let request_body=|text:&str| {
+                let mut r=Request{id:"conflicting-request".into(),verb:"memory.write".into(),requested_by:sender.pubkey(),body:serde_json::json!({"bot_id":job.bot_id,"text":text}),created_at:crate::config::now_secs()};
+                let signature=sender.sign(&serde_json::to_vec(&("beans-request-v1",&r.id,&r.verb,&r.requested_by,sender.pubkey(),r.created_at,&r.body)).unwrap());
+                r.body=serde_json::json!({"payload":r.body,"signature":signature});serde_json::to_value(r).unwrap()
+            };
+            let original_body=if kind=="job" {serde_json::to_value(&job).unwrap()}else{request_body("original")};
+            let changed_body=if kind=="job" {let mut changed=job.clone();changed.trigger_message_id="changed-trigger".into();serde_json::to_value(changed).unwrap()}else{request_body("changed")};
+            let original=addressed_blob(app,1,kind,"canonical-intent",&original_body);
+            crate::envelope::preflight_page(app,std::slice::from_ref(&original)).unwrap();
+            let conflict=addressed_blob(app,2,kind,"rejected-conflict",&changed_body);
+            let message=Message::new(&job.chat_id,Author::System,Body::text("trailing accepted chat"));let message_id=message.id.clone();
+            let trailing=if trailing_kind=="chat" {account_blob(app,3,"chat","trailing-chat",&ChatBlob::Upsert{message})}
+                else {
+                    let queued=app.store.queued_roster().unwrap().unwrap();
+                    let mut roster:RosterBlob=crate::crypto::decrypt_json(&app.dek().unwrap(),"roster",&queued.ciphertext).unwrap();
+                    roster.bots.push(bot("trailing-roster-bot"));
+                    account_blob(app,3,"roster","trailing-roster",&roster)
+                };
+            app.update.prepare(app,Duration::from_secs(60));
+            assert!(!apply_pull_page(app,&app.machine_file().unwrap(),vec![conflict.clone(),trailing]).unwrap());
+            assert!(crate::envelope::rejected_delivery(app,&conflict).unwrap());
+            if trailing_kind=="chat" {assert!(app.message(&job.chat_id,&message_id).is_some());}
+            else {assert!(app.bot("trailing-roster-bot").is_some());}
+            assert_eq!(app.store.load_state().unwrap().last_seq,3);
+            assert!(!app.running_jobs.lock().unwrap().contains_key(&job.id));
+            assert!(starts_work(app,&original).unwrap(),"canonical pending retry still requires new-work admission");
+            let status:String=app.store.connection.lock().unwrap().query_row("SELECT status FROM transport_operations",[],|r|r.get(0)).unwrap();assert_eq!(status,"staged");
+            app.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_rejection_read BEFORE INSERT ON transport_conflicts BEGIN SELECT RAISE(ABORT,'rejection storage failure'); END;").unwrap();
+            let mut next=conflict;next.id="next-conflict".into();next.seq=4;
+            assert!(apply_pull_page(app,&app.machine_file().unwrap(),vec![next]).is_err());assert_eq!(app.store.load_state().unwrap().last_seq,3);
+        }
     }
 }

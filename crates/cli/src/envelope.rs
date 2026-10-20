@@ -423,7 +423,18 @@ pub(crate) fn current_authority(app:&App,e:&Envelope)->bool {
     state.listed_machines.contains_key(&e.from) && state.listed_machine_boxes.get(&e.from)==Some(&binding.sender_box) && state.devices.iter().any(|d|d.id==e.from && d.box_pubkey==binding.sender_box)
 }
 
+pub(crate) fn rejected_delivery(app:&App,blob:&crate::relay::BlobIn)->anyhow::Result<bool> {
+    if !addressed(&blob.kind) {return Ok(false);}
+    let account=account(app)?;
+    let encoded=serde_json::to_string(blob)?;
+    let c=app.store.connection.lock().unwrap();
+    let conflict:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM transport_conflicts WHERE account=?1 AND id=?2)",params![account,blob.id],|r|r.get(0))?;
+    let canonical:Option<(String,String)>=c.query_row("SELECT blob,status FROM transport_custody WHERE account=?1 AND id=?2",params![account,blob.id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    Ok(match canonical {Some((saved,status))=>if saved==encoded {status=="rejected"}else{conflict},None=>conflict})
+}
+
 fn pump_selected(app:&Arc<App>,selected:Option<&str>) -> anyhow::Result<()> {
+    if app.machine_file().is_none() {return Ok(());}
     let account=account(app)?;
     for e in app.store.transport_pending(&account)? {
         if selected.is_some_and(|id|operation(&e).ok().flatten().as_deref()!=Some(id)){continue;}

@@ -25,7 +25,11 @@ jobs:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
       - run: bun run sync:models --report "$RUNNER_TEMP/report.md" --new "$RUNNER_TEMP/new.md"
-      - run: cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/report.md" ]]; then
+            cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
       - id: diff
         run: |
           if git diff --quiet -- crates/models/catalog.json; then

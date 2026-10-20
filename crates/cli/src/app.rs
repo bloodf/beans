@@ -585,27 +585,32 @@ impl App {
     pub fn set_device_name(&self, id: &str, name: &str) -> anyhow::Result<()> {
         let name = name.trim();
         anyhow::ensure!(name.chars().count() <= 64, "Device names must be at most 64 characters");
-        anyhow::ensure!(self.has_identity(), "No identity on this Device");
+        let lifecycle = self.plugin_lifecycle.lock();
+        anyhow::ensure!(!lifecycle.get().1, "No identity on this Device");
         let _edit = self.roster_edit.lock().unwrap();
+        let dek = self.machine_file().ok_or_else(|| anyhow::anyhow!("No identity on this Device"))?.dek()?;
         {
             let mut state = self.state.lock().unwrap();
             let device = state.devices.iter().find(|device| device.id == id)
                 .ok_or_else(|| anyhow::anyhow!("Unknown Device"))?;
             let alias = (!name.is_empty() && name != device.name).then(|| name.to_owned());
-            let previous = state.device_names.get(id).cloned();
+            let mut snapshot = state.clone();
             match alias {
-                Some(name) => { state.device_names.insert(id.to_owned(), name); }
-                None => { state.device_names.remove(id); }
+                Some(name) => { snapshot.device_names.insert(id.to_owned(), name); }
+                None => { snapshot.device_names.remove(id); }
             }
-            if let Err(error) = self.store.save_state(&state) {
-                match previous {
-                    Some(name) => { state.device_names.insert(id.to_owned(), name); }
-                    None => { state.device_names.remove(id); }
-                }
-                return Err(error);
-            }
+            let item = OutboxItem {
+                id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
+                ciphertext: crate::crypto::encrypt_json(&dek, "roster", &Self::roster_from_state(&snapshot))?,
+                slot: Some(Slot::latest("roster")), group: None,
+            };
+            remember_applied(&mut snapshot, &item.id);
+            self.store.queue_outbox_with_state(&item, &snapshot)?;
+            *state = snapshot;
         }
-        self.push_roster();
+        drop(_edit);
+        drop(lifecycle);
+        self.outbox_notify.notify_waiters();
         self.emit(self.roster_summary());
         Ok(())
     }
@@ -751,9 +756,17 @@ impl App {
 
     pub fn push_roster(&self) {
         let Some(dek) = self.dek() else { return };
-        let roster = {
-            let state = self.state.lock().unwrap();
-            RosterBlob {
+        let roster = Self::roster_from_state(&self.state.lock().unwrap());
+        match crate::crypto::encrypt_json(&dek, "roster", &roster) {
+            Ok(ciphertext) => {
+                self.push_slot_blob("roster", Slot::latest("roster"), None, ciphertext);
+            }
+            Err(error) => tracing::error!(%error, "encrypting roster"),
+        }
+    }
+
+    fn roster_from_state(state: &State) -> RosterBlob {
+        RosterBlob {
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
                 device_names: state.device_names.clone(),
@@ -767,13 +780,6 @@ impl App {
                 policy_capabilities: state.policy_capabilities.clone(),
                 deleted_bot_versions: state.deleted_bot_versions.clone(),
                 updated_at: config::now_secs(),
-            }
-        };
-        match crate::crypto::encrypt_json(&dek, "roster", &roster) {
-            Ok(ciphertext) => {
-                self.push_slot_blob("roster", Slot::latest("roster"), None, ciphertext);
-            }
-            Err(error) => tracing::error!(%error, "encrypting roster"),
         }
     }
 
@@ -2307,6 +2313,69 @@ mod tests {
         let reset = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
         assert!(!reset.state.lock().unwrap().device_names.contains_key("peer"));
         assert_eq!(reset.device("peer").unwrap().name, "New machine name");
+    }
+
+    fn assert_device_alias_transaction_failure(table: &str, operation: &str) {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+        app.set_device_name("peer", "Old alias").unwrap();
+        let before = app.store.load_state().unwrap();
+        let queued = app.store.queued_roster().unwrap().unwrap();
+        let ancestor = serde_json::to_value(app.store.roster_baseline("queued").unwrap()).unwrap();
+        let db = rusqlite::Connection::open(app.config.database_path()).unwrap();
+        db.execute_batch(&format!("CREATE TRIGGER fail_alias BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, 'synthetic alias failure'); END;")).unwrap();
+        let mut events = app.events.subscribe();
+        let error = app.set_device_name("peer", "New alias").unwrap_err();
+        assert!(error.to_string().contains("synthetic alias failure"));
+        let persisted = app.store.load_state().unwrap();
+        assert_eq!(app.state.lock().unwrap().device_names, before.device_names);
+        assert_eq!(persisted.device_names, before.device_names);
+        assert_eq!(app.state.lock().unwrap().applied_blob_ids, before.applied_blob_ids);
+        assert_eq!(persisted.applied_blob_ids, before.applied_blob_ids);
+        let retained = app.store.queued_roster().unwrap().unwrap();
+        assert_eq!(retained.id, queued.id);
+        assert_eq!(retained.ciphertext, queued.ciphertext);
+        assert_eq!(serde_json::to_value(app.store.roster_baseline("queued").unwrap()).unwrap(), ancestor);
+        assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn device_alias_state_failure_rejects_without_publication() {
+        assert_device_alias_transaction_failure("device_names", "UPDATE");
+    }
+
+    #[test]
+    fn device_alias_outbox_failure_rolls_back_state_and_receipt() {
+        assert_device_alias_transaction_failure("outbox", "UPDATE");
+    }
+
+    #[test]
+    fn device_alias_committed_intent_survives_dropped_app() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config { home: home.path().into(), port: 0 };
+        let (queued_id, dek, ancestor) = {
+            let app = App::load(config.clone()).unwrap();
+            crate::identity::create(&app, Some("Workbench".into())).unwrap();
+            app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+            app.set_device_name("peer", "Office").unwrap();
+            let ancestor = serde_json::to_value(app.store.roster_baseline("queued").unwrap().unwrap()).unwrap();
+            let queued = app.store.queued_roster().unwrap().unwrap();
+            (queued.id, app.dek().unwrap(), ancestor)
+        };
+        // The original App and its SQLite connection are dropped before admission.
+        let reopened = App::load(config).unwrap();
+        assert_eq!(reopened.device("peer").unwrap().name, "Office");
+        let persisted = reopened.store.load_state().unwrap();
+        assert_eq!(persisted.device_names.get("peer").unwrap(), "Office");
+        let queued = reopened.store.queued_roster().unwrap().unwrap();
+        assert_eq!(queued.id, queued_id);
+        assert!(persisted.applied_blob_ids.contains(&queued_id));
+        assert_eq!(queued.slot, Some(Slot::latest("roster")));
+        let roster: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &queued.ciphertext).unwrap();
+        assert_eq!(roster.device_names, persisted.device_names);
+        assert_eq!(serde_json::to_value(reopened.store.roster_baseline("queued").unwrap().unwrap()).unwrap(), ancestor);
     }
 
     #[test]

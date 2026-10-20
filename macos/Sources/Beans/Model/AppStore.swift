@@ -79,6 +79,12 @@ final class AppStore {
 
     /// True when the CLI answers on localhost (mock: toggled from the Debug menu).
     private(set) var isConnected = false
+    /// Service inspection replies belong to one admitted connection/account snapshot.
+    private var serviceStatusGeneration: UInt64 = 0
+    var serviceStatusOwner: UInt64? {
+        guard isConnected, hasIdentity == true, (isMock || !isBootstrapping) else { return nil }
+        return serviceStatusGeneration
+    }
     /// The first connection is still loading. The window is visible throughout this phase.
     private(set) var isStarting = true
     /// nil until the CLI has supplied the initial snapshot.
@@ -478,6 +484,11 @@ final class AppStore {
 
     private func emit(_ event: StoreEvent) {
         guard !isApplyingBootstrap else { return }
+        switch event {
+        case .connectionChanged, .snapshotReplaced, .identityChanged:
+            serviceStatusGeneration &+= 1
+        default: break
+        }
         subscriptions.removeAll { $0.owner == nil }
         for subscription in subscriptions {
             subscription.handler(event)
@@ -1652,8 +1663,11 @@ final class AppStore {
 
     /// Whether `beans service` keeps the CLI running on a Runner, asked through the CLI.
     func serviceStatus(_ id: Device.ID) async throws -> Wire.ServiceStatus {
+        guard let owner = serviceStatusOwner else { throw CLIClient.RequestError(message: L("Waiting for the CLI")) }
         if isMock { return .init(installed: false, running: false) }
-        return try await client.request("device.service_status", ["id": id], as: Wire.ServiceStatus.self)
+        let status = try await client.request("device.service_status", ["id": id], as: Wire.ServiceStatus.self)
+        guard serviceStatusOwner == owner else { throw CancellationError() }
+        return status
     }
 
     /// Unpairs another Device. The CLI has the relay drop its key; the Device wipes its copy of

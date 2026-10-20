@@ -74,6 +74,10 @@ pub trait BashSessions: Send + Sync {
     fn get(&self, id: &str) -> Option<Arc<BashSession>>;
     /// The model has read how the session ended; the host may let it go.
     fn remove(&self, id: &str);
+    /// Whether the host holds an unread user message. Background output waits yield to it.
+    fn user_wrote(&self) -> bool {
+        false
+    }
 }
 
 /// How a session ended.
@@ -255,6 +259,8 @@ pub(crate) enum Stop {
     Deadline,
     /// The command was sent to the background while the call waited on it.
     Backgrounded,
+    /// An unread user message ended a background output wait, not the command.
+    UserWrote,
     Cancelled,
 }
 
@@ -288,6 +294,11 @@ impl BashSession {
             self.changed.send_modify(|version| *version += 1);
         }
         true
+    }
+
+    /// Wakes waiters to recheck host state, including unread user messages.
+    pub fn nudge(&self) {
+        self.changed.send_modify(|version| *version += 1);
     }
 
     /// How it ended, or `None` while it runs.
@@ -460,6 +471,8 @@ impl BashSession {
     /// passes, it is sent to the background, or `cancel` fires. `base` is how much output there was when the wait began and
     /// `since` when it began: silence counts from the later of `since` and the last output,
     /// and only output past `base` counts as new. `on_output` runs after each chunk.
+    /// Background output waits also yield when `user_wrote` reports an unread message.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn wait(
         &self,
         base: u64,
@@ -467,6 +480,7 @@ impl BashSession {
         idle: Idle,
         until: Option<Instant>,
         cancel: &CancellationToken,
+        user_wrote: impl Fn() -> bool,
         mut on_output: impl FnMut(&BashSession),
     ) -> Stop {
         let mut changes = self.changed.subscribe();
@@ -482,6 +496,9 @@ impl BashSession {
             };
             if ended {
                 return Stop::Ended;
+            }
+            if in_background && user_wrote() {
+                return Stop::UserWrote;
             }
             if until.is_some_and(|until| now >= until) {
                 return Stop::Deadline;
@@ -860,6 +877,10 @@ fn running_note(session: &BashSession, stop: Stop, idle: Duration) -> String {
             "[The user sent the command to the background, where it runs on as session {id}: go on with your work. Read what it \
              prints with bash_output, or stop it with bash_input \"\\u0003\".]"
         ),
+        (Stop::UserWrote, _) => format!(
+            "[The user wrote while you waited: answer their message, which follows. The command runs on in the background as \
+             session {id}: read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]"
+        ),
         // Quiet, or in raw mode for its own keys (a dev server's shortcuts), is how a server waits.
         _ if session.background() => format!(
             "[Running in the background as session {id}. Read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]"
@@ -994,7 +1015,7 @@ impl Tool for BashInputTool {
         }
         let (base, since) = (session.total(), Instant::now());
         let idle = Idle { after: self.waiting_after, needs_output: false };
-        let stop = session.wait(base, since, idle, None, &cancel, |_| {}).await;
+        let stop = session.wait(base, since, idle, None, &cancel, || false, |_| {}).await;
         session_result(&session, self.sessions.as_ref(), from, stop, self.waiting_after, false)
     }
 }
@@ -1026,7 +1047,8 @@ impl Tool for BashOutputTool {
     }
     fn description(&self) -> &str {
         "Read what a command that bash left running printed since you last read it, by its session id. With wait_seconds (at \
-         most 300), wait until it ends, asks for input, or the time is up. Returns whether it still runs or how it ended."
+         most 300), wait until it ends, asks for input, or the time is up. A wait on a background command also yields to an \
+         unread user message without stopping the command. Returns whether it still runs or how it ended."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -1045,7 +1067,7 @@ impl Tool for BashOutputTool {
         let from = session.read_mark();
         let (base, since) = (session.total(), Instant::now());
         let idle = Idle { after: self.waiting_after, needs_output: true };
-        let stop = session.wait(base, since, idle, Some(since + wait.min(MAX_OUTPUT_WAIT)), &cancel, |_| {}).await;
+        let stop = session.wait(base, since, idle, Some(since + wait.min(MAX_OUTPUT_WAIT)), &cancel, || !wait.is_zero() && self.sessions.user_wrote(), |_| {}).await;
         session_result(&session, self.sessions.as_ref(), from, stop, self.waiting_after, false)
     }
 }
@@ -1078,7 +1100,7 @@ pub(crate) async fn run(
     // Sent to the background before the wait began, it waits as one started there.
     let until = session.background().then(|| session.started + BACKGROUND_SETTLE);
     let stop = session
-        .wait(0, session.started, idle, until, &cancel, |session| {
+        .wait(0, session.started, idle, until, &cancel, || false, |session| {
             if last_update.elapsed() >= Duration::from_millis(super::bash::UPDATE_THROTTLE_MS) {
                 last_update = Instant::now();
                 on_update(ToolResult::text(session.preview()));
@@ -1094,9 +1116,9 @@ mod tests {
     use crate::tools::BashTool;
     use std::collections::HashMap;
 
-    /// Sessions kept in a map, as a host would.
+    /// Sessions kept by a host, with an unread user-message flag.
     #[derive(Default)]
-    struct Host(Mutex<HashMap<String, Arc<BashSession>>>);
+    struct Host(Mutex<HashMap<String, Arc<BashSession>>>, std::sync::atomic::AtomicBool);
 
     impl BashSessions for Host {
         fn insert(&self, _call_id: &str, session: Arc<BashSession>) {
@@ -1107,6 +1129,9 @@ mod tests {
         }
         fn remove(&self, id: &str) {
             self.0.lock().unwrap().remove(id);
+        }
+        fn user_wrote(&self) -> bool {
+            self.1.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -1134,6 +1159,45 @@ mod tests {
 
     fn session_id(result: &ToolResult) -> String {
         session_of(&result.details).expect("a session id").to_string()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unread_messages_release_only_background_output_waits() {
+        let t = tools(Duration::from_secs(30));
+        for background in [true, false] {
+            let bash = BashTool::with_sessions(std::env::temp_dir(), t.host.clone()).waiting_after(Duration::from_millis(100));
+            let started = call(&bash, json!({"command": "printf 'ready\\n'; read -r first; printf 'accepted\\n'; read -r last; printf 'done\\n'", "background": background})).await.unwrap();
+            assert!(started.text_content().contains("ready\n"));
+            let id = session_id(&started);
+            let session = t.host.get(&id).unwrap();
+            t.host.1.store(false, std::sync::atomic::Ordering::Relaxed);
+            let args = json!({"session_id": id, "wait_seconds": 30});
+            let mut waiting = std::pin::pin!(call(&t.output, args.clone()));
+            assert!(futures::poll!(waiting.as_mut()).is_pending());
+            t.host.1.store(true, std::sync::atomic::Ordering::Relaxed);
+            session.nudge();
+            if background {
+                let result = tokio::time::timeout(Duration::from_secs(2), waiting).await.expect("unread message wakes output wait").unwrap();
+                assert_eq!(result.details["session_id"], id);
+                assert!(session.end().is_none());
+                tokio::time::timeout(Duration::from_secs(2), call(&t.output, args)).await.unwrap().unwrap();
+                let mut input = std::pin::pin!(call(&t.input, json!({"session_id": id, "text": "first"})));
+                assert!(futures::poll!(input.as_mut()).is_pending());
+                session.nudge();
+                assert!(futures::poll!(input.as_mut()).is_pending());
+                session.write(b"last\r").await.unwrap();
+                let done = tokio::time::timeout(Duration::from_secs(5), input).await.unwrap().unwrap();
+                assert_eq!(done.details["exit_code"], 0);
+                assert!(done.text_content().contains("done\n"));
+            } else {
+                assert!(futures::poll!(waiting.as_mut()).is_pending());
+                session.write(b"first\rlast\r").await.unwrap();
+                let done = tokio::time::timeout(Duration::from_secs(5), waiting).await.unwrap().unwrap();
+                assert_eq!(done.details["exit_code"], 0);
+                assert!(done.text_content().contains("done\n"));
+            }
+        }
     }
 
     #[cfg(unix)]

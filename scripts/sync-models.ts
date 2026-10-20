@@ -132,8 +132,8 @@ function endpointTable(text: string): Map<string, string> {
     .split(/<[^>]+>/).map((cell) => cell.trim()).filter(Boolean)
   const endpoints = new Map<string, string>()
   cells.forEach((cell, i) => {
-    const endpoint = cell.match(/^https:\/\/opencode\.ai\/inference\/(?:[\w.-]+\/)*v1\/(.+)$/)
-    if (endpoint && /^[\w.-]+$/.test(cells[i - 1] ?? "")) endpoints.set(cells[i - 1], endpoint[1])
+    const endpoint = cell.match(/^https:\/\/opencode\.ai\/inference\/(?:[\w.-]+\/)*(v\d+(?:beta\d*)?)\/(.+)$/)
+    if (endpoint && /^[\w.-]+$/.test(cells[i - 1] ?? "")) endpoints.set(cells[i - 1], endpoint[1] === "v1" ? endpoint[2] : `${endpoint[1]}/${endpoint[2]}`)
   })
   return endpoints
 }
@@ -197,6 +197,7 @@ export function syncCatalog(text: string, sources: Sources, now = Date.now()) {
       if (!completeRates(cost)) notes.push(`${name}: incomplete or invalid upstream rates; missing components and pricing-completeness fields stay unchanged.`)
       if (upstream.cost.tiers !== undefined && !Array.isArray(upstream.cost.tiers)) throw new Error(`${name}: invalid upstream tiers`)
       const tiers = (upstream.cost.tiers ?? []).filter((t) => t.tier?.type === "context")
+      if (tiers.some((t) => !completeRates(t))) notes.push(`${name}: incomplete upstream tier prices; missing components retain existing values where available.`)
       if (tiers.length) {
         if (tiers.every((t) => positive(t.tier?.size) && (completeRates(t) || m.tiers?.some((old) => old.input_tokens_above === t.tier?.size)))) {
           const unmatched = (m.tiers ?? []).filter((old) => !tiers.some((t) => t.tier?.size === old.input_tokens_above))
@@ -208,7 +209,7 @@ export function syncCatalog(text: string, sources: Sources, now = Date.now()) {
           }))
         } else notes.push(`${name}: incomplete or invalid upstream tiers; existing tiers stay unchanged.`)
       } else if (m.tiers?.length) notes.push(`${name}: upstream no longer lists long-context tiers; review by hand.`)
-    }
+    } else notes.push(`${name}: upstream pricing is missing; existing rates and pricing-completeness fields stay unchanged.`)
   }
   const listed = new Set(catalog.models.map((m) => `${m.provider}/${m.id}`))
   const since = new Date(now - NEW_DAYS * 86_400_000).toISOString().slice(0, 10)
@@ -293,6 +294,13 @@ if (import.meta.main) {
     const partial = validate(syncCatalog(text, sources).text).models[0]
     assert.deepEqual(partial.rates, { ...rates, input: 0.25, output: 0 })
     assert.deepEqual(partial.tiers, [{ ...row.tiers[0], rates: { ...rates, input: 0.5 } }])
+    delete modelsDev.opencode.models.chat.cost
+    const missingCost = syncCatalog(text, sources)
+    assert.deepEqual(validate(missingCost.text).models[0].rates, rates)
+    assert.match(missingCost.report, /upstream pricing is missing/)
+    const beta = syncCatalog(text, { ...sources, docs: { ...sources.docs, opencode: `${html}<td>beta</td><td>https://opencode.ai/inference/google/v1beta/models/generateContent</td>` } })
+    assert.match(beta.report, /beta: unsupported endpoint v1beta\/models\/generateContent/)
+    assert.throws(() => validate(text, ["deepseek"]), /Missing review model for deepseek/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, review: {} }), sources), /Missing review/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, review: { opencode: "missing" } }), sources), /Invalid review model/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, review: { opencode: 7 } }), sources), /Invalid review model/)
@@ -312,6 +320,7 @@ if (import.meta.main) {
     publicText(CODEX_MODELS).then(JSON.parse).catch(() => undefined),
     ...Object.values(OPENCODE_DOCS).map((url) => publicText(url).catch(() => "")),
   ])
+  validate(text, Object.keys(MODELS_DEV))
   const result = syncCatalog(text, { modelsDev, codex, docs: Object.fromEntries(Object.keys(OPENCODE_DOCS).map((p, i) => [p, docs[i]])) })
   if (result.text !== text) await Bun.write(CATALOG, result.text)
   console.log(result.report || "The catalog matches upstream.")

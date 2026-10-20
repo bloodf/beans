@@ -961,7 +961,7 @@ fn script_reply(tool: &dyn Tool, outcome: &ToolOutcome) -> Reply {
         let reason = outcome.result.text_content();
         return Reply::Stop { reason: if reason.trim().is_empty() { format!("{} was not allowed", tool.name()) } else { reason }, terminate: outcome.result.terminate };
     }
-    if outcome.result.cleanup_uncertainty.is_some() {
+    if outcome.result.cleanup_is_uncertain() {
         return Reply::Throw("Tool cleanup completion is uncertain.".into());
     }
     if tool.output_schema().is_some() {

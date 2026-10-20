@@ -379,17 +379,30 @@ impl BashTool {
         let mut output: Vec<u8> = Vec::new();
         let mut last_update = tokio::time::Instant::now() - std::time::Duration::from_secs(1);
         let deadline = timeout.map(|t| tokio::time::Instant::now() + std::time::Duration::from_secs_f64(t));
+        let timeout_elapsed = async {
+            #[cfg(test)]
+            if let Some(arm) = probe.as_ref().filter(|_| timeout.is_some()).and_then(|probe| probe.timeout_arm.as_ref()) {
+                arm.acquire().await.expect("fixture timeout arm").forget();
+                tokio::time::sleep(Duration::from_secs_f64(timeout.expect("armed fixture timeout"))).await;
+                return;
+            }
+            if let Some(deadline) = deadline {
+                tokio::time::sleep_until(deadline).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::pin!(timeout_elapsed);
         let mut timed_out = false;
         let mut aborted = false;
 
         let mut pipes_closed = false;
         let mut status = None;
         loop {
-            let sleep_until = deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600));
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => { aborted = true; break; }
-                _ = tokio::time::sleep_until(sleep_until), if deadline.is_some() => { timed_out = true; break; }
+                _ = &mut timeout_elapsed => { timed_out = true; break; }
                 waited = child.wait(), if status.is_none() => {
                     status = Some(waited);
                 }
@@ -677,9 +690,26 @@ mod tests {
         assert!(failed.is_error);
         assert_eq!(failed.structured.as_ref().unwrap()["output"], "boom");
         assert_eq!(failed.structured.as_ref().unwrap()["exit_code"], 3);
-        let timed_out = tool.execute("2", json!({"command": "echo before; sleep 5", "timeout": 0.05}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        let cancel = CancellationToken::new();
+        let mut scope = ExecutionScope::root(&cancel);
+        let (events, _observed) = tokio::sync::mpsc::unbounded_channel();
+        let arm = Arc::new(tokio::sync::Semaphore::new(0));
+        scope.probe = Some(Arc::new(crate::tool::LifecycleProbe {
+            events,
+            release: tokio::sync::Semaphore::new(1),
+            timeout_arm: Some(arm.clone()),
+            completed: std::sync::Mutex::new(vec![]),
+        }));
+        // A spawned shell need not print within 50 ms. Start the fixture's unchanged timeout
+        // only after the real pipe reader delivers the output whose retention is under test.
+        let update = Arc::new(move |partial: ToolResult| {
+            if partial.text_content().contains("before") { arm.add_permits(1); }
+        });
+        let timed_out = tool.execute_scoped("2", json!({"command": "echo before; sleep 5", "timeout": 0.05}), cancel, update, &DirectRunner, &scope).await.unwrap();
+        scope.drain().await;
         assert!(timed_out.is_error);
         assert_eq!(timed_out.structured.as_ref().unwrap()["exit_code"], Value::Null);
+        assert!(timed_out.text_content().contains("timed out"));
         assert!(timed_out.structured.as_ref().unwrap()["output"].as_str().unwrap().contains("before"));
     }
 

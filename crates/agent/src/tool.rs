@@ -14,6 +14,22 @@ use crate::provider::ToolSpec;
 use crate::types::ContentPart;
 
 /// Final or partial output of a tool.
+/// Construct through `Default` or `text`, then edit public output fields. Runtime cleanup
+/// classification is read-only outside the agent crate.
+///
+/// ```
+/// use beans_agent::tool::ToolResult;
+/// let mut result = ToolResult::text("original");
+/// result.content.clear();
+/// result.is_error = true;
+/// assert!(!result.cleanup_is_uncertain());
+/// ```
+///
+/// ```compile_fail
+/// use beans_agent::tool::ToolResult;
+/// let mut result = ToolResult::default();
+/// result.cleanup_uncertainty = None;
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolResult {
     /// What the model sees.
@@ -35,10 +51,15 @@ pub struct ToolResult {
     pub terminate: bool,
     /// Runtime-only cleanup provenance, independent of tool output and hook error recovery.
     #[serde(skip)]
-    pub cleanup_uncertainty: Option<String>,
+    pub(crate) cleanup_uncertainty: Option<String>,
 }
 
 impl ToolResult {
+    /// Whether an owning runner observed unacknowledged cleanup.
+    pub fn cleanup_is_uncertain(&self) -> bool {
+        self.cleanup_uncertainty.is_some()
+    }
+
     pub(crate) fn take_cleanup_uncertainty(&mut self) -> Option<String> {
         self.cleanup_uncertainty.take()
     }

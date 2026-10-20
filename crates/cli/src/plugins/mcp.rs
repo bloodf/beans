@@ -2183,7 +2183,11 @@ impl Tool for PluginTool {
         if is_error && content.iter().all(|part| part.as_text().is_none_or(|text| text.trim().is_empty())) {
             content = vec![ContentPart::text(format!("{} {tool} reported an error", self.plugin_name))];
         }
-        Ok(ToolResult { content, details: json!({ "plugin_id": self.plugin_id, "tool": tool }), structured: Some(structured), is_error, terminate: false, ..ToolResult::default() })
+        let mut output = ToolResult::default().with_details(json!({ "plugin_id": self.plugin_id, "tool": tool }));
+        output.content = content;
+        output.structured = Some(structured);
+        output.is_error = is_error;
+        Ok(output)
     }
 }
 
@@ -2228,7 +2232,10 @@ impl PluginTool {
             is_error: bool,
         }
         let reply = bounded_value(&ScriptReply { content: &blocks, structured_content: &structured, is_error: false })?;
-        Ok(ToolResult { content, details: json!({"plugin_id":self.plugin_id,"tool":tool}), structured: Some(reply), is_error: false, terminate: false, ..ToolResult::default() })
+        let mut output = ToolResult::default().with_details(json!({"plugin_id":self.plugin_id,"tool":tool}));
+        output.content = content;
+        output.structured = Some(reply);
+        Ok(output)
     }
 }
 
@@ -2729,7 +2736,7 @@ pub fn dismiss_questions(app: &App, chat_id: &str) {
 /// direct chat's steering puts it. A group member's turn ends, and the room that message started
 /// answers it.
 pub fn dismissed_call(reason: String) -> ToolResult {
-    ToolResult { terminate: true, ..ToolResult::text(reason) }
+    ToolResult::text(reason).terminating()
 }
 
 #[cfg(test)]

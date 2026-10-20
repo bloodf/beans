@@ -429,6 +429,13 @@ struct DeviceServiceStatusRequest {
     private var generation: UInt64 = 0
     private var asked = false
     private(set) var status: Wire.ServiceStatus?
+    private var owner: UInt64?
+
+    mutating func updateOwner(_ owner: UInt64?) {
+        guard self.owner != owner else { return }
+        invalidate()
+        self.owner = owner
+    }
 
     mutating func invalidate() {
         generation &+= 1
@@ -441,7 +448,7 @@ struct DeviceServiceStatusRequest {
             invalidate()
             target = id
         }
-        guard id != nil, !asked else { return nil }
+        guard owner != nil, id != nil, !asked else { return nil }
         asked = true
         return generation
     }
@@ -467,6 +474,12 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
         addSection(machineSection)
         add(serviceNote)
         super.viewDidLoad()
+        store.observe(self) { [weak self] event in
+            switch event {
+            case .connectionChanged, .snapshotReplaced, .identityChanged: self?.reload()
+            default: break
+            }
+        }
     }
 
     override func viewWillAppear() {
@@ -533,11 +546,14 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
 
     /// Refetches after reconnecting or changing selection; stale replies cannot update the pane.
     private func askService(_ device: Device?) {
+        serviceRequest.updateOwner(store.serviceStatusOwner)
         let id = device.flatMap { $0.isRunner && $0.status == .online ? $0.id : nil }
         guard let generation = serviceRequest.begin(for: id), let id else { return }
         Task { @MainActor [weak self] in
             let status = try? await self?.store.serviceStatus(id)
-            guard let self, self.serviceRequest.complete(status, generation: generation) else { return }
+            guard let self else { return }
+            self.serviceRequest.updateOwner(self.store.serviceStatusOwner)
+            guard self.serviceRequest.complete(status, generation: generation) else { return }
             self.reload()
         }
     }

@@ -8,11 +8,12 @@ import { engine } from "../../src/core/engine";
 import { CUSTOM_PRESETS, customProviderNamed, isCustomProvider, providerLabel } from "../../src/core/model";
 import { useStore } from "../../src/core/store";
 import { deviceLanguage, languageNames, languages, setAppLanguage, t, useLanguage } from "../../src/i18n";
-import { FieldRow, MenuRow, Row, Section, ToggleRow, type MenuChoice } from "../../src/ui/forms";
+import { MenuRow, Row, Section, ToggleRow, type MenuChoice } from "../../src/ui/forms";
 import { usePalette } from "../../src/ui/theme";
 import { DeviceRows } from "../../src/ui/DeviceRows";
 import { useWide } from "../../src/ui/layout";
 import { CloseToolbar } from "../../src/ui/navigation";
+import { DeviceRename } from "../../src/ui/DeviceRename";
 import {
   automaticLanguage,
   languageName,
@@ -35,7 +36,6 @@ export default function SettingsScreen() {
   const paused = useStore((s) => s.paused);
   const providers = useStore((s) => s.providers);
   const thisDevice = devices.find((d) => d.is_this_device);
-  const [name, setName] = useState(thisDevice?.name ?? "");
   const [addingRule, setAddingRule] = useState(false);
   const [ruleText, setRuleText] = useState("");
   const [ruleBehavior, setRuleBehavior] = useState<"allow" | "ask">("allow");
@@ -73,10 +73,6 @@ export default function SettingsScreen() {
     { title: t("Other Server…"), selected: false, onPress: () => router.push("/settings/custom-provider") },
   ];
 
-  function commitName() {
-    if (thisDevice && name.trim() && name.trim() !== thisDevice.name)
-      void engine.renameDevice(name);
-  }
 
   function addRule() {
     if (Platform.OS === "android") {
@@ -180,17 +176,7 @@ export default function SettingsScreen() {
           title={t("This phone")}
           footer={t("How this phone shows up in the Device list on your other Devices.")}
         >
-          <FieldRow
-            label={t("Name")}
-            value={name}
-            onChangeText={setName}
-            onBlur={commitName}
-            onSubmitEditing={commitName}
-            returnKeyType="done"
-            autoCapitalize="words"
-            // A value among values: on the trailing edge in their color, as Role and App Language are.
-            style={{ textAlign: "right", color: p.secondaryLabel }}
-          />
+          {thisDevice ? <DeviceRename device={thisDevice} /> : null}
           <Row title={t("Role")} detail={t("Device")} />
           <Row
             title={t("App Language")}

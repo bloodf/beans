@@ -1259,6 +1259,7 @@ impl LocalStore {
         let tx = connection.transaction()?;
         for table in [
             "transport_outbound",
+            "transport_outbound_refusals",
             "transport_custody",
             "transport_replay",
             "transport_operations",

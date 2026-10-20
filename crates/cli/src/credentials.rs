@@ -493,7 +493,8 @@ mod tests {
         assert_eq!(restored.levels, Some(Vec::new()));
         provider.models[0].reasoning = Some(false);
         provider.models[0].thinking_format = Some("unknown".into());
-        provider.models[0].levels = Some(vec![High, Max]);
+        assert!(provider.merge_discovered_models(vec![CustomModel { id: "m".into(), levels: Some(vec![High, Max]), ..Default::default() }]));
+        assert_eq!(provider.models[0].levels, Some(vec![High, Max]));
         for api in [CustomApi::ChatCompletions, CustomApi::Responses] {
             provider.api = api;
             assert_eq!(provider.levels(&provider.models[0]), [High, Max]);

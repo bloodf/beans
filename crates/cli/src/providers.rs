@@ -690,6 +690,7 @@ mod tests {
                 let expected_levels = if api == CustomApi::Messages && format.is_none() { vec![] } else { declared };
                 assert_eq!(app.credentials.lock().unwrap().models("custom:levels")[0].levels, expected_levels);
                 let adapter = provider_for(app, "custom:levels", Some("alias"), Some(requested)).unwrap();
+                assert_eq!(adapter.model_info().unwrap().levels, expected_levels);
                 assert_eq!(adapter.model_info().unwrap().rates, None);
                 assert_eq!(adapter.model_info().unwrap().wire, None);
                 let request = ModelRequest { system_prompt: String::new(), messages: vec![beans_agent::LlmMessage::User(beans_agent::UserMessage::text("hi"))], tools: vec![], cache_points: vec![], max_tokens: Some(4096), options: Default::default() };

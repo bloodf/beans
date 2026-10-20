@@ -1,6 +1,8 @@
 // Simplified Chinese. The key is the English text passed to t(); `bun run l10n` checks this table.
 
 export const zh: Record<string, string> = {
+  "Bots": "智能体",
+  "Search your chats and messages.": "搜索聊天和消息。",
   "Yes": "是",
   "No": "否",
   "Local server": "本地服务器",

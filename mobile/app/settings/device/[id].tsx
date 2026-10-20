@@ -1,7 +1,6 @@
-// One Device, slid in from its row in Settings inside the same sheet: the bots assigned to it,
-// its plugins when it is a Runner, and the machine itself.
+// One Device, opened from the Devices tab or wide-window Settings.
 
-import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { Stack, useLocalSearchParams, usePathname, useRouter } from "expo-router";
 import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { engine } from "../../../src/core/engine";
 import { deviceName, isRunner, providerLabel, type Device, type PluginStatus } from "../../../src/core/model";
@@ -36,6 +35,7 @@ export default function DeviceScreen() {
   useLanguage();
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const inSettings = usePathname().startsWith("/settings");
   const p = usePalette();
   const device = useStore((s) => s.devices.find((d) => d.id === id));
   const seen = useStore((s) => s.device_seen[id]);
@@ -58,7 +58,7 @@ export default function DeviceScreen() {
   function openChat(botId: string) {
     const dm = chats.find((c) => c.kind === "dm" && c.bot_ids[0] === botId);
     if (!dm) return;
-    router.dismissAll();
+    if (inSettings) router.dismissAll();
     router.push(`/chat/${dm.id}`);
   }
 

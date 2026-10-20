@@ -371,7 +371,7 @@ fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> Mode
         provider: kind.to_string(),
         context_window: capabilities.context_window.map(std::num::NonZeroU64::get).unwrap_or(0),
         max_output: listed.and_then(|entry| entry.max_output).unwrap_or(0),
-        reasoning: listed.and_then(|entry| entry.reasoning).unwrap_or(false),
+        reasoning: listed.map(|entry| entry.levels.as_ref().map(|levels| !levels.is_empty()).unwrap_or(entry.reasoning.unwrap_or(false))).unwrap_or(false),
         images: capabilities.images.unwrap_or(false),
         rates: None,
         tiers: Vec::new(),
@@ -654,6 +654,64 @@ mod tests {
             String::from_utf8(request).unwrap()
         });
         (root, server)
+    }
+
+    #[tokio::test]
+    async fn declared_levels_drive_custom_menus_and_wire_effort() {
+        use futures::StreamExt;
+        use beans_agent::AssistantEvent;
+        use ThinkingLevel::{Low, Medium, High, XHigh, Max};
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let cases = [
+            (CustomApi::ChatCompletions, None, XHigh, Some("xhigh")),
+            (CustomApi::ChatCompletions, None, Max, Some("max")),
+            (CustomApi::Responses, None, Max, Some("max")),
+            (CustomApi::ChatCompletions, None, Medium, Some("high")),
+            (CustomApi::Messages, None, Max, None),
+            (CustomApi::Messages, Some("claude-adaptive"), Max, Some("max")),
+            (CustomApi::Messages, Some("claude-budget"), Max, Some("budget")),
+        ];
+        for (api, format, requested, effort) in cases {
+            let fixture = match api {
+                CustomApi::ChatCompletions => "data: [DONE]\n\n",
+                CustomApi::Responses => "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{}}}\n\n",
+                CustomApi::Messages => "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            };
+            for empty in [false, true] {
+                let (root, server) = answer_once(fixture);
+                let declared = if empty { vec![] } else { vec![Low, High, XHigh, Max] };
+                let provider = CustomProvider {
+                    name: "Levels".into(), api, base_url: format!("{root}/v1"), api_key: String::new(),
+                    models: vec![CustomModel { levels: Some(declared.clone()), thinking_format: format.map(str::to_string), ..model("alias") }],
+                    created_at: 1, integration: None, capabilities: None,
+                };
+                app.credentials.lock().unwrap().custom.insert("custom:levels".into(), provider);
+                let expected_levels = if api == CustomApi::Messages && format.is_none() { vec![] } else { declared };
+                assert_eq!(app.credentials.lock().unwrap().models("custom:levels")[0].levels, expected_levels);
+                let adapter = provider_for(app, "custom:levels", Some("alias"), Some(requested)).unwrap();
+                assert_eq!(adapter.model_info().unwrap().rates, None);
+                assert_eq!(adapter.model_info().unwrap().wire, None);
+                let request = ModelRequest { system_prompt: String::new(), messages: vec![beans_agent::LlmMessage::User(beans_agent::UserMessage::text("hi"))], tools: vec![], cache_points: vec![], max_tokens: Some(4096), options: Default::default() };
+                let events: Vec<_> = adapter.stream(request, CancellationToken::new()).await.collect().await;
+                assert!(!events.iter().any(|event| matches!(event, AssistantEvent::Error { .. })), "{events:?}");
+                let seen = server.join().unwrap();
+                let body: serde_json::Value = serde_json::from_str(seen.split_once("\r\n\r\n").unwrap().1).unwrap();
+                let expected = if empty { None } else { effort };
+                match api {
+                    CustomApi::ChatCompletions => assert_eq!(body["reasoning_effort"].as_str(), expected),
+                    CustomApi::Responses => assert_eq!(body["reasoning"]["effort"].as_str(), expected),
+                    CustomApi::Messages if expected == Some("budget") => {
+                        assert_eq!(body["thinking"]["type"], "enabled");
+                        assert!(body["thinking"]["budget_tokens"].as_u64().unwrap() <= 3072);
+                    }
+                    CustomApi::Messages => {
+                        assert_eq!(body["output_config"]["effort"].as_str(), expected);
+                        if expected.is_none() { assert!(body.get("thinking").is_none()); }
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]

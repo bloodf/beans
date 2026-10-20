@@ -87,6 +87,9 @@ pub struct CustomModel {
     pub thinking_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_can_disable: Option<bool>,
+    /// Declared supported thinking levels; an empty list explicitly disables thinking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub levels: Option<Vec<beans_models::ThinkingLevel>>,
 }
 
 impl CustomModel {
@@ -99,7 +102,7 @@ impl CustomModel {
                 changed = true;
             })+ };
         }
-        take!(name, context_window, max_output, images, reasoning, tools, thinking_format, thinking_can_disable);
+        take!(name, context_window, max_output, images, reasoning, tools, thinking_format, thinking_can_disable, levels);
         changed
     }
 }
@@ -162,10 +165,15 @@ impl CustomProvider {
         }
     }
 
-    /// Thinking controls require an explicit format supported by the selected wire.
-    /// Legacy gateway formats retain their declared effort translation.
+    /// Declared levels take precedence, including an explicit empty list. Otherwise thinking
+    /// controls require a supported format, retaining legacy gateway effort translation.
     pub fn levels(&self, model: &CustomModel) -> Vec<beans_models::ThinkingLevel> {
         use beans_models::ThinkingLevel::{Off, Minimal, Low, Medium, High, XHigh, Max};
+        // Messages has no portable effort field without an explicit thinking format.
+        if self.api == CustomApi::Messages && !matches!(model.thinking_format.as_deref(), Some("claude-adaptive" | "claude-budget")) {
+            return Vec::new();
+        }
+        if let Some(levels) = &model.levels { return levels.clone(); }
         if model.reasoning != Some(true) { return Vec::new(); }
         if self.integration.is_none() {
             let supported = match self.api {
@@ -407,6 +415,8 @@ impl Credentials {
                 models: provider.models.iter().map(|model| {
                     let capabilities = provider.effective_capabilities(Some(model));
                     let mut effective = model.clone();
+                    // StatusModel owns the effective levels key, not the flattened declaration.
+                    effective.levels = None;
                     effective.context_window = capabilities.context_window.map(std::num::NonZeroU64::get);
                     effective.images = capabilities.images;
                     effective.tools = capabilities.tools;
@@ -450,6 +460,51 @@ fn grok_email(tokens: &GrokTokens) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declared_levels_survive_sparse_refresh_and_credentials_sync() {
+        use beans_models::ThinkingLevel::{Low, High, XHigh, Max};
+        let mut provider = custom("Lab", 1);
+        let legacy = provider.models[0].clone();
+        assert_eq!(legacy.levels, None);
+        provider.models[0].levels = Some(vec![Low, High, XHigh, Max]);
+        provider.models[0].context_window = Some(32_768);
+        assert!(!provider.merge_discovered_models(vec![legacy.clone()]));
+        let mut credentials = Credentials::default();
+        credentials.custom.insert("custom:lab".into(), provider);
+        credentials.changed_at.insert("custom:lab".into(), 1.0);
+        let saved: Credentials = serde_json::from_value(serde_json::to_value(&credentials).unwrap()).unwrap();
+        let mut paired = Credentials::default();
+        paired.merge(&saved);
+        assert_eq!(paired.custom["custom:lab"], credentials.custom["custom:lab"]);
+        assert_eq!(paired.models("custom:lab")[0].levels, [Low, High, XHigh, Max]);
+        let wire = serde_json::to_string(&paired.statuses()).unwrap();
+        let statuses: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        let status = statuses.as_array().unwrap().iter().find(|status| status["kind"] == "custom:lab").unwrap();
+        assert_eq!(status["models"][0]["levels"], serde_json::json!(["low", "high", "xhigh", "max"]));
+        assert_eq!(wire.matches("\"levels\"").count(), 1);
+        let provider = paired.custom.get_mut("custom:lab").unwrap();
+        assert!(provider.merge_discovered_models(vec![CustomModel { levels: Some(Vec::new()), ..legacy.clone() }]));
+        assert!(provider.levels(&provider.models[0]).is_empty());
+        assert_eq!(provider.models[0].context_window, Some(32_768));
+        assert!(!provider.merge_discovered_models(vec![legacy]));
+        assert_eq!(provider.models[0].levels, Some(Vec::new()));
+        let restored: CustomModel = serde_json::from_value(serde_json::to_value(&provider.models[0]).unwrap()).unwrap();
+        assert_eq!(restored.levels, Some(Vec::new()));
+        provider.models[0].reasoning = Some(false);
+        provider.models[0].thinking_format = Some("unknown".into());
+        provider.models[0].levels = Some(vec![High, Max]);
+        for api in [CustomApi::ChatCompletions, CustomApi::Responses] {
+            provider.api = api;
+            assert_eq!(provider.levels(&provider.models[0]), [High, Max]);
+        }
+        provider.api = CustomApi::Messages;
+        assert!(provider.levels(&provider.models[0]).is_empty());
+        for format in ["claude-adaptive", "claude-budget"] {
+            provider.models[0].thinking_format = Some(format.into());
+            assert_eq!(provider.levels(&provider.models[0]), [High, Max]);
+        }
+    }
 
     fn key(api_key: &str) -> Option<ApiKeyCredential> {
         Some(ApiKeyCredential { api_key: api_key.into(), base_url: None, connected_at: 0 })

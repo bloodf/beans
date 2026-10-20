@@ -65,10 +65,12 @@ fn retryable_pattern() -> &'static Regex {
     })
 }
 
+const ADMISSION_REFUSED_PREFIX: &str = "Request admission refused: ";
+
 /// Whether an error message reads like a transient provider or transport failure, so the
 /// turn is worth restarting. Quota and billing exhaustion never is.
 pub fn is_retryable_error(message: &str) -> bool {
-    if non_retryable_limit_pattern().is_match(message) {
+    if message.starts_with(ADMISSION_REFUSED_PREFIX) || non_retryable_limit_pattern().is_match(message) {
         return false;
     }
     retryable_pattern().is_match(message)
@@ -159,6 +161,8 @@ pub fn is_recoverable_length(message: &AssistantMessage, desired_max_output: u64
 #[derive(Debug)]
 pub enum RequestFailure {
     Aborted,
+    /// A host's admission hook refused another attempt. Never retried by the adapter.
+    Refused(String),
     /// No response: the transport failed.
     Transport(String),
     /// A response with a failing status; `body` is what the server said.
@@ -171,6 +175,7 @@ impl RequestFailure {
     pub fn message(&self) -> String {
         match self {
             RequestFailure::Aborted => "Request aborted".into(),
+            RequestFailure::Refused(reason) => format!("{ADMISSION_REFUSED_PREFIX}{reason}"),
             RequestFailure::Transport(error) => format!("Request failed: {error}"),
             RequestFailure::Status { status, body } => format!("{status}: {}", summarize_error_body(body)),
         }
@@ -238,24 +243,40 @@ async fn bounded_error_body(mut response: reqwest::Response, cancel: &Cancellati
 
 /// Sends the request `build` makes, retrying a retryable failure up to `max_retries` times.
 /// Returns the successful response, or why the last attempt failed.
+/// Calls admission before each attempt and reports every received response exactly once.
+/// Admission refusal returns `Refused` without retrying; cancellation interrupts admission,
+/// sending, error-body reads, and backoff. Adapters must not report the returned response again.
 pub async fn send_with_retry(
     build: impl Fn() -> reqwest::RequestBuilder,
     max_retries: u32,
     max_delay_ms: u64,
     cancel: &CancellationToken,
+    options: &crate::request::RequestOptions,
 ) -> Result<reqwest::Response, RequestFailure> {
     let mut retries_left = max_retries;
     loop {
         if cancel.is_cancelled() {
             return Err(RequestFailure::Aborted);
         }
+        if let Some(hooks) = &options.hooks {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(RequestFailure::Aborted),
+                admitted = hooks.before_request(retries_left < max_retries, cancel) => admitted.map_err(RequestFailure::Refused)?,
+            }
+        }
         let sent = tokio::select! {
+            biased;
             _ = cancel.cancelled() => return Err(RequestFailure::Aborted),
             sent = build().send() => sent,
         };
         let (failure, delay) = match sent {
-            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) if response.status().is_success() => {
+                options.report(&response);
+                return Ok(response);
+            }
             Ok(response) => {
+                options.report(&response);
                 let retryable = retries_left > 0 && is_retryable_status(&response);
                 let delay = if retryable { retry_delay(&response, max_retries - retries_left, max_delay_ms) } else { Ok(Duration::ZERO) };
                 let status = response.status();
@@ -288,6 +309,88 @@ pub async fn send_with_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn admission_controls_retries_and_reports_each_http_response_once() {
+        use std::sync::{Arc, Mutex};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use crate::request::{RequestHooks, RequestOptions, ResponseInfo};
+
+        struct Guard {
+            deny_retry: bool,
+            events: Mutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl RequestHooks for Guard {
+            async fn before_request(&self, retry: bool, _: &CancellationToken) -> Result<(), String> {
+                self.events.lock().unwrap().push(format!("attempt {retry}"));
+                if retry && self.deny_retry { Err("429 overloaded: retry allowance exhausted".into()) } else { Ok(()) }
+            }
+
+            fn after_response(&self, response: &ResponseInfo) {
+                self.events.lock().unwrap().push(format!("response {} {}", response.status, response.headers["x-attempt"]));
+            }
+        }
+
+        for deny_retry in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let hits = Arc::new(AtomicUsize::new(0));
+            let count = hits.clone();
+            let server = tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut buf = [0; 4096];
+                    let _ = socket.read(&mut buf).await.unwrap();
+                    let attempt = count.fetch_add(1, Ordering::SeqCst) + 1;
+                    let status = if attempt == 1 { "503 Service Unavailable" } else { "200 OK" };
+                    let response = format!("HTTP/1.1 {status}\r\nRetry-After: 0\r\nX-Attempt: {attempt}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                }
+            });
+            let guard = Arc::new(Guard { deny_retry, events: Mutex::new(Vec::new()) });
+            let options = RequestOptions::default().with_hooks(guard.clone());
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(5), send_with_retry(|| client.post(&url), 2, 5000, &CancellationToken::new(), &options)).await.unwrap();
+            if deny_retry {
+                assert!(matches!(&result, Err(RequestFailure::Refused(reason)) if reason == "429 overloaded: retry allowance exhausted"));
+                let mut message = AssistantMessage::empty("fixture", "fixture");
+                message.stop_reason = StopReason::Error;
+                message.error_message = Some(result.unwrap_err().message());
+                assert!(!is_retryable_error(message.error_message.as_deref().unwrap()));
+                assert!(!is_retryable_assistant_error(&message));
+                assert_eq!(hits.load(Ordering::SeqCst), 1);
+                assert_eq!(*guard.events.lock().unwrap(), ["attempt false", "response 503 1", "attempt true"]);
+            } else {
+                assert_eq!(result.unwrap().text().await.unwrap(), "ok");
+                assert_eq!(hits.load(Ordering::SeqCst), 2);
+                assert_eq!(*guard.events.lock().unwrap(), ["attempt false", "response 503 1", "attempt true", "response 200 2"]);
+            }
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_pending_admission_without_sending_http() {
+        struct Waiting;
+        #[async_trait::async_trait]
+        impl crate::request::RequestHooks for Waiting {
+            async fn before_request(&self, _: bool, cancel: &CancellationToken) -> Result<(), String> {
+                cancel.cancel();
+                std::future::pending().await
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let options = crate::request::RequestOptions::default().with_hooks(std::sync::Arc::new(Waiting));
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let cancel = CancellationToken::new();
+        let result = tokio::time::timeout(Duration::from_secs(1), send_with_retry(|| client.get(&url), 2, 5000, &cancel, &options)).await.unwrap();
+        assert!(matches!(result, Err(RequestFailure::Aborted)));
+        assert!(tokio::time::timeout(Duration::from_millis(10), listener.accept()).await.is_err());
+    }
 
     #[test]
     fn classifies_transient_and_final_errors() {
@@ -344,12 +447,12 @@ mod tests {
         });
         let client = reqwest::Client::new();
         let url = format!("http://{address}/");
-        let response = send_with_retry(|| client.get(&url), 3, DEFAULT_MAX_RETRY_DELAY_MS, &CancellationToken::new()).await.unwrap();
+        let response = send_with_retry(|| client.get(&url), 3, DEFAULT_MAX_RETRY_DELAY_MS, &CancellationToken::new(), &crate::request::RequestOptions::default()).await.unwrap();
         assert_eq!(response.status(), 200);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
 
         // Out of retries: the failure carries the server's message.
-        let failing = send_with_retry(|| client.get(&url), 0, DEFAULT_MAX_RETRY_DELAY_MS, &CancellationToken::new()).await;
+        let failing = send_with_retry(|| client.get(&url), 0, DEFAULT_MAX_RETRY_DELAY_MS, &CancellationToken::new(), &crate::request::RequestOptions::default()).await;
         match failing {
             Ok(response) => assert_eq!(response.status(), 200, "the fourth hit succeeds"),
             Err(failure) => panic!("unexpected {}", failure.message()),

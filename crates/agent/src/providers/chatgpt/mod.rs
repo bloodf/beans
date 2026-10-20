@@ -154,6 +154,11 @@ impl Provider for ChatGptProvider {
         self.info.as_deref()
     }
 
+    fn default_max_output_tokens(&self) -> Option<u64> {
+        // The subscription wire has no adapter-imposed output cap.
+        None
+    }
+
     async fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream {
         let (tx, rx) = mpsc::channel(64);
         let mut body = self.body(&request);
@@ -173,11 +178,8 @@ impl Provider for ChatGptProvider {
 
         tokio::spawn(async move {
             let build = || build_request(&client, &tokens, &options, &body);
-            let response = match send_with_retry(build, 2, DEFAULT_MAX_RETRY_DELAY_MS, &cancel).await {
-                Ok(response) => {
-                    options.report(&response);
-                    response
-                }
+            let response = match send_with_retry(build, 2, DEFAULT_MAX_RETRY_DELAY_MS, &cancel, &options).await {
+                Ok(response) => response,
                 Err(failure) => {
                     let aborted = matches!(failure, RequestFailure::Aborted);
                     let _ = tx.send(AssistantEvent::Error { message: failure.message(), aborted }).await;

@@ -244,6 +244,8 @@ pub struct App {
     /// The checks of this Runner's routines.
     #[cfg(feature = "runner")]
     pub routine_checks: crate::routines::Checks,
+    #[cfg(all(test, feature = "runner"))]
+    pub routine_barrier: Mutex<Option<(String, std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     /// The local update lease, and the admission count every new turn, room, routine, check,
     /// and relay envelope passes through (`update_control`).
     pub update: crate::update_control::Control,
@@ -329,6 +331,8 @@ impl App {
             mcp: crate::plugins::mcp::Pool::new(),
             #[cfg(feature = "runner")]
             routine_checks: crate::routines::Checks::default(),
+            #[cfg(all(test, feature = "runner"))]
+            routine_barrier: Mutex::new(None),
             update: crate::update_control::Control::default(),
             http,
         });
@@ -1567,22 +1571,32 @@ impl App {
 
     /// Changes a routine, saves it, and publishes the roster.
     pub fn update_routine(&self, id: &str, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
-        self.change_routine(id, true, update)
+        self.change_routine(id, true, None, |routine, _, _| update(routine))
     }
 
     /// Saves a Runner checkpoint without uploading another roster for every quiet check.
     pub fn record_routine(&self, id: &str, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
-        self.change_routine(id, false, update)
+        self.change_routine(id, false, None, |routine, _, _| update(routine))
+    }
+
+    /// Supplies current local scheduling authority under the same lock as the routine write.
+    pub(crate) fn record_owned_routine(&self, id: &str, upload: bool, update: impl FnOnce(&mut Routine, bool, Option<String>)) -> anyhow::Result<Routine> {
+        let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        let this_device = self.this_device_id();
+        self.change_routine(id, upload, this_device.as_deref(), update)
     }
 
     /// Persist before admitting work, even during a bulk pull; a failed write rolls back memory.
-    fn change_routine(&self, id: &str, upload: bool, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+    fn change_routine(&self, id: &str, upload: bool, this_device: Option<&str>, update: impl FnOnce(&mut Routine, bool, Option<String>)) -> anyhow::Result<Routine> {
         let _edit = self.roster_edit.lock().unwrap();
         let routine = {
             let mut state = self.state.lock().unwrap();
             let index = state.routines.iter().position(|routine| routine.id == id).ok_or_else(|| anyhow::anyhow!("Unknown routine"))?;
+            let routine = &state.routines[index];
+            let owned = !state.paused && routine.is_enabled && state.bots.iter().any(|bot| bot.id == routine.bot_id && this_device == Some(bot.runner_id.as_str()));
+            let chat_id = state.chats.iter().find(|chat| chat.meta.kind == "dm" && chat.meta.bot_ids.len() == 1 && chat.meta.bot_ids[0] == routine.bot_id).map(|chat| chat.meta.id.clone());
             let previous = state.routines[index].clone();
-            update(&mut state.routines[index]);
+            update(&mut state.routines[index], owned, chat_id);
             if let Err(error) = self.store.save_state(&state) {
                 state.routines[index] = previous;
                 return Err(error);
@@ -1698,7 +1712,7 @@ impl App {
             "paused"
         } else if !online {
             "waiting_for_runner"
-        } else if routine.pending.as_ref().is_some_and(|pending| matches!(pending.phase, RoutinePhase::Checking | RoutinePhase::Running)) {
+        } else if routine.pending.as_ref().is_some_and(|pending| pending.binding.is_none() || matches!(pending.phase, RoutinePhase::Checking | RoutinePhase::Running)) {
             "blocked"
         } else {
             match routine.health.as_ref().and_then(|health| health.model.status.or(health.status)) {

@@ -1308,7 +1308,7 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
             merge_ids(&mut chat.bot_ids, &old.bot_ids, &local.bot_ids);
         }
     }
-    merge_entities!(routines, bot_id, name, prompt, schedule, is_enabled, enabled_at,
+    merge_entities!(routines, bot_id, name, prompt, schedule, timezone, missed_run_policy, is_enabled, enabled_at,
         last_run_at, last_outcome, paused_reason, check);
     merge_entities!(workflows, bot_id, name, definition);
     if queued.auto_review.is_enabled != base.auto_review.is_enabled {
@@ -2596,6 +2596,27 @@ mod tests {
             app.store.remove_outbox_roster_with_state(&latest.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
         }
         assert!(!app.store.pending_chat_creates().unwrap().contains(&"offline".to_string()));
+    }
+
+    #[test]
+    fn offline_routine_zone_and_policy_survive_concurrent_remote_rename() {
+        let mut base = roster(bot("lead"));
+        let routine: Routine = serde_json::from_value(serde_json::json!({
+            "id": "routine", "bot_id": "lead", "name": "Daily", "prompt": "Check",
+            "schedule": "every 1d", "timezone": "UTC", "missed_run_policy": "coalesce",
+            "is_enabled": true, "enabled_at": 1.0, "created_at": 1.0
+        })).unwrap();
+        base.routines.push(routine);
+        let mut queued = base.clone();
+        queued.routines[0].timezone = "Asia/Singapore".into();
+        queued.routines[0].missed_run_policy = crate::routine_health::MissedRunPolicy::Skip;
+        let queued: RosterBlob = serde_json::from_slice(&serde_json::to_vec(&queued).unwrap()).unwrap();
+        let mut remote = base.clone();
+        remote.routines[0].name = "Renamed remotely".into();
+        let merged = merge_rosters(remote, &base, &queued);
+        assert_eq!(merged.routines[0].name, "Renamed remotely");
+        assert_eq!(merged.routines[0].timezone, "Asia/Singapore");
+        assert_eq!(merged.routines[0].missed_run_policy, crate::routine_health::MissedRunPolicy::Skip);
     }
 
     #[test]

@@ -731,6 +731,19 @@ pub struct Routine {
 pub struct RoutinePending {
     pub job: Box<Job>,
     pub phase: RoutinePhase,
+    #[serde(default)]
+    pub binding: Option<RoutineBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoutineBinding {
+    pub bot_id: String,
+    pub schedule: String,
+    pub timezone: String,
+    pub missed_run_policy: crate::routine_health::MissedRunPolicy,
+    pub check: Option<String>,
+    pub enabled_at: f64,
+    pub last_scheduled_at: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

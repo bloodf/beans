@@ -106,6 +106,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 
 
 
+
 ### Plugins, MCP, providers
 
 | Method | Params | Result |

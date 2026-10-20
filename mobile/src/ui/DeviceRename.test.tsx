@@ -12,7 +12,7 @@ else test("Device naming consumer in an isolated Bun host", () => {
 
 function install() {
   // Follow the existing mobile hook-slot boundary; native presentation needs device proof.
-  type Node = { type: unknown; props: { children?: unknown; value?: { value: string }; onPress?: () => void; onClick?: () => void; onDismissRequest?: () => void } };
+  type Node = { type: unknown; props: { children?: unknown; value?: { value: string }; onValueChange?: (value: string) => void; onPress?: () => void; onClick?: () => void; onDismissRequest?: () => void } };
   type Button = { text: string; onPress?: (value?: string) => void };
   let slots: unknown[] = [], cursor = 0;
   let effects: Array<() => void> = [], cleanups: Array<() => void> = [];
@@ -35,7 +35,7 @@ function install() {
     prompt: (_title: string, _message: string, actions: Button[]) => { buttons = actions; },
     alert: (title: string) => { alerts.push(title); },
   } }));
-  mock.module("@expo/ui", () => ({ useNativeState: (value: string) => slot(() => ({ value })).value }));
+  mock.module("@expo/ui", () => ({ useNativeState: (value: string) => slot(() => ({ get value() { return value; }, set value(_next: string) { /* Native writes are pending until the bridge applies them. */ } })).value }));
   mock.module("@expo/ui/jetpack-compose", () => ({ Column: "Column", Host: "Host", Text: "Text", TextButton: "Button", OutlinedTextField: Object.assign("Input", { Placeholder: "Placeholder" }), AlertDialog: Object.assign("Dialog", { Title: "Title", Text: "Body", ConfirmButton: "Confirm", DismissButton: "Dismiss" }) }));
   mock.module("@expo/ui/jetpack-compose/modifiers", () => ({ fillMaxWidth: () => ({}) }));
   mock.module("./forms", () => ({ Row: "Row" }));
@@ -65,14 +65,17 @@ function install() {
     const open = () => { render(); find(root, "Row")!.props.onPress!(); render(); };
     const submit = async (name: string) => {
       if (os === "ios") buttons[1]!.onPress!(name);
-      else { find(root, "Input")!.props.value!.value = name; find(find(root, "Confirm"), "Button")!.props.onClick!(); }
+      else { find(root, "Input")!.props.onValueChange!(name); find(find(root, "Confirm"), "Button")!.props.onClick!(); }
       await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
     };
     try {
       expect(deviceName(device)).toBe("Alias");
       open();
       if (os === "ios") buttons[0]!.onPress!(); else find(root, "Dialog")!.props.onDismissRequest!();
-      expect(calls).toEqual([]);
+      open();
+      if (os === "ios") buttons[1]!.onPress!(device.name);
+      else find(find(root, "Confirm"), "Button")!.props.onClick!();
+      await Promise.resolve(); expect(calls).toEqual([]);
       open(); await submit("  " + "😀".repeat(64) + "  ");
       expect(calls).toEqual([{ method: "device.set_name", params: { id: "target", name: "😀".repeat(64) } }]);
       expect(useStore.getState().devices[0]!.name).toBe("Alias");
@@ -83,7 +86,7 @@ function install() {
       const count = calls.length;
       open(); await submit("😀".repeat(65)); expect(calls.length).toBe(count); expect(alerts).toContain("Could not rename Device");
       open();
-      if (os === "android") find(root, "Input")!.props.value!.value = "stale";
+      if (os === "android") find(root, "Input")!.props.onValueChange!("stale");
       const staleSubmit = os === "ios" ? () => buttons[1]!.onPress!("stale") : find(find(root, "Confirm"), "Button")!.props.onClick!;
       useStore.setState({ identityId: "other" }); useStore.setState({ identityId: "account" });
       staleSubmit(); await Promise.resolve(); expect(calls.length).toBe(count);

@@ -672,6 +672,11 @@ async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), Rela
             // the winner, rebases the queued edit, then retries after the outer backoff.
             Err(error) if kind == "roster" && error.status == Some(409) => return Err(error),
             Err(error) if kind == "policy" => return Err(error),
+            Err(error) if crate::envelope::addressed(&kind) && error.is_client_error() && !error.is_unauthorized() && !error.is_unpaired() => {
+                app.store.transport_refuse_outbound(&id,error.status.unwrap_or(400)).map_err(local_relay_error)?;
+                app.emit(Event::Snapshot(app.snapshot()));
+                continue;
+            }
             Err(error) if crate::envelope::addressed(&kind) => return Err(error),
             Err(error) if error.is_client_error() && !error.is_unauthorized() => {
                 tracing::warn!(%error, %kind, "relay rejected blob; dropping");
@@ -4053,5 +4058,47 @@ mod tests {
         assert!(app.running_jobs.lock().unwrap().is_empty());assert_eq!(app.state.lock().unwrap().last_seq,0);
         for table in ["transport_custody","transport_replay","transport_operations"] {let n:i64=app.store.connection.lock().unwrap().query_row(&format!("SELECT count(*) FROM {table}"),[],|r|r.get(0)).unwrap();assert_eq!(n,0);}
         crate::envelope::refresh(app).unwrap();assert!(app.running_jobs.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn signed_outbound_refusal_quarantines_bytes_across_restart_and_allows_account_uploads() {
+        use axum::{routing::put,Json,Router,http::StatusCode};
+        for status in [400u16,403,404] {
+            let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();
+            app.store.connection.lock().unwrap().execute("DELETE FROM outbox",[]).unwrap();
+            let peer=app.local_device().unwrap();app.state.lock().unwrap().devices.push(peer.clone());
+            let item=crate::envelope::prepare(app,"job_cancel",&peer,&JobCancel{job_id:"refused".into()}).unwrap();app.store.transport_queue(&item).unwrap();
+            app.store.queue_outbox(&OutboxItem{id:"following-account".into(),kind:"chat".into(),recipient:None,ciphertext:vec![1,2,3],slot:None,group:None}).unwrap();
+            let calls=Arc::new(std::sync::Mutex::new(Vec::<String>::new()));let recorded=calls.clone();
+            let router=Router::new().route("/v1/blobs",put(move|Json(body):Json<serde_json::Value>|{let calls=recorded.clone();async move {
+                let id=body["id"].as_str().unwrap().to_string();calls.lock().unwrap().push(id.clone());
+                if id=="following-account" {(StatusCode::OK,Json(serde_json::json!({"seq":1})))}else{(StatusCode::from_u16(status).unwrap(),Json(serde_json::json!({"error":"refused"})))}
+            }}));
+            let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let url=format!("http://{}",listener.local_addr().unwrap());
+            let server=tokio::spawn(async move{axum::serve(listener,router).await.unwrap()});
+            drain_outbox(app,&url,"token").await.unwrap();assert_eq!(calls.lock().unwrap().as_slice(),[item.id.clone(),"following-account".into()]);
+            let reloaded=App::load(Config{home:scratch.1.clone(),port:0}).unwrap();
+            let retained=reloaded.store.outbox().unwrap().into_iter().find(|i|i.id==item.id).unwrap();
+            assert_eq!(retained.ciphertext,item.ciphertext);assert_eq!(retained.recipient,item.recipient);
+            let marker:i64=reloaded.store.connection.lock().unwrap().query_row("SELECT version FROM transport_outbound WHERE id=?1",[&item.id],|r|r.get(0)).unwrap();assert_eq!(marker,1);
+            assert!(reloaded.store.transport_status().unwrap()["items"].as_array().unwrap().iter().any(|i|i["reason"]=="transport_relay_rejected"&&i["http_status"]==status));
+            reloaded.store.transport_queue(&retained).unwrap();
+            let mut substituted=retained.clone();substituted.ciphertext.push(0);
+            assert!(reloaded.store.transport_queue(&substituted).unwrap_err().to_string().contains("transport_identity_conflict"));
+            drain_outbox(&reloaded,&url,"token").await.unwrap();assert_eq!(calls.lock().unwrap().len(),2);
+            let next=crate::envelope::prepare(&reloaded,"job_cancel",&peer,&JobCancel{job_id:"explicit-new".into()}).unwrap();assert_ne!(next.id,item.id);reloaded.store.transport_queue(&next).unwrap();
+            drain_outbox(&reloaded,&url,"token").await.unwrap();assert_eq!(calls.lock().unwrap().len(),3);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn first_sync_later_identity_fault_has_no_dispatch_or_partial_replay() {
+        let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();let job=queued_turn(app);
+        let (url,server)=serve_log(vec![addressed_blob(app,1,"job","initial-first",&job),addressed_blob(app,2,"job_cancel","initial-second",&JobCancel{job_id:"later".into()})]).await;
+        app.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_initial_identity BEFORE INSERT ON transport_operations WHEN NEW.id LIKE 'delivery:%' BEGIN SELECT RAISE(ABORT,'initial identity failure'); END;").unwrap();
+        assert!(first_sync(app,&url,"token",&app.machine_file().unwrap()).await.is_err());
+        assert!(!app.bulk_sync.load(Ordering::Relaxed));assert!(app.running_jobs.lock().unwrap().is_empty());assert_eq!(app.store.load_state().unwrap().last_seq,0);
+        for table in ["transport_custody","transport_replay","transport_operations"] {let n:i64=app.store.connection.lock().unwrap().query_row(&format!("SELECT count(*) FROM {table}"),[],|r|r.get(0)).unwrap();assert_eq!(n,0);}
+        server.abort();
     }
 }

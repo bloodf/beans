@@ -139,6 +139,7 @@ fn semantic_binding(e: &Envelope) -> anyhow::Result<String> {
 }
 pub(crate) fn initialize(c: &rusqlite::Connection) -> anyhow::Result<()> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS transport_outbound(id TEXT PRIMARY KEY, version INTEGER NOT NULL, ciphertext BLOB NOT NULL);
+        CREATE TABLE IF NOT EXISTS transport_outbound_refusals(id TEXT PRIMARY KEY, http_status INTEGER NOT NULL, first_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS transport_custody(account TEXT NOT NULL,id TEXT NOT NULL,blob TEXT NOT NULL,status TEXT NOT NULL,reason TEXT NOT NULL,first_at INTEGER NOT NULL,PRIMARY KEY(account,id));
         CREATE TABLE IF NOT EXISTS transport_replay(account TEXT NOT NULL,sender TEXT NOT NULL,id TEXT NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(account,sender,id));
         CREATE TABLE IF NOT EXISTS transport_operations(account TEXT NOT NULL,id TEXT NOT NULL,binding TEXT NOT NULL,status TEXT NOT NULL,envelope TEXT NOT NULL,response TEXT,PRIMARY KEY(account,id));
@@ -181,7 +182,10 @@ impl LocalStore {
     }
     pub(crate) fn transport_queue(&self,item:&OutboxItem) -> anyhow::Result<()> { durable(self,|tx|queue(tx,item)) }
     pub(crate) fn transport_version(&self,item:&OutboxItem) -> anyhow::Result<bool> {
-        Ok(self.connection.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM transport_outbound WHERE id=?1 AND version=1 AND ciphertext=?2)",params![item.id,item.ciphertext],|r|r.get(0))?)
+        Ok(self.connection.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM transport_outbound WHERE id=?1 AND version=1 AND ciphertext=?2 AND NOT EXISTS(SELECT 1 FROM transport_outbound_refusals WHERE id=?1))",params![item.id,item.ciphertext],|r|r.get(0))?)
+    }
+    pub(crate) fn transport_refuse_outbound(&self,id:&str,status:u16) -> anyhow::Result<()> {
+        durable(self,|tx|{tx.execute("INSERT OR IGNORE INTO transport_outbound_refusals VALUES(?1,?2,?3)",params![id,status,crate::config::now_unix()])?;Ok(())})
     }
     pub(crate) fn transport_recover(&self) -> anyhow::Result<()> {
         durable(self,|tx| {
@@ -244,6 +248,8 @@ impl LocalStore {
         let mut items=s.query_map([],|r|Ok(json!({"direction":"inbound","blob_id":r.get::<_,String>(0)?,"reason":r.get::<_,String>(1)?,"first_at":r.get::<_,i64>(2)?})))?.collect::<Result<Vec<_>,_>>()?;
         let mut s=c.prepare("SELECT id FROM transport_operations WHERE status='uncertain' ORDER BY rowid DESC LIMIT 100")?;
         items.extend(s.query_map([],|r|Ok(json!({"operation_id":r.get::<_,String>(0)?,"reason":"transport_operation_uncertain"})))?.collect::<Result<Vec<_>,_>>()?);
+        let mut s=c.prepare("SELECT o.id,o.kind,o.recipient,q.http_status,q.first_at FROM transport_outbound_refusals q JOIN outbox o ON o.id=q.id ORDER BY q.rowid DESC LIMIT 100")?;
+        items.extend(s.query_map([],|r|Ok(json!({"direction":"outbound","blob_id":r.get::<_,String>(0)?,"kind":r.get::<_,String>(1)?,"peer":r.get::<_,Option<String>>(2)?,"http_status":r.get::<_,u16>(3)?,"first_at":r.get::<_,i64>(4)?,"reason":"transport_relay_rejected"})))?.collect::<Result<Vec<_>,_>>()?);
         let count:i64=c.query_row("SELECT count(*) FROM outbox o WHERE kind IN ('job','job_cancel','job_result','request','response') AND NOT EXISTS(SELECT 1 FROM transport_outbound t WHERE t.id=o.id AND t.version=1 AND t.ciphertext=o.ciphertext)",[],|r|r.get(0))?;
         Ok(json!({"items":items,"legacy_outbound_count":count}))
     }

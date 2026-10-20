@@ -576,7 +576,27 @@ fn listed_model(entry: &Value) -> Option<(bool, CustomModel)> {
     let tools = entry.pointer("/capabilities/tools").and_then(Value::as_bool);
     let thinking_format = entry.pointer("/capabilities/thinkingFormat").and_then(Value::as_str).map(str::to_string);
     let thinking_can_disable = entry.pointer("/capabilities/thinkingCanDisable").and_then(Value::as_bool);
-    Some((not_chat, CustomModel { id, name, context_window, max_output, images, reasoning, tools, thinking_format, thinking_can_disable }))
+    let levels = declared_levels(entry);
+    Some((not_chat, CustomModel { id, name, context_window, max_output, images, reasoning, tools, thinking_format, thinking_can_disable, levels }))
+}
+
+/// Known effort words in server order-independent declarations. Off has no portable wire
+/// representation, so discovery never infers it. Missing or unknown-only lists are sparse.
+fn declared_levels(entry: &Value) -> Option<Vec<beans_models::ThinkingLevel>> {
+    use beans_models::ThinkingLevel;
+    if entry["reasoning"].as_bool() == Some(false)
+        || entry.pointer("/capabilities/reasoning").and_then(Value::as_bool) == Some(false) {
+        return Some(Vec::new());
+    }
+    let declared = entry["supported_reasoning_levels"].as_array()?;
+    let mut levels: Vec<ThinkingLevel> = declared.iter()
+        .filter_map(|level| level["effort"].as_str().or_else(|| level.as_str()))
+        .filter_map(|word| word.parse().ok())
+        .filter(|level| *level != ThinkingLevel::Off)
+        .collect();
+    levels.sort();
+    levels.dedup();
+    if declared.is_empty() || !levels.is_empty() { Some(levels) } else { None }
 }
 
 /// Runs a ChatGPT sign-in, opening its authorization URL through the Device's UI.

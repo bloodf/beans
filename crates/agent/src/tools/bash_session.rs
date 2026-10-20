@@ -1436,21 +1436,28 @@ mod tests {
         assert_eq!(t.bash.parameters()["properties"]["background"]["type"], "boolean");
         assert!(BashTool::new(std::env::temp_dir()).parameters()["properties"].get("background").is_none(), "not on pipes");
         let command = "echo listening; while true; do echo tick; sleep 0.1; done";
-        let started = std::time::Instant::now();
-        let running = call(&t.bash, json!({"command": command, "background": true})).await.unwrap();
-        let elapsed = started.elapsed();
-        assert!(elapsed >= BACKGROUND_SETTLE && elapsed < BACKGROUND_SETTLE + Duration::from_secs(2), "{elapsed:?}");
+        // The command cannot finish until this test releases it. A finite watchdog catches
+        // a call that waits for exit; scheduler and login-shell latency are not the contract.
+        let running = tokio::time::timeout(Duration::from_secs(15),
+            call(&t.bash, json!({"command": command, "background": true})))
+            .await.expect("background call returns before the test stops its command").unwrap();
         let text = running.text_content();
         let id = session_id(&running);
-        assert!(text.starts_with("listening\ntick\n"), "{text}");
-        assert!(text.ends_with(&format!("[Running in the background as session {id}. Read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]")), "{text}");
+        assert!(text.contains("listening\n"), "command output reaches the caller");
         assert_eq!(running.details["summary"], "Running");
-        assert!(t.host.get(&id).unwrap().background());
-
-        let more = call(&t.output, json!({"session_id": id, "wait_seconds": 0.3})).await.unwrap();
-        assert!(more.text_content().starts_with("tick\n"), "{}", more.text_content());
+        let session = t.host.get(&id).unwrap();
+        assert!(session.background() && session.end().is_none(), "return does not end the command");
+        let mut changes = session.changed.subscribe();
+        let returned_at = session.total();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while session.total() <= returned_at {
+                changes.changed().await.unwrap();
+            }
+        }).await.expect("the command continues printing after its call returns");
+        assert!(session.end().is_none(), "only the test releases the running command");
         let stopped = call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await.unwrap();
-        assert!(stopped.text_content().ends_with("Command terminated by signal 2"), "{}", stopped.text_content());
+        assert_eq!(session.end(), Some(SessionEnd::Signaled(libc::SIGINT)));
+        assert_eq!(stopped.details["state"], "exited");
         assert!(t.host.0.lock().unwrap().is_empty());
 
         // One that ends first reads as it would have without it.

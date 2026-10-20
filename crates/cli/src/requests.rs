@@ -79,9 +79,13 @@ pub fn deliver(app: Arc<App>, from: &str, response: Response, blob_id: String) {
 /// A `request` reached this Runner: answers it, seals the answer to the Device that asked, and
 /// drops the request from the relay. `running` counts it as work here until it is answered.
 pub fn serve(app: Arc<App>, request: Request, blob_id: String, running: crate::update_control::Admission) {
+    let incarnation=app.plugin_lifecycle.lock().get().0;
+    let authority=crate::envelope::account(&app).and_then(|account|app.store.transport_envelope(&account,&format!("request:{}:{}",request.requested_by,request.id))).ok().flatten();
     tokio::spawn(async move {
         let _running = running;
-        let (body, error) = match answer(&app, &request).await {
+        let admitted={let authority_guard=app.plugin_lifecycle.lock();authority_guard.get()==(incarnation,false) && authority.as_ref().is_some_and(|e|crate::envelope::current_authority(&app,e))};
+        let answered=if admitted {answer(&app,&request).await} else {Err("Transport authority changed".into())};
+        let (body, error) = match answered {
             Ok(body) => (body, None),
             Err(error) => (Value::Null, Some(error)),
         };

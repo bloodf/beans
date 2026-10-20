@@ -272,6 +272,7 @@ impl LocalStore {
             device_turns: load_device_turns(&connection)?,
             applied_blob_ids: load_ordered_ids(&connection, "applied_blobs")?,
             listed_machines: Default::default(),
+            listed_machine_boxes: Default::default(),
             unknown_machines: Default::default(),
             caught_up: false,
         })
@@ -1270,6 +1271,7 @@ impl LocalStore {
             "transport_outbound",
             "transport_outbound_refusals",
             "transport_custody",
+            "transport_conflicts",
             "transport_replay",
             "transport_operations",
             "transport_cancelled",

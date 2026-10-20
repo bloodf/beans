@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use rusqlite::{params, OptionalExtension};
 use std::sync::Arc;
+use sha2::{Digest, Sha256};
 
 const DOMAIN: &[u8] = b"beans/envelope/v1\0";
 const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -17,7 +18,11 @@ struct Signed { envelope_version: u8, envelope: String, signature: String }
 pub(crate) struct Envelope {
     envelope_version: u8, pub identity: String, pub from: String, pub to: String,
     pub kind: String, pub id: String, at: i64, pub body: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authority: Option<Authority>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Authority { sender_box: String }
 #[derive(Debug, Clone)]
 pub(crate) struct Opened { pub envelope: Envelope, pub bytes: Vec<u8> }
 #[derive(Debug)]
@@ -36,7 +41,7 @@ pub(crate) fn prepare<T: Serialize>(app: &App, kind: &str, recipient: &Device, b
     let machine = file.machine()?;
     let envelope = Envelope { envelope_version: 1, identity: file.identity_pubkey, from: machine.pubkey(),
         to: recipient.id.clone(), kind: kind.into(), id: uuid::Uuid::new_v4().to_string(),
-        at: crate::config::now_unix(), body: serde_json::to_value(body)? };
+        at: crate::config::now_unix(), body: serde_json::to_value(body)?, authority: None };
     let bytes = serde_json::to_vec(&envelope)?;
     anyhow::ensure!(bytes.len() <= MAX_BYTES / 2, "Transport payload exceeds limit");
     let signed = Signed { envelope_version: 1, envelope: b64(&bytes), signature: machine.sign(&[DOMAIN, &bytes].concat()) };
@@ -61,15 +66,17 @@ pub(crate) fn body_of<T: serde::de::DeserializeOwned>(secret: &crypto_box::Secre
 #[cfg(test)]
 pub(crate) fn fixture_blob<T: Serialize>(app: &App, sender: &crate::keys::Machine, seq: i64, kind: &str, id: &str, body: &T) -> crate::relay::BlobIn {
     let device=app.local_device().unwrap();
-    let e=Envelope{envelope_version:1,identity:account(app).unwrap(),from:sender.pubkey(),to:device.id.clone(),kind:kind.into(),id:uuid::Uuid::new_v4().to_string(),at:crate::config::now_unix(),body:serde_json::to_value(body).unwrap()};
+    let e=Envelope{envelope_version:1,identity:account(app).unwrap(),from:sender.pubkey(),to:device.id.clone(),kind:kind.into(),id:uuid::Uuid::new_v4().to_string(),at:crate::config::now_unix(),body:serde_json::to_value(body).unwrap(),authority:None};
     let bytes=serde_json::to_vec(&e).unwrap();
     let signed=Signed{envelope_version:1,envelope:b64(&bytes),signature:sender.sign(&[DOMAIN,&bytes].concat())};
     app.state.lock().unwrap().listed_machines.insert(sender.pubkey(),1);
+    app.state.lock().unwrap().listed_machine_boxes.insert(sender.pubkey(),sender.box_pubkey());
     crate::relay::BlobIn{id:id.into(),kind:kind.into(),recipient_machine_pubkey:Some(device.id),seq,ciphertext:b64(&crate::crypto::seal_json(&device.box_pubkey,&signed).unwrap()),created_at:seq}
 }
 
 pub(crate) fn inspect(app: &App, blob: &crate::relay::BlobIn) -> Result<Opened, Refusal> {
     let decode = || -> Result<Opened, Refusal> {
+        let lifecycle=app.plugin_admission(None).map_err(|_|Refusal::Rejected)?;
         if blob.ciphertext.len() > MAX_BYTES * 2 { return Err(Refusal::Rejected); }
         let file = app.machine_file().ok_or(Refusal::Rejected)?;
         let machine = file.machine().map_err(|_| Refusal::Rejected)?;
@@ -81,7 +88,8 @@ pub(crate) fn inspect(app: &App, blob: &crate::relay::BlobIn) -> Result<Opened, 
         let signed: Signed = serde_json::from_slice(&plain).map_err(|_| Refusal::Rejected)?;
         if signed.envelope_version != 1 { return Err(Refusal::Unsupported); }
         let bytes = unb64(&signed.envelope).map_err(|_| Refusal::Rejected)?;
-        let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|_| Refusal::Rejected)?;
+        let mut envelope: Envelope = serde_json::from_slice(&bytes).map_err(|_| Refusal::Rejected)?;
+        if envelope.authority.is_some() { return Err(Refusal::Rejected); }
         if envelope.envelope_version != 1 { return Err(Refusal::Unsupported); }
         let uuid = uuid::Uuid::parse_str(&envelope.id).map_err(|_| Refusal::Rejected)?;
         if uuid.hyphenated().to_string() != envelope.id || envelope.identity != file.identity_pubkey
@@ -98,7 +106,10 @@ pub(crate) fn inspect(app: &App, blob: &crate::relay::BlobIn) -> Result<Opened, 
             if !state.listed_machines.contains_key(&envelope.from) {
                 return Err(if state.caught_up { Refusal::Rejected } else { Refusal::Deferred });
             }
-            if !state.devices.iter().any(|d| d.id == envelope.from) { return Err(Refusal::Deferred); }
+            let sender=state.devices.iter().find(|d|d.id==envelope.from).ok_or(Refusal::Deferred)?;
+            let sender_box=state.listed_machine_boxes.get(&envelope.from).ok_or(Refusal::Deferred)?;
+            if sender.box_pubkey!=*sender_box {return Err(Refusal::Rejected);}
+            envelope.authority=Some(Authority{sender_box:sender_box.clone()});
         }
         match envelope.kind.as_str() {
             "job" => { let body: Job = serde_json::from_value(envelope.body.clone()).map_err(|_| Refusal::Rejected)?;
@@ -141,6 +152,7 @@ pub(crate) fn initialize(c: &rusqlite::Connection) -> anyhow::Result<()> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS transport_outbound(id TEXT PRIMARY KEY, version INTEGER NOT NULL, ciphertext BLOB NOT NULL);
         CREATE TABLE IF NOT EXISTS transport_outbound_refusals(id TEXT PRIMARY KEY, http_status INTEGER NOT NULL, first_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS transport_custody(account TEXT NOT NULL,id TEXT NOT NULL,blob TEXT NOT NULL,status TEXT NOT NULL,reason TEXT NOT NULL,first_at INTEGER NOT NULL,PRIMARY KEY(account,id));
+        CREATE TABLE IF NOT EXISTS transport_conflicts(account TEXT NOT NULL,id TEXT NOT NULL,blob TEXT NOT NULL,first_at INTEGER NOT NULL,PRIMARY KEY(account,id,blob));
         CREATE TABLE IF NOT EXISTS transport_replay(account TEXT NOT NULL,sender TEXT NOT NULL,id TEXT NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(account,sender,id));
         CREATE TABLE IF NOT EXISTS transport_operations(account TEXT NOT NULL,id TEXT NOT NULL,binding TEXT NOT NULL,status TEXT NOT NULL,envelope TEXT NOT NULL,response TEXT,PRIMARY KEY(account,id));
         CREATE TABLE IF NOT EXISTS transport_cancelled(account TEXT NOT NULL,job TEXT NOT NULL,PRIMARY KEY(account,job));")?;
@@ -232,6 +244,10 @@ impl LocalStore {
             Ok(())
         })
     }
+    pub(crate) fn transport_envelope(&self,account:&str,id:&str)->anyhow::Result<Option<Envelope>> {
+        let encoded:Option<String>=self.connection.lock().unwrap().query_row("SELECT envelope FROM transport_operations WHERE account=?1 AND id=?2",params![account,id],|r|r.get(0)).optional()?;
+        encoded.map(|s|serde_json::from_str(&s).map_err(Into::into)).transpose()
+    }
     pub(crate) fn transport_pending(&self,account:&str) -> anyhow::Result<Vec<Envelope>> {
         let c=self.connection.lock().unwrap(); let mut s=c.prepare("SELECT envelope FROM transport_operations WHERE account=?1 AND status='pending' ORDER BY rowid")?;
         let rows=s.query_map([account],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
@@ -246,6 +262,8 @@ impl LocalStore {
         let c=self.connection.lock().unwrap();
         let mut s=c.prepare("SELECT id,reason,first_at FROM transport_custody WHERE status NOT IN ('accepted') ORDER BY rowid DESC LIMIT 100")?;
         let mut items=s.query_map([],|r|Ok(json!({"direction":"inbound","blob_id":r.get::<_,String>(0)?,"reason":r.get::<_,String>(1)?,"first_at":r.get::<_,i64>(2)?})))?.collect::<Result<Vec<_>,_>>()?;
+        let mut s=c.prepare("SELECT id,first_at FROM transport_conflicts ORDER BY rowid DESC LIMIT 100")?;
+        items.extend(s.query_map([],|r|Ok(json!({"direction":"inbound","blob_id":r.get::<_,String>(0)?,"first_at":r.get::<_,i64>(1)?,"reason":"transport_identity_conflict"})))?.collect::<Result<Vec<_>,_>>()?);
         let mut s=c.prepare("SELECT id FROM transport_operations WHERE status='uncertain' ORDER BY rowid DESC LIMIT 100")?;
         items.extend(s.query_map([],|r|Ok(json!({"operation_id":r.get::<_,String>(0)?,"reason":"transport_operation_uncertain"})))?.collect::<Result<Vec<_>,_>>()?);
         let mut s=c.prepare("SELECT o.id,o.kind,o.recipient,q.http_status,q.first_at FROM transport_outbound_refusals q JOIN outbox o ON o.id=q.id ORDER BY q.rowid DESC LIMIT 100")?;
@@ -258,23 +276,45 @@ impl LocalStore {
 pub(crate) fn account(app:&App) -> anyhow::Result<String> { Ok(app.machine_file().ok_or_else(||anyhow::anyhow!("No identity"))?.identity_pubkey) }
 
 
+#[derive(Debug)]
+struct IdentityConflict;
+impl std::fmt::Display for IdentityConflict {fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{f.write_str("transport_identity_conflict")}}
+impl std::error::Error for IdentityConflict {}
+
+fn conflict_digest(blob:&crate::relay::BlobIn)->anyhow::Result<String>{Ok(b64(&Sha256::digest(serde_json::to_vec(blob)?)))}
+fn admit_disposition(tx:&rusqlite::Transaction<'_>,account:&str,blob:&crate::relay::BlobIn,inspected:&Result<Opened,Refusal>,advance:bool,staged:bool)->anyhow::Result<bool> {
+    tx.execute_batch("SAVEPOINT transport_delivery")?;
+    match admit_tx(tx,account,blob,inspected,advance,staged) {
+        Ok(fresh)=>{tx.execute_batch("RELEASE transport_delivery")?;Ok(fresh)},
+        Err(error) if error.downcast_ref::<IdentityConflict>().is_some()=>{
+            tx.execute_batch("ROLLBACK TO transport_delivery; RELEASE transport_delivery")?;
+            tx.execute("DELETE FROM transport_conflicts WHERE account=?1 AND id=?2",params![account,blob.id])?;
+            tx.execute("INSERT INTO transport_conflicts VALUES(?1,?2,?3,?4)",params![account,blob.id,conflict_digest(blob)?,crate::config::now_unix()])?;
+            tx.execute("UPDATE transport_custody SET status='rejected',reason='transport_identity_conflict' WHERE account=?1 AND id=?2 AND status IN ('deferred','staged_deferred')",params![account,blob.id])?;
+            if advance {tx.execute("UPDATE metadata SET last_seq=max(last_seq,?1) WHERE id=1",[blob.seq])?;}
+            Ok(false)
+        },
+        Err(error)=>Err(error),
+    }
+}
+
 fn admit_tx(tx:&rusqlite::Transaction<'_>,account:&str,blob:&crate::relay::BlobIn,inspected:&Result<Opened,Refusal>,advance:bool,staged:bool) -> anyhow::Result<bool> {
     let (status,reason)=match inspected {Ok(_)=>("accepted",""),Err(Refusal::Deferred)=>(if staged{"staged_deferred"}else{"deferred"},"transport_sender_evidence_pending"),Err(e)=>("rejected",e.code())};
     let blob_json=serde_json::to_string(blob)?;
         let old:Option<String>=tx.query_row("SELECT blob FROM transport_custody WHERE account=?1 AND id=?2",params![account,blob.id],|r|r.get(0)).optional()?;
-        anyhow::ensure!(old.as_ref().is_none_or(|s|s==&blob_json),"transport_identity_conflict");
-        tx.execute("INSERT INTO transport_custody VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(account,id) DO UPDATE SET status=excluded.status,reason=excluded.reason WHERE transport_custody.status IN ('deferred','reserved')",params![account,blob.id,blob_json,status,reason,crate::config::now_unix()])?;
+        if old.as_ref().is_some_and(|s|s!=&blob_json) {return Err(IdentityConflict.into());}
+        tx.execute("INSERT INTO transport_custody VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(account,id) DO UPDATE SET status=excluded.status,reason=excluded.reason WHERE transport_custody.status IN ('deferred','staged_deferred','reserved')",params![account,blob.id,blob_json,status,reason,crate::config::now_unix()])?;
         let mut fresh=false;
         if let Ok(opened)=&inspected {
             let e=&opened.envelope;
             let previous:Option<Vec<u8>>=tx.query_row("SELECT bytes FROM transport_replay WHERE account=?1 AND sender=?2 AND id=?3",params![account,e.from,e.id],|r|r.get(0)).optional()?;
-            anyhow::ensure!(previous.as_ref().is_none_or(|b|b==&opened.bytes),"transport_identity_conflict");
+            if previous.as_ref().is_some_and(|b|b!=&opened.bytes) {return Err(IdentityConflict.into());}
             fresh=previous.is_none();
             tx.execute("INSERT OR IGNORE INTO transport_replay VALUES(?1,?2,?3,?4)",params![account,e.from,e.id,opened.bytes])?;
             if let Some(id)=operation(e)? {
                 let binding=semantic_binding(e)?;
                 let old:Option<(String,Option<String>)>=tx.query_row("SELECT binding,response FROM transport_operations WHERE account=?1 AND id=?2",params![account,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
-                anyhow::ensure!(old.as_ref().is_none_or(|(b,_)|b==&binding),"transport_identity_conflict");
+                if old.as_ref().is_some_and(|(b,_)|b!=&binding) {return Err(IdentityConflict.into());}
                 if let Some((_,Some(saved)))=&old { let v:Value=serde_json::from_str(saved)?; let item=OutboxItem{id:v["id"].as_str().unwrap().into(),kind:v["kind"].as_str().unwrap().into(),recipient:v["recipient"].as_str().map(str::to_string),ciphertext:unb64(v["ciphertext"].as_str().unwrap())?,slot:None,group:None}; queue(tx,&item)?; }
                 if fresh && old.is_none() {
                     tx.execute("INSERT INTO transport_operations(account,id,binding,status,envelope) VALUES(?1,?2,?3,?4,?5)",params![account,id,binding,if staged{"staged"}else{"pending"},serde_json::to_string(e)?])?;
@@ -289,9 +329,10 @@ fn admit_tx(tx:&rusqlite::Transaction<'_>,account:&str,blob:&crate::relay::BlobI
 }
 
 pub(crate) fn preflight_page(app:&App,blobs:&[crate::relay::BlobIn]) -> anyhow::Result<()> {
+    if !blobs.iter().any(|b|addressed(&b.kind)) {return Ok(());}
     let account=account(app)?;
     let inspected=blobs.iter().filter(|b|addressed(&b.kind)).map(|b|(b,inspect(app,b))).collect::<Vec<_>>();
-    durable(&app.store,|tx|{for (blob,opened) in &inspected {admit_tx(tx,&account,blob,opened,false,true)?;}Ok(())})
+    durable(&app.store,|tx|{for (blob,opened) in &inspected {admit_disposition(tx,&account,blob,opened,false,true)?;}Ok(())})
 }
 
 pub(crate) fn activate(app:&App,blob:&crate::relay::BlobIn) -> anyhow::Result<()> { activate_at(app,blob,true) }
@@ -308,6 +349,13 @@ fn activate_prepared(app:&App,blob:&crate::relay::BlobIn,advance:bool,prepared:i
     prepared();
     durable(&app.store,|tx|{
         locked();
+        if tx.query_row("SELECT EXISTS(SELECT 1 FROM transport_conflicts WHERE account=?1 AND id=?2)",params![account,blob.id],|r|r.get::<_,bool>(0))? {
+            let canonical:Option<String>=tx.query_row("SELECT blob FROM transport_custody WHERE account=?1 AND id=?2",params![account,blob.id],|r|r.get(0)).optional()?;
+            if canonical.as_deref()!=Some(blob_json.as_str()) {
+                if advance {tx.execute("UPDATE metadata SET last_seq=max(last_seq,?1) WHERE id=1",[blob.seq])?;}
+                return Ok(());
+            }
+        }
         let (status,saved):(String,String)=tx.query_row("SELECT status,blob FROM transport_custody WHERE account=?1 AND id=?2",params![account,blob.id],|r|Ok((r.get(0)?,r.get(1)?)))?;
         anyhow::ensure!(saved==blob_json,"transport_identity_conflict");
         let opened=if status=="accepted" {Some(inspected.as_ref().map_err(|_|anyhow::anyhow!("Accepted envelope evidence changed"))?)}else{None};
@@ -332,20 +380,7 @@ fn activate_prepared(app:&App,blob:&crate::relay::BlobIn,advance:bool,prepared:i
 pub(crate) fn receive(app:&Arc<App>,blob:&crate::relay::BlobIn,advance:bool) -> anyhow::Result<()> {
     let account=account(app)?;
     let inspected=inspect(app,blob);
-    let blob_json=serde_json::to_string(blob)?;
-    let admitted=durable(&app.store,|tx|admit_tx(tx,&account,blob,&inspected,advance,false));
-    let fresh = match admitted {
-        Ok(fresh) => fresh,
-        Err(error) => {
-        if error.to_string().contains("transport_identity_conflict") {
-            durable(&app.store, |tx| {
-                tx.execute("INSERT INTO transport_custody VALUES(?1,?2,?3,'rejected','transport_identity_conflict',?4) ON CONFLICT(account,id) DO UPDATE SET reason='transport_identity_conflict'", params![account,blob.id,blob_json,crate::config::now_unix()])?;
-                Ok(())
-            })?;
-        }
-            return Err(error);
-        }
-    };
+    let fresh=durable(&app.store,|tx|admit_disposition(tx,&account,blob,&inspected,advance,false))?;
     if advance { let mut state=app.state.lock().unwrap(); state.last_seq=state.last_seq.max(blob.seq); }
     // Every accepted kind has a recoverable inbox operation; no publication lives only here.
     if fresh && !advance && !app.bulk_sync.load(std::sync::atomic::Ordering::Relaxed) { pump(app)?; }
@@ -355,17 +390,45 @@ pub(crate) fn receive(app:&Arc<App>,blob:&crate::relay::BlobIn,advance:bool) -> 
 
 pub(crate) fn pump(app:&Arc<App>) -> anyhow::Result<()> { pump_selected(app,None) }
 
+pub(crate) fn receive_control(app:&Arc<App>,blob:&crate::relay::BlobIn)->anyhow::Result<()> {
+    preflight_page(app,std::slice::from_ref(blob))?;
+    if let Ok(opened)=inspect(app,blob) {
+        let e=&opened.envelope;
+        if e.kind=="job" || (e.kind=="request" && !crate::sync::continues_work(e.body["verb"].as_str().unwrap_or(""))) {return Ok(());}
+    }
+    // Replay already exists after page preflight. Activation, not reinsertion, releases staged controls.
+    activate_first(app,blob)?;
+    pump_at(app,blob)
+}
+
 pub(crate) fn pump_at(app:&Arc<App>,blob:&crate::relay::BlobIn) -> anyhow::Result<()> {
+    let account=account(app)?;
+    let rejected=app.store.connection.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM transport_conflicts WHERE account=?1 AND id=?2)",params![account,blob.id],|r|r.get::<_,bool>(0))?;
+    if rejected {
+        let canonical:Option<String>=app.store.connection.lock().unwrap().query_row("SELECT blob FROM transport_custody WHERE account=?1 AND id=?2",params![account,blob.id],|r|r.get(0)).optional()?;
+        if canonical.as_deref()!=Some(serde_json::to_string(blob)?.as_str()) {return Ok(());}
+    }
     let selected=inspect(app,blob).ok().map(|opened|operation(&opened.envelope)).transpose()?.flatten();
     if let Some(id)=selected {pump_selected(app,Some(&id))?;}
     Ok(())
+}
+
+pub(crate) fn current_authority(app:&App,e:&Envelope)->bool {
+    let Some(binding)=&e.authority else {return false};
+    let Ok(lifecycle)=app.plugin_admission(None) else {return false};
+    let _lifecycle=lifecycle;
+    let Some(file)=app.machine_file() else {return false};
+    if file.identity_pubkey!=e.identity || !file.machine().is_ok_and(|m|m.pubkey()==e.to) {return false;}
+    let state=app.state.lock().unwrap();
+    state.listed_machines.contains_key(&e.from) && state.listed_machine_boxes.get(&e.from)==Some(&binding.sender_box) && state.devices.iter().any(|d|d.id==e.from && d.box_pubkey==binding.sender_box)
 }
 
 fn pump_selected(app:&Arc<App>,selected:Option<&str>) -> anyhow::Result<()> {
     let account=account(app)?;
     for e in app.store.transport_pending(&account)? {
         if selected.is_some_and(|id|operation(&e).ok().flatten().as_deref()!=Some(id)){continue;}
-        if !app.state.lock().unwrap().listed_machines.contains_key(&e.from) {continue;}
+        let Ok(_authority)=app.plugin_admission(None) else {continue};
+        if !current_authority(app,&e) {continue;}
         if e.kind == "job_result" && app.bulk_sync.load(std::sync::atomic::Ordering::Relaxed) { continue; }
         if e.kind == "response" {
             let response:Response=serde_json::from_value(e.body.clone())?;
@@ -422,7 +485,7 @@ mod tests {
         let devices=[a.local_device().unwrap(),b.local_device().unwrap()];
         {let source=a.state.lock().unwrap();let mut target=b.state.lock().unwrap();target.bots=source.bots.clone();target.chats=source.chats.clone();for bot in &mut target.bots{bot.runner_id=devices[1].id.clone();}}
         for app in [&a,&b] { let mut state=app.state.lock().unwrap(); state.devices=devices.to_vec();
-            for d in &devices {state.listed_machines.insert(d.id.clone(),1);} drop(state); app.save_state_now(); }
+            for d in &devices {state.listed_machines.insert(d.id.clone(),1);state.listed_machine_boxes.insert(d.id.clone(),d.box_pubkey.clone());} drop(state); app.save_state_now(); }
         Pair{a,b,homes}
     }
     fn blob(p:&Pair,kind:&str,body:Value)->crate::relay::BlobIn {
@@ -529,13 +592,14 @@ mod tests {
         let bytes=serde_json::to_vec(&("beans-request-v1",&r.id,&r.verb,&r.requested_by,p.b.this_device_id().unwrap(),r.created_at,&payload)).unwrap();
         r.body=json!({"payload":payload,"signature":p.a.machine_file().unwrap().machine().unwrap().sign(&bytes)});
         let changed=blob(&p,"request",json!(r));
-        assert!(receive(&p.b,&changed,false).is_err());assert_eq!(count(&p.b,"transport_operations"),1);
+        receive(&p.b,&changed,false).unwrap();assert_eq!(count(&p.b,"transport_conflicts"),1);assert_eq!(count(&p.b,"transport_operations"),1);
         let mut same_id=inspect(&p.b,&first).unwrap().envelope;
         same_id.at+=1;
+        same_id.authority=None;
         let bytes=serde_json::to_vec(&same_id).unwrap();
         let signed=Signed{envelope_version:1,envelope:b64(&bytes),signature:p.a.machine_file().unwrap().machine().unwrap().sign(&[DOMAIN,&bytes].concat())};
         let mut conflicting=first.clone();conflicting.id="conflicting-replay".into();conflicting.ciphertext=b64(&crate::crypto::seal_json(&p.b.local_device().unwrap().box_pubkey,&signed).unwrap());
-        assert!(receive(&p.b,&conflicting,false).is_err());assert_eq!(count(&p.b,"transport_replay"),1);
+        receive(&p.b,&conflicting,false).unwrap();assert_eq!(count(&p.b,"transport_conflicts"),2);assert_eq!(count(&p.b,"transport_replay"),1);
         let mut wrong=first.clone();wrong.kind="response".into();assert!(matches!(inspect(&p.b,&wrong),Err(Refusal::Rejected)));
     }
     #[tokio::test]
@@ -715,5 +779,84 @@ mod tests {
         activator.join().unwrap();
         assert!(p.b.store.transport_cancelled(&account(&p.b).unwrap(),"lock-order").unwrap());
         assert_eq!(p.b.store.load_state().unwrap().last_seq,0);
+    }
+    #[tokio::test]
+    async fn accepted_sender_removal_and_box_change_never_claim() {
+        for change in ["unpair","box"] {
+            let p=pair();hold(&p);
+            let incoming=blob(&p,"request",request(&p,"authority-race"));
+            receive(&p.b,&incoming,false).unwrap();
+            let captured=p.b.store.transport_pending(&account(&p.b).unwrap()).unwrap().pop().unwrap();
+            {
+                let lifecycle=p.b.plugin_lifecycle.lock();
+                match change {
+                    "unpair"=>{p.b.state.lock().unwrap().listed_machines.remove(&captured.from);},
+                    "box"=>{let replacement=crate::keys::Machine::generate().box_pubkey();let mut state=p.b.state.lock().unwrap();state.listed_machine_boxes.insert(captured.from.clone(),replacement.clone());state.devices.iter_mut().find(|d|d.id==captured.from).unwrap().box_pubkey=replacement;},
+                    _=>unreachable!(),
+                }
+            }
+            p.b.update.cancel(&p.b);pump(&p.b).unwrap();
+            assert!(!current_authority(&p.b,&captured));
+            let status:String=p.b.store.connection.lock().unwrap().query_row("SELECT status FROM transport_operations",[],|r|r.get(0)).unwrap();
+            assert_eq!(status,"pending");
+        }
+    }
+
+    #[tokio::test]
+    async fn page_conflict_preserves_original_and_unrelated_intent_and_storage_failure_rolls_back() {
+        let p=pair();hold(&p);
+        let original=blob(&p,"request",request(&p,"conflict-page"));receive(&p.b,&original,false).unwrap();
+        let mut changed=request(&p,"conflict-page");
+        changed["body"]["payload"]["text"]=json!("changed");
+        let mut request:Request=serde_json::from_value(changed).unwrap();
+        let payload=request.body["payload"].clone();
+        let bytes=serde_json::to_vec(&("beans-request-v1",&request.id,&request.verb,&request.requested_by,p.b.this_device_id().unwrap(),request.created_at,&payload)).unwrap();
+        request.body=json!({"payload":payload,"signature":p.a.machine_file().unwrap().machine().unwrap().sign(&bytes)});
+        let conflict=blob(&p,"request",json!(request));
+        let unrelated=blob(&p,"job_cancel",json!({"job_id":"unrelated"}));
+        p.b.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_conflict BEFORE INSERT ON transport_conflicts BEGIN SELECT RAISE(ABORT,'conflict write failure'); END;").unwrap();
+        assert!(preflight_page(&p.b,&[unrelated.clone(),conflict.clone()]).is_err());
+        assert_eq!(count(&p.b,"transport_operations"),1);assert_eq!(count(&p.b,"transport_conflicts"),0);
+        p.b.store.connection.lock().unwrap().execute_batch("DROP TRIGGER fail_conflict").unwrap();
+        preflight_page(&p.b,&[conflict.clone(),unrelated.clone()]).unwrap();
+        activate(&p.b,&conflict).unwrap();activate(&p.b,&unrelated).unwrap();
+        assert_eq!(count(&p.b,"transport_conflicts"),1);assert_eq!(count(&p.b,"transport_operations"),2);
+        assert!(p.b.store.transport_status().unwrap()["items"].as_array().unwrap().iter().any(|i|i["reason"]=="transport_identity_conflict"));
+        assert!(p.b.store.transport_cancelled(&account(&p.b).unwrap(),"unrelated").unwrap());
+        let variants=(10..13).map(|seq|{let mut variant=conflict.clone();variant.seq=seq;variant}).collect::<Vec<_>>();
+        preflight_page(&p.b,&variants).unwrap();
+        for variant in variants {activate(&p.b,&variant).unwrap();}
+        assert_eq!(count(&p.b,"transport_conflicts"),1);
+        assert_eq!(p.b.store.load_state().unwrap().last_seq,12);
+    }
+    #[tokio::test]
+    async fn forget_recreate_restart_cannot_restore_old_pending_authority() {
+        let mut p=pair();hold(&p);let incoming=blob(&p,"request",request(&p,"old-account"));receive(&p.b,&incoming,false).unwrap();
+        let captured=p.b.store.transport_pending(&account(&p.b).unwrap()).unwrap().pop().unwrap();
+        p.b.forget_identity().unwrap();crate::identity::create(&p.b,None).unwrap();
+        assert!(!current_authority(&p.b,&captured));assert_eq!(count(&p.b,"transport_operations"),0);
+        let homes=std::mem::take(&mut p.homes);let home=homes[1].clone();drop(p);
+        let reopened=App::load(crate::config::Config{home,port:0}).unwrap();
+        assert!(!current_authority(&reopened,&captured));assert_eq!(count(&reopened,"transport_operations"),0);
+        drop(reopened);for home in homes {std::fs::remove_dir_all(home).unwrap();}
+    }
+
+    #[tokio::test]
+    async fn deferred_conflict_retains_original_binding_and_records_rejection() {
+        let p=pair();hold(&p);let first=blob(&p,"request",request(&p,"deferred-conflict"));receive(&p.b,&first,false).unwrap();
+        let mut changed=request(&p,"deferred-conflict");changed["body"]["payload"]["text"]=json!("different effect");
+        let mut r:Request=serde_json::from_value(changed).unwrap();let payload=r.body["payload"].clone();
+        let bytes=serde_json::to_vec(&("beans-request-v1",&r.id,&r.verb,&r.requested_by,p.b.this_device_id().unwrap(),r.created_at,&payload)).unwrap();
+        r.body=json!({"payload":payload,"signature":p.a.machine_file().unwrap().machine().unwrap().sign(&bytes)});
+        let mut conflict=blob(&p,"request",json!(r));conflict.seq+=1;
+        let sender=p.a.this_device_id().unwrap();let device=p.b.device(&sender).unwrap();
+        p.b.state.lock().unwrap().devices.retain(|d|d.id!=sender);
+        // Retain changed signed intent until sender metadata returns.
+        conflict.id="deferred-conflicting-delivery".into();receive(&p.b,&conflict,false).unwrap();
+        p.b.state.lock().unwrap().devices.push(device);
+        refresh(&p.b).unwrap();
+        assert_eq!(count(&p.b,"transport_operations"),1);assert_eq!(count(&p.b,"transport_replay"),1);
+        assert_eq!(count(&p.b,"transport_conflicts"),1);
+        assert!(p.b.store.transport_status().unwrap()["items"].as_array().unwrap().iter().any(|i|i["reason"]=="transport_identity_conflict"));
     }
 }

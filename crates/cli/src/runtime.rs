@@ -614,6 +614,14 @@ pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
 /// before taking the lock, so hard Stop also cancels jobs waiting behind another turn.
 /// `admission` counts the job as running here until it ends.
 pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, admission: Admission) {
+    let Ok(authority_guard)=app.plugin_admission(None) else {return};
+    let incarnation=authority_guard.get().0;
+    let authority=if remote_blob_id.is_some() {
+        let Ok(account)=crate::envelope::account(&app) else {return};
+        let Ok(Some(e))=app.store.transport_envelope(&account,&format!("job:{}",job.id)) else {return};
+        if !crate::envelope::current_authority(&app,&e) {return;}
+        Some(e)
+    } else {None};
     let registration = app.transport_registration.lock().unwrap();
     let transport = remote_blob_id.is_some();
     if transport {
@@ -629,6 +637,7 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, 
         app.notice(&job.chat_id, "Account paused. Resume to run bots.");
         if let Some(id) = remote_blob_id {
             drop(registration);
+            drop(authority_guard);
             let app = app.clone();
             tokio::spawn(async move {
                 let completed = if app.this_device_id().as_deref()==Some(job.requested_by.as_str()) {
@@ -660,11 +669,19 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, 
         }
     }
     drop(registration);
+    drop(authority_guard);
     tokio::spawn(async move {
         let _admission = admission;
         let lock = app.chat_lock(&job.chat_id);
         let _guard = lock.lock().await;
-        let outcome = run_job_started(&app, job.clone(), cancel).await;
+        let admitted={
+            let authority_guard=app.plugin_lifecycle.lock();
+            let admitted=authority_guard.get()==(incarnation,false) && authority.as_ref().is_none_or(|e|crate::envelope::current_authority(&app,e));
+            if !admitted {cancel.cancel();}
+            admitted
+        };
+        let outcome=if admitted {run_job_started(&app,job.clone(),cancel).await}
+            else {finish_job(&app,&job.id);TurnOutcome::Skipped};
         if let Some(id) = &job.routine_id {
             crate::routines::finished(&app, id, outcome);
         }
@@ -958,6 +975,7 @@ mod tests {
     fn cancellation_is_sealed_to_the_remote_runner() {
         let scratch = scratch_app();
         let app = &scratch.0;
+        crate::identity::create(app,None).unwrap();
         let runner_keys = crate::keys::Machine::generate();
         app.state.lock().unwrap().devices.push(Device {
             id: "runner".into(),
@@ -1001,6 +1019,7 @@ mod tests {
     fn removing_bot_cancels_only_its_jobs_in_surviving_group() {
         let scratch = scratch_app();
         let app = &scratch.0;
+        crate::identity::create(app,None).unwrap();
         let runner_keys = crate::keys::Machine::generate();
         app.state.lock().unwrap().devices.push(Device {
             id: "runner".into(), name: "Runner".into(), model: String::new(), os: "macos".into(),
@@ -1111,6 +1130,7 @@ mod tests {
     fn stop_is_sealed_to_the_device_that_lists_the_turn() {
         let scratch = scratch_app();
         let app = &scratch.0;
+        crate::identity::create(app,None).unwrap();
         let mac_keys = crate::keys::Machine::generate();
         app.state.lock().unwrap().devices.push(Device {
             id: "mac".into(),
@@ -1292,10 +1312,16 @@ mod tests {
         let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();
         let local=app.local_device().unwrap();let remote=crate::keys::Machine::generate();
         app.state.lock().unwrap().devices.push(Device{id:remote.pubkey(),box_pubkey:remote.box_pubkey(),envelope_version:Some(1),..Default::default()});
-        app.set_paused(true);let account=crate::envelope::account(app).unwrap();
+        app.set_paused(true);
         for (id,requester,transport) in [("paused-local",local.id,false),("paused-self",app.this_device_id().unwrap(),true),("paused-remote",remote.pubkey(),true)] {
             let mut job=command_job(app,"chat","bot","card");job.id=id.into();job.requested_by=requester;
-            if transport {app.store.connection.lock().unwrap().execute("INSERT INTO transport_operations VALUES(?1,?2,'binding','pending','{}',NULL)",rusqlite::params![account,format!("job:{id}")]).unwrap();}
+            if transport {
+                let local_sender=app.machine_file().unwrap().machine().unwrap();
+                let sender=if job.requested_by==remote.pubkey(){&remote}else{&local_sender};
+                let incoming=crate::envelope::fixture_blob(app,sender,1,"job",id,&job);
+                crate::envelope::preflight_page(app,std::slice::from_ref(&incoming)).unwrap();
+                crate::envelope::activate_first(app,&incoming).unwrap();
+            }
             spawn_local_job(app.clone(),job,transport.then(String::new),app.update.hold());
         }
         tokio::time::timeout(std::time::Duration::from_secs(5),async {loop {let c=app.store.connection.lock().unwrap();let n:i64=c.query_row("SELECT count(*) FROM transport_operations WHERE status='completed'",[],|r|r.get(0)).unwrap();drop(c);if n==2{break;}tokio::task::yield_now().await;}}).await.unwrap();

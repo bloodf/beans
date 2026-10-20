@@ -1596,5 +1596,41 @@ mod tests {
         assert_eq!(incoming[0].pending, running.pending);
         drop(admission);
     }
+    #[cfg(feature = "runner")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_dispatch_timestamp_retains_intent_and_launches_nothing() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let routine = create(app, "b1", "Dispatch failure", "every 10m", "x", None, true).unwrap();
+        let routine = app.update_routine(&routine.id, |r| r.enabled_at = now_secs() - 700.0).unwrap();
+        let admission = app.update.try_admit().unwrap();
+        let claimed = claim_due(app, &routine, now_unix()).unwrap();
+        let dm = app.dm_with("b1", None).unwrap();
+        let lock = app.chat_lock(&dm.meta.id);
+        let guard = lock.lock().await;
+        let connection = rusqlite::Connection::open(app.config.database_path()).unwrap();
+        connection.execute_batch("CREATE TRIGGER reject_dispatch BEFORE UPDATE ON routines BEGIN SELECT RAISE(FAIL, 'dispatch write unavailable'); END;").unwrap();
+        dispatch_pending(app, claimed.clone(), admission);
+        assert_eq!(app.routine(&routine.id).unwrap(), claimed);
+        assert!(!app.is_routine_running(&routine.id));
+        assert!(app.running_turns().is_empty());
+        assert!(app.messages(&dm.meta.id).is_empty());
+        connection.execute_batch("DROP TRIGGER reject_dispatch").unwrap();
+        tick(app);
+        let queued = app.routine(&routine.id).unwrap();
+        assert!(queued.last_run_at.is_some());
+        assert_eq!(queued.pending, claimed.pending);
+        assert_eq!(app.running_turns().len(), 1);
+        tick(app);
+        assert_eq!(app.running_turns().len(), 1);
+        assert_eq!(app.routine(&routine.id).unwrap(), queued);
+        drop(guard);
+        for _ in 0..100 {
+            if app.routine(&routine.id).unwrap().last_outcome.is_some() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(app.routine(&routine.id).unwrap().last_outcome.as_deref(), Some("error"));
+        assert_eq!(app.messages(&dm.meta.id).iter().filter(|message| matches!(&message.body, Body::Notice { routine_id: Some(id), .. } if id == &routine.id)).count(), 1);
+    }
 }
 

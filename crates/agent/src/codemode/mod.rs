@@ -21,6 +21,7 @@ mod search;
 mod source;
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,7 +37,7 @@ pub use sandbox::{MAX_STORE_TOTAL_CHARS, MAX_STORE_VALUE_CHARS};
 pub use search::DEFAULT_SEARCH_LIMIT;
 pub use source::{parse_source, ParsedSource, SourceOptions, OPTIONS_PREFIX};
 
-use crate::tool::{DirectRunner, Tool, ToolError, ToolOutcome, ToolResult, ToolRunner, ToolUpdateFn};
+use crate::tool::{fold_cleanup, DirectRunner, ExecutionScope, Tool, ToolError, ToolOutcome, ToolResult, ToolRunner, ToolUpdateFn};
 use crate::types::ContentPart;
 use sandbox::{Event, Script, ScriptGlobal, ScriptTool, Worker};
 
@@ -390,8 +391,22 @@ impl Tool for CodemodeTool {
     }
 
     async fn execute_with(&self, tool_call_id: &str, args: Value, cancel: CancellationToken, on_update: ToolUpdateFn, tools: &dyn ToolRunner) -> Result<ToolResult, ToolError> {
-        let parsed = parse_source(args["code"].as_str().unwrap_or("")).map_err(ToolError)?;
-        Ok(Run::new(self, tool_call_id, &cancel, on_update, tools).execute(parsed).await.result)
+        let scope = ExecutionScope::root(&cancel);
+        let mut result = self.execute_scoped(tool_call_id, args, cancel, on_update, tools, &scope).await;
+        let completed = scope.drain().await;
+        fold_cleanup(&mut result, &completed);
+        result
+    }
+
+    async fn execute_scoped(&self, tool_call_id: &str, args: Value, cancel: CancellationToken, on_update: ToolUpdateFn, tools: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+        let scope = scope.child(&cancel).map_err(ToolError)?;
+        let mut result = match parse_source(args["code"].as_str().unwrap_or("")) {
+            Ok(parsed) => Ok(Run::new(self, tool_call_id, &cancel, on_update, tools, scope.clone()).execute(parsed).await.result),
+            Err(error) => Err(ToolError(error)),
+        };
+        let completed = scope.drain().await;
+        fold_cleanup(&mut result, &completed);
+        result
     }
 }
 
@@ -409,8 +424,19 @@ impl CodemodeTool {
     /// Runs `code` as a call of this tool would, with `tools` running the script's calls, and
     /// keeps what it returned apart from what it printed.
     pub async fn run_script(&self, call_id: &str, code: &str, cancel: CancellationToken, tools: &dyn ToolRunner) -> Result<ScriptRun, ToolError> {
-        let parsed = parse_source(code).map_err(ToolError)?;
-        Ok(Run::new(self, call_id, &cancel, Arc::new(|_| {}), tools).execute(parsed).await)
+        let root = ExecutionScope::root(&cancel);
+        let scope = root.child(&cancel).map_err(ToolError)?;
+        let result = match parse_source(code) {
+            Ok(parsed) => Ok(Run::new(self, call_id, &cancel, Arc::new(|_| {}), tools, scope).execute(parsed).await),
+            Err(error) => Err(ToolError(error)),
+        };
+        let completed = root.drain().await;
+        result.map(|mut run| {
+            let mut result = Ok(run.result);
+            fold_cleanup(&mut result, &completed);
+            run.result = result.expect("folding cleanup preserves a result");
+            run
+        })
     }
 }
 
@@ -443,6 +469,7 @@ struct Run<'a> {
     cancel: &'a CancellationToken,
     on_update: ToolUpdateFn,
     tools: &'a dyn ToolRunner,
+    scope: ExecutionScope,
     /// Callable tools by name and by identifier; grows as searches and lookups find more.
     known: Mutex<HashMap<String, Entry>>,
     calls: Mutex<Vec<NestedCall>>,
@@ -454,13 +481,14 @@ struct Run<'a> {
 }
 
 impl<'a> Run<'a> {
-    fn new(tool: &'a CodemodeTool, call_id: &'a str, cancel: &'a CancellationToken, on_update: ToolUpdateFn, tools: &'a dyn ToolRunner) -> Self {
+    fn new(tool: &'a CodemodeTool, call_id: &'a str, cancel: &'a CancellationToken, on_update: ToolUpdateFn, tools: &'a dyn ToolRunner, scope: ExecutionScope) -> Self {
         Run {
             tool,
             call_id,
             cancel,
             on_update,
             tools,
+            scope,
             known: Mutex::new(HashMap::new()),
             calls: Mutex::new(Vec::new()),
             dropped_calls: Mutex::new(0),
@@ -563,9 +591,15 @@ impl<'a> Run<'a> {
 
     /// Runs the script to its end: its calls, its output, and the host's deadline and stop.
     async fn drive(&self, mut worker: Worker, timeout: Duration, output: &mut Vec<ContentPart>) -> End {
-        type Pending<'f> = std::pin::Pin<Box<dyn std::future::Future<Output = (u64, Option<usize>, Reply)> + Send + 'f>>;
+        type Pending<'f> = std::pin::Pin<Box<dyn Future<Output = (u64, Option<usize>, Reply)> + Send + 'f>>;
         let mut in_flight: FuturesUnordered<Pending<'_>> = FuturesUnordered::new();
-        let sleep = tokio::time::sleep(timeout);
+        let sleep = async {
+            #[cfg(test)]
+            if let Some(arm) = self.scope.probe.as_ref().and_then(|probe| probe.timeout_arm.as_ref()) {
+                arm.acquire().await.expect("fixture timeout arm").forget();
+            }
+            tokio::time::sleep(timeout).await;
+        };
         tokio::pin!(sleep);
         let mut next_call = 0u64;
         let mut output_chars = 0usize;
@@ -648,8 +682,15 @@ impl<'a> Run<'a> {
         // Calls the script left running are cancelled, and get a moment to wind down (a
         // question they put to a person resolves) before the result goes back.
         worker.stop();
+        self.scope.close_and_cancel();
         self.calls_cancel.cancel();
-        let _ = tokio::time::timeout(WIND_DOWN, async { while in_flight.next().await.is_some() {} }).await;
+        let wind_down = tokio::time::timeout(WIND_DOWN, async { while in_flight.next().await.is_some() {} }).await;
+        drop(in_flight);
+        #[cfg(test)]
+        if wind_down.is_err() { self.scope.event("wind_down_expired"); }
+        #[cfg(not(test))]
+        let _ = wind_down;
+        self.scope.drain().await;
         end
     }
 
@@ -732,7 +773,7 @@ impl<'a> Run<'a> {
         if self.calls_cancel.is_cancelled() {
             return self.never_ran(record);
         }
-        let outcome = self.tools.run(entry.tool.clone(), call_id, args, self.calls_cancel.child_token()).await;
+        let outcome = self.tools.run_scoped(entry.tool.clone(), call_id, args, self.calls_cancel.child_token(), &self.scope).await;
         let cancelled = self.calls_cancel.is_cancelled();
         self.update(record, |call| {
             call.duration_ms = Some(started.elapsed().as_millis() as u64);

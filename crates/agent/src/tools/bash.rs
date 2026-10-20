@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::bash_session::{BashSessions, WAITING_AFTER};
 use super::truncate::{format_size, truncate_tail, TruncatedBy, TruncationOptions, DEFAULT_MAX_BYTES};
-use crate::tool::{Tool, ToolError, ToolResult, ToolUpdateFn};
+use crate::tool::{fold_cleanup, DirectRunner, ExecutionScope, Tool, ToolError, ToolResult, ToolRunner, ToolUpdateFn};
 
 pub(crate) const UPDATE_THROTTLE_MS: u64 = 250;
 
@@ -52,6 +52,7 @@ const NO_SHELL: &str = "Commands run in Git for Windows' bash, and none was foun
      %LOCALAPPDATA%\\Programs\\Git, or beside a git.exe on PATH. Install Git for Windows from https://git-scm.com/downloads/win, \
      and commands run from the next message on; or set BEANS_SHELL to the full path of a bash.exe and restart Beans.";
 
+#[derive(Clone)]
 pub struct BashTool {
     cwd: PathBuf,
     /// None on a Windows computer without Git for Windows' bash: every call then fails saying so.
@@ -286,6 +287,44 @@ impl Tool for BashTool {
         parameters
     }
     async fn execute(&self, id: &str, args: Value, cancel: CancellationToken, on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+        let scope = ExecutionScope::root(&cancel);
+        let mut result = self.execute_scoped(id, args, cancel, on_update, &DirectRunner, &scope).await;
+        let completed = scope.drain().await;
+        fold_cleanup(&mut result, &completed);
+        result
+    }
+
+    async fn execute_scoped(&self, id: &str, args: Value, cancel: CancellationToken, on_update: ToolUpdateFn, _tools: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+        if self.terminal().is_some() {
+            #[cfg(test)]
+            let result = self.execute_owned(id, args, cancel, on_update, None).await;
+            #[cfg(not(test))]
+            let result = self.execute_owned(id, args, cancel, on_update).await;
+            return result;
+        }
+        let owned = self.clone();
+        let id = id.to_string();
+        let worker_id = id.clone();
+        #[cfg(test)]
+        let probe = scope.probe.clone();
+        let waiter = scope.spawn_pipe(&id, move |cancel| async move {
+            #[cfg(test)]
+            let result = owned.execute_owned(&worker_id, args, cancel, on_update, probe).await;
+            #[cfg(not(test))]
+            let result = owned.execute_owned(&worker_id, args, cancel, on_update).await;
+            result.map_err(|error| error.0)
+        }).map_err(ToolError)?;
+        match waiter.completion().await.as_ref() {
+            Ok(result) => Ok(result.clone()),
+            Err(error) => Err(ToolError(error.clone())),
+        }
+    }
+}
+
+impl BashTool {
+    async fn execute_owned(&self, id: &str, args: Value, cancel: CancellationToken, on_update: ToolUpdateFn,
+        #[cfg(test)] probe: Option<Arc<crate::tool::LifecycleProbe>>,
+    ) -> Result<ToolResult, ToolError> {
         let command = args["command"].as_str().ok_or("command is required")?.to_string();
         let timeout = args["timeout"].as_f64();
         if let Some(t) = timeout {
@@ -358,6 +397,11 @@ impl Tool for BashTool {
                     match chunk {
                         Some(bytes) => {
                             output.extend_from_slice(&bytes);
+                            #[cfg(test)]
+                            if let Some(probe) = &probe {
+                                let _ = probe.events.send("pipe_ready");
+                                probe.release.acquire().await.expect("fixture release").forget();
+                            }
                             if last_update.elapsed() >= Duration::from_millis(UPDATE_THROTTLE_MS) {
                                 last_update = tokio::time::Instant::now();
                                 let text = if self.script { super::sanitize::terminal_text(&output) } else { String::from_utf8_lossy(&output).into_owned() };
@@ -376,6 +420,8 @@ impl Tool for BashTool {
         let mut cleanup_problem = None;
         if aborted || timed_out {
             let cleanup_deadline = tokio::time::Instant::now() + CANCEL_CLEANUP;
+            #[cfg(test)]
+            if let Some(probe) = &probe { let _ = probe.events.send("cleanup_started"); }
             let cleanup = async {
                 #[cfg(unix)]
                 if pid != 0 && unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } == -1 {
@@ -418,6 +464,8 @@ impl Tool for BashTool {
         }
         // Do not wait for aborted readers or queued bytes past the cleanup deadline.
         rx.close();
+        #[cfg(test)]
+        if let Some(probe) = &probe { let _ = probe.events.send("cleanup_finished"); }
         let status = match status {
             Some(Ok(status)) => Some(status),
             Some(Err(error)) => {

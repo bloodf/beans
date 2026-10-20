@@ -467,6 +467,8 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
     private let machineSection = SectionView(title: L("Machine"))
     private let serviceNote = Build.label("", font: Theme.Font.caption, color: .tertiaryLabelColor, lines: 0)
     private var serviceRequest = DeviceServiceStatusRequest()
+    private var renameGeneration: UInt64 = 0
+    private var renameTarget: Device.ID?
 
     override func viewDidLoad() {
         title = L("Devices")
@@ -474,6 +476,7 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
         addSection(machineSection)
         add(serviceNote)
         super.viewDidLoad()
+        header.onRename = { [weak self] in self?.askDeviceName() }
         store.observe(self) { [weak self] event in
             switch event {
             case .connectionChanged, .snapshotReplaced, .identityChanged: self?.reload()
@@ -485,10 +488,15 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
     override func viewWillAppear() {
         super.viewWillAppear()
         serviceRequest.invalidate()
+        renameGeneration &+= 1
         reload()
     }
 
     override func reload() {
+        if renameTarget != deviceID {
+            renameGeneration &+= 1
+            renameTarget = deviceID
+        }
         askService(device)
         guard let device else {
             serviceNote.isHidden = true
@@ -558,6 +566,72 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
         }
     }
 
+    override func viewWillDisappear() {
+        renameGeneration &+= 1
+        super.viewWillDisappear()
+    }
+
+    private func askDeviceName() {
+        guard let device, device.os != .unknown, let owner = store.deviceNameOwner,
+            let window = view.window else { return }
+        let generation = renameGeneration
+        let prompt = DeviceNamePrompt(device: device, owner: owner, generation: generation)
+        prompt.alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, self.renameGeneration == generation,
+                self.deviceID == device.id, self.store.deviceNameOwner == owner,
+                let name = prompt.name(for: response, owner: self.store.deviceNameOwner,
+                                       target: self.deviceID, generation: self.renameGeneration) else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.renameGeneration == generation,
+                    self.deviceID == device.id, self.store.deviceNameOwner == owner else { return }
+                do {
+                    try await self.store.setDeviceName(device.id, name: name, owner: owner)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard self.renameGeneration == generation, self.deviceID == device.id,
+                        self.store.deviceNameOwner == owner else { return }
+                    let alert = NSAlert()
+                    alert.messageText = L("Couldn’t rename Device")
+                    alert.informativeText = error.localizedDescription
+                    await alert.beginSheetModal(for: window)
+                }
+            }
+        }
+    }
+
+}
+
+/// The native prompt keeps the proposed name separate from the displayed Device.
+@MainActor
+final class DeviceNamePrompt {
+    let alert = NSAlert()
+    let field: NSTextField
+    private let owner: UInt64
+    private let target: Device.ID
+    private let generation: UInt64
+
+    init(device: Device, owner: UInt64, generation: UInt64) {
+        self.owner = owner
+        self.target = device.id
+        self.generation = generation
+        field = NSTextField(string: device.name)
+        alert.messageText = L("Rename Device")
+        alert.informativeText = L("This name appears on every paired Device. Leave it blank to use the machine’s name.")
+        alert.addButton(withTitle: L("Rename"))
+        alert.addButton(withTitle: L("Cancel"))
+        field.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        field.placeholderString = device.machineName
+        field.setAccessibilityLabel(L("Device name"))
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+    }
+
+    func name(for response: NSApplication.ModalResponse, owner: UInt64?, target: Device.ID?, generation: UInt64) -> String? {
+        guard response == .alertFirstButtonReturn, owner == self.owner,
+              target == self.target, generation == self.generation else { return nil }
+        return field.stringValue
+    }
 }
 
 final class DeviceHeaderView: NSView {
@@ -566,6 +640,8 @@ final class DeviceHeaderView: NSView {
     private let model = Build.label("", font: .systemFont(ofSize: 12.5), color: .secondaryLabelColor)
     private let dot = StatusDotView(size: 8)
     private let status = Build.label("", font: .systemFont(ofSize: 11.5, weight: .medium))
+    var onRename: (() -> Void)?
+    private lazy var renameButton = NSButton(title: L("Rename…"), target: self, action: #selector(rename))
 
     init() {
         super.init(frame: .zero)
@@ -574,7 +650,7 @@ final class DeviceHeaderView: NSView {
         icon.contentTintColor = .secondaryLabelColor
 
         let statusLine = Build.stack([dot, status], orientation: .horizontal, spacing: 6)
-        let text = Build.stack([name, model, statusLine], spacing: 3)
+        let text = Build.stack([name, renameButton, model, statusLine], spacing: 3)
         text.setCustomSpacing(8, after: model)
 
         addSubview(icon)
@@ -595,12 +671,14 @@ final class DeviceHeaderView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    @objc private func rename() { onRename?() }
     func configure(device: Device) {
         icon.image = NSImage(systemSymbolName: device.symbolName, accessibilityDescription: nil)
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 34, weight: .regular)
         name.stringValue = device.name
         model.stringValue = "\(device.model) · \(device.osVersion)"
         model.isHidden = device.os == .unknown
+        renameButton.isHidden = device.os == .unknown
         dot.status = device.status
 
         switch device.status {

@@ -507,6 +507,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn status_serializes_one_levels_key_without_mutating_saved_declarations() {
+        use beans_models::ThinkingLevel::{High, Max};
+        for declaration in [None, Some(vec![]), Some(vec![High, Max])] {
+            let mut provider = custom("Lab", 1);
+            provider.models[0].levels = declaration.clone();
+            let mut credentials = Credentials::default();
+            credentials.custom.insert("custom:lab".into(), provider);
+            let statuses = credentials.statuses();
+            let status = statuses.iter().find(|status| status.kind == "custom:lab").unwrap();
+            let model = &status.models[0];
+            assert_eq!(model.model.levels, None);
+            assert_eq!(model.levels, declaration.clone().unwrap_or_default());
+            // Count on the raw serializer output before parsing can discard duplicate keys.
+            let raw = serde_json::to_string(model).unwrap();
+            assert_eq!(raw.matches("\"levels\":").count(), 1, "{raw}");
+            let expected = match declaration.as_deref() {
+                Some([High, Max]) => "\"levels\":[\"high\",\"max\"]",
+                _ => "\"levels\":[]",
+            };
+            assert!(raw.contains(expected), "{raw}");
+            assert_eq!(credentials.custom["custom:lab"].models[0].levels, declaration);
+            let saved = serde_json::to_string(&credentials.custom["custom:lab"].models[0]).unwrap();
+            assert_eq!(saved.matches("\"levels\":").count(), usize::from(declaration.is_some()));
+            let restored: CustomModel = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored.levels, declaration);
+            assert_eq!(credentials.models("custom:lab")[0].levels, model.levels);
+        }
+    }
+
     fn key(api_key: &str) -> Option<ApiKeyCredential> {
         Some(ApiKeyCredential { api_key: api_key.into(), base_url: None, connected_at: 0 })
     }

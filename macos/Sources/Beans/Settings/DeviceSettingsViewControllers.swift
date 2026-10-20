@@ -423,16 +423,28 @@ final class PluginsSettingsViewController: DevicePaneViewController {
 
 // MARK: - Devices
 
-/// The picked Device itself: what it is, whether it is online, its machine key, and Unpair.
+/// The picked Device, its machine key, background service status, and Unpair.
 final class AboutDeviceSettingsViewController: DevicePaneViewController {
     private let header = DeviceHeaderView()
     private let machineSection = SectionView(title: L("Machine"))
+    private let serviceNote = Build.label("", font: Theme.Font.caption, color: .tertiaryLabelColor, lines: 0)
+    private var service: Wire.ServiceStatus?
+    private var serviceAsked: Device.ID?
+    private var isAskingService = false
 
     override func viewDidLoad() {
         title = L("Devices")
         add(header)
         addSection(machineSection)
+        add(serviceNote)
         super.viewDidLoad()
+    }
+
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        guard !isAskingService else { return }
+        serviceAsked = nil
+        reload()
     }
 
     override func reload() {
@@ -456,6 +468,15 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
             KeyValueRow(
                 key: L("Role"),
                 value: device.isRunner ? L("Runner · runs bots with its own credentials") : L("Device · never runs bots")))
+        askService(device)
+        let service = device.isRunner && device.status == .online ? service : nil
+        if let service {
+            rows.append(KeyValueRow(
+                key: L("Background service"),
+                value: service.running ? L("Running") : service.installed ? L("Installed, not running") : L("Not installed")))
+        }
+        serviceNote.stringValue = L("Run beans service install in Terminal on %@ to keep its bots running while Beans is closed.", device.name)
+        serviceNote.isHidden = service?.installed != false
         rows.append(
             KeyValueRow(
                 key: L("Last seen"),
@@ -476,6 +497,23 @@ final class AboutDeviceSettingsViewController: DevicePaneViewController {
         unpair.onAction = { [weak self] in UnpairDevice.confirm(device, in: self?.view.window) }
         rows.append(unpair)
         machineSection.setRows(rows)
+    }
+
+    /// Fetches an online Runner's service status once per Device shown.
+    private func askService(_ device: Device) {
+        guard serviceAsked != device.id else { return }
+        service = nil
+        guard device.isRunner, device.status == .online else { return }
+        serviceAsked = device.id
+        isAskingService = true
+        Task { @MainActor [weak self] in
+            let status = try? await self?.store.serviceStatus(device.id)
+            guard let self else { return }
+            self.isAskingService = false
+            guard self.serviceAsked == device.id else { return }
+            self.service = status
+            self.reload()
+        }
     }
 
 }

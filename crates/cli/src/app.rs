@@ -1003,7 +1003,7 @@ impl App {
     /// Runner that has not listed it yet.
     fn known_turns(&self) -> std::collections::BTreeMap<String, LiveTurn> {
         let mut turns = std::collections::BTreeMap::new();
-        let offline_runners: std::collections::HashSet<String> = {
+        {
             let state = self.state.lock().unwrap();
             for (device_id, listed) in &state.device_turns {
                 if state.turns_online.contains(device_id) {
@@ -1012,12 +1012,8 @@ impl App {
                     }
                 }
             }
-            state.listed_machines.keys().filter(|id| !state.turns_online.contains(*id)).cloned().collect()
-        };
+        }
         for (id, job) in self.running_jobs.lock().unwrap().iter() {
-            if job.runner_id.as_ref().is_some_and(|runner| offline_runners.contains(runner)) {
-                continue;
-            }
             turns.entry(id.clone()).or_insert_with(|| job.turn(id));
         }
         turns
@@ -1032,7 +1028,11 @@ impl App {
         }
         let mut announced = self.announced_turns.lock().unwrap();
         let known = self.known_turns();
-        self.announce_ended(&announced, &known);
+        for (id, turn) in announced.iter() {
+            if !known.contains_key(id) {
+                self.emit(Event::JobFinished { chat_id: turn.chat_id.clone(), bot_id: turn.bot_id.clone(), job_id: id.clone(), routine_id: turn.routine_id.clone() });
+            }
+        }
         for (id, turn) in &known {
             let before = announced.get(id);
             if before.is_none() {
@@ -1045,26 +1045,6 @@ impl App {
             }
         }
         *announced = known;
-    }
-
-    /// Ends announced turns immediately after presence changes, without announcing new work
-    /// before the sync pull completes. Pending remote results remain admitted.
-    pub fn turns_ended(&self) {
-        if self.bulk_sync.load(Ordering::Relaxed) {
-            return;
-        }
-        let mut announced = self.announced_turns.lock().unwrap();
-        let known = self.known_turns();
-        self.announce_ended(&announced, &known);
-        announced.retain(|id, _| known.contains_key(id));
-    }
-
-    fn announce_ended(&self, announced: &std::collections::BTreeMap<String, LiveTurn>, known: &std::collections::BTreeMap<String, LiveTurn>) {
-        for (id, turn) in announced {
-            if !known.contains_key(id) {
-                self.emit(Event::JobFinished { chat_id: turn.chat_id.clone(), bot_id: turn.bot_id.clone(), job_id: id.clone(), routine_id: turn.routine_id.clone() });
-            }
-        }
     }
 
     /// A turn here started, ended, or changed what it is doing: the other Devices hear it
@@ -2977,38 +2957,6 @@ mod tests {
         assert_eq!(read_mark_at(&messages, 0), messages.len());
         assert_eq!(read_mark_at(&messages, 9), 0);
     }
-    #[test]
-    fn offline_runner_ends_presentation_without_cancelling_result_wait() {
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        let cancel = CancellationToken::new();
-        app.running_jobs.lock().unwrap().insert("remote".into(), RunningJob {
-            chat_id: "chat".into(), bot_id: "bot".into(), routine_id: None,
-            runner_id: Some("runner".into()), cancel: cancel.clone(), activity: None,
-        });
-        {
-            let mut state = app.state.lock().unwrap();
-            state.listed_machines.insert("runner".into(), 1);
-            state.turns_online.insert("runner".into());
-        }
-        let mut events = app.events.subscribe();
-        app.turns_changed();
-        assert!(matches!(events.try_recv().unwrap(), Event::JobStarted { job_id, .. } if job_id == "remote"));
-        app.state.lock().unwrap().turns_online.remove("runner");
-        app.turns_ended();
-        assert!(matches!(events.try_recv().unwrap(), Event::JobFinished { job_id, .. } if job_id == "remote"));
-        assert!(app.running_turns().is_empty());
-        assert!(app.running_jobs.lock().unwrap().contains_key("remote"));
-        assert!(!cancel.is_cancelled());
-        app.turns_ended();
-        assert!(events.try_recv().is_err(), "offline refresh must not repeat completion");
-        app.state.lock().unwrap().turns_online.insert("runner".into());
-        app.turns_ended();
-        assert!(events.try_recv().is_err(), "new starts wait for the completed pull");
-        app.turns_changed();
-        assert!(matches!(events.try_recv().unwrap(), Event::JobStarted { job_id, .. } if job_id == "remote"));
-    }
-
     #[test]
     fn pause_cancels_work_and_survives_restart() {
         let scratch = scratch_app();

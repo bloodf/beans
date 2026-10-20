@@ -782,7 +782,6 @@ async fn refresh_presence(app: &Arc<App>, url: &str, token: &str) -> Result<(), 
             tracing::error!(%error, "dropping another Device's turns");
         }
     }
-    app.turns_ended();
     Ok(())
 }
 
@@ -1630,37 +1629,6 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
-    }
-
-    #[cfg(feature = "server")]
-    #[tokio::test]
-    async fn presence_refresh_ends_offline_runner_turns_before_pull_finishes() {
-        use axum::{routing::get, Json, Router};
-        use std::sync::atomic::AtomicBool;
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        let online = Arc::new(AtomicBool::new(true));
-        let listed = online.clone();
-        let relay = Router::new().route("/v1/machines", get(move || {
-            let online = listed.load(Ordering::Relaxed);
-            async move { Json(serde_json::json!({"machines":[{"machine_pubkey":"runner","box_pubkey":"box","last_seen":1,"created_at":1,"online":online}],"now":crate::config::now_unix()})) }
-        }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, relay).await.unwrap() });
-        refresh_presence(app, &url, "fixture").await.unwrap();
-        app.set_device_turns("runner", vec![LiveTurn {
-            job_id: "remote".into(), chat_id: "chat".into(), bot_id: "bot".into(), routine_id: None, activity: None,
-        }]);
-        let mut events = app.events.subscribe();
-        online.store(false, Ordering::Relaxed);
-        refresh_presence(app, &url, "fixture").await.unwrap();
-        let ended = std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
-            matches!(event, Event::JobFinished { job_id, .. } if job_id == "remote")
-        });
-        assert!(ended, "presence refresh must publish completion without a later pull");
-        assert!(app.running_turns().is_empty());
-        server.abort();
     }
 
     fn policy_cut_fixture(log: &[serde_json::Value], query: &std::collections::HashMap<String,String>) -> serde_json::Value {

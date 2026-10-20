@@ -531,14 +531,16 @@ pub fn send_now(app: &Arc<App>, chat_id: &str, message_id: &str) -> Result<bool,
 }
 
 /// A new message from the user reached this Runner. The direct-chat loop that owns the chat
-/// takes it as steering, and the questions the chat's turn waits on are dismissed: the user
-/// wrote instead of answering, and the turn could not read what they wrote until its question
-/// let go. Steering comes first, so the loop finds the message when the dismissed call returns.
+/// takes it as steering, background output waits yield to it, and the questions the chat's
+/// turn waits on are dismissed. Steering comes first, so the loop finds the message when
+/// the waiting call returns. Foreground commands and input waits keep their existing lifetime.
 pub(crate) fn hear_user_message(app: &App, message: &Message) {
     if message.author != Author::You || !message.is_complete() {
         return;
     }
-    steer_message(app, message);
+    if steer_message(app, message) {
+        app.shell_sessions.user_wrote(&message.chat_id);
+    }
     crate::plugins::mcp::dismiss_questions(app, &message.chat_id);
 }
 
@@ -4112,6 +4114,43 @@ mod tests {
         let card = run_of(&app.message("chat", &asks.id).unwrap()).unwrap();
         assert_eq!((card.state.as_str(), card.prompt.as_deref(), card.handed_over), ("waiting", Some("Password:"), true));
         app.shell_sessions.stop_chat("chat");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_user_message_releases_background_output_for_steering() {
+        use beans_agent::tools::{BashOutputTool, BashSessions, BashTool};
+        let (scratch, chef) = chef_in_a_dm();
+        let app = &scratch.0;
+        let queue = AgentMessageQueue::new(QueueMode::All);
+        app.register_steering_queue("chat", "job-1", queue.clone());
+        let mut turn = turn_state(app, &chef, "dev");
+        let sessions: Arc<dyn BashSessions> = Arc::new(crate::shell::TurnSessions::new(app, "chat", "b1"));
+        let bash = BashTool::with_sessions(scratch.1.clone(), sessions.clone());
+        let (row, result) = call_tool(&mut turn, &bash, "call-1", json!({
+            "command": "printf 'ready\\n'; read -r answer; printf 'done\\n'", "description": "Watch", "background": true
+        })).await;
+        assert!(result.unwrap().text_content().contains("ready\n"));
+        let id = run_of(&row).unwrap().session_id.unwrap();
+        let session = app.shell_sessions.find("chat", "b1", &id).unwrap();
+        let output = BashOutputTool::new(sessions);
+        let mut waiting = std::pin::pin!(output.execute("call-2", json!({"session_id": id, "wait_seconds": 30}), CancellationToken::new(), Arc::new(|_| {})));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        hear_user_message(app, &said("elsewhere", Author::You, "other chat", 2.0));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        let message = said("chat", Author::You, "inspect something else", 3.0);
+        app.upsert_message(message.clone(), false);
+        hear_user_message(app, &message);
+        let result = tokio::time::timeout(Duration::from_secs(2), waiting).await.expect("steering releases background output").unwrap();
+        assert_eq!(result.details["session_id"], id);
+        assert!(session.end().is_none() && app.shell_sessions.contains(&id));
+        let steered = materialize_steering_messages(app, &chef, &scratch.1, queue.drain()).await;
+        assert!(matches!(&steered[..], [AgentMessage::User(user)] if user.content[0].as_text() == Some("inspect something else")));
+        assert!(!app.message("chat", &message.id).unwrap().queued);
+        app.shell_sessions.stop_chat("chat");
+        assert!(session.end().is_none(), "chat Stop leaves background commands running");
+        session.stop("Stopped");
+        assert!(session.end().is_some());
     }
 
     #[cfg(unix)]

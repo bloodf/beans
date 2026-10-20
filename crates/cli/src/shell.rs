@@ -190,6 +190,15 @@ impl Sessions {
         }
     }
 
+    /// Wake background output waits after the turn has queued the user's message.
+    pub fn user_wrote(&self, chat_id: &str) {
+        let sessions: Vec<Arc<BashSession>> =
+            self.entries.lock().unwrap().iter().filter(|e| e.chat_id == chat_id).filter_map(|e| e.session.clone()).filter(|s| s.background()).collect();
+        for session in sessions {
+            session.nudge();
+        }
+    }
+
     /// Stop in the chat: every session there ends, and its card says so, except a command
     /// running in the background, which Running tasks stops.
     pub fn stop_chat(&self, chat_id: &str) {
@@ -645,5 +654,9 @@ impl BashSessions for TurnSessions {
 
     fn remove(&self, id: &str) {
         self.app.shell_sessions.remove(&self.app, id);
+    }
+
+    fn user_wrote(&self) -> bool {
+        self.app.steering_queue(&self.chat_id).is_some_and(|queue| !queue.is_empty())
     }
 }

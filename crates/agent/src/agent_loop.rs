@@ -1766,6 +1766,18 @@ mod tests {
             self.cancel();
             std::future::pending().await
         }
+        async fn execute_scoped(&self, id: &str, args: Value, cancel: CancellationToken, update: ToolUpdateFn, _runner: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+            struct AdmissionAtDrop(ExecutionScope);
+            impl Drop for AdmissionAtDrop {
+                fn drop(&mut self) {
+                    let child_rejected = self.0.child(&CancellationToken::new()).is_err();
+                    let spawn_rejected = self.0.spawn_pipe("dispose-attempt", |_| async { Ok(ToolResult::text("unexpected admission")) }).is_err();
+                    self.0.event(if child_rejected && spawn_rejected { "child_disposed_closed" } else { "child_disposed_open" });
+                }
+            }
+            let _guard = AdmissionAtDrop(scope.clone());
+            self.execute(id, args, cancel, update).await
+        }
     }
 
     #[async_trait]
@@ -1852,11 +1864,15 @@ mod tests {
         root.probe = Some(Arc::new(crate::tool::LifecycleProbe { events, release: tokio::sync::Semaphore::new(0), timeout_arm: None }));
         let outcome = tokio::time::timeout(Duration::from_secs(5), runner.run_scoped(tool, "child".into(), json!({}), cancel, &root)).await.expect("child released its caller");
         let mut admission_closed = false;
+        let mut disposed_closed = false;
         while let Ok(event) = observed.try_recv() {
+            assert_ne!(event, "child_disposed_open");
+            if event == "child_disposed_closed" { disposed_closed = true; }
             if event == "child_admission_closed" { admission_closed = true; }
             if event == "child_cutoff" { assert!(admission_closed); }
         }
         assert!(admission_closed);
+        assert!(disposed_closed, "actual child execution disposal rejects both admission paths");
         root.drain().await;
         assert!(outcome.is_error && !outcome.blocked);
         assert!(outcome.result.text_content().starts_with("Cut off:"));

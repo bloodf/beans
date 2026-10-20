@@ -474,8 +474,8 @@ fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
         Ok(())
         })();
         app.bulk_sync.store(false, Ordering::Relaxed);
-        applied?;
         app.store.save_state(&app.state.lock().unwrap().clone()).map_err(local_relay_error)?;
+        applied?;
         if bulk {
             app.emit(Event::Snapshot(app.snapshot()));
             app.turns_changed();
@@ -4184,6 +4184,8 @@ mod tests {
                 else {
                     let queued=app.store.queued_roster().unwrap().unwrap();
                     let mut roster:RosterBlob=crate::crypto::decrypt_json(&app.dek().unwrap(),"roster",&queued.ciphertext).unwrap();
+                    let (expected_slot_seq, _)=app.store.roster_baseline("queued").unwrap().unwrap();
+                    app.store.record_submitted_roster(expected_slot_seq,&roster).unwrap();
                     roster.bots.push(bot("trailing-roster-bot"));
                     account_blob(app,3,"roster","trailing-roster",&roster)
                 };

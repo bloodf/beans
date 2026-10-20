@@ -32,10 +32,23 @@ const react = {
   useRef: <T,>(value: T) => slot(() => ({ current: value })).value,
   useState: <T,>(initial: T) => {
     const state = slot(() => initial);
-    return [state.value, (value: T) => { slots[state.index] = value; }];
+    return [state.value, (value: T | ((previous: T) => T)) => {
+      // React owns the value at this stable hook position.
+      const previous = slots[state.index] as T;
+      slots[state.index] = typeof value === "function" ? (value as (previous: T) => T)(previous) : value;
+    }];
   },
-  useMemo: <T,>(compute: () => T) => compute(),
-  useCallback: <T,>(callback: T) => callback,
+  useMemo: <T,>(compute: () => T, deps: unknown[]) => {
+    const state = slot<{ deps?: unknown[]; value?: T }>(() => ({})).value;
+    const previous = state.deps;
+    if (!previous || deps.some((value, index) => !Object.is(value, previous[index]))) {
+      state.deps = deps;
+      state.value = compute();
+    }
+    // The first call always computes before returning.
+    return state.value as T;
+  },
+  useCallback: <T,>(callback: T, deps: unknown[]): T => react.useMemo(() => callback, deps),
   useEffect: (effect: () => void) => { if (firstRender) effects.push(effect); },
   forwardRef: (component: unknown) => component,
 };

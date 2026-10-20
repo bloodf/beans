@@ -1885,7 +1885,7 @@ mod tests {
         fn parameters(&self) -> Value { json!({"type":"object","properties":{}}) }
         async fn execute(&self, _: &str, _: Value, cancel: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> {
             let mut result = crate::tool::DirectRunner.run(Arc::new(StructuredWorkerResult(true)), "child".into(), json!({}), cancel).await.result;
-            assert!(result.cleanup_uncertainty.is_some());
+            assert!(result.cleanup_is_uncertain());
             match self.0 {
                 0 => result.content.clear(),
                 1 => result.content = vec![ContentPart::text("replacement")],
@@ -1912,7 +1912,7 @@ mod tests {
             let (result, is_error) = execute_prepared(&tool, &call, &call.arguments, &emit, &CancellationToken::new(), &runner).await;
             let finalized = finalize_executed(&context, &assistant, call, json!({}), result, is_error, &config, None).await;
             assert!(finalized.is_error && finalized.result.is_error);
-            assert!(finalized.result.cleanup_uncertainty.is_some());
+            assert!(finalized.result.cleanup_is_uncertain());
             let expected: Vec<&str> = match mode { 0 => vec![], 1 => vec!["replacement"], _ => vec!["second", "first"] };
             assert_eq!(finalized.result.content.iter().filter_map(ContentPart::as_text).collect::<Vec<_>>(), expected);
             assert_eq!(finalized.result.text_content().matches("Pipe cleanup:").count(), 1);

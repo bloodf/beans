@@ -68,6 +68,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Local API](docs/architecture/local-api.md) | The `/ws` socket: trust boundary, field errors, every method with params and results, events, secret-bearing methods, memory and setup bodies |
 | [Routine and background service API](docs/architecture/routine-api.md) | Routine schedules, recovery health and Runner service status methods |
 | [CLI (runtime)](docs/architecture/runtime.md) | Commands, local websocket access, proxy/certificate trust, diagnostics, agent loop and notifications |
+| [Agent execution](docs/architecture/agent-execution.md) | Agent loop, context and streaming, steering, cancellation and owned tool cleanup |
 | [Local storage and startup admission](docs/architecture/storage-admission.md) | Data directory, format admission, staged scratch preload, creation guards and final startup persistence |
 | [CLI service and updates](docs/architecture/service-updates.md) | CLI installation, standalone services, Runner admission drain and update availability |
 | [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review |

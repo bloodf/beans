@@ -182,6 +182,9 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         queued.as_mut().enable();
 
         let token = token_or_register(app, &url, &machine).await?;
+        if refresh || app.presence_stale.swap(false, Ordering::Relaxed) {
+            refresh_presence(app, &url, &token).await?;
+        }
         // Reconcile encrypted policy events before a queued roster can supersede the relay's
         // latest roster. The relay itself cannot inspect either payload.
         let queued_roster = app.store.queued_roster().map_err(|error| RelayError { status: None, message: error.to_string() })?;
@@ -209,9 +212,6 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         drain_outbox(app, &url, &token).await?;
         drain_group_deletes(app, &url, &token).await?;
         drain_blob_deletes(app, &url, &token).await?;
-        if refresh {
-            refresh_presence(app, &url, &token).await?;
-        }
         crate::envelope::refresh(app).map_err(local_relay_error)?;
         if std::mem::take(&mut credentials_due) {
             app.push_credentials_if_owed();
@@ -509,7 +509,9 @@ async fn pull_controls(app: &Arc<App>, url: &str, token: &str, machine_file: &cr
                 _ => false,
             };
             if applies {
-                apply_incoming_blob(app,machine_file,blob,true)?;
+                if crate::envelope::addressed(&blob.kind) {
+                    crate::envelope::receive_control(app,blob).map_err(local_relay_error)?;
+                } else {apply_incoming_blob(app,machine_file,blob,true)?;}
             }
         }
         since = last;
@@ -735,16 +737,16 @@ async fn refresh_presence(app: &Arc<App>, url: &str, token: &str) -> Result<(), 
     let skew = crate::config::now_unix() - relay_now;
     let this_id = app.this_device_id();
     let (changed, pruned) = {
+        let _authority=app.plugin_lifecycle.lock();
         let mut state = app.state.lock().unwrap();
         let before: Vec<bool> = state.devices.iter().map(|d| online(&state, &d.id)).collect();
         state.listed_machines = machines.iter().map(|m| (m.machine_pubkey.clone(), m.created_at + skew)).collect();
+        state.listed_machine_boxes=machines.iter().map(|m|(m.machine_pubkey.clone(),m.box_pubkey.clone())).collect();
         state.device_online = machines.iter().filter(|m| m.online).map(|m| m.machine_pubkey.clone()).collect();
         for machine in &machines {
             state.device_seen.insert(machine.machine_pubkey.clone(), machine.last_seen);
             if let Some(device) = state.devices.iter_mut().find(|d| d.id == machine.machine_pubkey) {
-                if device.box_pubkey.is_empty() {
-                    device.box_pubkey = machine.box_pubkey.clone();
-                }
+                device.box_pubkey = machine.box_pubkey.clone();
             }
         }
         let count = state.devices.len();
@@ -843,12 +845,14 @@ pub async fn unpair_device(app: &Arc<App>, id: &str) -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     }
     {
+        let _authority=app.plugin_lifecycle.lock();
         let mut state = app.state.lock().unwrap();
         state.devices.retain(|d| d.id != id);
         state.device_seen.remove(id);
         state.device_online.remove(id);
         state.turns_online.remove(id);
         state.listed_machines.remove(id);
+        state.listed_machine_boxes.remove(id);
         state.unknown_machines.remove(id);
     }
     app.save_state();
@@ -1044,7 +1048,8 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             }
         },
         "machine" => match crate::crypto::decrypt_json::<MachineBlob>(&dek, "machine", &ciphertext) {
-            Ok(MachineBlob { device, turns }) => {
+            Ok(MachineBlob { mut device, turns }) => {
+                let _authority=app.plugin_lifecycle.lock();
                 if app.this_device_id().as_deref() == Some(device.id.as_str()) {
                     return;
                 }
@@ -1052,6 +1057,7 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
                 // lists shows nothing.
                 app.set_device_turns(&device.id, turns);
                 let mut state = app.state.lock().unwrap();
+                if let Some(box_key)=state.listed_machine_boxes.get(&device.id) {device.box_pubkey=box_key.clone();}
                 // A key the last presence refresh did not list is either a Device that just
                 // paired or one unpaired since, whose old blob must not bring it back. It
                 // lands quietly, and the refresh at the end of the cycle confirms or prunes it.
@@ -1574,6 +1580,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use rusqlite::OptionalExtension;
     use crate::config::Config;
 
     struct ScratchApp(Arc<App>, std::path::PathBuf);
@@ -3576,6 +3583,7 @@ mod tests {
     fn addressed_blob<T: serde::Serialize>(app: &App, seq: i64, kind: &str, id: &str, contents: &T) -> BlobIn {
         let device = app.local_device().unwrap();
         app.state.lock().unwrap().listed_machines.insert(device.id.clone(), 1);
+        app.state.lock().unwrap().listed_machine_boxes.insert(device.id.clone(),device.box_pubkey.clone());
         let item = crate::envelope::prepare(app, kind, &device, contents).unwrap();
         BlobIn { id: id.into(), kind: kind.into(), recipient_machine_pubkey: item.recipient,
             ciphertext: crate::keys::b64(&item.ciphertext), seq, created_at: seq }
@@ -3694,6 +3702,8 @@ mod tests {
         assert_eq!(app.state.lock().unwrap().last_seq, 0, "a held first sync does not claim the log");
 
         let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        reloaded.state.lock().unwrap().listed_machines.insert(reloaded.this_device_id().unwrap(),1);
+        let local=reloaded.local_device().unwrap();reloaded.state.lock().unwrap().listed_machine_boxes.insert(local.id,local.box_pubkey);
         assert_eq!(reloaded.device(&paired.pubkey()).unwrap().name, "Paired laptop", "the applied Device metadata survives restart");
         assert_eq!(reloaded.state.lock().unwrap().last_seq, 0);
         // Restart drops the lease. Replay on the reopened Device must still admit the held job.
@@ -3910,7 +3920,8 @@ mod tests {
         let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();
         let job=queued_turn(app);let lock=app.chat_lock(&job.chat_id);let guard=lock.lock().await;
         let first=addressed_blob(app,1,"job","prefix-job",&job);
-        let mut invalid=account_blob(app,2,"chat","bad-chat",&ChatBlob::ClearUnread{chat_id:job.chat_id.clone()});invalid.ciphertext="invalid".into();
+        let invalid=account_blob(app,2,"chat","bad-chat",&ChatBlob::ClearUnread{chat_id:job.chat_id.clone()});
+        app.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_prefix_read BEFORE INSERT ON applied_blobs WHEN NEW.id='bad-chat' BEGIN SELECT RAISE(ABORT,'prefix read failure'); END;").unwrap();
         let machine=app.machine_file().unwrap();
         assert!(apply_pull_page(app,&machine,vec![first,invalid]).is_err());
         assert!(app.running_jobs.lock().unwrap().contains_key(&job.id));
@@ -3975,6 +3986,51 @@ mod tests {
         assert!(first_sync(app,&url,"token",&app.machine_file().unwrap()).await.is_err());
         assert!(!app.bulk_sync.load(Ordering::Relaxed));assert!(app.running_jobs.lock().unwrap().is_empty());assert_eq!(app.store.load_state().unwrap().last_seq,0);
         for table in ["transport_custody","transport_replay","transport_operations"] {let n:i64=app.store.connection.lock().unwrap().query_row(&format!("SELECT count(*) FROM {table}"),[],|r|r.get(0)).unwrap();assert_eq!(n,0);}
+        server.abort();
+    }
+    #[tokio::test]
+    async fn held_page_activates_continuation_without_admitting_new_job() {
+        let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();let job=queued_turn(app);
+        app.state.lock().unwrap().last_seq=1;
+        let sender=app.machine_file().unwrap().machine().unwrap();
+        let mut request=Request{id:"held-continuation".into(),verb:"bash.stop".into(),requested_by:sender.pubkey(),body:serde_json::json!({"id":"absent-command"}),created_at:crate::config::now_secs()};
+        let signature=sender.sign(&serde_json::to_vec(&("beans-request-v1",&request.id,&request.verb,&request.requested_by,app.this_device_id().unwrap(),request.created_at,&request.body)).unwrap());
+        request.body=serde_json::json!({"payload":request.body,"signature":signature});
+        let (url,server)=serve_log(vec![addressed_blob(app,2,"job","held-new-job",&job),addressed_blob(app,3,"request","held-continuation",&request)]).await;
+        app.update.prepare(app,Duration::from_secs(60));pull_blobs(app,&url,"token",&app.machine_file().unwrap()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5),async{loop{
+            let status:Option<String>=app.store.connection.lock().unwrap().query_row("SELECT status FROM transport_operations WHERE id=?1",[format!("request:{}:{}",sender.pubkey(),request.id)],|r|r.get(0)).optional().unwrap();
+            if status.as_deref()==Some("completed"){break;}tokio::task::yield_now().await;
+        }}).await.unwrap();
+        assert_eq!(app.state.lock().unwrap().last_seq,1);assert!(!app.running_jobs.lock().unwrap().contains_key(&job.id));server.abort();
+    }
+
+    #[tokio::test]
+    async fn accepted_job_unpaired_before_pump_never_registers() {
+        let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();let mut job=queued_turn(app);
+        let sender=crate::keys::Machine::generate();job.requested_by=sender.pubkey();
+        app.state.lock().unwrap().devices.push(Device{id:sender.pubkey(),box_pubkey:sender.box_pubkey(),envelope_version:Some(1),..Default::default()});
+        let incoming=crate::envelope::fixture_blob(app,&sender,2,"job","unpaired-pending",&job);
+        app.update.prepare(app,Duration::from_secs(60));assert!(apply_pull_page(app,&app.machine_file().unwrap(),vec![incoming.clone()]).unwrap());
+        crate::envelope::activate_first(app,&incoming).unwrap();
+        {let _authority=app.plugin_lifecycle.lock();let mut state=app.state.lock().unwrap();state.listed_machines.remove(&sender.pubkey());state.devices.retain(|d|d.id!=sender.pubkey());}
+        app.update.cancel(app);crate::envelope::pump(app).unwrap();
+        assert!(!app.running_jobs.lock().unwrap().contains_key(&job.id));
+        let status:String=app.store.connection.lock().unwrap().query_row("SELECT status FROM transport_operations WHERE id=?1",[format!("job:{}",job.id)],|r|r.get(0)).unwrap();assert_eq!(status,"pending");
+    }
+    #[tokio::test]
+    async fn relay_box_authority_survives_unknown_and_stale_machine_metadata() {
+        use axum::{routing::get,Json,Router};
+        let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();
+        let sender=crate::keys::Machine::generate();let wrong=crate::keys::Machine::generate().box_pubkey();let id=sender.pubkey();let box_key=sender.box_pubkey();
+        let listed=serde_json::json!({"machines":[{"machine_pubkey":id,"box_pubkey":box_key,"created_at":1,"last_seen":1,"online":true}],"now":crate::config::now_unix()});
+        let router=Router::new().route("/v1/machines",get(move||{let listed=listed.clone();async move{Json(listed)}}));
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let url=format!("http://{}",listener.local_addr().unwrap());
+        let server=tokio::spawn(async move{axum::serve(listener,router).await.unwrap()});
+        refresh_presence(app,&url,"token").await.unwrap();assert!(app.device(&id).is_none());
+        let metadata=MachineBlob{device:Device{id:id.clone(),box_pubkey:wrong,envelope_version:Some(1),updated_at:1,..Default::default()},turns:Vec::new()};
+        let incoming=account_blob(app,1,"machine","unknown-metadata",&metadata);apply_blob(app,&app.machine_file().unwrap(),&incoming);
+        assert_eq!(app.device(&id).unwrap().box_pubkey,box_key);
         server.abort();
     }
 }

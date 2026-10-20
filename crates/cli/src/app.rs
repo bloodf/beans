@@ -90,6 +90,8 @@ pub struct State {
     /// The relay's machine list as last read: machine pubkey → when the relay attested it, on
     /// this Device's clock. Not kept across runs.
     pub listed_machines: HashMap<String, i64>,
+    /// Relay-attested box keys, including listed Devices whose metadata has not arrived.
+    pub listed_machine_boxes: HashMap<String, String>,
     /// Listed machines that never sent a `machine` blob, which the Device list shows as unknown
     /// (`sync::settle_unknown_machines`). Not kept across runs.
     pub unknown_machines: std::collections::BTreeSet<String>,

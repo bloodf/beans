@@ -2642,6 +2642,7 @@ mod tests {
             bot_ids: vec!["lead".into()], owner_bot_id: Some("lead".into()), description: None, is_pinned: false, created_at: 1.0 });
         initial.routines.push(Routine { id: "routine".into(), bot_id: "lead".into(), name: "Daily".into(),
             prompt: "Check".into(), schedule: "every 1d".into(), is_enabled: true, enabled_at: 1.0,
+            timezone: "UTC".into(), missed_run_policy: Default::default(), last_scheduled_at: None, health: None,
             last_run_at: None, last_outcome: None, paused_reason: None, check: None, created_at: 1.0 });
         app.store.observe_roster(4, &initial).unwrap();
         apply_roster(app, initial.clone());
@@ -2803,6 +2804,7 @@ mod tests {
             bot_ids: vec!["bot".into()], owner_bot_id: Some("bot".into()), description: None, is_pinned: false, created_at: 1.0 });
         baseline.routines.push(Routine { id: "routine".into(), bot_id: "bot".into(), name: "Daily".into(),
             prompt: "Check".into(), schedule: "every 1d".into(), is_enabled: true, enabled_at: 1.0,
+            timezone: "UTC".into(), missed_run_policy: Default::default(), last_scheduled_at: None, health: None,
             last_run_at: None, last_outcome: None, paused_reason: None, check: None, created_at: 1.0 });
         let initial_queue = a.0.store.queued_roster().unwrap().unwrap();
         a.0.store.remove_outbox_roster_with_state(&initial_queue.id, &a.0.state.lock().unwrap().clone(), &[]).unwrap();

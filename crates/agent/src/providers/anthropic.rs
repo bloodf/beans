@@ -224,11 +224,20 @@ impl AnthropicProvider {
         let mark_last_tool = usize::from(has_system) + marks.len() < MAX_CACHE_MARKS;
 
         let requested = request.max_tokens.unwrap_or(self.max_tokens);
-        let (thinking, output_config, max_tokens) = self.thinking_fields(requested);
+        let (mut thinking, output_config, max_tokens) = self.thinking_fields(requested);
+        // A host's allowance wins over the thinking level's preferred output budget.
+        let max_tokens = request.max_tokens.map(|cap| max_tokens.min(cap)).unwrap_or(max_tokens);
         let max_tokens = match self.info.as_ref().map(|i| i.max_output).filter(|cap| *cap > 0) {
             Some(cap) => max_tokens.min(cap),
             None => max_tokens,
         };
+        if let Some(budget) = thinking.as_ref().and_then(|value| value["budget_tokens"].as_u64()) {
+            // Keep enabled thinking for fail-closed validation when the cap cannot fit it.
+            let budget = budget.min(max_tokens.saturating_sub(THINKING_ANSWER_RESERVE));
+            if let Some(thinking) = &mut thinking {
+                thinking["budget_tokens"] = json!(budget);
+            }
+        }
         let mut body = json!({
             "model": self.model,
             "max_tokens": max_tokens,
@@ -624,6 +633,11 @@ fn server_tool_summary(name: &str, detail: &str, result: &Value) -> String {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
+    fn default_max_output_tokens(&self) -> Option<u64> {
+        let cap = self.thinking_fields(self.max_tokens).2;
+        Some(self.info.as_ref().map(|info| info.max_output).filter(|limit| *limit > 0).map(|limit| cap.min(limit)).unwrap_or(cap))
+    }
+
     fn provider_id(&self) -> &str {
         &self.provider_id
     }
@@ -649,6 +663,12 @@ impl Provider for AnthropicProvider {
         let mut body = self.body(&request);
         let options = request.options.clone();
         options.before_payload(&mut body);
+        if let Some(cap) = request.max_tokens {
+            if !body["max_tokens"].as_u64().is_some_and(|tokens| tokens <= cap) {
+                let _ = tx.send(AssistantEvent::Error { message: "Request payload exceeds or removes the host output cap.".into(), aborted: false }).await;
+                return channel_stream(rx);
+            }
+        }
         if body["thinking"]["type"] == "enabled" {
             let budget = body["thinking"]["budget_tokens"].as_u64().unwrap_or(0);
             if budget < 1024 || body["max_tokens"].as_u64().unwrap_or(0).saturating_sub(budget) < THINKING_ANSWER_RESERVE {
@@ -675,11 +695,8 @@ impl Provider for AnthropicProvider {
                     .header("User-Agent", USER_AGENT);
                 options.apply_to(request).json(&body)
             };
-            let response = match send_with_retry(build, max_retries, max_retry_delay_ms, &cancel).await {
-                Ok(response) => {
-                    options.report(&response);
-                    response
-                }
+            let response = match send_with_retry(build, max_retries, max_retry_delay_ms, &cancel, &options).await {
+                Ok(response) => response,
                 Err(failure) => {
                     let aborted = matches!(failure, RequestFailure::Aborted);
                     let _ = tx.send(AssistantEvent::Error { message: failure.message(), aborted }).await;
@@ -911,12 +928,20 @@ mod tests {
     #[test]
     fn budget_thinking_reserves_answer_tokens_before_the_model_cap_is_applied() {
         for (cap, expected_budget) in [(2048, 1024), (4095, 3071), (4096, 3072)] {
-            let mut request = request(vec![LlmMessage::User(UserMessage::text("hi"))]);
-            request.max_tokens = Some(128);
-            let body = budget_provider(cap).body(&request);
+            let request = request(vec![LlmMessage::User(UserMessage::text("hi"))]);
+            let provider = budget_provider(cap);
+            assert_eq!(provider.default_max_output_tokens(), Some(cap));
+            let body = provider.body(&request);
             assert_eq!(body["thinking"]["budget_tokens"], expected_budget, "cap {cap}");
             assert_eq!(body["max_tokens"], cap);
             assert_eq!(body["max_tokens"].as_u64().unwrap() - body["thinking"]["budget_tokens"].as_u64().unwrap(), 1024);
+        }
+        for (cap, expected_budget) in [(2048, 1024), (4095, 3071), (4096, 3072)] {
+            let mut request = request(Vec::new());
+            request.max_tokens = Some(cap);
+            let body = budget_provider(32_000).body(&request);
+            assert_eq!(body["max_tokens"], cap);
+            assert_eq!(body["thinking"]["budget_tokens"], expected_budget);
         }
         let mut off = budget_provider(2047);
         off.thinking_level = Some(ThinkingLevel::Off);
@@ -927,16 +952,40 @@ mod tests {
 
     #[tokio::test]
     async fn budget_thinking_rejects_caps_that_cannot_fit_minimum_thinking_and_answer_reserve() {
-        for cap in [1024, 2047] {
+        for (model_cap, host_cap) in [(1024, None), (2047, None), (32_000, Some(1024)), (32_000, Some(2047))] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
-            let mut provider = budget_provider(cap);
+            let mut provider = budget_provider(model_cap);
             provider.base_url = format!("http://{}", listener.local_addr().unwrap());
             let mut request = request(Vec::new());
+            request.max_tokens = host_cap;
             request.options = request.options.with_timeout(std::time::Duration::from_millis(100));
             let events: Vec<_> = provider.stream(request, CancellationToken::new()).await.collect().await;
             assert!(matches!(&events[..], [AssistantEvent::Error { message, aborted: false }] if message.contains("1024") && message.contains("answer")), "{events:?}");
             assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock), "rejected before sending any request");
+        }
+    }
+
+    #[tokio::test]
+    async fn payload_hooks_cannot_raise_or_remove_the_host_output_cap() {
+        struct Override(Value);
+        #[async_trait]
+        impl crate::request::RequestHooks for Override {
+            fn before_payload(&self, payload: &mut Value) {
+                payload["max_tokens"] = self.0.clone();
+            }
+        }
+        for replacement in [json!(4096), Value::Null, json!("2048")] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let mut provider = budget_provider(32_000);
+            provider.base_url = format!("http://{}", listener.local_addr().unwrap());
+            let mut request = request(Vec::new());
+            request.max_tokens = Some(2048);
+            request.options = request.options.with_hooks(Arc::new(Override(replacement))).with_timeout(std::time::Duration::from_millis(100));
+            let events: Vec<_> = provider.stream(request, CancellationToken::new()).await.collect().await;
+            assert!(matches!(&events[..], [AssistantEvent::Error { message, aborted: false }] if message.contains("host output cap")), "{events:?}");
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
         }
     }
 

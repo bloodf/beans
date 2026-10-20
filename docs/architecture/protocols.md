@@ -14,6 +14,8 @@ The app may choose ids (`bots.create.id`, `chats.create.id`, `chats.send.message
 
 Device naming uses `device.set_name { id, name } -> null`. The encrypted roster's optional `device_names` map stores account aliases; absent entries use original machine names. Device rows in snapshots and `roster.changed` expose effective `name` and original `machine_name`. Alias edits and explicit resets participate in per-key fieldwise roster CAS rebase and persisted submitted-baseline recovery, not whole-map latest-wins replacement.
 
+When a later roster from another Device supplies lost-response recovery evidence, only alias keys matching the submitted set/reset advance the alias baseline. A matching key does not establish acceptance of other submitted aliases. A directly acknowledged or recognized own roster retains its atomic acceptance boundary.
+
 `update.status` / `update.prepare` / `update.cancel` are local Runner drain control, with token-authenticated mutations. `device.update` / `device.auto_update` reject before local installation or remote routing in Beans. The retained incoming `self_update.install` / `self_update.auto` verbs reject independently of drain control. Device metadata carries `version`; this Beans core leaves optional CLI `update` status absent. See [Service management](service-updates.md#service-management).
 
 `bots.create` / `bots.update` accept the version-1 `look` object (`base` plus optional `states`). An omitted update keeps it, null resets generated settings, and an object replaces the complete validated draft. `avatar` remains independent. Look validation precedes image storage or profile mutation; see [Bot avatars](avatars.md#saved-look-version-1).

@@ -658,7 +658,7 @@ async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), Rela
                     if let (Some(current), Some((_, base))) = (newer, baseline) {
                         let dek = app.dek().ok_or_else(|| roster_conflict("account key unavailable"))?;
                         let local: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &current.ciphertext).map_err(local_relay_error)?;
-                        let base = accepted_roster_baseline(base, &roster);
+                        let base = accepted_roster_baseline(base, &roster, None);
                         let merged = merge_rosters(roster, &base, &local);
                         validate_merged_groups(&merged)?;
                         let rebased = OutboxItem { id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
@@ -977,11 +977,11 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
         (Some(item), Some((_, base))) => {
             let queued: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &item.ciphertext).map_err(local_relay_error)?;
             let base = if !recovering { base }
-                else if own_accepted { accepted_roster_baseline(base, &roster) }
+                else if own_accepted { accepted_roster_baseline(base, &roster, None) }
                 else {
                     let (_, submitted) = submitted
                         .ok_or_else(|| roster_conflict("accepted creation lacks its original submitted roster"))?;
-                    accepted_roster_baseline(base, &submitted)
+                    accepted_roster_baseline(base, &submitted, Some(&roster))
                 };
             let projected = merge_rosters(roster.clone(), &base, &queued);
             validate_merged_groups(&projected)?;
@@ -1353,7 +1353,7 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
 
 // Only creations from our submitted snapshot have become a common ancestor.
 // A later remote roster can also contain unrelated creations by other Devices.
-fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob) -> RosterBlob {
+fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob, observed: Option<&RosterBlob>) -> RosterBlob {
     macro_rules! accept_creations {
         ($field:ident) => {
             for entry in &submitted.$field {
@@ -1370,6 +1370,8 @@ fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob) -> Ros
     // Extend the accepted ancestor only with alias intent actually submitted by this Device.
     for id in base.device_names.keys().chain(submitted.device_names.keys()).cloned().collect::<std::collections::BTreeSet<_>>() {
         if base.device_names.get(&id) == submitted.device_names.get(&id) { continue; }
+        // A different Device's later roster proves acceptance only for matching keys.
+        if observed.is_some_and(|remote| remote.device_names.get(&id) != submitted.device_names.get(&id)) { continue; }
         match submitted.device_names.get(&id) {
             Some(name) => { base.device_names.insert(id, name.clone()); }
             None => { base.device_names.remove(&id); }
@@ -2091,12 +2093,32 @@ mod tests {
         apply_roster(app, merged.clone());
         let restarted = App::load(crate::config::Config { home: scratch.1.clone(), port: 0 }).unwrap();
         assert_eq!(restarted.state.lock().unwrap().device_names, merged.device_names);
-        let accepted = accepted_roster_baseline(base, &local);
+        let accepted = accepted_roster_baseline(base, &local, None);
         local.device_names.remove("a");
         let reset = merge_rosters(merged, &accepted, &local);
         assert!(!reset.device_names.contains_key("a"));
         assert_eq!(reset.device_names.get("b").unwrap(), "Remote B");
-        assert!(!accepted_roster_baseline(accepted, &local).device_names.contains_key("a"));
+        assert!(!accepted_roster_baseline(accepted, &local, None).device_names.contains_key("a"));
+    }
+
+    #[test]
+    fn partial_alias_acceptance_does_not_advance_unmatched_keys() {
+        let mut base = RosterBlob::default();
+        base.device_names.insert("a".into(), "Old A".into());
+        base.device_names.insert("b".into(), "Old B".into());
+        let mut sent = base.clone();
+        sent.device_names.insert("a".into(), "Sent A".into());
+        sent.device_names.insert("b".into(), "Sent B".into());
+        let mut remote = sent.clone();
+        remote.device_names.insert("b".into(), "Remote B".into());
+        let mut queued = sent.clone();
+        queued.device_names.insert("b".into(), "Old B".into());
+        let accepted = accepted_roster_baseline(base, &sent, Some(&remote));
+        assert_eq!(accepted.device_names.get("a").unwrap(), "Sent A");
+        assert_eq!(accepted.device_names.get("b").unwrap(), "Old B");
+        let merged = merge_rosters(remote, &accepted, &queued);
+        assert_eq!(merged.device_names.get("a").unwrap(), "Sent A");
+        assert_eq!(merged.device_names.get("b").unwrap(), "Remote B");
     }
 
     #[test]

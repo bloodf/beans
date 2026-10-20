@@ -3,7 +3,9 @@
 //! Works with [`AgentMessage`] throughout and converts to [`LlmMessage`] only at the provider
 //! boundary. Emits [`AgentEvent`]s over a channel in the same order pi does.
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -173,6 +175,12 @@ pub fn default_convert_to_llm(messages: &[AgentMessage]) -> Vec<LlmMessage> {
 pub trait EventSink: Send + Sync {
     async fn on_event(&self, event: &AgentEvent);
 }
+
+/// How long a cancelled pre-execution hook may hold the loop. Executing tools receive one
+/// additional second so pipe-mode bash can finish its own total one-second cleanup deadline.
+/// This bounds waiting, not side effects or detached work. Event sinks and other hooks are not
+/// covered by this grace.
+pub const STOP_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct AgentLoopConfig {
@@ -832,11 +840,11 @@ async fn prepare_call(
         Err(message) => return Preparation::Immediate { result: error_result(message), is_error: true, blocked: false },
     };
 
-    if let Some(before) = config
-        .hooks
-        .before_tool_call(BeforeToolCallContext { assistant_message: assistant, tool_call, args: &args, context, cancel, parent })
-        .await
-    {
+    let check = config.hooks.before_tool_call(BeforeToolCallContext { assistant_message: assistant, tool_call, args: &args, context, cancel, parent });
+    let Some(before) = unless_stuck(check, cancel, STOP_GRACE).await else {
+        return Preparation::Immediate { result: cut_off(STOP_GRACE), is_error: true, blocked: false };
+    };
+    if let Some(before) = before {
         if cancel.is_cancelled() {
             return Preparation::Immediate { result: error_result("Operation aborted".into()), is_error: true, blocked: false };
         }
@@ -902,12 +910,15 @@ impl ToolRunner for LoopRunner<'_> {
                     return ToolOutcome { result: error_result(reason), is_error: true, blocked: true };
                 }
                 let nested = LoopRunner { parent: &tool_call, ..*self };
-                let (result, is_error) = match tool.execute_with(&tool_call.id, args.clone(), cancel.clone(), Arc::new(|_| {}), &nested).await {
-                    Ok(result) => {
+                let execution = tool.execute_with(&tool_call.id, args.clone(), cancel.clone(), Arc::new(|_| {}), &nested);
+                let grace = STOP_GRACE + Duration::from_secs(1);
+                let (result, is_error) = match unless_stuck(execution, &cancel, grace).await {
+                    Some(Ok(result)) => {
                         let is_error = result.is_error;
                         (result, is_error)
                     }
-                    Err(error) => (error_result(error.0), true),
+                    Some(Err(error)) => (error_result(error.0), true),
+                    None => (cut_off(grace), true),
                 };
                 let finalized = finalize_executed(self.context, self.assistant, tool_call, args, result, is_error, self.config, Some(self.parent)).await;
                 ToolOutcome { result: finalized.result, is_error: finalized.is_error, blocked: false }
@@ -929,6 +940,27 @@ fn validate_arguments(arguments: &Value) -> Result<Value, String> {
     }
 }
 
+/// Prefer a completed future, including cleanup completing on the deadline, over cutting it off.
+async fn unless_stuck<F: Future>(future: F, cancel: &CancellationToken, grace: Duration) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        output = future => Some(output),
+        _ = stuck_after(cancel, grace) => None,
+    }
+}
+
+async fn stuck_after(cancel: &CancellationToken, grace: Duration) {
+    cancel.cancelled().await;
+    tokio::time::sleep(grace).await;
+}
+
+fn cut_off(grace: Duration) -> ToolResult {
+    error_result(format!(
+        "Cut off: this call was stopped and had not ended {} seconds later, so nothing waited for its result. It may have done part of its work, and may still be running.",
+        grace.as_secs()
+    ))
+}
+
 async fn execute_prepared(
     tool: &Arc<dyn Tool>,
     tool_call: &ToolCall,
@@ -948,10 +980,17 @@ async fn execute_prepared(
 
     let execution = tool.execute_with(&call_id, args.clone(), cancel.clone(), on_update, tools);
     tokio::pin!(execution);
+    // Do not race bash's own one-second cleanup with a one-second outer deadline. The extra
+    // second lets cleanup start and return its partial output, including through child calls.
+    let grace = STOP_GRACE + Duration::from_secs(1);
+    let stuck = stuck_after(cancel, grace);
+    tokio::pin!(stuck);
 
     let outcome = loop {
         tokio::select! {
-            result = &mut execution => break result,
+            biased;
+            result = &mut execution => break Some(result),
+            _ = &mut stuck => break None,
             Some(partial) = update_rx.recv() => {
                 emit.send(AgentEvent::ToolExecutionUpdate {
                     tool_call_id: call_id.clone(),
@@ -976,11 +1015,12 @@ async fn execute_prepared(
     }
 
     match outcome {
-        Ok(result) => {
+        Some(Ok(result)) => {
             let is_error = result.is_error;
             (result, is_error)
         }
-        Err(error) => (error_result(error.0), true),
+        Some(Err(error)) => (error_result(error.0), true),
+        None => (cut_off(grace), true),
     }
 }
 
@@ -1657,6 +1697,180 @@ mod tests {
         let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
         assert_eq!(last.stop_reason, StopReason::Error);
         assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    }
+
+    /// Models a tool or reviewer that ignores cancellation entirely.
+    struct Hangs {
+        stop: Option<CancellationToken>,
+        interrupt: Option<(crate::AgentMessageQueue, StepInterrupt)>,
+    }
+
+    impl Hangs {
+        fn cancel(&self) {
+            if let Some(stop) = &self.stop {
+                stop.cancel();
+            }
+            if let Some((queue, interrupt)) = &self.interrupt {
+                queue.push(AgentMessage::user("skip that, ship it"));
+                assert!(interrupt.interrupt());
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for Hangs {
+        fn name(&self) -> &str { "hang" }
+        fn description(&self) -> &str { "hangs" }
+        fn parameters(&self) -> Value { json!({ "type": "object", "properties": {} }) }
+        async fn execute(&self, _id: &str, _args: Value, _cancel: CancellationToken, _on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+            self.cancel();
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl LoopHooks for Hangs {
+        async fn before_tool_call(&self, _ctx: BeforeToolCallContext<'_>) -> Option<BeforeToolCallResult> {
+            self.cancel();
+            std::future::pending().await
+        }
+        async fn steering_messages(&self) -> Vec<AgentMessage> {
+            self.interrupt.as_ref().map_or_else(Vec::new, |(queue, _)| queue.drain())
+        }
+    }
+
+    /// Stop ends the run; Send now preserves the result, promotes the message, and continues.
+    /// Exercise both preparation and execution in both batch modes.
+    #[tokio::test]
+    async fn stuck_tools_and_checks_release_stop_and_send_now() {
+        for mode in [ToolExecutionMode::Sequential, ToolExecutionMode::Parallel] {
+            for check in [false, true] {
+                for send_now in [false, true] {
+                    let cancel = CancellationToken::new();
+                    let queue = crate::AgentMessageQueue::new(crate::QueueMode::All);
+                    let interrupt = StepInterrupt::new();
+                    let hangs = Arc::new(Hangs {
+                        stop: (!send_now).then(|| cancel.clone()),
+                        interrupt: send_now.then(|| (queue.clone(), interrupt.clone())),
+                    });
+                    let name = if check { "count" } else { "hang" };
+                    let args = if check { r#"{"limit": 1}"# } else { "{}" };
+                    let provider = Scripted::new("p", vec![Turn::Call { name, args, stop: StopReason::ToolUse }, Turn::Text("shipping")]);
+                    let counter = Arc::new(Counter { runs: Mutex::new(vec![]), cancel_on_run: None });
+                    let mut config = AgentLoopConfig::new(provider.clone()).with_interrupt(interrupt);
+                    config.tool_execution = mode;
+                    config.hooks = if check { hangs.clone() } else { Arc::new(Steering(queue)) };
+                    let tool: Arc<dyn Tool> = if check { counter.clone() } else { hangs };
+                    let started = std::time::Instant::now();
+                    let (messages, events) = tokio::time::timeout(Duration::from_secs(5), run_with(config, vec![tool], cancel)).await.expect("cancelled call released the loop");
+                    let grace = if check { STOP_GRACE } else { STOP_GRACE + Duration::from_secs(1) };
+                    assert!(started.elapsed() >= grace, "the call receives its grace");
+                    let results = tool_results(&messages);
+                    assert_eq!(results.len(), 1);
+                    assert!(results[0].is_error && results[0].text().starts_with("Cut off:"));
+                    assert!(counter.runs.lock().unwrap().is_empty(), "a stuck check never authorizes execution");
+                    assert!(events.iter().any(|event| matches!(event, AgentEvent::ToolExecutionEnd { is_error: true, .. })));
+                    assert!(matches!(events.last(), Some(AgentEvent::AgentEnd { .. })));
+                    let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
+                    if send_now {
+                        assert!(matches!(&messages[3], AgentMessage::User(user) if user.content[0].as_text() == Some("skip that, ship it")));
+                        assert_eq!((last.stop_reason, last.text().as_str()), (StopReason::Stop, "shipping"));
+                    } else {
+                        assert_eq!(last.stop_reason, StopReason::Aborted);
+                    }
+                    // Preserve the existing loop: Stop records one cancelled provider request
+                    // after the tool result; Send now records the next live request instead.
+                    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+                }
+            }
+        }
+    }
+
+    struct RecordChildResult(Mutex<Vec<bool>>);
+
+    #[async_trait]
+    impl LoopHooks for RecordChildResult {
+        async fn after_tool_call(&self, ctx: AfterToolCallContext<'_>) -> Option<AfterToolCallResult> {
+            assert_eq!(ctx.parent.unwrap().id, "script");
+            self.0.lock().unwrap().push(ctx.is_error);
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stuck_child_is_cut_off_and_finalized() {
+        let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+        let assistant = AssistantMessage::empty("p", "m");
+        let hooks = Arc::new(RecordChildResult(Mutex::new(vec![])));
+        let config = AgentLoopConfig::new(Scripted::new("p", vec![])).with_hooks(hooks.clone());
+        let parent = ToolCall { id: "script".into(), name: "codemode".into(), arguments: json!({}) };
+        let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &parent };
+        let cancel = CancellationToken::new();
+        let tool = Arc::new(Hangs { stop: Some(cancel.clone()), interrupt: None });
+        let outcome = tokio::time::timeout(Duration::from_secs(5), runner.run(tool, "child".into(), json!({}), cancel)).await.expect("child released its caller");
+        assert!(outcome.is_error && !outcome.blocked);
+        assert!(outcome.result.text_content().starts_with("Cut off:"));
+        assert_eq!(*hooks.0.lock().unwrap(), vec![true]);
+    }
+
+    #[cfg(unix)]
+    struct StopOnOutput(CancellationToken);
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl EventSink for StopOnOutput {
+        async fn on_event(&self, event: &AgentEvent) {
+            if let AgentEvent::ToolExecutionUpdate { partial_result, .. } = event {
+                if partial_result.text_content().contains("held") {
+                    self.0.cancel();
+                }
+            }
+        }
+    }
+
+    /// The loop must not drop pipe bash at its own cleanup deadline and lose partial output.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn loop_grace_preserves_pipe_bash_cleanup() {
+        struct HeldPipe(std::path::PathBuf);
+        impl Drop for HeldPipe {
+            fn drop(&mut self) {
+                if let Ok(pid) = std::fs::read_to_string(self.0.join("held.pid")) {
+                    if let Ok(pid) = pid.trim().parse::<i32>() {
+                        if pid > 0 {
+                            unsafe { libc::kill(pid, libc::SIGKILL); }
+                        }
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        for mode in [ToolExecutionMode::Sequential, ToolExecutionMode::Parallel] {
+            for script in [false, true] {
+                let dir = std::env::temp_dir().join(format!("beans-loop-held-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let held = HeldPipe(dir.clone());
+                let tool = if script { crate::tools::BashTool::for_script(dir) } else { crate::tools::BashTool::new(dir) };
+                let provider = Scripted::new("p", vec![Turn::Call {
+                    name: "bash",
+                    args: r#"{"command":"set -m; sleep 30 & echo $! > held.pid; printf held; wait","description":"Hold a pipe"}"#,
+                    stop: StopReason::ToolUse,
+                }]);
+                let cancel = CancellationToken::new();
+                let mut config = AgentLoopConfig::new(provider).with_sink(Arc::new(StopOnOutput(cancel.clone())));
+                config.tool_execution = mode;
+                let (messages, _) = tokio::time::timeout(Duration::from_secs(5), run_with(config, vec![Arc::new(tool)], cancel)).await.expect("pipe cleanup releases the loop");
+                let results = tool_results(&messages);
+                assert_eq!(results.len(), 1);
+                let result = results[0];
+                let text = result.text();
+                assert!(result.is_error);
+                assert!(text.contains("held") && text.contains("Command aborted"), "{text}");
+                assert!(text.contains("deadline reached") && text.contains("not undone"), "{text}");
+                assert!(!text.starts_with("Cut off:"), "bash completes its own cleanup");
+                drop(held);
+            }
+        }
     }
 
     #[tokio::test]

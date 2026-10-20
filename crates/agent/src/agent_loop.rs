@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::provider::{AssistantAccumulator, AssistantEvent, ModelRequest, Provider};
 use crate::schema::validate_tool_arguments;
-use crate::tool::{cleanup_diagnostic, fold_cleanup, ExecutionScope, Tool, ToolOutcome, ToolResult, ToolRunner};
+use crate::tool::{cleanup_diagnostic, ExecutionScope, Tool, ToolOutcome, ToolResult, ToolRunner};
 use crate::types::{
     AgentEvent, AgentMessage, AssistantMessage, ContentPart, LlmMessage, StopReason, ToolCall,
     ToolResultMessage,
@@ -941,13 +941,14 @@ impl ToolRunner for LoopRunner<'_> {
                 if outcome.is_none() { scope.event("child_cutoff"); }
                 let completed = scope.drain().await;
                 let cutoff = outcome.is_none();
-                let mut outcome = outcome.unwrap_or_else(|| Ok(cut_off(STOP_GRACE)));
-                if !cutoff { fold_cleanup(&mut outcome, &completed); }
+                let outcome = outcome.unwrap_or_else(|| Ok(cut_off(STOP_GRACE)));
                 let (mut result, is_error) = match outcome {
                     Ok(result) => { let is_error = result.is_error; (result, is_error) }
                     Err(error) => (error_result(error.0), true),
                 };
-                if cutoff {
+                if completed.iter().any(|(_, completion)| completion.is_uncertain()) {
+                    result.set_cleanup_uncertainty(cleanup_diagnostic(&completed));
+                } else if cutoff {
                     result.content.push(ContentPart::text(cleanup_diagnostic(&completed)));
                 }
                 let finalized = finalize_executed(self.context, self.assistant, tool_call, args, result, is_error, self.config, Some(self.parent)).await;
@@ -1009,7 +1010,7 @@ async fn execute_prepared(
     let call_args = tool_call.arguments.clone();
 
     let scope = ExecutionScope::root(cancel);
-    let outcome = execute_in_scope(tool, &call_id, args, cancel, on_update, tools, &scope, &mut update_rx, emit, &name, &call_args).await;
+    let (outcome, uncertainty) = execute_in_scope(tool, &call_id, args, cancel, on_update, tools, &scope, &mut update_rx, emit, &name, &call_args).await;
 
     // Flush updates the tool sent right before it returned.
     while let Ok(partial) = update_rx.try_recv() {
@@ -1023,13 +1024,15 @@ async fn execute_prepared(
         .await;
     }
 
-    match outcome {
+    let (mut result, is_error) = match outcome {
         Ok(result) => {
             let is_error = result.is_error;
             (result, is_error)
         }
         Err(error) => (error_result(error.0), true),
-    }
+    };
+    if let Some(diagnostic) = uncertainty { result.set_cleanup_uncertainty(diagnostic); }
+    (result, is_error)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1037,7 +1040,7 @@ async fn execute_in_scope(
     tool: &Arc<dyn Tool>, call_id: &str, args: &Value, cancel: &CancellationToken,
     on_update: crate::tool::ToolUpdateFn, tools: &dyn ToolRunner, scope: &ExecutionScope,
     update_rx: &mut mpsc::UnboundedReceiver<ToolResult>, emit: &Emitter<'_>, name: &str, call_args: &Value,
-) -> Result<ToolResult, crate::tool::ToolError> {
+) -> (Result<ToolResult, crate::tool::ToolError>, Option<String>) {
     let outcome = {
         let execution = tool.execute_scoped(call_id, args.clone(), cancel.clone(), on_update, tools, scope);
         tokio::pin!(execution);
@@ -1064,13 +1067,13 @@ async fn execute_in_scope(
     let cutoff = outcome.is_none();
     let completed = scope.drain().await;
     let mut result = outcome.unwrap_or_else(|| Ok(cut_off(STOP_GRACE)));
-    if !cutoff { fold_cleanup(&mut result, &completed); }
-    if cutoff {
+    let uncertainty = completed.iter().any(|(_, completion)| completion.is_uncertain()).then(|| cleanup_diagnostic(&completed));
+    if cutoff && uncertainty.is_none() {
         if let Ok(result) = &mut result {
             result.content.push(ContentPart::text(cleanup_diagnostic(&completed)));
         }
     }
-    result
+    (result, uncertainty)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1084,6 +1087,8 @@ async fn finalize_executed(
     config: &AgentLoopConfig,
     parent: Option<&ToolCall>,
 ) -> FinalizedCall {
+    let uncertainty = result.take_cleanup_uncertainty();
+    if uncertainty.is_some() { is_error = true; }
     if let Some(after) = config
         .hooks
         .after_tool_call(AfterToolCallContext {
@@ -1112,6 +1117,10 @@ async fn finalize_executed(
         if let Some(flag) = after.is_error {
             is_error = flag;
         }
+    }
+    if let Some(diagnostic) = uncertainty {
+        is_error = true;
+        result.set_cleanup_uncertainty(diagnostic);
     }
     FinalizedCall { tool_call, result, is_error }
 }
@@ -1844,6 +1853,85 @@ mod tests {
                     assert_eq!(provider.requests.lock().unwrap().len(), 2);
                 }
             }
+        }
+    }
+
+    struct StructuredWorkerResult(bool);
+
+    #[async_trait]
+    impl Tool for StructuredWorkerResult {
+        fn name(&self) -> &str { "composite" }
+        fn description(&self) -> &str { "Structured composite fixture" }
+        fn parameters(&self) -> Value { json!({"type":"object","properties":{}}) }
+        fn output_schema(&self) -> Option<Value> { Some(json!({"type":"object"})) }
+        async fn execute(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult { is_error: true, structured: Some(json!({"isError":true})), ..ToolResult::text("ordinary failure") })
+        }
+        async fn execute_scoped(&self, id: &str, args: Value, cancel: CancellationToken, update: ToolUpdateFn, _: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+            if self.0 {
+                let worker = scope.spawn_pipe("private\nworker", |_| async { panic!("private worker output") }).unwrap();
+                assert!(worker.completion().await.result().is_err());
+            }
+            self.execute(id, args, cancel, update).await
+        }
+    }
+
+    struct RecoverAfterHook(bool);
+
+    #[async_trait]
+    impl LoopHooks for RecoverAfterHook {
+        async fn after_tool_call(&self, _: AfterToolCallContext<'_>) -> Option<AfterToolCallResult> {
+            Some(AfterToolCallResult {
+                content: self.0.then(|| vec![ContentPart::text("hook replacement")]),
+                structured: Some(json!({"recovered":true})),
+                is_error: Some(false),
+                ..AfterToolCallResult::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_cleanup_survives_top_and_nested_hook_recovery() {
+        for replace in [false, true] {
+            for uncertain in [false, true] {
+                let config = AgentLoopConfig::new(Scripted::new("p", vec![])).with_hooks(Arc::new(RecoverAfterHook(replace)));
+                let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+                let assistant = AssistantMessage::empty("p", "m");
+                let call = ToolCall { id: "owner".into(), name: "composite".into(), arguments: json!({}) };
+                let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &call };
+                let tool: Arc<dyn Tool> = Arc::new(StructuredWorkerResult(uncertain));
+                let (tx, _rx) = mpsc::channel(256);
+                let emit = Emitter::new(&tx, &config);
+                let (result, is_error) = execute_prepared(&tool, &call, &call.arguments, &emit, &CancellationToken::new(), &runner).await;
+                let top = finalize_executed(&context, &assistant, call.clone(), json!({}), result, is_error, &config, None).await;
+                let nested = runner.run(tool, "nested".into(), json!({}), CancellationToken::new()).await;
+                for (result, is_error) in [(&top.result, top.is_error), (&nested.result, nested.is_error)] {
+                    assert_eq!(is_error, uncertain);
+                    assert_eq!(result.text_content().matches("Pipe cleanup:").count(), usize::from(uncertain));
+                    assert_eq!(result.structured, Some(json!({"recovered":true})));
+                    assert!(!result.text_content().contains("private worker output"));
+                    if uncertain { assert!(result.is_error); }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "codemode")]
+    #[tokio::test]
+    async fn structured_composite_uncertainty_rejects_before_following_script_effect() {
+        for (uncertain, recovery) in [(false, None), (true, None), (false, Some(false)), (true, Some(false)), (false, Some(true)), (true, Some(true))] {
+            let mut config = AgentLoopConfig::new(Scripted::new("p", vec![]));
+            if let Some(replace) = recovery { config = config.with_hooks(Arc::new(RecoverAfterHook(replace))); }
+            let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+            let assistant = AssistantMessage::empty("p", "m");
+            let call = ToolCall { id: "script".into(), name: "codemode".into(), arguments: json!({}) };
+            let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &call };
+            let counter = Arc::new(Counter { runs: Mutex::new(vec![]), cancel_on_run: None });
+            let catalog = crate::codemode::StaticCatalog::new(vec![Arc::new(StructuredWorkerResult(uncertain)), counter.clone()]);
+            let script = crate::codemode::CodemodeTool::new(Arc::new(catalog), Default::default());
+            let result = script.execute_with("script", json!({"code":"await tools.composite({}); await tools.count({limit:1});"}), CancellationToken::new(), Arc::new(|_| {}), &runner).await.unwrap();
+            assert_eq!(*counter.runs.lock().unwrap(), if uncertain { vec![] } else { vec![json!({"limit":1})] });
+            assert_eq!(result.is_error, uncertain);
         }
     }
 

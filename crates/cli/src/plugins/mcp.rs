@@ -2183,7 +2183,7 @@ impl Tool for PluginTool {
         if is_error && content.iter().all(|part| part.as_text().is_none_or(|text| text.trim().is_empty())) {
             content = vec![ContentPart::text(format!("{} {tool} reported an error", self.plugin_name))];
         }
-        Ok(ToolResult { content, details: json!({ "plugin_id": self.plugin_id, "tool": tool }), structured: Some(structured), is_error, terminate: false })
+        Ok(ToolResult { content, details: json!({ "plugin_id": self.plugin_id, "tool": tool }), structured: Some(structured), is_error, terminate: false, ..ToolResult::default() })
     }
 }
 
@@ -2228,7 +2228,7 @@ impl PluginTool {
             is_error: bool,
         }
         let reply = bounded_value(&ScriptReply { content: &blocks, structured_content: &structured, is_error: false })?;
-        Ok(ToolResult { content, details: json!({"plugin_id":self.plugin_id,"tool":tool}), structured: Some(reply), is_error: false, terminate: false })
+        Ok(ToolResult { content, details: json!({"plugin_id":self.plugin_id,"tool":tool}), structured: Some(reply), is_error: false, terminate: false, ..ToolResult::default() })
     }
 }
 

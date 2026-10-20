@@ -98,6 +98,11 @@ final class AppStore {
         guard isConnected, hasIdentity == true, (isMock || !isBootstrapping) else { return nil }
         return serviceStatusOwnership.generation
     }
+    private var deviceNameGeneration: UInt64 = 0
+    var deviceNameOwner: UInt64? {
+        guard isConnected, hasIdentity == true, (isMock || !isBootstrapping) else { return nil }
+        return deviceNameGeneration
+    }
     /// The first connection is still loading. The window is visible throughout this phase.
     private(set) var isStarting = true
     /// nil until the CLI has supplied the initial snapshot.
@@ -499,6 +504,7 @@ final class AppStore {
         guard !isApplyingBootstrap else { return }
         switch event {
         case .connectionChanged, .snapshotReplaced, .identityChanged:
+            deviceNameGeneration &+= 1
             let context = ServiceStatusContext(
                 admitted: isConnected && hasIdentity == true && (isMock || !isBootstrapping),
                 identityID: identityID)
@@ -1689,6 +1695,25 @@ final class AppStore {
         return status
     }
 
+    func setDeviceName(_ id: Device.ID, name: String, owner: UInt64) async throws {
+        guard deviceNameOwner == owner, let current = device(id), current.os != .unknown else {
+            throw CancellationError()
+        }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name.unicodeScalars.count <= 64 else {
+            throw CLIClient.RequestError(message: L("Keep the name to 64 characters"))
+        }
+        if isMock {
+            guard let index = devices.firstIndex(where: { $0.id == id }) else { return }
+            let original = current.machineName.isEmpty ? current.name : current.machineName
+            devices[index].machineName = original
+            devices[index].name = name.isEmpty ? original : name
+            emit(.rosterChanged)
+            return
+        }
+        _ = try await client.request("device.set_name", ["id": id, "name": name])
+        guard deviceNameOwner == owner else { throw CancellationError() }
+    }
     /// Unpairs another Device. The CLI has the relay drop its key; the Device wipes its copy of
     /// the account the next time it connects. Throws when the relay could not be told.
     func unpairDevice(_ id: Device.ID) async throws {

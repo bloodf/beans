@@ -53,7 +53,7 @@ export interface ComposerReply {
 
 export interface ComposerHandle {
   focus(): void;
-  setText(text: string): void;
+  setText(text: string, preserveDraft?: boolean): void;
   /** Makes the draft a reply to a message, shown above the text until it is sent or dropped. */
   reply(to: ComposerReply): void;
 }
@@ -136,10 +136,11 @@ export function Composer(props: {
   };
 
   const focus = () => area?.focus();
-  const replaceText = (value: string) => {
+  const replaceText = (value: string, preserveDraft = false) => {
+    if (preserveDraft && draft.text !== "") value = `${draft.text}\n\n${value}`;
     draft.revision++;
     setText(value);
-    draft.picked = [];
+    if (!preserveDraft) draft.picked = [];
     if (area) area.value = value;
     queueMicrotask(() => {
       updateLayout();

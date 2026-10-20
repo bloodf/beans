@@ -19,6 +19,8 @@ import {
   providerModels,
   providerName,
   routineDetail,
+  routineProblem,
+  routineProblemNeedsUser,
   spendSummary,
   thinkingLevels,
   withCustomModels,
@@ -381,7 +383,7 @@ function Routines(props: { bot: Bot }) {
           {(routine) => (
             <SwitchRow
               symbol={routine().isRunning ? "arrow.triangle.2.circlepath" : routine().isEnabled ? "clock" : "pause.circle"}
-              tint={routine().isRunning ? "var(--accent)" : routine().isEnabled ? "var(--label-2)" : "var(--label-3)"}
+              tint={routine().isRunning ? "var(--accent)" : routineProblemNeedsUser(routineProblem(routine())) ? "var(--orange)" : routine().isEnabled ? "var(--label-2)" : "var(--label-3)"}
               title={routine().name}
               detail={routineDetail(routine())}
               isOn={routine().isEnabled}

@@ -1715,6 +1715,25 @@ body.resizing * {
   line-height: 1.4;
 }
 
+.routine-sheet .sheet-header,
+.routine-sheet .sheet-buttons {
+  flex: none;
+}
+
+.routine-sheet .sheet-content {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.routine-sheet .sheet-buttons,
+.routine-sheet .sheet-actions {
+  flex-wrap: wrap;
+}
+
+.routine-sheet .sheet-leading {
+  min-width: 0;
+}
+
 .routine-prompt {
   height: 96px;
   overflow-y: auto;

@@ -33,6 +33,8 @@ Help › Diagnostics… (Command-Option-Shift-D) opens a resizable native review
 
 General settings has an account-wide Pause switch, synchronized across Devices through the encrypted roster; the sidebar footer shows Paused status. A DM inspector's Abilities controls gate shell, file writes, and either all installed plugins or selected plugin IDs for that bot. Existing bots remain unrestricted until their abilities are changed.
 
+Custom-provider model drafts preserve an omitted thinking-level declaration separately from an explicit empty array. Sparse discovery keeps the draft's existing levels when absent and replaces them when present, including an empty array, without changing the selected models, default, or other saved metadata. Runtime thinking menus use the current CLI provider status's resolved `levels`; the app does not derive levels from model IDs, reasoning flags, or thinking formats. See [Providers](providers.md).
+
 Settings › Plugins lists marketplace installs and user-managed MCP servers for the selected Runner. Its MCP section loads `mcp.list` from that Runner and reloads its `mcp.json` with `mcp.reload`. A server sheet fetches `mcp.get` only when opened; it edits JSON configuration and name through `mcp.save`, toggles availability, reconnects, signs in or out, hides or shows individual tools, and confirms removal. Credentials in environment and header fields appear masked, with unchanged values preserved on save. Remote Runner requests are sealed by the CLI; server configuration is not roster state.
 
 Memory-service drafts and the independent local MEMORY.md editor are described in [Memory service UI](memory-ui.md).

@@ -1,11 +1,31 @@
 import { expect, mock, test } from "bun:test";
 import type { Chat, Message } from "../core/model";
+import { fileURLToPath } from "node:url";
+
+// Module mocks live only in a dedicated Bun host, never in the full-suite process.
+if (process.env.BEANS_TRANSCRIPT_SCROLL_HOST === "1") {
+  installTranscriptScenario();
+} else {
+  test("transcript scroll consumer in an isolated Bun host", () => {
+    const child = Bun.spawnSync([process.execPath, "test", "--isolate", fileURLToPath(import.meta.url)], {
+      env: { ...process.env, BEANS_TRANSCRIPT_SCROLL_HOST: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(child.exitCode, child.stdout.toString() + child.stderr.toString()).toBe(0);
+  });
+}
+
+function installTranscriptScenario() {
+// No renderer is installed in mobile; retain its existing hook-slot/native-tag boundary.
+// These scenarios exercise production callbacks, not native layout or React scheduling.
 
 type ScrollEvent = { nativeEvent: { contentOffset: { y: number }; contentSize: { height: number }; layoutMeasurement: { height: number } } };
 type Props = {
   blankSpace?: { value: number };
   renderScrollComponent: (props: Record<string, never>, ref: null) => Node;
   children?: unknown;
+  data?: Array<{ key: string }>;
   ref?: { current: unknown };
   onLayout: (event: { nativeEvent: { layout: { height: number } } }) => void;
   onContentSizeChange: (width: number, height: number) => void;
@@ -56,6 +76,7 @@ let firstRender = true;
 mock.module("react", () => ({ ...react, default: react }));
 const scrolls: Array<{ kind: string; offset?: number }> = [];
 let offset = 0, tail = 300;
+let renderedRows: Array<{ key: string }> = [];
 const list = {
   scrollToOffset: ({ offset: target }: { offset: number }) => { scrolls.push({ kind: "offset", offset: target }); },
   scrollToEnd: () => { scrolls.push({ kind: "end" }); },
@@ -63,10 +84,13 @@ const list = {
   getWindowSize: () => ({ height: 800 }),
   getChildContainerDimensions: () => ({ height: tail }),
   getFirstItemOffset: () => 0,
-  getLayout: () => ({ y: 0, isHeightMeasured: true }),
+  getLayout: (index: number) => renderedRows[index]?.key === message.id ? { y: 0, isHeightMeasured: true } : undefined,
 };
 const jsx = (type: unknown, props: Props): Node => {
-  if (type === "List" && props.ref) props.ref.current = list;
+  if (type === "List" && props.ref) {
+    props.ref.current = list;
+    renderedRows = props.data ?? [];
+  }
   return { type, props };
 };
 mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
@@ -77,7 +101,7 @@ mock.module("expo-router", () => ({ Stack: Object.assign("Stack", { Screen: "Scr
 mock.module("expo-router/react-navigation", () => ({ useHeaderHeight: () => 64 }));
 mock.module("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 24, bottom: 0 }) }));
 mock.module("react-native-keyboard-controller", () => ({ KeyboardChatScrollView: "Scroll", KeyboardController: { dismiss: () => {} }, useKeyboardHandler: () => {} }));
-mock.module("react-native-reanimated", () => ({ default: { View: "AnimatedView" }, useSharedValue: (value: number) => slot(() => ({ value })).value, useAnimatedStyle: () => ({}), useAnimatedReaction: () => {}, runOnJS: (callback: unknown) => callback, ZoomIn: { duration: () => ({}) }, ZoomOut: { duration: () => ({}) }));
+mock.module("react-native-reanimated", () => ({ default: { View: "AnimatedView" }, useSharedValue: (value: number) => slot(() => ({ value })).value, useAnimatedStyle: () => ({}), useAnimatedReaction: () => {}, runOnJS: (callback: unknown) => callback, ZoomIn: { duration: () => ({}) }, ZoomOut: { duration: () => ({}) } }));
 mock.module("expo-linear-gradient", () => ({ LinearGradient: "Gradient" }));
 mock.module("../../modules/beans-core/SoftScrollEdgeView", () => ({ SoftScrollEdgeView: "Edge" }));
 mock.module("./AvatarFlashList", () => ({ AvatarFlashList: "List" }));
@@ -94,11 +118,11 @@ const message: Message = { id: "sent", chat_id: "chat", author: { kind: "you" },
 const chat: Chat = { id: "chat", kind: "dm", bot_ids: [], messages: [message], unread_count: 0, is_pinned: false, created_at: 0 };
 const store = { identityId: "account", relayUrl: "relay", deviceId: "phone", paired: true, statuses: {}, openChatId: null };
 mock.module("../core/store", () => ({ useStore: Object.assign((select: (state: typeof store) => unknown) => select(store), { subscribe: () => () => {}, getState: () => store, setState: () => {} }), useChat: () => chat, useBotMap: () => new Map(), useWorkingBots: () => [], useIsWorking: () => false, useRunningTasks: () => [] }));
-mock.module("../core/engine", () => ({ chatTitle: () => "Chat", engine: { sendMessage: async () => message, loadOlder: async () => {} } }));
+mock.module("../core/engine", () => ({ chatTitle: () => "Chat", engine: { sendMessage: async () => { chat.messages = [...chat.messages, message]; return message; }, loadOlder: async () => {} } }));
 mock.module("../core/composerDraft", () => ({ composerDraft: () => ({}), editComposerDraft: () => {} }));
-mock.module("./transcript", () => ({ buildRows: () => [{ key: "sent", type: "message", message }], quoteAuthorName: () => "You", DayRow: "Day", MarkerRow: "Marker", MessageRow: "Message", NoticeRow: "Notice", PermissionRow: "Permission", CommandRow: "Command", StatusRow: "Status", WorkingRow: "Working" }));
+mock.module("./transcript", () => ({ buildRows: (current: Chat) => current.messages.map(row => ({ key: row.id, type: "message", message: row })), quoteAuthorName: () => "You", DayRow: "Day", MarkerRow: "Marker", MessageRow: "Message", NoticeRow: "Notice", PermissionRow: "Permission", CommandRow: "Command", StatusRow: "Status", WorkingRow: "Working" }));
 // Native mocks must be installed before this production consumer loads.
-const { default: ChatScreen } = await import("../../app/(main)/chat/[id]");
+const { default: ChatScreen }: typeof import("../../app/(main)/chat/[id]") = require("../../app/(main)/chat/[id]");
 function find(node: unknown, type: unknown): Node | undefined {
   if (Array.isArray(node)) return node.map(child => find(child, type)).find(Boolean);
   if (!node || typeof node !== "object" || !("type" in node) || !("props" in node)) return;
@@ -108,7 +132,9 @@ function find(node: unknown, type: unknown): Node | undefined {
 }
 
 test.each(["ios", "android"])("%s transcript yields streaming scroll to reader and anchors acknowledged sends", async os => {
-  platform.OS = os; slots = []; cursor = 0; effects.length = 0; firstRender = true; scrolls.length = 0; tail = 300;
+  platform.OS = os; slots = []; cursor = 0; effects.length = 0; firstRender = true; scrolls.length = 0; tail = 300; offset = 0;
+  chat.messages = [{ ...message, id: "earlier" }];
+  renderedRows = [];
   const originalTimeout = globalThis.setTimeout, originalClear = globalThis.clearTimeout, originalFrame = globalThis.requestAnimationFrame;
   const timers = new Map<number, () => void>(); let timerId = 0;
   // Native timer handles are replaced only within this deterministic consumer scenario.
@@ -137,15 +163,27 @@ test.each(["ios", "android"])("%s transcript yields streaming scroll to reader a
     events.onScrollToTop(); scrolls.length = 0; events.onContentSizeChange(400, 1800); expect(scrolls).toEqual([]);
     render();
     expect(await find(root, "Composer")!.props.onSend("sent", [], [])).toBe(true);
+    // The acknowledgement adds the sent row; only the next render exposes its layout.
+    expect(renderedRows.some(row => row.key === message.id)).toBe(false);
     render();
+    expect(renderedRows.some(row => row.key === message.id)).toBe(true);
     find(root, "List")!.props.onContentSizeChange(400, 1801);
     render(); scrolls.length = 0;
     // Observe the inset handed to the real scroll consumer, not the harness's hook slots.
     const scrollView = find(root, "List")!.props.renderScrollComponent({}, null);
+    expect(scrollView.type).toBe("Scroll");
     expect(scrollView.props.blankSpace?.value).toBe(os === "android" ? 412 : 436);
     const currentEvents = find(root, "List")!.props;
     currentEvents.onScrollBeginDrag(); scrolls.length = 0; tail = 350;
     currentEvents.onContentSizeChange(400, 1850);
     expect(scrolls).toEqual([]);
+    // A smaller anchored inset waits for the iOS row commit; Android publishes immediately.
+    if (os === "ios") {
+      expect(scrollView.props.blankSpace?.value).toBe(436);
+      for (const callback of [...timers.values()]) callback();
+      timers.clear();
+    }
+    expect(scrollView.props.blankSpace?.value).toBe(os === "android" ? 362 : 386);
   } finally { globalThis.setTimeout = originalTimeout; globalThis.clearTimeout = originalClear; globalThis.requestAnimationFrame = originalFrame; }
 });
+}

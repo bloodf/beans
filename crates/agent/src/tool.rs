@@ -289,17 +289,10 @@ pub(crate) fn fold_cleanup(result: &mut Result<ToolResult, ToolError>, completed
     if !completed.iter().any(|(_, completion)| completion.is_uncertain()) {
         return;
     }
-    let diagnostic = cleanup_diagnostic(completed);
-    match result {
-        Ok(result) => {
-            result.set_cleanup_uncertainty(diagnostic);
-        }
-        Err(error) => {
-            if !error.0.contains(&diagnostic) {
-                error.0.push_str("\n\n");
-                error.0.push_str(&diagnostic);
-            }
-        }
+    // Error conversion and uncertainty enforcement belong to the owning runner. Preserve
+    // the original Err here; its retained scope still carries the worker classification.
+    if let Ok(result) = result {
+        result.set_cleanup_uncertainty(cleanup_diagnostic(completed));
     }
 }
 
@@ -556,10 +549,7 @@ mod lifecycle_tests {
         assert!(!diagnostic.contains("secret"));
         let mut error = Err(ToolError("Original failure".into()));
         fold_cleanup(&mut error, &completed);
-        let error = error.unwrap_err().0;
-        assert!(error.starts_with("Original failure\n\nPipe cleanup:"));
-        assert!(error.contains("Cleanup completion is uncertain."));
-        assert!(!error.contains("secret panic payload"));
+        assert_eq!(error.unwrap_err().0, "Original failure");
         let mut success = Ok(ToolResult::text("original"));
         fold_cleanup(&mut success, &completed);
         let success = success.unwrap();

@@ -1133,7 +1133,7 @@ async fn emit_tool_execution_end(finalized: &FinalizedCall, emit: &Emitter<'_>) 
     emit.send(AgentEvent::ToolExecutionEnd {
             tool_call_id: finalized.tool_call.id.clone(),
             tool_name: finalized.tool_call.name.clone(),
-            result: finalized.result.clone(),
+            result: finalized.result.clone().into_reported(),
             is_error: finalized.is_error,
         },
     )
@@ -1144,7 +1144,7 @@ fn tool_result_message(finalized: &FinalizedCall) -> ToolResultMessage {
     ToolResultMessage {
         tool_call_id: finalized.tool_call.id.clone(),
         tool_name: finalized.tool_call.name.clone(),
-        content: finalized.result.content.clone(),
+        content: finalized.result.clone().into_reported().content,
         details: finalized.result.details.clone(),
         is_error: finalized.is_error,
         timestamp: crate::now_ms(),
@@ -1873,6 +1873,58 @@ mod tests {
                 assert!(worker.completion().await.result().is_err());
             }
             self.execute(id, args, cancel, update).await
+        }
+    }
+
+    struct TransformUncertainContent(u8);
+
+    #[async_trait]
+    impl Tool for TransformUncertainContent {
+        fn name(&self) -> &str { "transform_uncertain" }
+        fn description(&self) -> &str { "Transforms a real uncertain child result" }
+        fn parameters(&self) -> Value { json!({"type":"object","properties":{}}) }
+        async fn execute(&self, _: &str, _: Value, cancel: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+            let mut result = crate::tool::DirectRunner.run(Arc::new(StructuredWorkerResult(true)), "child".into(), json!({}), cancel).await.result;
+            assert!(result.cleanup_uncertainty.is_some());
+            match self.0 {
+                0 => result.content.clear(),
+                1 => result.content = vec![ContentPart::text("replacement")],
+                _ => {
+                    result.content = vec![ContentPart::text("first"), ContentPart::text("second")];
+                    result.content.reverse();
+                }
+            }
+            Ok(result)
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_child_content_transform_survives_outer_finalization() {
+        for mode in 0..3 {
+            let config = AgentLoopConfig::new(Scripted::new("p", vec![]));
+            let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+            let assistant = AssistantMessage::empty("p", "m");
+            let call = ToolCall { id: "outer".into(), name: "transform_uncertain".into(), arguments: json!({}) };
+            let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &call };
+            let tool: Arc<dyn Tool> = Arc::new(TransformUncertainContent(mode));
+            let (tx, mut rx) = mpsc::channel(256);
+            let emit = Emitter::new(&tx, &config);
+            let (result, is_error) = execute_prepared(&tool, &call, &call.arguments, &emit, &CancellationToken::new(), &runner).await;
+            let finalized = finalize_executed(&context, &assistant, call, json!({}), result, is_error, &config, None).await;
+            assert!(finalized.is_error && finalized.result.is_error);
+            assert!(finalized.result.cleanup_uncertainty.is_some());
+            let expected: Vec<&str> = match mode { 0 => vec![], 1 => vec!["replacement"], _ => vec!["second", "first"] };
+            assert_eq!(finalized.result.content.iter().filter_map(ContentPart::as_text).collect::<Vec<_>>(), expected);
+            assert_eq!(finalized.result.text_content().matches("Pipe cleanup:").count(), 1);
+            let message = tool_result_message(&finalized);
+            assert!(message.is_error);
+            assert_eq!(message.content.iter().filter_map(ContentPart::as_text).take(expected.len()).collect::<Vec<_>>(), expected);
+            assert_eq!(message.text().matches("Pipe cleanup:").count(), 1);
+            emit_tool_execution_end(&finalized, &emit).await;
+            let AgentEvent::ToolExecutionEnd { result, is_error, .. } = rx.recv().await.unwrap() else { panic!("execution end expected") };
+            assert!(is_error && result.is_error);
+            assert_eq!(result.text_content().matches("Pipe cleanup:").count(), 1);
+            assert_eq!(result.content.iter().filter_map(ContentPart::as_text).take(expected.len()).collect::<Vec<_>>(), expected);
         }
     }
 

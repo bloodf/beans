@@ -35,22 +35,25 @@ pub struct ToolResult {
     pub terminate: bool,
     /// Runtime-only cleanup provenance, independent of tool output and hook error recovery.
     #[serde(skip)]
-    pub cleanup_uncertainty: Option<(usize, String)>,
+    pub cleanup_uncertainty: Option<String>,
 }
 
 impl ToolResult {
     pub(crate) fn take_cleanup_uncertainty(&mut self) -> Option<String> {
-        self.cleanup_uncertainty.take().map(|(index, diagnostic)| {
-            self.content.remove(index);
-            diagnostic
-        })
+        self.cleanup_uncertainty.take()
     }
 
     pub(crate) fn set_cleanup_uncertainty(&mut self, diagnostic: String) {
-        self.take_cleanup_uncertainty();
         self.is_error = true;
-        self.cleanup_uncertainty = Some((self.content.len(), diagnostic.clone()));
-        self.content.push(ContentPart::text(diagnostic));
+        self.cleanup_uncertainty = Some(diagnostic);
+    }
+
+    /// Projects runtime provenance into output only when reporting, never into mutable tool content.
+    pub(crate) fn into_reported(mut self) -> Self {
+        if let Some(diagnostic) = self.take_cleanup_uncertainty() {
+            self.content.push(ContentPart::text(diagnostic));
+        }
+        self
     }
 
     pub fn text(text: impl Into<String>) -> Self {
@@ -68,7 +71,7 @@ impl ToolResult {
     }
 
     pub fn text_content(&self) -> String {
-        self.content.iter().filter_map(ContentPart::as_text).collect::<Vec<_>>().join("\n")
+        self.content.iter().filter_map(ContentPart::as_text).chain(self.cleanup_uncertainty.as_deref()).collect::<Vec<_>>().join("\n")
     }
 }
 

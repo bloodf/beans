@@ -13,13 +13,23 @@ import { checkSkillLibraryConsumer } from "./src/ui/sheets/skillLibrary.test";
 import { checkCommandCardInput } from "./src/ui/chat/cards.test";
 import { checkComposerSendAck } from "./src/ui/chat/composer.test";
 
-const checks = { checkReducedMotion, checkSearchResults, checkSheetDialogName, checkSkillDiscoveryConsumer, checkSkillLibraryConsumer, checkCommandCardInput, checkComposerSendAck };
+const checks = [
+  { path: "/src/ui/motion.test.tsx", name: "checkReducedMotion", run: checkReducedMotion, transport: false },
+  { path: "/src/ui/palette.test.tsx", name: "checkSearchResults", run: checkSearchResults, transport: false },
+  { path: "/src/ui/overlay.test.tsx", name: "checkSheetDialogName", run: checkSheetDialogName, transport: false },
+  { path: "/src/ui/sheets/skillDiscovery.test.tsx", name: "checkSkillDiscoveryConsumer", run: checkSkillDiscoveryConsumer, transport: true },
+  { path: "/src/ui/sheets/skillLibrary.test.tsx", name: "checkSkillLibraryConsumer", run: checkSkillLibraryConsumer, transport: true },
+  { path: "/src/ui/chat/cards.test.tsx", name: "checkCommandCardInput", run: checkCommandCardInput, transport: false },
+  { path: "/src/ui/chat/composer.test.tsx", name: "checkComposerSendAck", run: checkComposerSendAck, transport: false },
+];
 
 declare global {
   interface Window { runFixture: typeof runFixture; }
 }
 
 export async function runFixture(fixture: { path: string; check: string; transport?: boolean }) {
+  const selected = checks.find((check) => check.path === fixture.path && check.name === fixture.check && check.transport === (fixture.transport === true));
+  if (!selected) throw new Error("Unknown browser fixture binding");
   await loadHost();
   document.documentElement.dataset.platform = "linux";
   setLanguage("en");
@@ -34,9 +44,8 @@ export async function runFixture(fixture: { path: string; check: string; transpo
       await promise;
     }
   }
-  if (fixture.transport) hostInfo().isMock = false;
-  if (!(fixture.check in checks)) throw new Error(`Missing check ${fixture.check}`);
-  const check = checks[fixture.check as keyof typeof checks];
+  if (selected.transport) hostInfo().isMock = false;
+  const check = selected.run;
   const { promise, reject } = Promise.withResolvers<never>();
   const timer = setTimeout(() => reject(new Error("Browser check exceeded 30 seconds")), 30_000);
   try {

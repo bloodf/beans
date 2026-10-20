@@ -4,7 +4,7 @@ import { expect, mock, test } from "bun:test";
 // Hook slots/native tags follow Composer.test.tsx; native layout and navigation need device proof.
 type SearchItem = { snippet: string };
 type Node = { type: unknown; props: { children?: unknown; data: SearchItem[]; renderItem: (input: { item: SearchItem }) => Node; onPress: () => void; onChangeText: (value: string | { nativeEvent: { text: string } }) => void; hidden?: boolean } };
-type HookRecord = { deps?: unknown[]; value?: unknown; cleanup?: void | (() => void) };
+type HookRecord = { deps?: unknown[]; value?: unknown; cleanup?: () => void };
 let slots: unknown[] = [], cursor = 0, dirty = false;
 let effects: Array<() => void> = [];
 function slot<T>(make: () => T) {
@@ -23,7 +23,8 @@ const react = {
   },
   useMemo: (compute: () => unknown, deps: unknown[]) => {
     const item = slot<HookRecord>(() => ({}));
-    if (!item.value.deps || deps.some((value, index) => !Object.is(value, item.value.deps[index]))) {
+    const previousDeps = item.value.deps;
+    if (!previousDeps || deps.some((value, index) => !Object.is(value, previousDeps[index]))) {
       item.value.deps = deps; item.value.value = compute();
     }
     return item.value.value;
@@ -31,8 +32,14 @@ const react = {
   useRef: <T,>(initial: T) => slot(() => ({ current: initial })).value,
   useEffect: (effect: () => void | (() => void), deps: unknown[]) => {
     const item = slot<HookRecord>(() => ({}));
-    if (!item.value.deps || deps.some((value, index) => !Object.is(value, item.value.deps[index]))) {
-      effects.push(() => { item.value.cleanup?.(); item.value.deps = deps; item.value.cleanup = effect(); });
+    const previousDeps = item.value.deps;
+    if (!previousDeps || deps.some((value, index) => !Object.is(value, previousDeps[index]))) {
+      effects.push(() => {
+        item.value.cleanup?.();
+        item.value.deps = deps;
+        const cleanup = effect();
+        item.value.cleanup = typeof cleanup === "function" ? cleanup : undefined;
+      });
     }
   },
 };
@@ -184,12 +191,14 @@ test("widening a Devices or Search tab restores the empty chat pane without repl
   for (const path of ["/devices", "/devices/device/runner", "/search", "/chat/current", "/"]) {
     slots = []; cursor = 0; effects = []; navigated.length = 0;
     pathname = path; wide = false;
-    const compact = TabsLayout();
+    // The JSX runtime mock returns the harness Node shape.
+    const compact = TabsLayout() as unknown as Node;
     for (const effect of effects) effect();
     expect(compact.props.hidden).toBe(false);
     expect(navigated).toEqual([]);
     cursor = 0; effects = []; wide = true;
-    const expanded = TabsLayout();
+    // The same mocked JSX boundary applies after the width transition.
+    const expanded = TabsLayout() as unknown as Node;
     for (const effect of effects) effect();
     expect(expanded.props.hidden).toBe(true);
     expect(navigated).toEqual(path.startsWith("/devices") || path === "/search" ? ["/"] : []);

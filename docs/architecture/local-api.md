@@ -109,6 +109,8 @@ The required string parameters that `api.rs` reads through its `string` helper (
 
 Routine timezones are IANA names; creation and description default to this Device's zone, with UTC when unavailable. `missed_run_policy` is `coalesce` (default) or `skip`. Updates keep omitted values. A routine output includes `timezone`, `missed_run_policy`, optional `last_scheduled_at` and `health`, plus `schedule_text`, nullable `next_run_at`, `is_running` and `state` (`running`, `blocked`, `paused`, `waiting_for_runner`, `failed`, `on`). `paused_reason` is optionally `away` or `authentication`. All routine timestamps are Unix seconds.
 
+Optional `pending` is a Runner-owned scheduled intent: `{ job: Job, phase: "check" | "checking" | "model" | "running" }`. It is not client-editable. Unstarted intents recover after restart; effect-started intents remain `blocked` without automatic replay. Explicit Resume of an inactive routine discards uncertain intent and re-arms its schedule; Run Now refuses pending intent. See [routine recovery](bots.md#routines).
+
 `health` contains `updated_at`, nullable `last_check_at`, `last_success_at`, `status` and `retry_at`, integer `connection_failures` and `authentication_failures`, and `model`. `model` contains nullable `status` and `retry_at` plus its own integer failure counters. Both statuses are `quiet`, `ready`, `failed`, `blocked` or null. Check success does not reset model failures. `service.status` is a signed sealed Runner verb, not a local API method; its body is empty and its result matches `device.service_status`. There is no local `service.status { runner_id }` endpoint.
 
 ### Plugins, MCP, providers

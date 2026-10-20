@@ -1698,6 +1698,8 @@ impl App {
             "paused"
         } else if !online {
             "waiting_for_runner"
+        } else if routine.pending.as_ref().is_some_and(|pending| matches!(pending.phase, RoutinePhase::Checking | RoutinePhase::Running)) {
+            "blocked"
         } else {
             match routine.health.as_ref().and_then(|health| health.model.status.or(health.status)) {
                 Some(CheckStatus::Failed) => "failed",
@@ -2445,6 +2447,7 @@ mod tests {
             timezone: "UTC".into(),
             missed_run_policy: Default::default(),
             last_scheduled_at: None,
+            pending: None,
             health: None,
             is_enabled: true,
             enabled_at: 1.0,

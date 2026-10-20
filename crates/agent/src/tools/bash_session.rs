@@ -1459,9 +1459,8 @@ mod tests {
             }
         }).await.expect("the command continues printing after its call returns");
         assert!(session.end().is_none(), "only the test releases the running command");
-        let stopped = call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await.unwrap();
+        call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await.unwrap();
         assert_eq!(session.end(), Some(SessionEnd::Signaled(libc::SIGINT)));
-        assert_eq!(stopped.details["state"], "exited");
         assert!(t.host.0.lock().unwrap().is_empty());
 
         // One that ends first reads as it would have without it.

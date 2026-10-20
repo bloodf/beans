@@ -89,12 +89,13 @@ fn parse_every(rest: &str) -> Result<Schedule, String> {
             (amount, unit)
         }
     };
-    let secs = match unit {
-        "m" | "min" | "mins" | "minute" | "minutes" => amount * 60,
-        "h" | "hr" | "hrs" | "hour" | "hours" => amount * 3600,
-        "d" | "day" | "days" => amount * 86_400,
+    let multiplier = match unit {
+        "m" | "min" | "mins" | "minute" | "minutes" => 60,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
+        "d" | "day" | "days" => 86_400,
         _ => return Err(format!("Could not read the interval {rest:?}. Use every 30m, every 2h, or every 1d.")),
     };
+    let secs = amount.checked_mul(multiplier).ok_or("That interval is longer than a year.")?;
     if secs < MIN_INTERVAL_SECS {
         return Err("That runs too often. A routine runs at most every five minutes.".into());
     }
@@ -366,6 +367,9 @@ mod tests {
         assert_eq!(parse("every 120m").unwrap().canonical(), "every 2h");
         assert!(parse("every 2m").unwrap_err().contains("too often"));
         assert!(parse("every fortnight").is_err());
+        for unit in ["m", "h", "d"] {
+            assert!(parse(&format!("every {}{unit}", i64::MAX)).unwrap_err().contains("longer than a year"));
+        }
         assert_eq!(parse("every 30m").unwrap().next_after(1000), Some(2800));
     }
 

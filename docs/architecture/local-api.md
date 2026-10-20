@@ -64,7 +64,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `device.rename` | `name` | `name` |
 | `device.unpair` | `id` (this Device's id forgets the identity) | `null` |
 | `device.update`, `device.auto_update` | any | always the error `SELF_UPDATE_UNAVAILABLE` |
-| `device.service_status` | `id?` (Runner id; this Device when omitted) | `installed`, `running` (booleans); local inspection and remote requests retain Runner update admission |
+| `device.service_status` | see [Routine and background service API](routine-api.md) | service state |
 | `sync.account` | none | `providers` (masked); waits up to 30 s for the pull |
 | `sync.wake`, `ui.watching` | `chat_id?` (watching) | `null` |
 | `push.register` | `platform`, `token`, `environment?` | `null` |
@@ -100,16 +100,10 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `chats.permission` | `chat_id`, `message_id`, `decision` (`allow`, `always`, `deny`) | `answered` or the plugin sign-in reply |
 | `bash.stdin`, `bash.stop`, `bash.background` | `chat_id`, `message_id`; `bash.stdin` also `text?`, `enter?` | the Runner's reply |
 | `files.path` | `attachment` | `path` (the decrypted file on this disk) |
-| `routines.create` | `bot_id`, `name`, `schedule`, `prompt?`, `enabled?`, `timezone?`, `missed_run_policy?` | `routine` |
-| `routines.update` | `id`, `name?`, `schedule?`, `prompt?`, `enabled?`, `timezone?`, `missed_run_policy?` | `routine` |
-| `routines.delete`, `routines.run` | `id` | `null` |
 | `workflows.create`, `workflows.list`, `workflows.delete` | see [Saved workflows](bots.md#saved-workflows) | `{ workflow }`, `{ workflows }`, `null` |
-| `routines.describe` | `schedule`, `timezone?`, `missed_run_policy?` | `schedule`, `text`, `timezone`, `missed_run_policy`, `next_run_at` |
+| `routines.*` | see [Routine and background service API](routine-api.md) | routine state and schedule descriptions |
 | `auto_review.set` | `is_enabled?`, `rules?` | `auto_review` |
 
-Routine timezones are IANA names; creation and description default to this Device's zone, with UTC when unavailable. `missed_run_policy` is `coalesce` (default) or `skip`. Updates keep omitted values. A routine output includes `timezone`, `missed_run_policy`, optional `last_scheduled_at` and `health`, plus `schedule_text`, nullable `next_run_at`, `is_running` and `state` (`running`, `blocked`, `paused`, `waiting_for_runner`, `failed`, `on`). `paused_reason` is optionally `away` or `authentication`. All routine timestamps are Unix seconds.
-
-`health` contains `updated_at`, nullable `last_check_at`, `last_success_at`, `status` and `retry_at`, integer `connection_failures` and `authentication_failures`, and `model`. `model` contains nullable `status` and `retry_at` plus its own integer failure counters. Both statuses are `quiet`, `ready`, `failed`, `blocked` or null. Check success does not reset model failures. `service.status` is a signed sealed Runner verb, not a local API method; its body is empty and its result matches `device.service_status`. There is no local `service.status { runner_id }` endpoint.
 
 ### Plugins, MCP, providers
 

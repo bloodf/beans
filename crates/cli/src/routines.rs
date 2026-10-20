@@ -209,15 +209,22 @@ pub fn set_enabled(app: &Arc<App>, id: &str, enabled: bool) -> Result<Routine, S
         return Err("Wait for the routine's active work before resuming it.".into());
     }
     app.update_routine(id, |routine| {
-        if enabled && (!routine.is_enabled || routine.pending.is_some()) {
+        let resumed = enabled && !routine.is_enabled;
+        if resumed {
             routine.enabled_at = now_secs();
             if let Some(health) = routine.health.as_mut() {
                 health.resume();
             }
         }
         routine.is_enabled = enabled;
-        if enabled && routine.pending.as_ref().is_some_and(|pending| matches!(pending.phase, RoutinePhase::Checking | RoutinePhase::Running)) {
+        if resumed && routine.pending.as_ref().is_some_and(|pending| matches!(pending.phase, RoutinePhase::Checking | RoutinePhase::Running)) {
             routine.pending = None;
+        }
+        if resumed {
+            let binding = schedule_binding(routine);
+            if let Some(pending) = routine.pending.as_mut() {
+                pending.binding = Some(binding);
+            }
         }
         routine.paused_reason = None;
     })
@@ -380,6 +387,8 @@ pub fn tick(app: &Arc<App>) {
         // While an update holds new work back, a due routine stays due: the next tick after
         // the lease ends starts it.
         let Some(admission) = app.update.try_admit() else { return };
+        #[cfg(test)]
+        scheduling_barrier(app, "claim");
         let claimed = if routine.pending.is_some() {
             Ok(routine)
         } else {
@@ -396,23 +405,56 @@ pub fn tick(app: &Arc<App>) {
     }
 }
 
+#[cfg(all(test, feature = "runner"))]
+fn scheduling_barrier(app: &App, point: &str) {
+    let barrier = {
+        let mut held = app.routine_barrier.lock().unwrap();
+        if held.as_ref().is_some_and(|(name, _, _)| name == point) { held.take() } else { None }
+    };
+    if let Some((_, entered, release)) = barrier {
+        entered.send(()).unwrap();
+        release.recv_timeout(std::time::Duration::from_secs(10)).expect("authority change releases checkpoint");
+    }
+}
+
 /// Atomically consume a due time with either a recoverable job or an explicit skip.
 #[cfg(feature = "runner")]
 fn claim_due(app: &Arc<App>, routine: &Routine, now: i64) -> Result<Routine, String> {
-    let skip = routine.missed_run_policy.should_skip(routine.next_run_at().unwrap_or(now), now);
-    let pending = if skip {
-        None
-    } else {
-        let mut job = job_for(app, routine)?;
-        job.id = format!("routine-scheduled-{}", uuid::Uuid::new_v4());
-        Some(RoutinePending { job: Box::new(job), phase: if routine.check.is_some() { RoutinePhase::Check } else { RoutinePhase::Model } })
-    };
-    app.record_routine(&routine.id, |current| {
-        if current.pending.is_none() {
+    let _lifecycle = app.plugin_admission(None)?;
+    let requested_by = app.this_device_id().ok_or("No local Runner")?;
+    let mut admitted = false;
+    let saved = app.record_owned_routine(&routine.id, false, |current, owned, chat_id| {
+        if owned && current.pending.is_none() && same_schedule(current, routine)
+            && current.next_run_at().is_some_and(|due| due <= now)
+            && current.next_run_at() == routine.next_run_at()
+            && (current.missed_run_policy.should_skip(current.next_run_at().expect("validated due time"), now) || chat_id.is_some()) {
+            let skip = current.missed_run_policy.should_skip(current.next_run_at().expect("validated due time"), now);
             current.last_scheduled_at = Some(now as f64);
-            current.pending = pending;
+            current.pending = if skip { None } else {
+                let job = Job {
+                    id: format!("routine-scheduled-{}", uuid::Uuid::new_v4()), chat_id: chat_id.expect("validated routine DM"),
+                    bot_id: current.bot_id.clone(), kind: "routine".into(), trigger_message_id: String::new(),
+                    routine_id: Some(current.id.clone()), check: None, requested_by,
+                    from_bot_id: None, hops: 0, round: 0, is_winding_down: false, setup: None, created_at: now_secs(),
+                };
+                Some(RoutinePending { job: Box::new(job), phase: if current.check.is_some() { RoutinePhase::Check } else { RoutinePhase::Model }, binding: Some(schedule_binding(current)) })
+            };
+            admitted = true;
         }
-    }).map_err(|error| error.to_string())
+    }).map_err(|error| error.to_string())?;
+    if admitted { Ok(saved) } else { Err("Routine scheduling authority changed before claim.".into()) }
+}
+
+fn schedule_binding(routine: &Routine) -> RoutineBinding {
+    RoutineBinding { bot_id: routine.bot_id.clone(), schedule: routine.schedule.clone(), timezone: routine.timezone.clone(), missed_run_policy: routine.missed_run_policy, check: routine.check.clone(), enabled_at: routine.enabled_at, last_scheduled_at: routine.last_scheduled_at }
+}
+
+#[cfg(feature = "runner")]
+fn same_schedule(current: &Routine, expected: &Routine) -> bool {
+    current.bot_id == expected.bot_id && current.schedule == expected.schedule
+        && current.timezone == expected.timezone && current.missed_run_policy == expected.missed_run_policy
+        && current.check == expected.check && current.enabled_at == expected.enabled_at
+        && current.last_scheduled_at == expected.last_scheduled_at
 }
 
 #[cfg(feature = "runner")]
@@ -423,9 +465,11 @@ fn dispatch_pending(app: &Arc<App>, routine: Routine, admission: crate::update_c
         RoutinePhase::Model => {
             // Publish the scheduled start before job.started, even while the chat is busy.
             // The durable Model intent remains recoverable until the turn's effect fence.
+            #[cfg(test)]
+            scheduling_barrier(app, "timestamp");
             let mut dispatched = false;
-            if let Err(error) = app.update_routine(&routine.id, |current| {
-                if current.pending.as_ref().is_some_and(|held| held.job.id == pending.job.id && held.phase == RoutinePhase::Model) {
+            if let Err(error) = app.record_owned_routine(&routine.id, false, |current, owned, _| {
+                if owned && same_schedule(current, &routine) && current.pending.as_ref().is_some_and(|held| held.binding.as_ref() == Some(&schedule_binding(current)) && held.job.id == pending.job.id && held.phase == RoutinePhase::Model) {
                     current.last_run_at = Some(now_secs());
                     dispatched = true;
                 }
@@ -445,9 +489,12 @@ fn dispatch_pending(app: &Arc<App>, routine: Routine, admission: crate::update_c
 #[cfg(feature = "runner")]
 pub(crate) fn begin_scheduled_model(app: &App, job: &Job) -> Result<(), String> {
     if !job.id.starts_with("routine-scheduled-") { return Ok(()) }
+    #[cfg(test)]
+    scheduling_barrier(app, "model");
     let mut admitted = false;
-    app.record_routine(job.routine_id.as_deref().ok_or("Missing scheduled routine")?, |routine| {
-        if let Some(pending) = routine.pending.as_mut().filter(|pending| pending.job.id == job.id && pending.phase == RoutinePhase::Model) {
+    app.record_owned_routine(job.routine_id.as_deref().ok_or("Missing scheduled routine")?, false, |routine, owned, _| {
+        let binding = schedule_binding(routine);
+        if let Some(pending) = routine.pending.as_mut().filter(|pending| owned && pending.binding.as_ref() == Some(&binding) && pending.job.id == job.id && pending.phase == RoutinePhase::Model) {
             pending.phase = RoutinePhase::Running;
             admitted = true;
         }
@@ -580,9 +627,12 @@ pub fn next_run_shown(routine: &Routine) -> Option<i64> {
 
 #[cfg(feature = "runner")]
 fn begin_scheduled_check(app: &App, routine: &Routine) -> Result<(), String> {
+    #[cfg(test)]
+    scheduling_barrier(app, "check");
     let mut admitted = false;
-    app.record_routine(&routine.id, |current| {
-        if let Some(pending) = current.pending.as_mut().filter(|pending| pending.phase == RoutinePhase::Check && routine.pending.as_ref().is_some_and(|held| held.job.id == pending.job.id)) {
+    app.record_owned_routine(&routine.id, false, |current, owned, _| {
+        let valid = owned && same_schedule(current, routine) && current.pending.as_ref().is_some_and(|pending| pending.binding.as_ref() == Some(&schedule_binding(current)));
+        if let Some(pending) = current.pending.as_mut().filter(|pending| valid && pending.phase == RoutinePhase::Check && routine.pending.as_ref().is_some_and(|held| held.job.id == pending.job.id)) {
             pending.phase = RoutinePhase::Checking;
             admitted = true;
         }
@@ -822,6 +872,7 @@ mod tests {
                 created_at: 0.0,
             });
         }
+        app.dm_with("b1", None).unwrap();
         ScratchApp(app, home)
     }
 
@@ -1439,6 +1490,7 @@ mod tests {
         let scratch = scratch_app();
         let app = &scratch.0;
         let routine = create(app, "b1", "Failure", "every 10m", "x", Some("return 'new'"), true).unwrap();
+        let routine = app.update_routine(&routine.id, |r| r.enabled_at = now_secs() - 700.0).unwrap();
         let admission = app.update.try_admit().unwrap();
         let claimed = claim_due(app, &routine, now_unix()).unwrap();
         let connection = rusqlite::Connection::open(app.config.database_path()).unwrap();
@@ -1520,7 +1572,9 @@ mod tests {
         let dm = app.dm_with("b1", None).unwrap();
         app.upsert_message(Message::new(&dm.meta.id, Author::You, Body::text("Resume this routine.")), false);
         let resumed = set_enabled(app, &routine.id, true).unwrap();
-        assert_eq!(resumed.pending, claimed.pending);
+        assert_eq!(resumed.pending.as_ref().unwrap().job.as_ref(), claimed.pending.as_ref().unwrap().job.as_ref());
+        assert_eq!(resumed.pending.as_ref().unwrap().phase, RoutinePhase::Check);
+        assert_eq!(resumed.pending.as_ref().unwrap().binding, Some(schedule_binding(&resumed)));
         tick(app);
         for _ in 0..200 {
             if app.routine(&routine.id).unwrap().pending.is_none() && !app.routine_checks.is_running(&routine.id) && Arc::strong_count(app) == 1 { break; }
@@ -1536,6 +1590,8 @@ mod tests {
         let routine = app.update_routine(&routine.id, |r| {
             r.created_at = now_secs() - (AWAY_AFTER_SECS + 1000) as f64;
             r.enabled_at = r.created_at;
+            r.health = None;
+            r.last_scheduled_at = None;
         }).unwrap();
         let admission = app.update.try_admit().unwrap();
         let claimed = claim_due(app, &routine, now_unix()).unwrap();
@@ -1559,12 +1615,14 @@ mod tests {
         let scratch = scratch_app();
         let app = &scratch.0;
         let routine = create(app, "b1", "Edit claim", "every 10m", "x", None, true).unwrap();
+        let routine = app.update_routine(&routine.id, |r| r.enabled_at = now_secs() - 700.0).unwrap();
         let admission = app.update.try_admit().unwrap();
         let claimed = claim_due(app, &routine, now_unix()).unwrap();
         let old_job = claimed.pending.unwrap().job;
         assert!(edit(app, &routine.id, None, Some("every 20m"), None, None).unwrap().pending.is_none());
         assert!(begin_scheduled_model(app, &old_job).is_err());
-        let claimed = claim_due(app, &app.routine(&routine.id).unwrap(), now_unix()).unwrap();
+        let due = app.update_routine(&routine.id, |r| { r.enabled_at = now_secs() - 2000.0; r.last_scheduled_at = None; }).unwrap();
+        let claimed = claim_due(app, &due, now_unix()).unwrap();
         let job = claimed.pending.unwrap().job;
         begin_scheduled_model(app, &job).unwrap();
         let edited = edit(app, &routine.id, None, Some("every 30m"), None, None).unwrap();
@@ -1578,6 +1636,7 @@ mod tests {
         let scratch = scratch_app();
         let app = &scratch.0;
         let routine = create(app, "b1", "Merge claim", "every 10m", "x", None, true).unwrap();
+        let routine = app.update_routine(&routine.id, |r| r.enabled_at = now_secs() - 700.0).unwrap();
         let admission = app.update.try_admit().unwrap();
         let claimed = claim_due(app, &routine, now_unix()).unwrap();
         let bots = app.state.lock().unwrap().bots.clone();
@@ -1631,6 +1690,131 @@ mod tests {
         }
         assert_eq!(app.routine(&routine.id).unwrap().last_outcome.as_deref(), Some("error"));
         assert_eq!(app.messages(&dm.meta.id).iter().filter(|message| matches!(&message.body, Body::Notice { routine_id: Some(id), .. } if id == &routine.id)).count(), 1);
+    }
+    #[cfg(feature = "runner")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn winning_authority_changes_reject_snapshots_and_effect_fences() {
+        for point in ["claim", "skip", "check", "model", "timestamp"] {
+            for change in ["disable", "rearm", "runner", "pause"] {
+                let scratch = scratch_app();
+                let app = &scratch.0;
+                let check = (point == "check").then_some("store('forbidden', true); return 'new'");
+                let routine = create(app, "b1", "Authority", "every 10m", "x", check, true).unwrap();
+                let routine = app.update_routine(&routine.id, |r| {
+                    r.enabled_at = now_secs() - 700.0;
+                    if point == "skip" { r.missed_run_policy = crate::routine_health::MissedRunPolicy::Skip; }
+                }).unwrap();
+                let mut admission = Some(app.update.try_admit().unwrap());
+                let claimed = if matches!(point, "claim" | "skip") { routine.clone() } else { claim_due(app, &routine, now_unix()).unwrap() };
+                let (entered_tx, entered) = std::sync::mpsc::channel();
+                let (release, release_rx) = std::sync::mpsc::channel();
+                *app.routine_barrier.lock().unwrap() = Some(((if point == "skip" { "claim" } else { point }).into(), entered_tx, release_rx));
+                let worker = app.clone();
+                let thread = std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+                    runtime.block_on(async {
+                        match point {
+                            "claim" | "skip" => tick(&worker),
+                            "check" => { assert!(begin_scheduled_check(&worker, &claimed).is_err()); }
+                            "model" => { assert!(begin_scheduled_model(&worker, &claimed.pending.as_ref().unwrap().job).is_err()); }
+                            "timestamp" => dispatch_pending(&worker, claimed, admission.take().unwrap()),
+                            _ => unreachable!(),
+                        }
+                    });
+                    drop(admission);
+                    drop(worker);
+                });
+                entered.recv_timeout(std::time::Duration::from_secs(10)).expect("production path reaches authority checkpoint");
+                match change {
+                    "disable" => { set_enabled(app, &routine.id, false).unwrap(); }
+                    "rearm" => { edit_with_policy(app, &routine.id, None, Some("every 2h"), None, Some("return 'changed'"), Some("Asia/Singapore"), None).unwrap(); }
+                    "runner" | "pause" => {
+                        let _edit = app.roster_edit.lock().unwrap();
+                        let mut state = app.state.lock().unwrap();
+                        if change == "runner" { state.bots[0].runner_id = "other-runner".into(); } else { state.paused = true; }
+                        app.store.save_state(&state).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let before = app.routine(&routine.id).unwrap();
+                release.send(()).unwrap();
+                thread.join().unwrap();
+                let after = app.routine(&routine.id).unwrap();
+                assert_eq!(after.pending, before.pending, "{point}/{change}");
+                assert_eq!(after.last_scheduled_at, before.last_scheduled_at, "{point}/{change}");
+                assert_eq!(after.last_run_at, before.last_run_at, "{point}/{change}");
+                let dm = app.dm_with("b1", None).unwrap();
+                assert!(app.store.codemode_values(&dm.meta.id, "b1").unwrap().get("forbidden").is_none());
+                assert!(!app.messages(&dm.meta.id).iter().any(|m| matches!(&m.body, Body::Notice { routine_id: Some(id), .. } if id == &routine.id)));
+                let persisted_pending = after.pending;
+                let scratch = scratch.restart();
+                assert_eq!(scratch.0.routine(&routine.id).unwrap().pending, persisted_pending);
+            }
+        }
+    }
+    #[cfg(feature = "runner")]
+    #[tokio::test]
+    async fn missing_binding_cannot_start_until_explicit_resume() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let routine = create(app, "b1", "Binding", "every 10m", "x", None, true).unwrap();
+        let routine = app.update_routine(&routine.id, |r| r.enabled_at = now_secs() - 700.0).unwrap();
+        let admission = app.update.try_admit().unwrap();
+        let claimed = claim_due(app, &routine, now_unix()).unwrap();
+        let job = claimed.pending.as_ref().unwrap().job.clone();
+        app.record_routine(&routine.id, |r| r.pending.as_mut().unwrap().binding = None).unwrap();
+        drop(admission);
+        let scratch = scratch.restart();
+        let app = &scratch.0;
+        assert!(begin_scheduled_model(app, &job).is_err());
+        assert_eq!(app.routine(&routine.id).unwrap().pending.as_ref().unwrap().phase, RoutinePhase::Model);
+        assert_eq!(app.routine_out(&app.routine(&routine.id).unwrap())["state"], "blocked");
+        set_enabled(app, &routine.id, true).unwrap();
+        assert!(begin_scheduled_model(app, &job).is_err());
+        set_enabled(app, &routine.id, false).unwrap();
+        set_enabled(app, &routine.id, true).unwrap();
+        begin_scheduled_model(app, &job).unwrap();
+    }
+    #[cfg(feature = "runner")]
+    #[tokio::test]
+    async fn missing_dm_never_consumes_work_but_explicit_skip_needs_no_dm() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let routine = create(app, "b1", "Missing DM", "every 10m", "x", None, true).unwrap();
+        let routine = app.update_routine(&routine.id, |r| r.enabled_at = now_secs() - 700.0).unwrap();
+        {
+            let _edit = app.roster_edit.lock().unwrap();
+            let mut state = app.state.lock().unwrap();
+            state.chats.clear();
+            app.store.save_state(&state).unwrap();
+        }
+        let admission = app.update.try_admit().unwrap();
+        assert!(claim_due(app, &routine, now_unix()).is_err());
+        assert_eq!(app.routine(&routine.id).unwrap(), routine);
+        assert!(app.state.lock().unwrap().chats.is_empty());
+        let skip = app.update_routine(&routine.id, |r| r.missed_run_policy = crate::routine_health::MissedRunPolicy::Skip).unwrap();
+        let skipped = claim_due(app, &skip, now_unix()).unwrap();
+        assert!(skipped.last_scheduled_at.is_some());
+        assert!(skipped.pending.is_none());
+        assert!(app.state.lock().unwrap().chats.is_empty());
+        drop(admission);
+    }
+    #[cfg(feature = "runner")]
+    #[tokio::test]
+    async fn unchanged_authority_claims_once_and_crosses_one_effect_fence() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let routine = create(app, "b1", "Control", "every 10m", "x", None, true).unwrap();
+        let routine = app.update_routine(&routine.id, |r| r.enabled_at = now_secs() - 700.0).unwrap();
+        let admission = app.update.try_admit().unwrap();
+        let claimed = claim_due(app, &routine, now_unix()).unwrap();
+        assert!(claim_due(app, &routine, now_unix()).is_err());
+        assert_eq!(app.routine(&routine.id).unwrap(), claimed);
+        let job = claimed.pending.as_ref().unwrap().job.clone();
+        begin_scheduled_model(app, &job).unwrap();
+        assert!(begin_scheduled_model(app, &job).is_err());
+        assert_eq!(app.routine(&routine.id).unwrap().pending.unwrap().phase, RoutinePhase::Running);
+        drop(admission);
     }
 }
 

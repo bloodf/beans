@@ -314,9 +314,9 @@ impl Tool for BashTool {
             let result = owned.execute_owned(&worker_id, args, cancel, on_update).await;
             result.map_err(|error| error.0)
         }).map_err(ToolError)?;
-        match waiter.completion().await.as_ref() {
+        match waiter.completion().await.result() {
             Ok(result) => Ok(result.clone()),
-            Err(error) => Err(ToolError(error.clone())),
+            Err(error) => Err(ToolError(error.to_string())),
         }
     }
 }

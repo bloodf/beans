@@ -899,6 +899,14 @@ struct LoopRunner<'a> {
 
 #[async_trait]
 impl ToolRunner for LoopRunner<'_> {
+    async fn run(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken) -> ToolOutcome {
+        let root = ExecutionScope::root(&cancel);
+        // run_scoped owns the call's result, error folding, and single cutoff diagnostic.
+        let outcome = self.run_scoped(tool, tool_call_id, args, cancel, &root).await;
+        root.drain().await;
+        outcome
+    }
+
     async fn run_scoped(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken, scope: &ExecutionScope) -> ToolOutcome {
         let tool_call = ToolCall { id: tool_call_id, name: tool.name().to_string(), arguments: args };
         let scope = match scope.child(&cancel) {
@@ -932,13 +940,14 @@ impl ToolRunner for LoopRunner<'_> {
                 #[cfg(test)]
                 if outcome.is_none() { scope.event("child_cutoff"); }
                 let completed = scope.drain().await;
+                let cutoff = outcome.is_none();
                 let mut outcome = outcome.unwrap_or_else(|| Ok(cut_off(STOP_GRACE)));
-                fold_cleanup(&mut outcome, &completed);
+                if !cutoff { fold_cleanup(&mut outcome, &completed); }
                 let (mut result, is_error) = match outcome {
                     Ok(result) => { let is_error = result.is_error; (result, is_error) }
                     Err(error) => (error_result(error.0), true),
                 };
-                if result.text_content().starts_with("Cut off:") {
+                if cutoff {
                     result.content.push(ContentPart::text(cleanup_diagnostic(&completed)));
                 }
                 let finalized = finalize_executed(self.context, self.assistant, tool_call, args, result, is_error, self.config, Some(self.parent)).await;
@@ -1055,7 +1064,7 @@ async fn execute_in_scope(
     let cutoff = outcome.is_none();
     let completed = scope.drain().await;
     let mut result = outcome.unwrap_or_else(|| Ok(cut_off(STOP_GRACE)));
-    fold_cleanup(&mut result, &completed);
+    if !cutoff { fold_cleanup(&mut result, &completed); }
     if cutoff {
         if let Ok(result) = &mut result {
             result.content.push(ContentPart::text(cleanup_diagnostic(&completed)));
@@ -1838,6 +1847,103 @@ mod tests {
         }
     }
 
+    struct FailedWorkerCutoff;
+
+    #[async_trait]
+    impl Tool for FailedWorkerCutoff {
+        fn name(&self) -> &str { "failed_worker" }
+        fn description(&self) -> &str { "fixture worker failure" }
+        fn parameters(&self) -> Value { json!({"type":"object","properties":{}}) }
+        async fn execute(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> { unreachable!() }
+        async fn execute_scoped(&self, _: &str, _: Value, cancel: CancellationToken, _: ToolUpdateFn, _: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+            scope.spawn_pipe("private\nworker", |_| async { panic!("private worker output") }).unwrap();
+            cancel.cancel();
+            std::future::pending().await
+        }
+    }
+
+    fn assert_single_cutoff(result: &ToolResult) {
+        let text = result.text_content();
+        assert!(result.is_error);
+        assert_eq!(text.matches("Pipe cleanup:").count(), 1, "{text}");
+        assert!(text.contains("completed=1, failed=1"));
+        assert!(!text.contains("private worker output"));
+        assert!(result.structured.is_none());
+        assert_eq!(result.details, json!({}));
+    }
+
+    #[tokio::test]
+    async fn failed_completion_cutoff_has_one_diagnostic_in_both_owning_paths() {
+        let config = AgentLoopConfig::new(Scripted::new("p", vec![]));
+        let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+        let assistant = AssistantMessage::empty("p", "m");
+        let call = ToolCall { id: "owner".into(), name: "failed_worker".into(), arguments: json!({}) };
+        let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &call };
+        let tool: Arc<dyn Tool> = Arc::new(FailedWorkerCutoff);
+        let (tx, _rx) = mpsc::channel(256);
+        let emit = Emitter::new(&tx, &config);
+        let (result, _) = execute_prepared(&tool, &call, &call.arguments, &emit, &CancellationToken::new(), &runner).await;
+        assert_single_cutoff(&result);
+        let outcome = runner.run(tool, "nested".into(), json!({}), CancellationToken::new()).await;
+        assert_single_cutoff(&outcome.result);
+    }
+
+    struct ParallelHeldWorker(Arc<tokio::sync::Semaphore>);
+
+    #[async_trait]
+    impl Tool for ParallelHeldWorker {
+        fn name(&self) -> &str { "parallel_held" }
+        fn description(&self) -> &str { "fixture held worker" }
+        fn parameters(&self) -> Value { json!({"type":"object","properties":{}}) }
+        async fn execute(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> { unreachable!() }
+        async fn execute_scoped(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn, _: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+            let release = self.0.clone();
+            scope.spawn_pipe("private-child", |_| async move {
+                release.acquire().await.unwrap().forget();
+                Ok(ToolResult::text("private-output"))
+            }).unwrap();
+            Ok(ToolResult::text("held-owner"))
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_execution_end_does_not_wait_for_another_roots_worker() {
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![
+            Arc::new(ParallelHeldWorker(release.clone())),
+            Arc::new(Counter { runs: Mutex::new(vec![]), cancel_on_run: None }),
+        ], cache_points: vec![] };
+        let config = AgentLoopConfig::new(Scripted::new("p", vec![]));
+        let assistant = AssistantMessage::empty("p", "m");
+        let calls = vec![
+            ToolCall { id: "held".into(), name: "parallel_held".into(), arguments: json!({}) },
+            ToolCall { id: "free".into(), name: "count".into(), arguments: json!({"limit":1}) },
+        ];
+        let (tx, mut rx) = mpsc::channel(256);
+        let emit = Emitter::new(&tx, &config);
+        let cancel = CancellationToken::new();
+        let batch = execute_parallel(&context, &assistant, calls, &config, &emit, &cancel);
+        tokio::pin!(batch);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    _ = &mut batch => panic!("held root returned before release"),
+                    event = rx.recv() => if let Some(AgentEvent::ToolExecutionEnd { tool_call_id, result, .. }) = event {
+                        assert_eq!(tool_call_id, "free");
+                        assert!(!result.text_content().contains("private"));
+                        break;
+                    },
+                }
+            }
+        }).await.expect("independent execution-end");
+        assert!(futures::poll!(&mut batch).is_pending());
+        release.add_permits(1);
+        let batch = batch.await;
+        assert_eq!(batch.messages[0].tool_call_id, "held");
+        assert_eq!(batch.messages[1].tool_call_id, "free");
+        assert!(!batch.messages[1].text().contains("private"));
+    }
+
     struct RecordChildResult(Mutex<Vec<bool>>);
 
     #[async_trait]
@@ -1861,7 +1967,7 @@ mod tests {
         let tool = Arc::new(Hangs { stop: Some(cancel.clone()), interrupt: None });
         let mut root = ExecutionScope::root(&cancel);
         let (events, mut observed) = mpsc::unbounded_channel();
-        root.probe = Some(Arc::new(crate::tool::LifecycleProbe { events, release: tokio::sync::Semaphore::new(0), timeout_arm: None }));
+        root.probe = Some(Arc::new(crate::tool::LifecycleProbe { events, release: tokio::sync::Semaphore::new(0), timeout_arm: None, completed: Mutex::new(vec![]) }));
         let outcome = tokio::time::timeout(Duration::from_secs(5), runner.run_scoped(tool, "child".into(), json!({}), cancel, &root)).await.expect("child released its caller");
         let mut admission_closed = false;
         let mut disposed_closed = false;
@@ -1911,6 +2017,9 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&self.0);
             }
         }
+        // Login-shell discovery has its own five-second budget. The watchdog below covers
+        // command cancellation and cleanup, not that unrelated one-time startup boundary.
+        crate::login_shell::environment().await;
         for mode in [ToolExecutionMode::Sequential, ToolExecutionMode::Parallel] {
             for script in [false, true] {
                 let dir = std::env::temp_dir().join(format!("beans-loop-held-{}", uuid::Uuid::new_v4()));
@@ -2042,7 +2151,7 @@ mod tests {
                 ]);
                 let cancel = CancellationToken::new();
                 let (events, mut observed) = mpsc::unbounded_channel();
-                let probe = Arc::new(crate::tool::LifecycleProbe { events: events.clone(), release: tokio::sync::Semaphore::new(0), timeout_arm: None });
+                let probe = Arc::new(crate::tool::LifecycleProbe { events: events.clone(), release: tokio::sync::Semaphore::new(0), timeout_arm: None, completed: Mutex::new(vec![]) });
                 let tool: Arc<dyn Tool> = Arc::new(ProbedScript {
                     tool: crate::codemode::CodemodeTool::new(Arc::new(catalog), Default::default()), probe: probe.clone(),
                 });
@@ -2087,18 +2196,27 @@ mod tests {
                 let (messages, _) = tokio::time::timeout(Duration::from_secs(5), &mut execution).await.expect("root drained");
                 let mut started = 0;
                 let mut finished = 0;
+                let mut captured = 0;
                 let mut promoted = 0;
                 while let Ok(event) = observed.try_recv() {
                     match event {
                         "cleanup_started" => { started += 1; assert_eq!(finished, 0); }
                         "cleanup_finished" => { assert_eq!(started, 1); finished += 1; }
-                        "promoted" => { assert_eq!(finished, 1, "promotion waits for cleanup"); promoted += 1; }
+                        "worker_completed" => { assert_eq!(finished, 1); captured += 1; }
+                        "promoted" => { assert_eq!(captured, 1, "promotion waits for immutable completion"); promoted += 1; }
                         _ => {}
                     }
                 }
+                assert_eq!(captured, 1);
+                let retained = probe.completed.lock().unwrap();
+                let pipe = retained[0].result().unwrap();
+                assert_eq!(pipe.structured.as_ref().unwrap()["output"], "held");
+                assert!(pipe.text_content().contains("deadline reached"));
                 assert_eq!((started, finished, promoted), (1, 1, usize::from(send_now)));
                 let result = tool_results(&messages)[0];
                 assert!(result.is_error);
+                assert!(!result.text().contains("held"));
+                assert!(!result.text().contains("deadline reached"));
                 if result.text().starts_with("Cut off:") { assert!(result.text().contains("Pipe cleanup: completed=1")); }
                 if send_now {
                     assert!(messages.iter().any(|message| matches!(message, AgentMessage::User(user) if user.content[0].as_text() == Some("ship now"))));
@@ -2140,7 +2258,7 @@ mod tests {
             let mut root = ExecutionScope::root(&cancel);
             let (events, mut observed) = mpsc::unbounded_channel();
             let arm = Arc::new(tokio::sync::Semaphore::new(0));
-            let probe = Arc::new(crate::tool::LifecycleProbe { events, release: tokio::sync::Semaphore::new(0), timeout_arm: Some(arm.clone()) });
+            let probe = Arc::new(crate::tool::LifecycleProbe { events, release: tokio::sync::Semaphore::new(0), timeout_arm: Some(arm.clone()), completed: Mutex::new(vec![]) });
             root.probe = Some(probe.clone());
             // Await a host-controlled gate before normal return, or let the real host timer end it.
             let code = if timeout {
@@ -2169,7 +2287,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), &mut execution).await.expect("script drained").unwrap();
             let completed = root.drain().await;
             assert_eq!(completed.len(), 1);
-            let pipe = completed[0].1.as_ref().as_ref().unwrap();
+            let pipe = completed[0].1.result().unwrap();
             assert_eq!(pipe.structured.as_ref().unwrap()["output"], "held");
             assert!(pipe.text_content().contains("deadline reached"));
             assert!(!cancel.is_cancelled());

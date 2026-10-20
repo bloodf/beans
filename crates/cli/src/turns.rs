@@ -59,6 +59,15 @@ fn memory_flush_enabled() -> bool {
 // MARK: - The turn
 
 pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken) -> TurnOutcome {
+    let mut scheduled_started = false;
+    let outcome = run_admitted_job(app, job, cancel, &mut scheduled_started).await;
+    if scheduled_started {
+        crate::routines::complete_scheduled_model(app, job);
+    }
+    outcome
+}
+
+async fn run_admitted_job(app: &Arc<App>, job: &Job, cancel: CancellationToken, scheduled_started: &mut bool) -> TurnOutcome {
     if app.is_paused() || cancel.is_cancelled() { return TurnOutcome::Skipped; }
     let Some(bot) = app.bot(&job.bot_id) else { return TurnOutcome::Skipped };
     if app.chat(&job.chat_id).is_none() {
@@ -90,6 +99,14 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
                     app.notice(&job.chat_id, crate::routines::signed_out_text(&routine));
                     return TurnOutcome::Skipped;
                 }
+                if job.id.starts_with("routine-scheduled-") && !routine.is_enabled {
+                    return TurnOutcome::Skipped;
+                }
+                if let Err(error) = crate::routines::begin_scheduled_model(app, job) {
+                    tracing::error!(%error, job = %job.id, "refusing scheduled effects");
+                    return TurnOutcome::Skipped;
+                }
+                *scheduled_started = job.id.starts_with("routine-scheduled-");
                 crate::routines::started(app, id);
                 let marker = Message::new(&job.chat_id, Author::System, Body::Notice { text: format!("Routine · {}", routine.name), routine_id: Some(id.to_string()) });
                 trigger = Trigger { message_id: marker.id.clone(), routine: Some(routine.clone()) };

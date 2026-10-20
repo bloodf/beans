@@ -105,6 +105,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `auto_review.set` | `is_enabled?`, `rules?` | `auto_review` |
 
 
+
 ### Plugins, MCP, providers
 
 | Method | Params | Result |

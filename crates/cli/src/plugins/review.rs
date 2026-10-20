@@ -513,7 +513,7 @@ mod tests {
         let routine = app
             .insert_routine(Routine {
                 id: "rt-watch".into(), bot_id: devops.id.clone(), name: "Railway memory watch".into(), prompt: "Check Railway memory.".into(),
-                schedule: "every 2h".into(), timezone: "UTC".into(), missed_run_policy: Default::default(), last_scheduled_at: None, health: None,
+                schedule: "every 2h".into(), timezone: "UTC".into(), missed_run_policy: Default::default(), last_scheduled_at: None, pending: None, health: None,
                 is_enabled: true, enabled_at: 0.0, last_run_at: None, last_outcome: None, paused_reason: None, check: None, created_at: 0.0,
             })
             .unwrap();

@@ -699,9 +699,12 @@ pub struct Routine {
     /// What a Runner that was off at a due time does when it is back: one run, or none.
     #[serde(default)]
     pub missed_run_policy: crate::routine_health::MissedRunPolicy,
-    /// The last due time the Runner took or skipped, so a restart neither repeats nor drops it.
+    /// The last due time durably represented by pending work or explicitly skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scheduled_at: Option<f64>,
+    /// The Runner's recoverable scheduled intent, including its effect-start fence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<RoutinePending>,
     /// How the routine's checks and runs have gone, as its Runner records them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<crate::routine_health::CheckHealth>,
@@ -722,6 +725,21 @@ pub struct Routine {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<String>,
     pub created_at: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoutinePending {
+    pub job: Box<Job>,
+    pub phase: RoutinePhase,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutinePhase {
+    Check,
+    Checking,
+    Model,
+    Running,
 }
 
 impl Routine {

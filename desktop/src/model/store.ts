@@ -1397,11 +1397,24 @@ export class AppStore {
 
   // MARK: - Routines
 
+  /** Read-only service status, bound to the admitted account and connection. */
+  async runnerServiceStatus(id: string): Promise<{ installed: boolean; running: boolean }> {
+    const identity = this.identityID, generation = this.bootstrapGeneration;
+    if (this.isMock || !this.isConnected || !this.hasIdentity || !identity || !this.runners.some((runner) => runner.id === id && runner.status === "online")) {
+      throw new RequestError(L("Background service status is unavailable."));
+    }
+    const result = await this.request<{ installed: boolean; running: boolean }>("device.service_status", { id });
+    if (identity !== this.identityID || generation !== this.bootstrapGeneration || !this.isConnected || !this.hasIdentity || typeof result?.installed !== "boolean" || typeof result?.running !== "boolean") {
+      throw new RequestError(L("Background service status is unavailable."));
+    }
+    return { installed: result.installed, running: result.running };
+  }
+
   /** Pauses or resumes a routine. A resumed schedule counts from now. */
   setRoutineEnabled(id: string, enabled: boolean): void {
     if (!this.routine(id)) return;
     this.routines = this.routines.map((routine) =>
-      routine.id === id ? { ...routine, isEnabled: enabled, pausedReason: undefined, nextRunAt: enabled ? routine.nextRunAt : undefined } : routine,
+      routine.id === id ? { ...routine, isEnabled: enabled, state: enabled ? "on" : "paused", pausedReason: undefined, nextRunAt: enabled ? routine.nextRunAt : undefined } : routine,
     );
     this.emit({ kind: "rosterChanged" });
     this.perform("routines.update", { id, enabled });
@@ -1409,7 +1422,8 @@ export class AppStore {
 
   /** Runs the routine now, on its bot's Runner. */
   runRoutine(id: string): void {
-    if (!this.routine(id)) return;
+    const routine = this.routine(id);
+    if (!routine || routine.isRunning || routine.state === "running" || routine.state === "waiting_for_runner" || routine.pausedReason === "authentication") return;
     this.routines = this.routines.map((routine) => (routine.id === id ? { ...routine, isRunning: true } : routine));
     this.emit({ kind: "rosterChanged" });
     this.perform("routines.run", { id });

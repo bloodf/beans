@@ -843,12 +843,17 @@ export interface Routine {
   name: string;
   /** The task, written to the bot, handed to it on every run. */
   prompt: string;
-  /** `every 30m`, `every 2h`, `every 1d`, or five cron fields in the Runner's local time. */
+  /** `every 30m`, `every 2h`, `every 1d`, or five cron fields in `timezone`. */
   schedule: string;
+  timezone: string;
+  missedRunPolicy: string;
+  state: string;
+  lastScheduledAt?: number;
+  health: RoutineHealth;
   /** The schedule in words: "Weekdays at 9:00 AM". */
   scheduleText: string;
   isEnabled: boolean;
-  /** Why Beans paused it, when it did: "away". */
+  /** Why Beans paused it: "away" or "authentication". */
   pausedReason?: string;
   lastRunAt?: number;
   /** How the last run ended: "sent", "pass", or "error". */
@@ -861,9 +866,110 @@ export interface Routine {
   createdAt: number;
 }
 
+/** Persisted check health and the independent model-provider failure streak. */
+export interface RoutineHealth {
+  updatedAt?: number;
+  lastCheckAt?: number;
+  lastSuccessAt?: number;
+  status?: string;
+  connectionFailures: number;
+  authenticationFailures: number;
+  retryAt?: number;
+  model: {
+    status?: string;
+    connectionFailures: number;
+    authenticationFailures: number;
+    retryAt?: number;
+  };
+}
+
+export type RoutineProblem = "signedOut" | "modelSignedOut" | "offline" | "cantConnect" | "modelCantConnect" | "signInFailed" | "modelSignInFailed" | "checkFailed" | "checkBlocked";
+
+export function routineProblem(routine: Routine): RoutineProblem | undefined {
+  if (routine.isRunning || routine.state === "running") return undefined;
+  const health = routine.health;
+  switch (routine.state) {
+    case "blocked":
+      if (routine.pausedReason !== "authentication") return "checkBlocked";
+      return health.model.authenticationFailures >= 3 ? "modelSignedOut" : "signedOut";
+    case "waiting_for_runner":
+      return "offline";
+    case "failed":
+      if (health.model.status === "failed" || health.model.status === "blocked") return health.model.authenticationFailures > 0 ? "modelSignInFailed" : "modelCantConnect";
+      if (health.authenticationFailures > 0) return "signInFailed";
+      return health.connectionFailures > 0 ? "cantConnect" : "checkFailed";
+    default:
+      return undefined;
+  }
+}
+
+export function routineProblemText(problem: RoutineProblem): string {
+  switch (problem) {
+    case "signedOut":
+    case "modelSignedOut": return L("Needs sign-in");
+    case "offline": return L("Waiting for Runner");
+    case "cantConnect":
+    case "modelCantConnect": return L("Can’t connect");
+    case "signInFailed":
+    case "modelSignInFailed": return L("Sign-in failed");
+    case "checkFailed":
+    case "checkBlocked": return L("Check failed");
+  }
+}
+
+export function routineProblemNeedsUser(problem: RoutineProblem | undefined): boolean {
+  return problem !== undefined && problem !== "cantConnect" && problem !== "modelCantConnect";
+}
+
+export function routineProblemExplanation(problem: RoutineProblem, bot: string, runner: string): string {
+  switch (problem) {
+    case "modelSignedOut": return L("The model provider turned down three sign-ins in a row, so the routine is paused. Reconnect the provider in Settings, then resume it.");
+    case "signedOut": return L("The check couldn’t sign in to a plugin three times in a row, so the routine is paused. Sign in to the plugin again on %@, then resume it.", runner);
+    case "offline": return L("%@ is offline, so the routine waits for it. To keep it available while the app is closed, run beans service install on it.", runner);
+    case "modelCantConnect": return L("The last run couldn’t reach the model provider. It tries again at the next run, waiting longer after each failure.");
+    case "cantConnect": return L("The last check couldn’t connect. It tries again at the next check, waiting longer after each failure.");
+    case "modelSignInFailed": return L("The last run couldn’t sign in to the model provider. Reconnect it in Settings; after three failures in a row the routine pauses.");
+    case "signInFailed": return L("The last check couldn’t sign in to a plugin. Sign in to it again on %@; after three failures in a row the routine pauses.", runner);
+    case "checkFailed": return L("The check stopped with an error. %@ got the error and can fix the check.", bot);
+    case "checkBlocked": return L("The check tried to change something, and checks only read. Ask %@ to fix it.", bot);
+  }
+}
+
+/** Cron uses its saved zone; intervals count elapsed time without a zone label. */
+export function routineScheduleSummary(routine: Routine, now = Date.now()): string {
+  if (routine.schedule.startsWith("every ") || routine.timezone === "Local") return routine.scheduleText;
+  try {
+    const options: Intl.DateTimeFormatOptions = { year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric", hourCycle: "h23" };
+    const there = new Intl.DateTimeFormat("en-US", { ...options, timeZone: routine.timezone });
+    const here = new Intl.DateTimeFormat("en-US", options);
+    const later = new Date(now);
+    later.setDate(later.getDate() + 182);
+    if ([now, later.getTime()].every((at) => there.format(at) === here.format(at))) return routine.scheduleText;
+    const city = routine.timezone.split("/").pop()!.replaceAll("_", " ");
+    return L("%@ (%@ time)", routine.scheduleText, city);
+  } catch {
+    // A zone absent from this webview's database still remains visible and editable in chat.
+    return L("%@ (%@ time)", routine.scheduleText, routine.timezone);
+  }
+}
+
+export function lastCheckSummary(routine: Routine): string {
+  if (routine.check === undefined || routine.health.lastCheckAt === undefined) return "";
+  const when = Format.daySeparator(routine.health.lastCheckAt);
+  switch (routine.health.status) {
+    case "quiet": return L("%@ · nothing new", when);
+    case "ready": return L("%@ · found something", when);
+    case "failed":
+    case "blocked": return L("%@ · failed", when);
+    default: return when;
+  }
+}
+
 /** The line under the name in the inspector: the schedule, then what is going on. */
 export function routineDetail(routine: Routine): string {
-  if (routine.isRunning) return L("%@ · Running…", routine.scheduleText);
+  if (routine.isRunning || routine.state === "running") return L("%@ · Running…", routine.scheduleText);
+  const problem = routineProblem(routine);
+  if (problem) return `${routineProblemText(problem)} · ${routine.scheduleText}`;
   if (!routine.isEnabled) {
     return routine.pausedReason === "away" ? L("%@ · Paused while you were away", routine.scheduleText) : L("%@ · Paused", routine.scheduleText);
   }

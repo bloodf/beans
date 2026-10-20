@@ -223,6 +223,25 @@ export interface WireRoutine {
   name: string;
   prompt: string;
   schedule: string;
+  timezone?: string | null;
+  missed_run_policy?: "coalesce" | "skip" | null;
+  last_scheduled_at?: number | null;
+  state?: string | null;
+  health?: {
+    updated_at: number;
+    last_check_at: number | null;
+    last_success_at: number | null;
+    status: "quiet" | "ready" | "failed" | "blocked" | null;
+    connection_failures: number;
+    authentication_failures: number;
+    retry_at: number | null;
+    model: {
+      status: "quiet" | "ready" | "failed" | "blocked" | null;
+      connection_failures: number;
+      authentication_failures: number;
+      retry_at: number | null;
+    };
+  } | null;
   schedule_text?: string | null;
   is_enabled: boolean;
   paused_reason?: string | null;
@@ -677,6 +696,25 @@ export function toRoutine(wire: WireRoutine): Routine {
     name: wire.name,
     prompt: wire.prompt,
     schedule: wire.schedule,
+    timezone: wire.timezone || "Local",
+    missedRunPolicy: wire.missed_run_policy ?? "coalesce",
+    lastScheduledAt: wire.last_scheduled_at == null ? undefined : seconds(wire.last_scheduled_at),
+    state: wire.state ?? (wire.is_enabled ? "on" : "paused"),
+    health: {
+      updatedAt: wire.health == null ? undefined : seconds(wire.health.updated_at),
+      lastCheckAt: wire.health?.last_check_at == null ? undefined : seconds(wire.health.last_check_at),
+      lastSuccessAt: wire.health?.last_success_at == null ? undefined : seconds(wire.health.last_success_at),
+      status: optional(wire.health?.status),
+      connectionFailures: wire.health?.connection_failures ?? 0,
+      authenticationFailures: wire.health?.authentication_failures ?? 0,
+      retryAt: wire.health?.retry_at == null ? undefined : seconds(wire.health.retry_at),
+      model: {
+        status: optional(wire.health?.model.status),
+        connectionFailures: wire.health?.model.connection_failures ?? 0,
+        authenticationFailures: wire.health?.model.authentication_failures ?? 0,
+        retryAt: wire.health?.model.retry_at == null ? undefined : seconds(wire.health.model.retry_at),
+      },
+    },
     scheduleText: Format.schedule(wire.schedule_text ?? wire.schedule),
     isEnabled: wire.is_enabled,
     pausedReason: optional(wire.paused_reason),

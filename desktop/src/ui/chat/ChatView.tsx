@@ -376,7 +376,7 @@ export function ChatView(props: { chatID: string; onRedirect: (chatID: string) =
     if (!active || active === document.body) composer?.focus();
     chatActions.focusComposer = () => composer?.focus();
     chatActions.prefill = (text) => {
-      composer?.setText(text);
+      composer?.setText(text, true);
       composer?.focus();
     };
     chatActions.scrollToLatest = () => scrollToBottom(true);

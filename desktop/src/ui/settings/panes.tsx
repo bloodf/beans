@@ -2,7 +2,7 @@
 // controllers: section cards and footnotes in one scrolling column, the window's title bar carrying
 // the page title. General and Advanced also fill the small Settings window onboarding opens.
 
-import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { files, host, hostInfo, onUpdaterChanged, preferences, setPreferences, type UpdaterState } from "../../host";
 import { parseCLIPort } from "../../host/cliPort";
@@ -776,6 +776,28 @@ function StatusDot(props: { status: Device["status"] }) {
 /** The picked Device itself: what it is, whether it is online, its machine key, and Unpair. */
 function DevicePane() {
   const device = pickedDevice;
+  const [service, setService] = createSignal<{ installed: boolean; running: boolean } | undefined>();
+  let serviceRequest = 0;
+  onCleanup(() => { serviceRequest++; });
+  createEffect(
+    () => {
+      track.roster();
+      track.connection();
+      const current = device();
+      return store.isConnected && store.hasIdentity && current?.status === "online" && isRunner(current) ? `${store.identityID}:${current.id}` : undefined;
+    },
+    (key) => {
+      const request = ++serviceRequest;
+      setService(undefined);
+      const id = device()?.id;
+      if (!key || !id) return;
+      void store.runnerServiceStatus(id).then((status) => {
+        if (request === serviceRequest) setService(status);
+      }, () => {
+        if (request === serviceRequest) setService(undefined);
+      });
+    },
+  );
   const relay = () => {
     track.roster();
     track.connection();
@@ -829,6 +851,9 @@ function DevicePane() {
               </Show>
               <Show when={current().version}><KeyValueRow label={L("Beans CLI")} value={current().version} /></Show>
               <KeyValueRow label={L("Role")} value={isRunner(current()) ? L("Runner · runs bots with its own credentials") : L("Device · never runs bots")} />
+              <Show when={service()}>
+                {(status) => <KeyValueRow label={L("Background service")} value={status().running ? L("Running") : status().installed ? L("Installed, not running") : L("Not installed")} />}
+              </Show>
               <KeyValueRow label={L("Last seen")} value={current().status === "online" ? L("Active now") : Format.lastSeen(current().lastSeen)} />
               <KeyValueRow label={L("Relay")} value={relay()} monospaced />
               <ActionRow
@@ -839,6 +864,9 @@ function DevicePane() {
                 onAction={() => void confirmUnpair(current())}
               />
             </Section>
+            <Show when={service() && !service()!.installed}>
+              <Footnote text={L("Run beans service install in Terminal on %@ to keep its bots running while Beans is closed.", current().name)} />
+            </Show>
           </>
         )}
       </Show>

@@ -52,9 +52,13 @@ export function ChatsScreen({ sidebar = false, search = false }: { sidebar?: boo
   const [searching, setSearching] = useState(false);
   const [searchGeneration, setSearchGeneration] = useState(0);
   const searchOwner = useRef<{ active: boolean; query: string } | null>(null);
+  const inputValue = useRef(query);
 
   function updateQuery(value: string) {
+    if (value === inputValue.current) return;
+    inputValue.current = value;
     if (searchOwner.current) searchOwner.current.active = false;
+    setSearchGeneration(generation => generation + 1);
     setQuery(value);
     setMatches({ chats: [], messages: [], files: [], history_complete: true });
     setSearching(!!value.trim());

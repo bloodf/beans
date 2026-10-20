@@ -2,38 +2,42 @@ import { expect, mock, test } from "bun:test";
 
 // Mount the production search consumer with real store subscriptions and controlled native replies.
 // Hook slots/native tags follow Composer.test.tsx; native layout and navigation need device proof.
-type Node = { type: any; props: any };
-let slots: any[] = [], cursor = 0, dirty = false;
+type SearchItem = { snippet: string };
+type Node = { type: unknown; props: { children?: unknown; data: SearchItem[]; renderItem: (input: { item: SearchItem }) => Node; onPress: () => void; onChangeText: (value: string | { nativeEvent: { text: string } }) => void; hidden?: boolean } };
+type HookRecord = { deps?: unknown[]; value?: unknown; cleanup?: void | (() => void) };
+let slots: unknown[] = [], cursor = 0, dirty = false;
 let effects: Array<() => void> = [];
-function slot(make: () => any) {
+function slot<T>(make: () => T) {
   const index = cursor++;
   if (!(index in slots)) slots[index] = make();
-  return { index, value: slots[index] };
+  // Each stable hook position retains the value created by that hook.
+  const value = slots[index] as T;
+  return { index, value };
 }
 const react = {
-  useCallback: (fn: any) => fn, useDebugValue: () => {},
-  useSyncExternalStore: (_subscribe: any, snapshot: any) => snapshot(),
-  useState: (initial: any) => {
-    const item = slot(() => typeof initial === "function" ? initial() : initial);
-    return [item.value, (next: any) => { slots[item.index] = typeof next === "function" ? next(slots[item.index]) : next; dirty = true; }];
+  useCallback: <T,>(fn: T) => fn, useDebugValue: () => {},
+  useSyncExternalStore: (_subscribe: unknown, snapshot: () => unknown) => snapshot(),
+  useState: <T,>(initial: T | (() => T)) => {
+    const item = slot(() => typeof initial === "function" ? (initial as () => T)() : initial);
+    return [item.value, (next: T | ((previous: T) => T)) => { slots[item.index] = typeof next === "function" ? (next as (previous: T) => T)(slots[item.index] as T) : next; dirty = true; }];
   },
-  useMemo: (compute: any, deps: any[]) => {
-    const item = slot(() => ({ deps: undefined, value: undefined }));
+  useMemo: (compute: () => unknown, deps: unknown[]) => {
+    const item = slot<HookRecord>(() => ({}));
     if (!item.value.deps || deps.some((value, index) => !Object.is(value, item.value.deps[index]))) {
       item.value.deps = deps; item.value.value = compute();
     }
     return item.value.value;
   },
-  useRef: (initial: any) => slot(() => ({ current: initial })).value,
-  useEffect: (effect: any, deps: any[]) => {
-    const item = slot(() => ({ deps: undefined, cleanup: undefined }));
+  useRef: <T,>(initial: T) => slot(() => ({ current: initial })).value,
+  useEffect: (effect: () => void | (() => void), deps: unknown[]) => {
+    const item = slot<HookRecord>(() => ({}));
     if (!item.value.deps || deps.some((value, index) => !Object.is(value, item.value.deps[index]))) {
       effects.push(() => { item.value.cleanup?.(); item.value.deps = deps; item.value.cleanup = effect(); });
     }
   },
 };
 mock.module("react", () => ({ ...react, default: react }));
-const jsx = (type: any, props: any) => ({ type, props });
+const jsx = (type: unknown, props: Node["props"]) => ({ type, props });
 mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
 mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
 const platform = { OS: "ios" };
@@ -62,7 +66,7 @@ mock.module("../core/prefs", () => ({ savePrefs: () => {}, loadPrefs: () => ({})
 mock.module("../core/host", () => ({ hostFacts: () => ({}) }));
 mock.module("../core/push", () => ({ clearPushes: () => {}, installPushHandlers: () => {}, registerForPushes: () => {} }));
 mock.module("expo-web-browser", () => ({}));
-const replies: Array<(value: any) => void> = [];
+const replies: Array<(value: unknown) => void> = [];
 mock.module("../../modules/beans-core", () => ({ request: () => new Promise(resolve => replies.push(resolve)) }));
 // These imports exercise production consumers after native and React mocks are installed.
 const { useStore, resetStore } = await import("../core/store");
@@ -70,15 +74,18 @@ const { ChatsScreen } = await import("./ChatsScreen");
 const { default: TabsLayout } = await import("../../app/(main)/(tabs)/_layout");
 const timers = new Map<number, () => void>();
 let timerID = 0;
-function find(node: any, type: string): Node | undefined {
+function find(node: unknown, type: string): Node | undefined {
   if (Array.isArray(node)) return node.map(child => find(child, type)).find(Boolean);
-  if (!node || typeof node !== "object") return;
-  return node.type === type ? node : find(node.props?.children, type);
+  if (!node || typeof node !== "object" || !("type" in node) || !("props" in node)) return;
+  // All nodes here come from the test JSX factory, not external input.
+  const element = node as Node;
+  return element.type === type ? element : find(element.props.children, type);
 }
 function render(commit = true): Node {
   for (let pass = 0; pass < 10; pass++) {
     cursor = 0; dirty = false; effects = [];
-    const root = ChatsScreen(searchSurface === "sidebar" ? { sidebar: true } : { search: true });
+    // The mocked JSX factory returns the Node shape above.
+    const root = ChatsScreen(searchSurface === "sidebar" ? { sidebar: true } : { search: true }) as unknown as Node;
     if (!commit) return root;
     for (const effect of effects) effect();
     if (!dirty) return root;
@@ -100,14 +107,17 @@ test.each(["sidebar", "ios", "android"] as const)("%s search retains authority a
   platform.OS = surface === "android" ? "android" : "ios";
   opened.length = 0;
   const originalTimeout = globalThis.setTimeout, originalClear = globalThis.clearTimeout;
-  globalThis.setTimeout = ((run: () => void) => { const id = ++timerID; timers.set(id, run); return id; }) as any;
-  globalThis.clearTimeout = ((id: number) => { timers.delete(id); }) as any;
-  const dispose = () => { for (const item of slots) item?.cleanup?.(); slots = []; timers.clear(); replies.length = 0; };
-  const source = { paired: true, identityId: "A", relayUrl: "relay-A", deviceId: "phone-A", relayConnected: true, chats: [{ id: "same", title: "Same chat", kind: "group", bot_ids: [], messages: [], unread_count: 0 }], bots: [] };
+  // Fake timers return numeric handles; Bun's native timer type also carries methods.
+  const fakeTimeout = ((run: () => void) => { const id = ++timerID; timers.set(id, run); return id; }) as unknown as typeof setTimeout;
+  const fakeClear = ((id: number) => { timers.delete(id); }) as unknown as typeof clearTimeout;
+  globalThis.setTimeout = fakeTimeout;
+  globalThis.clearTimeout = fakeClear;
+  const dispose = () => { for (const item of slots) { if (item && typeof item === "object" && "cleanup" in item && typeof item.cleanup === "function") item.cleanup(); } slots = []; timers.clear(); replies.length = 0; };
+  const source = { paired: true, identityId: "A", relayUrl: "relay-A", deviceId: "phone-A", relayConnected: true, chats: [{ id: "same", title: "Same chat", kind: "group" as const, bot_ids: [], messages: [], unread_count: 0, is_pinned: false, created_at: 0 }], bots: [] };
   try {
     for (const field of ["identityId", "relayUrl", "deviceId", "paired"] as const) {
       for (const aba of [false, true]) {
-        dispose(); resetStore(); useStore.setState(source as any); startSearch();
+        dispose(); resetStore(); useStore.setState(source); startSearch();
         const old = replies.shift()!;
         useStore.setState({ [field]: field === "paired" ? false : "B" });
         if (aba) useStore.setState({ [field]: source[field] });
@@ -119,12 +129,33 @@ test.each(["sidebar", "ios", "android"] as const)("%s search retains authority a
         const current = replies.shift()!;
         expect(current).toBeDefined();
         current(result("current")); await flush();
-        expect(find(render(), "List")!.props.data.map((row: any) => row.snippet)).toEqual(["current", "current", "current"]);
+        expect(find(render(), "List")!.props.data.map(row => row.snippet)).toEqual(["current", "current", "current"]);
         const list = find(render(), "List")!;
         const row = list.props.renderItem({ item: list.props.data[2] });
         row.props.onPress();
         expect(opened.pop()).toBe("/chat/same");
         const queryRoot = render();
+        if (surface === "ios") find(queryRoot, "SearchBar")!.props.onChangeText({ nativeEvent: { text: "needle" } });
+        else find(queryRoot, surface === "sidebar" ? "Search" : "TextInput")!.props.onChangeText("needle");
+        row.props.onPress();
+        expect(opened.pop()).toBe("/chat/same");
+        if (surface === "ios") {
+          find(queryRoot, "SearchBar")!.props.onChangeText({ nativeEvent: { text: "temporary" } });
+          find(queryRoot, "SearchBar")!.props.onChangeText({ nativeEvent: { text: "needle" } });
+        } else {
+          const field = find(queryRoot, surface === "sidebar" ? "Search" : "TextInput")!;
+          field.props.onChangeText("temporary");
+          field.props.onChangeText("needle");
+        }
+        row.props.onPress();
+        expect(opened).toEqual([]);
+        render();
+        for (const [id, run] of [...timers]) { timers.delete(id); run(); }
+        replies.shift()!(result("restored")); await flush();
+        const restoredList = find(render(), "List")!;
+        const restoredRow = restoredList.props.renderItem({ item: restoredList.props.data[0] });
+        restoredRow.props.onPress();
+        expect(opened.pop()).toBe("/chat/same");
         if (surface === "ios") find(queryRoot, "SearchBar")!.props.onChangeText({ nativeEvent: { text: "replacement" } });
         else find(queryRoot, surface === "sidebar" ? "Search" : "TextInput")!.props.onChangeText("replacement");
         // No render or passive effect has run since the field changed.

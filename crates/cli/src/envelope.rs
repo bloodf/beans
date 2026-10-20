@@ -297,10 +297,20 @@ pub(crate) fn preflight_page(app:&App,blobs:&[crate::relay::BlobIn]) -> anyhow::
 pub(crate) fn activate(app:&App,blob:&crate::relay::BlobIn) -> anyhow::Result<()> { activate_at(app,blob,true) }
 pub(crate) fn activate_first(app:&App,blob:&crate::relay::BlobIn) -> anyhow::Result<()> { activate_at(app,blob,false) }
 fn activate_at(app:&App,blob:&crate::relay::BlobIn,advance:bool) -> anyhow::Result<()> {
+    activate_prepared(app,blob,advance,||{},||{})
+}
+
+fn activate_prepared(app:&App,blob:&crate::relay::BlobIn,advance:bool,prepared:impl FnOnce(),locked:impl FnOnce()) -> anyhow::Result<()> {
+    // All authority reads precede the SQLite lifetime. The transaction borrows only values.
     let account=account(app)?;
-    let status:String=app.store.connection.lock().unwrap().query_row("SELECT status FROM transport_custody WHERE account=?1 AND id=?2",params![account,blob.id],|r|r.get(0))?;
-    let opened=if status=="accepted" {Some(inspect(app,blob).map_err(|_|anyhow::anyhow!("Accepted envelope evidence changed"))?)}else{None};
+    let inspected=inspect(app,blob);
+    let blob_json=serde_json::to_string(blob)?;
+    prepared();
     durable(&app.store,|tx|{
+        locked();
+        let (status,saved):(String,String)=tx.query_row("SELECT status,blob FROM transport_custody WHERE account=?1 AND id=?2",params![account,blob.id],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        anyhow::ensure!(saved==blob_json,"transport_identity_conflict");
+        let opened=if status=="accepted" {Some(inspected.as_ref().map_err(|_|anyhow::anyhow!("Accepted envelope evidence changed"))?)}else{None};
         if status=="staged_deferred" {
             tx.execute("UPDATE transport_custody SET status='deferred' WHERE account=?1 AND id=?2 AND status='staged_deferred'",params![account,blob.id])?;
         }
@@ -669,6 +679,41 @@ mod tests {
         receive(&p.b,&incoming,false).unwrap();assert_eq!(p.b.store.load_state().unwrap().last_seq,0);
         p.b.state.lock().unwrap().devices.push(sender);refresh(&p.b).unwrap();
         assert!(p.b.store.transport_cancelled(&account(&p.b).unwrap(),"held-future").unwrap());
+        assert_eq!(p.b.store.load_state().unwrap().last_seq,0);
+    }
+    #[test]
+    fn activation_sql_commit_never_waits_for_state_held_by_concurrent_save() {
+        let p=pair();let incoming=blob(&p,"job_cancel",json!({"job_id":"lock-order"}));
+        preflight_page(&p.b,std::slice::from_ref(&incoming)).unwrap();
+        let prepared=Arc::new(std::sync::Barrier::new(2));
+        let state_held=Arc::new(std::sync::Barrier::new(2));
+        let sql_locked=Arc::new(std::sync::Barrier::new(2));
+        let (attempt_tx,attempt_rx)=std::sync::mpsc::channel();
+        let (done_tx,done_rx)=std::sync::mpsc::channel();
+        let app=p.b.clone();let ready=prepared.clone();let held=state_held.clone();let sql=sql_locked.clone();
+        let saver=std::thread::spawn(move||{
+            ready.wait();let state=app.state.lock().unwrap();held.wait();sql.wait();
+            attempt_tx.send(()).unwrap();
+            let result=app.store.save_state(&state);
+            done_tx.send(result.map_err(|e|e.to_string())).unwrap();
+        });
+        let (activated_tx,activated_rx)=std::sync::mpsc::channel();
+        let app=p.b.clone();
+        let activator=std::thread::spawn(move||{
+            let result=activate_prepared(&app,&incoming,false,||{
+                prepared.wait();state_held.wait();
+            },||{
+                sql_locked.wait();
+                attempt_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("concurrent save did not reach SQLite");
+                // SQLite is held here while the saver holds state. No app lock may follow.
+            });
+            activated_tx.send(result.map_err(|e|e.to_string())).unwrap();
+        });
+        activated_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("activation blocked by state/SQLite inversion").unwrap();
+        done_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("save blocked by activation lock inversion").unwrap();
+        saver.join().unwrap();
+        activator.join().unwrap();
+        assert!(p.b.store.transport_cancelled(&account(&p.b).unwrap(),"lock-order").unwrap());
         assert_eq!(p.b.store.load_state().unwrap().last_seq,0);
     }
 }

@@ -55,6 +55,7 @@ impl Slot {
 #[derive(Debug, Clone, Default)]
 pub struct State {
     pub devices: Vec<Device>,
+    pub device_names: std::collections::BTreeMap<String, String>,
     pub bots: Vec<Bot>,
     pub chats: Vec<Chat>,
     pub routines: Vec<Routine>,
@@ -576,23 +577,31 @@ impl App {
         Ok(())
     }
 
-    /// Renames this Device; the roster hears through the machine blob.
-    pub fn rename_device(&self, name: &str) -> anyhow::Result<()> {
+    /// Gives a known Device an account alias; blank restores its machine name.
+    pub fn set_device_name(&self, id: &str, name: &str) -> anyhow::Result<()> {
         let name = name.trim();
-        if name.is_empty() {
-            anyhow::bail!("Give the Device a name");
-        }
+        anyhow::ensure!(name.chars().count() <= 64, "Device names must be at most 64 characters");
+        anyhow::ensure!(self.has_identity(), "No identity on this Device");
+        let _edit = self.roster_edit.lock().unwrap();
         {
-            let mut machine = self.machine.lock().unwrap();
-            let Some(file) = machine.as_mut() else { anyhow::bail!("No identity on this Device") };
-            file.name = name.to_string();
+            let mut state = self.state.lock().unwrap();
+            let device = state.devices.iter().find(|device| device.id == id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown Device"))?;
+            let alias = (!name.is_empty() && name != device.name).then(|| name.to_owned());
+            let previous = state.device_names.get(id).cloned();
+            match alias {
+                Some(name) => { state.device_names.insert(id.to_owned(), name); }
+                None => { state.device_names.remove(id); }
+            }
+            if let Err(error) = self.store.save_state(&state) {
+                match previous {
+                    Some(name) => { state.device_names.insert(id.to_owned(), name); }
+                    None => { state.device_names.remove(id); }
+                }
+                return Err(error);
+            }
         }
-        self.save_machine()?;
-        if let Some(device) = self.local_device() {
-            upsert_device(&mut self.state.lock().unwrap().devices, device);
-        }
-        self.save_state();
-        self.push_machine_blob_if_changed();
+        self.push_roster();
         self.emit(self.roster_summary());
         Ok(())
     }
@@ -743,6 +752,7 @@ impl App {
             RosterBlob {
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
+                device_names: state.device_names.clone(),
                 routines: state.routines.clone(),
                 workflows: state.workflows.clone(),
                 auto_review: state.auto_review.clone(),
@@ -881,7 +891,10 @@ impl App {
     }
 
     pub fn device(&self, id: &str) -> Option<Device> {
-        self.state.lock().unwrap().devices.iter().find(|d| d.id == id).cloned()
+        let state = self.state.lock().unwrap();
+        let mut device = state.devices.iter().find(|d| d.id == id).cloned()?;
+        if let Some(name) = state.device_names.get(id) { device.name = name.clone(); }
+        Some(device)
     }
 
     /// A chat's name as the apps show it: a group's title, else its members' names; a direct
@@ -2002,7 +2015,8 @@ impl App {
     fn devices_out(&self, state: &State) -> Vec<Value> {
         let this_id = self.this_device_id();
         let mut devices: Vec<&Device> = state.devices.iter().collect();
-        devices.sort_by_key(|d| (Some(d.id.clone()) != this_id, d.name.to_lowercase()));
+        let name = |device: &Device| state.device_names.get(&device.id).unwrap_or(&device.name).clone();
+        devices.sort_by_key(|d| (Some(d.id.clone()) != this_id, name(d).to_lowercase()));
         let mut out: Vec<Value> = devices
             .into_iter()
             .map(|device| {
@@ -2011,7 +2025,8 @@ impl App {
                 let status = if is_this || state.device_online.contains(&device.id) { "online" } else { "offline" };
                 json!({
                     "id": device.id,
-                    "name": device.name,
+                    "name": name(device),
+                    "machine_name": device.name,
                     "model": device.model,
                     "os": device.os,
                     "os_version": device.os_version,
@@ -2204,6 +2219,29 @@ mod tests {
         let home = std::env::temp_dir().join(format!("beans-app-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    #[test]
+    fn device_alias_preserves_machine_name_and_survives_restart() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+        app.set_device_name("peer", "  Office  ").unwrap();
+        assert_eq!(app.device("peer").unwrap().name, "Office");
+        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let snapshot = restarted.snapshot();
+        let row = snapshot["devices"].as_array().unwrap().iter().find(|d| d["id"] == "peer").unwrap();
+        assert_eq!(row["name"], "Office");
+        assert_eq!(row["machine_name"], "Machine");
+        assert!(restarted.set_device_name("missing", "Name").is_err());
+        assert!(restarted.set_device_name("peer", &"界".repeat(65)).is_err());
+        restarted.set_device_name("peer", &"界".repeat(64)).unwrap();
+        restarted.state.lock().unwrap().devices.iter_mut().find(|d| d.id == "peer").unwrap().name = "New machine name".into();
+        restarted.set_device_name("peer", " \n ").unwrap();
+        let reset = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert!(!reset.state.lock().unwrap().device_names.contains_key("peer"));
+        assert_eq!(reset.device("peer").unwrap().name, "New machine name");
     }
 
     #[test]

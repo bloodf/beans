@@ -240,7 +240,7 @@ export function ChatsScreen({ sidebar = false, search = false }: { sidebar?: boo
       ) : connecting ? (
         <Stack.Title asChild>
           <View style={styles.status} accessibilityRole="header" accessibilityLabel={t("Connecting…")}>
-            <ActivityIndicator size="small" color={p.secondaryLabel as any} />
+            <ActivityIndicator size="small" color={p.secondaryLabel} />
             <Text style={[styles.statusText, { color: p.secondaryLabel }]} numberOfLines={1}>
               {t("Connecting…")}
             </Text>

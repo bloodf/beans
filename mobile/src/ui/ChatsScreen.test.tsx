@@ -36,15 +36,21 @@ mock.module("react", () => ({ ...react, default: react }));
 const jsx = (type: any, props: any) => ({ type, props });
 mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
 mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
-mock.module("react-native", () => ({ Platform: { OS: "ios" }, View: "View", Text: "Text", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator", Alert: {}, AppState: {}, StyleSheet: { create: (x: any) => x, hairlineWidth: 1 }, useWindowDimensions: () => ({ width: 400 }) }));
+const platform = { OS: "ios" };
+const opened: string[] = [];
+let searchSurface: "sidebar" | "ios" | "android" = "sidebar";
+let wide = false, pathname = "/";
+const navigated: string[] = [];
+mock.module("react-native", () => ({ Platform: platform, View: "View", Text: "Text", TextInput: "TextInput", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator", Alert: {}, AppState: {}, StyleSheet: { create: (x: unknown) => x, hairlineWidth: 1 }, useWindowDimensions: () => ({ width: 400 }) }));
 mock.module("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
 mock.module("expo-haptics", () => ({}));
-mock.module("expo-router", () => ({ Link: "Link", Stack: { SearchBar: "SearchBar", Toolbar: Object.assign("Toolbar", { Button: "Button", Menu: "Menu", MenuAction: "MenuAction" }), Title: "Title" }, useRouter: () => ({}) }));
+mock.module("expo-router", () => ({ Link: "Link", Stack: { SearchBar: "SearchBar", Toolbar: Object.assign("Toolbar", { Button: "Button", Menu: "Menu", MenuAction: "MenuAction" }), Title: "Title" }, usePathname: () => pathname, useRouter: () => ({ push: (path: string) => opened.push(path), replace: (path: string) => opened.push(path), navigate: (path: string) => navigated.push(path) }) }));
+mock.module("expo-router/unstable-native-tabs", () => ({ NativeTabs: Object.assign("NativeTabs", { Trigger: Object.assign("Trigger", { Icon: "Icon", Label: "Label" }) }) }));
 mock.module("./AvatarFlashList", () => ({ AvatarFlashList: "List" }));
 mock.module("./Avatar", () => ({ AvatarCluster: "Avatar" }));
 mock.module("./ChatPeek", () => ({ ChatPeek: "Peek" }));
 mock.module("./ChatRow", () => ({ ChatRow: "Row" }));
-mock.module("./layout", () => ({ PaneWidth: "PaneWidth", useSidebarWidth: () => 320 }));
+mock.module("./layout", () => ({ PaneWidth: "PaneWidth", useSidebarWidth: () => 320, useWide: () => wide }));
 mock.module("./relay", () => ({ problemTitle: () => "", showRelayProblem: () => {} }));
 mock.module("./format", () => ({ lastActivity: () => 0, preview: () => "", stamp: () => "" }));
 mock.module("./SidebarSearch", () => ({ SidebarSearch: "Search", useSidebarSearchInset: () => 0 }));
@@ -58,8 +64,10 @@ mock.module("../core/push", () => ({ clearPushes: () => {}, installPushHandlers:
 mock.module("expo-web-browser", () => ({}));
 const replies: Array<(value: any) => void> = [];
 mock.module("../../modules/beans-core", () => ({ request: () => new Promise(resolve => replies.push(resolve)) }));
+// These imports exercise production consumers after native and React mocks are installed.
 const { useStore, resetStore } = await import("../core/store");
 const { ChatsScreen } = await import("./ChatsScreen");
+const { default: TabsLayout } = await import("../../app/(main)/(tabs)/_layout");
 const timers = new Map<number, () => void>();
 let timerID = 0;
 function find(node: any, type: string): Node | undefined {
@@ -70,7 +78,7 @@ function find(node: any, type: string): Node | undefined {
 function render(commit = true): Node {
   for (let pass = 0; pass < 10; pass++) {
     cursor = 0; dirty = false; effects = [];
-    const root = ChatsScreen({ sidebar: true });
+    const root = ChatsScreen(searchSurface === "sidebar" ? { sidebar: true } : { search: true });
     if (!commit) return root;
     for (const effect of effects) effect();
     if (!dirty) return root;
@@ -79,14 +87,18 @@ function render(commit = true): Node {
 }
 function startSearch() {
   const root = render();
-  find(root, "Search")!.props.onChangeText("needle");
+  if (searchSurface === "ios") find(root, "SearchBar")!.props.onChangeText({ nativeEvent: { text: "needle" } });
+  else find(root, searchSurface === "sidebar" ? "Search" : "TextInput")!.props.onChangeText("needle");
   render();
   for (const [id, run] of [...timers]) { timers.delete(id); run(); }
 }
 const result = (label: string) => ({ chats: [{ chat_id: "same", snippet: label }], messages: [{ chat_id: "same", message_id: "message", snippet: label, created_at: 1 }], files: [{ chat_id: "same", message_id: "file", attachment_id: "attachment", name: label, created_at: 1 }], history_complete: false });
 async function flush() { for (let i = 0; i < 8; i++) await Promise.resolve(); }
 
-test("search results retain authority across deferred switches and sticky ABA", async () => {
+test.each(["sidebar", "ios", "android"] as const)("%s search retains authority across deferred switches and sticky ABA", async (surface) => {
+  searchSurface = surface;
+  platform.OS = surface === "android" ? "android" : "ios";
+  opened.length = 0;
   const originalTimeout = globalThis.setTimeout, originalClear = globalThis.clearTimeout;
   globalThis.setTimeout = ((run: () => void) => { const id = ++timerID; timers.set(id, run); return id; }) as any;
   globalThis.clearTimeout = ((id: number) => { timers.delete(id); }) as any;
@@ -108,14 +120,48 @@ test("search results retain authority across deferred switches and sticky ABA", 
         expect(current).toBeDefined();
         current(result("current")); await flush();
         expect(find(render(), "List")!.props.data.map((row: any) => row.snippet)).toEqual(["current", "current", "current"]);
+        const list = find(render(), "List")!;
+        const row = list.props.renderItem({ item: list.props.data[2] });
+        row.props.onPress();
+        expect(opened.pop()).toBe("/chat/same");
+        const queryRoot = render();
+        if (surface === "ios") find(queryRoot, "SearchBar")!.props.onChangeText({ nativeEvent: { text: "replacement" } });
+        else find(queryRoot, surface === "sidebar" ? "Search" : "TextInput")!.props.onChangeText("replacement");
+        // No render or passive effect has run since the field changed.
+        row.props.onPress();
+        expect(opened).toEqual([]);
+        render();
+        for (const [id, run] of [...timers]) { timers.delete(id); run(); }
+        replies.shift()!(result("replacement")); await flush();
+        const replacementList = find(render(), "List")!;
+        const replacementRow = replacementList.props.renderItem({ item: replacementList.props.data[0] });
         // Published results must disappear before passive effects run, even after A -> B -> A.
         const owner = useStore.getState()[field];
         useStore.setState({ [field]: field === "paired" ? !owner : "other" });
         useStore.setState({ [field]: owner });
+        replacementRow.props.onPress();
+        expect(opened).toEqual([]);
         const revoked = render(false);
         expect(find(revoked, "List")!.props.data).toEqual([]);
         expect(find(revoked, "Text")).toBeUndefined();
       }
     }
   } finally { dispose(); globalThis.setTimeout = originalTimeout; globalThis.clearTimeout = originalClear; }
+});
+
+test("widening a Devices or Search tab restores the empty chat pane without replacing an open chat", () => {
+  for (const path of ["/devices", "/devices/device/runner", "/search", "/chat/current", "/"]) {
+    slots = []; cursor = 0; effects = []; navigated.length = 0;
+    pathname = path; wide = false;
+    const compact = TabsLayout();
+    for (const effect of effects) effect();
+    expect(compact.props.hidden).toBe(false);
+    expect(navigated).toEqual([]);
+    cursor = 0; effects = []; wide = true;
+    const expanded = TabsLayout();
+    for (const effect of effects) effect();
+    expect(expanded.props.hidden).toBe(true);
+    expect(navigated).toEqual(path.startsWith("/devices") || path === "/search" ? ["/"] : []);
+  }
+  wide = false; pathname = "/"; slots = [];
 });

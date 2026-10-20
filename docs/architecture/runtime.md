@@ -88,6 +88,8 @@ Turns in one chat run one at a time on a Runner. A direct turn registers an `Age
 
 An unread user message also releases a `bash_output` wait on a background command without stopping it. `hear_user_message` queues steering before waking the chat's background sessions; `TurnSessions` reads the active steering queue. The loop then consumes the message at its next safe boundary. Foreground commands and `bash_input` waits are not interrupted by this notification, and no new work or update admission is created.
 
+The loop bounds cancellation waits for `before_tool_call` and tool execution in sequential and parallel batches, including child calls through `LoopRunner`. `STOP_GRACE` is one second for a pre-execution hook. Executing tools receive two seconds after cancellation is observed: the extra second keeps the outer cutoff from racing pipe-mode bash's own one-second termination, reaping, and drain deadline. A completed result wins over the cutoff when both are ready. A stuck call gets an error result warning that effects may already have occurred and work may remain running; Stop ends the run, while Send now lets the queued message proceed. Current-state authorization still runs synchronously immediately before each prepared top-level or child call executes. Event sinks, result-finalization hooks, other loop hooks, and non-yielding synchronous work are not covered by this cutoff. `AgentLoopConfig` keeps its existing fields and callers; there is no configurable grace field.
+
 ## Notifications
 
 Replies, failed responses, and pending confirmations reach the user wherever they are not looking.

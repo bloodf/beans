@@ -12,6 +12,7 @@ pub mod credentials;
 pub mod crypto;
 pub mod diagnostics;
 pub mod embeddings;
+pub mod envelope;
 pub mod events;
 pub mod files;
 pub mod artifacts;

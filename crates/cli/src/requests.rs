@@ -46,10 +46,12 @@ pub async fn ask_within(app: &Arc<App>, runner_id: &str, verb: &str, body: Value
     let machine = app.machine_file().ok_or("Pair this Device first")?.machine().map_err(|_| "Device signing key unavailable")?;
     let payload = request_bytes(&request, runner_id, &request.body)?;
     request.body = json!({"payload": request.body, "signature": machine.sign(&payload)});
-    let ciphertext = crate::crypto::seal_json(&runner.box_pubkey, &request).map_err(|e| e.to_string())?;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.pending_responses.lock().unwrap().insert(request.id.clone(), tx);
-    app.push_blob("request", Some(runner.id.clone()), ciphertext);
+    app.pending_responses.lock().unwrap().insert(request.id.clone(), (runner.id.clone(), tx));
+    if let Err(error) = crate::envelope::send(app, "request", &runner, &request) {
+        app.pending_responses.lock().unwrap().remove(&request.id);
+        return Err(error.to_string());
+    }
     let answer = tokio::time::timeout(timeout, rx).await;
     app.pending_responses.lock().unwrap().remove(&request.id);
     match answer {
@@ -61,11 +63,17 @@ pub async fn ask_within(app: &Arc<App>, runner_id: &str, verb: &str, body: Value
 
 /// A `response` reached this Device: hands it to the waiting `ask`, then drops the blob from
 /// the relay.
-pub fn deliver(app: Arc<App>, response: Response, blob_id: String) {
-    if let Some(tx) = app.pending_responses.lock().unwrap().remove(&response.request_id) {
-        let _ = tx.send(response);
+pub fn deliver(app: Arc<App>, from: &str, response: Response, blob_id: String) {
+    let waiting = {
+        let mut pending = app.pending_responses.lock().unwrap();
+        if pending.get(&response.request_id).is_some_and(|(runner, _)| runner == from) {
+            pending.remove(&response.request_id).map(|(_, tx)| tx)
+        } else { None }
+    };
+    if let Some(tx) = waiting {
+        let delivered = tx.send(response).is_ok();
+        if delivered && !blob_id.is_empty() { tokio::spawn(async move { crate::sync::delete_remote_blob(&app, &blob_id).await }); }
     }
-    tokio::spawn(async move { crate::sync::delete_remote_blob(&app, &blob_id).await });
 }
 
 /// A `request` reached this Runner: answers it, seals the answer to the Device that asked, and
@@ -78,16 +86,22 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String, running: crate::u
             Err(error) => (Value::Null, Some(error)),
         };
         let response = Response { request_id: request.id.clone(), body, error };
-        match app.device(&request.requested_by).filter(|d| !d.box_pubkey.is_empty()) {
-            Some(requester) => match crate::crypto::seal_json(&requester.box_pubkey, &response) {
-                Ok(ciphertext) => {
-                    app.push_blob("response", Some(requester.id.clone()), ciphertext);
-                }
-                Err(error) => tracing::warn!(%error, "sealing a response"),
-            },
-            None => tracing::warn!(verb = %request.verb, "a request from a Device this Runner does not know"),
+        let completed = (|| -> anyhow::Result<()> {
+            let requester = app.device(&request.requested_by).ok_or_else(|| anyhow::anyhow!("Requester unavailable"))?;
+            let item = crate::envelope::prepare(&app, "response", &requester, &response)?;
+            app.store.transport_complete(&crate::envelope::account(&app)?,
+                &format!("request:{}:{}", request.requested_by, request.id), Some(&item))?;
+            app.outbox_notify.notify_waiters();
+            Ok(())
+        })();
+        if let Err(error) = completed {
+            if let Ok(account)=crate::envelope::account(&app) {
+                if let Err(storage)=app.store.transport_uncertain(&account,&format!("request:{}:{}",request.requested_by,request.id)) { tracing::error!(%storage,"persisting uncertain request"); }
+            }
+            app.emit(crate::events::Event::Snapshot(app.snapshot()));
+            tracing::error!(%error, "transport_operation_uncertain"); return;
         }
-        crate::sync::delete_remote_blob(&app, &blob_id).await;
+        if !blob_id.is_empty() { crate::sync::delete_remote_blob(&app, &blob_id).await; }
     });
 }
 
@@ -107,7 +121,7 @@ fn request_bytes(request: &Request, target: &str, body: &Value) -> Result<Vec<u8
     serde_json::to_vec(&(domain, &request.id, &request.verb, &request.requested_by, target, request.created_at, body)).map_err(|_| "Invalid signed request".into())
 }
 
-async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
+pub(crate) fn verify(app: &App, request: &Request) -> Result<(), String> {
     // Sealed boxes hide the payload but do not authenticate its claimed sender.
     // Check current membership and signing authority before dispatching any verb.
     let paired = app.state.lock().unwrap().listed_machines.contains_key(&request.requested_by);
@@ -119,6 +133,12 @@ async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     let bytes = crate::keys::unb64(signature).map_err(|_| "Invalid request signature")?;
     let signature = ed25519_dalek::Signature::from_slice(&bytes).map_err(|_| "Invalid request signature")?;
     key.verify_strict(&request_bytes(request, &target, body)?, &signature).map_err(|_| "Invalid request signature")?;
+    Ok(())
+}
+
+async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
+    verify(app, request)?;
+    let body = &request.body["payload"];
     match request.verb.as_str() {
         "skills.discovery" => crate::skill_discovery::serve_as(app, body.clone(), &request.requested_by).await,
         "skills.library.preview" | "skills.library.import" | "skills.library.uninstall" => crate::skill_library::serve_as(app, &request.verb, body.clone(), &request.requested_by).await,

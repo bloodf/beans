@@ -262,6 +262,7 @@ async fn join(app: &Arc<App>, pairing: (String, String, String, String), device_
         os,
         os_version,
         box_pubkey: machine.box_pubkey(),
+        envelope_version: Some(1),
         plugins: Vec::new(),
         version: crate::config::VERSION.into(),
         update: None,

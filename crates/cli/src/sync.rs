@@ -212,6 +212,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         if refresh {
             refresh_presence(app, &url, &token).await?;
         }
+        crate::envelope::refresh(app).map_err(local_relay_error)?;
         if std::mem::take(&mut credentials_due) {
             app.push_credentials_if_owed();
             app.push_memory_config().map_err(|e| local_relay_error(e.into()))?;
@@ -259,10 +260,11 @@ async fn first_sync(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
     // A held first sync keeps `last_seq` at 0 but did apply the roster, credentials and policy
     // before the envelope it stopped at: those are written and shown now, not lost to a restart.
     if matches!(synced, Ok(FirstSync::Done | FirstSync::Held)) {
-        app.save_state_now();
+        app.store.save_state(&app.state.lock().unwrap().clone()).map_err(local_relay_error)?;
         app.emit(Event::Snapshot(app.snapshot()));
     }
     app.turns_changed();
+    if matches!(synced, Ok(FirstSync::Done)) { crate::envelope::refresh(app).map_err(local_relay_error)?; }
     synced
 }
 
@@ -291,16 +293,18 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
             }
             break;
         };
+        crate::envelope::preflight_page(app,&blobs).map_err(local_relay_error)?;
         for blob in &blobs {
             // While an update holds new work back, the first sync stops at an envelope that
             // starts work; `last_seq` stays 0, so the next pull starts it over (`update_control`).
-            let admission = if starts_work(machine_file, blob) {
+            let admission = if starts_work(app, blob) {
                 let Some(admission) = app.update.try_admit() else { return Ok(FirstSync::Held) };
                 Some(admission)
             } else {
                 None
             };
-            apply_incoming_blob(app, machine_file, blob, true)?;
+            if crate::envelope::addressed(&blob.kind) {crate::envelope::activate_first(app,blob).map_err(local_relay_error)?;}
+            else {apply_incoming_blob(app, machine_file, blob, true)?;}
             drop(admission);
             if blob.kind == "roster" {
                 let mut state = app.state.lock().unwrap();
@@ -423,6 +427,7 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
 // Keep page application synchronous: decrypt and commit before advancing past a read mark.
 fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
     blobs: Vec<BlobIn>) -> Result<bool, RelayError> {
+        crate::envelope::preflight_page(app,&blobs).map_err(local_relay_error)?;
         // A backlog publishes one snapshot instead of one event per message.
         let bulk = blobs.len() >= BULK_BLOBS;
         app.bulk_sync.store(bulk, Ordering::Relaxed);
@@ -437,7 +442,7 @@ fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
             // An envelope that starts work here waits on the relay while an update holds new
             // work back: the cursor stops before it, so it and everything after it come again
             // once the lease ends (`update_control`).
-            let admission = if starts_work(machine_file, &blob) {
+            let admission = if starts_work(app, &blob) {
                 let Some(admission) = app.update.try_admit() else {
                     held = true;
                     break;
@@ -447,9 +452,13 @@ fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
                 None
             };
             if bulk && blob.kind == "job_result" {
+                crate::envelope::activate(app,&blob).map_err(local_relay_error)?;
                 results.push(blob);
             } else {
-                if blob.kind == "chat" {
+                if crate::envelope::addressed(&blob.kind) {
+                    crate::envelope::activate(app,&blob).map_err(local_relay_error)?;
+                    crate::envelope::pump_at(app,&blob).map_err(local_relay_error)?;
+                } else if blob.kind == "chat" {
                     apply_chat_blob(app, machine_file, &blob, true, true)?;
                 } else {
                     apply_incoming_blob(app, machine_file, &blob, true)?;
@@ -465,7 +474,8 @@ fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
         Ok(())
         })();
         app.bulk_sync.store(false, Ordering::Relaxed);
-        app.save_state_now();
+        applied?;
+        app.store.save_state(&app.state.lock().unwrap().clone()).map_err(local_relay_error)?;
         if bulk {
             app.emit(Event::Snapshot(app.snapshot()));
             app.turns_changed();
@@ -473,7 +483,7 @@ fn apply_pull_page(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
         for blob in results {
             apply_blob(app, machine_file, &blob);
         }
-        applied?;
+        crate::envelope::pump(app).map_err(local_relay_error)?;
         Ok(held)
 }
 
@@ -492,22 +502,10 @@ async fn pull_controls(app: &Arc<App>, url: &str, token: &str, machine_file: &cr
         for blob in &blobs {
             let applies = match blob.kind.as_str() {
                 "policy" | "memory_config" => true,
-                "job_cancel" => unb64(&blob.ciphertext)
-                    .ok()
-                    .and_then(|ciphertext| crate::crypto::unseal_json::<JobCancel>(&machine.box_secret, &ciphertext).ok())
-                    .is_some_and(|cancel| app.running_jobs.lock().unwrap().contains_key(&cancel.job_id)),
-                "request" => unb64(&blob.ciphertext)
-                    .ok()
-                    .and_then(|ciphertext| crate::crypto::unseal_json::<Request>(&machine.box_secret, &ciphertext).ok())
-                    .is_some_and(|request| continues_work(&request.verb)),
-                "job_result" => unb64(&blob.ciphertext)
-                    .ok()
-                    .and_then(|ciphertext| crate::crypto::unseal_json::<JobResult>(&machine.box_secret, &ciphertext).ok())
-                    .is_some_and(|result| app.pending_results.lock().unwrap().contains_key(&result.job_id)),
-                "response" => unb64(&blob.ciphertext)
-                    .ok()
-                    .and_then(|ciphertext| crate::crypto::unseal_json::<Response>(&machine.box_secret, &ciphertext).ok())
-                    .is_some_and(|response| app.pending_responses.lock().unwrap().contains_key(&response.request_id)),
+                kind if crate::envelope::addressed(kind) => match crate::envelope::inspect(app, blob) {
+                    Ok(opened) => kind != "request" || continues_work(opened.envelope.body["verb"].as_str().unwrap_or("")),
+                    Err(_) => true,
+                },
                 _ => false,
             };
             if applies {
@@ -521,19 +519,15 @@ async fn pull_controls(app: &Arc<App>, url: &str, token: &str, machine_file: &cr
 /// Whether an envelope starts work on this Runner: a job, or a request other than an answer to
 /// work already running here (a permission card, a command's input or Stop), which running work
 /// may be waiting on.
-fn starts_work(machine_file: &crate::keys::MachineFile, blob: &BlobIn) -> bool {
-    match blob.kind.as_str() {
-        "job" => true,
-        "request" => {
-            let (Ok(machine), Ok(ciphertext)) = (machine_file.machine(), unb64(&blob.ciphertext)) else { return true };
-            crate::crypto::unseal_json::<Request>(&machine.box_secret, &ciphertext)
-                .map_or(true, |request| !continues_work(&request.verb))
-        }
-        _ => false,
+fn starts_work(app: &App, blob: &BlobIn) -> bool {
+    match crate::envelope::inspect(app, blob) {
+        Ok(opened) => opened.envelope.kind == "job" || (opened.envelope.kind == "request"
+            && !continues_work(opened.envelope.body["verb"].as_str().unwrap_or(""))),
+        Err(_) => false,
     }
 }
 
-fn continues_work(verb: &str) -> bool {
+pub(crate) fn continues_work(verb: &str) -> bool {
     matches!(verb, "permission.answer" | "bash.stdin" | "bash.stop" | "bash.background" | "chats.send_now")
 }
 
@@ -622,10 +616,7 @@ pub async fn ensure_registered(app: &Arc<App>, url: &str) -> Result<(), RelayErr
 
 async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), RelayError> {
     loop {
-        let Some(item) = app
-            .store
-            .first_outbox()
-            .map_err(|error| RelayError { status: None, message: error.to_string() })?
+        let Some(item) = app.store.transport_uploadable(app).map_err(local_relay_error)?
         else {
             return Ok(());
         };
@@ -681,6 +672,7 @@ async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), Rela
             // the winner, rebases the queued edit, then retries after the outer backoff.
             Err(error) if kind == "roster" && error.status == Some(409) => return Err(error),
             Err(error) if kind == "policy" => return Err(error),
+            Err(error) if crate::envelope::addressed(&kind) => return Err(error),
             Err(error) if error.is_client_error() && !error.is_unauthorized() => {
                 tracing::warn!(%error, %kind, "relay rejected blob; dropping");
                 if kind == "roster" { return Err(error); }
@@ -767,6 +759,7 @@ async fn refresh_presence(app: &Arc<App>, url: &str, token: &str) -> Result<(), 
     if changed || pruned || unknown {
         app.emit(app.roster_summary());
     }
+    crate::envelope::refresh(app).map_err(local_relay_error)?;
     // A Device that is not online lists nothing: a Runner that stopped mid-turn never shows
     // that turn again, and one that only lost the relay lists it again when it connects.
     let offline: Vec<String> = {
@@ -913,6 +906,9 @@ fn local_relay_error(error: anyhow::Error) -> RelayError {
 
 fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn,
     remember: bool) -> Result<(), RelayError> {
+    if crate::envelope::addressed(&blob.kind) {
+        return crate::envelope::receive(app, blob, false).map_err(local_relay_error);
+    }
     if blob.kind == "chat" {
         return apply_chat_blob(app, machine_file, blob, remember, false);
     }
@@ -1010,6 +1006,10 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
 }
 
 pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
+    if crate::envelope::addressed(&blob.kind) {
+        if let Err(error) = crate::envelope::receive(app, blob, false) { tracing::error!(%error, "admitting signed transport"); }
+        return;
+    }
     if matches!(blob.kind.as_str(), "roster" | "memory_config" | "chat") {
         if let Err(error) = apply_incoming_blob(app, machine_file, blob, true) {
             tracing::warn!(%error, "applying incoming blob");
@@ -1079,53 +1079,8 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Ok(credentials) => app.apply_credentials(&credentials),
             Err(error) => tracing::warn!(%error, "credentials blob"),
         },
-        "job" => {
-            let Ok(machine) = machine_file.machine() else { return };
-            match crate::crypto::unseal_json::<Job>(&machine.box_secret, &ciphertext) {
-                Ok(job) => {
-                    // The pull that applies this holds its admission (`starts_work`).
-                    crate::runtime::spawn_local_job(app.clone(), job, Some(blob.id.clone()), app.update.hold());
-                }
-                Err(error) => tracing::warn!(%error, "job envelope"),
-            }
-        }
-        "job_cancel" => {
-            let Ok(machine) = machine_file.machine() else { return };
-            match crate::crypto::unseal_json::<JobCancel>(&machine.box_secret, &ciphertext) {
-                Ok(cancel) => {
-                    app.cancel_job(&cancel.job_id);
-                    let app = app.clone();
-                    let blob_id = blob.id.clone();
-                    tokio::spawn(async move { delete_remote_blob(&app, &blob_id).await });
-                }
-                Err(error) => tracing::warn!(%error, "job cancellation envelope"),
-            }
-        }
-        "job_result" => {
-            let Ok(machine) = machine_file.machine() else { return };
-            match crate::crypto::unseal_json::<JobResult>(&machine.box_secret, &ciphertext) {
-                Ok(result) => {
-                    crate::runtime::deliver_job_result(app, result);
-                    let app = app.clone();
-                    let blob_id = blob.id.clone();
-                    tokio::spawn(async move { delete_remote_blob(&app, &blob_id).await });
-                }
-                Err(error) => tracing::warn!(%error, "job result envelope"),
-            }
-        }
-        "request" => {
-            let Ok(machine) = machine_file.machine() else { return };
-            match crate::crypto::unseal_json::<Request>(&machine.box_secret, &ciphertext) {
-                Ok(request) => crate::requests::serve(app.clone(), request, blob.id.clone(), app.update.hold()),
-                Err(error) => tracing::warn!(%error, "request envelope"),
-            }
-        }
-        "response" => {
-            let Ok(machine) = machine_file.machine() else { return };
-            match crate::crypto::unseal_json::<Response>(&machine.box_secret, &ciphertext) {
-                Ok(response) => crate::requests::deliver(app.clone(), response, blob.id.clone()),
-                Err(error) => tracing::warn!(%error, "response envelope"),
-            }
+        kind if crate::envelope::addressed(kind) => {
+            if let Err(error) = crate::envelope::receive(app, blob, false) { tracing::error!(%error, "admitting signed transport"); }
         }
         _ => {}
     }
@@ -2042,7 +1997,7 @@ mod tests {
         let entry = snapshot["devices"].as_array().unwrap().iter().find(|d| d["id"] == silent.as_str()).unwrap();
         assert_eq!((entry["name"].as_str(), entry["os"].as_str(), entry["is_this_device"].as_bool()), (Some(""), Some(""), Some(false)));
 
-        let device = Device { id: silent.clone(), name: "Laptop".into(), model: String::new(), os: "windows".into(), os_version: String::new(), box_pubkey: String::new(), plugins: Vec::new(), version: String::new(), update: None, updated_at: now };
+        let device = Device { envelope_version: None, id: silent.clone(), name: "Laptop".into(), model: String::new(), os: "windows".into(), os_version: String::new(), box_pubkey: String::new(), plugins: Vec::new(), version: String::new(), update: None, updated_at: now };
         upsert_device(&mut app.state.lock().unwrap().devices, device);
         assert!(unknown().is_empty(), "its blob landed");
         assert!(settle_unknown_machines(app));
@@ -3738,10 +3693,11 @@ mod tests {
     }
 
     fn addressed_blob<T: serde::Serialize>(app: &App, seq: i64, kind: &str, id: &str, contents: &T) -> BlobIn {
-        let machine = app.machine_file().unwrap().machine().unwrap();
-        BlobIn { id: id.into(), kind: kind.into(), recipient_machine_pubkey: Some(machine.pubkey()),
-            ciphertext: crate::keys::b64(&crate::crypto::seal_json(&machine.box_pubkey(), contents).unwrap()),
-            seq, created_at: seq }
+        let device = app.local_device().unwrap();
+        app.state.lock().unwrap().listed_machines.insert(device.id.clone(), 1);
+        let item = crate::envelope::prepare(app, kind, &device, contents).unwrap();
+        BlobIn { id: id.into(), kind: kind.into(), recipient_machine_pubkey: item.recipient,
+            ciphertext: crate::keys::b64(&item.ciphertext), seq, created_at: seq }
     }
 
     fn queued_turn(app: &Arc<App>) -> Job {
@@ -3840,7 +3796,7 @@ mod tests {
         let paired = crate::keys::Machine::generate();
         let before = MachineBlob { device: Device { id: paired.pubkey(), name: "Paired laptop".into(),
             model: String::new(), os: "macos".into(), os_version: String::new(), box_pubkey: paired.box_pubkey(),
-            plugins: Vec::new(), version: String::new(), update: None, updated_at: 1 }, turns: Vec::new() };
+            envelope_version: Some(1), plugins: Vec::new(), version: String::new(), update: None, updated_at: 1 }, turns: Vec::new() };
         let mut after = before.clone();
         after.device.name = "Renamed laptop".into();
         after.device.updated_at = 3;
@@ -3906,19 +3862,11 @@ mod tests {
 
         assert!(app.update.cancel(app));
         pull_blobs(app, &url, "token", &machine_file).await.unwrap();
-        let held = app.running_jobs.lock().unwrap().get(&job.id).unwrap().cancel.clone();
-        assert!(held.is_cancelled(), "the queued Stop was retained and reaches the turn after admission resumes");
+        assert!(!app.running_jobs.lock().unwrap().contains_key(&job.id), "Stop before arrival prevents execution");
+        assert!(app.store.transport_cancelled(&machine_file.identity_pubkey, &job.id).unwrap());
         assert_eq!(app.state.lock().unwrap().last_seq, 4);
         drop(guard);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let (mut running_finished, mut held_finished) = (false, false);
-            while !running_finished || !held_finished {
-                if let Event::JobFinished { job_id, .. } = events.recv().await.unwrap() {
-                    if job_id == "running" { running_finished = true; }
-                    if job_id == job.id { held_finished = true; }
-                }
-            }
-        }).await.expect("both stopped turns should finish");
+        wait_for_job_finished(&mut events, "running").await;
         assert!(!app.running_turns().iter().any(|turn| turn["job_id"] == "running" || turn["job_id"] == job.id));
         assert!(app.message(&job.chat_id, &job.trigger_message_id).unwrap().queued, "neither stopped turn consumes the queued message");
         server.abort();
@@ -3934,7 +3882,7 @@ mod tests {
         let guard = lock.lock().await;
         // A turn this Device sealed to another Runner, waiting on its `job_result`.
         app.store.insert_sent_job(&crate::app::SentJob { id: "remote-job".into(), chat_id: job.chat_id.clone(),
-            bot_id: "sync-bot".into(), routine_id: None, runner_id: "other-runner".into(), sent_at: crate::config::now_secs() }).unwrap();
+            bot_id: "sync-bot".into(), routine_id: None, runner_id: app.this_device_id().unwrap(), sent_at: crate::config::now_secs() }).unwrap();
         crate::runtime::resume_sent_jobs(app);
         assert!(app.running_turns().iter().any(|turn| turn["job_id"] == "remote-job"));
         app.state.lock().unwrap().last_seq = 1;
@@ -3976,7 +3924,7 @@ mod tests {
         {
             let mut state = app.state.lock().unwrap();
             state.devices.push(Device { id: runner.pubkey(), name: "Other Runner".into(), model: String::new(), os: "linux".into(),
-                os_version: String::new(), box_pubkey: runner.box_pubkey(), plugins: Vec::new(), version: String::new(), update: None, updated_at: 1 });
+                envelope_version: Some(1), os_version: String::new(), box_pubkey: runner.box_pubkey(), plugins: Vec::new(), version: String::new(), update: None, updated_at: 1 });
             state.device_online.insert(runner.pubkey());
             state.last_seq = 1;
         }
@@ -3991,7 +3939,7 @@ mod tests {
         let request: Request = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(item) = app.store.outbox().unwrap().into_iter().find(|item| item.kind == "request") {
-                    break crate::crypto::unseal_json(&runner.box_secret, &item.ciphertext).unwrap();
+                    break crate::envelope::body_of(&runner.box_secret, &item.ciphertext);
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -3999,7 +3947,7 @@ mod tests {
         let response = Response { request_id: request.id, body: serde_json::json!({ "index": "remembered" }), error: None };
         let (url, server) = serve_log(vec![
             addressed_blob(app, 2, "job", "held-job", &job),
-            addressed_blob(app, 3, "response", "remote-response", &response),
+            crate::envelope::fixture_blob(app, &runner, 3, "response", "remote-response", &response),
         ]).await;
         let mut events = app.events.subscribe();
         app.update.prepare(app, Duration::from_secs(60));
@@ -4015,4 +3963,95 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn bulk_snapshot_precedes_durable_result_completion_without_another_pull() {
+        let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();
+        let job=queued_turn(app);let sender=app.this_device_id().unwrap();
+        app.store.insert_sent_job(&crate::app::SentJob{id:"bulk-result".into(),chat_id:job.chat_id.clone(),bot_id:job.bot_id.clone(),routine_id:None,runner_id:sender,sent_at:crate::config::now_secs()}).unwrap();
+        crate::runtime::resume_sent_jobs(app);
+        let result=JobResult{job_id:"bulk-result".into(),chat_id:job.chat_id.clone(),bot_id:job.bot_id.clone(),outcome:"sent".into()};
+        let incoming=addressed_blob(app,1,"job_result","bulk-completion",&result);
+        let mut page=vec![incoming.clone()];
+        for seq in 2..=(BULK_BLOBS as i64+1) {let message=Message::new(&job.chat_id,Author::System,Body::text(format!("row {seq}")));page.push(account_blob(app,seq,"chat",&format!("bulk-row-{seq}"),&ChatBlob::Upsert{message}));}
+        let mut events=app.events.subscribe();
+        apply_pull_page(app,&app.machine_file().unwrap(),page).unwrap();
+        tokio::time::timeout(Duration::from_secs(5),async {
+            let mut snapshot=false;
+            loop {match events.recv().await.unwrap(){Event::Snapshot(_)=>snapshot=true,Event::JobFinished{job_id,..}if job_id=="bulk-result"=>{assert!(snapshot);break;},_=>{}}}
+        }).await.unwrap();
+        assert!(app.store.sent_jobs().unwrap().is_empty());
+        let mut duplicate=incoming;duplicate.id="bulk-completion-duplicate".into();
+        crate::envelope::receive(app,&duplicate,false).unwrap();
+        app.store.transport_recover().unwrap();crate::envelope::pump(app).unwrap();
+        assert!(!app.pending_results.lock().unwrap().contains_key("bulk-result"));
+        assert!(app.store.transport_pending(&app.machine_file().unwrap().identity_pubkey).unwrap().iter().all(|e|e.kind!="job_result"));
+    }
+    #[tokio::test]
+    async fn failed_transport_custody_keeps_accepted_prefix_without_dispatch() {
+        let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();
+        let job=queued_turn(app);let machine=app.machine_file().unwrap();
+        let first=addressed_blob(app,1,"job","accepted-job",&job);
+        let failed=addressed_blob(app,2,"job_cancel","failed-custody",&JobCancel{job_id:"later".into()});
+        app.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER reject_second BEFORE INSERT ON transport_custody WHEN NEW.id='failed-custody' BEGIN SELECT RAISE(ABORT,'custody fault'); END;").unwrap();
+        let mut events=app.events.subscribe();
+        assert!(apply_pull_page(app,&machine,vec![first.clone(),failed.clone()]).is_err());
+        assert_eq!(app.store.load_state().unwrap().last_seq,0);
+        assert_eq!(app.state.lock().unwrap().last_seq,0);
+        assert!(!app.running_jobs.lock().unwrap().contains_key(&job.id));
+        assert!(!app.bulk_sync.load(Ordering::Relaxed));
+        while let Ok(event)=events.try_recv(){assert!(!matches!(event,Event::JobStarted{..}));}
+        let c=app.store.connection.lock().unwrap();
+        assert_eq!(c.query_row("SELECT count(*) FROM transport_custody WHERE id='failed-custody'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        drop(c);
+        app.store.connection.lock().unwrap().execute_batch("DROP TRIGGER reject_second;").unwrap();
+        app.update.prepare(app,Duration::from_secs(60));
+        apply_pull_page(app,&machine,vec![failed]).unwrap();
+        assert_eq!(app.store.load_state().unwrap().last_seq,2);
+        assert!(app.store.transport_cancelled(&machine.identity_pubkey,"later").unwrap());
+    }
+    #[tokio::test]
+    async fn first_sync_publishes_snapshot_before_accepted_job_and_request() {
+        let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();
+        let job=queued_turn(app);let lock=app.chat_lock(&job.chat_id);let guard=lock.lock().await;
+        let machine=app.machine_file().unwrap().machine().unwrap();
+        let mut request=Request{id:"initial-request".into(),verb:"memory.read".into(),requested_by:machine.pubkey(),body:serde_json::json!({"bot_id":job.bot_id}),created_at:crate::config::now_secs()};
+        let bytes=serde_json::to_vec(&("beans-request-v1",&request.id,&request.verb,&request.requested_by,machine.pubkey(),request.created_at,&request.body)).unwrap();
+        request.body=serde_json::json!({"payload":request.body,"signature":machine.sign(&bytes)});
+        let (url,server)=serve_log(vec![addressed_blob(app,1,"job","initial-job",&job),addressed_blob(app,2,"request","initial-request-blob",&request)]).await;
+        let mut events=app.events.subscribe();assert!(matches!(first_sync(app,&url,"token",&app.machine_file().unwrap()).await.unwrap(),FirstSync::Done));
+        let mut snapshot=false;let mut started=false;
+        while let Ok(event)=events.try_recv(){match event{Event::Snapshot(_)=>snapshot=true,Event::JobStarted{job_id,..}if job_id==job.id=>{assert!(snapshot);started=true;},_=>{}}}
+        assert!(started);assert!(app.store.transport_pending(&app.machine_file().unwrap().identity_pubkey).unwrap().is_empty());
+        app.cancel_job(&job.id);drop(guard);server.abort();
+    }
+    #[tokio::test]
+    async fn later_nontransport_failure_preserves_dispatched_prefix_and_deferred_custody() {
+        let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();
+        let job=queued_turn(app);let lock=app.chat_lock(&job.chat_id);let guard=lock.lock().await;
+        let first=addressed_blob(app,1,"job","prefix-job",&job);
+        let mut invalid=account_blob(app,2,"chat","bad-chat",&ChatBlob::ClearUnread{chat_id:job.chat_id.clone()});invalid.ciphertext="invalid".into();
+        let machine=app.machine_file().unwrap();
+        assert!(apply_pull_page(app,&machine,vec![first,invalid]).is_err());
+        assert!(app.running_jobs.lock().unwrap().contains_key(&job.id));
+        assert_eq!(app.state.lock().unwrap().last_seq,1);assert_eq!(app.store.load_state().unwrap().last_seq,1);
+        app.cancel_job(&job.id);drop(guard);
+        let sender=crate::keys::Machine::generate();
+        let deferred=crate::envelope::fixture_blob(app,&sender,2,"job_cancel","deferred-control",&JobCancel{job_id:"future".into()});
+        apply_pull_page(app,&machine,vec![deferred.clone()]).unwrap();
+        assert_eq!(app.store.transport_deferred(&machine.identity_pubkey).unwrap().len(),1);
+        assert_eq!(app.store.load_state().unwrap().last_seq,2);
+        app.state.lock().unwrap().devices.push(Device{id:sender.pubkey(),box_pubkey:sender.box_pubkey(),envelope_version:Some(1),..Default::default()});
+        crate::envelope::refresh(app).unwrap();assert!(app.store.transport_cancelled(&machine.identity_pubkey,"future").unwrap());
+    }
+    #[tokio::test]
+    async fn later_addressed_inbox_failure_rolls_back_all_page_transport_admission() {
+        let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();let job=queued_turn(app);
+        let first=addressed_blob(app,1,"job","first-identity",&job);
+        let second=addressed_blob(app,2,"job_cancel","second-identity",&JobCancel{job_id:"later".into()});
+        app.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_later_identity BEFORE INSERT ON transport_operations WHEN NEW.id LIKE 'delivery:%' BEGIN SELECT RAISE(ABORT,'later inbox failure'); END;").unwrap();
+        assert!(apply_pull_page(app,&app.machine_file().unwrap(),vec![first,second]).is_err());
+        assert!(app.running_jobs.lock().unwrap().is_empty());assert_eq!(app.state.lock().unwrap().last_seq,0);
+        for table in ["transport_custody","transport_replay","transport_operations"] {let n:i64=app.store.connection.lock().unwrap().query_row(&format!("SELECT count(*) FROM {table}"),[],|r|r.get(0)).unwrap();assert_eq!(n,0);}
+        crate::envelope::refresh(app).unwrap();assert!(app.running_jobs.lock().unwrap().is_empty());
+    }
 }

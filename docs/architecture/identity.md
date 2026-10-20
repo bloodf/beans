@@ -82,6 +82,8 @@ Every Device writes its `os` into its machine metadata blob. Values: `macos`, `l
 
 Runner status is derived from `os` alone. There is no flag to opt a phone in or a desktop out. Peers read `os` from the decrypted metadata blob, so the relay never learns which Devices are Runners.
 
+Device metadata advertises optional signed transport `envelope_version: 1`. Invalid or absent support does not remove the Device, but current senders refuse addressed work to it. Support grants no authority: receivers verify paired membership and the machine signature bound to account, recipient, kind, identity and time. This changes neither the account DEK nor format or key derivation.
+
 ## Relay surface
 
 The relay stores:

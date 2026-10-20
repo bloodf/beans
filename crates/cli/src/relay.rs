@@ -66,7 +66,7 @@ pub struct GroupSlot {
     pub blobs: Vec<BlobIn>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct BlobIn {
     pub id: String,

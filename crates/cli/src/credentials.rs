@@ -509,21 +509,24 @@ mod tests {
 
     #[test]
     fn status_serializes_one_levels_key_without_mutating_saved_declarations() {
-        use beans_models::ThinkingLevel::{High, Max};
+        use beans_models::ThinkingLevel::{Minimal, Low, Medium, High, XHigh, Max};
         for declaration in [None, Some(vec![]), Some(vec![High, Max])] {
             let mut provider = custom("Lab", 1);
             provider.models[0].levels = declaration.clone();
+            provider.models[0].reasoning = Some(true);
+            provider.models[0].thinking_format = Some("openai".into());
             let mut credentials = Credentials::default();
             credentials.custom.insert("custom:lab".into(), provider);
             let statuses = credentials.statuses();
             let status = statuses.iter().find(|status| status.kind == "custom:lab").unwrap();
             let model = &status.models[0];
             assert_eq!(model.model.levels, None);
-            assert_eq!(model.levels, declaration.clone().unwrap_or_default());
+            assert_eq!(model.levels, declaration.clone().unwrap_or_else(|| vec![Minimal, Low, Medium, High, XHigh]));
             // Count on the raw serializer output before parsing can discard duplicate keys.
             let raw = serde_json::to_string(model).unwrap();
             assert_eq!(raw.matches("\"levels\":").count(), 1, "{raw}");
             let expected = match declaration.as_deref() {
+                None => "\"levels\":[\"minimal\",\"low\",\"medium\",\"high\",\"xhigh\"]",
                 Some([High, Max]) => "\"levels\":[\"high\",\"max\"]",
                 _ => "\"levels\":[]",
             };

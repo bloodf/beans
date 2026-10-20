@@ -26,7 +26,7 @@ function install() {
     useMemo: <T,>(compute: () => T) => compute(),
   };
   mock.module("react", () => ({ ...react, default: react }));
-  const jsx = (type: unknown, props: Node["props"]) => ({ type, props });
+  const jsx = (type: unknown, props: Node["props"]) => typeof type === "function" ? type(props) : { type, props };
   mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
   mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
   const platform = { OS: "ios" };
@@ -35,7 +35,7 @@ function install() {
     prompt: (_title: string, _message: string, actions: Button[]) => { buttons = actions; },
     alert: (title: string) => { alerts.push(title); },
   } }));
-  mock.module("@expo/ui", () => ({ useNativeState: (value: string) => slot(() => ({ get value() { return value; }, set value(_next: string) { /* Native writes are pending until the bridge applies them. */ } })).value }));
+  mock.module("@expo/ui", () => ({ useNativeState: (value: string) => ({ value }) }));
   mock.module("@expo/ui/jetpack-compose", () => ({ Column: "Column", Host: "Host", Text: "Text", TextButton: "Button", OutlinedTextField: Object.assign("Input", { Placeholder: "Placeholder" }), AlertDialog: Object.assign("Dialog", { Title: "Title", Text: "Body", ConfirmButton: "Confirm", DismissButton: "Dismiss" }) }));
   mock.module("@expo/ui/jetpack-compose/modifiers", () => ({ fillMaxWidth: () => ({}) }));
   mock.module("./forms", () => ({ Row: "Row" }));
@@ -65,12 +65,13 @@ function install() {
     const open = () => { render(); find(root, "Row")!.props.onPress!(); render(); };
     const submit = async (name: string) => {
       if (os === "ios") buttons[1]!.onPress!(name);
-      else { find(root, "Input")!.props.onValueChange!(name); find(find(root, "Confirm"), "Button")!.props.onClick!(); }
+      else { find(root, "Input")!.props.value!.value = name; find(find(root, "Confirm"), "Button")!.props.onClick!(); }
       await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
     };
     try {
       expect(deviceName(device)).toBe("Alias");
       open();
+      if (os === "android") expect(find(root, "Input")!.props.value!.value).toBe(device.name);
       if (os === "ios") buttons[0]!.onPress!(); else find(root, "Dialog")!.props.onDismissRequest!();
       open();
       if (os === "ios") buttons[1]!.onPress!(device.name);
@@ -86,7 +87,7 @@ function install() {
       const count = calls.length;
       open(); await submit("😀".repeat(65)); expect(calls.length).toBe(count); expect(alerts).toContain("Could not rename Device");
       open();
-      if (os === "android") find(root, "Input")!.props.onValueChange!("stale");
+      if (os === "android") find(root, "Input")!.props.value!.value = "stale";
       const staleSubmit = os === "ios" ? () => buttons[1]!.onPress!("stale") : find(find(root, "Confirm"), "Button")!.props.onClick!;
       useStore.setState({ identityId: "other" }); useStore.setState({ identityId: "account" });
       staleSubmit(); await Promise.resolve(); expect(calls.length).toBe(count);

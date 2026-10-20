@@ -171,8 +171,10 @@ pub fn keep_checks(current: &[Routine], incoming: &mut [Routine], bots: &[Bot], 
             continue;
         }
         let Some(held) = current.iter().find(|held| held.id == routine.id) else { continue };
-        if routine.pending != held.pending {
-            routine.pending = held.pending.clone();
+        let uncertain = held.pending.as_ref().is_some_and(|pending| matches!(pending.phase, RoutinePhase::Checking | RoutinePhase::Running));
+        let pending = if uncertain || routine.enabled_at <= held.enabled_at { held.pending.clone() } else { None };
+        if routine.pending != pending {
+            routine.pending = pending;
             kept = true;
         }
         if routine.check.is_none() && held.check.is_some() {
@@ -1549,6 +1551,30 @@ mod tests {
         let edited = edit(app, &routine.id, None, Some("every 30m"), None, None).unwrap();
         assert_eq!(edited.pending.unwrap().phase, RoutinePhase::Running);
         assert!(begin_scheduled_model(app, &job).is_err());
+        drop(admission);
+    }
+    #[cfg(feature = "runner")]
+    #[tokio::test]
+    async fn roster_rearm_revokes_unstarted_but_preserves_uncertain_claim() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let routine = create(app, "b1", "Merge claim", "every 10m", "x", None, true).unwrap();
+        let admission = app.update.try_admit().unwrap();
+        let claimed = claim_due(app, &routine, now_unix()).unwrap();
+        let bots = app.state.lock().unwrap().bots.clone();
+        let runner = app.this_device_id().unwrap();
+        let mut incoming = vec![routine.clone()];
+        keep_checks(std::slice::from_ref(&claimed), &mut incoming, &bots, &runner);
+        assert_eq!(incoming[0].pending, claimed.pending);
+        incoming[0].enabled_at = claimed.enabled_at + 1.0;
+        incoming[0].schedule = "every 20m".into();
+        keep_checks(std::slice::from_ref(&claimed), &mut incoming, &bots, &runner);
+        assert!(incoming[0].pending.is_none());
+        let job = claimed.pending.as_ref().unwrap().job.clone();
+        begin_scheduled_model(app, &job).unwrap();
+        let running = app.routine(&routine.id).unwrap();
+        keep_checks(std::slice::from_ref(&running), &mut incoming, &bots, &runner);
+        assert_eq!(incoming[0].pending, running.pending);
         drop(admission);
     }
 }

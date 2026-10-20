@@ -17,6 +17,8 @@ The app speaks to `beans serve` over JSON on `ws://127.0.0.1:<port>/ws`; the CLI
 
 `beans status` prints the same masked snapshot `bootstrap` answers, with no socket needed.
 
+Snapshots include local `transport` status: bounded persisted incompatible/deferred/rejected/uncertain items and `legacy_outbound_count`. Status omits ciphertext, signatures and payload contents. Update incompatible peers, inspect the originating chat and effects, then explicitly request new work if needed. Reconnection and updates never release legacy or uncertain intent automatically.
+
 ## Trust boundary
 
 `check_upgrade_headers` (`ws.rs`) runs before the socket opens and answers `403` on failure:

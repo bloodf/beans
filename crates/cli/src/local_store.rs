@@ -211,6 +211,7 @@ impl LocalStore {
         if connection.prepare("SELECT original_json FROM pending_chat_creates").is_err() {
             connection.execute("ALTER TABLE pending_chat_creates ADD COLUMN original_json TEXT", [])?;
         }
+        crate::envelope::initialize(&connection)?;
         crate::config::set_private(path)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -1257,6 +1258,11 @@ impl LocalStore {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
         for table in [
+            "transport_outbound",
+            "transport_custody",
+            "transport_replay",
+            "transport_operations",
+            "transport_cancelled",
             "memory_config",
             "memory_deliveries",
             "memory_fences",
@@ -1657,7 +1663,7 @@ fn body_kind(body: &Body) -> &'static str {
     }
 }
 
-fn outbox_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxItem> {
+pub(crate) fn outbox_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxItem> {
     let slot_name: Option<String> = row.get(4)?;
     let keep_first = row.get::<_, i64>(5)? != 0;
     Ok(OutboxItem {

@@ -219,7 +219,8 @@ pub struct App {
     /// Jobs sent to other Runners, waiting for their `job_result`.
     pub pending_results: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
     /// Requests sent to other Runners, waiting for their `response`.
-    pub pending_responses: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Response>>>,
+    pub pending_responses: Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<Response>)>>,
+    pub(crate) transport_registration: Mutex<()>,
     /// Questions waiting for the user's answer, by the id of the row that asks: its chat, and
     /// where the answer goes.
     #[cfg(feature = "runner")]
@@ -265,6 +266,7 @@ impl App {
         let store = LocalStore::open_with_admission(&config.database_path(), admission.as_ref(), false)?;
         let memory_config = crate::memory_service::load(&store, machine.as_ref().and_then(|m| m.dek().ok()))?;
         store.recover_memory_queue()?;
+        store.transport_recover()?;
         let mut state = store.load_state()?;
         for bot in &mut state.bots {
             bot.normalize_description();
@@ -316,6 +318,7 @@ impl App {
             watched_chat: Mutex::new(None),
             pending_results: Mutex::new(HashMap::new()),
             pending_responses: Mutex::new(HashMap::new()),
+            transport_registration: Mutex::new(()),
             #[cfg(feature = "runner")]
             pending_permissions: Mutex::new(HashMap::new()),
             #[cfg(feature = "runner")]
@@ -663,6 +666,7 @@ impl App {
             os: machine.os.clone(),
             os_version,
             box_pubkey: keys.box_pubkey(),
+            envelope_version: Some(1),
             plugins: self.plugins.lock().unwrap().statuses(),
             version: config::VERSION.into(),
             update: self.update_status(),
@@ -2134,6 +2138,7 @@ impl App {
             "providers": self.credentials.lock().unwrap().statuses(),
             "models": models_out(),
             "memory": self.memory_summary(),
+            "transport": self.store.transport_status().unwrap_or_else(|_| json!({"error":"transport_storage_unavailable"})),
             "running_chat_ids": self.running_chat_ids(),
             "running_turns": self.running_turns(),
         })

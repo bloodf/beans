@@ -4456,6 +4456,7 @@ mod tests {
                 plugins: Vec::new(),
                 version: String::new(),
                 update: None,
+                envelope_version: None,
                 updated_at: 1,
             });
         }

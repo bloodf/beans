@@ -45,6 +45,8 @@ pub struct Device {
     pub os: String,
     pub os_version: String,
     pub box_pubkey: String,
+    #[serde(default, deserialize_with = "transport_capability", skip_serializing_if = "Option::is_none")]
+    pub envelope_version: Option<u8>,
     /// Plugins installed on that Runner, with their setup state. Secrets stay on the Runner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginStatus>,
@@ -57,6 +59,11 @@ pub struct Device {
     pub update: Option<UpdateStatus>,
     #[serde(default)]
     pub updated_at: i64,
+}
+
+fn transport_capability<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok((value.as_u64() == Some(1)).then_some(1))
 }
 
 /// A self-updating CLI's updates, as every Device sees them in its `machine` blob.

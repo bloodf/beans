@@ -135,9 +135,8 @@ pub fn cancel_removed_bots(app: &Arc<App>, removed_bot_ids: &[String]) {
 fn forward_cancellations(app: &Arc<App>, remote: Vec<(String, String)>) {
     for (job_id, runner_id) in remote {
         let Some(runner) = app.device(&runner_id).filter(|runner| !runner.box_pubkey.is_empty()) else { continue };
-        match crate::crypto::seal_json(&runner.box_pubkey, &JobCancel { job_id: job_id.clone() }) {
-            Ok(ciphertext) => {
-                app.push_blob("job_cancel", Some(runner.id), ciphertext);
+        match crate::envelope::send(app, "job_cancel", &runner, &JobCancel { job_id: job_id.clone() }) {
+            Ok(()) => {
             }
             Err(error) => tracing::warn!(%error, %job_id, "sealing job cancellation"),
         }
@@ -527,9 +526,11 @@ pub fn resume_sent_jobs(app: &Arc<App>) {
 }
 
 /// A `job_result` from another Runner reached this Device.
-pub fn deliver_job_result(app: &Arc<App>, result: JobResult) {
-    if let Some(tx) = app.pending_results.lock().unwrap().remove(&result.job_id) {
-        let _ = tx.send(result.outcome);
+pub fn deliver_job_result(app: &Arc<App>, from: &str, result: JobResult) {
+    let expected = app.running_jobs.lock().unwrap().get(&result.job_id)
+        .is_some_and(|job| job.runner_id.as_deref() == Some(from) && job.chat_id == result.chat_id && job.bot_id == result.bot_id);
+    if expected {
+        if let Some(tx) = app.pending_results.lock().unwrap().remove(&result.job_id) { let _ = tx.send(result.outcome); }
     }
 }
 
@@ -584,9 +585,8 @@ pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
         return Dispatch::Ran;
     }
     match app.device(&bot.runner_id) {
-        Some(runner) if !runner.box_pubkey.is_empty() => match crate::crypto::seal_json(&runner.box_pubkey, &job) {
-            Ok(ciphertext) => {
-                app.push_blob("job", Some(runner.id.clone()), ciphertext);
+        Some(runner) if !runner.box_pubkey.is_empty() => match crate::envelope::send(app, "job", &runner, &job) {
+            Ok(()) => {
                 if app.relay_url().is_none() {
                     app.notice(&job.chat_id, format!("{} runs on {}, but no relay is configured, so this turn cannot leave this Device.", bot.name, runner.name));
                     Dispatch::Deferred
@@ -614,14 +614,30 @@ pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
 /// before taking the lock, so hard Stop also cancels jobs waiting behind another turn.
 /// `admission` counts the job as running here until it ends.
 pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, admission: Admission) {
+    let registration = app.transport_registration.lock().unwrap();
+    let transport = remote_blob_id.is_some();
+    if transport {
+        let claimed = crate::envelope::account(&app).and_then(|account|
+            app.store.transport_claim(&account, &format!("job:{}", job.id)));
+        match claimed {
+            Ok(true) => {},
+            Ok(false) => return,
+            Err(error) => { tracing::error!(%error, "claiming authenticated Job"); return; }
+        }
+    }
     if app.is_paused() {
         app.notice(&job.chat_id, "Account paused. Resume to run bots.");
         if let Some(id) = remote_blob_id {
+            drop(registration);
             let app = app.clone();
             tokio::spawn(async move {
-                crate::sync::delete_remote_blob(&app, &id).await;
-                if app.this_device_id().as_deref() != Some(job.requested_by.as_str()) {
-                    report_outcome(&app, &job, TurnOutcome::Skipped);
+                let completed = if app.this_device_id().as_deref()==Some(job.requested_by.as_str()) {
+                    crate::envelope::account(&app).and_then(|account|app.store.transport_complete(&account,&format!("job:{}",job.id),None))
+                } else { report_outcome(&app,&job,TurnOutcome::Skipped) };
+                if completed.is_ok() && !id.is_empty() { crate::sync::delete_remote_blob(&app,&id).await; }
+                if completed.is_err() {
+                    if let Ok(account)=crate::envelope::account(&app) { if let Err(error)=app.store.transport_uncertain(&account,&format!("job:{}",job.id)){tracing::error!(%error,"persisting uncertain Job");} }
+                    app.emit(crate::events::Event::Snapshot(app.snapshot()));
                 }
             });
         }
@@ -637,6 +653,13 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, 
         None,
         cancel.clone(),
     );
+    if transport {
+        match crate::envelope::account(&app).and_then(|account| app.store.transport_cancelled(&account, &job.id)) {
+            Ok(false) => {},
+            _ => cancel.cancel(),
+        }
+    }
+    drop(registration);
     tokio::spawn(async move {
         let _admission = admission;
         let lock = app.chat_lock(&job.chat_id);
@@ -645,11 +668,19 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>, 
         if let Some(id) = &job.routine_id {
             crate::routines::finished(&app, id, outcome);
         }
-        if let Some(id) = remote_blob_id {
-            crate::sync::delete_remote_blob(&app, &id).await;
-        }
-        if app.this_device_id().as_deref() != Some(job.requested_by.as_str()) {
-            report_outcome(&app, &job, outcome);
+        if transport {
+            let completed = if app.this_device_id().as_deref()==Some(job.requested_by.as_str()) {
+                crate::envelope::account(&app).and_then(|account|app.store.transport_complete(&account,&format!("job:{}",job.id),None))
+            } else { report_outcome(&app,&job,outcome) };
+            if completed.is_ok() {
+                if let Some(id)=remote_blob_id { if !id.is_empty() { crate::sync::delete_remote_blob(&app,&id).await; } }
+            }
+            if completed.is_err() {
+                if let Ok(account)=crate::envelope::account(&app) { if let Err(error)=app.store.transport_uncertain(&account,&format!("job:{}",job.id)){tracing::error!(%error,"persisting uncertain Job");} }
+                app.emit(crate::events::Event::Snapshot(app.snapshot()));
+            }
+        } else if app.this_device_id().as_deref() != Some(job.requested_by.as_str()) {
+            let _ = report_outcome(&app, &job, outcome);
         }
     });
 }
@@ -693,15 +724,24 @@ async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken) ->
     outcome
 }
 
-fn report_outcome(app: &Arc<App>, job: &Job, outcome: TurnOutcome) {
-    let Some(requester) = app.device(&job.requested_by).filter(|d| !d.box_pubkey.is_empty()) else { return };
-    let result = JobResult { job_id: job.id.clone(), chat_id: job.chat_id.clone(), bot_id: job.bot_id.clone(), outcome: outcome.as_str().into() };
-    match crate::crypto::seal_json(&requester.box_pubkey, &result) {
-        Ok(ciphertext) => {
-            app.push_blob("job_result", Some(requester.id.clone()), ciphertext);
+fn report_outcome(app: &Arc<App>, job: &Job, outcome: TurnOutcome) -> anyhow::Result<()> {
+    let result=(|| -> anyhow::Result<()> {
+        let requester = app.device(&job.requested_by).filter(|d| !d.box_pubkey.is_empty())
+            .ok_or_else(||anyhow::anyhow!("Result requester unavailable"))?;
+        let reply = JobResult { job_id: job.id.clone(), chat_id: job.chat_id.clone(), bot_id: job.bot_id.clone(), outcome: outcome.as_str().into() };
+        let item=crate::envelope::prepare(app,"job_result",&requester,&reply)?;
+        app.store.transport_finish_job(&crate::envelope::account(app)?,&format!("job:{}",job.id),&item)?;
+        app.outbox_notify.notify_waiters();
+        Ok(())
+    })();
+    if let Err(error)=&result {
+        if let Ok(account)=crate::envelope::account(app) {
+            if let Err(storage)=app.store.transport_uncertain(&account,&format!("job:{}",job.id)) { tracing::error!(%storage,"persisting uncertain Job"); }
         }
-        Err(error) => tracing::warn!(%error, "sealing the job result"),
+        tracing::error!(%error,"Job outcome is uncertain");
+        app.emit(crate::events::Event::Snapshot(app.snapshot()));
     }
+    result
 }
 
 /// What a turn running here is doing that no message says: it goes into this Device's machine
@@ -929,6 +969,7 @@ mod tests {
             plugins: Vec::new(),
             version: String::new(),
             update: None,
+            envelope_version: Some(1),
             updated_at: 1,
         });
         let cancel = CancellationToken::new();
@@ -952,7 +993,7 @@ mod tests {
         assert_eq!(queued.recipient.as_deref(), Some("runner"));
         let ciphertext = queued.ciphertext;
         let payload: JobCancel =
-            crate::crypto::unseal_json(&runner_keys.box_secret, &ciphertext).unwrap();
+            crate::envelope::body_of(&runner_keys.box_secret, &ciphertext);
         assert_eq!(payload.job_id, "remote-job");
     }
 
@@ -965,6 +1006,7 @@ mod tests {
             id: "runner".into(), name: "Runner".into(), model: String::new(), os: "macos".into(),
             os_version: String::new(), box_pubkey: runner_keys.box_pubkey(), plugins: Vec::new(), updated_at: 1,
             version: String::new(), update: None,
+            envelope_version: Some(1),
         });
         let removed = CancellationToken::new();
         let survivor = CancellationToken::new();
@@ -988,7 +1030,7 @@ mod tests {
         let cancels: Vec<_> = app.store.outbox().unwrap().into_iter().filter(|item| item.kind == "job_cancel").collect();
         let [queued] = cancels.try_into().unwrap();
         assert_eq!(queued.recipient.as_deref(), Some("runner"));
-        let payload: JobCancel = crate::crypto::unseal_json(&runner_keys.box_secret, &queued.ciphertext).unwrap();
+        let payload: JobCancel = crate::envelope::body_of(&runner_keys.box_secret, &queued.ciphertext);
         assert_eq!(payload.job_id, "remote");
     }
 
@@ -1080,6 +1122,7 @@ mod tests {
             plugins: Vec::new(),
             version: String::new(),
             update: None,
+            envelope_version: Some(1),
             updated_at: 1,
         });
         app.state.lock().unwrap().turns_online.insert("mac".into());
@@ -1090,7 +1133,7 @@ mod tests {
         let cancels: Vec<_> = app.store.outbox().unwrap().into_iter().filter(|item| item.kind == "job_cancel").collect();
         let [cancel] = cancels.try_into().unwrap();
         assert_eq!(cancel.recipient.as_deref(), Some("mac"));
-        let payload: JobCancel = crate::crypto::unseal_json(&mac_keys.box_secret, &cancel.ciphertext).unwrap();
+        let payload: JobCancel = crate::envelope::body_of(&mac_keys.box_secret, &cancel.ciphertext);
         assert_eq!(payload.job_id, "mac-job");
     }
 
@@ -1111,6 +1154,7 @@ mod tests {
             plugins: Vec::new(),
             version: String::new(),
             update: None,
+            envelope_version: Some(1),
             updated_at: 1,
         };
         app.state.lock().unwrap().device_seen.insert("mac".into(), 1);
@@ -1185,7 +1229,7 @@ mod tests {
 
         // The result that lands later ends it there, and nothing is left to resume.
         let mut events = restarted.events.subscribe();
-        deliver_job_result(&restarted, JobResult { job_id: "remote-job".into(), chat_id: "chat".into(), bot_id: "bot".into(), outcome: "sent".into() });
+        deliver_job_result(&restarted, "runner", JobResult { job_id: "remote-job".into(), chat_id: "chat".into(), bot_id: "bot".into(), outcome: "sent".into() });
         let finished = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
         assert!(matches!(finished, Event::JobFinished { job_id, .. } if job_id == "remote-job"));
         assert!(restarted.running_turns().is_empty());
@@ -1212,5 +1256,51 @@ mod tests {
 
         assert!(app.running_turns().is_empty());
         assert!(app.store.sent_jobs().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn local_results_enqueue_and_claimed_results_complete_with_the_same_outbox_contract() {
+        let scratch=scratch_app();let app=&scratch.0;
+        crate::identity::create(app,None).unwrap();
+        let remote=crate::keys::Machine::generate();
+        let requester=Device { id:remote.pubkey(),box_pubkey:remote.box_pubkey(),envelope_version:Some(1),os:"linux".into(),..Default::default() };
+        app.state.lock().unwrap().devices.push(requester.clone());
+        let mut job=command_job(app,"chat", "bot", "card");job.requested_by=requester.id.clone();
+        report_outcome(app,&job,TurnOutcome::Sent).unwrap();
+        let ordinary=app.store.outbox().unwrap().into_iter().find(|i|i.kind=="job_result").unwrap();
+        assert!(app.store.transport_version(&ordinary).unwrap());
+        let result:JobResult=crate::envelope::body_of(&remote.box_secret,&ordinary.ciphertext);
+        assert_eq!(result.job_id,job.id);assert_eq!(result.outcome,"sent");
+        job.id="claimed-job".into();let account=crate::envelope::account(app).unwrap();
+        app.store.connection.lock().unwrap().execute("INSERT INTO transport_operations VALUES(?1,'job:claimed-job','binding','pending','{}',NULL)",[&account]).unwrap();
+        assert!(app.store.transport_claim(&account,"job:claimed-job").unwrap());
+        report_outcome(app,&job,TurnOutcome::Pass).unwrap();
+        let status:String=app.store.connection.lock().unwrap().query_row("SELECT status FROM transport_operations WHERE id='job:claimed-job'",[],|r|r.get(0)).unwrap();
+        assert_eq!(status,"completed");
+        let rows=app.store.outbox().unwrap();
+        assert!(rows.iter().filter(|i|i.kind=="job_result").any(|i|crate::envelope::body_of::<JobResult>(&remote.box_secret,&i.ciphertext).job_id=="claimed-job"));
+        app.state.lock().unwrap().chats.push(empty_chat("result-chat"));
+        app.store.insert_sent_job(&SentJob{id:"waiting".into(),chat_id:"result-chat".into(),bot_id:"bot".into(),routine_id:None,runner_id:remote.pubkey(),sent_at:now_secs()}).unwrap();
+        resume_sent_jobs(app);
+        let completion=JobResult{job_id:"waiting".into(),chat_id:"result-chat".into(),bot_id:"bot".into(),outcome:"sent".into()};
+        deliver_job_result(app,"wrong",completion.clone());
+        assert!(app.pending_results.lock().unwrap().contains_key("waiting"));
+        deliver_job_result(app,&remote.pubkey(),completion);
+        tokio::time::timeout(std::time::Duration::from_secs(5),async{while !app.store.sent_jobs().unwrap().is_empty(){tokio::task::yield_now().await;}}).await.unwrap();
+    }
+    #[tokio::test]
+    async fn paused_self_and_remote_jobs_complete_only_owned_claims() {
+        let scratch=scratch_app();let app=&scratch.0;crate::identity::create(app,None).unwrap();
+        let local=app.local_device().unwrap();let remote=crate::keys::Machine::generate();
+        app.state.lock().unwrap().devices.push(Device{id:remote.pubkey(),box_pubkey:remote.box_pubkey(),envelope_version:Some(1),..Default::default()});
+        app.set_paused(true);let account=crate::envelope::account(app).unwrap();
+        for (id,requester,transport) in [("paused-local",local.id,false),("paused-self",app.this_device_id().unwrap(),true),("paused-remote",remote.pubkey(),true)] {
+            let mut job=command_job(app,"chat","bot","card");job.id=id.into();job.requested_by=requester;
+            if transport {app.store.connection.lock().unwrap().execute("INSERT INTO transport_operations VALUES(?1,?2,'binding','pending','{}',NULL)",rusqlite::params![account,format!("job:{id}")]).unwrap();}
+            spawn_local_job(app.clone(),job,transport.then(String::new),app.update.hold());
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5),async {loop {let c=app.store.connection.lock().unwrap();let n:i64=c.query_row("SELECT count(*) FROM transport_operations WHERE status='completed'",[],|r|r.get(0)).unwrap();drop(c);if n==2{break;}tokio::task::yield_now().await;}}).await.unwrap();
+        assert!(app.running_jobs.lock().unwrap().is_empty());
+        let results=app.store.outbox().unwrap().into_iter().filter(|i|i.kind=="job_result").collect::<Vec<_>>();
+        assert_eq!(results.len(),1);let result:JobResult=crate::envelope::body_of(&remote.box_secret,&results[0].ciphertext);assert_eq!(result.job_id,"paused-remote");
     }
 }

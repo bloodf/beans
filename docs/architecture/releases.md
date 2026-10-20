@@ -6,6 +6,8 @@ Feature changes run relevant checks locally before integration: the affected Rus
 
 [Tests](../../.github/workflows/test.yml) runs the full platform matrix, [Docs](../../.github/workflows/docs.yml) checks architecture budgets and links, and [Catalog](../../.github/workflows/catalog.yml) checks model catalog and marketplace index update timestamps. Jobs accept any same-repository PR head branch; fork PRs are skipped, including fork branches named `release/**`. Manual dispatch does not require a PR. Catalog fetches the PR base branch, falling back to `main` on manual dispatch. Docs and Catalog use distinct `docs` and `catalog` check names. `scripts/release-pr-gates.test.ts` checks triggers, job admission and catalog base selection locally.
 
+Tests jobs have explicit runtime limits: Rust on Linux and macOS and the AppKit suite allow 30 minutes, Windows Rust allows 45, desktop allows 20, and phone allows 15, matching the upstream platform limits. A hung job fails instead of holding the run indefinitely.
+
 Release publication and mobile submission remain manual-only. E2E scripts remain manual/local and are not added to these validation workflows.
 
 ## Source and readiness

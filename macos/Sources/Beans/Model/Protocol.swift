@@ -167,6 +167,18 @@ enum Wire {
     }
 
     struct Routine: Decodable {
+        struct Health: Decodable {
+            struct Model: Decodable {
+                var status: String?
+                var authenticationFailures: Int?
+            }
+            var lastCheckAt: Double?
+            var lastSuccessAt: Double?
+            var status: String?
+            var connectionFailures: Int?
+            var authenticationFailures: Int?
+            var model: Model?
+        }
         var id: String
         var botId: String
         var name: String
@@ -181,14 +193,32 @@ enum Wire {
         var isRunning: Bool?
         var check: String?
         var createdAt: Double
+        var timezone: String?
+        var missedRunPolicy: String?
+        var state: String?
+        var health: Health?
 
         func toModel() -> Beans.Routine {
             Beans.Routine(
                 id: id, botID: botId, name: name, prompt: prompt, schedule: schedule, scheduleText: Format.schedule(scheduleText ?? schedule),
                 isEnabled: isEnabled, pausedReason: pausedReason, lastRunAt: lastRunAt.map { Date(timeIntervalSince1970: $0) },
                 lastOutcome: lastOutcome, nextRunAt: nextRunAt.map { Date(timeIntervalSince1970: $0) }, isRunning: isRunning ?? false,
-                createdAt: Date(timeIntervalSince1970: createdAt), check: check)
+                createdAt: Date(timeIntervalSince1970: createdAt), check: check,
+                timezone: timezone ?? TimeZone.current.identifier, missedRunPolicy: missedRunPolicy ?? "coalesce",
+                state: state ?? (isEnabled ? "on" : "paused"),
+                health: RoutineHealth(
+                    lastCheckAt: health?.lastCheckAt.map { Date(timeIntervalSince1970: $0) },
+                    lastSuccessAt: health?.lastSuccessAt.map { Date(timeIntervalSince1970: $0) },
+                    status: health?.status, connectionFailures: health?.connectionFailures ?? 0,
+                    authenticationFailures: health?.authenticationFailures ?? 0, modelStatus: health?.model?.status,
+                    modelAuthenticationFailures: health?.model?.authenticationFailures ?? 0))
         }
+    }
+
+    /// `device.service_status`: whether `beans service` keeps the CLI running on that Device.
+    struct ServiceStatus: Decodable {
+        var installed: Bool
+        var running: Bool
     }
 
     struct RoutineChanged: Decodable {

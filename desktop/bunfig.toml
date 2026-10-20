@@ -1,6 +1,7 @@
 [test]
 # These exported browser checks require the Solid Vite compiler and a mounted DOM.
 # Keep their URLs stable for browser runners; they do not register bun:test cases.
+# `bun run test:browser` executes every export below, including both motion preferences.
 pathIgnorePatterns = [
   "**/src/ui/motion.test.tsx",
   "**/src/ui/palette.test.tsx",

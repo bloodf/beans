@@ -159,6 +159,10 @@ jobs:
       - run: bun run generate
       - run: bun run typecheck
       - run: bun run test
+      - run: bunx playwright install --with-deps chromium
+        if: ${{ !cancelled() }}
+      - run: bun run test:browser
+        if: ${{ !cancelled() }}
       - run: go test ./...
 
   mobile:

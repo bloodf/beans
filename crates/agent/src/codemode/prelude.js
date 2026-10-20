@@ -115,9 +115,17 @@
 		}
 	}
 
+	// A promise is not a tool result; serializing it must not silently produce {}.
+	function unawaited(label) {
+		return () => {
+			throw new TypeErrorCtor(label + " returns a promise: await it before using its result");
+		};
+	}
+
 	function caller(kind, name, spread) {
-		return (...args) =>
-			new PromiseCtor((resolve, reject) => {
+		const toJSON = unawaited(name + "()");
+		return (...args) => {
+			const promise = new PromiseCtor((resolve, reject) => {
 				if (finished) {
 					reject(new ErrorCtor("The script has already finished"));
 					return;
@@ -134,6 +142,9 @@
 				pendingCount++;
 				send(kind, id, name, json);
 			});
+			defineProperty(promise, "toJSON", { value: toJSON });
+			return promise;
+		};
 	}
 
 	// Tools known when the script starts, by identifier and by name. A name the script finds

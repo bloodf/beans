@@ -161,6 +161,16 @@ async fn searches_and_lookups_reach_tools_the_catalog_finds_late() {
     assert!(text_of(&result).ends_with("[1,\"late__lookup\",true,true,7,1]"), "{}", text_of(&result));
 }
 
+#[tokio::test]
+async fn unawaited_results_report_the_missing_await() {
+    let codemode = CodemodeTool::new(Arc::new(Late), CodemodeOptions::default());
+    for call in ["searchTools('lookup')", "describeTool('echo')", "tools.echo({ id: 7 })"] {
+        let result = run(&codemode, &format!("return JSON.stringify({call});")).await;
+        assert!(result.is_error, "{call}: {}", text_of(&result));
+        assert!(text_of(&result).contains("returns a promise: await it before using its result"), "{call}: {}", text_of(&result));
+    }
+}
+
 #[derive(Default)]
 struct MemoryStore(StdMutex<BTreeMap<String, Value>>);
 

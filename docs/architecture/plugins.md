@@ -9,6 +9,8 @@ A bot uses plugins by writing a script, after pi's codemode: `codemode { code }`
 - **The listing**: the tool's description, rendered once per turn, declares callable tools as TypeScript: shared MCP result types, `models.ask`, local tools (with the structured output shape of script bash), and each plugin's name, description, what it needs, the start of its servers' instructions, and its tools' declarations from JSON Schemas. About 3,000 tokens are offered, each plugin getting one tool before any gets all. A plugin with no saved list remains named; `describeNamespace()` or a call by name connects it.
 - **Every call goes through the loop**: arguments and current account Pause and bot shell/write/plugin capabilities are checked before the nested call runs, including after an approval wait. Shell and writable plugin calls go through Auto-review with the script beside them. A refusal, unanswered question, or new-message dismissal ends the script; waiting calls never start. A question stopped waiting reads as dismissed, not as the user's no. The script's row retains nested calls; its working state names the latest command's description as "Running command: …" or the plugin as "Using GitHub…", and its finished row summarizes the plugins used.
 
+Tool calls and catalog discovery helpers return promises. Scripts await their results before serializing them; JSON serialization of an unawaited call reports the missing `await` instead of silently producing `{}`.
+
 Custom servers entered in a Runner's `mcp.json` use this same catalog, permission gate, and sign-in flow; their file, lifecycle, and management API are in [MCP servers](mcp-servers.md).
 
 Skill metadata discovery and managed copies are described in [Skills](skills.md).

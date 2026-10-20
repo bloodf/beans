@@ -676,7 +676,7 @@ mod tests {
             let fixture = match api {
                 CustomApi::ChatCompletions => "data: [DONE]\n\n",
                 CustomApi::Responses => "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{}}}\n\n",
-                CustomApi::Messages => "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                CustomApi::Messages => "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
             };
             for empty in [false, true] {
                 let (root, server) = answer_once(fixture);

@@ -154,10 +154,17 @@ export function syncCatalog(text: string, sources: Sources, now = Date.now()) {
       if (!Object.hasOwn(WIRES, endpoint)) notes.push(`${provider}/${id}: unsupported endpoint ${endpoint}; no catalog row is generated. Requires an atomic wire/parser/provider port.`)
     }
   }
+  const unsupported = catalog.models.filter((m) => {
+    const endpoint = tables[m.provider]?.get(m.id)
+    return endpoint !== undefined && !Object.hasOwn(WIRES, endpoint)
+  })
+  if (unsupported.length) return {
+    text, fresh: [], refused: true,
+    report: `### Sync refused\n\n${notes.map((note) => `- ${note}`).join("\n")}\n\nExisting models require unsupported wires; no catalog changes are written.\n`,
+  }
   for (const m of catalog.models) {
     const name = `${m.provider}/${m.id}`
     const endpoint = tables[m.provider]?.get(m.id)
-    if (endpoint && !Object.hasOwn(WIRES, endpoint)) throw new Error(`${name}: unsupported endpoint ${endpoint}; refusing to relabel or update this model`)
     if (m.provider in OPENCODE_DOCS && !endpoint) {
       notes.push(`${name}: wire verification unavailable; existing row stays unchanged.`)
       continue
@@ -241,7 +248,7 @@ export function syncCatalog(text: string, sources: Sources, now = Date.now()) {
   validate(output, required)
   const section = (title: string, lines: string[]) => lines.length ? `### ${title}\n\n${lines.map((l) => `- ${l}`).join("\n")}\n` : ""
   const report = [section("Changed", changes), section(`Upstream models the catalog lacks (released in the last ${NEW_DAYS} days)`, fresh), section("To check", notes)].filter(Boolean).join("\n")
-  return { text: output, report, fresh }
+  return { text: output, report, fresh, refused: false }
 }
 
 async function publicText(url: string) {
@@ -276,7 +283,11 @@ if (import.meta.main) {
     assert.match(result.report, /opencode-go: wire verification unavailable/)
     assert.deepEqual(output.models.map((m) => m.id), ["chat"])
     assert.deepEqual(result.fresh, [])
-    assert.throws(() => syncCatalog(text, { ...sources, docs: { ...sources.docs, opencode: html.replace("openai/v1/chat/completions", "systemone/v1/systemone") } }), /unsupported endpoint systemone/)
+    const refused = syncCatalog(text, { ...sources, docs: { ...sources.docs, opencode: html.replace("openai/v1/chat/completions", "systemone/v1/systemone") } })
+    assert.equal(refused.refused, true)
+    assert.equal(refused.text, text)
+    assert.match(refused.report, /chat: unsupported endpoint systemone/)
+    assert.match(refused.report, /no catalog changes are written/)
     assert.equal(syncCatalog(text, { ...sources, docs: { opencode: "", "opencode-go": "" } }).text, text)
     modelsDev.opencode.models.chat.cost = { input: 0.25, output: 0, tiers: [{ tier: { type: "context", size: 50 }, input: 0.5 }] }
     const partial = validate(syncCatalog(text, sources).text).models[0]
@@ -306,4 +317,5 @@ if (import.meta.main) {
   console.log(result.report || "The catalog matches upstream.")
   if (options["--report"]) await Bun.write(options["--report"], result.report)
   if (options["--new"]) await Bun.write(options["--new"], result.fresh.map((line) => `- ${line}\n`).join(""))
+  if (result.refused) process.exitCode = 1
 }

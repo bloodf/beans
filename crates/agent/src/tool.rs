@@ -66,7 +66,25 @@ pub struct ToolOutcome {
 
 /// A pipe worker's immutable completion, retained until its execution root is released.
 pub type PipeCompletion = Result<ToolResult, String>;
-type Completion = Arc<PipeCompletion>;
+/// Command failure is a completed execution, not evidence of uncertain worker cleanup.
+pub enum PipeWorkerCompletion {
+    Finished(PipeCompletion),
+    Uncertain,
+}
+
+impl PipeWorkerCompletion {
+    pub fn result(&self) -> Result<&ToolResult, &str> {
+        match self {
+            Self::Finished(Ok(result)) => Ok(result),
+            Self::Finished(Err(error)) => Err(error),
+            Self::Uncertain => Err("Pipe worker failed; cleanup completion is uncertain."),
+        }
+    }
+
+    fn is_uncertain(&self) -> bool { matches!(self, Self::Uncertain) }
+}
+
+type Completion = Arc<PipeWorkerCompletion>;
 type Joined = Shared<BoxFuture<'static, Completion>>;
 
 struct ScopeNode {
@@ -192,11 +210,19 @@ impl ExecutionScope {
                 return Err("Pipe worker launch failed".into());
             }
         };
+        #[cfg(test)]
+        let probe = self.probe.clone();
         let joined = async move {
-            Arc::new(match handle.await {
-                Ok(result) => result,
-                Err(_) => Err("Pipe worker failed; cleanup completion is uncertain.".into()),
-            })
+            let completed = Arc::new(match handle.await {
+                Ok(result) => PipeWorkerCompletion::Finished(result),
+                Err(_) => PipeWorkerCompletion::Uncertain,
+            });
+            #[cfg(test)]
+            if let Some(probe) = &probe {
+                probe.completed.lock().expect("fixture completions").push(completed.clone());
+                let _ = probe.events.send("worker_completed");
+            }
+            completed
         }.boxed().shared();
         arena.slots.push(PipeSlot { node: self.node, call_id, joined: joined.clone() });
         let _ = start.send(());
@@ -233,9 +259,9 @@ impl ExecutionScope {
 
 /// Only status and a bounded call identity cross an owning cutoff boundary, never child output.
 pub(crate) fn cleanup_diagnostic(completed: &[(String, Completion)]) -> String {
-    let failed = completed.iter().filter(|(_, result)| result.is_err()).count();
+    let failed = completed.iter().filter(|(_, result)| result.is_uncertain()).count();
     let mut text = format!("Pipe cleanup: completed={}, failed={failed}.", completed.len());
-    if let Some((id, _)) = completed.iter().find(|(_, result)| result.is_err()) {
+    if let Some((id, _)) = completed.iter().find(|(_, result)| result.is_uncertain()) {
         let id: String = id.chars().take(64).map(|ch| if ch.is_control() { '?' } else { ch }).collect();
         text.push_str(&format!(" Failed child: {id}. Cleanup completion is uncertain."));
     }
@@ -243,7 +269,7 @@ pub(crate) fn cleanup_diagnostic(completed: &[(String, Completion)]) -> String {
 }
 
 pub(crate) fn fold_cleanup(result: &mut Result<ToolResult, ToolError>, completed: &[(String, Completion)]) {
-    if !completed.iter().any(|(_, completion)| completion.is_err()) {
+    if !completed.iter().any(|(_, completion)| completion.is_uncertain()) {
         return;
     }
     let diagnostic = cleanup_diagnostic(completed);
@@ -266,6 +292,7 @@ pub(crate) struct LifecycleProbe {
     pub events: tokio::sync::mpsc::UnboundedSender<&'static str>,
     pub release: tokio::sync::Semaphore,
     pub timeout_arm: Option<Arc<tokio::sync::Semaphore>>,
+    pub completed: Mutex<Vec<Arc<PipeWorkerCompletion>>>,
 }
 
 #[cfg(test)]
@@ -289,7 +316,7 @@ pub trait ToolRunner: Send + Sync {
         let scope = ExecutionScope::root(&cancel);
         let mut outcome = self.run_scoped(tool, tool_call_id, args, cancel, &scope).await;
         let completed = scope.drain().await;
-        if completed.iter().any(|(_, result)| result.is_err()) {
+        if completed.iter().any(|(_, result)| result.is_uncertain()) {
             outcome.is_error = true;
             outcome.result.is_error = true;
             outcome.result.content.push(ContentPart::text(cleanup_diagnostic(&completed)));
@@ -304,6 +331,13 @@ pub struct DirectRunner;
 
 #[async_trait]
 impl ToolRunner for DirectRunner {
+    async fn run(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken) -> ToolOutcome {
+        let root = ExecutionScope::root(&cancel);
+        let outcome = self.run_scoped(tool, tool_call_id, args, cancel, &root).await;
+        root.drain().await;
+        outcome
+    }
+
     async fn run_scoped(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken, scope: &ExecutionScope) -> ToolOutcome {
         let args = match crate::agent_loop::checked_arguments(tool.as_ref(), &args) {
             Ok(args) => args,
@@ -429,6 +463,18 @@ pub trait Tool: Send + Sync {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+    #[tokio::test]
+    async fn ordinary_command_error_is_not_uncertain_cleanup() {
+        let root = ExecutionScope::root(&CancellationToken::new());
+        let waiter = root.spawn_pipe("command", |_| async { Err("outputbefore\nCommand terminated by signal 9".into()) }).unwrap();
+        let completed = root.drain().await;
+        assert_eq!(waiter.completion().await.result().unwrap_err(), "outputbefore\nCommand terminated by signal 9");
+        let mut outcome = Err(ToolError("outputbefore\nCommand terminated by signal 9".into()));
+        fold_cleanup(&mut outcome, &completed);
+        assert_eq!(outcome.unwrap_err().0, "outputbefore\nCommand terminated by signal 9");
+        assert_eq!(cleanup_diagnostic(&completed), "Pipe cleanup: completed=1, failed=0.");
+    }
+
 
     #[tokio::test]
     async fn inclusive_drain_survives_waiter_disposal_and_excludes_siblings() {
@@ -456,7 +502,7 @@ mod lifecycle_tests {
         assert_eq!(completed[0].0, "own");
         let normal = waiter.completion().await;
         assert!(Arc::ptr_eq(&normal, &completed[0].1));
-        assert_eq!(normal.as_ref().as_ref().unwrap().text_content(), "private");
+        assert_eq!(normal.result().unwrap().text_content(), "private");
         assert!(child.child(&CancellationToken::new()).is_err());
         assert!(child.spawn_pipe("late", |_| async { panic!("closed worker polled") }).is_err());
         assert!(sibling.child(&CancellationToken::new()).is_ok());
@@ -485,7 +531,7 @@ mod lifecycle_tests {
         let waiter = root.spawn_pipe("panic\nprivate", |_| async { panic!("secret panic payload") }).unwrap();
         let completed = root.drain().await;
         assert_eq!(completed.len(), 1);
-        assert_eq!(waiter.completion().await.as_ref().as_ref().unwrap_err(), "Pipe worker failed; cleanup completion is uncertain.");
+        assert_eq!(waiter.completion().await.result().unwrap_err(), "Pipe worker failed; cleanup completion is uncertain.");
         let diagnostic = cleanup_diagnostic(&completed);
         assert!(diagnostic.contains("panic?private"));
         assert!(!diagnostic.contains("secret"));
@@ -519,7 +565,7 @@ mod lifecycle_tests {
             let completed = root.drain().await;
             assert_eq!(completed.len(), usize::from(admitted.is_ok()));
             if let Ok(waiter) = admitted {
-                assert_eq!(waiter.completion().await.as_ref().as_ref().unwrap().text_content(), "ack");
+                assert_eq!(waiter.completion().await.result().unwrap().text_content(), "ack");
             }
         }
     }
@@ -539,7 +585,7 @@ mod lifecycle_tests {
         other.spawn_pipe("public", |_| async { Ok(ToolResult::text("public")) }).unwrap();
         let independent = other.drain().await;
         assert_eq!(independent.len(), 1);
-        assert_eq!(independent[0].1.as_ref().as_ref().unwrap().text_content(), "public");
+        assert_eq!(independent[0].1.result().unwrap().text_content(), "public");
         let parent = root.drain();
         tokio::pin!(parent);
         assert!(futures::poll!(&mut parent).is_pending());

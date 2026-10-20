@@ -184,17 +184,20 @@ export function syncCatalog(text: string, sources: Sources, now = Date.now()) {
     if (upstream.cost) {
       // Absence is unknown, not free. Preserve extension fields, including pricing completeness.
       const cost = upstream.cost
-      if (completeRates(cost)) set("rates", { ...m.rates, ...Object.fromEntries(RATE_FIELDS.map((key) => [key, cost[key]])) })
-      else notes.push(`${name}: incomplete or invalid upstream rates; existing rates and pricing-completeness fields stay unchanged.`)
+      const rates = { ...m.rates }
+      for (const key of RATE_FIELDS) if (validRate(cost[key])) rates[key] = cost[key]
+      set("rates", rates)
+      if (!completeRates(cost)) notes.push(`${name}: incomplete or invalid upstream rates; missing components and pricing-completeness fields stay unchanged.`)
       if (upstream.cost.tiers !== undefined && !Array.isArray(upstream.cost.tiers)) throw new Error(`${name}: invalid upstream tiers`)
       const tiers = (upstream.cost.tiers ?? []).filter((t) => t.tier?.type === "context")
       if (tiers.length) {
-        if (tiers.every((t) => positive(t.tier?.size) && completeRates(t))) {
+        if (tiers.every((t) => positive(t.tier?.size) && (completeRates(t) || m.tiers?.some((old) => old.input_tokens_above === t.tier?.size)))) {
           const unmatched = (m.tiers ?? []).filter((old) => !tiers.some((t) => t.tier?.size === old.input_tokens_above))
           if (unmatched.length) notes.push(`${name}: upstream omits existing tier thresholds; all tiers stay unchanged for manual review.`)
           else set("tiers", tiers.map((t) => {
             const old = m.tiers?.find((v) => v.input_tokens_above === t.tier?.size)
-            return { ...old, input_tokens_above: t.tier?.size, rates: { ...old?.rates, ...Object.fromEntries(RATE_FIELDS.map((key) => [key, t[key]])) } }
+            const rates = { ...old?.rates, ...Object.fromEntries(RATE_FIELDS.filter((key) => validRate(t[key])).map((key) => [key, t[key]])) }
+            return { ...old, input_tokens_above: t.tier?.size, rates }
           }))
         } else notes.push(`${name}: incomplete or invalid upstream tiers; existing tiers stay unchanged.`)
       } else if (m.tiers?.length) notes.push(`${name}: upstream no longer lists long-context tiers; review by hand.`)
@@ -275,9 +278,13 @@ if (import.meta.main) {
     assert.deepEqual(result.fresh, [])
     assert.throws(() => syncCatalog(text, { ...sources, docs: { ...sources.docs, opencode: html.replace("openai/v1/chat/completions", "systemone/v1/systemone") } }), /unsupported endpoint systemone/)
     assert.equal(syncCatalog(text, { ...sources, docs: { opencode: "", "opencode-go": "" } }).text, text)
-    modelsDev.opencode.models.chat.cost = { input: 0 }
-    assert.deepEqual(validate(syncCatalog(text, sources).text).models[0].rates, rates)
+    modelsDev.opencode.models.chat.cost = { input: 0.25, output: 0, tiers: [{ tier: { type: "context", size: 50 }, input: 0.5 }] }
+    const partial = validate(syncCatalog(text, sources).text).models[0]
+    assert.deepEqual(partial.rates, { ...rates, input: 0.25, output: 0 })
+    assert.deepEqual(partial.tiers, [{ ...row.tiers[0], rates: { ...rates, input: 0.5 } }])
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, review: {} }), sources), /Missing review/)
+    assert.throws(() => syncCatalog(JSON.stringify({ ...input, review: { opencode: "missing" } }), sources), /Invalid review model/)
+    assert.throws(() => syncCatalog(JSON.stringify({ ...input, review: { opencode: 7 } }), sources), /Invalid review model/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, version: 2 }), sources), /version 1/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, updated: "2026-02-30T00:00:00Z" }), sources), /UTC/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, padding: "x".repeat(MAX_BYTES) }), sources), /1 MiB/)

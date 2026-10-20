@@ -1957,11 +1957,14 @@ mod tests {
         fn parameters(&self) -> Value { self.tool.parameters() }
         async fn execute(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> { unreachable!() }
         async fn execute_scoped(&self, id: &str, args: Value, cancel: CancellationToken, update: ToolUpdateFn, runner: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
-            struct Disposed(Arc<crate::tool::LifecycleProbe>);
+            struct Disposed(Arc<crate::tool::LifecycleProbe>, ExecutionScope);
             impl Drop for Disposed {
-                fn drop(&mut self) { let _ = self.0.events.send("parent_disposed"); }
+                fn drop(&mut self) {
+                    assert!(self.1.child(&CancellationToken::new()).is_err(), "admission closes before parent disposal");
+                    let _ = self.0.events.send("parent_disposed");
+                }
             }
-            let _disposed = Disposed(self.probe.clone());
+            let _disposed = Disposed(self.probe.clone(), scope.clone());
             let mut scope = scope.clone();
             scope.probe = Some(self.probe.clone());
             self.tool.execute_scoped(id, args, cancel, update, runner, &scope).await
@@ -2038,6 +2041,7 @@ mod tests {
                             _ = &mut execution => panic!("parent disposed active pipe cleanup"),
                             event = observed.recv() => {
                                 assert_ne!(event, Some("promoted"));
+                                assert_ne!(event, Some("cleanup_started"), "worker remains withheld through parent disposal");
                                 if event == Some("parent_disposed") { break; }
                             },
                         }
@@ -2046,12 +2050,18 @@ mod tests {
                 assert!(futures::poll!(&mut execution).is_pending());
                 probe.release.add_permits(1);
                 let (messages, _) = tokio::time::timeout(Duration::from_secs(5), &mut execution).await.expect("root drained");
-                let mut finished = false;
+                let mut started = 0;
+                let mut finished = 0;
+                let mut promoted = 0;
                 while let Ok(event) = observed.try_recv() {
-                    if event == "cleanup_finished" { finished = true; }
-                    if event == "promoted" { assert!(finished, "promotion waits for cleanup"); }
+                    match event {
+                        "cleanup_started" => { started += 1; assert_eq!(finished, 0); }
+                        "cleanup_finished" => { assert_eq!(started, 1); finished += 1; }
+                        "promoted" => { assert_eq!(finished, 1, "promotion waits for cleanup"); promoted += 1; }
+                        _ => {}
+                    }
                 }
-                assert!(finished);
+                assert_eq!((started, finished, promoted), (1, 1, usize::from(send_now)));
                 let result = tool_results(&messages)[0];
                 assert!(result.is_error);
                 if result.text().starts_with("Cut off:") { assert!(result.text().contains("Pipe cleanup: completed=1")); }
@@ -2103,7 +2113,8 @@ mod tests {
             } else {
                 "tools.bash({command:'set -m; sleep 30 & echo $! > held.pid; printf held; wait'}); await gate(); return 'done';"
             };
-            let execution = tool.execute_scoped("script", json!({"code":code}), cancel.clone(), Arc::new(|_| {}), &crate::tool::DirectRunner, &root);
+            let direct = crate::tool::DirectRunner;
+            let execution = tool.execute_scoped("script", json!({"code":code}), cancel.clone(), Arc::new(|_| {}), &direct, &root);
             tokio::pin!(execution);
             let mut ready = false;
             tokio::time::timeout(Duration::from_secs(20), async {

@@ -252,7 +252,12 @@ pub(crate) fn fold_cleanup(result: &mut Result<ToolResult, ToolError>, completed
             result.is_error = true;
             result.content.push(ContentPart::text(diagnostic));
         }
-        Err(_) => {}
+        Err(error) => {
+            if !error.0.contains(&diagnostic) {
+                error.0.push_str("\n\n");
+                error.0.push_str(&diagnostic);
+            }
+        }
     }
 }
 
@@ -484,6 +489,17 @@ mod lifecycle_tests {
         let diagnostic = cleanup_diagnostic(&completed);
         assert!(diagnostic.contains("panic?private"));
         assert!(!diagnostic.contains("secret"));
+        let mut error = Err(ToolError("Original failure".into()));
+        fold_cleanup(&mut error, &completed);
+        let error = error.unwrap_err().0;
+        assert!(error.starts_with("Original failure\n\nPipe cleanup:"));
+        assert!(error.contains("Cleanup completion is uncertain."));
+        assert!(!error.contains("secret panic payload"));
+        let mut success = Ok(ToolResult::text("original"));
+        fold_cleanup(&mut success, &completed);
+        let success = success.unwrap();
+        assert!(success.is_error);
+        assert!(success.text_content().contains("Pipe cleanup:"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

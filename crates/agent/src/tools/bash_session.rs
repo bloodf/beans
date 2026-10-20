@@ -1166,11 +1166,15 @@ mod tests {
     async fn unread_messages_release_only_background_output_waits() {
         let t = tools(Duration::from_secs(30));
         for background in [true, false] {
-            let bash = BashTool::with_sessions(std::env::temp_dir(), t.host.clone()).waiting_after(Duration::from_millis(100));
-            let started = call(&bash, json!({"command": "printf 'ready\\n'; read -r first; printf 'accepted\\n'; read -r last; printf 'done\\n'", "background": background})).await.unwrap();
-            assert!(started.text_content().contains("ready\n"));
-            let id = session_id(&started);
-            let session = t.host.get(&id).unwrap();
+            let session = BashSession::spawn("/bin/bash", "printf 'ready\\n'; read -r first; printf 'accepted\\n'; read -r last; printf 'done\\n'", &std::env::temp_dir(), None, background, &crate::login_shell::Extras::default()).await.unwrap();
+            t.host.insert("call", session.clone());
+            let mut changes = session.changed.subscribe();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !session.preview().contains("ready\n") {
+                    changes.changed().await.unwrap();
+                }
+            }).await.expect("command reached its input barrier");
+            let id = session.id().to_string();
             t.host.1.store(false, std::sync::atomic::Ordering::Relaxed);
             let args = json!({"session_id": id, "wait_seconds": 30});
             let mut waiting = std::pin::pin!(call(&t.output, args.clone()));

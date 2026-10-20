@@ -420,7 +420,22 @@ fn dispatch_pending(app: &Arc<App>, routine: Routine, admission: crate::update_c
     let Some(pending) = &routine.pending else { return };
     match pending.phase {
         RoutinePhase::Check => check_then_run(app, routine, admission),
-        RoutinePhase::Model => runtime::spawn_local_job(app.clone(), (*pending.job).clone(), None, admission),
+        RoutinePhase::Model => {
+            // Publish the scheduled start before job.started, even while the chat is busy.
+            // The durable Model intent remains recoverable until the turn's effect fence.
+            let mut dispatched = false;
+            if let Err(error) = app.update_routine(&routine.id, |current| {
+                if current.pending.as_ref().is_some_and(|held| held.job.id == pending.job.id && held.phase == RoutinePhase::Model) {
+                    current.last_run_at = Some(now_secs());
+                    dispatched = true;
+                }
+            }) {
+                tracing::error!(%error, routine = %routine.name, "saving a routine's dispatch time");
+                return;
+            }
+            if !dispatched { return; }
+            runtime::spawn_local_job(app.clone(), (*pending.job).clone(), None, admission);
+        }
         // Effects may already have happened. Only explicit resume discards uncertainty.
         RoutinePhase::Checking | RoutinePhase::Running => {}
     }
@@ -868,16 +883,20 @@ mod tests {
         // Armed an hour and a bit ago: due now.
         let now = now_secs();
         app.update_routine(&hourly.id, |r| r.enabled_at = now - 3700.0).unwrap();
+        let dm = app.dm_with("b1", None).unwrap();
+        let chat_lock = app.chat_lock(&dm.meta.id);
+        let chat_guard = chat_lock.lock().await;
         tick(app);
         let ran = app.routine(&hourly.id).unwrap();
         let first_run = ran.last_run_at.expect("started");
+        assert_eq!(ran.pending.as_ref().unwrap().phase, RoutinePhase::Model, "queued dispatch must retain its unstarted intent");
         assert!(ran.next_run_at().unwrap() > now_unix() + 3500, "the next run counts from this one");
         tick(app);
-        // The run itself stamps the start too, a moment after the tick did.
+        // Dispatch publishes its start synchronously; a second tick cannot queue another job.
         let again = app.routine(&hourly.id).unwrap().last_run_at.unwrap();
-        assert!((again - first_run).abs() < 5.0, "not started again: {again} vs {first_run}");
+        assert_eq!(again, first_run, "a queued job has not crossed its effect-start fence");
         // The run ends: no provider on this Runner, so the chat says so and the outcome is an error.
-        let dm = app.dm_with("b1", None).unwrap();
+        drop(chat_guard);
         for _ in 0..100 {
             if app.routine(&hourly.id).unwrap().last_outcome.is_some() {
                 break;

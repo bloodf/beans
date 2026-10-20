@@ -58,6 +58,8 @@ export interface Device {
   /// The machine signing public key, base64url.
   id: string;
   name: string;
+  /// The original machine name, before the account's alias.
+  machine_name?: string;
   model: string;
   os: string;
   os_version: string;
@@ -112,9 +114,9 @@ export function isRunner(device: Device): boolean {
   return device.os === "macos" || device.os === "linux" || device.os === "windows";
 }
 
-/// What a Device goes by: a machine that never said what it is has no name of its own.
+/// The effective account name, including aliases for Devices without machine metadata.
 export function deviceName(device: Device): string {
-  return device.unknown ? t("Unknown Device") : device.name;
+  return device.name || device.machine_name || t("Unknown Device");
 }
 
 export type Accent = "indigo" | "blue" | "teal" | "green" | "orange" | "pink" | "purple" | "red";

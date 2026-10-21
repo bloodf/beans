@@ -145,18 +145,19 @@ async fn queued_request_from_revoked_device_cannot_write_surviving_runner_memory
     let (still_queued, _) = runner.relay.list_blobs(&url, &runner_token, 0, "request").await.unwrap();
     assert_eq!(still_queued.iter().map(|blob| blob.id.as_str()).collect::<Vec<_>>(), vec![request.id.as_str()]);
     assert!(requester.relay.authenticate(&url, &requester_machine).await.unwrap_err().is_unpaired());
+    // This fixture directly admits one delivery after the authoritative unpair completes.
+    runner.state.lock().unwrap().caught_up = true;
     let runner_outbox_before = outbox(&runner);
     let requester_outbox_before = outbox(&requester);
     beans::sync::apply_blob(&runner, &runner_file, &still_queued[0]);
-    // Deletion follows answer completion in public requests::serve, so it is a causal barrier,
-    // not a sleep or a copied membership predicate.
-    timeout(Duration::from_secs(5), async {
-        loop {
-            let (remaining, _) = runner.relay.list_blobs(&url, &runner_token, 0, "request").await.unwrap();
-            if remaining.is_empty() { break; }
-            sleep(Duration::from_millis(10)).await;
-        }
-    }).await.expect("Runner did not consume the queued request");
+    // Rejected signed deliveries retain durable custody and relay bytes, never dispatch.
+    let custody = rusqlite::Connection::open_with_flags(runner.config.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let reason: String = custody.query_row("SELECT reason FROM transport_custody WHERE account=?1 AND id=?2", [&runner_file.identity_pubkey, &request.id], |row| row.get(0)).unwrap();
+    assert_eq!(reason, "transport_rejected");
+    drop(custody);
+    let retained = runner.relay.list_blobs(&url, &runner_token, 0, "request").await.unwrap().0;
+    assert_eq!(retained.iter().map(|blob| &blob.id).collect::<Vec<_>>(), vec![&request.id]);
     asking.abort();
     assert!(asking.await.unwrap_err().is_cancelled());
     let after = beans::requests::memory_read(&runner, &bot_id).unwrap();
@@ -165,17 +166,17 @@ async fn queued_request_from_revoked_device_cannot_write_surviving_runner_memory
     assert_eq!(outbox(&runner), runner_outbox_before, "revoked requester must receive no response or new Runner outbox effects");
     assert_eq!(outbox(&requester), requester_outbox_before, "requester's persisted intent remains exact");
     assert_eq!((after, stored_memory), (before, "retained memory\n".into()),
-        "consuming a request queued before revocation must not mutate surviving Runner memory after prune");
-    // Keep the original RED assertion intact. Then exercise unsigned, forged and valid
-    // attribution with a fresh, actually attested Device, through the same real ingress.
+        "rejecting a request queued before revocation must not mutate surviving Runner memory after prune");
+    // Exercise inner attribution inside authenticated version-1 transport, with a current peer.
     let current = Machine::generate();
     let current_id = current.pubkey();
     runner.relay.attest(&url, &runner_token, &current_id, &current.box_pubkey()).await.unwrap();
     {
         let mut state = runner.state.lock().unwrap();
         state.listed_machines.insert(current_id.clone(), 1);
+        state.listed_machine_boxes.insert(current_id.clone(), current.box_pubkey());
         state.devices.push(beans::model::Device { id: current_id.clone(), name: "current requester".into(),
-            box_pubkey: current.box_pubkey(), os: "ios".into(), ..Default::default() });
+            box_pubkey: current.box_pubkey(), os: "ios".into(), envelope_version: Some(1), ..Default::default() });
     }
     for mode in ["unsigned", "forged", "valid"] {
         let mut candidate = beans::model::Request { id: format!("attribution-{mode}"), verb: "memory.write".into(),
@@ -187,33 +188,49 @@ async fn queued_request_from_revoked_device_cannot_write_surviving_runner_memory
             let signer = if mode == "forged" { &requester_machine } else { &current };
             candidate.body = json!({"payload": candidate.body, "signature": signer.sign(&signing_bytes)});
         }
-        let ciphertext = beans::crypto::seal_json(&runner_machine.box_pubkey(), &candidate).unwrap();
+        let envelope = json!({"envelope_version":1, "identity":runner_file.identity_pubkey,
+            "from":current_id, "to":runner.this_device_id().unwrap(), "kind":"request",
+            "id":uuid::Uuid::new_v4().to_string(), "at":beans::config::now_unix(), "body":candidate});
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let signed = json!({"envelope_version":1, "envelope":beans::keys::b64(&bytes),
+            "signature":current.sign(&[b"beans/envelope/v1\0".as_slice(), &bytes].concat())});
+        let ciphertext = beans::crypto::seal_json(&runner_machine.box_pubkey(), &signed).unwrap();
         let item = OutboxItem { id: candidate.id.clone(), kind: "request".into(), recipient: runner.this_device_id(),
             ciphertext, slot: None, group: None };
         let current_token = runner.relay.authenticate(&url, &current).await.unwrap();
         runner.relay.put_blob(&url, &current_token, item, 0).await.unwrap();
         let (pending, _) = runner.relay.list_blobs(&url, &runner_token, 0, "request").await.unwrap();
-        assert_eq!(pending.iter().map(|blob| blob.id.as_str()).collect::<Vec<_>>(), vec![candidate.id.as_str()]);
-        beans::sync::apply_blob(&runner, &runner_file, &pending[0]);
-        timeout(Duration::from_secs(5), async {
-            loop {
-                if runner.relay.list_blobs(&url, &runner_token, 0, "request").await.unwrap().0.is_empty() { break; }
-                sleep(Duration::from_millis(10)).await;
-            }
-        }).await.expect("attribution request did not finish");
+        let delivery = pending.iter().find(|blob| blob.id == candidate.id).unwrap();
+        beans::sync::apply_blob(&runner, &runner_file, delivery);
+        if mode == "valid" {
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    let db = rusqlite::Connection::open_with_flags(runner.config.database_path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+                    let operation = format!("request:{}:{}", current_id, candidate.id);
+                    let complete: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM transport_operations WHERE account=?1 AND id=?2 AND status='completed')", [&runner_file.identity_pubkey, &operation], |row| row.get(0)).unwrap();
+                    if complete { break; }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("valid attribution request did not finish");
+        } else {
+            let db = rusqlite::Connection::open_with_flags(runner.config.database_path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let reason: String = db.query_row("SELECT reason FROM transport_custody WHERE account=?1 AND id=?2", [&runner_file.identity_pubkey, &candidate.id], |row| row.get(0)).unwrap();
+            assert_eq!(reason, "transport_rejected");
+        }
         let memory = std::fs::read_to_string(runner.config.home.join("workspaces").join(&bot_id).join("MEMORY.md")).unwrap();
         assert_eq!(memory, if mode == "valid" { "current signed mutation\n" } else { "retained memory\n" }, "{mode} attribution effect");
         let db = rusqlite::Connection::open_with_flags(runner.config.database_path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let replies: Vec<Vec<u8>> = db.prepare("SELECT ciphertext FROM outbox WHERE kind = 'response' AND recipient = ?1 ORDER BY position").unwrap()
             .query_map([&current_id], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-        let response: beans::model::Response = beans::crypto::unseal_json(&current.box_secret, replies.last().unwrap()).unwrap();
-        assert_eq!(response.request_id, candidate.id);
-        match mode {
-            "unsigned" => assert_eq!(response.error.as_deref(), Some("Unsigned request")),
-            "forged" => assert_eq!(response.error.as_deref(), Some("Invalid request signature")),
-            "valid" => assert_eq!(response.body["hash"], beans::requests::memory_read(&runner, &bot_id).unwrap()["index"]["hash"]),
-            _ => unreachable!(),
+        if mode == "valid" {
+            let signed: Value = beans::crypto::unseal_json(&current.box_secret, replies.last().unwrap()).unwrap();
+            let envelope: Value = serde_json::from_slice(&beans::keys::unb64(signed["envelope"].as_str().unwrap()).unwrap()).unwrap();
+            let response: beans::model::Response = serde_json::from_value(envelope["body"].clone()).unwrap();
+            assert_eq!(response.request_id, candidate.id);
+            assert!(response.error.is_none());
+            assert_eq!(response.body["hash"], beans::requests::memory_read(&runner, &bot_id).unwrap()["index"]["hash"]);
+        } else {
+            assert!(replies.is_empty(), "rejected attribution must not produce a response");
         }
-        assert_eq!(response.error.is_none(), mode == "valid");
     }
 }

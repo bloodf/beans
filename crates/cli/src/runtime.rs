@@ -585,6 +585,10 @@ pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
         return Dispatch::Ran;
     }
     match app.device(&bot.runner_id) {
+        Some(runner) if !runner.box_pubkey.is_empty() && runner.envelope_version != Some(1) => {
+            app.notice(&job.chat_id, format!("{} runs on {}, which needs a Beans update before it can receive this turn. Update Beans there, then send the turn again. This turn was not queued.", bot.name, runner.name));
+            Dispatch::Deferred
+        }
         Some(runner) if !runner.box_pubkey.is_empty() => match crate::envelope::send(app, "job", &runner, &job) {
             Ok(()) => {
                 if app.relay_url().is_none() {
@@ -1328,5 +1332,21 @@ mod tests {
         assert!(app.running_jobs.lock().unwrap().is_empty());
         let results=app.store.outbox().unwrap().into_iter().filter(|i|i.kind=="job_result").collect::<Vec<_>>();
         assert_eq!(results.len(),1);let result:JobResult=crate::envelope::body_of(&remote.box_secret,&results[0].ciphertext);assert_eq!(result.job_id,"paused-remote");
+    }
+
+    #[test]
+    fn incompatible_runner_refuses_without_queued_or_running_work() {
+        let scratch=scratch_app();let app=&scratch.0;
+        crate::identity::create(app,None).unwrap();
+        let peer=crate::keys::Machine::generate();
+        let bot_id={let mut state=app.state.lock().unwrap();
+            state.devices.push(Device{id:peer.pubkey(),name:"Older Runner".into(),box_pubkey:peer.box_pubkey(),..Default::default()});
+            state.bots[0].runner_id=peer.pubkey();state.bots[0].id.clone()};
+        let before=app.store.outbox().unwrap().into_iter().map(|item|item.id).collect::<Vec<_>>();
+        let job=command_job(app,"chat",&bot_id,"card");
+        assert!(matches!(dispatch_job(app,job),Dispatch::Deferred));
+        assert_eq!(app.store.outbox().unwrap().into_iter().map(|item|item.id).collect::<Vec<_>>(),before);
+        assert!(app.running_jobs.lock().unwrap().is_empty());
+        assert!(app.store.sent_jobs().unwrap().is_empty());
     }
 }

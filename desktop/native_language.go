@@ -2,12 +2,12 @@ package main
 
 import (
 	"fmt"
-	"github.com/egoist/mygo"
 	"strings"
 )
 
-// Read the existing preference at render time; no separate native language setting.
-var nativeSystemLocale = func() string { return mygo.App.Locale() }
+// The main-thread launch callback captures the system locale before rendering begins.
+var nativeLocale string
+var nativeSystemLocale = func() string { return nativeLocale }
 
 func nativeL(key string, args ...any) string {
 	language := prefs.get().AppLanguage

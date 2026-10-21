@@ -1,5 +1,4 @@
-import { useNativeState } from "@expo/ui";
-import { AlertDialog, Column, Host, OutlinedTextField, Text as ComposeText, TextButton } from "@expo/ui/jetpack-compose";
+import { AlertDialog, Column, Host, OutlinedTextField, Text as ComposeText, TextButton, useNativeState } from "@expo/ui/jetpack-compose";
 import { fillMaxWidth } from "@expo/ui/jetpack-compose/modifiers";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Platform } from "react-native";
@@ -72,7 +71,7 @@ export function DeviceRename({ device }: { device: Device }) {
     if (Platform.OS === "ios") {
       Alert.prompt(t("Rename Device"), t("Every paired Device shows this name. Leave it blank to use the name the machine goes by."), [
         { text: t("Cancel"), style: "cancel", onPress: () => cancel(attempt) },
-        { text: t("Rename"), onPress: value => { void submit(attempt, value ?? ""); } },
+        { text: t("Rename"), onPress: (value?: string) => { void submit(attempt, value ?? ""); } },
       ], "plain-text", device.name);
     } else {
       setDialog(attempt);
@@ -83,7 +82,7 @@ export function DeviceRename({ device }: { device: Device }) {
     <Row title={t("Rename…")} detail={deviceName(device)} onPress={open} />
     {Platform.OS === "android" && dialog?.active && dialog.id === device.id ? (
       <RenameDialog key={sequence.current} attempt={dialog} machineName={device.machine_name || device.name}
-        onCancel={() => cancel(dialog)} onSubmit={value => { void submit(dialog, value); }} />
+        onCancel={() => cancel(dialog)} onSubmit={(value: string) => { void submit(dialog, value); }} />
     ) : null}
   </>;
 }

@@ -18,6 +18,7 @@ function install() {
   let effects: Array<() => void> = [], cleanups: Array<() => void> = [];
   function slot<T>(make: () => T) { const index = cursor++; if (!(index in slots)) slots[index] = make(); return { index, value: slots[index] as T }; }
   const react = {
+    useCallback: <T,>(callback: T) => callback,
     useRef: <T,>(value: T) => slot(() => ({ current: value })).value,
     useState: <T,>(value: T) => { const item = slot(() => value); return [item.value, (next: T) => { slots[item.index] = next; }]; },
     useEffect: (effect: () => () => void) => { const item = slot(() => false); if (!item.value) { slots[item.index] = true; effects.push(() => { cleanups.push(effect()); }); } },

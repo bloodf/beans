@@ -40,7 +40,8 @@ async fn reconnect_process_worker() {
     std::io::stdout().flush().unwrap();
     let task = tokio::spawn(beans::sync::run(app.clone()));
     loop {
-        if let beans::events::Event::RelayStatus { connected: false, error: Some(problem), .. } = events.recv().await.unwrap() {
+        let event = events.recv().await.unwrap();
+        if let beans::events::Event::RelayStatus { connected: false, error: Some(problem), .. } = event {
             println!("{CHECKPOINT}{}", json!({"pid": std::process::id(), "persisted": persisted(&app),
                 "error": {"message": problem.message, "unknown_machine": problem.unknown_machine}}));
             std::io::stdout().flush().unwrap();
@@ -85,6 +86,7 @@ fn relay_router(relay: Relay) -> Router {
             "protocol": 5, "min_protocol": 5, "min_roster_protocol": 5, "memory_config_version": 1})) }))
         .route("/v1/auth/challenge", post(|| async { Json(json!({"nonce": "synthetic-challenge"})) }))
         .route("/v1/auth/verify", post(|| async { Json(json!({"token": "synthetic-token"})) }))
+        .route("/v1/machines", get(|| async { Json(json!({"machines": [], "now": beans::config::now_unix()})) }))
         .route("/v1/sync", get(upgrade)).route("/v1/blobs", get(list))
         .with_state(relay.clone())
         // Router-wide middleware also sees unmatched paths and method-not-allowed requests.
@@ -132,14 +134,17 @@ fn bot(id: &str) -> Bot {
 }
 
 async fn checkpoint(lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>) -> Value {
-    timeout(Duration::from_secs(10), async {
+    let mut observed = Vec::new();
+    let result = timeout(Duration::from_secs(10), async {
         loop {
             let line = lines.next_line().await.unwrap().expect("child exited before checkpoint");
             if let Some((_, value)) = line.split_once(CHECKPOINT) {
                 return serde_json::from_str(value).unwrap();
             }
+            observed.push(line);
         }
-    }).await.expect("child checkpoint deadline")
+    }).await;
+    result.unwrap_or_else(|error| panic!("child checkpoint deadline: {error}; observed stdout: {observed:?}"))
 }
 
 #[tokio::test]

@@ -12,6 +12,7 @@ const fixtures = [
   { path: "/src/ui/sheets/skillLibrary.test.tsx", check: "checkSkillLibraryConsumer", transport: true },
   { path: "/src/ui/chat/cards.test.tsx", check: "checkCommandCardInput" },
   { path: "/src/ui/chat/composer.test.tsx", check: "checkComposerSendAck" },
+  { path: "/src/ui/settings/deviceNaming.test.tsx", check: "checkDeviceNamingConsumer", transport: true },
 ] as const;
 
 const server = await createServer({
@@ -65,4 +66,4 @@ try {
   await server.close();
 }
 if (failures) throw new Error(`${failures} mounted browser checks failed`);
-console.log(`PASS all ${fixtures.length} mounted browser checks across 7 suites`);
+console.log(`PASS all ${fixtures.length} mounted browser checks across 8 suites`);

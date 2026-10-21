@@ -12,14 +12,26 @@ import { checkSkillDiscoveryConsumer } from "./src/ui/sheets/skillDiscovery.test
 import { checkSkillLibraryConsumer } from "./src/ui/sheets/skillLibrary.test";
 import { checkCommandCardInput } from "./src/ui/chat/cards.test";
 import { checkComposerSendAck } from "./src/ui/chat/composer.test";
+import { checkDeviceNamingConsumer } from "./src/ui/settings/deviceNaming.test";
 
-const checks = { checkReducedMotion, checkSearchResults, checkSheetDialogName, checkSkillDiscoveryConsumer, checkSkillLibraryConsumer, checkCommandCardInput, checkComposerSendAck };
+const checks = { checkReducedMotion, checkSearchResults, checkSheetDialogName, checkSkillDiscoveryConsumer, checkSkillLibraryConsumer, checkCommandCardInput, checkComposerSendAck, checkDeviceNamingConsumer };
+const paths: Record<keyof typeof checks, string> = {
+  checkReducedMotion: "/src/ui/motion.test.tsx",
+  checkSearchResults: "/src/ui/palette.test.tsx",
+  checkSheetDialogName: "/src/ui/overlay.test.tsx",
+  checkSkillDiscoveryConsumer: "/src/ui/sheets/skillDiscovery.test.tsx",
+  checkSkillLibraryConsumer: "/src/ui/sheets/skillLibrary.test.tsx",
+  checkCommandCardInput: "/src/ui/chat/cards.test.tsx",
+  checkComposerSendAck: "/src/ui/chat/composer.test.tsx",
+  checkDeviceNamingConsumer: "/src/ui/settings/deviceNaming.test.tsx",
+};
 
 declare global {
   interface Window { runFixture: typeof runFixture; }
 }
 
 export async function runFixture(fixture: { path: string; check: string; transport?: boolean }) {
+  if (!Object.hasOwn(checks, fixture.check) || paths[fixture.check as keyof typeof checks] !== fixture.path) throw new Error(`Unknown browser fixture ${fixture.path} ${fixture.check}`);
   await loadHost();
   document.documentElement.dataset.platform = "linux";
   setLanguage("en");

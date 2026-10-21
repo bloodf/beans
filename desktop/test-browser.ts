@@ -51,6 +51,24 @@ try {
       page.on("pageerror", (error) => errors.push(error.message));
       await page.goto(`${origin}/__browser_checks__?mock=1&platform=linux`);
       await page.waitForFunction(() => typeof window.runFixture === "function");
+      if (fixture.check === "checkDeviceNamingConsumer") {
+        const rejected = await page.evaluate(async (valid) => {
+          const invalid = [
+            { ...valid, path: "/src/ui/motion.test.tsx" },
+            { ...valid, transport: false },
+          ];
+          for (const binding of invalid) {
+            try { await window.runFixture(binding); }
+            catch (error) {
+              if (error instanceof Error && error.message === "Unknown browser fixture binding") continue;
+              throw error;
+            }
+            throw new Error("Mismatched browser fixture was admitted");
+          }
+          return invalid.length;
+        }, fixture);
+        if (rejected !== 2) throw new Error("Browser fixture rejection checks did not run");
+      }
       const result = await page.evaluate((fixture) => window.runFixture(fixture), fixture);
       if (errors.length) throw new Error(errors.join("\n"));
       console.log(`PASS ${label} ${JSON.stringify(result ?? "completed")}`);

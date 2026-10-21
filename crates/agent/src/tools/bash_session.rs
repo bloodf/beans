@@ -959,11 +959,12 @@ pub fn session_of(details: &Value) -> Option<&str> {
 pub struct BashInputTool {
     sessions: Arc<dyn BashSessions>,
     waiting_after: Duration,
+    longest_wait: Duration,
 }
 
 impl BashInputTool {
     pub fn new(sessions: Arc<dyn BashSessions>) -> Self {
-        BashInputTool { sessions, waiting_after: WAITING_AFTER }
+        BashInputTool { sessions, waiting_after: WAITING_AFTER, longest_wait: MAX_OUTPUT_WAIT }
     }
 
     /// How long the command may stay silent after the input before the call returns.
@@ -980,7 +981,8 @@ impl Tool for BashInputTool {
     }
     fn description(&self) -> &str {
         "Type into a command that bash left running, by its session id: the text, then Enter unless enter is false. Returns \
-         what the command printed since you last read it, once it ends, asks again, or goes quiet. Keys are control \
+         what the command printed since you last read it, once it ends, asks again, or goes quiet, or at most 2 seconds \
+         later for a command in the background and 5 minutes for any other. Keys are control \
          characters: \\u0003 is Ctrl-C (interrupts the command), \\u0004 is Ctrl-D (ends input), \\u001b is Escape. What you \
          type is not echoed back."
     }
@@ -1015,7 +1017,8 @@ impl Tool for BashInputTool {
         }
         let (base, since) = (session.total(), Instant::now());
         let idle = Idle { after: self.waiting_after, needs_output: false };
-        let stop = session.wait(base, since, idle, None, &cancel, || false, |_| {}).await;
+        let longest = if session.background() { BACKGROUND_SETTLE } else { self.longest_wait };
+        let stop = session.wait(base, since, idle, Some(since + longest), &cancel, || false, |_| {}).await;
         session_result(&session, self.sessions.as_ref(), from, stop, self.waiting_after, false)
     }
 }
@@ -1199,6 +1202,24 @@ mod tests {
             }
         }
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn background_input_returns_without_waiting_for_continuous_output_to_stop() {
+        let t = tools(Duration::from_millis(100));
+        let started = call(&t.bash, json!({"command": "printf 'ready\\n'; read -r answer; while true; do printf 'tick\\n'; sleep 0.05; done", "background": true})).await.unwrap();
+        let id = session_id(&started);
+        let session = t.host.get(&id).unwrap();
+        assert!(started.text_content().contains("ready\n"));
+        let input = BashInputTool::new(t.host.clone()).waiting_after(Duration::from_secs(30));
+        let typed = tokio::time::timeout(Duration::from_secs(5), call(&input, json!({"session_id": id, "text": "go"}))).await;
+        let still_running = session.end().is_none();
+        session.stop("Stopped");
+        let result = typed.expect("background input must return while its command keeps printing").unwrap();
+        assert!(still_running, "return must not stop the command");
+        assert_eq!(result.details["session_id"], id);
+        assert!(result.text_content().contains("tick\n"));
+    }
+
 
     #[cfg(unix)]
     fn alive(pid: i32) -> bool {

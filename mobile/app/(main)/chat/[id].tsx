@@ -122,6 +122,10 @@ export default function ChatScreen() {
   const revokeScroll = useRef<() => void>(() => {});
   useEffect(() => {
     const owner = presentation;
+    const state = useStore.getState();
+    if (sendPresentation.current === owner && owner.epoch === authorityEpoch.current
+      && state.identityId === owner.identityId && state.deviceId === owner.deviceId
+      && state.relayUrl === owner.relayUrl && state.paired === owner.paired) owner.active = true;
     const unsubscribe = useStore.subscribe((state, previous) => {
       if (state.identityId !== previous.identityId || state.relayUrl !== previous.relayUrl
         || state.deviceId !== previous.deviceId || state.paired !== previous.paired) {

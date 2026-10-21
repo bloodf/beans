@@ -179,7 +179,8 @@ test.each(["ios", "android"])("%s transcript yields streaming scroll to reader a
     events.onContentSizeChange(400, 1800); events.onMomentumScrollEnd();
     events.onContentSizeChange(400, 1900); expect(scrolls).toEqual([]);
     // A final release within 24 points still resumes following.
-    events.onScrollBeginDrag(); scroll(1190); events.onScrollEndDrag();
+    const currentEnd = 1900 + find(root, "List")!.props.renderScrollComponent({}, null).props.blankSpace!.value - 800;
+    events.onScrollBeginDrag(); scroll(currentEnd - 24); events.onScrollEndDrag();
     for (const callback of [...timers.values()]) callback(); timers.clear();
     events.onContentSizeChange(400, 2000); expect(scrolls.pop()?.kind).toBe("end");
     events.onScrollToTop(); scrolls.length = 0; events.onContentSizeChange(400, 1800); expect(scrolls).toEqual([]);

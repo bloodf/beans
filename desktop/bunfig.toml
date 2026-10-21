@@ -10,4 +10,5 @@ pathIgnorePatterns = [
   "**/src/ui/sheets/skillLibrary.test.tsx",
   "**/src/ui/chat/cards.test.tsx",
   "**/src/ui/chat/composer.test.tsx",
+  "**/src/ui/settings/deviceNaming.test.tsx",
 ]

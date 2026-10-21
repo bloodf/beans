@@ -12,6 +12,7 @@ import { checkSkillDiscoveryConsumer } from "./src/ui/sheets/skillDiscovery.test
 import { checkSkillLibraryConsumer } from "./src/ui/sheets/skillLibrary.test";
 import { checkCommandCardInput } from "./src/ui/chat/cards.test";
 import { checkComposerSendAck } from "./src/ui/chat/composer.test";
+import { checkDeviceNamingConsumer } from "./src/ui/settings/deviceNaming.test";
 
 const checks = [
   { path: "/src/ui/motion.test.tsx", name: "checkReducedMotion", run: checkReducedMotion, transport: false },
@@ -21,6 +22,7 @@ const checks = [
   { path: "/src/ui/sheets/skillLibrary.test.tsx", name: "checkSkillLibraryConsumer", run: checkSkillLibraryConsumer, transport: true },
   { path: "/src/ui/chat/cards.test.tsx", name: "checkCommandCardInput", run: checkCommandCardInput, transport: false },
   { path: "/src/ui/chat/composer.test.tsx", name: "checkComposerSendAck", run: checkComposerSendAck, transport: false },
+  { path: "/src/ui/settings/deviceNaming.test.tsx", name: "checkDeviceNamingConsumer", run: checkDeviceNamingConsumer, transport: true },
 ];
 
 declare global {

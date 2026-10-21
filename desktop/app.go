@@ -113,6 +113,7 @@ func (a *appDelegate) publishState() {
 
 func (a *appDelegate) didFinishLaunching() {
 	startupTrace("did finish launching")
+	nativeLocale = mygo.App.Locale()
 	a.cli = newCLIClient()
 	a.launcher = newLauncher()
 	a.session = model.NewSession(a.identityChanged, func(name string, data stdjson.RawMessage) {

@@ -771,7 +771,7 @@ impl App {
         }
     }
 
-    fn roster_from_state(state: &State) -> RosterBlob {
+    pub(crate) fn roster_from_state(state: &State) -> RosterBlob {
         RosterBlob {
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),

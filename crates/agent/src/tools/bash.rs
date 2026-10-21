@@ -414,6 +414,12 @@ impl BashTool {
                             if let Some(probe) = &probe {
                                 let _ = probe.events.send("pipe_ready");
                                 probe.release.acquire().await.expect("fixture release").forget();
+                                if let Some(arm) = &probe.timeout_arm {
+                                    probe.release.add_permits(1);
+                                    if output.windows(b"before".len()).any(|bytes| bytes == b"before") {
+                                        arm.add_permits(1);
+                                    }
+                                }
                             }
                             if last_update.elapsed() >= Duration::from_millis(UPDATE_THROTTLE_MS) {
                                 last_update = tokio::time::Instant::now();
@@ -700,12 +706,11 @@ mod tests {
             timeout_arm: Some(arm.clone()),
             completed: std::sync::Mutex::new(vec![]),
         }));
-        // A spawned shell need not print within 50 ms. Start the fixture's unchanged timeout
-        // only after the real pipe reader delivers the output whose retention is under test.
-        let update = Arc::new(move |partial: ToolResult| {
-            if partial.text_content().contains("before") { arm.add_permits(1); }
-        });
-        let timed_out = tool.execute_scoped("2", json!({"command": "echo before; sleep 5", "timeout": 0.05}), cancel, update, &DirectRunner, &scope).await.unwrap();
+        // Arm from accumulated pipe bytes, independent of chunk boundaries and UI throttling.
+        let timed_out = tokio::time::timeout(Duration::from_secs(10), tool.execute_scoped(
+            "2", json!({"command": "printf be; sleep 0.1; printf 'fore\\n'; sleep 5", "timeout": 0.05}),
+            cancel, Arc::new(|_| {}), &DirectRunner, &scope,
+        )).await.expect("timeout fixture watchdog").unwrap();
         scope.drain().await;
         assert!(timed_out.is_error);
         assert_eq!(timed_out.structured.as_ref().unwrap()["exit_code"], Value::Null);

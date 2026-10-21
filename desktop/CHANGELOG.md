@@ -6,6 +6,7 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- Device settings renames known local or offline paired Devices through account aliases. Blank confirmation restores the machine name; account, connection and selection changes revoke stale prompts.
 - Local CLI WebSockets require a private home-scoped token in addition to loopback, Host and Origin admission. Native clients and the separate update lease authenticate without changing update-control credentials; browser development uses a gated Vite host proxy.
 
 - `BEANS_NATIVE=1` opens a native sidebar, transcript and multiline composer alongside the full client. Awaited text/file/reply sends and file selection are account-fenced; updater installation requires closing the native window. The full client and website preview remain available.

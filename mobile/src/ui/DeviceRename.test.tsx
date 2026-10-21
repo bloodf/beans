@@ -35,8 +35,7 @@ function install() {
     prompt: (_title: string, _message: string, actions: Button[]) => { buttons = actions; },
     alert: (title: string) => { alerts.push(title); },
   } }));
-  mock.module("@expo/ui", () => ({ useNativeState: (value: string) => ({ value }) }));
-  mock.module("@expo/ui/jetpack-compose", () => ({ Column: "Column", Host: "Host", Text: "Text", TextButton: "Button", OutlinedTextField: Object.assign("Input", { Placeholder: "Placeholder" }), AlertDialog: Object.assign("Dialog", { Title: "Title", Text: "Body", ConfirmButton: "Confirm", DismissButton: "Dismiss" }) }));
+  mock.module("@expo/ui/jetpack-compose", () => ({ useNativeState: (value: string) => ({ value }), Column: "Column", Host: "Host", Text: "Text", TextButton: "Button", OutlinedTextField: Object.assign("Input", { Placeholder: "Placeholder" }), AlertDialog: Object.assign("Dialog", { Title: "Title", Text: "Body", ConfirmButton: "Confirm", DismissButton: "Dismiss" }) }));
   mock.module("@expo/ui/jetpack-compose/modifiers", () => ({ fillMaxWidth: () => ({}) }));
   mock.module("./forms", () => ({ Row: "Row" }));
   mock.module("../i18n", () => ({ t: (value: string) => value }));

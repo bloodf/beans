@@ -4,11 +4,16 @@ package main
 
 import (
 	"log"
+    "os"
 
 	"github.com/egoist/mygo"
 )
 
 func main() {
+    if len(os.Args) == 2 && os.Args[1] == "--cli-dev-proxy" {
+        if err := runDevelopmentCLIProxy(); err != nil { log.Fatal(err) }
+        return
+    }
 	// Keep MyGo's instance lock until the on-quit installation has finished.
 	// RequestSingleInstanceLock registers its release callback after this one.
 	mygo.App.OnQuit(func() {

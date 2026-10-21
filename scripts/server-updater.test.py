@@ -89,5 +89,38 @@ class ReleaseProtocolTests(unittest.TestCase):
                 UPDATER["parse_manifest"](json.dumps(manifest).encode(), "beans-v1.0.0")
 
 
+class RunnerHomeTests(unittest.TestCase):
+    def target(self, **changes):
+        value = {"name": "runner", "driver": "systemd", "binary": "/usr/local/bin/beans", "service": "beans.service", "home": "/var/lib/beans/.beans-v2", "token_file": "/etc/beans/update-token"}
+        value.update(changes)
+        return value
+
+    def test_home_is_required_absolute_and_not_inferred_from_update_token(self):
+        for home in (None, "", "relative/home", 42):
+            with self.subTest(home=home), self.assertRaises(UPDATER["ConfigError"]):
+                UPDATER["parse_target"](self.target(home=home), "runner", "runner")
+        parsed = UPDATER["parse_target"](self.target(), "runner", "runner")
+        self.assertEqual(parsed["home"], "/var/lib/beans/.beans-v2")
+        self.assertEqual(parsed["token_file"], "/etc/beans/update-token")
+
+    def test_every_driver_and_control_verb_selects_home_without_changing_update_token(self):
+        import subprocess
+        control = UPDATER["runner_control"]
+        for driver in ("systemd", "incus"):
+            for verb in ("status", "prepare", "cancel"):
+                value = self.target(driver=driver)
+                if driver == "incus": value["instance"] = "scratch"
+                target = UPDATER["parse_target"](value, "runner", "runner")
+                calls = []
+                def invoke(target, argv, **kwargs):
+                    calls.append((argv, kwargs))
+                    return subprocess.CompletedProcess(argv, 0, stdout=b"{}", stderr=b"")
+                with patch.dict(control.__globals__, {"require_target_path": lambda *args, **kwargs: None, "in_target": invoke}):
+                    control(target, [verb])
+                argv, kwargs = calls[0]
+                self.assertEqual(argv, [target["binary"], "--home", target["home"], "--port", "4874", "update", verb])
+                self.assertEqual(kwargs["env"], {"BEANS_UPDATE_TOKEN_FILE": target["token_file"]})
+
+
 if __name__ == "__main__":
     unittest.main()

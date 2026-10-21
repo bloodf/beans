@@ -101,6 +101,8 @@ CLI self-update is unavailable in Beans, including automatic, manual and remote 
 
 Beans desktop apps update their bundled CLI through signed Beans readiness. The configured server updater upgrades the relay first and uses `beans update status|prepare|cancel` to drain standalone Runners before replacement; these commands do not discover or download releases.
 
+Local WebSocket clients also send `Authorization: Bearer <serve-token>` from the selected CLI home's private `serve-token` file. The service publishes it before readiness; clients never create it. Loopback peer, exact Host and Origin checks remain mandatory. Update prepare/cancel still require their separate update-control token. Operator updater targets configure an absolute `home` as well as `token_file`; install the adapted updater and reviewed configuration before cutting Runners over to token-authenticated sockets.
+
 ## Environment
 
 | Variable | What it sets |

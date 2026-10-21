@@ -253,7 +253,9 @@ func newDesktopUpdateLease(ctx context.Context) (*desktopUpdateLease, error) {
 	if !connected {
 		return nil, errNotRunning
 	}
-	conn, _, err := websocket.Dial(ctx, "ws://127.0.0.1:"+strconv.Itoa(lease.port)+"/ws", nil)
+    headers, err := cliAuthorization()
+    if err != nil { return nil, err }
+    conn, _, err := websocket.Dial(ctx, "ws://127.0.0.1:"+strconv.Itoa(lease.port)+"/ws", &websocket.DialOptions{HTTPHeader: headers})
 	if err != nil {
 		return nil, err
 	}

@@ -17,6 +17,7 @@
       "service": "beans.service",
       "binary": "/usr/local/bin/beans",
       "port": 4874,
+      "home": "/var/lib/beans/.beans-v2",
       "token_file": "/etc/beans/update-token",
       "drain_timeout": 1800
     }

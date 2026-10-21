@@ -108,7 +108,9 @@ func (c *cliClient) open() {
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		conn, _, err := websocket.Dial(ctx, url, nil)
+        headers, err := cliAuthorization()
+        if err != nil { cancel(); c.dropped(generation); return }
+        conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: headers})
 		cancel()
 		if err != nil {
 			c.dropped(generation)

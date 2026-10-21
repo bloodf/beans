@@ -166,7 +166,7 @@ func (l *launcher) environment() []string {
 		}
 	}
 	set("RUST_LOG", "beans=info")
-	set("BEANS_HOME", defaultCLIHome())
+	set("BEANS_HOME", cliHome())
 	if !isDevelopment() && mygo.Updater.Enabled() {
 		// Pass the eventual path; only the ready core establishes its account home.
 		set("BEANS_UPDATE_TOKEN_FILE", desktopUpdateTokenPath())

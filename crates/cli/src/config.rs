@@ -1,6 +1,8 @@
 //! Where the CLI keeps things and how it is configured.
 
 mod membership_preflight;
+#[cfg(feature = "server")]
+mod serve_token;
 
 use std::path::{Path, PathBuf};
 
@@ -163,13 +165,24 @@ impl Config {
 
     /// Acquire before creation and return exclusion to the caller through its DB effects.
     pub fn ensure_home_admission(&self) -> anyhow::Result<Option<StorageAdmission>> {
+        self.ensure_home_admission_mode(false)
+    }
+
+    pub(crate) fn ensure_home_admission_mode(&self, serving: bool) -> anyhow::Result<Option<StorageAdmission>> {
         #[cfg(unix)]
         let mut admission = Some(StorageAdmission::acquire_creation(&self.home)?);
         #[cfg(not(unix))]
-        let admission: Option<StorageAdmission> = None;
+        let mut admission: Option<StorageAdmission> = None;
         let marked = self.validate_home()?;
+        #[cfg(feature = "server")]
+        if marked && serving { self.read_serve_token()?; }
         #[cfg(unix)]
         if let Some(guard) = admission.as_ref() { guard.validate_platform_namespace()?; }
+        #[cfg(all(windows, feature = "server"))]
+        if !marked {
+            let directory = self.create_private_serve_home()?;
+            admission = Some(StorageAdmission { directory, home: self.home.clone(), ancestors: Vec::new() });
+        }
         std::fs::create_dir_all(&self.home)?;
         #[cfg(unix)]
         if let Some(guard) = admission.as_mut() { guard.attach_created_home()?; }
@@ -178,12 +191,17 @@ impl Config {
         set_private(&self.home)?;
         if !marked {
             use std::io::Write;
+            #[cfg(all(windows, feature = "server"))]
+            let mut file = self.create_private_serve_marker(admission.as_ref().expect("new Windows home admission"))?;
+            #[cfg(not(all(windows, feature = "server")))]
             let mut options = std::fs::OpenOptions::new();
+            #[cfg(not(all(windows, feature = "server")))]
             options.write(true).create_new(true);
             #[cfg(unix)] {
                 use std::os::unix::fs::OpenOptionsExt;
                 options.mode(0o600);
             }
+            #[cfg(not(all(windows, feature = "server")))]
             let mut file = options.open(self.home.join("format.json"))?;
             file.write_all(&serde_json::to_vec(&FormatMarker { format: Format::BeansV2 })?)?;
             file.sync_all()?;
@@ -328,7 +346,9 @@ impl StorageAdmission {
     }
 
     pub(crate) fn revalidate_legacy(&self) -> anyhow::Result<()> {
-        #[cfg(not(unix))]
+        #[cfg(all(windows, feature = "server"))]
+        { return serve_token::validate_admission(self, &self.home); }
+        #[cfg(not(any(unix, all(windows, feature = "server"))))]
         anyhow::bail!("Descriptor storage admission is unsupported on this platform");
         #[cfg(unix)] {
             let mut marker = self.marker()?;
@@ -344,7 +364,9 @@ impl StorageAdmission {
 
     /// Bind borrowed admission to the actual requested database parent, not path spelling.
     pub(crate) fn validate_target(&self, home: &Path) -> anyhow::Result<()> {
-        #[cfg(not(unix))]
+        #[cfg(all(windows, feature = "server"))]
+        { return serve_token::validate_admission(self, home); }
+        #[cfg(not(any(unix, all(windows, feature = "server"))))]
         anyhow::bail!("Descriptor storage admission is unsupported on this platform");
         #[cfg(unix)] {
             use std::os::unix::fs::MetadataExt;
@@ -956,9 +978,9 @@ mod format_tests {
 
         // A marked registry root must not reach account/store initialization.
         let root = tempfile::tempdir().unwrap();
-        let root_config = Config { home: root.path().into(), port: 0 };
+        let root_config = Config { home: root.path().join("home"), port: 0 };
         root_config.ensure_home().unwrap();
-        let registry = root.path().join("memberships.json");
+        let registry = root_config.home.join("memberships.json");
         let valid = br#"{"registry_version":1,"active_membership_id":null,"memberships":[]}"#;
         for bytes in [
             valid.as_slice(),
@@ -969,21 +991,21 @@ mod format_tests {
             b"{broken".as_slice(),
         ] {
             write_private(&registry, bytes).unwrap();
-            let before = std::fs::read(root.path().join("format.json")).unwrap();
+            let before = std::fs::read(root_config.home.join("format.json")).unwrap();
             assert!(root_config.validate_home().is_err());
             assert!(crate::app::App::load(root_config.clone()).is_err());
             assert!(crate::local_store::LocalStore::open(&root_config.database_path()).is_err());
             assert_eq!(std::fs::read(&registry).unwrap(), bytes);
-            assert_eq!(std::fs::read(root.path().join("format.json")).unwrap(), before);
+            assert_eq!(std::fs::read(root_config.home.join("format.json")).unwrap(), before);
             for name in ["beans.sqlite3", "beans.sqlite3-wal", "beans.sqlite3-shm", "identity.json", "machine.json"] {
-                assert!(!root.path().join(name).exists());
+                assert!(!root_config.home.join(name).exists());
             }
         }
         std::fs::remove_file(&registry).unwrap();
-        write_private(&root.path().join("membership-migration.json"), b"{}").unwrap();
+        write_private(&root_config.home.join("membership-migration.json"), b"{}").unwrap();
         assert!(root_config.validate_home().is_err());
         assert!(!root_config.database_path().exists());
-        std::fs::remove_file(root.path().join("membership-migration.json")).unwrap();
+        std::fs::remove_file(root_config.home.join("membership-migration.json")).unwrap();
         assert!(root_config.validate_home().unwrap());
         assert!(!root_config.database_path().exists());
     }
@@ -991,7 +1013,7 @@ mod format_tests {
     #[test]
     fn fresh_format_rejects_malformed_records_and_direct_old_database() {
         let home = tempfile::tempdir().unwrap();
-        let config = Config { home: home.path().into(), port: 0 };
+        let config = Config { home: home.path().join("home"), port: 0 };
         config.ensure_home().unwrap();
         let database = config.database_path();
         let connection = rusqlite::Connection::open(&database).unwrap();
@@ -1011,23 +1033,23 @@ mod format_tests {
     #[test]
     fn partial_identity_is_rejected_before_mutation_but_machine_only_is_valid() {
         let home = tempfile::tempdir().unwrap();
-        let config = Config { home: home.path().into(), port: 0 };
+        let config = Config { home: home.path().join("home"), port: 0 };
         config.ensure_home().unwrap();
         let identity = crate::keys::IdentityFile::new(&crate::keys::Identity::from_master([17; 32]));
         write_json_private(&config.identity_path(), &identity).unwrap();
         let bytes = std::fs::read(config.identity_path()).unwrap();
         #[cfg(unix)] {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&config.home, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let permissions = std::fs::metadata(home.path()).unwrap().permissions();
+        let permissions = std::fs::metadata(&config.home).unwrap().permissions();
         let error = crate::app::App::load(config.clone()).err().expect("partial identity must fail admission");
         assert!(error.to_string().contains("missing its machine record"));
         assert_eq!(std::fs::read(config.identity_path()).unwrap(), bytes);
         assert!(!config.database_path().exists());
         #[cfg(unix)] {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(home.path()).unwrap().permissions().mode(), permissions.mode());
+            assert_eq!(std::fs::metadata(&config.home).unwrap().permissions().mode(), permissions.mode());
         }
         std::fs::remove_file(config.identity_path()).unwrap();
         let app = crate::app::App::load(config.clone()).unwrap();
@@ -1050,27 +1072,27 @@ mod format_tests {
             };
             for &bytes in cases {
                 let home = tempfile::tempdir().unwrap();
-                let config = Config { home: home.path().into(), port: 0 };
+                let config = Config { home: home.path().join("home"), port: 0 };
                 config.ensure_home().unwrap();
                 std::fs::create_dir(config.plugins_dir()).unwrap();
                 let path = config.plugins_dir().join(name);
                 std::fs::write(&path, bytes).unwrap();
                 #[cfg(unix)] {
                     use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+                    std::fs::set_permissions(&config.home, std::fs::Permissions::from_mode(0o755)).unwrap();
                 }
-                let permissions = std::fs::metadata(home.path()).unwrap().permissions();
+                let permissions = std::fs::metadata(&config.home).unwrap().permissions();
                 assert!(crate::plugins::Store::load(&config).is_err());
                 assert!(crate::app::App::load(config.clone()).is_err());
                 assert_eq!(std::fs::read(&path).unwrap(), bytes);
                 assert!(!config.database_path().exists());
                 #[cfg(unix)] {
                     use std::os::unix::fs::PermissionsExt;
-                    assert_eq!(std::fs::metadata(home.path()).unwrap().permissions().mode(), permissions.mode());
+                    assert_eq!(std::fs::metadata(&config.home).unwrap().permissions().mode(), permissions.mode());
                 }
             }
             let home = tempfile::tempdir().unwrap();
-            let config = Config { home: home.path().into(), port: 0 };
+            let config = Config { home: home.path().join("home"), port: 0 };
             config.ensure_home().unwrap();
             std::fs::create_dir_all(config.plugins_dir().join(name)).unwrap();
             assert!(config.ensure_home().is_err(), "unreadable record must not default");

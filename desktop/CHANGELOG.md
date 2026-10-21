@@ -6,6 +6,8 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- Local CLI WebSockets require a private home-scoped token in addition to loopback, Host and Origin admission. Native clients and the separate update lease authenticate without changing update-control credentials; browser development uses a gated Vite host proxy.
+
 - `BEANS_NATIVE=1` opens a native sidebar, transcript and multiline composer alongside the full client. Awaited text/file/reply sends and file selection are account-fenced; updater installation requires closing the native window. The full client and website preview remain available.
 - Native reconnect waits for authoritative account admission before showing account data or accepting sends. Outgoing native RPCs bind to the captured socket/account authority. Unsent native drafts veto close, quit and install even without a window; changed-account drafts remain recoverable with explicit save/discard controls.
 - The native sidebar renders saved Blobatar geometry from the shared generator, with exact uploaded-photo precedence. Native memory uses the existing service/setup contract bundle for consent, masking, deletion fences and one-use approvals; a native connections panel shows masked configuration. The full client remains default while editing and animated parity are completed.

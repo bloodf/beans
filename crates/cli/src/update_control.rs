@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use crate::app::App;
 
 #[cfg(any(windows, test))]
-mod privacy;
+pub(crate) mod privacy;
 
 /// What a refused admission says.
 pub const UPDATING: &str = "This Runner is installing an update. Try again in a few minutes.";

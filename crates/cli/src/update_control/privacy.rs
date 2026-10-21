@@ -231,6 +231,35 @@ mod native {
         Ok(parent)
     }
 
+    pub(crate) fn validate_object(file: &File, private: bool) -> io::Result<()> { validate(file, private) }
+
+    /// Only a newly created inode may receive this private DACL.
+    pub(crate) fn secure_new(file: &File) -> io::Result<()> {
+        use windows_sys::Win32::Security::{Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SetSecurityInfo}, GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION};
+        let mut token = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 { return Err(io::Error::last_os_error()); }
+        let token = Token(token);
+        let mut buffer = [0usize; 128];
+        let mut needed = 0;
+        if unsafe { GetTokenInformation(token.0, TokenUser, buffer.as_mut_ptr().cast(), std::mem::size_of_val(&buffer) as u32, &mut needed) } == 0 { return Err(io::Error::last_os_error()); }
+        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        let mut sid_text = std::ptr::null_mut();
+        if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid_text) } == 0 { return Err(io::Error::last_os_error()); }
+        let length = (0..256).find(|&i| unsafe { *sid_text.add(i) } == 0).ok_or_else(refused)?;
+        let text = String::from_utf16(unsafe { std::slice::from_raw_parts(sid_text, length) }).map_err(|_| refused());
+        unsafe { LocalFree(sid_text.cast()); }
+        let text: Vec<u16> = format!("D:P(A;;FA;;;{})", text?).encode_utf16().chain([0]).collect();
+        let mut descriptor = std::ptr::null_mut();
+        if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(text.as_ptr(), 1, &mut descriptor, std::ptr::null_mut()) } == 0 { return Err(io::Error::last_os_error()); }
+        let descriptor = Descriptor(descriptor);
+        let mut acl = std::ptr::null_mut();
+        let (mut present, mut defaulted) = (0, 0);
+        if unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut acl, &mut defaulted) } == 0 || present == 0 || acl.is_null() { return Err(refused()); }
+        let status = unsafe { SetSecurityInfo(file.as_raw_handle(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, user.User.Sid, std::ptr::null_mut(), acl, std::ptr::null_mut()) };
+        if status != 0 { return Err(io::Error::from_raw_os_error(status as i32)); }
+        validate(file, true)
+    }
+
     #[cfg(test)]
     #[test]
     fn existing_windows_token_and_directory_are_refused_without_repair() {
@@ -498,6 +527,8 @@ mod native {
 
 #[cfg(windows)]
 pub(super) use native::validate_token;
+#[cfg(windows)]
+pub(crate) use native::{validate_object, secure_new};
 
 #[cfg(test)]
 mod tests {

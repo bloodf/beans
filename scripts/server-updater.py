@@ -478,7 +478,7 @@ def parse_target(value, role, what):
     if role == "relay":
         optional = common + ("instance", "database", "catalog_dir", "backup_dir")
     else:
-        optional = common + ("instance", "port", "token_file", "drain_timeout")
+        optional = common + ("instance", "port", "home", "token_file", "drain_timeout")
     if not isinstance(value, dict):
         raise ConfigError(what + " must be an object")
     exact_keys(value, ("name", "driver", "binary", "service"), optional, what, ConfigError)
@@ -526,6 +526,7 @@ def parse_target(value, role, what):
         if "health_url" in value:
             raise ConfigError(what + ".health_url applies only to the relay")
         target["port"] = whole(value.get("port", 4874), what + ".port", 1, 65535)
+        target["home"] = absolute(value.get("home"), what + ".home")
         target["token_file"] = absolute(value.get("token_file"), what + ".token_file")
         target["drain_timeout"] = whole(value.get("drain_timeout", 1800), what + ".drain_timeout", 60, 86400)
     return target
@@ -706,7 +707,7 @@ def runner_control(target, command, check=True):
     token file is the operator's, named by path in the environment; its contents never pass
     through here."""
     require_target_path(target, target["binary"], executable=True)
-    argv = [target["binary"], "--port", str(target["port"]), "update"] + command
+    argv = [target["binary"], "--home", target["home"], "--port", str(target["port"]), "update"] + command
     result = in_target(target, argv, timeout=60, check=False, env={"BEANS_UPDATE_TOKEN_FILE": target["token_file"]})
     if result.returncode != 0:
         if check:

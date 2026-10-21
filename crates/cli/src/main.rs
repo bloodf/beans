@@ -300,10 +300,11 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    let explicit_home = cli.home.is_some();
     let config = Config::load(cli.home, cli.port);
     // Update control and service management open no account data folder.
     let command = match command {
-        Command::Update { command } => return update(config.port, command).await,
+        Command::Update { command } => return update(&config, command, explicit_home).await,
         Command::Service { command } => return service(&config, command).await,
         Command::SelfUpdate => anyhow::bail!("{}", beans::update::UNAVAILABLE),
         Command::StorageUpgrade { scratch_home } => {
@@ -317,6 +318,8 @@ async fn main() -> anyhow::Result<()> {
         // may escape into a shareable doctor transcript with private paths or values.
         tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || App::load(config))
             .map_err(|_| anyhow::anyhow!("Doctor could not load local account data; no report was produced. Check storage access and account format locally; private details are omitted."))?
+    } else if matches!(command, Command::Serve { .. }) {
+        App::load_serving(config)?
     } else {
         App::load(config)?
     };
@@ -413,9 +416,10 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+
 /// `beans update …` against the `beans serve` on `port`. Prints the service's JSON answer, or
 /// `{"serving": false}` when nothing listens there.
-async fn update(port: u16, command: UpdateCommand) -> anyhow::Result<()> {
+async fn update(config: &Config, command: UpdateCommand, explicit_home: bool) -> anyhow::Result<()> {
     let token = || -> anyhow::Result<String> {
         let path = std::env::var_os(beans::update_control::TOKEN_FILE_ENV).ok_or_else(|| anyhow::anyhow!("Set BEANS_UPDATE_TOKEN_FILE to the update control token file."))?;
         beans::update_control::read_token(std::path::Path::new(&path)).map_err(anyhow::Error::msg)
@@ -425,7 +429,7 @@ async fn update(port: u16, command: UpdateCommand) -> anyhow::Result<()> {
         UpdateCommand::Prepare { ttl } => ("update.prepare", serde_json::json!({ "token": token()?, "ttl": ttl })),
         UpdateCommand::Cancel => ("update.cancel", serde_json::json!({ "token": token()? })),
     };
-    let reply = match serve_call(port, method, &params).await? {
+    let reply = match serve_call_mode(config, method, &params, explicit_home).await? {
         Some(reply) => reply.map_err(anyhow::Error::msg)?,
         None => serde_json::json!({ "serving": false }),
     };
@@ -469,7 +473,7 @@ async fn provider(app: &std::sync::Arc<App>, command: ProviderCommand) -> anyhow
             return Ok(());
         }
     };
-    let result = match serve_call(app.config.port, &method, &params).await? {
+    let result = match serve_call(&app.config, &method, &params).await? {
         Some(result) => result,
         None => {
             let result = Box::pin(beans::api::dispatch(app, &method, params)).await;
@@ -499,7 +503,7 @@ async fn chats(app: &std::sync::Arc<App>, command: ChatsCommand) -> anyhow::Resu
                 return Ok(());
             }
             let params = serde_json::json!({ "chat_id": chat.meta.id, "bot_id": bot.id });
-            let result = match serve_call(app.config.port, "chats.set_owner", &params).await? {
+            let result = match serve_call(&app.config, "chats.set_owner", &params).await? {
                 Some(result) => result,
                 None => {
                     let result = Box::pin(beans::api::dispatch(app, "chats.set_owner", params)).await;
@@ -575,7 +579,7 @@ fn print_providers(providers: &serde_json::Value) {
 /// An `mcp.*` request to the running `beans serve` when there is one, so the app sees the change
 /// at once and the server runs there; else here. Says which it was.
 async fn mcp_call(app: &std::sync::Arc<App>, method: &str, params: serde_json::Value) -> anyhow::Result<(serde_json::Value, bool)> {
-    let (result, live) = match serve_call(app.config.port, method, &params).await? {
+    let (result, live) = match serve_call(&app.config, method, &params).await? {
         Some(result) => (result, true),
         // Boxed, as `main`'s future lives on the main thread's stack, a megabyte on Windows.
         None => (Box::pin(beans::api::dispatch(app, method, params)).await, false),
@@ -974,7 +978,7 @@ fn print_mcp_server(server: &serde_json::Value) {
 /// `beans models reload` and `beans marketplace reload`: checks the configured feed now,
 /// through the running `beans serve`, or with none, here into its cache for the next start.
 async fn reload(app: &std::sync::Arc<App>, method: &str, enable: fn(&App), what: &str) -> anyhow::Result<()> {
-    let (reply, live) = match serve_call(app.config.port, method, &serde_json::json!({})).await? {
+    let (reply, live) = match serve_call(&app.config, method, &serde_json::json!({})).await? {
         Some(reply) => (reply, true),
         None => {
             enable(app);
@@ -997,7 +1001,7 @@ async fn service(config: &Config, command: ServiceCommand) -> anyhow::Result<()>
     match command {
         ServiceCommand::Install => {
             // Another beans serve on the port would keep the service's from starting.
-            if !service::status(config).running.is_some() && serve_call(config.port, "hello", &serde_json::json!({})).await?.is_some() {
+            if !service::status(config).running.is_some() && serve_call(config, "hello", &serde_json::json!({})).await?.is_some() {
                 anyhow::bail!(
                     "A beans serve already answers on port {}. Stop it first; on a computer with the Beans app, the app runs beans serve itself.",
                     config.port
@@ -1045,10 +1049,24 @@ async fn service(config: &Config, command: ServiceCommand) -> anyhow::Result<()>
 }
 
 /// One request to the `beans serve` on `port`; `None` when nothing listens there.
-async fn serve_call(port: u16, method: &str, params: &serde_json::Value) -> anyhow::Result<Option<Result<serde_json::Value, String>>> {
+async fn serve_call(config: &Config, method: &str, params: &serde_json::Value) -> anyhow::Result<Option<Result<serde_json::Value, String>>> {
+    serve_call_mode(config, method, params, false).await
+}
+
+async fn serve_call_mode(config: &Config, method: &str, params: &serde_json::Value, control: bool) -> anyhow::Result<Option<Result<serde_json::Value, String>>> {
     use futures::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-    let Ok((mut socket, _)) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws")).await else { return Ok(None) };
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    let stream = match tokio::net::TcpStream::connect(("127.0.0.1", config.port)).await {
+        Ok(stream) => stream,
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let token = if control { config.read_control_serve_token()? } else { config.read_serve_token()? }
+        .ok_or_else(|| anyhow::anyhow!("The selected Beans home has no local WebSocket token"))?;
+    let mut request = format!("ws://127.0.0.1:{}/ws", config.port).into_client_request()?;
+    request.headers_mut().insert("Authorization", format!("Bearer {token}").parse()?);
+    let (mut socket, _) = tokio_tungstenite::client_async(request, stream).await
+        .map_err(|_| anyhow::anyhow!("The local Beans service refused its authenticated connection"))?;
     socket.send(Message::Text(serde_json::json!({ "id": 1, "method": method, "params": params }).to_string().into())).await?;
     // Events share the socket; the reply is the message with our id.
     while let Some(message) = socket.next().await {

@@ -252,10 +252,19 @@ pub struct App {
 
 impl App {
     pub fn load(config: Config) -> anyhow::Result<Arc<App>> {
+        Self::load_mode(config, false)
+    }
+
+    #[cfg(feature = "server")]
+    pub fn load_serving(config: Config) -> anyhow::Result<Arc<App>> {
+        Self::load_mode(config, true)
+    }
+
+    fn load_mode(config: Config, serving: bool) -> anyhow::Result<Arc<App>> {
         if config.home.join("forget-in-progress.json").try_exists()? {
             anyhow::bail!("Account forget is incomplete; finish local cleanup before reopening this home");
         }
-        let admission = config.ensure_home_admission()?;
+        let admission = config.ensure_home_admission_mode(serving)?;
         let settings = Settings::load(&config);
         let identity: Option<IdentityFile> = config::read_json_strict(&config.identity_path())?;
         let machine: Option<MachineFile> = config::read_json_strict(&config.machine_path())?;
@@ -2209,7 +2218,7 @@ mod tests {
     #[test]
     fn load_propagates_final_normalization_save_failure() {
         let home = tempfile::tempdir().unwrap();
-        let config = Config { home: home.path().into(), port: 0 };
+        let config = Config { home: home.path().join("home"), port: 0 };
         let initial = App::load(config.clone()).unwrap();
         let mut seeded = initial.store.load_state().unwrap();
         seeded.machine_blob_hash = Some("retained-startup-hash".into());

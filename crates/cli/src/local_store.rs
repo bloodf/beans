@@ -49,6 +49,8 @@ impl LocalStore {
         let config = crate::config::Config { home: parent.into(), port: 0 };
         #[cfg(unix)]
         admission.ok_or_else(|| anyhow::anyhow!("Storage admission guard is required"))?.validate_target(parent)?;
+        #[cfg(all(windows, feature = "server"))]
+        if let Some(admission) = admission { admission.validate_target(parent)?; }
         if staged {
             admission.ok_or_else(|| anyhow::anyhow!("Staged admission guard is required"))?.revalidate_staged()?;
         } else {
@@ -1685,7 +1687,6 @@ mod tests {
 
     fn scratch() -> Scratch {
         let home = std::env::temp_dir().join(format!("beans-transcript-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&home).unwrap();
         Scratch(LocalStore::open(&home.join("beans.sqlite3")).unwrap(), home)
     }
 

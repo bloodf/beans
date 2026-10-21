@@ -21,6 +21,8 @@ func openDesktopControlFile(root *os.Root, name string, flags int) (*os.File, er
 	return root.OpenFile(name, flags, 0o600)
 }
 
+func desktopServeRootOwner(info os.FileInfo) bool { return false }
+
 var desktopControlSecurity = syscall.NewLazyDLL("advapi32.dll")
 var desktopConvertSecurity = desktopControlSecurity.NewProc("ConvertStringSecurityDescriptorToSecurityDescriptorW")
 var desktopReadDACL = desktopControlSecurity.NewProc("GetSecurityDescriptorDacl")

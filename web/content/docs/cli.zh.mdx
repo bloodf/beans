@@ -101,6 +101,8 @@ Beans 不支持 CLI 自更新，包括自动、手动和远程设备请求；`BE
 
 Beans 桌面应用通过 Beans 签名清单更新内置 CLI。已配置的服务器更新器先更新中继，再使用 `beans update status|prepare|cancel` 等待 Runner 已接纳的任务完成后替换程序。这些命令不会查找或下载版本。
 
+本地 WebSocket 客户端还需读取所选 CLI 数据目录中的私有 `serve-token` 文件，并发送 `Authorization: Bearer <serve-token>`。服务在就绪通知前发布令牌；客户端不创建令牌。回环地址、精确 Host 和 Origin 检查仍须同时通过。更新的 prepare/cancel 仍需独立的更新控制令牌。更新器目标同时配置绝对 `home` 和 `token_file`；应先安装适配后的更新器并审查配置，再将 Runner 切换到令牌认证套接字。
+
 ## 环境变量
 
 | 变量 | 设置什么 |

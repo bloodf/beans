@@ -285,7 +285,12 @@ async fn reference_frames_round_trip_over_ws() {
     let url = format!("ws://127.0.0.1:{port}/ws");
     let (mut socket, _) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Ok(socket) = tokio_tungstenite::connect_async(&url).await { break socket; }
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+            if let Some(token) = s.app.config.read_serve_token().unwrap() {
+                let mut request = url.as_str().into_client_request().unwrap();
+                request.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
+                if let Ok(socket) = tokio_tungstenite::connect_async(request).await { break socket; }
+            }
             assert!(!server.is_finished(), "server exited before connection");
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }

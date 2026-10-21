@@ -198,8 +198,7 @@ class AppTransport implements Transport {
   }
 }
 
-/** A browser tab's own websocket to a CLI started by hand (`beans serve`). The CLI must
- * explicitly allow this page's origin via BEANS_ALLOWED_ORIGINS (the desktop dev loop sets it). */
+/** A browser tab uses the gated Vite host; the page never receives the CLI token. */
 class SocketTransport implements Transport {
   private socket: WebSocket | null = null;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
@@ -243,7 +242,7 @@ class SocketTransport implements Transport {
     }
     this.failure = null;
     this.connection = "connecting";
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/__beans_cli_ws`);
     this.socket = socket;
     socket.onopen = () => {
       this.delay = 400;

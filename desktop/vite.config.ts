@@ -1,8 +1,9 @@
 import solid from "@solidjs/vite-plugin";
 import { defineConfig } from "vite";
+import { cliProxy } from "./cli-proxy";
 
 export default defineConfig({
-  plugins: [solid()],
+  plugins: [solid(), cliProxy()],
   server: {
     // The app loads this address during `mygo dev` (devUrl in mygo.config.ts).
     port: 5178,

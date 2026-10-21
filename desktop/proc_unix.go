@@ -16,6 +16,11 @@ func desktopControlOwner(info os.FileInfo) bool {
 	return ok && (metadata.Uid == 0 || metadata.Uid == uint32(os.Geteuid()))
 }
 
+func desktopServeRootOwner(info os.FileInfo) bool {
+    metadata, ok := info.Sys().(*syscall.Stat_t)
+    return ok && metadata.Uid == 0
+}
+
 func openDesktopControlFile(root *os.Root, name string, flags int) (*os.File, error) {
 	return root.OpenFile(name, flags|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
 }

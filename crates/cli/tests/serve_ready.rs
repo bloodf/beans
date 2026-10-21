@@ -108,9 +108,13 @@ async fn assert_serve_ready(args: &[&str]) {
     assert!(port > 0);
     assert!(child.try_wait().unwrap().is_none());
 
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let token = std::fs::read_to_string(home.0.join("serve-token")).unwrap();
+    let mut request = format!("ws://127.0.0.1:{port}/ws").into_client_request().unwrap();
+    request.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
     let (mut socket, _) = timeout(
         Duration::from_secs(2),
-        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws")),
+        tokio_tungstenite::connect_async(request),
     )
     .await
     .unwrap()
@@ -166,7 +170,10 @@ fn mcp_cli(home: &Home, port: u16, args: &[&str]) -> std::process::Command {
 }
 
 fn mcp_command(home: &Home, args: &[&str]) -> std::process::Output {
-    mcp_cli(home, 0, args).output().unwrap()
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    mcp_cli(home, port, args).output().unwrap()
 }
 
 /// A remote MCP server whose handshake reports it entered, then answers only once released.
@@ -193,9 +200,19 @@ async fn held_mcp(axum::extract::State(held): axum::extract::State<Held>, axum::
 
 /// Forwards one CLI websocket to `beans serve`, releasing the held handshake once the CLI asks
 /// serve to connect a server.
-async fn relay(client: tokio::net::TcpStream, serve_port: u16, release: Arc<Notify>) {
-    let Ok(client) = tokio_tungstenite::accept_async(client).await else { return };
-    let Ok((serve, _)) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{serve_port}/ws")).await else { return };
+async fn relay(client: tokio::net::TcpStream, serve_port: u16, token: String, release: Arc<Notify>) {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let expected = format!("Bearer {token}");
+    let Ok(client) = tokio_tungstenite::accept_hdr_async(client, move |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+        if request.headers().get("Authorization").and_then(|value| value.to_str().ok()) == Some(expected.as_str()) {
+            Ok(response)
+        } else {
+            Err(tokio_tungstenite::tungstenite::http::Response::builder().status(401).body(None).unwrap())
+        }
+    }).await else { return };
+    let mut request = format!("ws://127.0.0.1:{serve_port}/ws").into_client_request().unwrap();
+    request.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let Ok((serve, _)) = tokio_tungstenite::connect_async(request).await else { return };
     let (mut to_client, mut from_client) = client.split();
     let (mut to_serve, mut from_serve) = serve.split();
     let up = async {
@@ -249,10 +266,11 @@ async fn live_mcp_list_waits_for_a_healthy_server_still_connecting() {
     let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let proxy_port = proxy.local_addr().unwrap().port();
     let release = held.release.clone();
+    let token = std::fs::read_to_string(home.0.join("serve-token")).unwrap();
     tasks.spawn(async move {
         let mut relays = tokio::task::JoinSet::new();
         while let Ok((stream, _)) = proxy.accept().await {
-            relays.spawn(relay(stream, serve_port, release.clone()));
+            relays.spawn(relay(stream, serve_port, token.clone(), release.clone()));
         }
     });
 

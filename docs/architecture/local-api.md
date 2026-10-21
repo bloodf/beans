@@ -22,10 +22,10 @@ The app speaks to `beans serve` over JSON on `ws://127.0.0.1:<port>/ws`; the CLI
 `check_upgrade_headers` (`ws.rs`) runs before the socket opens and answers `403` on failure:
 
 - `Host` is exactly one header, exactly `localhost:<port>` or `127.0.0.1:<port>`.
-- `Origin` absent: allowed (AppKit, the Go desktop client, the phone core, the CLI).
+- `Origin` absent: allowed for native AppKit, Go and CLI sockets. The phone core dispatches in process, without this socket.
 - `Origin` present: exactly one header and an exact origin, with no path, wildcard, userinfo or list. It must equal `http://<Host>` or appear in `BEANS_ALLOWED_ORIGINS`, a comma-separated list of exact origins read on each upgrade; one malformed entry rejects every cross-origin upgrade.
 
-There is no per-connection credential, no per-method authorization and no sandbox. The boundary is the local user account: any local process that connects without an `Origin` can call every method below, including the secret-bearing and destructive ones, and a page served from the CLI's own `http://localhost:<port>` or `http://127.0.0.1:<port>` origin passes the `Origin` check. Only `update.prepare` and `update.cancel` check a token: the contents of the file `BEANS_UPDATE_TOKEN_FILE` names, at least 32 characters, in a regular file of at most 4096 bytes that is not a symlink, is owned by root or the running user, and is not group-writable or readable by others (on Windows, a private owner and DACL); it is compared by digest. `update.status` needs none. See [Runtime](runtime.md) for the listener and proxy behavior.
+Every `/ws` upgrade additionally requires exactly one `Authorization: Bearer <serve-token>` from the selected admitted CLI home. Actual TCP peer must be loopback; forwarded headers confer no authority. Host, Origin and credential checks are conjunctive. The persistent 32-byte random token is privately published after binding and before readiness; native callers read it without creating or repairing files. The Vite development proxy validates its own loopback peer, exact Host and required exact Origin before injecting this header, forwarding Origin unchanged. No token is returned to page JavaScript. Socket authentication is not per-method authorization or a sandbox. `update.prepare` and `update.cancel` still independently require the token from `BEANS_UPDATE_TOKEN_FILE`, with their existing ownership/privacy policy; `update.status` requires only socket authentication. Direct CLI and phone API dispatch do not require a socket token.
 
 ## Field errors
 

@@ -76,6 +76,12 @@ final class CLIClient: NSObject {
         var request = URLRequest(url: url)
         request.setValue(String(AppInfo.protocolVersion), forHTTPHeaderField: "Beans-Protocol")
         request.setValue(AppInfo.format, forHTTPHeaderField: "Beans-Format")
+        do {
+            request.setValue("Bearer \(try ServeToken.read())", forHTTPHeaderField: "Authorization")
+        } catch {
+            dropped()
+            return
+        }
         let task = session.webSocketTask(with: request)
         // The default is 1 MiB, and a message over it fails the receive, which reads as a dropped
         // connection. A snapshot carries every chat's messages and outgrows that.

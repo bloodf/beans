@@ -6,9 +6,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Request as HttpRequest, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use axum::middleware::{self, Next};
+use axum::response::Response;
+use sha2::{Digest, Sha256};
 use axum::routing::get;
 use axum::Router;
 use futures::{SinkExt, StreamExt};
@@ -28,16 +31,22 @@ struct Request {
     params: Value,
 }
 
+#[derive(Clone)]
+struct Server {
+    app: Arc<App>,
+    port: u16,
+    token: [u8; 32],
+}
+
 pub async fn serve(app: Arc<App>, ready_stdout: bool) -> anyhow::Result<()> {
     let addr: SocketAddr = ([127, 0, 0, 1], app.config.port).into();
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow::anyhow!("cannot bind {addr}: {e}. Is another beans serve running?"))?;
     let port = listener.local_addr()?.port();
-    let router = Router::new()
-        .route("/", get(index))
-        .route("/ws", get(upgrade))
-        .with_state((app, port));
+    let token = app.config.provision_serve_token()?;
+    let server = Server { app, port, token: Sha256::digest(token.as_bytes()).into() };
+    let router = router(server);
     tracing::info!(%addr, "beans serve");
     if ready_stdout {
         // The parent connects only after this record. Logs go to stderr so stdout is a
@@ -46,19 +55,41 @@ pub async fn serve(app: Arc<App>, ready_stdout: bool) -> anyhow::Result<()> {
         writeln!(stdout, "{}", json!({ "event": "ready", "port": port }))?;
         stdout.flush()?;
     }
-    axum::serve(listener, router).await?;
+    axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
+}
+
+fn router(server: Server) -> Router {
+    Router::new().route("/", get(index)).route("/ws", get(upgrade))
+        .layer(middleware::from_fn_with_state(server.clone(), local_only)).with_state(server)
 }
 
 async fn index() -> impl IntoResponse {
     "beans"
 }
 
-async fn upgrade(State((app, port)): State<(Arc<App>, u16)>, headers: HeaderMap, ws: WebSocketUpgrade) -> impl IntoResponse {
-    if let Err(status) = check_upgrade_headers(&headers, port, std::env::var("BEANS_ALLOWED_ORIGINS").ok().as_deref()) {
-        return status.into_response();
+async fn local_only(State(server): State<Server>, request: HttpRequest, next: Next) -> Response {
+    let local = request.extensions().get::<ConnectInfo<SocketAddr>>().is_some_and(|peer| {
+        match peer.0.ip() {
+            std::net::IpAddr::V4(ip) => ip.is_loopback(),
+            std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback()),
+        }
+    });
+    if !local || check_upgrade_headers(request.headers(), server.port, std::env::var("BEANS_ALLOWED_ORIGINS").ok().as_deref()).is_err() {
+        return StatusCode::FORBIDDEN.into_response();
     }
-    ws.on_upgrade(move |socket| connection(app, socket)).into_response()
+    next.run(request).await
+}
+
+async fn upgrade(State(server): State<Server>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let sent = values.next().and_then(|value| value.to_str().ok()).and_then(|value| value.strip_prefix("Bearer "));
+    let valid = sent.filter(|_| values.next().is_none()).is_some_and(|sent| {
+        let given = Sha256::digest(sent.as_bytes());
+        given.iter().zip(server.token.iter()).fold(0u8, |diff, (a, b)| diff | (a ^ b)) == 0
+    });
+    if !valid { return StatusCode::UNAUTHORIZED.into_response(); }
+    ws.on_upgrade(move |socket| connection(server.app, socket))
 }
 
 /// Keep this guard before `on_upgrade`: loopback binding alone does not stop DNS rebinding or
@@ -213,5 +244,28 @@ mod tests {
         headers.append(header::ORIGIN, HeaderValue::from_static("http://localhost:4875"));
         headers.append(header::ORIGIN, HeaderValue::from_static("http://evil.example"));
         assert_eq!(check_upgrade_headers(&headers, 4875, None), Err(StatusCode::FORBIDDEN));
+    }
+
+    #[tokio::test]
+    async fn real_non_loopback_peer_cannot_upgrade_with_valid_headers_and_token() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let address = if_addrs::get_if_addrs().unwrap().into_iter().map(|interface| interface.ip())
+            .find(|ip| ip.is_ipv4() && !ip.is_loopback() && !ip.is_unspecified())
+            .expect("UNBOUND: real remote-address handshake needs a non-loopback local interface");
+        let home = std::env::temp_dir().join(format!("beans-ws-peer-{}", uuid::Uuid::new_v4()));
+        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        let token = app.config.provision_serve_token().unwrap();
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = router(Server { app, port, token: Sha256::digest(token.as_bytes()).into() });
+        let task = tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap(); });
+        let mut stream = tokio::net::TcpStream::connect((address, port)).await.unwrap();
+        stream.write_all(format!("GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nX-Forwarded-For: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").as_bytes()).await.unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), BufReader::new(stream).read_line(&mut line)).await.unwrap().unwrap();
+        assert_eq!(line.split_whitespace().nth(1), Some("403"));
+        task.abort();
+        let _ = task.await;
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

@@ -69,10 +69,16 @@ const react = {
     return state.value as T;
   },
   useCallback: <T,>(callback: T, deps: unknown[]): T => react.useMemo(() => callback, deps),
-  useEffect: (effect: () => void) => { if (firstRender) effects.push(effect); },
+  useEffect: (effect: () => void | (() => void), deps: unknown[]) => {
+    const state = slot<{ deps?: unknown[]; cleanup?: () => void }>(() => ({})).value;
+    if (!state.deps || deps.some((value, index) => !Object.is(value, state.deps![index]))) {
+      effects.push(() => { state.cleanup?.(); state.deps = deps; state.cleanup = effect() || undefined; });
+    }
+  },
   forwardRef: (component: unknown) => component,
+  useSyncExternalStore: (_subscribe: unknown, snapshot: () => unknown) => snapshot(),
+  useDebugValue: () => {},
 };
-let firstRender = true;
 mock.module("react", () => ({ ...react, default: react }));
 const scrolls: Array<{ kind: string; offset?: number }> = [];
 let offset = 0, tail = 300;
@@ -115,11 +121,17 @@ mock.module("./format", () => ({ quoteText: (text: string) => text }));
 mock.module("./AnswerSheet", () => ({ AnswerSheet: "Answer" }));
 mock.module("../i18n", () => ({ t: (text: string) => text, useLanguage: () => ({ language: "en" }) }));
 const message: Message = { id: "sent", chat_id: "chat", author: { kind: "you" }, body: { kind: "text", text: "sent" }, state: { kind: "complete" }, created_at: 0 };
-const chat: Chat = { id: "chat", kind: "dm", bot_ids: [], messages: [message], unread_count: 0, is_pinned: false, created_at: 0 };
-const store = { identityId: "account", relayUrl: "relay", deviceId: "phone", paired: true, statuses: {}, openChatId: null };
-mock.module("../core/store", () => ({ useStore: Object.assign((select: (state: typeof store) => unknown) => select(store), { subscribe: () => () => {}, getState: () => store, setState: () => {} }), useChat: () => chat, useBotMap: () => new Map(), useWorkingBots: () => [], useIsWorking: () => false, useRunningTasks: () => [] }));
-mock.module("../core/engine", () => ({ chatTitle: () => "Chat", engine: { sendMessage: async () => { chat.messages = [...chat.messages, message]; return message; }, loadOlder: async () => {} } }));
-mock.module("../core/composerDraft", () => ({ composerDraft: () => ({}), editComposerDraft: () => {} }));
+let chat: Chat = { id: "chat", kind: "dm", bot_ids: [], messages: [message], unread_count: 0, is_pinned: false, created_at: 0 };
+mock.module("../core/prefs", () => ({ savePrefs: () => {}, loadPrefs: () => ({}), coreHome: () => "unused", pathOf: (value: string) => value, wipePrefs: () => {} }));
+const { useStore }: typeof import("../core/store") = require("../core/store");
+const { composerDraft, editComposerDraft, submitComposerDraft }: typeof import("../core/composerDraft") = require("../core/composerDraft");
+let sendReply: (() => Promise<Message>) | undefined;
+mock.module("../core/engine", () => ({ chatTitle: () => "Chat", engine: { sendMessage: async () => {
+  if (sendReply) return sendReply();
+  chat = { ...chat, messages: [...chat.messages, message] };
+  useStore.setState({ chats: [chat] });
+  return message;
+}, loadOlder: async () => {} } }));
 mock.module("./transcript", () => ({ buildRows: (current: Chat) => current.messages.map(row => ({ key: row.id, type: "message", message: row })), quoteAuthorName: () => "You", DayRow: "Day", MarkerRow: "Marker", MessageRow: "Message", NoticeRow: "Notice", PermissionRow: "Permission", CommandRow: "Command", StatusRow: "Status", WorkingRow: "Working" }));
 // Native mocks must be installed before this production consumer loads.
 const { default: ChatScreen }: typeof import("../../app/(main)/chat/[id]") = require("../../app/(main)/chat/[id]");
@@ -132,7 +144,8 @@ function find(node: unknown, type: unknown): Node | undefined {
 }
 
 test.each(["ios", "android"])("%s transcript yields streaming scroll to reader and anchors acknowledged sends", async os => {
-  platform.OS = os; slots = []; cursor = 0; effects.length = 0; firstRender = true; scrolls.length = 0; tail = 300; offset = 0;
+  platform.OS = os; slots = []; cursor = 0; effects.length = 0; scrolls.length = 0; tail = 300; offset = 0; sendReply = undefined;
+  useStore.setState({ identityId: "account", relayUrl: "relay", deviceId: "phone", paired: true, chats: [chat] });
   chat.messages = [{ ...message, id: "earlier" }];
   renderedRows = [];
   const originalTimeout = globalThis.setTimeout, originalClear = globalThis.clearTimeout, originalFrame = globalThis.requestAnimationFrame;
@@ -143,8 +156,9 @@ test.each(["ios", "android"])("%s transcript yields streaming scroll to reader a
   globalThis.setTimeout = timeout; globalThis.clearTimeout = clear;
   globalThis.requestAnimationFrame = callback => { callback(0); return 0; };
   try {
-    let root: unknown = ChatScreen(); for (const effect of effects) effect(); firstRender = false;
-    const render = () => { cursor = 0; root = ChatScreen(); };
+    let root: unknown;
+    const render = () => { cursor = 0; root = ChatScreen(); for (const effect of effects.splice(0)) effect(); };
+    render();
     const edge = find(root, "Edge")!.props;
     const events = find(root, "List")!.props;
     edge.onLayout({ nativeEvent: { layout: { height: 800 } } });
@@ -156,10 +170,18 @@ test.each(["ios", "android"])("%s transcript yields streaming scroll to reader a
     events.onScrollEndDrag(); events.onMomentumScrollBegin(); scroll(80);
     events.onContentSizeChange(400, 1400); expect(scrolls).toEqual([]);
     events.onMomentumScrollEnd(); events.onContentSizeChange(400, 1500); expect(scrolls).toEqual([]);
-    // A reader reaching the computed end resumes only after releasing the drag.
+    // Growth before release revokes the old near-end sample.
     events.onScrollBeginDrag(); scroll(804); events.onContentSizeChange(400, 1600); expect(scrolls).toEqual([]);
     events.onScrollEndDrag(); for (const callback of [...timers.values()]) callback(); timers.clear();
-    events.onContentSizeChange(400, 1700); expect(scrolls.pop()?.kind).toBe("end");
+    events.onContentSizeChange(400, 1700); expect(scrolls).toEqual([]);
+    // Momentum completion also uses current geometry, without another scroll sample.
+    events.onScrollBeginDrag(); scroll(1004); events.onScrollEndDrag(); events.onMomentumScrollBegin();
+    events.onContentSizeChange(400, 1800); events.onMomentumScrollEnd();
+    events.onContentSizeChange(400, 1900); expect(scrolls).toEqual([]);
+    // A final release within 24 points still resumes following.
+    events.onScrollBeginDrag(); scroll(1190); events.onScrollEndDrag();
+    for (const callback of [...timers.values()]) callback(); timers.clear();
+    events.onContentSizeChange(400, 2000); expect(scrolls.pop()?.kind).toBe("end");
     events.onScrollToTop(); scrolls.length = 0; events.onContentSizeChange(400, 1800); expect(scrolls).toEqual([]);
     render();
     expect(await find(root, "Composer")!.props.onSend("sent", [], [])).toBe(true);
@@ -184,6 +206,44 @@ test.each(["ios", "android"])("%s transcript yields streaming scroll to reader a
       timers.clear();
     }
     expect(scrollView.props.blankSpace?.value).toBe(os === "android" ? 362 : 386);
-  } finally { globalThis.setTimeout = originalTimeout; globalThis.clearTimeout = originalClear; globalThis.requestAnimationFrame = originalFrame; }
+    // Revocation clears a pending send's anchor gate synchronously, with the chat unchanged.
+    for (const field of ["identityId", "deviceId", "relayUrl"] as const) {
+      const pending = Promise.withResolvers<Message>();
+      sendReply = () => pending.promise;
+      render();
+      const retainedSend = find(root, "Composer")!.props.onSend;
+      const origin = composerDraft(useStore.getState().identityId, useStore.getState().relayUrl, "chat");
+      editComposerDraft(origin, { text: "pending" });
+      const sent = submitComposerDraft(origin, text => retainedSend(text, [], []));
+      const original = useStore.getState()[field];
+      useStore.setState({ [field]: "replacement" });
+      useStore.setState({ [field]: original });
+      expect(await retainedSend("revoked before render", [], [])).toBe(false);
+      useStore.setState({ [field]: "replacement" });
+      render();
+      expect(await retainedSend("retained", [], [])).toBe(false);
+      const state = useStore.getState();
+      const draft = composerDraft(state.identityId, state.relayUrl, "chat");
+      editComposerDraft(draft, { text: "new presentation draft" });
+      const fresh = find(root, "List")!.props;
+      fresh.onScrollBeginDrag(); offset = 10000; fresh.onScrollEndDrag();
+      for (const callback of [...timers.values()]) callback(); timers.clear();
+      scrolls.length = 0;
+      fresh.onContentSizeChange(400, 2100); expect(scrolls.pop()?.kind).toBe("end");
+      if (field === "deviceId") pending.reject(new Error("revoked failure"));
+      else pending.resolve(message);
+      await sent;
+      expect(draft.text).toBe("new presentation draft");
+      expect(origin.text).toBe(origin === draft ? "new presentation draft" : "pending");
+      scrolls.length = 0;
+      fresh.onContentSizeChange(400, 2200); expect(scrolls.pop()?.kind).toBe("end");
+      useStore.setState({ [field]: original }); render();
+    }
+  } finally {
+    for (const value of slots) {
+      if (value && typeof value === "object" && "cleanup" in value && typeof value.cleanup === "function") value.cleanup();
+    }
+    globalThis.setTimeout = originalTimeout; globalThis.clearTimeout = originalClear; globalThis.requestAnimationFrame = originalFrame;
+  }
 });
 }

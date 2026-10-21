@@ -1204,20 +1204,23 @@ mod tests {
     }
     #[cfg(unix)]
     #[tokio::test]
-    async fn background_input_returns_without_waiting_for_continuous_output_to_stop() {
+    async fn input_returns_without_waiting_for_continuous_output_to_stop() {
         let t = tools(Duration::from_millis(100));
-        let started = call(&t.bash, json!({"command": "printf 'ready\\n'; read -r answer; while true; do printf 'tick\\n'; sleep 0.05; done", "background": true})).await.unwrap();
-        let id = session_id(&started);
-        let session = t.host.get(&id).unwrap();
-        assert!(started.text_content().contains("ready\n"));
-        let input = BashInputTool::new(t.host.clone()).waiting_after(Duration::from_secs(30));
-        let typed = tokio::time::timeout(Duration::from_secs(5), call(&input, json!({"session_id": id, "text": "go"}))).await;
-        let still_running = session.end().is_none();
-        session.stop("Stopped");
-        let result = typed.expect("background input must return while its command keeps printing").unwrap();
-        assert!(still_running, "return must not stop the command");
-        assert_eq!(result.details["session_id"], id);
-        assert!(result.text_content().contains("tick\n"));
+        for background in [true, false] {
+            let started = call(&t.bash, json!({"command": "printf 'ready\\n'; read -r answer; while true; do printf 'tick\\n'; sleep 0.05; done", "background": background})).await.unwrap();
+            let id = session_id(&started);
+            let session = t.host.get(&id).unwrap();
+            assert!(started.text_content().contains("ready\n"));
+            let mut input = BashInputTool::new(t.host.clone()).waiting_after(Duration::from_secs(30));
+            input.longest_wait = Duration::from_millis(200);
+            let typed = tokio::time::timeout(Duration::from_secs(5), call(&input, json!({"session_id": id, "text": "go"}))).await;
+            let still_running = session.end().is_none();
+            session.stop("Stopped");
+            let result = typed.expect("input must return while its command keeps printing").unwrap();
+            assert!(still_running, "return must not stop the command");
+            assert_eq!(result.details["session_id"], id);
+            assert!(result.text_content().contains("tick\n"));
+        }
     }
 
 

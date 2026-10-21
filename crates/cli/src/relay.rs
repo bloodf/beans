@@ -225,12 +225,27 @@ pub enum Signal {
     Machines,
 }
 
-/// This machine's sync socket. It is online on the relay while this is open.
+/// Owns socket I/O independently of HTTP sync rounds, coalescing repeated signals.
 pub struct SyncSocket {
-    stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    /// When the relay has to have said something, a ping of its own or the answer to a probe.
-    due: tokio::time::Instant,
+    shared: Arc<SocketShared>,
+    probes: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<RelayResult<()>>>,
+    reader: tokio::task::JoinHandle<()>,
 }
+
+#[derive(Default)]
+struct SocketShared {
+    heard: Mutex<SocketHeard>,
+    changed: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct SocketHeard {
+    blobs: bool,
+    machines: bool,
+    ended: Option<String>,
+}
+
+type SocketStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// The relay pings every 25 s. A socket silent for this long is dead: the computer slept, the
 /// phone changed networks.
@@ -239,41 +254,95 @@ const SOCKET_SILENCE: std::time::Duration = std::time::Duration::from_secs(70);
 const PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl SyncSocket {
-    /// The next signal. An error means the socket is gone and the caller connects again.
+    fn start(stream: SocketStream) -> Self {
+        let shared = Arc::new(SocketShared::default());
+        let (probes, receiver) = tokio::sync::mpsc::channel(1);
+        let owned = shared.clone();
+        let reader = tokio::spawn(async move {
+            let ended = read_socket(stream, &owned, receiver).await;
+            owned.heard.lock().unwrap().ended = Some(ended);
+            owned.changed.notify_one();
+        });
+        Self { shared, probes, reader }
+    }
+
+    /// Membership invalidation wins; blob work stays pending for the following round.
     pub async fn next(&mut self) -> RelayResult<Signal> {
-        use futures::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::Message;
         loop {
-            let message = tokio::time::timeout_at(self.due, self.stream.next())
-                .await
-                .map_err(|_| RelayError { status: None, message: "the sync socket went silent".into() })?
-                .ok_or_else(|| RelayError { status: None, message: "the relay closed the sync socket".into() })?
-                .map_err(socket_error)?;
-            self.due = tokio::time::Instant::now() + SOCKET_SILENCE;
-            match message {
-                Message::Text(text) => match serde_json::from_str::<Value>(&text).ok().as_ref().and_then(|v| v["type"].as_str()) {
-                    Some("blobs") => return Ok(Signal::Blobs),
-                    Some("machines") => return Ok(Signal::Machines),
-                    _ => {}
-                },
-                // The pong has to be flushed by hand when nothing else is written.
-                Message::Ping(_) => self.stream.flush().await.map_err(socket_error)?,
-                Message::Close(_) => return Err(RelayError { status: None, message: "the relay closed the sync socket".into() }),
-                _ => {}
+            let changed = self.shared.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut heard = self.shared.heard.lock().unwrap();
+                if std::mem::take(&mut heard.machines) { return Ok(Signal::Machines); }
+                if std::mem::take(&mut heard.blobs) { return Ok(Signal::Blobs); }
+                if let Some(message) = &heard.ended {
+                    return Err(RelayError { status: None, message: message.clone() });
+                }
             }
+            changed.await;
         }
     }
 
-    /// Pings the relay, which has `PROBE_WAIT` to answer before `next` gives the socket up: a
-    /// phone's may have died while the app was suspended, with nothing said on it since.
     pub async fn probe(&mut self) -> RelayResult<()> {
-        use futures::SinkExt;
-        use tokio_tungstenite::tungstenite::Message;
-        self.due = self.due.min(tokio::time::Instant::now() + PROBE_WAIT);
-        tokio::time::timeout_at(self.due, self.stream.send(Message::Ping(Default::default())))
-            .await
-            .map_err(|_| RelayError { status: None, message: "the sync socket took no ping".into() })?
-            .map_err(socket_error)
+        let (reply, received) = tokio::sync::oneshot::channel();
+        let failed = || RelayError { status: None, message: self.shared.heard.lock().unwrap().ended.clone().unwrap_or_else(|| "the sync socket closed before its probe".into()) };
+        self.probes.send(reply).await.map_err(|_| failed())?;
+        received.await.map_err(|_| failed())?
+    }
+}
+
+impl Drop for SyncSocket {
+    fn drop(&mut self) { self.reader.abort(); }
+}
+
+async fn read_socket(mut stream: SocketStream, shared: &SocketShared, mut probes: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<RelayResult<()>>>) -> String {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let mut due = tokio::time::Instant::now() + SOCKET_SILENCE;
+    loop {
+        let received = tokio::select! {
+            received = tokio::time::timeout_at(due, stream.next()) => received,
+            probe = probes.recv() => {
+                let Some(reply) = probe else { return "the sync socket owner closed".into() };
+                due = due.min(tokio::time::Instant::now() + PROBE_WAIT);
+                let result = match tokio::time::timeout_at(due, stream.send(Message::Ping(Default::default()))).await {
+                    Ok(result) => result.map_err(socket_error),
+                    Err(_) => Err(RelayError { status: None, message: "the sync socket took no ping".into() }),
+                };
+                let ended = result.as_ref().err().map(|error| error.message.clone());
+                let _ = reply.send(result);
+                if let Some(message) = ended { return message; }
+                continue;
+            }
+        };
+        let message = match received {
+            Err(_) => return "the sync socket went silent".into(),
+            Ok(None) => return "the relay closed the sync socket".into(),
+            Ok(Some(Err(error))) => return socket_error(error).message,
+            Ok(Some(Ok(message))) => message,
+        };
+        due = tokio::time::Instant::now() + SOCKET_SILENCE;
+        match message {
+            Message::Text(text) => {
+                let signal = serde_json::from_str::<Value>(&text).ok();
+                let mut heard = shared.heard.lock().unwrap();
+                match signal.as_ref().and_then(|value| value["type"].as_str()) {
+                    Some("blobs") => heard.blobs = true,
+                    Some("machines") => heard.machines = true,
+                    _ => continue,
+                }
+                drop(heard);
+                shared.changed.notify_one();
+            }
+            Message::Ping(_) => match tokio::time::timeout_at(due, stream.flush()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return socket_error(error).message,
+                Err(_) => return "the sync socket took no pong".into(),
+            },
+            Message::Close(_) => return "the relay closed the sync socket".into(),
+            _ => {}
+        }
     }
 }
 
@@ -502,7 +571,7 @@ impl RelayClient {
             .await
             .map_err(|_| RelayError { status: None, message: "the sync socket timed out connecting".into() })?
             .map_err(socket_error)?;
-        Ok(SyncSocket { stream, due: tokio::time::Instant::now() + SOCKET_SILENCE })
+        Ok(SyncSocket::start(stream))
     }
 
     pub async fn list_blobs(&self, url: &str, token: &str, since: i64, kinds: &str) -> RelayResult<(Vec<BlobIn>, i64)> {
@@ -763,5 +832,64 @@ fn decode_optional(value: &Value) -> RelayResult<Option<Vec<u8>>> {
             .map(Some)
             .map_err(|e| RelayError { status: None, message: format!("bad ciphertext: {e}") }),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    #[tokio::test]
+    async fn busy_sync_round_still_answers_relay_ping() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ponged, pong) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut stream = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            for _ in 0..100 {
+                stream.send(Message::Text(r#"{"type":"blobs"}"#.into())).await.unwrap();
+            }
+            stream.send(Message::Text(r#"{"type":"machines"}"#.into())).await.unwrap();
+            stream.send(Message::Ping(Vec::from(&b"relay-probe"[..]).into())).await.unwrap();
+            while let Some(Ok(message)) = stream.next().await {
+                if matches!(&message, Message::Pong(bytes) if bytes.as_ref() == b"relay-probe") {
+                    let _ = ponged.send(());
+                    break;
+                }
+            }
+        });
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}")).await.unwrap();
+        let mut socket = SyncSocket::start(stream);
+        // A production sync round can be busy on HTTP without polling next().
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(2), pong).await;
+        if answered.is_err() {
+            server.abort();
+            panic!("relay ping must be answered while the sync consumer is busy");
+        }
+        answered.unwrap().unwrap();
+        assert_eq!(socket.next().await.unwrap(), Signal::Machines);
+        assert_eq!(socket.next().await.unwrap(), Signal::Blobs);
+        drop(socket);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_waits_for_socket_owner_and_refuses_a_dead_reader() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut stream = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            assert!(matches!(stream.next().await.unwrap().unwrap(), Message::Ping(_)));
+        });
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}")).await.unwrap();
+        let mut socket = SyncSocket::start(stream);
+        tokio::time::timeout(std::time::Duration::from_secs(2), socket.probe()).await.unwrap().unwrap();
+        server.await.unwrap();
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await.unwrap().is_err());
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(2), socket.probe()).await.unwrap().is_err());
     }
 }

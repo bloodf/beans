@@ -288,8 +288,7 @@ fn admit_disposition(tx:&rusqlite::Transaction<'_>,account:&str,blob:&crate::rel
         Ok(fresh)=>{tx.execute_batch("RELEASE transport_delivery")?;Ok(fresh)},
         Err(error) if error.downcast_ref::<IdentityConflict>().is_some()=>{
             tx.execute_batch("ROLLBACK TO transport_delivery; RELEASE transport_delivery")?;
-            tx.execute("DELETE FROM transport_conflicts WHERE account=?1 AND id=?2",params![account,blob.id])?;
-            tx.execute("INSERT INTO transport_conflicts VALUES(?1,?2,?3,?4)",params![account,blob.id,conflict_digest(blob)?,crate::config::now_unix()])?;
+            tx.execute("INSERT INTO transport_conflicts SELECT ?1,?2,?3,?4 WHERE NOT EXISTS(SELECT 1 FROM transport_conflicts WHERE account=?1 AND id=?2)",params![account,blob.id,conflict_digest(blob)?,crate::config::now_unix()])?;
             tx.execute("UPDATE transport_custody SET status='rejected',reason='transport_identity_conflict' WHERE account=?1 AND id=?2 AND status IN ('deferred','staged_deferred')",params![account,blob.id])?;
             if advance {tx.execute("UPDATE metadata SET last_seq=max(last_seq,?1) WHERE id=1",[blob.seq])?;}
             Ok(false)
@@ -834,10 +833,14 @@ mod tests {
         assert_eq!(count(&p.b,"transport_conflicts"),1);assert_eq!(count(&p.b,"transport_operations"),2);
         assert!(p.b.store.transport_status().unwrap()["items"].as_array().unwrap().iter().any(|i|i["reason"]=="transport_identity_conflict"));
         assert!(p.b.store.transport_cancelled(&account(&p.b).unwrap(),"unrelated").unwrap());
+        let first_digest:String=p.b.store.connection.lock().unwrap().query_row("SELECT blob FROM transport_conflicts WHERE account=?1 AND id=?2",params![account(&p.b).unwrap(),conflict.id],|row|row.get(0)).unwrap();
+        p.b.store.connection.lock().unwrap().execute("UPDATE transport_conflicts SET first_at=1 WHERE account=?1 AND id=?2",params![account(&p.b).unwrap(),conflict.id]).unwrap();
         let variants=(10..13).map(|seq|{let mut variant=conflict.clone();variant.seq=seq;variant}).collect::<Vec<_>>();
         preflight_page(&p.b,&variants).unwrap();
         for variant in variants {activate(&p.b,&variant).unwrap();}
         assert_eq!(count(&p.b,"transport_conflicts"),1);
+        let retained:(String,i64)=p.b.store.connection.lock().unwrap().query_row("SELECT blob,first_at FROM transport_conflicts WHERE account=?1 AND id=?2",params![account(&p.b).unwrap(),conflict.id],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(retained,(first_digest,1),"repeated conflicts retain the first evidence within the one-record bound");
         assert_eq!(p.b.store.load_state().unwrap().last_seq,12);
     }
     #[tokio::test]

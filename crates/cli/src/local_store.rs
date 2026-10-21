@@ -279,9 +279,14 @@ impl LocalStore {
     }
 
     pub fn save_state(&self, state: &State) -> anyhow::Result<()> {
+        self.save_state_removing_device_turns(state, None)
+    }
+
+    pub(crate) fn save_state_removing_device_turns(&self, state: &State, device_id: Option<&str>) -> anyhow::Result<()> {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
         save_state_tx(&tx, state)?;
+        if let Some(id) = device_id { tx.execute("DELETE FROM device_turns WHERE id = ?1", [id])?; }
         tx.commit()?;
         Ok(())
     }
@@ -1075,6 +1080,10 @@ impl LocalStore {
     }
 
     pub fn queue_outbox_with_state(&self, item: &OutboxItem, state: &State) -> anyhow::Result<()> {
+        self.queue_outbox_removing_device_turns(item, state, None)
+    }
+
+    pub(crate) fn queue_outbox_removing_device_turns(&self, item: &OutboxItem, state: &State, device_id: Option<&str>) -> anyhow::Result<()> {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
         if item.kind == "roster" {
@@ -1103,6 +1112,7 @@ impl LocalStore {
         sync_chats(&tx, state)?;
         append_applied_blob_tx(&tx, &item.id)?;
         queue_outbox_tx(&tx, item)?;
+        if let Some(id) = device_id { tx.execute("DELETE FROM device_turns WHERE id = ?1", [id])?; }
         tx.commit()?;
         Ok(())
     }

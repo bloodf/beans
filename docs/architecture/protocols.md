@@ -34,6 +34,8 @@ Inbound custody, replay identity and recoverable delivery intent commit before d
 
 Session entry and machine-list invalidation refresh authoritative membership before pulling or dispatching. Pending intent binds the account identity, recipient and sender box key. Membership publication, claim and execution admission share the existing local lifecycle boundary without holding it across effects or awaits; queued execution captures the process-local incarnation, and account teardown clears durable transport intent. Held control scans durably activate staged Stop, completion and continuation intent without advancing the forward cursor. Identity conflicts retain the original binding and one payload-free digest record per conflicting relay id; unrelated page items continue, while storage failures roll back admission.
 
+For local account-owned atomic persistence, lifecycle -> roster -> state may remain held through SQLite commit. These guards release before notifications, event construction/publication, callbacks and network awaits. This local SQLite exception does not authorize holding transport admission across external effects.
+
 Pages containing only account blobs do not require addressed-transport identity. The pending transport pump does no work when the local machine identity is absent; signed addressed admission still requires it.
 
 Forward and first-sync pages consult durable rejection before new-work admission. A rejected conflicting delivery advances through its rejection path during an update lease; genuine pending retries still require admission. Failure reading or persisting that disposition stops the page.

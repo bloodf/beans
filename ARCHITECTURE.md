@@ -67,6 +67,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Managed policy receipts and replay](docs/architecture/managed-policy-replay.md) | Staged opaque policy/roster commits, durable receipt retention, authenticated finite replay cuts and teardown boundaries |
 | [Local API](docs/architecture/local-api.md) | The `/ws` socket: trust boundary, field errors, every method with params and results, events, secret-bearing methods, memory and setup bodies |
 | [Routine and background service API](docs/architecture/routine-api.md) | Routine schedules, recovery health and Runner service status methods |
+| [Device API](docs/architecture/device-api.md) | Device names, account aliases, unpairing, update availability and service status |
 | [CLI (runtime)](docs/architecture/runtime.md) | Commands, local websocket access, proxy/certificate trust, diagnostics, agent loop and notifications |
 | [Agent execution](docs/architecture/agent-execution.md) | Agent loop, context and streaming, steering, cancellation and owned tool cleanup |
 | [Local storage and startup admission](docs/architecture/storage-admission.md) | Data directory, format admission, staged scratch preload, creation guards and final startup persistence |

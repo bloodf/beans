@@ -61,10 +61,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `pair.status` | `nonce` | `{state:"waiting"}`, `{state:"completed",device}` or `{state:"failed",error}` |
 | `pair.cancel`, `pair.abort` | `nonce` (cancel only) | `null` |
 | `pair.accept` | `pairing_string`, `device_name?` | `id`, `name`, `os`, `identity_id` |
-| `device.set_name` | `id`, `name` (trimmed, at most 64 Unicode scalar values; blank resets to machine name) | `null`; unknown Devices reject |
-| `device.unpair` | `id` (this Device's id forgets the identity) | `null` |
-| `device.update`, `device.auto_update` | any | always the error `SELF_UPDATE_UNAVAILABLE` |
-| `device.service_status` | see [Routine and background service API](routine-api.md) | service state |
+| Device methods | see [Device API](device-api.md) | naming, unpairing, update availability and service status |
 | `sync.account` | none | `providers` (masked); waits up to 30 s for the pull |
 | `sync.wake`, `ui.watching` | `chat_id?` (watching) | `null` |
 | `push.register` | `platform`, `token`, `environment?` | `null` |

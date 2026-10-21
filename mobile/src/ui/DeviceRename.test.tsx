@@ -50,7 +50,7 @@ function install() {
   const { useStore }: typeof import("../core/store") = require("../core/store");
   const { deviceName }: typeof import("../core/model") = require("../core/model");
   const { DeviceRename }: typeof import("./DeviceRename") = require("./DeviceRename");
-  const device: Device = { id: "target", name: "Alias", machine_name: "Original", model: "", os: "android", os_version: "", machine_key: "target", is_this_device: false, status: "offline", last_seen: 0, unknown: true };
+  const device: Device = { id: "target", name: "Alias", machine_name: "Original", model: "", os: "android", os_version: "", machine_key: "target", is_this_device: false, status: "offline", last_seen: 0 };
   function find(node: unknown, type: unknown): Node | undefined {
     if (Array.isArray(node)) return node.map(child => find(child, type)).find(Boolean);
     if (!node || typeof node !== "object" || !("type" in node) || !("props" in node)) return;
@@ -70,6 +70,8 @@ function install() {
     };
     try {
       expect(deviceName(device)).toBe("Alias");
+      render({ ...device, unknown: true }); expect(find(root, "Row")).toBeUndefined();
+      render();
       open();
       if (os === "android") expect(find(root, "Input")!.props.value!.value).toBe(device.name);
       if (os === "ios") buttons[0]!.onPress!(); else find(root, "Dialog")!.props.onDismissRequest!();

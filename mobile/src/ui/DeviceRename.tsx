@@ -26,7 +26,7 @@ export function DeviceRename({ device }: { device: Device }) {
     const unsubscribe = useStore.subscribe((state, previous) => {
       if (state.identityId !== previous.identityId || state.deviceId !== previous.deviceId
         || state.relayUrl !== previous.relayUrl || state.paired !== previous.paired
-        || !state.devices.some(item => item.id === selected.current)) {
+        || !state.devices.some(item => item.id === selected.current && !item.unknown)) {
         if (current.current) current.current.active = false;
         setDialog(null);
       }
@@ -40,7 +40,7 @@ export function DeviceRename({ device }: { device: Device }) {
   function valid(attempt: Attempt) {
     const state = useStore.getState();
     return attempt.active && current.current === attempt && selected.current === attempt.id
-      && state.paired && state.devices.some(item => item.id === attempt.id);
+      && state.paired && state.devices.some(item => item.id === attempt.id && !item.unknown);
   }
   function cancel(attempt: Attempt) {
     if (attempt.submitted) return;
@@ -78,6 +78,7 @@ export function DeviceRename({ device }: { device: Device }) {
       setDialog(attempt);
     }
   }
+  if (device.unknown) return null;
   return <>
     <Row title={t("Rename…")} detail={deviceName(device)} onPress={open} />
     {Platform.OS === "android" && dialog?.active && dialog.id === device.id ? (

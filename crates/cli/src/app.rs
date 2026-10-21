@@ -158,6 +158,8 @@ pub struct SentJob {
 }
 
 pub struct App {
+    /// Serializes scoped context revisions, optimistic checks, and remote replay locally.
+    pub(crate) project_context_lock: Mutex<()>,
     pub config: Config,
     pub settings: Mutex<Settings>,
     pub identity: Mutex<Option<IdentityFile>>,
@@ -286,6 +288,7 @@ impl App {
         let http = beans_tls::client_builder().timeout(std::time::Duration::from_secs(60)).build()?;
 
         let app = Arc::new(App {
+            project_context_lock: Mutex::new(()),
             config,
             settings: Mutex::new(settings),
             identity: Mutex::new(identity),

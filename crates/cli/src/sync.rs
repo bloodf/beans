@@ -1472,6 +1472,9 @@ fn rebase_queued_roster(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
 }
 
 fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
+    // A roster that removes a group takes its project context with it, so the context lock
+    // comes before the roster's own state changes.
+    let _project_context = app.project_context_lock.lock().unwrap();
     // Only creations still awaiting their first roster upload survive a remote omission.
     // A deleted existing chat must still lose its local transcript and outbox.
     let pending = match app.store.pending_chat_creates() {

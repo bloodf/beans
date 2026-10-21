@@ -306,6 +306,17 @@ struct HealthEvidence<'a> {
     min_protocol: u32,
     min_roster_protocol: u32,
     memory_config_version: u32,
+    /// The relay's shared project context version, when it offers the kind. A relay that
+    /// does not offer it is never asked for it: the relay refuses the whole request.
+    #[serde(default)]
+    project_context_version: Option<u32>,
+}
+
+/// What the relay offers this build, learned from its health answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Offerings {
+    /// The relay serves shared project context blobs.
+    pub project_context: bool,
 }
 
 const FILE_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -314,11 +325,17 @@ pub struct RelayClient {
     /// Replaced by `reset_connections`, and its pooled connections with it.
     http: Mutex<reqwest::Client>,
     token: Mutex<Option<(String, i64)>>,
+    /// What the relay's last health answer offered. A kind it does not offer is never named.
+    offerings: Mutex<Offerings>,
 }
 
 impl RelayClient {
     pub fn new() -> anyhow::Result<Self> {
-        Ok(RelayClient { http: Mutex::new(Self::http_client()?), token: Mutex::new(None) })
+        Ok(RelayClient {
+            http: Mutex::new(Self::http_client()?),
+            token: Mutex::new(None),
+            offerings: Mutex::new(Offerings::default()),
+        })
     }
 
     /// The relay's own client: what it says about this build goes to the relay and never to
@@ -381,10 +398,21 @@ impl RelayClient {
         if health.ok && health.service == "beans-relay" && health.format == crate::config::Format::BeansV2
             && health.protocol >= PROTOCOL && health.min_protocol == PROTOCOL
             && health.min_roster_protocol == MIN_ROSTER_PROTOCOL && health.memory_config_version == 1 {
+            // The relay says what it serves. A kind it does not serve is never named in a
+            // query: the relay refuses the whole request when it does not know a kind.
+            *self.offerings.lock().unwrap() = Offerings {
+                project_context: health.project_context_version.unwrap_or(0) >= 1,
+            };
             Ok(health.protocol)
         } else {
             Err(incompatible())
         }
+    }
+
+    /// What the relay's last health answer offered. A kind the relay does not offer is
+    /// never named in a blob query.
+    pub fn offerings(&self) -> Offerings {
+        *self.offerings.lock().unwrap()
     }
 
     /// Signed by the identity: registers the identity (idempotent) and attests one machine.

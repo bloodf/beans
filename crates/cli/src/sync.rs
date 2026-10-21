@@ -837,11 +837,11 @@ fn settle_unknown_machines(app: &Arc<App>) -> bool {
 /// Unpairs another Device: the relay drops its key, and it leaves this roster now rather
 /// than on the next presence refresh. A machine the relay already forgot still leaves.
 pub async fn unpair_device(app: &Arc<App>, id: &str) -> Result<(), String> {
-    let url = app.relay_url().ok_or("Set a relay URL first.")?;
-    let (incarnation, machine) = {
+    let (incarnation, machine, url, relay_generation) = {
         let authority = app.plugin_admission(None)?;
+        let url = app.relay_url().ok_or("Set a relay URL first.")?;
         let machine = app.machine_file().and_then(|m| m.machine().ok()).ok_or("No identity on this Device")?;
-        (authority.get().0, machine)
+        (authority.get().0, machine, url, app.relay_generation.load(Ordering::Relaxed))
     };
     let token = token_or_register(app, &url, &machine).await.map_err(|e| e.to_string())?;
     match app.relay.revoke_machine(&url, &token, id).await {
@@ -849,13 +849,22 @@ pub async fn unpair_device(app: &Arc<App>, id: &str) -> Result<(), String> {
         Err(error) if error.is_unknown_machine() => {}
         Err(error) => return Err(error.to_string()),
     }
-    finish_unpair(app, id, incarnation, &machine.pubkey())
+    finish_unpair(app, id, incarnation, &machine.pubkey(), Some(&url), relay_generation)
 }
 
 // Relay revocation is irreversible here. Persistence failure must not restore membership.
-fn finish_unpair(app: &Arc<App>, id: &str, incarnation: u64, machine_id: &str) -> Result<(), String> {
+fn finish_unpair(app: &Arc<App>, id: &str, incarnation: u64, machine_id: &str, relay_url: Option<&str>, relay_generation: u64) -> Result<(), String> {
+    let persisted = commit_unpair(app, id, incarnation, machine_id, relay_url, relay_generation)?;
+    publish_unpair(app, &persisted);
+    persisted.map(|_| ())
+}
+
+fn commit_unpair(app: &Arc<App>, id: &str, incarnation: u64, machine_id: &str, relay_url: Option<&str>, relay_generation: u64) -> Result<Result<bool, String>, String> {
     let persisted = {
         let _authority = app.plugin_admission(Some(incarnation))?;
+        if app.relay_generation.load(Ordering::Relaxed) != relay_generation || app.relay_url().as_deref() != relay_url {
+            return Err("The relay changed during Device revocation".into());
+        }
         let _edit = app.roster_edit.lock().unwrap();
         let machine = app.machine_file().ok_or("No identity on this Device")?;
         if machine.machine().map_err(|e| e.to_string())?.pubkey() != machine_id {
@@ -869,6 +878,7 @@ fn finish_unpair(app: &Arc<App>, id: &str, incarnation: u64, machine_id: &str) -
         state.listed_machines.remove(id);
         state.listed_machine_boxes.remove(id);
         state.unknown_machines.remove(id);
+        state.device_turns.remove(id);
         let mut snapshot = state.clone();
         let named = snapshot.device_names.remove(id).is_some();
         let saved = (|| -> anyhow::Result<()> {
@@ -879,9 +889,9 @@ fn finish_unpair(app: &Arc<App>, id: &str, incarnation: u64, machine_id: &str) -
                     slot: Some(Slot::latest("roster")), group: None,
                 };
                 remember_applied(&mut snapshot, &item.id);
-                app.store.queue_outbox_with_state(&item, &snapshot)?;
+                app.store.queue_outbox_removing_device_turns(&item, &snapshot, Some(id))?;
             } else {
-                app.store.save_state(&snapshot)?;
+                app.store.save_state_removing_device_turns(&snapshot, Some(id))?;
             }
             Ok(())
         })();
@@ -890,12 +900,15 @@ fn finish_unpair(app: &Arc<App>, id: &str, incarnation: u64, machine_id: &str) -
             Err(error) => Err(error.to_string()),
         }
     };
+    Ok(persisted)
+}
+
+fn publish_unpair(app: &Arc<App>, persisted: &Result<bool, String>) {
     // No lifecycle, roster, or state guard spans notification or turn callbacks.
     if matches!(persisted, Ok(true)) { app.outbox_notify.notify_waiters(); }
     app.emit(app.roster_summary());
-    app.set_device_turns(id, Vec::new());
     app.turns_changed();
-    persisted.map(|_| ())
+    // This tail performs no account-owned state or SQLite mutation.
 }
 
 /// Before this Device forgets the identity, it asks the relay to drop its key, so the other
@@ -1684,12 +1697,13 @@ mod tests {
             state.listed_machine_boxes.insert("revoked".into(), "box".into());
         }
         app.set_device_name("revoked", "Alias").unwrap();
+        app.set_device_turns("revoked", vec![LiveTurn { job_id: "old".into(), chat_id: "chat".into(), bot_id: "bot".into(), routine_id: None, activity: None }]);
         (app.plugin_lifecycle.lock().get().0, app.this_device_id().unwrap())
     }
 
     #[test]
     fn revoked_membership_stays_removed_when_alias_transaction_fails() {
-        for (table, operation) in [("device_names", "DELETE"), ("outbox", "UPDATE")] {
+        for (table, operation) in [("device_names", "DELETE"), ("outbox", "UPDATE"), ("device_turns", "DELETE")] {
             let scratch = scratch_app();
             let app = &scratch.0;
             let (incarnation, machine) = unpair_fixture(app);
@@ -1697,17 +1711,20 @@ mod tests {
             let before = app.store.load_state().unwrap();
             let db = rusqlite::Connection::open(app.config.database_path()).unwrap();
             db.execute_batch(&format!("CREATE TRIGGER fail_unpair BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, 'unpair persistence failure'); END;")).unwrap();
-            let error = finish_unpair(app, "revoked", incarnation, &machine).unwrap_err();
+            let error = finish_unpair(app, "revoked", incarnation, &machine, app.relay_url().as_deref(), app.relay_generation.load(Ordering::Relaxed)).unwrap_err();
             assert!(error.contains("unpair persistence failure"));
             let state = app.state.lock().unwrap();
             assert!(!state.devices.iter().any(|d| d.id == "revoked"));
             assert!(!state.listed_machines.contains_key("revoked"));
             assert!(!state.listed_machine_boxes.contains_key("revoked"));
+            assert!(!state.device_turns.contains_key("revoked"));
             assert_eq!(state.device_names, before.device_names);
             assert_eq!(state.applied_blob_ids, before.applied_blob_ids);
             drop(state);
             assert_eq!(app.store.load_state().unwrap().device_names, before.device_names);
             assert_eq!(app.store.queued_roster().unwrap().unwrap().id, queued.id);
+            let count: i64 = db.query_row("SELECT count(*) FROM device_turns WHERE id = 'revoked'", [], |row| row.get(0)).unwrap();
+            assert_eq!(count, 1, "failed transaction retains prior durable turns for retry");
         }
     }
 
@@ -1720,10 +1737,43 @@ mod tests {
             let authority = app.plugin_lifecycle.lock();
             authority.set((incarnation + 1, false));
         }
-        assert!(finish_unpair(app, "revoked", incarnation, &machine).is_err());
+        assert!(finish_unpair(app, "revoked", incarnation, &machine, app.relay_url().as_deref(), app.relay_generation.load(Ordering::Relaxed)).is_err());
         let state = app.state.lock().unwrap();
         assert!(state.listed_machines.contains_key("revoked"));
         assert_eq!(state.device_names.get("revoked").unwrap(), "Alias");
+    }
+
+    #[test]
+    fn unpair_rejects_relay_change_and_away_back_before_commit() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let (incarnation, machine) = unpair_fixture(app);
+        let original = app.relay_url();
+        let generation = app.relay_generation.load(Ordering::Relaxed);
+        app.set_relay_url(Some("http://127.0.0.1:19001".into())).unwrap();
+        assert!(finish_unpair(app, "revoked", incarnation, &machine, original.as_deref(), generation).is_err());
+        app.set_relay_url(original.clone()).unwrap();
+        assert!(finish_unpair(app, "revoked", incarnation, &machine, original.as_deref(), generation).is_err());
+        assert!(app.state.lock().unwrap().listed_machines.contains_key("revoked"));
+    }
+
+
+    #[test]
+    fn unpair_commit_then_replacement_before_tail_preserves_new_turns() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let (incarnation, machine) = unpair_fixture(app);
+        let persisted = commit_unpair(app, "revoked", incarnation, &machine, app.relay_url().as_deref(), app.relay_generation.load(Ordering::Relaxed)).unwrap();
+        assert!(persisted.is_ok());
+        app.forget_identity().unwrap();
+        crate::identity::create(app, Some("Replacement".into())).unwrap();
+        let turns = vec![LiveTurn { job_id: "replacement".into(), chat_id: "chat".into(), bot_id: "bot".into(), routine_id: None, activity: None }];
+        app.set_device_turns("revoked", turns.clone());
+        publish_unpair(app, &persisted);
+        let db = rusqlite::Connection::open(app.config.database_path()).unwrap();
+        let json: String = db.query_row("SELECT json FROM device_turns WHERE id = 'revoked'", [], |row| row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Vec<LiveTurn>>(&json).unwrap(), turns);
+        assert_eq!(app.state.lock().unwrap().device_turns.get("revoked").unwrap(), &turns);
     }
 
     #[tokio::test]
@@ -1736,7 +1786,9 @@ mod tests {
         notified.as_mut().enable();
         let credentials = app.credentials.lock().unwrap();
         let worker_app = app.clone();
-        let worker = tokio::task::spawn_blocking(move || finish_unpair(&worker_app, "revoked", incarnation, &machine));
+        let url = app.relay_url();
+        let generation = app.relay_generation.load(Ordering::Relaxed);
+        let worker = tokio::task::spawn_blocking(move || finish_unpair(&worker_app, "revoked", incarnation, &machine, url.as_deref(), generation));
         let notification = tokio::time::timeout(std::time::Duration::from_secs(5), notified).await;
         let lifecycle_free = app.plugin_lifecycle.try_lock().is_some();
         let roster_free = app.roster_edit.try_lock().is_ok();

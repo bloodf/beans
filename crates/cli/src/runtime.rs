@@ -1338,15 +1338,17 @@ mod tests {
     fn incompatible_runner_refuses_without_queued_or_running_work() {
         let scratch=scratch_app();let app=&scratch.0;
         crate::identity::create(app,None).unwrap();
+        app.state.lock().unwrap().chats.push(empty_chat("chat"));
         let peer=crate::keys::Machine::generate();
         let bot_id={let mut state=app.state.lock().unwrap();
             state.devices.push(Device{id:peer.pubkey(),name:"Older Runner".into(),box_pubkey:peer.box_pubkey(),..Default::default()});
             state.bots[0].runner_id=peer.pubkey();state.bots[0].id.clone()};
-        let before=app.store.outbox().unwrap().into_iter().map(|item|item.id).collect::<Vec<_>>();
         let job=command_job(app,"chat",&bot_id,"card");
         assert!(matches!(dispatch_job(app,job),Dispatch::Deferred));
-        assert_eq!(app.store.outbox().unwrap().into_iter().map(|item|item.id).collect::<Vec<_>>(),before);
+        assert!(!app.store.outbox().unwrap().iter().any(|item|crate::envelope::addressed(&item.kind)), "refusal must not queue addressed work");
         assert!(app.running_jobs.lock().unwrap().is_empty());
         assert!(app.store.sent_jobs().unwrap().is_empty());
+        let messages=app.messages("chat");
+        assert!(matches!(messages.as_slice(), [crate::model::Message { body: crate::model::Body::Notice { .. }, .. }]), "refused turn must persist a visible notice without queuing work");
     }
 }

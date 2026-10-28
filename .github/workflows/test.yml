@@ -36,6 +36,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:17
@@ -62,6 +63,12 @@ jobs:
           fallback: none
       # Cargo unifies features across the packages of one run, and the phone core takes beans
       # without the runner, so it is tested on its own.
+      - name: Build real relay for revocation fixture
+        run: |
+          cargo build --locked -p beans-relay --bin beans-relay
+          relay="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, pathlib, sys; print(pathlib.Path(json.load(sys.stdin)["target_directory"]) / "debug" / "beans-relay")')"
+          test -x "$relay"
+          printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
 
@@ -69,6 +76,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (macOS)
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -77,6 +85,12 @@ jobs:
         with:
           tool: protoc@3.36.2
           fallback: none
+      - name: Build real relay for revocation fixture
+        run: |
+          cargo build --locked -p beans-relay --bin beans-relay
+          relay="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, pathlib, sys; print(pathlib.Path(json.load(sys.stdin)["target_directory"]) / "debug" / "beans-relay")')"
+          test -x "$relay"
+          printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
 
@@ -89,6 +103,7 @@ jobs:
     # the login shell's environment) are #[cfg(unix)]. The release builds x86_64-pc-windows-gnu with zig, and the
     # tests build with the runner's MSVC toolchain.
     runs-on: windows-latest
+    timeout-minutes: 90
     env:
       # rustc ran out of memory (STATUS_STACK_BUFFER_OVERRUN after a failed allocation) compiling
       # the CLI's test targets with the Lance dependencies; one job at a time keeps the peak down.
@@ -138,7 +153,8 @@ jobs:
   desktop:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Windows and Linux app
-    runs-on: ubuntu-latest
+    # Playwright 1.59.1 has no Chromium build for ubuntu26.04; pin until the pin is raised.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: desktop
@@ -153,8 +169,10 @@ jobs:
       # src/mygo.ts, the page's bindings to the Go side, is generated and never committed.
       - run: bun run generate
       - run: bun run typecheck
+      - name: Install Chromium for desktop browser checks
+        run: bun ./node_modules/playwright/cli.js install --with-deps chromium
       - run: bun run test
-      - run: go test ./...
+      - run: go test -count=1 ./...
 
   mobile:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository

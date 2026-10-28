@@ -30,19 +30,24 @@ async fn warm_binary(once: &OnceCell<Preflight>, mut command: Command) -> Prefli
 async fn prepare_cli() {
     let home = Home::new();
     let mut command = Command::new(env!("CARGO_BIN_EXE_beans"));
-    command.env_clear().env("RUST_LOG", "off").env("HOME", &home.0).env("USERPROFILE", &home.0);
+    command.env_clear().env("RUST_LOG", "off").env("HOME", &home.path).env("USERPROFILE", &home.path);
     if let Some(root) = std::env::var_os("SystemRoot") { command.env("SystemRoot", root); }
-    command.arg("--home").arg(&home.0).arg("--help").stdin(Stdio::null());
+    command.arg("--home").arg(&home.path).arg("--help").stdin(Stdio::null());
     let elapsed = warm_binary(&CLI_PREFLIGHT, command).await.expect("CLI executable preflight succeeds");
     // macOS can validate a newly linked, large debug Mach-O before Rust main starts. This
     // cold measurement stays visible and precedes, rather than extends, readiness deadlines.
     eprintln!("CLI executable preflight (outside readiness deadline): {elapsed:?}");
 }
-struct Home(std::path::PathBuf);
+struct Home {
+    path: std::path::PathBuf,
+    _parent: tempfile::TempDir,
+}
 
 impl Home {
     fn new() -> Self {
-        Self(std::env::temp_dir().join(format!("beans-ready-{}", uuid::Uuid::new_v4())))
+        // Keep the home absent for creation/help assertions, beneath an owned parent.
+        let parent = tempfile::tempdir().unwrap();
+        Self { path: parent.path().join("home"), _parent: parent }
     }
 
     fn serve(&self, port: u16) -> Command {
@@ -62,7 +67,7 @@ impl Home {
                 &port.to_string(),
                 "--home",
             ])
-            .arg(&self.0)
+            .arg(&self.path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -73,7 +78,7 @@ impl Home {
 
 impl Drop for Home {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
@@ -158,10 +163,10 @@ async fn a_failed_bind_exits_without_announcing_readiness() {
 
 fn mcp_cli(home: &Home, port: u16, args: &[&str]) -> std::process::Command {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_beans"));
-    command.env_clear().env("HOME", &home.0).env("USERPROFILE", &home.0);
+    command.env_clear().env("HOME", &home.path).env("USERPROFILE", &home.path);
     if let Some(root) = std::env::var_os("SystemRoot") { command.env("SystemRoot", root); }
     command.env("BEANS_MODELS_FETCH", "0").env("BEANS_MARKETPLACE_FETCH", "0");
-    command.env("RUST_LOG", "off").arg("--home").arg(&home.0).arg("--port").arg(port.to_string()).arg("mcp").args(args);
+    command.env("RUST_LOG", "off").arg("--home").arg(&home.path).arg("--port").arg(port.to_string()).arg("mcp").args(args);
     command
 }
 
@@ -234,12 +239,12 @@ async fn live_mcp_list_waits_for_a_healthy_server_still_connecting() {
     tasks.spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    beans::config::Config { home: home.0.clone(), port: 0 }.ensure_home().unwrap();
+    beans::config::Config { home: home.path.clone(), port: 0 }.ensure_home().unwrap();
     let servers = json!({ "held": { "type": "http", "url": format!("{url}/mcp") }, "off": { "type": "http", "url": format!("{url}/off"), "disabled": true } });
-    std::fs::write(home.0.join("mcp.json"), json!({ "mcpServers": servers }).to_string()).unwrap();
+    std::fs::write(home.path.join("mcp.json"), json!({ "mcpServers": servers }).to_string()).unwrap();
 
     let mut serve = home.serve(0);
-    serve.env("HOME", &home.0).env("USERPROFILE", &home.0).env("BEANS_MODELS_FETCH", "0").env("BEANS_MARKETPLACE_FETCH", "0");
+    serve.env("HOME", &home.path).env("USERPROFILE", &home.path).env("BEANS_MODELS_FETCH", "0").env("BEANS_MARKETPLACE_FETCH", "0");
     let mut child = serve.spawn().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
@@ -263,7 +268,7 @@ async fn live_mcp_list_waits_for_a_healthy_server_still_connecting() {
 
     // An enabled entry that cannot run still needs attention through the live serve.
     let servers = json!({ "held": { "type": "http", "url": format!("{url}/mcp") }, "broken": { "command": "" } });
-    std::fs::write(home.0.join("mcp.json"), json!({ "mcpServers": servers }).to_string()).unwrap();
+    std::fs::write(home.path.join("mcp.json"), json!({ "mcpServers": servers }).to_string()).unwrap();
     let reload = timeout(Duration::from_secs(60), Command::from(mcp_cli(&home, proxy_port, &["reload"])).kill_on_drop(true).output()).await.expect("reload returns").unwrap();
     assert!(!reload.status.success());
     child.kill().await.unwrap();
@@ -283,21 +288,21 @@ async fn mcp_add_flags_and_import_skip_existing_without_exposing_secrets() {
     assert!(!String::from_utf8_lossy(&output.stdout).contains("private-token"));
     let output = mcp_command(&home, &["add", "local", "--transport", "stdio", "--env", "TOKEN=private-token", "-e", "MODE=test", "--", "does-not-run", "--flag"]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let path = home.0.join("mcp.json");
+    let path = home.path.join("mcp.json");
     let saved: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     assert_eq!(saved["mcpServers"]["remote"]["headers"]["Authorization"], "Bearer private-token");
     assert_eq!(saved["mcpServers"]["remote"]["timeout"], 42);
     assert_eq!(saved["mcpServers"]["local"]["env"]["TOKEN"], "private-token");
     assert_eq!(saved["mcpServers"]["local"]["args"][0], "--flag");
 
-    let source = home.0.join("source.json");
+    let source = home.path.join("source.json");
     std::fs::write(&source, r#"{"mcpServers":{"remote":{"type":"http","url":"https://other.example/mcp"},"new":{"command":"new-command"}}}"#).unwrap();
     let path = source.to_str().unwrap();
     let output = mcp_command(&home, &["import", path]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let output = mcp_command(&home, &["import", path]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let saved: Value = serde_json::from_slice(&std::fs::read(home.0.join("mcp.json")).unwrap()).unwrap();
+    let saved: Value = serde_json::from_slice(&std::fs::read(home.path.join("mcp.json")).unwrap()).unwrap();
     assert_eq!(saved["mcpServers"]["remote"]["url"], remote_url);
     assert_eq!(saved["mcpServers"]["new"]["command"], "new-command");
     server.abort();
@@ -307,11 +312,11 @@ async fn mcp_add_flags_and_import_skip_existing_without_exposing_secrets() {
 async fn mcp_list_fails_for_enabled_invalid_entries_but_not_disabled_ones() {
     prepare_cli().await;
     let home = Home::new();
-    beans::config::Config { home: home.0.clone(), port: 0 }.ensure_home().unwrap();
-    std::fs::write(home.0.join("mcp.json"), r#"{"mcpServers":{"broken":{"command":""}}}"#).unwrap();
+    beans::config::Config { home: home.path.clone(), port: 0 }.ensure_home().unwrap();
+    std::fs::write(home.path.join("mcp.json"), r#"{"mcpServers":{"broken":{"command":""}}}"#).unwrap();
     let output = mcp_command(&home, &["list"]);
     assert!(!output.status.success());
-    std::fs::write(home.0.join("mcp.json"), r#"{"mcpServers":{"broken":{"command":"","disabled":true}}}"#).unwrap();
+    std::fs::write(home.path.join("mcp.json"), r#"{"mcpServers":{"broken":{"command":"","disabled":true}}}"#).unwrap();
     let output = mcp_command(&home, &["list"]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 }
@@ -320,18 +325,18 @@ async fn mcp_list_fails_for_enabled_invalid_entries_but_not_disabled_ones() {
 async fn bare_beans_lists_the_commands_and_starts_nothing() {
     prepare_cli().await;
     let home = Home::new();
-    let output = Command::new(env!("CARGO_BIN_EXE_beans")).env("BEANS_HOME", &home.0).env("RUST_LOG", "off").stdin(Stdio::null()).output();
+    let output = Command::new(env!("CARGO_BIN_EXE_beans")).env("BEANS_HOME", &home.path).env("RUST_LOG", "off").stdin(Stdio::null()).output();
     let output = timeout(Duration::from_secs(10), output).await.expect("it returns rather than serving").unwrap();
     assert!(output.status.success());
-    assert!(!home.0.exists(), "a help page makes no data folder");
+    assert!(!home.path.exists(), "a help page makes no data folder");
 }
 
 #[cfg(unix)]
 fn delayed_preflight_fixture(home: &Home, fail: bool) -> (std::path::PathBuf, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(&home.0).unwrap();
-    let script = home.0.join("cold-cli");
-    let count = home.0.join("count");
+    std::fs::create_dir_all(&home.path).unwrap();
+    let script = home.path.join("cold-cli");
+    let count = home.path.join("count");
     std::fs::write(&script, format!("#!/bin/sh\nprintf x >> \"$1\"\nsleep 0.2\nexit {}\n", if fail { 9 } else { 0 })).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
     (script, count)

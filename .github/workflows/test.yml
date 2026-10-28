@@ -103,7 +103,7 @@ jobs:
     # the login shell's environment) are #[cfg(unix)]. The release builds x86_64-pc-windows-gnu with zig, and the
     # tests build with the runner's MSVC toolchain.
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       # rustc ran out of memory (STATUS_STACK_BUFFER_OVERRUN after a failed allocation) compiling
       # the CLI's test targets with the Lance dependencies; one job at a time keeps the peak down.

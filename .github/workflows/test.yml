@@ -153,7 +153,8 @@ jobs:
   desktop:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Windows and Linux app
-    runs-on: ubuntu-latest
+    # Playwright 1.59.1 has no Chromium build for ubuntu26.04; pin until the pin is raised.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: desktop

@@ -98,6 +98,27 @@ fn scratch_app() -> ScratchApp {
 }
 
 /// Answers each request with the next status and body, and hands back the request lines.
+
+fn accept_within(listener: &std::net::TcpListener, budget: std::time::Duration) -> std::net::TcpStream {
+    listener.set_nonblocking(true).expect("fixture listener nonblocking");
+    let start = std::time::Instant::now();
+    loop {
+        match listener.accept() {
+            Ok((socket, _)) => {
+                let _ = socket.set_nonblocking(false);
+                return socket;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if start.elapsed() >= budget {
+                    panic!("fixture accept timed out");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(err) => panic!("fixture accept failed: {err}"),
+        }
+    }
+}
+
 fn serve(answers: Vec<(&'static str, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let root = format!("http://{}", listener.local_addr().unwrap());
@@ -109,7 +130,7 @@ fn serve(answers: Vec<(&'static str, String)>) -> (String, std::thread::JoinHand
         // treat client disconnect as success.
         let io_timeout = std::time::Duration::from_secs(2);
         for (status, body) in answers {
-            let (mut socket, _) = listener.accept().unwrap();
+            let mut socket = accept_within(&listener, std::time::Duration::from_secs(5));
             let _ = socket.set_read_timeout(Some(io_timeout));
             let _ = socket.set_write_timeout(Some(io_timeout));
             let mut request = [0u8; 4096];
@@ -196,7 +217,7 @@ async fn credential_redirects_are_not_followed() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let root = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = accept_within(&listener, std::time::Duration::from_secs(5));
         let io_timeout = std::time::Duration::from_secs(2);
         let _ = socket.set_read_timeout(Some(io_timeout));
         let _ = socket.set_write_timeout(Some(io_timeout));
@@ -377,7 +398,7 @@ async fn in_flight_refresh_cannot_restore_a_deleted_provider() {
     let (release, proceed) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
         use std::io::{Read, Write};
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = accept_within(&listener, std::time::Duration::from_secs(5));
         let io_timeout = std::time::Duration::from_secs(2);
         let _ = socket.set_read_timeout(Some(io_timeout));
         let _ = socket.set_write_timeout(Some(io_timeout));
@@ -652,7 +673,7 @@ async fn guided_revocation_during_discovery_prevents_credential_commit() {
     let app = scratch.0.clone();
     let revoked = id.clone();
     let server = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = accept_within(&listener, std::time::Duration::from_secs(5));
         let io_timeout = std::time::Duration::from_secs(2);
         let _ = socket.set_read_timeout(Some(io_timeout));
         let _ = socket.set_write_timeout(Some(io_timeout));
@@ -684,7 +705,7 @@ async fn guided_create_delete_during_discovery_preserves_tombstone() {
     let (requested, received) = tokio::sync::oneshot::channel();
     let (release, proceed) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = accept_within(&listener, std::time::Duration::from_secs(5));
         let io_timeout = std::time::Duration::from_secs(2);
         let _ = socket.set_read_timeout(Some(io_timeout));
         let _ = socket.set_write_timeout(Some(io_timeout));

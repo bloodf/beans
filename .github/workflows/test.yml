@@ -36,6 +36,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:17
@@ -75,6 +76,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (macOS)
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -101,6 +103,7 @@ jobs:
     # the login shell's environment) are #[cfg(unix)]. The release builds x86_64-pc-windows-gnu with zig, and the
     # tests build with the runner's MSVC toolchain.
     runs-on: windows-latest
+    timeout-minutes: 45
     env:
       # rustc ran out of memory (STATUS_STACK_BUFFER_OVERRUN after a failed allocation) compiling
       # the CLI's test targets with the Lance dependencies; one job at a time keeps the peak down.

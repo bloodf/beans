@@ -104,17 +104,45 @@ fn serve(answers: Vec<(&'static str, String)>) -> (String, std::thread::JoinHand
     let server = std::thread::spawn(move || {
         use std::io::{Read, Write};
         let mut seen = Vec::new();
+        // Discovery can reject on Content-Length without reading the body. On macOS a blocking
+        // write of that body can stall forever once the send buffer fills; bound fixture I/O and
+        // treat client disconnect as success.
+        let io_timeout = std::time::Duration::from_secs(2);
         for (status, body) in answers {
             let (mut socket, _) = listener.accept().unwrap();
+            let _ = socket.set_read_timeout(Some(io_timeout));
+            let _ = socket.set_write_timeout(Some(io_timeout));
             let mut request = [0u8; 4096];
             let read = socket.read(&mut request).unwrap();
             seen.push(String::from_utf8_lossy(&request[..read]).to_string());
             let reply = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-            socket.write_all(reply.as_bytes()).unwrap();
+            match socket.write_all(reply.as_bytes()) {
+                Ok(()) => {}
+                Err(err) if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                ) => {}
+                Err(err) => panic!("fixture write failed: {err}"),
+            }
+            let _ = socket.shutdown(std::net::Shutdown::Both);
         }
         seen
     });
     (root, server)
+}
+
+/// Never block-join a std fixture thread on the current-thread tokio runtime.
+async fn join_server<T: Send + 'static>(server: std::thread::JoinHandle<T>) -> T {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || server.join().expect("fixture server")),
+    )
+    .await
+    .expect("fixture server did not finish; write likely blocked after the client stopped reading")
+    .expect("fixture join task")
 }
 
 fn input(name: &str, api: &str, base_url: &str, models: &[&str]) -> CustomInput {
@@ -132,7 +160,7 @@ async fn legacy_discovery_uses_only_models_and_keeps_identity_on_edit() {
     let mut edited = input("My gateway", "chat-completions", &format!("{root}/v1/models"), &[]);
     edited.kind = Some(kind.clone());
     connect_custom(&scratch.0, edited).await.unwrap();
-    let requests = server.join().unwrap();
+    let requests = join_server(server).await;
     assert!(requests.iter().all(|request| request.starts_with("GET /v1/models ")));
     assert!(!requests.iter().any(|r| r.to_ascii_lowercase().contains("authorization:")));
     let credentials = scratch.0.credentials.lock().unwrap();
@@ -143,15 +171,19 @@ async fn legacy_discovery_uses_only_models_and_keeps_identity_on_edit() {
 
 #[tokio::test]
 async fn discovery_rejects_malformed_and_oversized_bodies() {
-    let scratch = scratch_app();
-    for body in ["not json".into(), " ".repeat(MODEL_RESPONSE_LIMIT + 1)] {
-        let (root, server) = serve(vec![("200 OK", body)]);
-        assert!(list_custom_models(&scratch.0, "Legacy", "chat-completions", &root, "", Some("durindoor")).await.is_err());
-        server.join().unwrap();
-    }
-    let (root, server) = serve(vec![("200 OK", " ".repeat(MODEL_RESPONSE_LIMIT + 1))]);
-    assert!(list_custom_models(&scratch.0, "Generic", "chat-completions", &root, "", None).await.unwrap_err().contains("too large"));
-    server.join().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let scratch = scratch_app();
+        for body in ["not json".into(), " ".repeat(MODEL_RESPONSE_LIMIT + 1)] {
+            let (root, server) = serve(vec![("200 OK", body)]);
+            assert!(list_custom_models(&scratch.0, "Legacy", "chat-completions", &root, "", Some("durindoor")).await.is_err());
+            join_server(server).await;
+        }
+        let (root, server) = serve(vec![("200 OK", " ".repeat(MODEL_RESPONSE_LIMIT + 1))]);
+        assert!(list_custom_models(&scratch.0, "Generic", "chat-completions", &root, "", None).await.unwrap_err().contains("too large"));
+        join_server(server).await;
+    })
+    .await
+    .expect("discovery oversized-body fixture timed out");
 }
 
 #[tokio::test]
@@ -165,12 +197,16 @@ async fn credential_redirects_are_not_followed() {
     let root = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
+        let io_timeout = std::time::Duration::from_secs(2);
+        let _ = socket.set_read_timeout(Some(io_timeout));
+        let _ = socket.set_write_timeout(Some(io_timeout));
         let mut request = [0u8; 4096];
         socket.read(&mut request).unwrap();
-        write!(socket, "HTTP/1.1 307 Temporary Redirect\r\nLocation: {destination}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        let _ = write!(socket, "HTTP/1.1 307 Temporary Redirect\r\nLocation: {destination}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = socket.shutdown(std::net::Shutdown::Both);
     });
     assert!(list_custom_models(&scratch.0, "DurinDoor", "chat-completions", &root, "fixture-key-not-real", Some("durindoor")).await.is_err());
-    server.join().unwrap();
+    join_server(server).await;
     assert_eq!(sink.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
 }
 
@@ -194,7 +230,7 @@ async fn durindoor_rejected_access_never_fetches_public_models_or_saves() {
     gateway.integration = Some("durindoor".into());
     gateway.api_key = "fixture-key-not-real".into();
     assert_eq!(connect_custom(&scratch.0, gateway).await.unwrap_err(), "DurinDoor rejected that key");
-    assert!(server.join().unwrap()[0].starts_with("GET /v1/models "));
+    assert!(join_server(server).await[0].starts_with("GET /v1/models "));
     assert!(scratch.0.credentials.lock().unwrap().custom.is_empty());
 }
 
@@ -210,7 +246,8 @@ async fn a_custom_provider_takes_the_models_its_server_lists() {
     let (root, server) = serve(vec![("200 OK", list.to_string())]);
     let kind = connect_custom(app, input("Ollama", "chat-completions", &format!("{root}/v1/chat/completions"), &[])).await.unwrap();
     assert_eq!(kind, "custom:ollama");
-    let request = &server.join().unwrap()[0];
+    let requests = join_server(server).await;
+    let request = &requests[0];
     assert!(request.starts_with("GET /v1/models "), "{request}");
     assert!(!request.to_ascii_lowercase().contains("authorization"), "no key, no header");
 
@@ -233,7 +270,8 @@ async fn the_users_models_keep_their_order_and_take_what_the_list_says() {
     let mut proxy = input("Claude proxy", "messages", &format!("{root}/v1"), &["claude-sonnet-5", "claude-opus-5", "claude-sonnet-5"]);
     proxy.api_key = " sk-proxy-1234 ".into();
     let kind = connect_custom(app, proxy).await.unwrap();
-    let request = &server.join().unwrap()[0];
+    let requests = join_server(server).await;
+    let request = &requests[0];
     assert!(request.starts_with("GET /v1/models?limit=1000 "), "{request}");
     assert!(request.contains("x-api-key: sk-proxy-1234"), "{request}");
     let provider = app.credentials.lock().unwrap().custom[&kind].clone();
@@ -246,7 +284,7 @@ async fn the_users_models_keep_their_order_and_take_what_the_list_says() {
     let mut edited = input("Claude", "messages", &root, &["claude-opus-5"]);
     edited.kind = Some(kind.clone());
     assert_eq!(connect_custom(app, edited).await.unwrap(), kind);
-    server.join().unwrap();
+    join_server(server).await;
     let saved = app.credentials.lock().unwrap().custom[&kind].clone();
     assert_eq!((saved.name.as_str(), saved.created_at, saved.models.len()), ("Claude", provider.created_at, 1));
 }
@@ -261,7 +299,7 @@ async fn a_custom_provider_needs_a_key_it_takes_and_models_to_offer() {
     assert_eq!(connect_custom(app, keyed).await.unwrap_err(), "Gateway rejected that key");
     assert_eq!(connect_custom(app, input("Gateway", "chat-completions", &root, &["m"])).await.unwrap_err(), "Gateway needs an API key");
     assert!(connect_custom(app, input("Gateway", "chat-completions", &root, &[])).await.unwrap_err().contains("Add the model ids yourself"));
-    server.join().unwrap();
+    join_server(server).await;
 
     assert_eq!(connect_custom(app, input(" ", "chat-completions", &root, &["m"])).await.unwrap_err(), "Name the provider");
     assert_eq!(connect_custom(app, input("Anthropic", "messages", &root, &["m"])).await.unwrap_err(), "A provider named Anthropic exists already");
@@ -279,7 +317,7 @@ async fn the_picker_gets_the_chat_models_or_hears_there_is_no_list() {
     assert_eq!(models.iter().map(|m| (m.id.as_str(), m.context_window)).collect::<Vec<_>>(), [("gpt-6-sol", Some(1_050_000))]);
     assert_eq!(list_custom_models(app, "", "chat-completions", &root, "", None).await.unwrap(), None);
     assert_eq!(list_custom_models(app, "", "chat-completions", &root, "bad", None).await.unwrap_err(), "The server rejected that key");
-    let requests = server.join().unwrap();
+    let requests = join_server(server).await;
     assert!(requests[0].starts_with("GET /v1/models ") && requests[0].contains("authorization: Bearer sk-1"), "{}", requests[0]);
     assert!(list_custom_models(app, "", "chat-completions", "ftp://lab", "", None).await.unwrap_err().contains("http://"));
     assert!(app.credentials.lock().unwrap().custom.is_empty(), "listing saves nothing");
@@ -304,7 +342,7 @@ async fn refresh_adds_models_but_preserves_manual_ids_url_key_and_unchanged_stam
     assert_eq!(refresh_custom_models(app).await.unwrap(), 0);
     assert_eq!(app.credentials.lock().unwrap().changed_at[&kind], credentials.changed_at[&kind]);
     assert_eq!(Credentials::load(&app.config).custom[&kind], credentials.custom[&kind]);
-    assert_eq!(server.join().unwrap().len(), 3);
+    assert_eq!(join_server(server).await.len(), 3);
 }
 
 #[tokio::test]
@@ -319,7 +357,7 @@ async fn missing_list_and_rejected_key_leave_catalog_untouched() {
     let credentials = app.credentials.lock().unwrap();
     assert_eq!(credentials.changed_at[&kind], before);
     assert_eq!(credentials.custom[&kind].models[0].id, "picked");
-    server.join().unwrap();
+    join_server(server).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -331,7 +369,7 @@ async fn in_flight_refresh_cannot_restore_a_deleted_provider() {
     let kind = {
         let (root, server) = serve(vec![("404 Not Found", "{}".into())]);
         let kind = connect_custom(app, input("Lab", "responses", &root, &["picked"])).await.unwrap();
-        server.join().unwrap();
+        join_server(server).await;
         kind
     };
     app.update_credentials(&kind, |c| c.custom.get_mut(&kind).unwrap().base_url = root.clone()).unwrap();
@@ -340,12 +378,16 @@ async fn in_flight_refresh_cannot_restore_a_deleted_provider() {
     let server = std::thread::spawn(move || {
         use std::io::{Read, Write};
         let (mut socket, _) = listener.accept().unwrap();
+        let io_timeout = std::time::Duration::from_secs(2);
+        let _ = socket.set_read_timeout(Some(io_timeout));
+        let _ = socket.set_write_timeout(Some(io_timeout));
         let mut request = [0u8; 4096];
         socket.read(&mut request).unwrap();
         requested.send(()).unwrap();
         proceed.recv().unwrap();
         let body = json!({ "data": [{ "id": "new" }] }).to_string();
-        write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let _ = socket.shutdown(std::net::Shutdown::Both);
     });
     let app_for_refresh = app.clone();
     let refresh = tokio::spawn(async move { refresh_custom_models(&app_for_refresh).await });
@@ -353,7 +395,7 @@ async fn in_flight_refresh_cannot_restore_a_deleted_provider() {
     disconnect(app, &kind).unwrap();
     release.send(()).unwrap();
     assert_eq!(refresh.await.unwrap().unwrap(), 0);
-    server.join().unwrap();
+    join_server(server).await;
     assert!(!app.credentials.lock().unwrap().custom.contains_key(&kind));
 }
 
@@ -363,7 +405,7 @@ async fn deleting_a_custom_provider_reaches_every_device_as_a_change() {
     let app = &scratch.0;
     let (root, server) = serve(vec![("404 Not Found", "{}".into())]);
     let kind = connect_custom(app, input("Lab", "responses", &root, &["gpt-oss-120b"])).await.unwrap();
-    server.join().unwrap();
+    join_server(server).await;
     disconnect(app, &kind).unwrap();
     let credentials = app.credentials.lock().unwrap();
     assert!(credentials.custom.is_empty());
@@ -382,7 +424,7 @@ async fn compatible_discovery_errors_are_not_unsupported_listing() {
     ] {
         let (root, server) = serve(vec![(status, body)]);
         assert!(connect_custom(&scratch.0, input("Compatible", "responses", &root, &["manual"])).await.is_err());
-        server.join().unwrap();
+        join_server(server).await;
         assert!(scratch.0.credentials.lock().unwrap().custom.is_empty());
     }
 }
@@ -396,7 +438,7 @@ async fn compatible_messages_discovery_follows_official_cursors() {
     ]);
     let found = list_custom_models(&scratch.0, "Compatible", "messages", &format!("{root}/v1/messages"), "fixture-key", None).await.unwrap().unwrap();
     assert_eq!(found.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["claude-a", "audio-helper"]);
-    let requests = server.join().unwrap();
+    let requests = join_server(server).await;
     assert!(requests[0].starts_with("GET /v1/models?limit=1000 "));
     assert!(requests[1].starts_with("GET /v1/models?limit=1000&after_id=claude-a "));
     for request in requests {
@@ -451,7 +493,7 @@ async fn compatible_edit_and_refresh_preserve_sparse_metadata_and_saved_identity
     assert_eq!(scratch.0.credentials.lock().expect("credentials lock").custom[&kind], saved);
     assert_eq!(Credentials::load(&scratch.0.config).custom[&kind], saved);
     assert_eq!(scratch.0.state.lock().expect("state lock").bots[0], bot);
-    assert!(server.join().unwrap().iter().all(|request| request.starts_with("GET /v1/models ")));
+    assert!(join_server(server).await.iter().all(|request| request.starts_with("GET /v1/models ")));
 }
 
 #[tokio::test]
@@ -461,7 +503,7 @@ async fn compatible_save_failure_keeps_in_memory_and_synced_credentials_unchange
     std::fs::create_dir(scratch.0.config.credentials_path()).unwrap();
     let (root, server) = serve(vec![("405 Method Not Allowed", "{}".into())]);
     assert_eq!(connect_custom(&scratch.0, input("OpenAI Compatible", "chat-completions", &root, &["manual"])).await.unwrap_err(), "Could not save provider");
-    server.join().unwrap();
+    join_server(server).await;
     assert_eq!(serde_json::to_value(&*scratch.0.credentials.lock().expect("credentials lock")).unwrap(), before);
 }
 
@@ -471,7 +513,7 @@ async fn compatible_connections_are_not_singletons_by_display_name() {
     let (root, server) = serve(vec![("404 Not Found","{}".into()),("404 Not Found","{}".into())]);
     let a = connect_custom(&scratch.0, input("OpenAI Compatible","chat-completions",&root,&["guard"])).await.unwrap();
     let b = connect_custom(&scratch.0, input("OpenAI Compatible","responses",&root,&["guard"])).await.unwrap();
-    server.join().unwrap();
+    join_server(server).await;
     assert_ne!(a,b);
     let credentials = scratch.0.credentials.lock().expect("credentials lock");
     assert_eq!(credentials.custom[&a].name,credentials.custom[&b].name);
@@ -490,7 +532,7 @@ async fn compatible_messages_discovery_rejects_missing_repeated_and_excessive_cu
         let (root, server) = serve(pages.into_iter().map(|body| ("200 OK",body.to_string())).collect());
         let error = list_custom_models(&scratch.0,"Compatible","messages",&root,"",None).await.unwrap_err();
         assert!(error.contains("cursor") || error.contains("pagination limit"), "{error}");
-        server.join().unwrap();
+        join_server(server).await;
     }
 }
 
@@ -509,7 +551,7 @@ async fn compatible_failed_edit_persistence_retains_key_selection_metadata_and_s
     edit.kind = Some(kind);
     edit.api_key = "fixture-replacement-key".into();
     assert_eq!(connect_custom(&scratch.0,edit).await.unwrap_err(),"Could not save provider");
-    server.join().unwrap();
+    join_server(server).await;
     assert_eq!(serde_json::to_value(&*scratch.0.credentials.lock().expect("credentials lock")).unwrap(),before);
 }
 
@@ -521,7 +563,7 @@ async fn compatible_discovery_bounds_total_bytes_across_pages() {
     let second = format!("{{\"data\":[{{\"id\":\"b\"}}],\"has_more\":false}}{}", " ".repeat(MODEL_RESPONSE_LIMIT / 2));
     let (root,server) = serve(vec![("200 OK",first),("200 OK",second)]);
     assert!(list_custom_models(&scratch.0,"Compatible","messages",&root,"",None).await.unwrap_err().contains("too large"));
-    server.join().unwrap();
+    join_server(server).await;
 }
 
 #[tokio::test]
@@ -539,7 +581,7 @@ async fn guided_runner_save_refresh_preserves_declarations_and_origin() {
     let kind = saved["kind"].as_str().unwrap();
     body["kind"] = json!(kind);
     guided_request(&scratch.0, "providers.custom.refresh", body).await.unwrap();
-    let requests = server.join().unwrap();
+    let requests = join_server(server).await;
     assert_eq!(requests.len(), 3);
     assert!(requests.iter().all(|request| request.starts_with("GET /v1/models ") && !request.to_ascii_lowercase().contains("authorization:")));
     let credentials = Credentials::load(&scratch.0.config);
@@ -584,7 +626,7 @@ async fn guided_committed_add_retry_reuses_identity_without_http() {
     let mut first = input("Fixture retry", "chat-completions", &root, &["alias"]);
     first.kind = Some(kind.into());
     assert_eq!(connect_custom(&scratch.0, first).await.unwrap(), kind);
-    assert_eq!(server.join().unwrap().len(), 1);
+    assert_eq!(join_server(server).await.len(), 1);
     let stamp = scratch.0.credentials.lock().unwrap().changed_at[kind];
     let mut retry = input("Fixture retry", "chat-completions", &root, &["alias"]);
     retry.kind = Some(kind.into());
@@ -611,15 +653,19 @@ async fn guided_revocation_during_discovery_prevents_credential_commit() {
     let revoked = id.clone();
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
+        let io_timeout = std::time::Duration::from_secs(2);
+        let _ = socket.set_read_timeout(Some(io_timeout));
+        let _ = socket.set_write_timeout(Some(io_timeout));
         let mut bytes = [0; 4096];
         socket.read(&mut bytes).unwrap();
         app.state.lock().unwrap().devices.retain(|device| device.id != revoked);
         let body = r#"{"data":[{"id":"alias"}]}"#;
-        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let _ = socket.shutdown(std::net::Shutdown::Both);
     });
     let before = scratch.0.credentials.lock().unwrap().changed_at.clone();
     let error = serve_guided_as(&scratch.0, "providers.custom.save", &json!({"runner_id":runner,"name":"Revoked fixture","api":"chat-completions","base_url":root,"models":[]}), Some((&id, &box_key))).await.unwrap_err();
-    server.join().unwrap();
+    join_server(server).await;
     assert!(error.contains("revoked"));
     let credentials = scratch.0.credentials.lock().unwrap();
     assert!(credentials.custom.is_empty());
@@ -639,12 +685,16 @@ async fn guided_create_delete_during_discovery_preserves_tombstone() {
     let (release, proceed) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
+        let io_timeout = std::time::Duration::from_secs(2);
+        let _ = socket.set_read_timeout(Some(io_timeout));
+        let _ = socket.set_write_timeout(Some(io_timeout));
         let mut request = [0u8; 4096];
         socket.read(&mut request).unwrap();
         requested.send(()).unwrap();
         proceed.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         let body = r#"{"data":[{"id":"alias"}]}"#;
-        write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let _ = socket.shutdown(std::net::Shutdown::Both);
     });
     let outbox_snapshot = || app.store.outbox().unwrap().into_iter().map(|item| (item.id, item.kind, item.recipient, item.ciphertext, item.slot, item.group)).collect::<Vec<_>>();
     let mut pending = input("Pending fixture", "chat-completions", &root, &["alias"]);
@@ -655,7 +705,7 @@ async fn guided_create_delete_during_discovery_preserves_tombstone() {
         let mut other = input("Concurrent fixture", "chat-completions", &other_root, &["alias"]);
         other.kind = Some(kind.into());
         assert_eq!(connect_custom(app, other).await.unwrap(), kind);
-        other_server.join().unwrap();
+        join_server(other_server).await;
         disconnect(app, kind).unwrap();
         let deleted = serde_json::to_value(&*app.credentials.lock().unwrap()).unwrap();
         assert!(app.credentials.lock().unwrap().changed_at.contains_key(kind));
@@ -665,7 +715,7 @@ async fn guided_create_delete_during_discovery_preserves_tombstone() {
         release.send(()).unwrap();
         (deleted, state, outbox)
     });
-    server.join().unwrap();
+    join_server(server).await;
     assert_eq!(result.unwrap_err(), "The provider changed while connecting. Open it again.");
     assert!(!app.credentials.lock().unwrap().custom.contains_key(kind));
     assert_eq!(serde_json::to_value(&*app.credentials.lock().unwrap()).unwrap(), deleted);

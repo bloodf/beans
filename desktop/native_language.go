@@ -6,7 +6,8 @@ import (
 	"strings"
 )
 
-// Read the existing preference at render time; no separate native language setting.
+// nativeSystemLocale is overridable in tests so headless frames never block on
+// mygo.App.Locale()'s main-thread round-trip.
 var nativeSystemLocale = func() string { return mygo.App.Locale() }
 
 func nativeL(key string, args ...any) string {

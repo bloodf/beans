@@ -19,9 +19,12 @@ mock.module("../i18n", () => ({ useLanguage: () => {}, t: (value: string) => val
 mock.module("./attachments", () => ({ AttachmentBlock: "Attachments" }));
 mock.module("./Avatar", () => ({ BotAvatar: "Avatar" }));
 mock.module("./Markdown", () => ({ Markdown: "Markdown" }));
+mock.module("./outputs", () => ({ OutputCard: "OutputCard" }));
 mock.module("./Symbol", () => ({ Symbol: "Symbol" }));
 mock.module("./layout", () => ({ usePaneWidth: () => 400 }));
 mock.module("./theme", () => ({ Font: {}, usePalette: () => ({}) }));
+mock.module("expo-image", () => ({ Image: "Image" }));
+mock.module("expo-router", () => ({ useRouter: () => ({ push: () => {} }) }));
 
 // Native recognizer boundary: deliver lifecycle events, not a copy of reply logic.
 class Pan {

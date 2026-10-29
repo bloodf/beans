@@ -19,6 +19,7 @@ DELETE FROM roster_baseline;
 DELETE FROM pending_chat_creates;
 DELETE FROM codemode_store;
 DELETE FROM metadata;
+DELETE FROM attention;
 DELETE FROM devices;
 DELETE FROM bots;
 DELETE FROM chats;

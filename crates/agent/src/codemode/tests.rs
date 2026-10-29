@@ -331,6 +331,7 @@ async fn describe_namespace_lists_every_tool_of_a_group() {
     ];
     let catalog = StaticCatalog::with_entries(entries, vec![Namespace { name: "my-tools".into(), description: "Tools of mine".into() }]);
     let codemode = CodemodeTool::new(Arc::new(catalog), CodemodeOptions::default());
+    assert!(codemode.description().contains("`await describeNamespace(name)` gives its description"), "{}", codemode.description());
     let code = "return [await describeNamespace('my_tools'), await describeNamespace('other'), await describeNamespace('nothing')];";
     let result = run(&codemode, code).await;
     let text = text_of(&result);

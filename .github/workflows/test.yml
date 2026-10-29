@@ -1,9 +1,9 @@
 # Runs the full test matrix on same-repository pull requests targeting main and manual dispatch: the Rust workspace on Linux,
 # where the relay's store suite runs on SQLite and on a Postgres service, and on macOS; the crates
 # a Windows Runner runs, on Windows; the macOS app's XCTest suite over the markdown crate it links;
-# the Windows and Linux app's page and Go side; and the phone app's TypeScript. Jobs that compile
-# the CLI install a pinned protoc first. The end-to-end scripts, which need a live relay, a model,
-# or a simulator, run locally.
+# the Windows and Linux app's page and Go side on Ubuntu, plus Go-only desktop builds and tests on
+# macOS and Windows; and the phone app's TypeScript. Jobs that compile the CLI install a pinned
+# protoc first. The end-to-end scripts, which need a live relay, a model, or a simulator, run locally.
 name: Tests
 
 on:
@@ -172,6 +172,40 @@ jobs:
       - name: Install Chromium for desktop browser checks
         run: bun ./node_modules/playwright/cli.js install --with-deps chromium
       - run: bun run test
+      - run: go test -count=1 ./...
+
+  # Go module of desktop/ on macOS (MyGo host compiles without the Solid page or mygo-cli).
+  desktop-go-macos:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Desktop Go (macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - run: go build ./...
+      - run: go test -count=1 ./...
+
+  # Go module of desktop/ on Windows (same compile/test surface as desktop-go-macos).
+  desktop-go-windows:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Desktop Go (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - run: go build ./...
       - run: go test -count=1 ./...
 
   mobile:

@@ -1192,6 +1192,61 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_receive_is_idempotent_resumable_and_never_writes_plaintext() {
+        let account = Account::new();
+        let needle = "PLAINTEXT-MUST-NOT-TOUCH-DISK";
+        let mut first = account.report();
+        first.title = needle.into();
+        first.key = "upgrade-one".into();
+        let mut second = account.report();
+        second.title = format!("{needle}-two");
+        second.key = "upgrade-two".into();
+        let first_item = report(&account.app, first, Some(&account.scout.id), 0).unwrap();
+        let second_item = report(&account.app, second, Some(&account.scout.id), 0).unwrap();
+        let rows = account.app.store.attention_rows().unwrap();
+        let ciphertexts: Vec<Vec<u8>> = rows.iter().map(|(_, bytes)| bytes.clone()).collect();
+
+        let peer = Account::new();
+        *peer.app.machine.lock().unwrap() = account.app.machine_file();
+        peer.app.save_machine().unwrap();
+        *peer.app.state.lock().unwrap() = account.app.state.lock().unwrap().clone();
+        peer.app.save_state_now();
+        assert!(peer.app.store.attention_rows().unwrap().is_empty());
+
+        // Interrupt: only the first ciphertext lands; the rest arrives on "restart".
+        receive(&peer.app, &ciphertexts[0]).unwrap();
+        assert_eq!(peer.app.store.attention_rows().unwrap().len(), 1);
+        receive(&peer.app, &ciphertexts[0]).unwrap();
+        assert_eq!(
+            peer.app.store.attention_rows().unwrap().len(),
+            1,
+            "re-applying the same slot must not duplicate rows"
+        );
+
+        for bytes in &ciphertexts {
+            receive(&peer.app, bytes).unwrap();
+            receive(&peer.app, bytes).unwrap();
+        }
+        let restored = peer.app.store.attention_rows().unwrap();
+        assert_eq!(restored.len(), rows.len());
+        let view = view(&peer.app).unwrap();
+        assert!(view.items.iter().any(|item| item.id == first_item.id));
+        assert!(view.items.iter().any(|item| item.id == second_item.id));
+        for (_, bytes) in &restored {
+            assert!(
+                !bytes.windows(needle.len()).any(|part| part == needle.as_bytes()),
+                "attention rows stay ciphertext; plaintext is never written"
+            );
+            assert!(crate::crypto::decrypt_json::<Record>(
+                &crate::keys::random_32(),
+                KIND,
+                bytes
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
     fn source_validation_and_coordinator_permissions_preserve_the_projection() {
         let account = Account::new();
         // Beans stores task_id as an opaque link; inventing one is accepted until durable tasks land.

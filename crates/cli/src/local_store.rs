@@ -212,6 +212,17 @@ impl LocalStore {
         if connection.prepare("SELECT roster_slot_seq FROM metadata").is_err() {
             connection.execute("ALTER TABLE metadata ADD COLUMN roster_slot_seq INTEGER NOT NULL DEFAULT 0", [])?;
         }
+        // Upgrade replay for attention slots that predate this build recognizing the kind.
+        // Kept off the hot State write path so a crash mid-replay does not mark completion.
+        if connection
+            .prepare("SELECT attention_upgrade FROM metadata")
+            .is_err()
+        {
+            connection.execute(
+                "ALTER TABLE metadata ADD COLUMN attention_upgrade INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         if connection.prepare("SELECT original_json FROM pending_chat_creates").is_err() {
             connection.execute("ALTER TABLE pending_chat_creates ADD COLUMN original_json TEXT", [])?;
         }
@@ -1263,6 +1274,35 @@ impl LocalStore {
         let mut statement = connection.prepare("SELECT id, ciphertext FROM attention ORDER BY id")?;
         let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
         Ok(rows)
+    }
+
+    /// Whether this Device has finished the one-time attention-slot upgrade replay.
+    pub fn attention_upgrade_done(&self) -> anyhow::Result<bool> {
+        let connection = self.connection.lock().unwrap();
+        let done: i64 = connection
+            .query_row(
+                "SELECT attention_upgrade FROM metadata WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(done != 0)
+    }
+
+    /// Persists upgrade-replay completion. Cleared with the account (`clear` / forget).
+    pub fn set_attention_upgrade_done(&self, done: bool) -> anyhow::Result<()> {
+        let connection = self.connection.lock().unwrap();
+        let updated = connection.execute(
+            "UPDATE metadata SET attention_upgrade = ?1 WHERE id = 1",
+            params![done as i64],
+        )?;
+        if updated == 0 {
+            // Identity not written yet; a later save_state creates the row at DEFAULT 0.
+            // Callers only mark done after the account exists, so this is a programming error.
+            anyhow::bail!("metadata row missing; cannot record attention upgrade");
+        }
+        Ok(())
     }
 
     pub fn put_attention(&self, id: &str, ciphertext: &[u8]) -> anyhow::Result<()> {

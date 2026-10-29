@@ -442,6 +442,7 @@ export const zh: Record<string, string> = {
   "This deletes the routine and stops its future runs. This can't be undone.": "这将删除该例行任务并停止其后续运行。此操作无法撤销。",
   "This machine is paired to your account but has not sent its name or system. If you don't recognize it, unpair it.": "这台机器已配对到你的账户，但尚未发送它的名称和系统。如果你不认识它，请取消配对。",
   "This message is no longer available.": "此消息已不可用。",
+  "This review is no longer available": "此审核已不可用",
   "This phone": "这部手机",
   "THIS PHONE": "这部手机",
   "This removes the credential from every paired Device.": "这会从每台已配对的设备中移除该凭据。",

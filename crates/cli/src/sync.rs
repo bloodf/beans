@@ -374,33 +374,58 @@ async fn older_messages_from(app: &Arc<App>, url: &str, token: &str, machine_fil
     Ok(newest_first.len())
 }
 
+/// Replays account-encrypted attention slots for Devices that advanced `last_seq` before
+/// this build recognized the kind. Idempotent under `attention::receive` (upsert by id,
+/// skip older revisions). Marks completion only after a full empty page so an interrupt
+/// leaves the marker unset and the next start finishes the set without duplicate rows.
+async fn attention_upgrade_replay(
+    app: &Arc<App>,
+    url: &str,
+    token: &str,
+    machine_file: &crate::keys::MachineFile,
+) -> Result<(), RelayError> {
+    let mut since = 0;
+    loop {
+        let (blobs, _) = app.relay.list_blobs(url, token, since, "attention").await?;
+        let Some(last) = blobs.last().map(|blob| blob.seq) else { break };
+        for blob in &blobs {
+            // Relays filter by kinds; still ignore other kinds if a fixture returns them.
+            if blob.kind == "attention" {
+                apply_blob(app, machine_file, blob);
+            }
+        }
+        since = last;
+    }
+    app.store
+        .set_attention_upgrade_done(true)
+        .map_err(|error| RelayError {
+            status: None,
+            message: error.to_string(),
+        })?;
+    Ok(())
+}
+
 /// Pulls the log from `last_seq` until a page comes back empty.
 async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<(), RelayError> {
     // An older build can already have consumed the relay log while ignoring attention.
-    // Replay this bounded slot family once when its new local table is empty; ordinary
-    // first sync already reads it through NOT_CHAT_KINDS.
+    // Replay this bounded slot family once; completion is a persisted marker (not "table
+    // empty"), so a crash mid-loop resumes on the next start. `receive` upserts by id.
     if !app.attention_backfilled.load(Ordering::Relaxed) {
-        if app.state.lock().unwrap().last_seq > 0
-            && app
-                .store
-                .attention_rows()
-                .map_err(|error| RelayError {
-                    status: None,
-                    message: error.to_string(),
-                })?
-                .is_empty()
-        {
-            let mut since = 0;
-            loop {
-                let (blobs, _) = app.relay.list_blobs(url, token, since, "attention").await?;
-                let Some(last) = blobs.last().map(|blob| blob.seq) else { break };
-                for blob in &blobs {
-                    // Relays filter by kinds; still ignore other kinds if a fixture returns them.
-                    if blob.kind == "attention" {
-                        apply_blob(app, machine_file, blob);
-                    }
-                }
-                since = last;
+        let done = app.store.attention_upgrade_done().map_err(|error| RelayError {
+            status: None,
+            message: error.to_string(),
+        })?;
+        if !done {
+            if app.state.lock().unwrap().last_seq > 0 {
+                attention_upgrade_replay(app, url, token, machine_file).await?;
+            } else {
+                // First sync takes attention through NOT_CHAT_KINDS; no historical replay.
+                app.store
+                    .set_attention_upgrade_done(true)
+                    .map_err(|error| RelayError {
+                        status: None,
+                        message: error.to_string(),
+                    })?;
             }
         }
         app.attention_backfilled.store(true, Ordering::Relaxed);
@@ -3925,6 +3950,134 @@ mod tests {
         }
         assert!(!app.is_paused());
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn attention_upgrade_replay_is_idempotent_resumable_and_keeps_rows_encrypted() {
+        use crate::attention::{self, Category, Report, Source};
+        use crate::keys::b64;
+
+        let publisher = scratch_app();
+        crate::identity::create(&publisher.0, Some("Publisher".into())).unwrap();
+        let chef = publisher.0.state.lock().unwrap().bots[0].clone();
+        let mut scout = chef.clone();
+        scout.id = "scout".into();
+        scout.name = "Scout".into();
+        let (scout, dm) = publisher.0.create_bot_with_dm(scout, None).unwrap();
+        let needle = "UNIQUE-ATTENTION-PLAINTEXT-NEEDLE";
+        for (index, key) in ["one", "two", "three"].into_iter().enumerate() {
+            attention::report(
+                &publisher.0,
+                Report {
+                    key: key.into(),
+                    category: Category::Review,
+                    title: format!("{needle}-{index}"),
+                    summary: "summary".into(),
+                    next_action: "act".into(),
+                    source: Source {
+                        chat_id: dm.meta.id.clone(),
+                        task_id: None,
+                        message_id: None,
+                        review_id: None,
+                    },
+                    coordinator_bot_id: Some(chef.id.clone()),
+                    urgent: false,
+                    quiet: true,
+                },
+                Some(&scout.id),
+                0,
+            )
+            .unwrap();
+        }
+        let published = publisher.0.store.attention_rows().unwrap();
+        assert_eq!(published.len(), 3);
+        let blobs: Vec<BlobIn> = published
+            .iter()
+            .enumerate()
+            .map(|(index, (id, ciphertext))| BlobIn {
+                id: id.clone(),
+                kind: "attention".into(),
+                recipient_machine_pubkey: None,
+                ciphertext: b64(ciphertext),
+                seq: (index as i64) + 1,
+                created_at: (index as i64) + 1,
+            })
+            .collect();
+        let expected_ids: Vec<String> = published.iter().map(|(id, _)| id.clone()).collect();
+
+        // Upgrading Device: same account keys, empty attention table, last_seq already ahead.
+        let mut upgrading = scratch_app();
+        crate::identity::create(&upgrading.0, Some("Upgrading".into())).unwrap();
+        *upgrading.0.machine.lock().unwrap() = publisher.0.machine_file();
+        upgrading.0.save_machine().unwrap();
+        {
+            let mut state = upgrading.0.state.lock().unwrap();
+            *state = publisher.0.state.lock().unwrap().clone();
+            state.last_seq = 9;
+        }
+        upgrading.0.save_state_now();
+        assert!(upgrading.0.store.attention_rows().unwrap().is_empty());
+        assert!(!upgrading.0.store.attention_upgrade_done().unwrap());
+
+        let (url, server) = serve_log(blobs.clone()).await;
+        let machine_file = upgrading.0.machine_file().unwrap();
+
+        // Interrupt: apply only the first page's worth, leave the completion marker unset.
+        for blob in blobs.iter().take(2) {
+            apply_blob(&upgrading.0, &machine_file, blob);
+        }
+        assert_eq!(upgrading.0.store.attention_rows().unwrap().len(), 2);
+        assert!(
+            !upgrading.0.store.attention_upgrade_done().unwrap(),
+            "a crash mid-replay must not record completion"
+        );
+
+        // Resume: full replay upserts the rest and marks done; a second run stays stable.
+        attention_upgrade_replay(&upgrading.0, &url, "token", &machine_file)
+            .await
+            .unwrap();
+        let after = upgrading.0.store.attention_rows().unwrap();
+        let mut ids: Vec<_> = after.iter().map(|(id, _)| id.clone()).collect();
+        ids.sort();
+        let mut expected = expected_ids.clone();
+        expected.sort();
+        assert_eq!(ids, expected);
+        assert!(upgrading.0.store.attention_upgrade_done().unwrap());
+        for (_, bytes) in &after {
+            assert!(
+                !bytes.windows(needle.len()).any(|part| part == needle.as_bytes()),
+                "upgrade stores ciphertext only; plaintext never hits SQLite"
+            );
+        }
+
+        attention_upgrade_replay(&upgrading.0, &url, "token", &machine_file)
+            .await
+            .unwrap();
+        assert_eq!(
+            upgrading.0.store.attention_rows().unwrap().len(),
+            expected.len(),
+            "a second replay must not duplicate rows"
+        );
+
+        // Process restart: persisted marker skips the upgrade list; rows stay intact.
+        let home = upgrading.1.clone();
+        let discard = std::env::temp_dir().join(format!("beans-sync-discard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&discard).unwrap();
+        upgrading.1 = discard; // Drop deletes the discard path; the real home stays for reopen.
+        drop(upgrading); // releases the SQLite lock on `home`
+        let reopened = App::load(Config {
+            home: home.clone(),
+            port: 0,
+        })
+        .unwrap();
+        assert!(reopened.store.attention_upgrade_done().unwrap());
+        assert_eq!(reopened.store.attention_rows().unwrap().len(), expected.len());
+        pull_blobs(&reopened, &url, "token", &reopened.machine_file().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(reopened.store.attention_rows().unwrap().len(), expected.len());
+        server.abort();
+        let _ = std::fs::remove_dir_all(&home);
     }
 
 }

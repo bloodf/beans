@@ -647,3 +647,60 @@ async fn attesting_a_machine_takes_a_bearer_and_keeps_keys_apart() {
     let refused = relay.client.attest(&relay.url, &relay.token, &laptop, &box_key).await.unwrap_err();
     assert_eq!(refused.status, Some(410));
 }
+
+/// `Beans-Protocol: 5` and `Beans-Format: beans-v2` survive the sync upgrade on a live relay;
+/// a missing format is refused before the socket opens. A write still signals the writer's
+/// socket under current main hub behavior.
+#[tokio::test]
+async fn sync_upgrade_keeps_beans_protocol_and_format_headers() {
+    let relay = Relay::start(0).await;
+    assert_eq!(PROTOCOL, 5);
+    assert_eq!(FORMAT, "beans-v2");
+
+    let mut socket = relay.client.sync_socket(&relay.url, &relay.token).await.expect("sync opens with protocol 5 / beans-v2");
+    // Opening the socket publishes a machines event for this identity.
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .expect("timed out waiting for the open signal")
+        .expect("socket closed before the open signal");
+    assert!(first.machines || first.blobs);
+
+    relay
+        .http
+        .put(format!("{}/v1/blobs", relay.url))
+        .bearer_auth(&relay.token)
+        .json(&json!({
+            "id": "signal-blob",
+            "kind": "chat",
+            "ciphertext": "YQ",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let signals = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+        .await
+        .expect("timed out waiting for blob signal")
+        .expect("socket closed before blob signal");
+    assert!(signals.blobs, "new client must see main-behavior writer notifications");
+    drop(socket);
+
+    let refused = reqwest::Client::new()
+        .get(format!("{}/v1/sync", relay.url))
+        .bearer_auth(&relay.token)
+        .header("beans-protocol", PROTOCOL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UPGRADE_REQUIRED, "sync without Beans-Format must fail closed");
+
+    let admitted = relay
+        .http
+        .get(format!("{}/v1/machines", relay.url))
+        .bearer_auth(&relay.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(admitted.status(), StatusCode::OK, "protocol 5 / beans-v2 headers still admit account routes");
+}

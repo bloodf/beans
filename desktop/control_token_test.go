@@ -20,14 +20,7 @@ func unsetDesktopTestEnv(t *testing.T, key string) {
 // admission never repairs an existing home or record.
 func prepareDesktopTestControlHome(t *testing.T, home string) {
 	t.Helper()
-	if runtime.GOOS != "windows" { return }
-	for _, path := range []string{home, filepath.Join(home, "format.json")} {
-		file, err := os.Open(path)
-		if err != nil { t.Fatal(err) }
-		err = secureDesktopControlFile(file)
-		closeErr := file.Close()
-		if err != nil || closeErr != nil { t.Fatal("private Windows fixture", err, closeErr) }
-	}
+	prepareWindowsDesktopTestControlHome(t, home)
 }
 
 func TestDesktopTokenDoesNotInitializeHome(t *testing.T) {

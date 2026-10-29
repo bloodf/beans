@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strconv"
+
 	"github.com/bloodf/beans/desktop/model"
 	"github.com/egoist/mygo/ui"
 )
@@ -32,8 +34,12 @@ func (n *nativeDesktop) chatsSidebar(c *ui.Context) {
 						}
 					})
 				}
-				if ui.Button(c.Key(chat.ID), n.store.Title(chat)).Selected(n.store.Selected == chat.ID).Clicked() {
-					n.store.Selected = chat.ID
+				label := n.store.Title(chat)
+				if chat.UnreadCount > 0 {
+					label = label + " (" + formatUnread(chat.UnreadCount) + ")"
+				}
+				if ui.Button(c.Key(chat.ID), label).Selected(n.store.Selected == chat.ID).Clicked() {
+					n.store.SelectChat(chat.ID)
 					n.shell.selectChat()
 				}
 			}
@@ -157,11 +163,10 @@ func (n *nativeDesktop) transcriptView(c *ui.Context, chat *model.NativeChat) {
 					}
 				}
 				ui.Text(c, author).Bold()
-				text := m.Body.Text
-				if text == "" {
-					text = m.Body.Summary
+				if quote := m.Body.ReplyTo; quote != nil {
+					ui.Text(c, "↩ "+quote.Text).FontSize(12)
 				}
-				ui.Text(c, text)
+				ui.Text(c, m.DisplayText())
 				if m.State.Error != "" {
 					ui.Text(c, m.State.Error)
 				}
@@ -173,4 +178,8 @@ func (n *nativeDesktop) transcriptView(c *ui.Context, chat *model.NativeChat) {
 			})
 		}
 	})
+}
+
+func formatUnread(count int) string {
+	return strconv.Itoa(count)
 }

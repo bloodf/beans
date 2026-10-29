@@ -222,7 +222,7 @@ With sessions, `bash` also takes `background: true`, for a server, a watcher, or
 
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
-| `bash_input` | `session_id`, `text`, `enter?` (default `true`) | Types the text into the session's terminal, then Return unless `enter` is false. Control characters are keys: `\u0003` is Ctrl-C, `\u0004` Ctrl-D. Returns what the command printed since the model last read it, once it ends, asks again, or goes quiet. |
+| `bash_input` | `session_id`, `text`, `enter?` (default `true`) | Types the text into the session's terminal, then Return unless `enter` is false. Control characters are keys: `\u0003` is Ctrl-C, `\u0004` Ctrl-D. Returns what the command printed since the model last read it, once it ends, asks again, or goes quiet, or at most 2 s for a background command and five minutes otherwise when it keeps printing. |
 | `bash_output` | `session_id`, `wait_seconds?` (default 0, at most 300) | Returns what the command printed since the model last read it, waiting up to `wait_seconds` for it to end or ask. |
 
 A result on a command that ended reads the same as `bash`'s: output, then `Command exited with code N` (an error), `Command terminated by signal N`, or why it was stopped. The tool that reads an end calls `remove`.

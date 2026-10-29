@@ -145,7 +145,20 @@ mod tests {
         assert!(phone.signals.try_recv().is_err());
         hub.blobs("identity", None);
         assert_eq!(phone.signals.try_recv().ok(), Some(Signal::Blobs));
+        assert_eq!(mac.signals.try_recv().ok(), Some(Signal::Blobs));
         assert!(stranger.signals.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_writer_and_its_other_socket_observe_the_write() {
+        let hub = Hub::default();
+        let mut mac = hub.join("identity", "mac");
+        let mut second = hub.join("identity", "mac");
+        let mut phone = hub.join("identity", "phone");
+        hub.blobs("identity", None);
+        assert_eq!(mac.signals.try_recv().ok(), Some(Signal::Blobs));
+        assert_eq!(second.signals.try_recv().ok(), Some(Signal::Blobs));
+        assert_eq!(phone.signals.try_recv().ok(), Some(Signal::Blobs));
     }
 
     #[test]

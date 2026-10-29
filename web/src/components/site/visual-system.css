@@ -1,0 +1,1039 @@
+/* Tactile editorial layer. It extends the approved bento system without replacing it. */
+.beans-experience {
+  --coral: #f26744;
+  --coral-ink: #c94527;
+  --ink-soft: color-mix(in srgb, var(--foreground) 72%, transparent);
+  --surface-raised: color-mix(in srgb, var(--card) 92%, var(--foreground));
+  --surface-inset: color-mix(in srgb, var(--foreground) 4%, var(--background));
+  --motion-duration-fast: 160ms;
+  --motion-duration-base: 240ms;
+  --motion-duration-slow: 480ms;
+  --motion-ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
+  position: relative;
+  background:
+    radial-gradient(ellipse at 100% 0%, color-mix(in srgb, var(--coral) 3%, transparent), transparent 32rem),
+    var(--background);
+}
+
+/* A nearly invisible analogue field keeps large quiet areas from feeling digitally flat. */
+.beans-experience::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='.7'/%3E%3C/svg%3E");
+}
+
+.beans-experience :is(a[href], button, select, summary) {
+  cursor: pointer;
+}
+
+.beans-experience :is(a, button, select, summary) {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.beans-experience :is(a, button) {
+  transition-duration: var(--motion-duration-base);
+  transition-timing-function: var(--motion-ease);
+}
+
+.beans-experience :is(a, button):active {
+  transform: translateY(1px);
+}
+
+.site-nav {
+  border-bottom-color: color-mix(in srgb, var(--foreground) 9%, transparent);
+  background: color-mix(in srgb, var(--background) 96%, transparent);
+}
+
+.site-nav nav a {
+  position: relative;
+  padding-block: 0.75rem;
+  text-decoration: none;
+}
+
+.site-nav nav a::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0.3rem;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--coral);
+  transform: scaleX(0);
+  transform-origin: right;
+  transition: transform var(--motion-duration-base) var(--motion-ease);
+}
+
+.site-nav nav a:hover::after,
+.site-nav nav a[data-status="active"]::after {
+  transform: scaleX(1);
+  transform-origin: left;
+}
+
+.site-nav [data-slot="button"] {
+  box-shadow: 0 6px 18px -12px color-mix(in srgb, var(--foreground) 65%, transparent);
+}
+
+/* The opening is a typographic poster with a tactile object, not a generic SaaS split. */
+.beans-hero {
+  min-height: clamp(700px, calc(100dvh - 72px), 920px);
+  align-items: center;
+}
+
+.beans-hero::before {
+  content: "";
+  position: absolute;
+  inset: 9% -12% 11% 51%;
+  z-index: -1;
+  pointer-events: none;
+  border: 1px solid color-mix(in srgb, var(--coral) 13%, transparent);
+  border-radius: 50%;
+  opacity: 0.7;
+  transform: rotate(-14deg);
+}
+
+.hero-copy::before {
+  content: "";
+  display: block;
+  width: 3.5rem;
+  height: 3px;
+  margin-bottom: clamp(1.75rem, 4vh, 3rem);
+  background: var(--coral);
+  transform-origin: left;
+  animation: hero-rule-in 900ms var(--motion-ease) both;
+}
+
+@keyframes hero-rule-in {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+.hero-title {
+  max-width: 8ch;
+  font-size: clamp(4.5rem, 7.8vw, 7.5rem);
+  line-height: 0.88;
+  letter-spacing: -0.068em;
+  text-wrap: balance;
+}
+
+.hero-title .brush {
+  color: var(--coral-ink);
+  text-shadow: 0 0.08em 0.5em color-mix(in srgb, var(--coral) 8%, transparent);
+}
+
+.hero-copy > p:not(.hero-free, .hero-platforms) {
+  max-width: 34rem;
+  color: var(--ink-soft);
+  font-size: clamp(1.05rem, 1.4vw, 1.25rem);
+  line-height: 1.7;
+}
+
+.hero-copy [data-slot="button"] {
+  min-height: 3.25rem;
+  border-color: color-mix(in srgb, var(--foreground) 14%, transparent);
+  box-shadow: 0 12px 28px -20px color-mix(in srgb, var(--foreground) 55%, transparent);
+}
+
+.hero-copy [data-slot="button"]:hover {
+  box-shadow: 0 16px 34px -18px color-mix(in srgb, var(--coral) 32%, transparent);
+}
+
+.hero-free {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.hero-free::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--coral);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--coral) 10%, transparent);
+}
+
+.hero-platforms {
+  max-width: 42ch;
+  color: var(--muted-foreground);
+}
+
+.beans-hero .hero-scene {
+  width: min(100%, 620px);
+  filter: drop-shadow(0 2.5rem 2.5rem color-mix(in srgb, var(--coral) 10%, transparent));
+}
+
+.hero-scene::after {
+  content: "";
+  position: absolute;
+  inset: 9%;
+  z-index: -1;
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--coral) 10%, transparent), transparent 68%);
+  transform: scale(0.9);
+  animation: scene-breathe 7s var(--motion-ease-in-out) infinite alternate;
+  animation-play-state: var(--loop-state, paused);
+}
+
+@keyframes scene-breathe {
+  to { transform: scale(1.08); opacity: 0.55; }
+}
+
+.scene-orbit {
+  border-color: color-mix(in srgb, var(--coral) 28%, transparent);
+}
+
+.scene-orbit-two {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--foreground) 18%, transparent);
+}
+
+/* Editorial section markers give the long single page a memorable rhythm. */
+.beans-experience main {
+  counter-reset: story;
+}
+
+.beans-experience main > .story-section {
+  counter-increment: story;
+}
+
+.beans-experience .story-section {
+  padding-block: clamp(5rem, 8vw, 8.5rem);
+}
+
+.beans-experience .story-heading {
+  position: relative;
+  max-width: 940px;
+  padding-top: 1.5rem;
+  border-top: 1px solid color-mix(in srgb, var(--foreground) 14%, transparent);
+}
+
+.beans-experience .story-heading::before {
+  content: counter(story, decimal-leading-zero);
+  position: absolute;
+  top: 1.65rem;
+  right: 0;
+  color: var(--coral-ink);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+}
+
+.beans-experience .story-heading h2 {
+  max-width: 16ch;
+  font-size: clamp(2.8rem, 5.2vw, 5.4rem);
+  letter-spacing: -0.055em;
+  line-height: 0.98;
+  text-wrap: balance;
+}
+
+.beans-experience .story-heading p {
+  color: var(--ink-soft);
+  text-wrap: pretty;
+}
+
+.story-examples {
+  padding-top: clamp(3rem, 5vw, 5rem);
+}
+
+/* Real product UI remains the hero proof, now inside a quiet physical workbench. */
+.app-preview-shell {
+  position: relative;
+  padding: 2.75rem 0.75rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 12%, transparent);
+  border-radius: 16px;
+  background: #202022;
+  box-shadow:
+    0 3rem 7rem -3rem color-mix(in srgb, var(--coral) 22%, transparent),
+    0 1.5rem 3rem -2rem rgb(0 0 0 / 35%);
+}
+
+.app-preview-shell::before {
+  content: "";
+  position: absolute;
+  top: 1.3rem;
+  left: 1.35rem;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--coral);
+  box-shadow: 14px 0 0 #d7a857, 28px 0 0 #6f9c7b;
+}
+
+.app-preview-shell::after {
+  content: "BEANS / WORKSPACE";
+  position: absolute;
+  top: 1.05rem;
+  right: 1.25rem;
+  color: rgb(255 255 255 / 42%);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+
+.app-preview-frame {
+  border-radius: 10px;
+  background: var(--card);
+}
+
+.story-examples .demo-disclaimer {
+  max-width: 72ch;
+  margin-left: auto;
+  text-align: right;
+}
+
+/* Spotlight light is local to a surface and never moves layout. */
+[data-spotlight] {
+  --pointer-x: 50%;
+  --pointer-y: 50%;
+}
+
+.bento-card,
+.comparison-bento-card,
+.comparison-dimension {
+  position: relative;
+  isolation: isolate;
+  border: 1px solid color-mix(in srgb, var(--foreground) 7%, transparent);
+  background: var(--surface-raised);
+  box-shadow: 0 1.5rem 3.5rem -2.75rem color-mix(in srgb, var(--foreground) 28%, transparent);
+  transition:
+    border-color var(--motion-duration-base) ease,
+    box-shadow var(--motion-duration-base) ease;
+}
+
+.bento-card::before,
+.comparison-bento-card::before,
+.comparison-dimension::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(
+    24rem circle at var(--pointer-x) var(--pointer-y),
+    color-mix(in srgb, var(--coral) 13%, transparent),
+    transparent 68%
+  );
+  transition: opacity var(--motion-duration-base) ease;
+}
+
+.bento-card:hover,
+.comparison-bento-card:hover,
+.comparison-dimension:hover {
+  border-color: color-mix(in srgb, var(--coral) 30%, transparent);
+  box-shadow: 0 2rem 4rem -2.5rem color-mix(in srgb, var(--coral) 20%, transparent);
+}
+
+.bento-card:hover::before,
+.comparison-bento-card:hover::before,
+.comparison-dimension:hover::before {
+  opacity: 1;
+}
+
+.bento-grid {
+  gap: 1.5rem;
+}
+
+.bento-card {
+  min-height: 410px;
+}
+
+.bento-0 {
+  background:
+    radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--coral) 18%, transparent), transparent 62%),
+    var(--surface-raised);
+}
+
+.bento-5 {
+  background:
+    radial-gradient(ellipse at 85% 20%, color-mix(in srgb, var(--coral) 12%, transparent), transparent 58%),
+    var(--surface-raised);
+}
+
+.bento-art {
+  position: relative;
+}
+
+.bento-art::after {
+  content: "";
+  position: absolute;
+  inset: auto 28px 0;
+  height: 1px;
+  background: linear-gradient(to right, transparent, color-mix(in srgb, var(--foreground) 9%, transparent), transparent);
+}
+
+.bento-copy {
+  padding-bottom: 2rem;
+}
+
+.bento-copy h3 {
+  font-size: clamp(1.35rem, 2vw, 1.65rem);
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+}
+
+.bento-copy p {
+  color: var(--ink-soft);
+  text-wrap: pretty;
+}
+
+.bento-conversation > div,
+.bento-files,
+.bento-memory,
+.connection-icons svg {
+  border: 1px solid color-mix(in srgb, var(--foreground) 7%, transparent);
+  box-shadow: 0 12px 24px -20px color-mix(in srgb, var(--foreground) 35%, transparent);
+}
+
+.bento-conversation > div {
+  background: color-mix(in srgb, var(--card) 94%, transparent);
+}
+
+/* Provider support reads as one connected system rather than four isolated tiles. */
+.provider-section .story-heading {
+  margin-left: auto;
+}
+
+.provider-grid {
+  counter-reset: provider;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  margin-top: 3rem;
+  border-block: 1px solid var(--border);
+}
+
+.provider-tile {
+  counter-increment: provider;
+  position: relative;
+  align-items: flex-start;
+  gap: 1rem;
+  min-height: 220px;
+  padding: 2rem 1.75rem;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  transition: background-color var(--motion-duration-base) ease;
+}
+
+.provider-tile:first-child {
+  border-left: 0;
+}
+
+.provider-tile::before {
+  content: "0" counter(provider);
+  position: absolute;
+  top: 2rem;
+  right: 1.5rem;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.provider-tile::after {
+  content: "";
+  position: absolute;
+  inset: auto 1.75rem 0;
+  height: 3px;
+  background: var(--coral);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--motion-duration-base) var(--motion-ease);
+}
+
+.provider-tile:hover {
+  transform: none;
+  background: color-mix(in srgb, var(--coral) 6%, transparent);
+}
+
+.provider-tile:hover::after {
+  transform: scaleX(1);
+}
+
+.provider-tile img {
+  width: 48px;
+  height: 48px;
+  margin-bottom: 1rem;
+}
+
+.provider-tile strong {
+  font-size: 1.35rem;
+  letter-spacing: -0.025em;
+}
+
+.provider-tile span {
+  max-width: 22ch;
+  text-align: left;
+  line-height: 1.6;
+}
+
+.provider-custom {
+  margin-top: 2rem;
+  padding: 1.75rem 0 0;
+}
+
+.provider-custom > svg {
+  color: var(--coral-ink);
+}
+
+.provider-custom a {
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--coral) 40%, transparent);
+}
+
+/* Pricing gets one bold gesture; the adjacent copy remains factual and quiet. */
+.pricing-layout {
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: clamp(3rem, 7vw, 7rem);
+}
+
+.free-panel {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  min-height: 520px;
+  padding: clamp(2rem, 4vw, 3.5rem);
+  background:
+    radial-gradient(circle at 100% 0%, rgb(255 255 255 / 24%), transparent 46%),
+    var(--coral);
+  box-shadow: 0 2.5rem 5rem -3rem color-mix(in srgb, var(--coral) 55%, transparent);
+}
+
+.free-panel::before,
+.free-panel::after {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  border: 1px solid rgb(23 23 23 / 18%);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.free-panel::before {
+  width: 28rem;
+  height: 28rem;
+  right: -12rem;
+  top: -10rem;
+}
+
+.free-panel::after {
+  width: 20rem;
+  height: 20rem;
+  right: -8rem;
+  top: -6rem;
+}
+
+.free-price {
+  font-size: clamp(7rem, 12vw, 10rem);
+  letter-spacing: -0.085em;
+}
+
+.free-price span {
+  max-width: 24ch;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.free-panel .marketing-button {
+  transition:
+    transform var(--motion-duration-fast) var(--motion-ease),
+    box-shadow var(--motion-duration-base) ease;
+  box-shadow: 0 12px 24px -16px rgb(0 0 0 / 55%);
+}
+
+.provider-costs {
+  padding-block: 1rem;
+}
+
+.provider-costs h3 {
+  font-size: clamp(1.6rem, 2.5vw, 2rem);
+  line-height: 1.2;
+}
+
+.provider-costs p {
+  color: var(--ink-soft);
+}
+
+/* Comparison links become an editorial index with a clear scan axis. */
+.comparison-links .story-heading {
+  max-width: 800px;
+}
+
+.comparison-grid {
+  counter-reset: alternative;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 3rem;
+  margin-block: 2rem;
+  border-top: 1px solid var(--border);
+}
+
+.comparison-grid a {
+  counter-increment: alternative;
+  position: relative;
+  min-height: 150px;
+  padding: 2rem 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  font-size: clamp(1.6rem, 2.6vw, 2.25rem);
+  letter-spacing: -0.04em;
+  transition:
+    color var(--motion-duration-base) ease,
+    background-color var(--motion-duration-base) ease;
+}
+
+.comparison-grid a::before {
+  content: "0" counter(alternative);
+  position: absolute;
+  top: 0.85rem;
+  left: 0;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+}
+
+.comparison-grid a > svg {
+  box-sizing: content-box;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  transition:
+    color var(--motion-duration-base) ease,
+    background-color var(--motion-duration-base) ease,
+    transform var(--motion-duration-base) var(--motion-ease);
+}
+
+.comparison-grid a:hover {
+  transform: none;
+  color: var(--coral-ink);
+  background: color-mix(in srgb, var(--coral) 4%, transparent);
+}
+
+.comparison-grid a:hover > svg {
+  color: #171717;
+  background: var(--coral);
+  border-color: var(--coral);
+  transform: translate(3px, -3px);
+}
+
+.comparison-grid small {
+  font-size: 0.45em;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+/* Comparison routes inherit the identity without sacrificing dense evidence. */
+.comparison-page {
+  max-width: var(--site-width);
+}
+
+.comparison-hero {
+  min-height: 430px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
+  background:
+    linear-gradient(115deg, color-mix(in srgb, var(--coral) 8%, transparent), transparent 55%),
+    var(--surface-inset);
+}
+
+.comparison-hero .marketing-button {
+  align-self: flex-start;
+}
+
+.comparison-hero h1 {
+  max-width: 13ch;
+  font-size: clamp(3.5rem, 7.5vw, 7.5rem);
+  letter-spacing: -0.065em;
+  line-height: 0.92;
+}
+
+.comparison-mark {
+  width: clamp(220px, 31vw, 430px);
+  right: -2%;
+  bottom: -12%;
+  opacity: 0.09;
+  filter: saturate(0.8);
+}
+
+.comparison-contents {
+  position: sticky;
+  top: 72px;
+  z-index: 20;
+  padding: 1rem 0;
+  background: var(--background);
+}
+
+.comparison-contents a {
+  text-decoration: none;
+}
+
+.comparison-contents a:hover {
+  color: var(--coral-ink);
+}
+
+.comparison-bento-beans {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--coral) 15%, transparent);
+  background:
+    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--coral) 17%, transparent), transparent 52%),
+    var(--surface-raised);
+}
+
+.comparison-bento-beans h2 {
+  font-size: clamp(3rem, 5vw, 5rem);
+  letter-spacing: -0.06em;
+}
+
+.comparison-table-wrap {
+  border: 1px solid var(--border);
+  box-shadow: 0 1.5rem 4rem -3rem color-mix(in srgb, var(--foreground) 25%, transparent);
+}
+
+.comparison-table-wrap thead th {
+  background: var(--surface-inset);
+}
+
+.comparison-table-wrap .beans-column,
+.comparison-table-wrap th:nth-child(2),
+.comparison-table-wrap td:nth-child(2) {
+  background: color-mix(in srgb, var(--coral) 9%, var(--card));
+}
+
+.comparison-costs,
+.comparison-final {
+  border: 1px solid color-mix(in srgb, var(--coral) 14%, transparent);
+  background: var(--surface-inset);
+}
+
+.comparison-cost-breakdown div:first-child dd {
+  color: var(--coral-ink);
+  font-size: clamp(4rem, 7vw, 7rem);
+  letter-spacing: -0.07em;
+}
+
+/* The final action is a full-bleed brand gesture inside the existing layout. */
+.story-cta {
+  padding-bottom: clamp(4rem, 8vw, 7rem);
+}
+
+.beans-cta {
+  min-height: 460px;
+  border: 0;
+  background:
+    radial-gradient(circle at 5% 100%, rgb(255 255 255 / 20%), transparent 45%),
+    var(--coral);
+  box-shadow: 0 3rem 6rem -4rem color-mix(in srgb, var(--coral) 55%, transparent);
+}
+
+.beans-cta::after {
+  content: "";
+  position: absolute;
+  width: 34rem;
+  height: 34rem;
+  left: -12rem;
+  top: -14rem;
+  border: 1px solid rgb(23 23 23 / 16%);
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.cta-copy {
+  z-index: 1;
+  padding-right: clamp(2rem, 5vw, 5rem);
+}
+
+.cta-copy h2 {
+  max-width: 10ch;
+  color: #171717;
+  font-size: clamp(3rem, 5vw, 5.5rem);
+  letter-spacing: -0.06em;
+}
+
+.cta-copy p {
+  color: rgb(23 23 23 / 72%);
+  font-size: 1.05rem;
+  line-height: 1.7;
+}
+
+.cta-copy [data-slot="button"] {
+  background: #171717;
+  color: #fff;
+}
+
+.cta-mark {
+  filter: drop-shadow(0 2rem 2rem rgb(23 23 23 / 14%));
+}
+
+.marketing-footer {
+  border-top-color: color-mix(in srgb, var(--foreground) 14%, transparent);
+  background: color-mix(in srgb, var(--foreground) 2%, var(--background));
+}
+
+.footer-brand img {
+  width: 170px;
+  height: auto;
+}
+
+.marketing-footer nav a {
+  transition: color var(--motion-duration-fast) ease;
+}
+
+.motion-control {
+  border-color: color-mix(in srgb, var(--foreground) 14%, transparent);
+  background: var(--card);
+  box-shadow: 0 10px 30px -18px color-mix(in srgb, var(--foreground) 40%, transparent);
+}
+
+.reading-progress {
+  height: 2px;
+  background: var(--coral);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--coral) 45%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  .beans-experience {
+    --coral-ink: #ff7957;
+    --surface-raised: color-mix(in srgb, var(--card) 94%, var(--foreground));
+  }
+
+  .hero-title .brush {
+    color: var(--coral);
+  }
+
+  .beans-experience::before {
+    opacity: 0.035;
+    mix-blend-mode: screen;
+  }
+
+  .bento-conversation > div {
+    background: color-mix(in srgb, var(--card) 88%, var(--foreground));
+  }
+
+  .app-preview-shell {
+    border-color: rgb(255 255 255 / 12%);
+  }
+
+  .provider-tile img {
+    filter: invert(1);
+  }
+}
+
+@media (max-width: 1100px) {
+  .hero-title {
+    font-size: clamp(4rem, 7.4vw, 5.6rem);
+  }
+
+  .provider-tile {
+    padding-inline: 1.25rem;
+  }
+
+  .provider-tile::before {
+    right: 1rem;
+  }
+}
+
+@media (max-width: 767px) {
+  .beans-hero {
+    min-height: 0;
+    padding-top: 3rem;
+  }
+
+  .beans-hero::before {
+    inset: 48% -42% 3% 12%;
+  }
+
+  .hero-copy::before {
+    margin-bottom: 2rem;
+  }
+
+  .hero-title {
+    max-width: 9ch;
+    font-size: clamp(3.7rem, 17vw, 5.4rem);
+    line-height: 0.9;
+  }
+
+  .hero-copy > p:not(.hero-free, .hero-platforms) {
+    font-size: 1rem;
+    line-height: 1.7;
+  }
+
+  .beans-hero .hero-scene {
+    width: min(100%, 390px);
+  }
+
+  .beans-experience .story-section {
+    padding-block: 4.5rem;
+  }
+
+  .beans-experience .story-heading {
+    padding-top: 1.25rem;
+  }
+
+  .beans-experience .story-heading::before {
+    top: 1.4rem;
+  }
+
+  .beans-experience .story-heading h2 {
+    max-width: 13ch;
+    padding-right: 1rem;
+    font-size: clamp(2.55rem, 12vw, 4rem);
+  }
+
+  .app-preview-shell {
+    padding: 2.5rem 0.5rem 0.5rem;
+  }
+
+  .app-preview-shell::after {
+    display: none;
+  }
+
+  .story-examples .demo-disclaimer {
+    margin-left: 0;
+    text-align: left;
+  }
+
+  .bento-grid {
+    gap: 1rem;
+  }
+
+  .bento-card,
+  .bento-0,
+  .bento-1,
+  .bento-5 {
+    min-height: 370px;
+  }
+
+  .provider-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .provider-tile {
+    min-height: 190px;
+    padding: 1.5rem 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .provider-tile:nth-child(odd) {
+    border-left: 0;
+  }
+
+  .provider-tile:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+
+  .provider-tile:last-child {
+    grid-column: auto;
+    flex-direction: column;
+    justify-content: flex-start;
+  }
+
+  .provider-tile::before {
+    top: 1.5rem;
+    right: 0.75rem;
+  }
+
+  .provider-tile::after {
+    inset-inline: 1rem;
+  }
+
+  .provider-tile img {
+    width: 40px;
+    height: 40px;
+    margin-bottom: 0.5rem;
+  }
+
+  .provider-tile strong {
+    font-size: 1.1rem;
+  }
+
+  .provider-custom > div {
+    width: calc(100% - 45px);
+  }
+
+  .pricing-layout {
+    gap: 2.5rem;
+  }
+
+  .free-panel {
+    min-height: 470px;
+  }
+
+  .free-price {
+    font-size: clamp(7rem, 34vw, 9rem);
+  }
+
+  .comparison-grid {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .comparison-grid a {
+    min-height: 130px;
+    font-size: 1.8rem;
+  }
+
+  .comparison-hero {
+    min-height: 420px;
+  }
+
+  .comparison-hero h1 {
+    font-size: clamp(2.75rem, 13vw, 4.5rem);
+  }
+
+  .comparison-contents {
+    top: 72px;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+  }
+
+  .comparison-contents a {
+    flex: none;
+  }
+
+  .beans-cta {
+    min-height: 0;
+  }
+
+  .cta-art {
+    width: 260px;
+    height: 260px;
+  }
+
+  .cta-copy {
+    padding: 0 1.5rem 3rem;
+  }
+
+  .cta-copy h2 {
+    margin-inline: auto;
+    font-size: clamp(2.8rem, 13vw, 4.25rem);
+  }
+
+  .footer-brand img {
+    width: 150px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-copy::before,
+  .hero-scene::after {
+    animation: none;
+  }
+
+  .site-nav nav a::after,
+  .provider-tile::after,
+  .comparison-grid a > svg {
+    transition-duration: 0.01ms;
+  }
+}

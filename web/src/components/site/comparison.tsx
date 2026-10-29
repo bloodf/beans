@@ -110,7 +110,7 @@ export function ComparisonPage({ slug }: { slug?: ComparisonSlug }) {
               />
             </article>
             {slugs.map((key) => (
-              <article className="comparison-bento-card" key={key}>
+              <article data-spotlight className="comparison-bento-card" key={key}>
                 <h2>{products[key].name}</h2>
                 <ProsCons
                   pros={c.pros}

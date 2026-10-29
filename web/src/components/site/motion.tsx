@@ -50,9 +50,28 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
     }
     visibility()
     document.addEventListener('visibilitychange', visibility)
+
+    const finePointer = matchMedia('(pointer: fine)')
+    let pointerFrame = 0
+    const moveSpotlight = (event: PointerEvent) => {
+      if (!finePointer.matches || !(event.target instanceof Element)) return
+      const surface = event.target.closest<HTMLElement>('[data-spotlight]')
+      if (!surface) return
+      const { clientX, clientY } = event
+      cancelAnimationFrame(pointerFrame)
+      pointerFrame = requestAnimationFrame(() => {
+        const bounds = surface.getBoundingClientRect()
+        surface.style.setProperty('--pointer-x', `${clientX - bounds.left}px`)
+        surface.style.setProperty('--pointer-y', `${clientY - bounds.top}px`)
+      })
+    }
+    element.addEventListener('pointermove', moveSpotlight, { passive: true })
+
     return () => {
       observer.disconnect()
       document.removeEventListener('visibilitychange', visibility)
+      element.removeEventListener('pointermove', moveSpotlight)
+      cancelAnimationFrame(pointerFrame)
     }
   }, [])
 
@@ -206,6 +225,50 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
                 },
               },
             )
+            gsap.from('.provider-tile', {
+              y: 42,
+              opacity: 0.35,
+              stagger: 0.09,
+              duration: 0.8,
+              ease: 'power3.out',
+              scrollTrigger: {
+                trigger: '.provider-grid',
+                start: 'top 82%',
+                once: true,
+              },
+              clearProps: 'all',
+            })
+            gsap.fromTo(
+              '.free-panel',
+              { y: 55, rotate: -2.5 },
+              {
+                y: 0,
+                rotate: 0,
+                ease: 'none',
+                scrollTrigger: {
+                  trigger: '.pricing-layout',
+                  start: 'top 92%',
+                  end: 'center 68%',
+                  scrub: 0.6,
+                },
+              },
+            )
+            for (const [index, link] of gsap.utils
+              .toArray<HTMLElement>('.comparison-links .comparison-grid a')
+              .entries()) {
+              gsap.from(link, {
+                x: index % 2 === 0 ? -28 : 28,
+                opacity: 0.35,
+                duration: 0.75,
+                ease: 'power3.out',
+                scrollTrigger: {
+                  trigger: link,
+                  start: 'top 92%',
+                  once: true,
+                },
+                clearProps: 'all',
+              })
+            }
             gsap.from('.setup-step', {
               y: 28,
               stagger: 0.08,

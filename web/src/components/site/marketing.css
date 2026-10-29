@@ -906,7 +906,7 @@
     rgb(229 139 109 / 13%) 65%,
     transparent 85%
   );
-  animation: beans-gradient-drift 18s cubic-bezier(0.45, 0, 0.55, 1) infinite
+  animation: beans-gradient-drift 18s var(--motion-ease-in-out) infinite
     alternate;
   animation-play-state: var(--loop-state, paused);
   mask-image: radial-gradient(ellipse, black 20%, transparent 70%);

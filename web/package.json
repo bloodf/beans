@@ -6,9 +6,9 @@
     "#/*": "./src/*"
   },
   "scripts": {
-    "dev": "bun run build:preview && vite dev --port 3000",
+    "dev": "npm run build:preview && vite dev --port 3000",
     "generate-routes": "tsr generate",
-    "build": "bun run build:preview && vite build",
+    "build": "npm run build:preview && vite build",
     "preview": "vite preview",
     "deploy": "cd .. && vercel --prod",
     "build:preview": "cd ../desktop && vite build --config vite.preview.config.ts"

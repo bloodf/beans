@@ -115,6 +115,7 @@ export function DocsPage({ lang, data }: { lang: Language; data: DocsData }) {
       }}
     >
       <DocsLayout
+        containerProps={{ className: 'beans-docs' }}
         tree={pageTree}
         themeSwitch={{ enabled: false }}
         i18n

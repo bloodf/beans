@@ -27,6 +27,7 @@ import { useStore } from "../core/store";
 import { fileSize, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, type Bot } from "../core/model";
 import { notifyAvatarScroll } from "./avatarVisibility";
 import { BotAvatar } from "./Avatar";
+import { namePastedImages, pasteTimestamp } from "./composerPaste";
 import { automaticLanguage, languageName, pickDictationLanguage, setDictationLanguage, useDictationLanguage, useSupportedLanguages } from "./dictation";
 import { t, useLanguage } from "../i18n";
 import { joinDictation } from "./format";
@@ -250,14 +251,7 @@ export function Composer({
   }
 
   function pasteImages(images: PastedImage[]) {
-    const stamp = timestamp();
-    addFiles(
-      images.map((image, index) => {
-        const extension = image.mime === "image/jpeg" ? "jpg" : image.mime.slice("image/".length).split("+")[0] || "png";
-        const suffix = images.length > 1 ? ` ${index + 1}` : "";
-        return { ...image, name: `Pasted Image ${stamp}${suffix}.${extension}` };
-      }),
-    );
+    addFiles(namePastedImages(images, pasteTimestamp()));
   }
 
   async function pickPhotos() {
@@ -634,7 +628,7 @@ export function Composer({
 }
 
 function imageAsset(asset: ImagePicker.ImagePickerAsset): PickedFile {
-  const name = asset.fileName ?? `Photo ${timestamp()}.jpg`;
+  const name = asset.fileName ?? `Photo ${pasteTimestamp()}.jpg`;
   return {
     uri: asset.uri,
     name,
@@ -643,10 +637,6 @@ function imageAsset(asset: ImagePicker.ImagePickerAsset): PickedFile {
     width: asset.width,
     height: asset.height,
   };
-}
-
-function timestamp(): string {
-  return new Date().toISOString().slice(0, 19).replace("T", " ").replace(/:/g, ".");
 }
 
 function deviceLanguage(): string {

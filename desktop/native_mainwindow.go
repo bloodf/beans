@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/bloodf/beans/desktop/l10n"
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 )
@@ -12,6 +13,7 @@ import (
 
 func (n *nativeDesktop) shellView(c *ui.Context) {
 	applyNativeTheme(c)
+	n.nativeShortcuts(c)
 	p := nativeColors(c)
 	width, _ := c.Size()
 	n.shell.noteWidth(width)
@@ -172,7 +174,7 @@ func (n *nativeDesktop) leadingButtons(c *ui.Context, inContent bool) {
 	}
 	row.Children(func() {
 		if hoverButton(c, hoverButtonOptions{Symbol: "sidebar.leading", Tooltip: L("Toggle Sidebar (%@)", shortcutText("CmdOrCtrl+B")), Label: L("Toggle Sidebar")}).Clicked() {
-			n.shell.toggleSidebar()
+			n.toggleSidebar()
 		}
 		if n.shell.mode != "settings" {
 			create := hoverButton(c, hoverButtonOptions{Symbol: "plus", Tooltip: L("Create"), Label: L("Create")})
@@ -190,15 +192,91 @@ func (n *nativeDesktop) leadingButtons(c *ui.Context, inContent bool) {
 			})
 		}
 		if hoverButton(c, hoverButtonOptions{Symbol: "gearshape", Tooltip: L("Settings…"), Label: L("Settings")}).Clicked() {
-			n.shell.selectSettings("general")
+			runNativeCommand("settings")
 		}
 	})
 }
 
 func (n *nativeDesktop) inspectorToggle(c *ui.Context) {
 	if hoverButton(c, hoverButtonOptions{Symbol: "sidebar.trailing", Tooltip: L("Toggle Inspector (%@)", shortcutText("CmdOrCtrl+Shift+B")), Label: L("Toggle Inspector")}).Clicked() {
-		n.shell.toggleInspector()
+		n.toggleInspector()
 	}
+}
+
+// toggleSidebar matches Solid/AppKit: collapsing is immediate; opening goes through
+// openPane so a narrow window widens or squeezes content.
+func (n *nativeDesktop) toggleSidebar() {
+	if n.shell.sidebarCollapsed {
+		n.openPane(true, func() { n.shell.setSidebarCollapsed(false) })
+		return
+	}
+	n.shell.setSidebarCollapsed(true)
+}
+
+func (n *nativeDesktop) toggleInspector() {
+	if n.shell.mode != "chat" {
+		return
+	}
+	_, inspector := n.shell.panes(n.shell.lastWidth)
+	if inspector > 0 {
+		n.shell.setInspectorWanted(false)
+		return
+	}
+	n.openPane(false, func() { n.shell.setInspectorWanted(true) })
+}
+
+// widenNativeWindow widens the native window by `by` DIPs within the work area.
+// Tests replace it to exercise squeeze without a real window host.
+var widenNativeWindow = func(n *nativeDesktop, by int) int {
+	if n == nil || n.win == nil || by < 1 {
+		return 0
+	}
+	bounds := n.win.Bounds()
+	area := mygo.Screen.DisplayMatching(bounds).WorkArea
+	next := widened(bounds, area, by)
+	grew := next.Width - bounds.Width
+	if next != bounds {
+		n.win.SetBounds(next)
+	}
+	return grew
+}
+
+// openPane opens a side pane as Solid's paneLayout.open and Lorca's openPane do:
+// widen the window when there is room, else set squeezesContent so panes() keeps
+// the pane visible by narrowing content past its minimum.
+func (n *nativeDesktop) openPane(sidebar bool, show func()) {
+	s := &n.shell
+	s.ensureDefaults()
+	curSidebar, curInspector := s.panes(s.lastWidth)
+	wantSidebar, wantInspector := float32(0), float32(0)
+	if sidebar || curSidebar > 0 {
+		wantSidebar = s.sidebarWidth + 1
+	}
+	if !sidebar || curInspector > 0 {
+		wantInspector = s.inspectorWidth + 1
+	}
+	_, _, fits := fitPanes(s.lastWidth, wantSidebar, wantInspector)
+	maximized, fullscreen := false, false
+	if n.win != nil {
+		maximized = n.win.IsMaximized()
+		fullscreen = n.win.IsFullScreen()
+	}
+	if fits || maximized || fullscreen {
+		if !fits {
+			s.squeezesContent = true
+		}
+		show()
+		return
+	}
+	want := int(wantInspector + 0.5)
+	if sidebar {
+		want = int(wantSidebar + 0.5)
+	}
+	grew := widenNativeWindow(n, want)
+	if grew < want {
+		s.squeezesContent = true
+	}
+	show()
 }
 
 func (n *nativeDesktop) contentHeader(c *ui.Context, title, subtitle string, rightmost bool) ui.Element {

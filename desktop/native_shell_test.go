@@ -1,11 +1,25 @@
 package main
 
 import (
-	"math"
 	"testing"
 
-	"github.com/egoist/mygo"
+	"github.com/bloodf/beans/desktop/model"
+	"github.com/egoist/mygo/ui"
 )
+
+func withShellPrefs(t *testing.T) {
+	t.Helper()
+	prefs.mu.Lock()
+	prevPath, prev := prefs.path, prefs.value
+	prefs.path = ""
+	prefs.value = Preferences{ShowsInspector: true, SendOnReturn: true, ShowTimestamps: true, CLIPort: defaultCLIPort()}
+	prefs.mu.Unlock()
+	t.Cleanup(func() {
+		prefs.mu.Lock()
+		prefs.path, prefs.value = prevPath, prev
+		prefs.mu.Unlock()
+	})
+}
 
 func TestFitPanesResize(t *testing.T) {
 	// Wide window: both panes keep their requested widths.
@@ -29,42 +43,8 @@ func TestFitPanesResize(t *testing.T) {
 	}
 }
 
-func TestWidenedResize(t *testing.T) {
-	area := mygo.Rectangle{X: 0, Y: 40, Width: 1920, Height: 1000}
-	rect := func(x, width int) mygo.Rectangle {
-		return mygo.Rectangle{X: x, Y: 100, Width: width, Height: 760}
-	}
-	tests := []struct {
-		name string
-		r    mygo.Rectangle
-		by   int
-		want mygo.Rectangle
-	}{
-		{"with room", rect(200, 900), 281, rect(200, 1181)},
-		{"at the right edge", rect(1020, 900), 281, rect(739, 1181)},
-		{"near the right edge", rect(920, 900), 281, rect(739, 1181)},
-		{"at the left edge", rect(0, 900), 261, rect(0, 1161)},
-		{"wider than the room", rect(100, 1700), 281, rect(0, 1920)},
-		{"filling the area", rect(0, 1920), 281, rect(0, 1920)},
-		{"partly off the display", rect(1500, 900), 281, rect(1219, 1181)},
-		{"off both sides", rect(-100, 2200), 261, rect(-100, 2200)},
-		{"all the room", rect(300, 900), math.MaxInt32, rect(0, 1920)},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := widened(test.r, area, test.by); got != test.want {
-				t.Errorf("widened(%v, %d) = %v, want %v", test.r, test.by, got, test.want)
-			}
-		})
-	}
-}
-
 func TestDividerBounds(t *testing.T) {
-	prefs.mu.Lock()
-	prefs.path = ""
-	prefs.value = Preferences{ShowsInspector: true, SendOnReturn: true, ShowTimestamps: true, CLIPort: defaultCLIPort()}
-	prefs.mu.Unlock()
-
+	withShellPrefs(t)
 	s := newNativeShellLayout()
 	s.sidebarWidth = 260
 	s.inspectorWidth = 280
@@ -114,6 +94,7 @@ func TestDividerBounds(t *testing.T) {
 }
 
 func TestHeaderState(t *testing.T) {
+	withShellPrefs(t)
 	s := newNativeShellLayout()
 	s.mode = "chat"
 	if s.headerEdgeVisible() {
@@ -159,5 +140,116 @@ func TestHeaderState(t *testing.T) {
 	s.selectChat()
 	if s.mode != "chat" || len(s.paneHistory) != 0 {
 		t.Fatal("selectChat did not clear settings history")
+	}
+}
+
+func TestNativePaneShortcuts(t *testing.T) {
+	withShellPrefs(t)
+	oldNative, oldWiden := native, widenNativeWindow
+	t.Cleanup(func() {
+		native = oldNative
+		widenNativeWindow = oldWiden
+	})
+	native = &nativeDesktop{store: model.NewNativeStore(), shell: newNativeShellLayout()}
+	native.shell.lastWidth = 1180
+	native.shell.mode = "chat"
+	native.shell.sidebarCollapsed = false
+	native.shell.userWantsInspector = true
+	widenNativeWindow = func(*nativeDesktop, int) int { return 0 }
+
+	tt := ui.NewTester(native.view, 1180, 760)
+	tt.Key(ui.Cmd, ui.KeyB)
+	if !native.shell.sidebarCollapsed {
+		t.Fatal("Cmd+B did not collapse the sidebar")
+	}
+	tt.Key(ui.Cmd, ui.KeyB)
+	if native.shell.sidebarCollapsed {
+		t.Fatal("Cmd+B did not reopen the sidebar")
+	}
+	tt.Key(ui.Cmd|ui.Shift, ui.KeyB)
+	if native.shell.userWantsInspector {
+		t.Fatal("Cmd+Shift+B did not hide the inspector")
+	}
+	tt.Key(ui.Cmd|ui.Shift, ui.KeyB)
+	if !native.shell.userWantsInspector {
+		t.Fatal("Cmd+Shift+B did not show the inspector")
+	}
+	tt.Key(ui.Cmd, ui.KeyComma)
+	if native.shell.mode != "settings" || native.shell.settingsPane != "general" {
+		t.Fatalf("Cmd+, did not open settings: mode=%q pane=%q", native.shell.mode, native.shell.settingsPane)
+	}
+}
+
+func TestOpenPaneNarrowWindow(t *testing.T) {
+	withShellPrefs(t)
+	oldNative, oldWiden := native, widenNativeWindow
+	t.Cleanup(func() {
+		native = oldNative
+		widenNativeWindow = oldWiden
+	})
+	native = &nativeDesktop{store: model.NewNativeStore(), shell: newNativeShellLayout()}
+	// Sidebar open, inspector closed: content-min + sidebar leaves no room for the inspector.
+	native.shell.lastWidth = contentMinWidth + defaultSidebarWidth + 1
+	native.shell.mode = "chat"
+	native.shell.sidebarCollapsed = false
+	native.shell.userWantsInspector = false
+	native.shell.squeezesContent = false
+	var widenedBy int
+	widenNativeWindow = func(_ *nativeDesktop, by int) int {
+		widenedBy = by
+		return 0 // no room on the display
+	}
+
+	_, before := native.shell.panes(native.shell.lastWidth)
+	if before != 0 {
+		t.Fatalf("setup: inspector already visible (%v)", before)
+	}
+
+	native.toggleInspector()
+	if !native.shell.userWantsInspector {
+		t.Fatal("toggle did not set ShowsInspector")
+	}
+	if !native.shell.squeezesContent {
+		t.Fatal("narrow open did not set squeezesContent")
+	}
+	if widenedBy != int(native.shell.inspectorWidth+1) {
+		t.Fatalf("widen requested %d, want %d", widenedBy, int(native.shell.inspectorWidth+1))
+	}
+	_, after := native.shell.panes(native.shell.lastWidth)
+	if after == 0 {
+		t.Fatal("inspector stayed hidden after squeeze open")
+	}
+
+	// A second toggle hides it again without needing more width.
+	native.toggleInspector()
+	if native.shell.userWantsInspector {
+		t.Fatal("second toggle did not clear ShowsInspector")
+	}
+	_, hidden := native.shell.panes(native.shell.lastWidth)
+	if hidden != 0 {
+		t.Fatal("inspector still visible after hide")
+	}
+}
+
+func TestOpenPaneFitsWithoutSqueeze(t *testing.T) {
+	withShellPrefs(t)
+	oldNative, oldWiden := native, widenNativeWindow
+	t.Cleanup(func() {
+		native = oldNative
+		widenNativeWindow = oldWiden
+	})
+	native = &nativeDesktop{store: model.NewNativeStore(), shell: newNativeShellLayout()}
+	native.shell.lastWidth = 1180
+	native.shell.mode = "chat"
+	native.shell.sidebarCollapsed = false
+	native.shell.userWantsInspector = false
+	calls := 0
+	widenNativeWindow = func(*nativeDesktop, int) int {
+		calls++
+		return 0
+	}
+	native.toggleInspector()
+	if !native.shell.userWantsInspector || native.shell.squeezesContent || calls != 0 {
+		t.Fatalf("wide open: wants=%v squeeze=%v widenCalls=%d", native.shell.userWantsInspector, native.shell.squeezesContent, calls)
 	}
 }

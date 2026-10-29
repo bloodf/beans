@@ -119,13 +119,8 @@ func (s *nativeShellLayout) setSidebarCollapsed(collapsed bool) {
 	prefs.update(PreferencesPatch{SidebarCollapsed: &collapsed})
 }
 
-func (s *nativeShellLayout) toggleSidebar() {
-	s.setSidebarCollapsed(!s.sidebarCollapsed)
-}
-
-func (s *nativeShellLayout) toggleInspector() {
-	s.userWantsInspector = !s.userWantsInspector
-	wants := s.userWantsInspector
+func (s *nativeShellLayout) setInspectorWanted(wants bool) {
+	s.userWantsInspector = wants
 	prefs.update(PreferencesPatch{ShowsInspector: &wants})
 }
 

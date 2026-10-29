@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/ui"
 )
 
 // Native shell commands (adapted from Lorca commands.go). The Solid page keeps
@@ -54,9 +55,9 @@ func nativeCommandByID(id string) *nativeCommand {
 func runNativeCommand(id string) {
 	switch id {
 	case "toggleSidebar":
-		native.shell.toggleSidebar()
+		native.toggleSidebar()
 	case "toggleInspector":
-		native.shell.toggleInspector()
+		native.toggleInspector()
 	case "settings":
 		native.shell.selectSettings("general")
 	case "showOnboarding":
@@ -70,6 +71,20 @@ func runNativeCommand(id string) {
 	}
 	if native.win != nil {
 		native.win.Invalidate()
+	}
+}
+
+// nativeShortcuts registers the accelerators advertised on shell chrome tooltips
+// (CmdOrCtrl+B / Shift+B / ,). Called each frame from the native window view.
+func (n *nativeDesktop) nativeShortcuts(c *ui.Context) {
+	if c.Shortcut(ui.Cmd, ui.KeyB) {
+		runNativeCommand("toggleSidebar")
+	}
+	if c.Shortcut(ui.Cmd|ui.Shift, ui.KeyB) {
+		runNativeCommand("toggleInspector")
+	}
+	if c.Shortcut(ui.Cmd, ui.KeyComma) {
+		runNativeCommand("settings")
 	}
 }
 

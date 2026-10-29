@@ -21,6 +21,8 @@ export interface Palette {
   userBubbleText: ColorValue;
   botBubble: ColorValue;
   botBubbleText: ColorValue;
+  /// A published output's card in the transcript, apart from the bubbles.
+  outputCard: ColorValue;
   code: ColorValue;
   /// `code` over `cell` as one solid color, then that color clear: the ends of the fade at a
   /// scrolling code block's edge. iOS only; Android fades a scroll view's edges itself.
@@ -101,6 +103,7 @@ function buildPalette(dark: boolean): Palette {
       userBubbleText: "#FFFFFF",
       botBubble: dark ? "rgba(255,255,255,0.10)" : "#E9E9EB",
       botBubbleText: ios("label")!,
+      outputCard: dark ? "rgba(255,255,255,0.06)" : "#FFFFFF",
       code: dark ? "rgba(0,0,0,0.28)" : "rgba(0,0,0,0.06)",
       // secondarySystemGroupedBackground (#1C1C1E, #FFFFFF) under `code`.
       codeFade: dark ? ["rgb(20,20,22)", "rgba(20,20,22,0)"] : ["rgb(240,240,240)", "rgba(240,240,240,0)"],
@@ -126,6 +129,7 @@ function buildPalette(dark: boolean): Palette {
     userBubbleText: material.onPrimary,
     botBubble: material.surfaceContainerHigh,
     botBubbleText: material.onSurface,
+    outputCard: material.surfaceContainerLowest,
     code: material.surfaceContainerHighest,
     green: dark ? "#66DB89" : "#146C2E",
     red: material.error,

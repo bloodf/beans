@@ -88,6 +88,15 @@ const ANDROID: Record<string, string> = {
   dice: "casino",
   "arrow.uturn.backward": "undo",
   "arrow.counterclockwise": "restart_alt",
+  // What a published output is.
+  "richtext.page": "picture_as_pdf",
+  "text.page": "description",
+  "zipper.page": "folder_zip",
+  document: "draft",
+  curlybraces: "data_object",
+  tablecells: "table",
+  "circle.dashed": "radio_button_unchecked",
+  film: "movie",
 };
 
 export interface SymbolProps {

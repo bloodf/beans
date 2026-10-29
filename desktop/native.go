@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"slices"
+	"runtime"
 	"time"
 
 	"github.com/bloodf/beans/desktop/model"
@@ -22,6 +22,8 @@ type nativeDesktop struct {
 	store              *model.NativeStore
 	win                *mygo.Window
 	authority          cliAuthority
+	shell              nativeShellLayout
+	onboardingStep     nativeOnboardingStep
 	avatars            *nativeAvatars
 	activity           *nativeAvatarActivity
 	memory             *nativeMemory
@@ -34,7 +36,7 @@ type nativeDesktop struct {
 
 func nativeEnabled() bool { return os.Getenv("BEANS_NATIVE") == "1" }
 
-var native = &nativeDesktop{store: model.NewNativeStore()}
+var native = &nativeDesktop{store: model.NewNativeStore(), shell: newNativeShellLayout()}
 
 func (n *nativeDesktop) event(name string, data json.RawMessage) {
 	if name == "identity.changed" || name == "snapshot" {
@@ -89,7 +91,24 @@ func (n *nativeDesktop) show() {
 		})
 	}
 	if n.win == nil {
-		n.win = mygo.NewWindow(mygo.WindowOptions{Title: "Beans — Native", Width: 1100, Height: 760, MinWidth: 640, MinHeight: 440, Content: ui.View(n.view)})
+		n.shell = newNativeShellLayout()
+		syncNativeLanguage()
+		options := mygo.WindowOptions{
+			Title:          appName() + " — Native",
+			Width:          1180,
+			Height:         760,
+			MinWidth:       860,
+			MinHeight:      520,
+			TitleBarStyle:  mygo.TitleBarHidden,
+			TitleBarHeight: headerHeight,
+			// Sidebar shows the window material (d94feac8); elsewhere Context.Vibrancy is false.
+			Vibrancy: mygo.VibrancySidebar,
+			Content:  ui.View(n.view),
+		}
+		if runtime.GOOS == "darwin" {
+			options.TrafficLightPosition = &mygo.Point{X: 19, Y: 19}
+		}
+		n.win = mygo.NewWindow(options)
 		visibility := func() {
 			if n.avatars != nil {
 				n.avatars.visible = n.win.IsVisible() && !n.win.IsMinimized()
@@ -349,223 +368,7 @@ func (n *nativeDesktop) older(id string) {
 	}()
 }
 func (n *nativeDesktop) view(c *ui.Context) {
-	t := c.Theme()
-	ui.Row(c).Fill().AlignItems(ui.Stretch).Children(func() {
-		ui.Column(c).Width(240).Shrink(0).Padding(16).Gap(10).Background(t.Surface).Children(func() {
-			ui.Text(c, "Beans").Bold().FontSize(20)
-			ui.Scroll(c).Grow(1).Children(func() {
-				if !n.store.Connected {
-					return
-				}
-				for i := range n.store.Chats {
-					chat := &n.store.Chats[i]
-					if n.avatars != nil {
-						ui.Box(c.Key("cluster:"+chat.ID)).Size(32, 32).Shrink(0).Children(func() {
-							for _, slot := range nativeGroupAvatarSlots(chat.BotIDs, 32) {
-								for _, b := range n.store.Bots {
-									if b.ID == slot.BotID {
-										ui.Box(c.Key(chat.ID+":"+b.ID)).Absolute().Left(slot.X).Top(slot.Y).Size(slot.Size, slot.Size).Children(func() {
-											n.avatars.viewSlot(c, b, n.activity.state(b.ID, chat.ID), slot.Size, "sidebar:"+chat.ID+":"+b.ID)
-										})
-										n.fetchAvatar(b)
-										break
-									}
-								}
-							}
-						})
-					}
-					if ui.Button(c.Key(chat.ID), n.store.Title(chat)).Selected(n.store.Selected == chat.ID).Clicked() {
-						n.store.Selected = chat.ID
-					}
-				}
-			})
-			if ui.Button(c, "Open full client").Clicked() {
-				app.showMainWindow()
-			}
-		})
-		ui.Column(c).Grow(1).MinWidth(0).Padding(16).Gap(12).Children(func() {
-			if n.look != nil {
-				n.look.View(c)
-				if n.look.Done() && n.look.CanDismiss() {
-					n.look = nil
-				}
-				return
-			}
-			if n.store.HasOwnedIntent() && ui.Button(c, "Save native drafts").Clicked() {
-				n.saveDrafts()
-			}
-			if len(n.memoryRecovery) > 0 {
-				ui.Text(c, "Memory edits are retained for their original account. Reconnect that account to recover them.")
-				if ui.Button(c, "Discard retained memory edits…").Clicked() {
-					n.confirmDiscardMemoryRecovery()
-				}
-			}
-			if n.store.Error != "" {
-				ui.Text(c, n.store.Error)
-			}
-			if n.store.HasOwnedIntent() && ui.Button(c, "Discard native drafts…").Clicked() {
-				n.confirmDiscard()
-			}
-			if !n.store.Connected {
-				ui.Text(c, "The Beans CLI is not running")
-				if ui.Button(c, "Reconnect").Clicked() {
-					app.cli.reconnect()
-				}
-				return
-			}
-			if ui.Button(c, "Diagnostics…").Clicked() {
-				n.openDiagnostics()
-			}
-			if n.diagnostics != nil {
-				n.diagnostics.View(c)
-				if n.diagnostics.Done() {
-					n.diagnostics = nil
-				}
-				return
-			}
-			if n.memory != nil && ui.Button(c, "Memory connections").Clicked() {
-				n.loadMemory()
-			}
-			if n.memoryPanel.Open {
-				n.memoryView(c)
-				return
-			}
-			if !n.store.HasIdentity {
-				ui.Text(c, "Create or restore an identity in the full client.")
-				return
-			}
-			chat := n.store.Chat(n.store.Selected)
-			if chat == nil {
-				ui.Text(c, "Select a chat")
-				return
-			}
-			ui.Text(c, n.store.Title(chat)).Bold().FontSize(20)
-			if n.avatars != nil && len(chat.BotIDs) > 1 {
-				ui.Box(c.Key("header-cluster:"+chat.ID)).Size(32, 32).Children(func() {
-					for _, slot := range nativeGroupAvatarSlots(chat.BotIDs, 32) {
-						for _, bot := range n.store.Bots {
-							if bot.ID == slot.BotID {
-								ui.Box(c.Key(bot.ID)).Absolute().Left(slot.X).Top(slot.Y).Size(slot.Size, slot.Size).Children(func() {
-									n.avatars.viewSlot(c, bot, n.activity.state(bot.ID, chat.ID), slot.Size, "header:"+chat.ID+":"+bot.ID)
-								})
-								n.fetchAvatar(bot)
-								break
-							}
-						}
-					}
-				})
-			}
-			if n.store.Error != "" {
-				ui.Text(c, n.store.Error)
-			}
-			ui.Scroll(c.Key(chat.ID + "-transcript")).Grow(1).Gap(12).Children(func() {
-				if chat.HasMore && ui.Button(c, "Load older messages").Disabled(n.store.LoadingOlder[chat.ID]).Clicked() {
-					n.older(chat.ID)
-				}
-				for _, m := range chat.Messages {
-					ui.Column(c.Key(m.ID)).Gap(4).Children(func() {
-						author := m.Author.Kind
-						for _, b := range n.store.Bots {
-							if b.ID == m.Author.BotID {
-								author = b.Name
-								break
-							}
-						}
-						if n.avatars != nil && m.Author.Kind == "bot" {
-							for _, bot := range n.store.Bots {
-								if bot.ID == m.Author.BotID {
-									n.avatars.viewSlot(c, bot, n.activity.state(bot.ID, chat.ID), 28, "message:"+chat.ID+":"+m.ID)
-									n.fetchAvatar(bot)
-									if ui.Button(c, "Edit bot Look").Clicked() {
-										n.openLook(bot)
-									}
-									break
-								}
-							}
-						}
-						ui.Text(c, author).Bold()
-						text := m.Body.Text
-						if text == "" {
-							text = m.Body.Summary
-						}
-						ui.Text(c, text)
-						if m.State.Error != "" {
-							ui.Text(c, m.State.Error)
-						}
-						if m.Body.Kind == "text" && m.State.Kind == "complete" && ui.Button(c, "Reply").Clicked() {
-							d := n.store.Draft(chat.ID)
-							d.ReplyTo = m.ID
-							d.Revision++
-						}
-					})
-				}
-			})
-			d := n.store.Draft(chat.ID)
-			if d.ReplyTo != "" {
-				ui.Text(c, "Replying to "+d.ReplyTo)
-				if ui.Button(c, "Cancel reply").Clicked() {
-					d.ReplyTo = ""
-					d.Revision++
-				}
-			}
-			for i, a := range d.Attachments {
-				if ui.Button(c.Key(a.ID), "Remove "+a.Name).Clicked() {
-					d.Attachments = append(d.Attachments[:i], d.Attachments[i+1:]...)
-					d.Revision++
-					break
-				}
-			}
-			if ui.Button(c, "Attach files").Disabled(d.Sending).Clicked() {
-				n.attach(chat.ID)
-			}
-			ui.Row(c).Gap(6).Wrap().Children(func() {
-				for _, b := range n.store.Bots {
-					picked := slices.Contains(d.Mentions, b.ID)
-					label := "@" + b.Name
-					if picked {
-						label = "Remove " + label
-					}
-					if ui.Button(c.Key("mention-"+b.ID), label).Disabled(d.Sending).Clicked() {
-						if picked {
-							d.Mentions = slices.DeleteFunc(d.Mentions, func(id string) bool { return id == b.ID })
-						} else {
-							d.Mentions = append(d.Mentions, b.ID)
-						}
-						d.Revision++
-					}
-				}
-			})
-			input := ui.TextArea(c.Key(chat.ID+"-composer"), &d.Text).Lines(1, 8).Label("Message").Placeholder("Message…").Disabled(d.Sending)
-			composing := input.Composing()
-			input.HandleInput(func(ev ui.InputEvent) bool {
-				if composing || ev.Kind != ui.InputKeyDown || ev.Key != ui.KeyEnter {
-					return false
-				}
-				if (prefs.get().SendOnReturn && ev.Mods == 0) || (!prefs.get().SendOnReturn && ev.Mods == ui.Cmd) {
-					n.send(chat.ID)
-					return true
-				}
-				return false
-			})
-			if input.Changed() {
-				d.Revision++
-			}
-			if d.Error != "" {
-				ui.Text(c, d.Error)
-			}
-			for _, id := range n.store.Running {
-				if id == chat.ID {
-					if ui.Button(c, "Stop responding").Clicked() {
-						n.stop(chat.ID)
-					}
-					break
-				}
-			}
-			if ui.Button(c, "Send").Disabled(d.Sending).Clicked() {
-				n.send(chat.ID)
-			}
-		})
-	})
+	n.shellView(c)
 }
 
 func nativeQuitAdmission() error {

@@ -6,6 +6,7 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- `BEANS_NATIVE=1` uses the adapted native shell foundation: pane headers, resizable sidebar/inspector dividers, settings and onboarding navigation, localized chrome controls, and Vibrancy sidebar material. The Solid page stays the default client.
 - Desktop tests run mounted browser consumers through the Solid Vite compiler and pinned Chromium, alongside the Bun unit checks.
 - `BEANS_NATIVE=1` opens a native sidebar, transcript and multiline composer alongside the full client. Awaited text/file/reply sends and file selection are account-fenced; updater installation requires closing the native window. The full client and website preview remain available.
 - Native reconnect waits for authoritative account admission before showing account data or accepting sends. Outgoing native RPCs bind to the captured socket/account authority. Unsent native drafts veto close, quit and install even without a window; changed-account drafts remain recoverable with explicit save/discard controls.

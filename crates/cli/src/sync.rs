@@ -374,10 +374,47 @@ async fn older_messages_from(app: &Arc<App>, url: &str, token: &str, machine_fil
     Ok(newest_first.len())
 }
 
+fn mark_attention_upgrade_after_first_sync(app: &Arc<App>) -> Result<(), RelayError> {
+    if !app.store.attention_upgrade_done().map_err(|error| RelayError {
+        status: None,
+        message: error.to_string(),
+    })? {
+        app.store
+            .set_attention_upgrade_done(true)
+            .map_err(|error| RelayError {
+                status: None,
+                message: error.to_string(),
+            })?;
+    }
+    app.attention_backfilled.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Applies one attention relay blob. The encrypted row and applied-id receipt commit in
+/// one transaction inside `receive_blob` (the 2000-entry applied_blob_ids ring is not the
+/// idempotency source). A receipt without a row still re-applies so upgrade can restore it.
+/// Returns Err on missing DEK / decrypt / store failure so the upgrade marker stays unset.
+fn apply_attention_blob(
+    app: &Arc<App>,
+    machine_file: &crate::keys::MachineFile,
+    blob: &BlobIn,
+) -> Result<(), String> {
+    // Fail closed before touching storage when this Device cannot open account ciphertext.
+    machine_file
+        .dek()
+        .map_err(|_| "Account key unavailable".to_string())?;
+    let ciphertext =
+        unb64(&blob.ciphertext).map_err(|_| "Invalid attention blob encoding".to_string())?;
+    crate::attention::receive_blob(app, &ciphertext, Some(&blob.id))?;
+    remember_applied(&mut app.state.lock().unwrap(), &blob.id);
+    Ok(())
+}
+
 /// Replays account-encrypted attention slots for Devices that advanced `last_seq` before
-/// this build recognized the kind. Idempotent under `attention::receive` (upsert by id,
-/// skip older revisions). Marks completion only after a full empty page so an interrupt
-/// leaves the marker unset and the next start finishes the set without duplicate rows.
+/// this build recognized the kind. Idempotent under `attention::receive_blob` (upsert by
+/// id, skip older revisions; applied-id only after the row commits). Marks completion only
+/// after every blob in the replay succeeds and a full empty page, so DEK/decrypt failures
+/// and interrupts leave the marker unset for the next start.
 async fn attention_upgrade_replay(
     app: &Arc<App>,
     url: &str,
@@ -390,8 +427,16 @@ async fn attention_upgrade_replay(
         let Some(last) = blobs.last().map(|blob| blob.seq) else { break };
         for blob in &blobs {
             // Relays filter by kinds; still ignore other kinds if a fixture returns them.
-            if blob.kind == "attention" {
-                apply_blob(app, machine_file, blob);
+            if blob.kind != "attention" {
+                continue;
+            }
+            if let Err(error) = apply_attention_blob(app, machine_file, blob) {
+                // Log ids/seq only — never ciphertext or key material.
+                tracing::warn!(blob_id = %blob.id, seq = blob.seq, %error, "attention upgrade");
+                return Err(RelayError {
+                    status: None,
+                    message: error,
+                });
             }
         }
         since = last;
@@ -410,25 +455,19 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
     // An older build can already have consumed the relay log while ignoring attention.
     // Replay this bounded slot family once; completion is a persisted marker (not "table
     // empty"), so a crash mid-loop resumes on the next start. `receive` upserts by id.
+    // When last_seq == 0, first_sync takes attention through NOT_CHAT_KINDS — the marker
+    // is set only after that succeeds, not before.
     if !app.attention_backfilled.load(Ordering::Relaxed) {
         let done = app.store.attention_upgrade_done().map_err(|error| RelayError {
             status: None,
             message: error.to_string(),
         })?;
-        if !done {
-            if app.state.lock().unwrap().last_seq > 0 {
-                attention_upgrade_replay(app, url, token, machine_file).await?;
-            } else {
-                // First sync takes attention through NOT_CHAT_KINDS; no historical replay.
-                app.store
-                    .set_attention_upgrade_done(true)
-                    .map_err(|error| RelayError {
-                        status: None,
-                        message: error.to_string(),
-                    })?;
-            }
+        if !done && app.state.lock().unwrap().last_seq > 0 {
+            attention_upgrade_replay(app, url, token, machine_file).await?;
         }
-        app.attention_backfilled.store(true, Ordering::Relaxed);
+        if done || app.state.lock().unwrap().last_seq > 0 {
+            app.attention_backfilled.store(true, Ordering::Relaxed);
+        }
     }
     if app.state.lock().unwrap().last_seq == 0 {
         match first_sync(app, url, token, machine_file).await? {
@@ -439,10 +478,14 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
                 for blob in blobs {
                     apply_incoming_blob(app, machine_file, &blob, false)?;
                 }
+                mark_attention_upgrade_after_first_sync(app)?;
             }
             // The held first sync still lets Pause and a running job's Stop through.
+            // Leave the upgrade marker unset until a later pull finishes first sync.
             FirstSync::Held => return pull_controls(app, url, token, machine_file).await,
-            FirstSync::Done | FirstSync::NothingThere => {}
+            FirstSync::Done | FirstSync::NothingThere => {
+                mark_attention_upgrade_after_first_sync(app)?;
+            }
         }
     }
     loop {
@@ -1062,6 +1105,13 @@ pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob:
         }
         return;
     }
+    // Attention records the applied id only after the encrypted row commits.
+    if blob.kind == "attention" {
+        if let Err(error) = apply_attention_blob(app, machine_file, blob) {
+            tracing::warn!(blob_id = %blob.id, seq = blob.seq, %error, "attention blob");
+        }
+        return;
+    }
     let already = {
         let mut state = app.state.lock().unwrap();
         if state.applied_blob_ids.iter().any(|id| id == &blob.id) {
@@ -1071,7 +1121,9 @@ pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob:
             false
         }
     };
-    if !already { apply_blob_contents(app, machine_file, blob); }
+    if !already {
+        apply_blob_contents(app, machine_file, blob);
+    }
 }
 
 /// Applies a blob whether or not it was applied before, and leaves no record of it.
@@ -1126,9 +1178,7 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Err(error) => tracing::warn!(%error, "credentials blob"),
         },
         "attention" => {
-            if let Err(error) = crate::attention::receive(app, &ciphertext) {
-                tracing::warn!(%error, "attention blob");
-            }
+            // Live attention applies go through apply_attention_blob (row before receipt).
         }
         "job" => {
             let Ok(machine) = machine_file.machine() else { return };
@@ -3952,8 +4002,7 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test]
-    async fn attention_upgrade_replay_is_idempotent_resumable_and_keeps_rows_encrypted() {
+    fn publish_attention_blobs(needle: &str, count: usize) -> (ScratchApp, Vec<BlobIn>, Vec<String>) {
         use crate::attention::{self, Category, Report, Source};
         use crate::keys::b64;
 
@@ -3964,12 +4013,11 @@ mod tests {
         scout.id = "scout".into();
         scout.name = "Scout".into();
         let (scout, dm) = publisher.0.create_bot_with_dm(scout, None).unwrap();
-        let needle = "UNIQUE-ATTENTION-PLAINTEXT-NEEDLE";
-        for (index, key) in ["one", "two", "three"].into_iter().enumerate() {
+        for index in 0..count {
             attention::report(
                 &publisher.0,
                 Report {
-                    key: key.into(),
+                    key: format!("key-{index}"),
                     category: Category::Review,
                     title: format!("{needle}-{index}"),
                     summary: "summary".into(),
@@ -3990,12 +4038,12 @@ mod tests {
             .unwrap();
         }
         let published = publisher.0.store.attention_rows().unwrap();
-        assert_eq!(published.len(), 3);
+        let ids: Vec<String> = published.iter().map(|(id, _)| id.clone()).collect();
         let blobs: Vec<BlobIn> = published
             .iter()
             .enumerate()
             .map(|(index, (id, ciphertext))| BlobIn {
-                id: id.clone(),
+                id: format!("blob-{id}"),
                 kind: "attention".into(),
                 recipient_machine_pubkey: None,
                 ciphertext: b64(ciphertext),
@@ -4003,10 +4051,11 @@ mod tests {
                 created_at: (index as i64) + 1,
             })
             .collect();
-        let expected_ids: Vec<String> = published.iter().map(|(id, _)| id.clone()).collect();
+        (publisher, blobs, ids)
+    }
 
-        // Upgrading Device: same account keys, empty attention table, last_seq already ahead.
-        let mut upgrading = scratch_app();
+    fn upgrading_device(publisher: &ScratchApp) -> ScratchApp {
+        let upgrading = scratch_app();
         crate::identity::create(&upgrading.0, Some("Upgrading".into())).unwrap();
         *upgrading.0.machine.lock().unwrap() = publisher.0.machine_file();
         upgrading.0.save_machine().unwrap();
@@ -4014,70 +4063,274 @@ mod tests {
             let mut state = upgrading.0.state.lock().unwrap();
             *state = publisher.0.state.lock().unwrap().clone();
             state.last_seq = 9;
+            state.applied_blob_ids.clear();
         }
         upgrading.0.save_state_now();
-        assert!(upgrading.0.store.attention_rows().unwrap().is_empty());
-        assert!(!upgrading.0.store.attention_upgrade_done().unwrap());
+        upgrading
+    }
 
-        let (url, server) = serve_log(blobs.clone()).await;
+    fn assert_no_plaintext(app: &App, needle: &str) {
+        for (_, bytes) in app.store.attention_rows().unwrap() {
+            assert!(
+                !bytes.windows(needle.len()).any(|part| part == needle.as_bytes()),
+                "attention SQLite rows must stay ciphertext"
+            );
+        }
+        let state = app.store.load_state().unwrap();
+        let state_json = serde_json::to_string(&state.applied_blob_ids).unwrap();
+        assert!(
+            !state_json.contains(needle),
+            "applied_blob_ids / saved state must not embed attention plaintext"
+        );
+        for item in app.store.outbox().unwrap() {
+            assert!(
+                !item
+                    .ciphertext
+                    .windows(needle.len())
+                    .any(|part| part == needle.as_bytes()),
+                "outbox ciphertext must not contain attention plaintext"
+            );
+        }
+    }
+
+    /// Relay that serves attention blobs one-per-page and can fail on a chosen page index.
+    async fn serve_attention_paged(
+        blobs: Vec<BlobIn>,
+        fail_on_page: Option<usize>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{
+            extract::{Query, State as HttpState},
+            routing::get,
+            Json, Router,
+        };
+        use serde_json::{json, Value};
+        use std::sync::atomic::AtomicUsize;
+
+        struct Gate {
+            pages: Vec<Vec<Value>>,
+            fail_on_page: Option<usize>,
+            calls: AtomicUsize,
+        }
+        async fn list(
+            HttpState(gate): HttpState<Arc<Gate>>,
+            Query(query): Query<std::collections::HashMap<String, String>>,
+        ) -> Result<Json<Value>, axum::http::StatusCode> {
+            if query.contains_key("policy_replay") {
+                return Ok(Json(policy_cut_fixture(&[], &query)));
+            }
+            let page = gate.calls.fetch_add(1, Ordering::SeqCst);
+            if gate.fail_on_page == Some(page) {
+                return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            let since: i64 = query["since"].parse().unwrap();
+            let kinds: Vec<&str> = query["kinds"].split(',').collect();
+            if !kinds.contains(&"attention") {
+                let head = gate
+                    .pages
+                    .iter()
+                    .flatten()
+                    .map(|blob| blob["seq"].as_i64().unwrap())
+                    .max()
+                    .unwrap_or(0);
+                return Ok(Json(json!({"blobs": [], "seq": head})));
+            }
+            let blobs = gate
+                .pages
+                .iter()
+                .flatten()
+                .filter(|blob| blob["seq"].as_i64().unwrap() > since)
+                .take(1)
+                .cloned()
+                .collect::<Vec<_>>();
+            let head = gate
+                .pages
+                .iter()
+                .flatten()
+                .map(|blob| blob["seq"].as_i64().unwrap())
+                .max()
+                .unwrap_or(0);
+            Ok(Json(json!({"blobs": blobs, "seq": head})))
+        }
+        let pages: Vec<Vec<Value>> = blobs
+            .into_iter()
+            .map(|blob| {
+                vec![json!({
+                    "id": blob.id, "kind": blob.kind,
+                    "recipient_machine_pubkey": blob.recipient_machine_pubkey,
+                    "ciphertext": blob.ciphertext, "seq": blob.seq, "created_at": blob.created_at
+                })]
+            })
+            .collect();
+        let gate = Arc::new(Gate {
+            pages,
+            fail_on_page,
+            calls: AtomicUsize::new(0),
+        });
+        let server = Router::new()
+            .route("/v1/blobs", get(list))
+            .with_state(gate);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        (
+            url,
+            tokio::spawn(async move { axum::serve(listener, server).await.unwrap() }),
+        )
+    }
+
+    #[tokio::test]
+    async fn attention_upgrade_replay_resumes_after_page_error_without_duplicates() {
+        let needle = "UNIQUE-ATTENTION-PLAINTEXT-NEEDLE";
+        let (publisher, blobs, expected_ids) = publish_attention_blobs(needle, 3);
+        let upgrading = upgrading_device(&publisher);
+        let (url, server) = serve_attention_paged(blobs.clone(), Some(1)).await;
         let machine_file = upgrading.0.machine_file().unwrap();
 
-        // Interrupt: apply only the first page's worth, leave the completion marker unset.
-        for blob in blobs.iter().take(2) {
-            apply_blob(&upgrading.0, &machine_file, blob);
-        }
-        assert_eq!(upgrading.0.store.attention_rows().unwrap().len(), 2);
+        let err = attention_upgrade_replay(&upgrading.0, &url, "token", &machine_file)
+            .await
+            .unwrap_err();
         assert!(
             !upgrading.0.store.attention_upgrade_done().unwrap(),
-            "a crash mid-replay must not record completion"
+            "page failure must leave the marker unset: {err:?}"
+        );
+        assert!(
+            !upgrading.0.store.attention_rows().unwrap().is_empty(),
+            "page 1 rows should already be committed"
         );
 
-        // Resume: full replay upserts the rest and marks done; a second run stays stable.
-        attention_upgrade_replay(&upgrading.0, &url, "token", &machine_file)
+        let (url2, server2) = serve_attention_paged(blobs, None).await;
+        attention_upgrade_replay(&upgrading.0, &url2, "token", &machine_file)
             .await
             .unwrap();
-        let after = upgrading.0.store.attention_rows().unwrap();
-        let mut ids: Vec<_> = after.iter().map(|(id, _)| id.clone()).collect();
+        assert!(upgrading.0.store.attention_upgrade_done().unwrap());
+        let mut ids: Vec<_> = upgrading
+            .0
+            .store
+            .attention_rows()
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         ids.sort();
         let mut expected = expected_ids.clone();
         expected.sort();
         assert_eq!(ids, expected);
-        assert!(upgrading.0.store.attention_upgrade_done().unwrap());
-        for (_, bytes) in &after {
-            assert!(
-                !bytes.windows(needle.len()).any(|part| part == needle.as_bytes()),
-                "upgrade stores ciphertext only; plaintext never hits SQLite"
-            );
-        }
+        assert_no_plaintext(&upgrading.0, needle);
 
-        attention_upgrade_replay(&upgrading.0, &url, "token", &machine_file)
+        attention_upgrade_replay(&upgrading.0, &url2, "token", &machine_file)
             .await
             .unwrap();
-        assert_eq!(
-            upgrading.0.store.attention_rows().unwrap().len(),
-            expected.len(),
-            "a second replay must not duplicate rows"
-        );
-
-        // Process restart: persisted marker skips the upgrade list; rows stay intact.
-        let home = upgrading.1.clone();
-        let discard = std::env::temp_dir().join(format!("beans-sync-discard-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&discard).unwrap();
-        upgrading.1 = discard; // Drop deletes the discard path; the real home stays for reopen.
-        drop(upgrading); // releases the SQLite lock on `home`
-        let reopened = App::load(Config {
-            home: home.clone(),
-            port: 0,
-        })
-        .unwrap();
-        assert!(reopened.store.attention_upgrade_done().unwrap());
-        assert_eq!(reopened.store.attention_rows().unwrap().len(), expected.len());
-        pull_blobs(&reopened, &url, "token", &reopened.machine_file().unwrap())
-            .await
-            .unwrap();
-        assert_eq!(reopened.store.attention_rows().unwrap().len(), expected.len());
+        assert_eq!(upgrading.0.store.attention_rows().unwrap().len(), expected.len());
         server.abort();
-        let _ = std::fs::remove_dir_all(&home);
+        server2.abort();
+    }
+
+    #[tokio::test]
+    async fn attention_upgrade_replay_keeps_marker_unset_when_dek_or_decrypt_fails() {
+        let needle = "DEK-FAIL-NEEDLE";
+        let (publisher, blobs, _) = publish_attention_blobs(needle, 1);
+        let upgrading = upgrading_device(&publisher);
+        let (url, server) = serve_attention_paged(blobs.clone(), None).await;
+
+        // Missing/unusable account key: replay must fail closed and leave the marker unset.
+        let mut broken = upgrading.0.machine_file().unwrap();
+        broken.account_dek = "not-valid-key".into();
+        let err = attention_upgrade_replay(&upgrading.0, &url, "token", &broken)
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, "Account key unavailable");
+        assert!(!upgrading.0.store.attention_upgrade_done().unwrap());
+        assert!(upgrading.0.store.attention_rows().unwrap().is_empty());
+
+        // Undecryptable ciphertext under a valid key also leaves the marker unset.
+        let mut garbage = blobs;
+        garbage[0].ciphertext = crate::keys::b64(b"not-an-attention-envelope");
+        let (url2, server2) = serve_attention_paged(garbage, None).await;
+        let err = attention_upgrade_replay(
+            &upgrading.0,
+            &url2,
+            "token",
+            &upgrading.0.machine_file().unwrap(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.message, "Attention blob could not be decrypted");
+        assert!(!upgrading.0.store.attention_upgrade_done().unwrap());
+        server.abort();
+        server2.abort();
+    }
+
+    #[tokio::test]
+    async fn attention_upgrade_replay_restores_row_when_receipt_has_no_row() {
+        let needle = "RECEIPT-WITHOUT-ROW-NEEDLE";
+        let (publisher, blobs, expected_ids) = publish_attention_blobs(needle, 1);
+        let upgrading = upgrading_device(&publisher);
+        // Simulate the old id-before-row crash: receipt remembered, row missing.
+        remember_applied(
+            &mut upgrading.0.state.lock().unwrap(),
+            &blobs[0].id,
+        );
+        upgrading.0.store.mark_blob_applied(&blobs[0].id).unwrap();
+        upgrading.0.save_state_now();
+        assert!(upgrading.0.store.attention_rows().unwrap().is_empty());
+        assert!(upgrading
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .applied_blob_ids
+            .contains(&blobs[0].id));
+
+        let (url, server) = serve_attention_paged(blobs, None).await;
+        attention_upgrade_replay(
+            &upgrading.0,
+            &url,
+            "token",
+            &upgrading.0.machine_file().unwrap(),
+        )
+        .await
+        .unwrap();
+        let rows = upgrading.0.store.attention_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, expected_ids[0]);
+        assert!(upgrading.0.store.attention_upgrade_done().unwrap());
+        assert_no_plaintext(&upgrading.0, needle);
+        server.abort();
+    }
+
+    #[test]
+    fn attention_upgrade_marker_upserts_when_metadata_row_is_missing() {
+        let scratch = scratch_app();
+        crate::identity::create(&scratch.0, Some("Marker".into())).unwrap();
+        scratch.0.store.delete_metadata_for_tests().unwrap();
+        assert!(!scratch.0.store.attention_upgrade_done().unwrap());
+        scratch.0.store.set_attention_upgrade_done(true).unwrap();
+        assert!(scratch.0.store.attention_upgrade_done().unwrap());
+        // Sync path must not error when recording the marker on a fresh upsert.
+        mark_attention_upgrade_after_first_sync(&scratch.0).unwrap();
+        assert!(scratch.0.store.attention_upgrade_done().unwrap());
+    }
+
+    #[tokio::test]
+    async fn attention_upgrade_marker_waits_for_first_sync_when_last_seq_is_zero() {
+        let scratch = scratch_app();
+        crate::identity::create(&scratch.0, Some("First".into())).unwrap();
+        assert_eq!(scratch.0.state.lock().unwrap().last_seq, 0);
+        assert!(!scratch.0.store.attention_upgrade_done().unwrap());
+        let (url, server) = serve_log(vec![]).await;
+        pull_blobs(
+            &scratch.0,
+            &url,
+            "token",
+            &scratch.0.machine_file().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            scratch.0.store.attention_upgrade_done().unwrap(),
+            "marker is set only after first_sync succeeds"
+        );
+        assert!(scratch.0.attention_backfilled.load(Ordering::Relaxed));
+        server.abort();
     }
 
 }

@@ -163,19 +163,34 @@ fn records(app: &App) -> Result<Vec<Record>, String> {
     let Some(dek) = app.dek() else {
         return Ok(vec![]);
     };
-    app.store
-        .attention_rows()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|(id, bytes)| {
-            let record: Record =
-                crate::crypto::decrypt_json(&dek, KIND, &bytes).map_err(|e| e.to_string())?;
-            if record.id != id {
-                return Err("Attention record id mismatch".into());
-            }
-            Ok(record)
-        })
-        .collect()
+    let mut records = Vec::new();
+    for (id, bytes) in app.store.attention_rows().map_err(|e| e.to_string())? {
+        match crate::crypto::decrypt_json::<Record>(&dek, KIND, &bytes) {
+            Ok(record) if record.id == id => records.push(record),
+            Ok(_) => tracing::warn!(%id, "attention record id mismatch; skipping"),
+            Err(_) => tracing::warn!(%id, "attention row could not be decrypted; skipping"),
+        }
+    }
+    Ok(records)
+}
+
+/// Loads and decrypts one stored attention row. Undecryptable or mismatched rows are
+/// skipped (logged) so they cannot block an incoming write for that id.
+fn stored_record(app: &App, dek: &[u8; 32], id: &str) -> Result<Option<Record>, String> {
+    let Some(bytes) = app.store.attention_row(id).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    match crate::crypto::decrypt_json::<Record>(dek, KIND, &bytes) {
+        Ok(record) if record.id == id => Ok(Some(record)),
+        Ok(_) => {
+            tracing::warn!(%id, "attention record id mismatch; treating as absent");
+            Ok(None)
+        }
+        Err(_) => {
+            tracing::warn!(%id, "attention row could not be decrypted; treating as absent");
+            Ok(None)
+        }
+    }
 }
 
 fn next_revision(app: &App, records: &[Record]) -> Result<Revision, String> {
@@ -313,22 +328,40 @@ pub fn changed(app: &App) {
 
 /// Applying sync never wakes bots or emits alerts. Only the originating Runner does so.
 pub fn receive(app: &App, ciphertext: &[u8]) -> Result<(), String> {
+    receive_blob(app, ciphertext, None)
+}
+
+/// Like [`receive`], and when `blob_id` is set commits the encrypted row and that relay
+/// receipt in one transaction so a crash cannot mark a blob seen without its row.
+pub fn receive_blob(app: &App, ciphertext: &[u8], blob_id: Option<&str>) -> Result<(), String> {
     let _write = WRITES.lock().unwrap();
-    let dek = app.dek().ok_or("Pair this Device first")?;
-    let incoming: Record =
-        crate::crypto::decrypt_json(&dek, KIND, ciphertext).map_err(|e| e.to_string())?;
-    let known = records(app)?;
-    if known
-        .iter()
-        .any(|record| record.id == incoming.id && record.revision >= incoming.revision)
-    {
-        return Ok(());
+    let dek = app.dek().ok_or("Account key unavailable")?;
+    let incoming: Record = crate::crypto::decrypt_json(&dek, KIND, ciphertext).map_err(|_| {
+        // Avoid echoing crypto details that might include material from the envelope.
+        "Attention blob could not be decrypted".to_string()
+    })?;
+    // Only the row for this id — a bad neighbor must not reject every incoming blob.
+    let stale = stored_record(app, &dek, &incoming.id)?
+        .is_some_and(|record| record.revision >= incoming.revision);
+    if !stale {
+        if let Some(blob_id) = blob_id {
+            app.store
+                .put_attention_with_applied(&incoming.id, ciphertext, blob_id)
+                .map_err(|e| e.to_string())?;
+        } else {
+            app.store
+                .put_attention(&incoming.id, ciphertext)
+                .map_err(|e| e.to_string())?;
+        }
+    } else if let Some(blob_id) = blob_id {
+        app.store
+            .mark_blob_applied(blob_id)
+            .map_err(|e| e.to_string())?;
     }
-    app.store
-        .put_attention(&incoming.id, ciphertext)
-        .map_err(|e| e.to_string())?;
     drop(_write);
-    changed(app);
+    if !stale {
+        changed(app);
+    }
     Ok(())
 }
 
@@ -336,8 +369,15 @@ pub fn receive(app: &App, ciphertext: &[u8]) -> Result<(), String> {
 pub fn push_history(app: &App) -> Result<(), String> {
     let Some(keys) = app.dek() else { return Ok(()) };
     for (id, ciphertext) in app.store.attention_rows().map_err(|e| e.to_string())? {
-        let plaintext = crate::crypto::decrypt(&keys, KIND, &ciphertext).map_err(|e| e.to_string())?;
-        let ciphertext = crate::crypto::encrypt(&keys, KIND, &plaintext).map_err(|e| e.to_string())?;
+        let plaintext = match crate::crypto::decrypt(&keys, KIND, &ciphertext) {
+            Ok(plaintext) => plaintext,
+            Err(_) => {
+                tracing::warn!(%id, "attention row could not be decrypted; skipping history push");
+                continue;
+            }
+        };
+        let ciphertext =
+            crate::crypto::encrypt(&keys, KIND, &plaintext).map_err(|e| e.to_string())?;
         app.push_slot_blob(KIND, Slot::latest(id), None, ciphertext);
     }
     Ok(())
@@ -1192,7 +1232,61 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_receive_is_idempotent_resumable_and_never_writes_plaintext() {
+    fn receive_loads_only_the_incoming_id_and_survives_a_bad_neighbor_row() {
+        let account = Account::new();
+        let item = report(&account.app, account.report(), Some(&account.scout.id), 0).unwrap();
+        let before = account.app.store.attention_rows().unwrap().len();
+        // Poison a second row so decrypt-all would fail the whole set.
+        account
+            .app
+            .store
+            .put_attention("poison", b"not-ciphertext")
+            .unwrap();
+        assert!(records(&account.app).is_ok(), "projection skips undecryptable rows");
+        let good = account
+            .app
+            .store
+            .attention_rows()
+            .unwrap()
+            .into_iter()
+            .find(|(id, _)| id != "poison")
+            .map(|(_, bytes)| bytes)
+            .expect("observation ciphertext");
+        receive(&account.app, &good).unwrap();
+        assert_eq!(
+            account.app.store.attention_rows().unwrap().len(),
+            before + 1,
+            "poison stays; observation is not duplicated"
+        );
+        // A fresh observation for another key still lands despite the poison row.
+        let mut other = account.report();
+        other.key = "neighbor".into();
+        other.title = "Other decision".into();
+        report(&account.app, other, Some(&account.scout.id), 0).unwrap();
+        assert!(
+            view(&account.app)
+                .unwrap()
+                .items
+                .iter()
+                .any(|each| each.id == item.id)
+        );
+        assert!(view(&account.app).unwrap().items.len() >= 2);
+    }
+
+    #[test]
+    fn push_history_skips_undecryptable_rows() {
+        let account = Account::new();
+        report(&account.app, account.report(), Some(&account.scout.id), 0).unwrap();
+        account
+            .app
+            .store
+            .put_attention("poison", b"not-ciphertext")
+            .unwrap();
+        push_history(&account.app).unwrap();
+    }
+
+    #[test]
+    fn upgrade_receive_is_idempotent_and_never_writes_plaintext() {
         let account = Account::new();
         let needle = "PLAINTEXT-MUST-NOT-TOUCH-DISK";
         let mut first = account.report();
@@ -1213,7 +1307,6 @@ mod tests {
         peer.app.save_state_now();
         assert!(peer.app.store.attention_rows().unwrap().is_empty());
 
-        // Interrupt: only the first ciphertext lands; the rest arrives on "restart".
         receive(&peer.app, &ciphertexts[0]).unwrap();
         assert_eq!(peer.app.store.attention_rows().unwrap().len(), 1);
         receive(&peer.app, &ciphertexts[0]).unwrap();

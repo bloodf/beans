@@ -1276,6 +1276,28 @@ impl LocalStore {
         Ok(rows)
     }
 
+    /// One attention ciphertext by id, if present.
+    pub fn attention_row(&self, id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .query_row(
+                "SELECT ciphertext FROM attention WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    pub fn delete_metadata_for_tests(&self) -> anyhow::Result<()> {
+        self.connection
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM metadata", [])?;
+        Ok(())
+    }
+
     /// Whether this Device has finished the one-time attention-slot upgrade replay.
     pub fn attention_upgrade_done(&self) -> anyhow::Result<bool> {
         let connection = self.connection.lock().unwrap();
@@ -1290,18 +1312,28 @@ impl LocalStore {
         Ok(done != 0)
     }
 
-    /// Persists upgrade-replay completion. Cleared with the account (`clear` / forget).
+    /// Persists upgrade-replay completion. Upserts the metadata row when missing so sync
+    /// never fails on this path. Cleared with the account (`clear` / forget).
     pub fn set_attention_upgrade_done(&self, done: bool) -> anyhow::Result<()> {
         let connection = self.connection.lock().unwrap();
+        let flag = done as i64;
         let updated = connection.execute(
             "UPDATE metadata SET attention_upgrade = ?1 WHERE id = 1",
-            params![done as i64],
+            params![flag],
         )?;
-        if updated == 0 {
-            // Identity not written yet; a later save_state creates the row at DEFAULT 0.
-            // Callers only mark done after the account exists, so this is a programming error.
-            anyhow::bail!("metadata row missing; cannot record attention upgrade");
+        if updated > 0 {
+            return Ok(());
         }
+        // No settings row yet (identity/save_state has not landed). Insert a minimal row so
+        // the upgrade marker still persists; later save_state fills the other columns.
+        connection.execute(
+            "INSERT INTO metadata (
+                 id, auto_review_json, last_seq, roster_slot_seq, machine_blob_hash,
+                 credentials_uploaded, paused, policy_json, attention_upgrade
+             ) VALUES (1, '{}', 0, 0, NULL, 0, 0, '{}', ?1)
+             ON CONFLICT(id) DO UPDATE SET attention_upgrade = excluded.attention_upgrade",
+            params![flag],
+        )?;
         Ok(())
     }
 
@@ -1311,6 +1343,37 @@ impl LocalStore {
              ON CONFLICT(id) DO UPDATE SET ciphertext = excluded.ciphertext",
             params![id, ciphertext],
         )?;
+        Ok(())
+    }
+
+    /// Writes the encrypted attention row and its relay receipt in one transaction so a
+    /// crash cannot leave a seen-id without its row (the applied_blob_ids ring alone is
+    /// not enough: it keeps only 2000 entries).
+    pub fn put_attention_with_applied(
+        &self,
+        id: &str,
+        ciphertext: &[u8],
+        blob_id: &str,
+    ) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        tx.execute(
+            "INSERT INTO attention (id, ciphertext) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET ciphertext = excluded.ciphertext",
+            params![id, ciphertext],
+        )?;
+        append_applied_blob_tx(&tx, blob_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records that a relay blob id was fully applied when the row was already present
+    /// (stale/equal revision). Prefer [`put_attention_with_applied`] for new rows.
+    pub fn mark_blob_applied(&self, blob_id: &str) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        append_applied_blob_tx(&tx, blob_id)?;
+        tx.commit()?;
         Ok(())
     }
 

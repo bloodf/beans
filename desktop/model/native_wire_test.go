@@ -89,6 +89,7 @@ func TestNativeStoreMessageOrderingAndUnread(t *testing.T) {
 		t.Fatalf("selected chat still unread: %d", chat.UnreadCount)
 	}
 	s.Selected = ""
+	chat.UnreadCount = 2
 	if err := s.Apply("message.added", json.RawMessage(`{
 		"chat_id": "c",
 		"message": {
@@ -103,8 +104,12 @@ func TestNativeStoreMessageOrderingAndUnread(t *testing.T) {
 		t.Fatal(err)
 	}
 	chat = s.Chat("c")
-	if len(chat.Messages) != 3 || chat.Messages[2].ID != "m3" || chat.UnreadCount != 1 {
-		t.Fatalf("added: count=%d unread=%d last=%+v", len(chat.Messages), chat.UnreadCount, chat.Messages[len(chat.Messages)-1])
+	if len(chat.Messages) != 3 || chat.Messages[2].ID != "m3" {
+		t.Fatalf("added: count=%d last=%+v", len(chat.Messages), chat.Messages[len(chat.Messages)-1])
+	}
+	// Unread stays at the CLI-supplied count; message.added never bumps locally.
+	if chat.UnreadCount != 2 {
+		t.Fatalf("message.added bumped unread to %d", chat.UnreadCount)
 	}
 	if quote := chat.Messages[2].Body.ReplyTo; quote == nil || quote.MessageID != "m2" || quote.Text != "two" {
 		t.Fatalf("reply quote: %+v", quote)
@@ -176,6 +181,127 @@ func TestNativeStoreRosterPreservesUnreadWithoutWireCount(t *testing.T) {
 	chat := s.Chat("c")
 	if chat.Title != "Named" || chat.UnreadCount != 4 {
 		t.Fatalf("roster dropped unread: %+v", chat)
+	}
+}
+
+func TestNativeStoreMarkReadSendsCLIAndSurvivesSnapshot(t *testing.T) {
+	s := NewNativeStore()
+	var calls []struct {
+		method string
+		params map[string]any
+	}
+	s.Perform = func(method string, params map[string]any) {
+		calls = append(calls, struct {
+			method string
+			params map[string]any
+		}{method, params})
+	}
+	if err := s.Apply("snapshot", json.RawMessage(`{
+		"has_identity": true,
+		"identity_id": "account",
+		"bots": [{"id": "b", "name": "Bot"}],
+		"chats": [
+			{"id": "c1", "bot_ids": ["b"], "messages": []},
+			{"id": "c2", "bot_ids": ["b"], "unread_count": 3, "messages": []}
+		]
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Snapshot focuses c1 and may mark it read; c2 stays unread until selected.
+	if s.Chat("c2").UnreadCount != 3 {
+		t.Fatalf("c2 unread=%d", s.Chat("c2").UnreadCount)
+	}
+	calls = nil
+	s.SelectChat("c2")
+	if s.Chat("c2").UnreadCount != 0 {
+		t.Fatal("SelectChat left local unread")
+	}
+	if len(calls) != 1 || calls[0].method != "chats.mark_read" || calls[0].params["chat_id"] != "c2" {
+		t.Fatalf("mark_read not sent: %+v", calls)
+	}
+	// Next snapshot after the CLI accepted mark_read reports unread_count: 0 — count stays cleared.
+	if err := s.Apply("snapshot", json.RawMessage(`{
+		"has_identity": true,
+		"identity_id": "account",
+		"bots": [{"id": "b", "name": "Bot"}],
+		"chats": [
+			{"id": "c1", "bot_ids": ["b"], "messages": []},
+			{"id": "c2", "bot_ids": ["b"], "unread_count": 0, "messages": []}
+		]
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	if s.Selected != "c2" || s.Chat("c2").UnreadCount != 0 {
+		t.Fatalf("snapshot reverted unread: selected=%q unread=%d", s.Selected, s.Chat("c2").UnreadCount)
+	}
+}
+
+func TestNativeStoreOwnMessageDoesNotBumpUnread(t *testing.T) {
+	s := NewNativeStore()
+	if err := s.Apply("snapshot", json.RawMessage(`{
+		"has_identity": true,
+		"identity_id": "account",
+		"bots": [{"id": "b", "name": "Bot"}],
+		"chats": [
+			{"id": "focused", "bot_ids": ["b"], "messages": []},
+			{"id": "other", "bot_ids": ["b"], "unread_count": 1, "messages": []}
+		]
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	s.Selected = "focused"
+	before := s.Chat("other").UnreadCount
+	if err := s.Apply("message.added", json.RawMessage(`{
+		"chat_id": "other",
+		"message": {
+			"id": "from-phone",
+			"chat_id": "other",
+			"author": {"kind": "you"},
+			"body": {"kind": "text", "text": "sent elsewhere"},
+			"state": {"kind": "complete"},
+			"created_at": 1
+		}
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	other := s.Chat("other")
+	if len(other.Messages) != 1 || other.Messages[0].ID != "from-phone" {
+		t.Fatalf("own message not stored: %+v", other.Messages)
+	}
+	if other.UnreadCount != before {
+		t.Fatalf("own message bumped unread from %d to %d", before, other.UnreadCount)
+	}
+}
+
+func TestNativeStoreMessageUpdatedUpsertsUnknownID(t *testing.T) {
+	s := NewNativeStore()
+	if err := s.Apply("snapshot", json.RawMessage(`{
+		"has_identity": true,
+		"identity_id": "account",
+		"bots": [{"id": "b", "name": "Bot"}],
+		"chats": [{"id": "c", "bot_ids": ["b"], "messages": []}]
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Apply("message.updated", json.RawMessage(`{
+		"chat_id": "c",
+		"message": {
+			"id": "missed-added",
+			"chat_id": "c",
+			"author": {"kind": "bot", "bot_id": "b"},
+			"body": {"kind": "text", "text": "recovered"},
+			"state": {"kind": "complete"},
+			"created_at": 1
+		}
+	}`)); err != nil {
+		t.Fatal(err)
+	}
+	chat := s.Chat("c")
+	if len(chat.Messages) != 1 || chat.Messages[0].ID != "missed-added" || chat.Messages[0].Body.Text != "recovered" {
+		t.Fatalf("updated did not upsert: %+v", chat.Messages)
+	}
+	if chat.UnreadCount != 0 {
+		t.Fatalf("upsert bumped unread: %d", chat.UnreadCount)
 	}
 }
 

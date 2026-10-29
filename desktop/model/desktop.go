@@ -22,6 +22,9 @@ type NativeStore struct {
 	LoadingOlder   map[string]bool
 	AccountID      string
 	ArchivedDrafts map[string]map[string]*NativeDraft
+	// Perform sends a fire-and-forget CLI method on the host's admitted transport
+	// (Solid `perform` / Go Store.perform). Tests record calls; nil skips the wire.
+	Perform func(method string, params map[string]any)
 }
 
 type NativeBot struct {
@@ -166,8 +169,7 @@ func (m NativeMessage) DisplayText() string {
 	return text
 }
 
-// SelectChat selects a chat and clears its local unread count, matching the Solid store's focus
-// path. The host still owns `chats.mark_read` over the CLI.
+// SelectChat selects a chat and marks it read through the CLI, matching Solid's focus path.
 func (s *NativeStore) SelectChat(id string) {
 	if s.Chat(id) == nil {
 		return
@@ -176,13 +178,17 @@ func (s *NativeStore) SelectChat(id string) {
 	s.MarkRead(id)
 }
 
-// MarkRead clears local unread for a chat without touching other chats' counts.
+// MarkRead clears local unread and performs `chats.mark_read`, as Solid and the ported Store do,
+// so the next snapshot does not restore the count.
 func (s *NativeStore) MarkRead(id string) {
 	chat := s.Chat(id)
 	if chat == nil || chat.UnreadCount <= 0 {
 		return
 	}
 	chat.UnreadCount = 0
+	if s.Perform != nil {
+		s.Perform("chats.mark_read", map[string]any{"chat_id": id})
+	}
 }
 
 func (s *NativeStore) Apply(name string, data json.RawMessage) error {
@@ -297,12 +303,9 @@ func (s *NativeStore) Apply(name string, data json.RawMessage) error {
 				return nil
 			}
 		}
-		if name == "message.added" {
-			c.Messages = append(c.Messages, msg)
-			if s.Selected != v.ChatID {
-				c.UnreadCount++
-			}
-		}
+		// Upsert unknown ids for both added and updated (Solid upsert; a missed added
+		// must not drop the message). Unread comes only from the CLI's unread_count.
+		c.Messages = append(c.Messages, msg)
 	case "message.removed":
 		var v struct {
 			ChatID string `json:"chat_id"`

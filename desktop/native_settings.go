@@ -87,7 +87,6 @@ func (n *nativeDesktop) settingsGeneral(c *ui.Context, p nativePalette) {
 		if ui.Button(c.Key("lang-"+opt.id), opt.title).Selected(language == opt.id).Clicked() {
 			v := opt.id
 			prefs.update(PreferencesPatch{AppLanguage: &v})
-			syncNativeLanguage()
 			if n.win != nil {
 				n.win.Invalidate()
 			}
@@ -97,17 +96,23 @@ func (n *nativeDesktop) settingsGeneral(c *ui.Context, p nativePalette) {
 	if ui.Button(c, L("Send with Return")).Selected(send).Clicked() {
 		v := !send
 		prefs.update(PreferencesPatch{SendOnReturn: &v})
+		if n.win != nil {
+			n.win.Invalidate()
+		}
 	}
 	stamps := pref.ShowTimestamps
 	if ui.Button(c, L("Show timestamps")).Selected(stamps).Clicked() {
 		v := !stamps
 		prefs.update(PreferencesPatch{ShowTimestamps: &v})
+		if n.win != nil {
+			n.win.Invalidate()
+		}
 	}
 }
 
 func (n *nativeDesktop) settingsAdvanced(c *ui.Context, _ nativePalette) {
 	ui.Text(c, cliCommand())
-	ui.Text(c, "Port "+strconv.Itoa(defaultCLIPort()))
+	ui.Text(c, L("Port")+" "+strconv.Itoa(prefs.get().CLIPort))
 	if ui.Button(c, L("Show Onboarding")).Clicked() {
 		n.shell.selectOnboarding()
 	}

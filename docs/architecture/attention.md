@@ -50,8 +50,11 @@ routed a report marks its other completed text as quiet so the user hears the ne
 | `attention.preferences` | `summaries?`, `urgent_direct?`, `default_coordinator_bot_id?` | `Preferences` |
 
 Bootstrap includes `attention { items, briefs, preferences }`. `attention.changed` replaces that
-projection. Devices take attention blobs in live pulls and during first sync; a Device upgrading
-from a build that skipped this kind replays attention slots once when its new local table is empty.
+projection. Devices take attention blobs in live pulls and during first sync. A Device upgrading
+from a build that skipped this kind replays attention slots once and records a persisted
+`attention_upgrade` marker when the replay finishes; an interrupt leaves the marker unset so the
+next start resumes. `receive` upserts by id, so a resume never duplicates rows, and rows stay
+ciphertext at rest.
 
 ## In the apps
 

@@ -21,7 +21,7 @@ export default function ReviewScreen() {
       <>
         <Stack.Screen options={{ title: t("Review") }} />
         <CloseToolbar label={Platform.OS === "android" ? t("Close") : t("Done")} onClose={() => router.back()} />
-        <Text style={[styles.empty, { color: p.secondaryLabel }]}>{t("Nothing needs your attention")}</Text>
+        <Text style={[styles.empty, { color: p.secondaryLabel }]}>{t("This review is no longer available")}</Text>
       </>
     );
   }

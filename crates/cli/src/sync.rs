@@ -14,7 +14,7 @@ const BULK_BLOBS: usize = 20;
 
 /// What a pull takes. `file` blobs are left out: a transcript fetches them by id when it
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
-pub const POLL_KINDS: &str = "roster,policy,chat,machine,credentials,memory_config,job,job_cancel,job_result,request,response";
+pub const POLL_KINDS: &str = "roster,policy,chat,machine,credentials,memory_config,attention,job,job_cancel,job_result,request,response";
 
 pub async fn run(app: Arc<App>) {
     let mut failures: u32 = 0;
@@ -241,7 +241,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
 }
 
 /// Everything a Device polls for but the messages.
-const NOT_CHAT_KINDS: &str = "roster,policy,machine,credentials,memory_config,job,job_cancel,job_result,request,response";
+const NOT_CHAT_KINDS: &str = "roster,policy,machine,credentials,memory_config,attention,job,job_cancel,job_result,request,response";
 /// How much of each chat a Device takes when it first syncs: what a bot's turn reads.
 const FIRST_SYNC_MESSAGES: usize = 400;
 /// Messages to a page when reading a chat backwards.
@@ -376,6 +376,35 @@ async fn older_messages_from(app: &Arc<App>, url: &str, token: &str, machine_fil
 
 /// Pulls the log from `last_seq` until a page comes back empty.
 async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<(), RelayError> {
+    // An older build can already have consumed the relay log while ignoring attention.
+    // Replay this bounded slot family once when its new local table is empty; ordinary
+    // first sync already reads it through NOT_CHAT_KINDS.
+    if !app.attention_backfilled.load(Ordering::Relaxed) {
+        if app.state.lock().unwrap().last_seq > 0
+            && app
+                .store
+                .attention_rows()
+                .map_err(|error| RelayError {
+                    status: None,
+                    message: error.to_string(),
+                })?
+                .is_empty()
+        {
+            let mut since = 0;
+            loop {
+                let (blobs, _) = app.relay.list_blobs(url, token, since, "attention").await?;
+                let Some(last) = blobs.last().map(|blob| blob.seq) else { break };
+                for blob in &blobs {
+                    // Relays filter by kinds; still ignore other kinds if a fixture returns them.
+                    if blob.kind == "attention" {
+                        apply_blob(app, machine_file, blob);
+                    }
+                }
+                since = last;
+            }
+        }
+        app.attention_backfilled.store(true, Ordering::Relaxed);
+    }
     if app.state.lock().unwrap().last_seq == 0 {
         match first_sync(app, url, token, machine_file).await? {
             FirstSync::CannotPage => {
@@ -1071,6 +1100,11 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Ok(credentials) => app.apply_credentials(&credentials),
             Err(error) => tracing::warn!(%error, "credentials blob"),
         },
+        "attention" => {
+            if let Err(error) = crate::attention::receive(app, &ciphertext) {
+                tracing::warn!(%error, "attention blob");
+            }
+        }
         "job" => {
             let Ok(machine) = machine_file.machine() else { return };
             match crate::crypto::unseal_json::<Job>(&machine.box_secret, &ciphertext) {
@@ -3204,10 +3238,14 @@ mod tests {
         async fn list(HttpState(gate): HttpState<Arc<PullGate>>,
             Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
             if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
+            let seq = gate.blob["seq"].as_i64().unwrap();
+            // Attention upgrade replay is empty here; do not join the conflict gate.
+            if query.get("kinds").map(|kinds| kinds.as_str()) == Some("attention") {
+                return Json(json!({"blobs": [], "seq": seq}));
+            }
             gate.entered.notify_one();
             gate.release.notified().await;
             let since: i64 = query["since"].parse().unwrap();
-            let seq = gate.blob["seq"].as_i64().unwrap();
             Json(json!({"blobs": if since < seq { vec![gate.blob.clone()] } else { Vec::new() }, "seq":seq}))
         }
         for first in [true, false] {
@@ -3245,7 +3283,7 @@ mod tests {
             a.0.upsert_message(message.clone(), true);
             gate.release.notify_one();
             let error = pulling.await.unwrap().unwrap_err();
-            assert!(error.message.contains("chat X"));
+            assert!(error.message.contains("chat X"), "{error:?}");
             assert_eq!(a.0.chat("X").unwrap().meta.bot_ids, ["bot-A"]);
             assert!(a.0.bot("bot-A").is_some() && a.0.bot("bot-B").is_none());
             assert!(a.0.message("X", &message.id).is_some());

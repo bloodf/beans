@@ -7,16 +7,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
+	"unsafe"
 )
+
+var desktopSetNamedSecurity = desktopControlSecurity.NewProc("SetNamedSecurityInfoW")
 
 // prepareWindowsDesktopTestControlHome applies the private control DACL to a
 // disposable home and its format marker. Production never repairs existing
 // objects; fixtures recreate a creator-owned directory and exclusive marker,
-// then apply the shared private SDDL via icacls (GitHub-hosted runners refuse
-// SetNamedSecurityInfo / ReOpenFile WRITE_DAC even on freshly mkdir'd TempDir
-// children).
+// take ownership (GHA admin TempDir children are often owned by Administrators),
+// then replace the DACL with desktopControlPrivateSDDL via SetNamedSecurityInfo.
 func prepareWindowsDesktopTestControlHome(t *testing.T, home string) {
 	t.Helper()
 	marker := filepath.Join(home, "format.json")
@@ -73,28 +76,35 @@ func failDesktopControlFixture(t *testing.T, err error) {
 	t.Fatal("private Windows fixture", err)
 }
 
-// secureDesktopControlPath sets the object owner to the current user and a
-// protected DACL granting only that user and LocalSystem full control, matching
-// desktopControlPrivateSDDL / desktopControlACLPrivate (GHA admin runners often
-// create TempDir children owned by BUILTIN\Administrators).
+// secureDesktopControlPath takes ownership of path then replaces its DACL with
+// the protected private-control SDDL (user full control only). takeown is
+// required on GHA so WRITE_DAC succeeds; SetNamedSecurityInfo then drops any
+// Administrators ACE takeown may have added.
 func secureDesktopControlPath(path string) error {
 	sid, err := desktopControlCurrentUserSID()
 	if err != nil {
 		return err
 	}
-	owner := "*" + sid
 	if out, err := exec.Command("takeown", "/F", path).CombinedOutput(); err != nil {
 		return fmt.Errorf("takeown: %w: %s", err, out)
 	}
-	if out, err := exec.Command("icacls", path, "/setowner", owner).CombinedOutput(); err != nil {
+	if out, err := exec.Command("icacls", path, "/setowner", "*"+sid).CombinedOutput(); err != nil {
 		return fmt.Errorf("icacls setowner: %w: %s", err, out)
 	}
-	// /inheritance:r drops inherited TempDir ACEs; /grant:r replaces grants for
-	// each SID with Full Control only.
-	grant := owner + ":(F)"
-	system := "*S-1-5-18:(F)"
-	if out, err := exec.Command("icacls", path, "/inheritance:r", "/grant:r", grant, "/grant:r", system).CombinedOutput(); err != nil {
-		return fmt.Errorf("icacls grant: %w: %s", err, out)
+	acl, descriptor, err := desktopControlParseDACL(desktopControlPrivateSDDL(sid, ""))
+	if err != nil {
+		return err
+	}
+	defer desktopFreeSecurity.Call(descriptor)
+	pathPtr, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	// SE_FILE_OBJECT; DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION.
+	status, _, _ := desktopSetNamedSecurity.Call(uintptr(unsafe.Pointer(pathPtr)), 1, 0x80000004, 0, 0, acl, 0)
+	runtime.KeepAlive(pathPtr)
+	if status != 0 {
+		return syscall.Errno(status)
 	}
 	return nil
 }

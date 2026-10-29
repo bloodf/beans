@@ -3,21 +3,20 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"testing"
-	"unsafe"
 )
-
-var desktopSetNamedSecurity = desktopControlSecurity.NewProc("SetNamedSecurityInfoW")
 
 // prepareWindowsDesktopTestControlHome applies the private control DACL to a
 // disposable home and its format marker. Production never repairs existing
 // objects; fixtures recreate a creator-owned directory and exclusive marker,
-// then apply the same private SDDL production uses (TempDir inheritance on
-// GitHub-hosted runners refuses WRITE_DAC on the original TempDir inode).
+// then apply the shared private SDDL via icacls (GitHub-hosted runners refuse
+// SetNamedSecurityInfo / ReOpenFile WRITE_DAC even on freshly mkdir'd TempDir
+// children).
 func prepareWindowsDesktopTestControlHome(t *testing.T, home string) {
 	t.Helper()
 	marker := filepath.Join(home, "format.json")
@@ -44,12 +43,6 @@ func prepareWindowsDesktopTestControlHome(t *testing.T, home string) {
 		_ = os.Rename(aside, home)
 		failDesktopControlFixture(t, err)
 	}
-	if err := secureDesktopControlFile(file); err != nil {
-		_ = file.Close()
-		_ = os.RemoveAll(home)
-		_ = os.Rename(aside, home)
-		failDesktopControlFixture(t, err)
-	}
 	if _, err := file.Write(data); err != nil {
 		_ = file.Close()
 		_ = os.RemoveAll(home)
@@ -57,6 +50,11 @@ func prepareWindowsDesktopTestControlHome(t *testing.T, home string) {
 		failDesktopControlFixture(t, err)
 	}
 	if err := file.Close(); err != nil {
+		_ = os.RemoveAll(home)
+		_ = os.Rename(aside, home)
+		failDesktopControlFixture(t, err)
+	}
+	if err := secureDesktopControlPath(marker); err != nil {
 		_ = os.RemoveAll(home)
 		_ = os.Rename(aside, home)
 		failDesktopControlFixture(t, err)
@@ -75,27 +73,22 @@ func failDesktopControlFixture(t *testing.T, err error) {
 	t.Fatal("private Windows fixture", err)
 }
 
-// secureDesktopControlPath sets the private control DACL on an existing path
-// (directory or file) the fixture just created and therefore owns.
+// secureDesktopControlPath sets a protected DACL granting only the current
+// user full control, matching desktopControlPrivateSDDL.
 func secureDesktopControlPath(path string) error {
 	sid, err := desktopControlCurrentUserSID()
 	if err != nil {
 		return err
 	}
-	acl, descriptor, err := desktopControlParseDACL(desktopControlPrivateSDDL(sid, ""))
+	// /inheritance:r drops inherited TempDir ACEs; /grant:r replaces grants for
+	// this SID with Full Control. SYSTEM is added so LocalSystem remains a
+	// trusted owner/grantee under desktopControlACLPrivate.
+	grant := "*" + sid + ":(F)"
+	system := "*S-1-5-18:(F)"
+	cmd := exec.Command("icacls", path, "/inheritance:r", "/grant:r", grant, "/grant:r", system)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return err
-	}
-	defer desktopFreeSecurity.Call(descriptor)
-	pathPtr, err := syscall.UTF16PtrFromString(path)
-	if err != nil {
-		return err
-	}
-	// SE_FILE_OBJECT; DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION.
-	status, _, _ := desktopSetNamedSecurity.Call(uintptr(unsafe.Pointer(pathPtr)), 1, 0x80000004, 0, 0, acl, 0)
-	runtime.KeepAlive(pathPtr)
-	if status != 0 {
-		return syscall.Errno(status)
+		return fmt.Errorf("icacls: %w: %s", err, out)
 	}
 	return nil
 }

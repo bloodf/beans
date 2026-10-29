@@ -71,6 +71,19 @@ jobs:
           printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
+      # #427: same hang on Linux as macOS — bash_input waited forever on continuous output.
+      - name: Stress bash_session hang regression (#427)
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            echo "=== hang regression $i/20 ==="
+            cargo test --locked -p beans-agent --lib \
+              tools::bash_session::tests::a_background_command_returns_while_it_prints \
+              -- --exact --test-threads=1
+            cargo test --locked -p beans-agent --lib \
+              tools::bash_session::tests::input_returns_while_the_command_keeps_printing \
+              -- --exact --test-threads=1
+          done
 
   rust-macos:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
@@ -94,7 +107,8 @@ jobs:
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
       # #427: bash_input used to hang forever on a command that keeps printing; prove the
-      # bounded return and the background settle path stay green under repetition on macOS.
+      # bounded return and the background settle path stay green under repetition on macOS
+      # (and Linux, same step on rust-linux).
       - name: Stress bash_session hang regression (#427)
         run: |
           set -euo pipefail

@@ -83,6 +83,22 @@ test("versions compare by number", () => {
   expect(updates.isNewer("1.1.9", "1.2.0")).toBe(false);
 });
 
+test("updates stay off without both native install functions", () => {
+  const present = {
+    installUpdate: async () => {},
+    onInstallStatus: () => () => {},
+  };
+  expect(updates.hasNativeUpdater({})).toBe(false);
+  expect(updates.hasNativeUpdater({ installUpdate: present.installUpdate })).toBe(false);
+  expect(updates.hasNativeUpdater({ onInstallStatus: present.onInstallStatus })).toBe(false);
+  expect(updates.hasNativeUpdater(present)).toBe(true);
+  expect(updates.computeUpdatesSupported("android", "ai.amoena.beans", {})).toBe(false);
+  expect(updates.computeUpdatesSupported("android", "ai.amoena.beans.dev", present)).toBe(false);
+  expect(updates.computeUpdatesSupported("ios", "ai.amoena.beans", present)).toBe(false);
+  expect(updates.computeUpdatesSupported("android", "ai.amoena.beans", present)).toBe(true);
+  expect(updates.updatesSupported).toBe(true);
+});
+
 test("download progress is a fraction, zero when the total is unknown", () => {
   expect(updates.downloadProgress(0, 100)).toBe(0);
   expect(updates.downloadProgress(25, 100)).toBe(0.25);

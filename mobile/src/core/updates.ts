@@ -2,11 +2,12 @@
 // each holding the APK Beans-X.Y.Z.apk; the same tag also carries desktop and CLI assets, so the
 // app finds the newest published beans-v release that has a digest-backed APK. Once a day, at
 // launch or back in the foreground, it checks and offers a newer version in an alert (Install
-// Update, Remind Me Later, Skip This Version); Settings › Updates checks at once or installs what a
-// check found, and holds the switch for the daily check. While it installs, a dialog shows how far
-// the download is (UpdateProgress), and a failure is said in an alert. The native module downloads the APK, checks it against the size and
-// SHA-256 GitHub lists for it, and hands it to the package installer, which replaces the app.
-// iOS updates through TestFlight, and Beans Dev never updates.
+// Update, Remind Me Later, Skip This Version); prefs hold the switch for the daily check. While
+// it installs, a dialog shows how far the download is (UpdateProgress), and a failure is said in
+// an alert. The native module downloads the APK, checks it against the size and SHA-256 GitHub
+// lists for it, and hands it to the package installer, which replaces the app. Until beans-core
+// exports that installer, the check never runs and nothing is offered. iOS updates through
+// TestFlight, and Beans Dev never updates.
 
 import * as Application from "expo-application";
 import { Alert, AppState, Platform } from "react-native";
@@ -35,7 +36,7 @@ function saveUpdatePrefs(next: UpdatePrefs) {
   savePrefs(next as Prefs);
 }
 
-/// Optional Android installer surface on beans-core (absent until the native Updater lands).
+/// Android installer surface on beans-core (absent until the native Updater lands).
 type InstallStatus =
   | { state: "downloading"; received: number; total: number }
   | { state: "installing" }
@@ -43,12 +44,26 @@ type InstallStatus =
   | { state: "cancelled" }
   | { state: "failed"; message: string };
 
-type UpdateNative = typeof core & {
+export type UpdateNative = {
   installUpdate?: (url: string, sha256: string, size: number) => Promise<void>;
   onInstallStatus?: (listener: (status: InstallStatus) => void) => () => void;
 };
 
-const updateNative = core as UpdateNative;
+const updateNative = core as typeof core & UpdateNative;
+
+/// True only when beans-core exposes both install entry points the JS layer drives.
+export function hasNativeUpdater(native: UpdateNative = updateNative): boolean {
+  return typeof native.installUpdate === "function" && typeof native.onInstallStatus === "function";
+}
+
+/// The release Android build can self-update only when the native installer is present.
+export function computeUpdatesSupported(
+  platform: string,
+  applicationId: string | null | undefined,
+  native: UpdateNative = updateNative,
+): boolean {
+  return platform === "android" && applicationId === "ai.amoena.beans" && hasNativeUpdater(native);
+}
 
 /// A newer release than this build.
 export interface Release {
@@ -73,8 +88,8 @@ export interface Updates {
 
 export const useUpdates = create<Updates>()(() => ({ phase: "idle", progress: 0, checked: false }));
 
-/// The release build on Android installs its own updates.
-export const updatesSupported = Platform.OS === "android" && Application.applicationId === "ai.amoena.beans";
+/// The release build on Android installs its own updates when the native installer is linked.
+export const updatesSupported = computeUpdatesSupported(Platform.OS, Application.applicationId);
 
 export const installedVersion = Application.nativeApplicationVersion ?? "0.0.0";
 
@@ -135,8 +150,8 @@ export async function newestRelease(): Promise<Release | null> {
 
 let checking: Promise<void> | null = null;
 
-/// Asks GitHub for a newer release. A check of the user's own (Settings) reports what it found
-/// there; a daily one offers a release in an alert unless the user skipped that version.
+/// Asks GitHub for a newer release. A manual check reports what it found; a daily one offers a
+/// release in an alert unless the user skipped that version.
 export function checkForUpdates(daily = false): Promise<void> {
   if (!updatesSupported) return Promise.resolve();
   if (checking) return checking;
@@ -182,9 +197,12 @@ export function offerUpdate(release: Release) {
 /// Downloads the release and hands it to the package installer. When that installs it, the
 /// system stops this app; a confirmation the user declines leaves the update on offer.
 export async function installUpdate(release: Release) {
+  if (!updatesSupported || !updateNative.installUpdate) {
+    installFailed(t("This build cannot install updates"));
+    return;
+  }
   useUpdates.setState({ phase: "downloading", progress: 0, error: undefined });
   try {
-    if (!updateNative.installUpdate) throw new Error(t("This build cannot install updates"));
     await updateNative.installUpdate(release.url, release.sha256, release.size);
   } catch (error) {
     installFailed(error instanceof Error ? error.message : String(error));
@@ -233,7 +251,7 @@ export function startUpdateChecks() {
   });
 }
 
-/// Settings' switch for the daily check.
+/// Prefs switch for the daily check.
 export function setDailyChecks(on: boolean) {
   saveUpdatePrefs({ ...updatePrefs(), update_checks: on });
   if (on) checkIfDue();

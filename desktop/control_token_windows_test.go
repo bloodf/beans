@@ -5,7 +5,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"testing"
 	"unsafe"
@@ -13,74 +12,88 @@ import (
 
 // prepareWindowsDesktopTestControlHome applies the private control DACL to a
 // disposable home and its format marker. Production never repairs existing
-// objects; fixtures must open WRITE_DAC on the inode (CreateFile) because
-// GitHub-hosted runners often refuse ReOpenFile(WRITE_DAC) on TempDir handles.
+// objects; fixtures recreate the directory and marker with the private SDDL at
+// create time so GitHub-hosted runners (which refuse WRITE_DAC on TempDir
+// inheritance) still get a private home.
 func prepareWindowsDesktopTestControlHome(t *testing.T, home string) {
 	t.Helper()
-	for _, path := range []string{home, filepath.Join(home, "format.json")} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatal(err)
-		}
-		if err := secureDesktopControlPath(path); err != nil {
-			if err == syscall.ERROR_ACCESS_DENIED {
-				t.Skipf("private Windows fixture unavailable: %v", err)
-			}
-			t.Fatal("private Windows fixture", err)
-		}
+	marker := filepath.Join(home, "format.json")
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
 	}
+	aside := home + ".aside"
+	if err := os.Rename(home, aside); err != nil {
+		failDesktopControlFixture(t, err)
+	}
+	if err := createDesktopControlDirectory(home); err != nil {
+		_ = os.Rename(aside, home)
+		failDesktopControlFixture(t, err)
+	}
+	if err := createDesktopControlFile(marker, data); err != nil {
+		_ = os.RemoveAll(home)
+		_ = os.Rename(aside, home)
+		failDesktopControlFixture(t, err)
+	}
+	_ = os.RemoveAll(aside)
 }
 
-func secureDesktopControlPath(path string) error {
-	token, err := syscall.OpenCurrentProcessToken()
+func failDesktopControlFixture(t *testing.T, err error) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf("private Windows fixture: %v", err)
+	}
+	if err == syscall.ERROR_ACCESS_DENIED {
+		t.Skipf("private Windows fixture unavailable: %v", err)
+	}
+	t.Fatal("private Windows fixture", err)
+}
+
+func desktopControlSecurityAttributes(extra string) (*syscall.SecurityAttributes, uintptr, error) {
+	sid, err := desktopControlCurrentUserSID()
+	if err != nil {
+		return nil, 0, err
+	}
+	_, descriptor, err := desktopControlParseDACL(desktopControlPrivateSDDL(sid, extra))
+	if err != nil {
+		return nil, 0, err
+	}
+	sa := &syscall.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(syscall.SecurityAttributes{})),
+		SecurityDescriptor: descriptor,
+		InheritHandle:      0,
+	}
+	return sa, descriptor, nil
+}
+
+func createDesktopControlDirectory(path string) error {
+	sa, descriptor, err := desktopControlSecurityAttributes("")
 	if err != nil {
 		return err
-	}
-	defer token.Close()
-	user, err := token.GetTokenUser()
-	if err != nil {
-		return err
-	}
-	sid, err := user.User.Sid.String()
-	if err != nil {
-		return err
-	}
-	text, err := syscall.UTF16PtrFromString("D:P(A;;FA;;;" + sid + ")")
-	if err != nil {
-		return err
-	}
-	var descriptor uintptr
-	ok, _, callErr := desktopConvertSecurity.Call(uintptr(unsafe.Pointer(text)), 1, uintptr(unsafe.Pointer(&descriptor)), 0)
-	runtime.KeepAlive(text)
-	if ok == 0 {
-		return callErr
 	}
 	defer desktopFreeSecurity.Call(descriptor)
-	var present, defaulted uint32
-	var acl uintptr
-	ok, _, callErr = desktopReadDACL.Call(descriptor, uintptr(unsafe.Pointer(&present)), uintptr(unsafe.Pointer(&acl)), uintptr(unsafe.Pointer(&defaulted)))
-	if ok == 0 {
-		return callErr
-	}
-	if present == 0 || acl == 0 {
-		return syscall.EINVAL
-	}
 	pathPtr, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
 		return err
 	}
-	// WRITE_DAC | READ_CONTROL, with BACKUP_SEMANTICS so directories reopen.
-	handle, err := syscall.CreateFile(pathPtr, 0x00040000|0x00020000,
-		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
-		nil, syscall.OPEN_EXISTING, syscall.FILE_FLAG_BACKUP_SEMANTICS, 0)
-	runtime.KeepAlive(pathPtr)
+	return syscall.CreateDirectory(pathPtr, sa)
+}
+
+func createDesktopControlFile(path string, data []byte) error {
+	sa, descriptor, err := desktopControlSecurityAttributes("")
+	if err != nil {
+		return err
+	}
+	defer desktopFreeSecurity.Call(descriptor)
+	pathPtr, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	handle, err := syscall.CreateFile(pathPtr, syscall.GENERIC_WRITE, 0, sa, syscall.CREATE_NEW, syscall.FILE_ATTRIBUTE_NORMAL, 0)
 	if err != nil {
 		return err
 	}
 	defer syscall.CloseHandle(handle)
-	status, _, _ := desktopSetSecurity.Call(uintptr(handle), 1, 0x80000004, 0, 0, acl, 0)
-	runtime.KeepAlive(user)
-	if status != 0 {
-		return syscall.Errno(status)
-	}
-	return nil
+	var written uint32
+	return syscall.WriteFile(handle, data, &written, nil)
 }

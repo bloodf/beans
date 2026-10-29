@@ -206,7 +206,8 @@ jobs:
           go-version-file: desktop/go.mod
           cache-dependency-path: desktop/go.sum
       - run: go build ./...
-      - run: go test -count=1 ./...
+      # -v so control-token PASS/FAIL lines are visible in the job log.
+      - run: go test -count=1 -v ./...
 
   mobile:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository

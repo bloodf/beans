@@ -35,6 +35,52 @@ var desktopValidACL = desktopControlSecurity.NewProc("IsValidAcl")
 var desktopDescriptorLength = desktopControlSecurity.NewProc("GetSecurityDescriptorLength")
 var desktopValidDescriptor = desktopControlSecurity.NewProc("IsValidSecurityDescriptor")
 
+// desktopControlPrivateSDDL is the protected DACL granting the account full
+// control. extra appends ACE strings for fixtures (a foreign read grant).
+func desktopControlPrivateSDDL(userSID, extra string) string {
+	return "D:P(A;;FA;;;" + userSID + ")" + extra
+}
+
+func desktopControlCurrentUserSID() (string, error) {
+	token, err := syscall.OpenCurrentProcessToken()
+	if err != nil {
+		return "", err
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return "", err
+	}
+	sid, err := user.User.Sid.String()
+	runtime.KeepAlive(user)
+	return sid, err
+}
+
+// desktopControlParseDACL converts an SDDL string to a DACL pointer. The
+// caller must LocalFree descriptor when finished; acl is interior to it.
+func desktopControlParseDACL(sddl string) (acl, descriptor uintptr, err error) {
+	text, err := syscall.UTF16PtrFromString(sddl)
+	if err != nil {
+		return 0, 0, err
+	}
+	ok, _, callErr := desktopConvertSecurity.Call(uintptr(unsafe.Pointer(text)), 1, uintptr(unsafe.Pointer(&descriptor)), 0)
+	runtime.KeepAlive(text)
+	if ok == 0 {
+		return 0, 0, callErr
+	}
+	var present, defaulted uint32
+	ok, _, callErr = desktopReadDACL.Call(descriptor, uintptr(unsafe.Pointer(&present)), uintptr(unsafe.Pointer(&acl)), uintptr(unsafe.Pointer(&defaulted)))
+	if ok == 0 {
+		desktopFreeSecurity.Call(descriptor)
+		return 0, 0, callErr
+	}
+	if present == 0 || acl == 0 {
+		desktopFreeSecurity.Call(descriptor)
+		return 0, 0, syscall.EINVAL
+	}
+	return acl, descriptor, nil
+}
+
 func desktopSIDBytes(sid uintptr) ([]byte, error) {
 	if sid == 0 { return nil, syscall.EINVAL }
 	valid, _, _ := desktopValidSID.Call(sid)
@@ -88,35 +134,29 @@ func validateDesktopControlObject(file *os.File, private bool) error {
 
 // Apply the private DACL to the newly opened inode, not a replaceable pathname.
 func secureDesktopControlFile(file *os.File) error {
-	token, err := syscall.OpenCurrentProcessToken()
-	if err != nil { return err }
-	defer token.Close()
-	user, err := token.GetTokenUser()
-	if err != nil { return err }
-	sid, err := user.User.Sid.String()
-	if err != nil { return err }
-	text, err := syscall.UTF16PtrFromString("D:P(A;;FA;;;" + sid + ")")
-	if err != nil { return err }
-	var descriptor uintptr
-	ok, _, callErr := desktopConvertSecurity.Call(uintptr(unsafe.Pointer(text)), 1, uintptr(unsafe.Pointer(&descriptor)), 0)
-	runtime.KeepAlive(text)
-	if ok == 0 { return callErr }
+	sid, err := desktopControlCurrentUserSID()
+	if err != nil {
+		return err
+	}
+	acl, descriptor, err := desktopControlParseDACL(desktopControlPrivateSDDL(sid, ""))
+	if err != nil {
+		return err
+	}
 	defer desktopFreeSecurity.Call(descriptor)
-	var present, defaulted uint32
-	var acl uintptr
-	ok, _, callErr = desktopReadDACL.Call(descriptor, uintptr(unsafe.Pointer(&present)), uintptr(unsafe.Pointer(&acl)), uintptr(unsafe.Pointer(&defaulted)))
-	if ok == 0 { return callErr }
-	if present == 0 || acl == 0 { return syscall.EINVAL }
 	// Reopen the same inode with WRITE_DAC: ordinary write handles do not
 	// necessarily include permission to change its security descriptor.
 	handle, _, openErr := desktopReopenControl.Call(file.Fd(), 0x00040000, 7, 0x02000000)
 	runtime.KeepAlive(file)
-	if handle == ^uintptr(0) { return openErr }
+	if handle == ^uintptr(0) {
+		return openErr
+	}
 	defer syscall.CloseHandle(syscall.Handle(handle))
 	// SE_FILE_OBJECT; DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION.
 	status, _, _ := desktopSetSecurity.Call(handle, 1, 0x80000004, 0, 0, acl, 0)
 	runtime.KeepAlive(file)
-	if status != 0 { return syscall.Errno(status) }
+	if status != 0 {
+		return syscall.Errno(status)
+	}
 	return nil
 }
 

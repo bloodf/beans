@@ -6,6 +6,7 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- Native Go model layer: adapted store, wire, markdown, autolink, format, MCP, models and replies under `desktop/model`, with Beans protocol 5 / `beans-v2` fields only. `NativeStore` keeps Session admission and adds unread, reply quotes, ordered messages and Markdown plain-text display; Solid `desktop/src/model` stays until D12.
 - `BEANS_NATIVE=1` uses the adapted native shell foundation: pane headers, resizable sidebar/inspector dividers, settings and onboarding navigation, localized chrome controls, and Vibrancy sidebar material. The Solid page stays the default client.
 - Desktop tests run mounted browser consumers through the Solid Vite compiler and pinned Chromium, alongside the Bun unit checks.
 - `BEANS_NATIVE=1` opens a native sidebar, transcript and multiline composer alongside the full client. Awaited text/file/reply sends and file selection are account-fenced; updater installation requires closing the native window. The full client and website preview remain available.

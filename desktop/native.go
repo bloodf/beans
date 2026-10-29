@@ -38,6 +38,32 @@ func nativeEnabled() bool { return os.Getenv("BEANS_NATIVE") == "1" }
 
 var native = &nativeDesktop{store: model.NewNativeStore(), shell: newNativeShellLayout()}
 
+func init() { native.wireStore() }
+
+// wireStore binds fire-and-forget CLI methods (mark_read, …) to the admitted transport.
+func (n *nativeDesktop) wireStore() {
+	if n.store == nil {
+		return
+	}
+	n.store.Perform = n.performCLI
+}
+
+func (n *nativeDesktop) performCLI(method string, params map[string]any) {
+	payload, err := json.Marshal(params)
+	if err != nil || !n.store.Connected || !n.store.HasIdentity {
+		return
+	}
+	authority, client := n.authority, app.cli
+	if client == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, _ = client.requestBound(ctx, method, payload, &authority)
+	}()
+}
+
 func (n *nativeDesktop) event(name string, data json.RawMessage) {
 	if name == "identity.changed" || name == "snapshot" {
 		var v struct {

@@ -5,10 +5,11 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { runsInTerminal, type AutoReview, type Bot, type Chat, type ChatMeta, type ChatUsage, type Device, type Message, type ProviderModel, type ProviderStatus, type RelayProblem, type Routine } from "./model";
+import { reviewIsOpen, runsInTerminal, type AutoReview, type Bot, type Chat, type ChatMeta, type ChatUsage, type Device, type Message, type ProviderModel, type ProviderStatus, type RelayProblem, type ReviewItem, type Routine } from "./model";
 import { t } from "../i18n";
 import { savePrefs } from "./prefs";
 import { clearComposerDrafts, invalidateComposerSends, removeComposerDraft } from "./composerDraft";
+import { emptyAttention, type AttentionView } from "./attention";
 
 export interface Running {
   chatId: string;
@@ -63,6 +64,10 @@ export interface StoreState {
   routines: Routine[];
   /// Auto-review, from the roster.
   auto_review: AutoReview;
+  /// What waits on the user across chats, from the core's attention projection.
+  attention: AttentionView;
+  /// Reviews the phone knows about (from a snapshot or later review-queue sync).
+  reviews: ReviewItem[];
   /// The account's provider credentials, the same on every Device.
   providers: ProviderStatus[];
   /// The models the core's catalog offers, for the Model and Thinking pickers.
@@ -109,6 +114,8 @@ function empty(): Omit<StoreState, "ready" | "dictation_lang" | "appActive" | "a
     chats: [],
     routines: [],
     auto_review: { is_enabled: true, rules: [] },
+    attention: emptyAttention(),
+    reviews: [],
     providers: [],
     models: [],
     running: {},
@@ -180,6 +187,8 @@ export function replaceSnapshot(snapshot: {
   chats: Chat[];
   routines?: Routine[];
   auto_review?: AutoReview;
+  attention?: AttentionView;
+  reviews?: ReviewItem[];
   providers?: ProviderStatus[];
   models?: ProviderModel[];
   running_turns: { job_id: string; chat_id: string; bot_id: string; routine_id?: string | null }[];
@@ -214,6 +223,8 @@ export function replaceSnapshot(snapshot: {
     }),
     routines: snapshot.routines ?? [],
     auto_review: snapshot.auto_review ?? { is_enabled: true, rules: [] },
+    attention: snapshot.attention ?? emptyAttention(),
+    reviews: snapshot.reviews ?? [],
     providers: snapshot.providers ?? (sameAccountSource ? providers : []),
     models: snapshot.models ?? (sameAccountSource ? models : []),
     running,
@@ -434,6 +445,24 @@ function pick<T>(record: Record<string, T>, keys: Set<string>): Record<string, T
 export function useChat(id: string): Chat | undefined {
   return useStore((s) => s.chats.find((c) => c.id === id));
 }
+
+export function useReview(id: string | undefined): ReviewItem | undefined {
+  return useStore((s) => (id ? s.reviews.find((review) => review.id === id) : undefined));
+}
+
+/// Keeps the newest revision of a review; an older reply or event changes nothing.
+export function acceptReview(item: ReviewItem) {
+  useStore.setState((s) => {
+    const index = s.reviews.findIndex((each) => each.id === item.id);
+    if (index < 0) return { reviews: [...s.reviews, item] };
+    if (s.reviews[index].revision >= item.revision) return s;
+    const reviews = s.reviews.slice();
+    reviews[index] = item;
+    return { reviews };
+  });
+}
+
+export { reviewIsOpen };
 
 export function useBots(): Bot[] {
   return useStore((s) => s.bots);

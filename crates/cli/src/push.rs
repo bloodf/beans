@@ -89,8 +89,26 @@ pub fn permission(app: &Arc<App>, message: &Message) {
     send(app, &chat, &bot, &format!("Confirmation needed: {summary}"), Some(message.id.clone()));
 }
 
+/// A structured coordinator brief or urgent specialist escalation, each with its own
+/// synced preference. Quiet updates never reach the push transport.
+pub fn attention(app: &Arc<App>, message: &Message) {
+    let Some(notification) = message.notification else { return };
+    if !crate::attention::allows(app, notification) { return }
+    let Author::Bot { bot_id } = &message.author else { return };
+    let (Some(chat), Some(bot)) = (app.chat(&message.chat_id), app.bot(bot_id)) else { return };
+    let crate::model::Body::Text { text, .. } = &message.body else { return };
+    send_inner(app, &chat, &bot, text, None, Some(message.id.clone()));
+}
+
 fn send(app: &Arc<App>, chat: &Chat, bot: &Bot, text: &str, permission_id: Option<String>) {
-    if !should_notify(app, &chat.meta.id, permission_id.as_deref()) {
+    send_inner(app, chat, bot, text, permission_id, None);
+}
+
+fn send_inner(app: &Arc<App>, chat: &Chat, bot: &Bot, text: &str, permission_id: Option<String>, attention_id: Option<String>) {
+    let eligible = |app: &App| should_notify(app, &chat.meta.id, permission_id.as_deref()) && attention_id.as_deref().is_none_or(|id| {
+        app.message(&chat.meta.id, id).and_then(|message| message.notification).is_some_and(|kind| crate::attention::allows(app, kind))
+    });
+    if !eligible(app) {
         return;
     }
     let (Some(dek), Some(url), Some(machine)) = (app.dek(), app.relay_url(), app.machine_file().and_then(|m| m.machine().ok())) else { return };
@@ -111,20 +129,24 @@ fn send(app: &Arc<App>, chat: &Chat, bot: &Bot, text: &str, permission_id: Optio
         }
     }
     let app = app.clone();
+    let chat_id = chat.meta.id.clone();
     tokio::spawn(async move {
+        let eligible = |app: &App| should_notify(app, &chat_id, permission_id.as_deref()) && attention_id.as_deref().is_none_or(|id| {
+            app.message(&chat_id, id).and_then(|message| message.notification).is_some_and(|kind| crate::attention::allows(app, kind))
+        });
         tokio::time::sleep(READ_GRACE).await;
         let give_up = tokio::time::Instant::now() + RETRY_FOR;
         let mut wait = FIRST_RETRY;
         loop {
             // A read mark is about a reply that arrived, so a phone left open or disconnected
             // before the reply finished cannot suppress future notifications.
-            if app.dek() != Some(dek) || !should_notify(&app, &notice.chat_id, permission_id.as_deref()) {
+            if app.dek() != Some(dek) || !eligible(&app) {
                 return;
             }
             let result = match crate::sync::token_or_register(&app, &url, &machine).await {
                 Ok(token) => {
                     // Authentication may have taken longer than the read mark.
-                    if app.dek() != Some(dek) || !should_notify(&app, &notice.chat_id, permission_id.as_deref()) {
+                    if app.dek() != Some(dek) || !eligible(&app) {
                         return;
                     }
                     app.relay.push(&url, &token, &crate::keys::b64(&sealed)).await

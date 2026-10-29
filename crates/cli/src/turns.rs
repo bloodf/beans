@@ -137,6 +137,8 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
     let system_prompt = system_prompt(app, &chat, &bot, job, &store, routine.as_ref(), &plugin_briefs);
 
     let unattended = routine.is_some();
+    let attention_handled = Arc::new(std::sync::atomic::AtomicBool::new(job.kind == "attention_report"));
+    let attention_started_at = now_secs();
     let mut tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ListTeammates { app: app.clone(), chat_id: chat.meta.id.clone() }),
         Arc::new(MessageBot { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), hops: job.hops }),
@@ -147,6 +149,14 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         Arc::new(InstallPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), unattended }),
         Arc::new(ConnectPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }),
         Arc::new(Propose { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), job_id: job.id.clone(), unattended }),
+        Arc::new(crate::attention::AttentionTool {
+            app: app.clone(),
+            bot_id: bot.id.clone(),
+            chat_id: chat.meta.id.clone(),
+            hops: job.hops,
+            handled: attention_handled.clone(),
+            requesting_bot_id: job.from_bot_id.clone().filter(|_| job.kind == "message"),
+        }),
     ];
     tools.extend(memory_tools(app, &store, &chat));
     tools.push(Arc::new(Recall { app: app.clone(), store: store.clone(), bot: bot.clone() }));
@@ -261,6 +271,7 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         capture_message_ids: memory_access.as_ref().filter(|a|a.consent_revision.is_some()&&a.capture_cap>0).map(|_|Vec::new()),
         tools_used: Vec::new(),
         plugin_tools: plugin_tools.clone(),
+        attention_handled: attention_handled.clone(),
         shown_len: 0,
         last_flush: std::time::Instant::now(),
     })));
@@ -356,12 +367,38 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
     let (outcome, capture_ids, line) = {
         let mut state = sink.0.lock().unwrap();
         state.finish();
+        // A structured report/brief has its own alert. Other text in the reporting turn stays
+        // in its source transcript, with no second specialist or coordinator alert.
+        if attention_handled.load(std::sync::atomic::Ordering::Relaxed) {
+            for mut message in app
+                .store
+                .text_messages(&chat.meta.id, Some(attention_started_at as i64), None)
+                .unwrap_or_default()
+            {
+                if message.created_at >= attention_started_at
+                    && message.author
+                        == (Author::Bot {
+                            bot_id: bot.id.clone(),
+                        })
+                    && message.notification.is_none()
+                {
+                    message.notification = Some(crate::attention::Notification::Quiet);
+                    app.upsert_message(message, true);
+                }
+            }
+        }
         let outcome = if state.sent { TurnOutcome::Sent }
             else if failed || state.failed { TurnOutcome::Skipped }
             else { TurnOutcome::Pass };
-        if let Some(error) = state.last_error.as_deref().filter(|_| state.failed) {
+        if let Some(error) = state.last_error.as_deref().filter(|_| {
+            state.failed && !attention_handled.load(std::sync::atomic::Ordering::Relaxed)
+        }) {
             crate::push::failed(app, &chat, &bot, error);
-        } else if let (TurnOutcome::Sent, Some(said)) = (outcome, state.last_said.as_deref()) {
+        } else if let (TurnOutcome::Sent, Some(said), false) = (
+            outcome,
+            state.last_said.as_deref(),
+            attention_handled.load(std::sync::atomic::Ordering::Relaxed),
+        ) {
             crate::push::reply(app, &chat, &bot, said);
         }
         let line = turn_log_line(state.last_said.as_deref(), &state.tools_used, outcome == TurnOutcome::Skipped);
@@ -1047,6 +1084,8 @@ struct TurnState {
     tools_used: Vec<String>,
     /// The turn's plugin catalog, for the plugin a script is using ("Using GitHub…").
     plugin_tools: Arc<crate::plugins::mcp::PluginCatalog>,
+    /// The turn published a brief or routed an attention report; other text stays quiet.
+    attention_handled: Arc<std::sync::atomic::AtomicBool>,
     /// How much of the reply being generated the chat already shows.
     shown_len: usize,
     last_flush: std::time::Instant,
@@ -1290,7 +1329,11 @@ impl TurnState {
     }
 
     fn new_text_message(&self) -> Message {
-        Message::new(&self.chat_id, Author::Bot { bot_id: self.bot_id.clone() }, Body::text(String::new()))
+        let mut message = Message::new(&self.chat_id, Author::Bot { bot_id: self.bot_id.clone() }, Body::text(String::new()));
+        if self.attention_handled.load(std::sync::atomic::Ordering::Relaxed) {
+            message.notification = Some(crate::attention::Notification::Quiet);
+        }
+        message
     }
 
     /// The plugin of a script's latest plugin call that ran or runs, by name.
@@ -1565,6 +1608,7 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
         bot.id
     ));
     prompt.push_str(&routines_prompt(app, bot));
+    prompt.push_str(&crate::attention::prompt(app, &bot.id, &chat.meta.id, job.kind == "attention_report"));
     prompt.push_str(&plugins_prompt(app, bot, plugins));
     prompt.push_str(&memory_prompt(store));
 
@@ -3725,6 +3769,7 @@ mod tests {
             capture_message_ids: None,
             tools_used: Vec::new(),
             plugin_tools: crate::plugins::mcp::turn_catalog(app, Vec::new()),
+            attention_handled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             shown_len: 0,
             last_flush: std::time::Instant::now(),
         }

@@ -88,6 +88,8 @@ const ANDROID: Record<string, string> = {
   dice: "casino",
   "arrow.uturn.backward": "undo",
   "arrow.counterclockwise": "restart_alt",
+  "doc.text.magnifyingglass": "pageview",
+  "arrow.triangle.2.circlepath": "sync",
 };
 
 export interface SymbolProps {

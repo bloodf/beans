@@ -117,6 +117,9 @@ fn store_avatar(app: &Arc<App>, avatar: Option<Option<crate::files::OutgoingFile
 }
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Value, String> {
+    if method.starts_with("attention.") {
+        return crate::attention::dispatch(app, method, params, None);
+    }
     match method {
         "skills.discovery" => crate::skill_discovery::dispatch(app, params).await,
         "skills.library.preview" | "skills.library.import" | "skills.library.uninstall" => crate::skill_library::dispatch(app, method, params).await,

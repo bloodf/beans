@@ -14,7 +14,7 @@ const BULK_BLOBS: usize = 20;
 
 /// What a pull takes. `file` blobs are left out: a transcript fetches them by id when it
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
-pub const POLL_KINDS: &str = "roster,policy,chat,machine,credentials,memory_config,job,job_cancel,job_result,request,response";
+pub const POLL_KINDS: &str = "roster,policy,chat,machine,credentials,memory_config,attention,job,job_cancel,job_result,request,response";
 
 pub async fn run(app: Arc<App>) {
     let mut failures: u32 = 0;
@@ -238,7 +238,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
 }
 
 /// Everything a Device polls for but the messages.
-const NOT_CHAT_KINDS: &str = "roster,policy,machine,credentials,memory_config,job,job_cancel,job_result,request,response";
+const NOT_CHAT_KINDS: &str = "roster,policy,machine,credentials,memory_config,attention,job,job_cancel,job_result,request,response";
 /// How much of each chat a Device takes when it first syncs: what a bot's turn reads.
 const FIRST_SYNC_MESSAGES: usize = 400;
 /// Messages to a page when reading a chat backwards.
@@ -371,8 +371,150 @@ async fn older_messages_from(app: &Arc<App>, url: &str, token: &str, machine_fil
     Ok(newest_first.len())
 }
 
+fn mark_attention_upgrade_after_first_sync(app: &Arc<App>) -> Result<(), RelayError> {
+    if !app.store.attention_upgrade_done().map_err(|error| RelayError {
+        status: None,
+        message: error.to_string(),
+    })? {
+        app.store
+            .set_attention_upgrade_done(true)
+            .map_err(|error| RelayError {
+                status: None,
+                message: error.to_string(),
+            })?;
+    }
+    app.attention_backfilled.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Outcome of applying one attention upgrade blob.
+enum AttentionApply {
+    /// Row (and receipt) committed, or an equal/newer row already present.
+    Applied,
+    /// Ciphertext is permanently unusable under the present account key; skipped.
+    SkippedCorrupt,
+}
+
+/// Applies one attention relay blob. The encrypted row and applied-id receipt commit in
+/// one transaction inside `receive_blob` (the 2000-entry applied_blob_ids ring is not the
+/// idempotency source). A receipt without a row still re-applies so upgrade can restore it.
+///
+/// - Missing DEK → `Err` (marker stays unset; caller must not abort the rest of sync).
+/// - Present DEK but corrupt/undecryptable ciphertext → `SkippedCorrupt` (log + skip;
+///   replay may still complete and set the marker).
+fn apply_attention_blob(
+    app: &Arc<App>,
+    machine_file: &crate::keys::MachineFile,
+    blob: &BlobIn,
+) -> Result<AttentionApply, String> {
+    // Fail closed before touching storage when this Device cannot open account ciphertext.
+    machine_file
+        .dek()
+        .map_err(|_| "Account key unavailable".to_string())?;
+    let ciphertext = match unb64(&blob.ciphertext) {
+        Ok(ciphertext) => ciphertext,
+        Err(_) => {
+            tracing::warn!(
+                blob_id = %blob.id,
+                seq = blob.seq,
+                "attention blob encoding invalid; skipping"
+            );
+            // Permanently bad under this account: remember so live pulls do not re-warn.
+            let _ = app.store.mark_blob_applied(&blob.id);
+            remember_applied(&mut app.state.lock().unwrap(), &blob.id);
+            return Ok(AttentionApply::SkippedCorrupt);
+        }
+    };
+    match crate::attention::receive_blob(app, &ciphertext, Some(&blob.id)) {
+        Ok(()) => {
+            remember_applied(&mut app.state.lock().unwrap(), &blob.id);
+            Ok(AttentionApply::Applied)
+        }
+        Err(error) if error == "Attention blob could not be decrypted" => {
+            // Key is present; this envelope will not heal. Skip and continue the replay.
+            tracing::warn!(
+                blob_id = %blob.id,
+                seq = blob.seq,
+                "attention blob could not be decrypted; skipping"
+            );
+            let _ = app.store.mark_blob_applied(&blob.id);
+            remember_applied(&mut app.state.lock().unwrap(), &blob.id);
+            Ok(AttentionApply::SkippedCorrupt)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Replays account-encrypted attention slots for Devices that advanced `last_seq` before
+/// this build recognized the kind. Idempotent under `attention::receive_blob`.
+///
+/// Marker rules: set when the replay finishes (corrupt blobs may have been skipped). Left
+/// unset only when the account key is unavailable or the relay/network errors — so a later
+/// start retries. Callers must not abort the normal pull on `Err`.
+async fn attention_upgrade_replay(
+    app: &Arc<App>,
+    url: &str,
+    token: &str,
+    machine_file: &crate::keys::MachineFile,
+) -> Result<(), RelayError> {
+    let mut since = 0;
+    loop {
+        let (blobs, _) = app.relay.list_blobs(url, token, since, "attention").await?;
+        let Some(last) = blobs.last().map(|blob| blob.seq) else { break };
+        for blob in &blobs {
+            // Relays filter by kinds; still ignore other kinds if a fixture returns them.
+            if blob.kind != "attention" {
+                continue;
+            }
+            match apply_attention_blob(app, machine_file, blob) {
+                Ok(AttentionApply::Applied | AttentionApply::SkippedCorrupt) => {}
+                Err(error) => {
+                    // Missing DEK or store failure — ids/seq only, never key material.
+                    tracing::warn!(blob_id = %blob.id, seq = blob.seq, %error, "attention upgrade");
+                    return Err(RelayError {
+                        status: None,
+                        message: error,
+                    });
+                }
+            }
+        }
+        since = last;
+    }
+    app.store
+        .set_attention_upgrade_done(true)
+        .map_err(|error| RelayError {
+            status: None,
+            message: error.to_string(),
+        })?;
+    Ok(())
+}
+
 /// Pulls the log from `last_seq` until a page comes back empty.
 async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<(), RelayError> {
+    // An older build can already have consumed the relay log while ignoring attention.
+    // Replay this bounded slot family once; completion is a persisted marker (not "table
+    // empty"), so a crash mid-loop resumes on the next start. `receive` upserts by id.
+    // When last_seq == 0, first_sync takes attention through NOT_CHAT_KINDS — the marker
+    // is set only after that succeeds, not before. A replay Err (missing DEK or relay)
+    // must not abort this pull: log it, leave the marker unset, and continue so messages,
+    // roster and controls still sync.
+    if !app.attention_backfilled.load(Ordering::Relaxed) {
+        let done = app.store.attention_upgrade_done().map_err(|error| RelayError {
+            status: None,
+            message: error.to_string(),
+        })?;
+        if !done && app.state.lock().unwrap().last_seq > 0 {
+            if let Err(error) = attention_upgrade_replay(app, url, token, machine_file).await {
+                tracing::warn!(
+                    error = %error.message,
+                    "attention upgrade replay; continuing sync"
+                );
+            }
+        }
+        if done || app.state.lock().unwrap().last_seq > 0 {
+            app.attention_backfilled.store(true, Ordering::Relaxed);
+        }
+    }
     if app.state.lock().unwrap().last_seq == 0 {
         match first_sync(app, url, token, machine_file).await? {
             FirstSync::CannotPage => {
@@ -382,10 +524,14 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
                 for blob in blobs {
                     apply_incoming_blob(app, machine_file, &blob, false)?;
                 }
+                mark_attention_upgrade_after_first_sync(app)?;
             }
             // The held first sync still lets Pause and a running job's Stop through.
+            // Leave the upgrade marker unset until a later pull finishes first sync.
             FirstSync::Held => return pull_controls(app, url, token, machine_file).await,
-            FirstSync::Done | FirstSync::NothingThere => {}
+            FirstSync::Done | FirstSync::NothingThere => {
+                mark_attention_upgrade_after_first_sync(app)?;
+            }
         }
     }
     loop {
@@ -1005,6 +1151,18 @@ pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob:
         }
         return;
     }
+    // Attention records the applied id only after the encrypted row commits. A corrupt
+    // blob under a present DEK is skipped (see apply_attention_blob); last_seq still
+    // advances, so there is no later upgrade replay for it once the marker is set.
+    if blob.kind == "attention" {
+        match apply_attention_blob(app, machine_file, blob) {
+            Ok(AttentionApply::Applied | AttentionApply::SkippedCorrupt) => {}
+            Err(error) => {
+                tracing::warn!(blob_id = %blob.id, seq = blob.seq, %error, "attention blob");
+            }
+        }
+        return;
+    }
     let already = {
         let mut state = app.state.lock().unwrap();
         if state.applied_blob_ids.iter().any(|id| id == &blob.id) {
@@ -1014,7 +1172,9 @@ pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob:
             false
         }
     };
-    if !already { apply_blob_contents(app, machine_file, blob); }
+    if !already {
+        apply_blob_contents(app, machine_file, blob);
+    }
 }
 
 /// Applies a blob whether or not it was applied before, and leaves no record of it.
@@ -1068,6 +1228,9 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Ok(credentials) => app.apply_credentials(&credentials),
             Err(error) => tracing::warn!(%error, "credentials blob"),
         },
+        "attention" => {
+            // Live attention applies go through apply_attention_blob (row before receipt).
+        }
         "job" => {
             let Ok(machine) = machine_file.machine() else { return };
             match crate::crypto::unseal_json::<Job>(&machine.box_secret, &ciphertext) {
@@ -3201,10 +3364,14 @@ mod tests {
         async fn list(HttpState(gate): HttpState<Arc<PullGate>>,
             Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
             if query.contains_key("policy_replay") { return Json(policy_cut_fixture(&[], &query)); }
+            let seq = gate.blob["seq"].as_i64().unwrap();
+            // Attention upgrade replay is empty here; do not join the conflict gate.
+            if query.get("kinds").map(|kinds| kinds.as_str()) == Some("attention") {
+                return Json(json!({"blobs": [], "seq": seq}));
+            }
             gate.entered.notify_one();
             gate.release.notified().await;
             let since: i64 = query["since"].parse().unwrap();
-            let seq = gate.blob["seq"].as_i64().unwrap();
             Json(json!({"blobs": if since < seq { vec![gate.blob.clone()] } else { Vec::new() }, "seq":seq}))
         }
         for first in [true, false] {
@@ -3242,7 +3409,7 @@ mod tests {
             a.0.upsert_message(message.clone(), true);
             gate.release.notify_one();
             let error = pulling.await.unwrap().unwrap_err();
-            assert!(error.message.contains("chat X"));
+            assert!(error.message.contains("chat X"), "{error:?}");
             assert_eq!(a.0.chat("X").unwrap().meta.bot_ids, ["bot-A"]);
             assert!(a.0.bot("bot-A").is_some() && a.0.bot("bot-B").is_none());
             assert!(a.0.message("X", &message.id).is_some());
@@ -3883,6 +4050,516 @@ mod tests {
             assert!(!matches!(event, Event::JobStarted { job_id, .. } if job_id == job.id), "the queued turn remains held");
         }
         assert!(!app.is_paused());
+        server.abort();
+    }
+
+    fn publish_attention_blobs(needle: &str, count: usize) -> (ScratchApp, Vec<BlobIn>, Vec<String>) {
+        use crate::attention::{self, Category, Report, Source};
+        use crate::keys::b64;
+
+        let publisher = scratch_app();
+        crate::identity::create(&publisher.0, Some("Publisher".into())).unwrap();
+        let chef = publisher.0.state.lock().unwrap().bots[0].clone();
+        let mut scout = chef.clone();
+        scout.id = "scout".into();
+        scout.name = "Scout".into();
+        let (scout, dm) = publisher.0.create_bot_with_dm(scout, None).unwrap();
+        for index in 0..count {
+            attention::report(
+                &publisher.0,
+                Report {
+                    key: format!("key-{index}"),
+                    category: Category::Review,
+                    title: format!("{needle}-{index}"),
+                    summary: "summary".into(),
+                    next_action: "act".into(),
+                    source: Source {
+                        chat_id: dm.meta.id.clone(),
+                        task_id: None,
+                        message_id: None,
+                        review_id: None,
+                    },
+                    coordinator_bot_id: Some(chef.id.clone()),
+                    urgent: false,
+                    quiet: true,
+                },
+                Some(&scout.id),
+                0,
+            )
+            .unwrap();
+        }
+        let published = publisher.0.store.attention_rows().unwrap();
+        let ids: Vec<String> = published.iter().map(|(id, _)| id.clone()).collect();
+        let blobs: Vec<BlobIn> = published
+            .iter()
+            .enumerate()
+            .map(|(index, (id, ciphertext))| BlobIn {
+                id: format!("blob-{id}"),
+                kind: "attention".into(),
+                recipient_machine_pubkey: None,
+                ciphertext: b64(ciphertext),
+                seq: (index as i64) + 1,
+                created_at: (index as i64) + 1,
+            })
+            .collect();
+        (publisher, blobs, ids)
+    }
+
+    fn upgrading_device(publisher: &ScratchApp) -> ScratchApp {
+        let upgrading = scratch_app();
+        crate::identity::create(&upgrading.0, Some("Upgrading".into())).unwrap();
+        *upgrading.0.machine.lock().unwrap() = publisher.0.machine_file();
+        upgrading.0.save_machine().unwrap();
+        // identity::create queued a roster under the discarded local DEK; drop it so a
+        // follow-on roster encrypted with the publisher account key can apply cleanly.
+        if let Some(item) = upgrading.0.store.queued_roster().unwrap() {
+            upgrading
+                .0
+                .store
+                .remove_outbox_with_state(&item.id, &upgrading.0.state.lock().unwrap())
+                .unwrap();
+        }
+        upgrading.0.store.forget_queued_roster_base().unwrap();
+        {
+            let mut state = upgrading.0.state.lock().unwrap();
+            *state = publisher.0.state.lock().unwrap().clone();
+            state.last_seq = 9;
+            state.applied_blob_ids.clear();
+        }
+        upgrading.0.save_state_now();
+        upgrading
+    }
+
+    fn assert_no_plaintext(app: &App, needle: &str) {
+        for (_, bytes) in app.store.attention_rows().unwrap() {
+            assert!(
+                !bytes.windows(needle.len()).any(|part| part == needle.as_bytes()),
+                "attention SQLite rows must stay ciphertext"
+            );
+        }
+        let state = app.store.load_state().unwrap();
+        let state_json = serde_json::to_string(&state.applied_blob_ids).unwrap();
+        assert!(
+            !state_json.contains(needle),
+            "applied_blob_ids / saved state must not embed attention plaintext"
+        );
+        for item in app.store.outbox().unwrap() {
+            assert!(
+                !item
+                    .ciphertext
+                    .windows(needle.len())
+                    .any(|part| part == needle.as_bytes()),
+                "outbox ciphertext must not contain attention plaintext"
+            );
+        }
+    }
+
+    fn blob_json(blob: &BlobIn) -> serde_json::Value {
+        serde_json::json!({
+            "id": blob.id, "kind": blob.kind,
+            "recipient_machine_pubkey": blob.recipient_machine_pubkey,
+            "ciphertext": blob.ciphertext, "seq": blob.seq, "created_at": blob.created_at
+        })
+    }
+
+    /// Attention blobs one-per-page (optional fail), plus follow-on blobs for the normal pull.
+    async fn serve_attention_paged(
+        blobs: Vec<BlobIn>,
+        fail_on_page: Option<usize>,
+        follow_on: Vec<BlobIn>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{
+            extract::{Query, State as HttpState},
+            routing::get,
+            Json, Router,
+        };
+        use serde_json::{json, Value};
+        use std::sync::atomic::AtomicUsize;
+
+        struct Gate {
+            pages: Vec<Vec<Value>>,
+            follow_on: Vec<Value>,
+            fail_on_page: Option<usize>,
+            attention_calls: AtomicUsize,
+        }
+        async fn list(
+            HttpState(gate): HttpState<Arc<Gate>>,
+            Query(query): Query<std::collections::HashMap<String, String>>,
+        ) -> Result<Json<Value>, axum::http::StatusCode> {
+            if query.contains_key("policy_replay") {
+                return Ok(Json(policy_cut_fixture(&[], &query)));
+            }
+            let since: i64 = query["since"].parse().unwrap();
+            let kinds: Vec<&str> = query["kinds"].split(',').collect();
+            let head = gate
+                .pages
+                .iter()
+                .flatten()
+                .chain(gate.follow_on.iter())
+                .map(|blob| blob["seq"].as_i64().unwrap())
+                .max()
+                .unwrap_or(0);
+            if kinds == ["attention"] {
+                let page = gate.attention_calls.fetch_add(1, Ordering::SeqCst);
+                if gate.fail_on_page == Some(page) {
+                    return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                }
+                let blobs = gate
+                    .pages
+                    .iter()
+                    .flatten()
+                    .filter(|blob| blob["seq"].as_i64().unwrap() > since)
+                    .take(1)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                return Ok(Json(json!({"blobs": blobs, "seq": head})));
+            }
+            let blobs: Vec<Value> = gate
+                .pages
+                .iter()
+                .flatten()
+                .chain(gate.follow_on.iter())
+                .filter(|blob| {
+                    blob["seq"].as_i64().unwrap() > since
+                        && kinds.contains(&blob["kind"].as_str().unwrap())
+                })
+                .cloned()
+                .collect();
+            Ok(Json(json!({"blobs": blobs, "seq": head})))
+        }
+        let pages: Vec<Vec<Value>> = blobs.iter().map(|blob| vec![blob_json(blob)]).collect();
+        let follow_on: Vec<Value> = follow_on.iter().map(blob_json).collect();
+        let gate = Arc::new(Gate {
+            pages,
+            follow_on,
+            fail_on_page,
+            attention_calls: AtomicUsize::new(0),
+        });
+        let server = Router::new()
+            .route("/v1/blobs", get(list))
+            .route(
+                "/v1/groups/{group}/blobs",
+                get(|| async {
+                    Json(serde_json::json!({"slots": [], "has_more": false}))
+                }),
+            )
+            .with_state(gate);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        (
+            url,
+            tokio::spawn(async move { axum::serve(listener, server).await.unwrap() }),
+        )
+    }
+
+    /// Follow-on policy used when a test only needs to prove the normal pull still runs.
+    fn follow_on_policy(app: &App) -> BlobIn {
+        account_blob(
+            app,
+            10,
+            "policy",
+            "follow-on-policy",
+            &PolicyBlob {
+                paused: Some(false),
+                bot_id: None,
+                capabilities: None,
+                removed: false,
+                version: PolicyVersion {
+                    counter: 1,
+                    device_id: "follow-on".into(),
+                },
+            },
+        )
+    }
+
+    /// Chat + roster + policy after the attention replay, so the garbage-blob case can prove
+    /// messages, roster and controls still sync once a corrupt neighbor is skipped.
+    fn follow_on_message_roster_controls(app: &App) -> (Vec<BlobIn>, Message, String) {
+        let (chat_id, bots, chats) = {
+            let state = app.state.lock().unwrap();
+            let chat_id = state
+                .chats
+                .first()
+                .map(|chat| chat.meta.id.clone())
+                .expect("publisher has a chat");
+            (
+                chat_id,
+                state.bots.clone(),
+                state.chats.iter().map(|chat| chat.meta.clone()).collect::<Vec<_>>(),
+            )
+        };
+        let message = Message::new(&chat_id, Author::You, Body::text("follow-on after garbage"));
+        let mut bots = bots;
+        let renamed = "Scout-synced".to_string();
+        if let Some(bot) = bots.iter_mut().find(|bot| bot.id == "scout") {
+            bot.name = renamed.clone();
+        } else {
+            panic!("publisher scout bot missing");
+        }
+        let roster = RosterBlob {
+            bots,
+            chats,
+            updated_at: 100.0,
+            ..Default::default()
+        };
+        let policy = PolicyBlob {
+            paused: Some(true),
+            bot_id: None,
+            capabilities: None,
+            removed: false,
+            version: PolicyVersion {
+                counter: 2,
+                device_id: "follow-on".into(),
+            },
+        };
+        let blobs = vec![
+            account_blob(
+                app,
+                10,
+                "chat",
+                "follow-on-chat",
+                &ChatBlob::Upsert {
+                    message: message.clone(),
+                },
+            ),
+            account_blob(app, 11, "roster", "follow-on-roster", &roster),
+            account_blob(app, 12, "policy", "follow-on-policy", &policy),
+        ];
+        (blobs, message, renamed)
+    }
+
+    #[tokio::test]
+    async fn attention_upgrade_skips_corrupt_blob_sets_marker_and_keeps_syncing() {
+        let needle = "GARBAGE-AMONG-GOOD-NEEDLE";
+        let (publisher, mut blobs, expected_ids) = publish_attention_blobs(needle, 2);
+        // Insert a permanently bad envelope between two good slots.
+        blobs.insert(
+            1,
+            BlobIn {
+                id: "blob-garbage".into(),
+                kind: "attention".into(),
+                recipient_machine_pubkey: None,
+                ciphertext: crate::keys::b64(b"not-an-attention-envelope"),
+                seq: 2,
+                created_at: 2,
+            },
+        );
+        blobs[2].seq = 3;
+        blobs[2].created_at = 3;
+        let upgrading = upgrading_device(&publisher);
+        let (follow, message, renamed_bot) = follow_on_message_roster_controls(&publisher.0);
+        let (url, server) = serve_attention_paged(blobs, None, follow).await;
+        pull_blobs(
+            &upgrading.0,
+            &url,
+            "token",
+            &upgrading.0.machine_file().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            upgrading.0.store.attention_upgrade_done().unwrap(),
+            "corrupt blobs are skipped; the replay still completes and sets the marker"
+        );
+        let mut ids: Vec<_> = upgrading
+            .0
+            .store
+            .attention_rows()
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort();
+        let mut expected = expected_ids;
+        expected.sort();
+        assert_eq!(ids, expected, "good attention rows are restored");
+        assert_eq!(
+            upgrading
+                .0
+                .message(&message.chat_id, &message.id)
+                .expect("follow-on chat message synced")
+                .body,
+            Body::text("follow-on after garbage"),
+            "messages still sync after a skipped corrupt attention blob"
+        );
+        assert_eq!(
+            upgrading
+                .0
+                .state
+                .lock()
+                .unwrap()
+                .bots
+                .iter()
+                .find(|bot| bot.id == "scout")
+                .map(|bot| bot.name.as_str()),
+            Some(renamed_bot.as_str()),
+            "roster still syncs after a skipped corrupt attention blob"
+        );
+        assert!(
+            upgrading.0.is_paused(),
+            "controls still sync after a skipped corrupt attention blob"
+        );
+        assert_no_plaintext(&upgrading.0, needle);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn attention_upgrade_missing_dek_leaves_marker_unset_but_sync_continues() {
+        let needle = "MISSING-DEK-NEEDLE";
+        let (publisher, blobs, _) = publish_attention_blobs(needle, 1);
+        let upgrading = upgrading_device(&publisher);
+        // Policy-only follow-on: roster apply fails closed on a missing DEK, but the pull
+        // must still return Ok and leave the marker unset for a later retry.
+        let follow = follow_on_policy(&publisher.0);
+        let (url, server) = serve_attention_paged(blobs, None, vec![follow]).await;
+        let mut broken = upgrading.0.machine_file().unwrap();
+        broken.account_dek = "not-valid-key".into();
+        *upgrading.0.machine.lock().unwrap() = Some(broken.clone());
+        let before_seq = upgrading.0.state.lock().unwrap().last_seq;
+        pull_blobs(&upgrading.0, &url, "token", &broken)
+            .await
+            .expect("missing DEK must not abort pull_blobs");
+        assert!(
+            !upgrading.0.store.attention_upgrade_done().unwrap(),
+            "missing DEK leaves the marker unset for a later retry"
+        );
+        assert!(upgrading.0.store.attention_rows().unwrap().is_empty());
+        // Normal pull still ran (cursor advanced past the follow-on page) even though the
+        // ciphertext could not be opened without a DEK.
+        assert!(upgrading.0.attention_backfilled.load(Ordering::Relaxed));
+        assert!(
+            upgrading.0.state.lock().unwrap().last_seq > before_seq,
+            "sync continues past the upgrade failure"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn attention_upgrade_relay_error_leaves_marker_unset_and_pull_blobs_continues() {
+        let needle = "PAGE-ERROR-NEEDLE";
+        let (publisher, blobs, expected_ids) = publish_attention_blobs(needle, 3);
+        let upgrading = upgrading_device(&publisher);
+        let follow = follow_on_policy(&publisher.0);
+        let (url, server) = serve_attention_paged(blobs.clone(), Some(1), vec![follow.clone()]).await;
+        let before_seq = upgrading.0.state.lock().unwrap().last_seq;
+        pull_blobs(
+            &upgrading.0,
+            &url,
+            "token",
+            &upgrading.0.machine_file().unwrap(),
+        )
+        .await
+        .expect("relay error during upgrade must not abort pull_blobs");
+        assert!(!upgrading.0.store.attention_upgrade_done().unwrap());
+        assert!(
+            !upgrading.0.store.attention_rows().unwrap().is_empty(),
+            "page 1 rows were committed before the relay error"
+        );
+        assert!(
+            upgrading.0.state.lock().unwrap().last_seq > before_seq,
+            "normal pull still ran after the upgrade error"
+        );
+
+        // Rerun with a healthy relay completes the set and sets the marker.
+        upgrading.0.attention_backfilled.store(false, Ordering::Relaxed);
+        let (url2, server2) = serve_attention_paged(blobs, None, vec![follow]).await;
+        pull_blobs(
+            &upgrading.0,
+            &url2,
+            "token",
+            &upgrading.0.machine_file().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(upgrading.0.store.attention_upgrade_done().unwrap());
+        let mut ids: Vec<_> = upgrading
+            .0
+            .store
+            .attention_rows()
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort();
+        let mut expected = expected_ids;
+        expected.sort();
+        assert_eq!(ids, expected);
+        assert_no_plaintext(&upgrading.0, needle);
+        server.abort();
+        server2.abort();
+    }
+
+    #[tokio::test]
+    async fn attention_upgrade_replay_restores_row_when_receipt_has_no_row() {
+        let needle = "RECEIPT-WITHOUT-ROW-NEEDLE";
+        let (publisher, blobs, expected_ids) = publish_attention_blobs(needle, 1);
+        let upgrading = upgrading_device(&publisher);
+        // Simulate the old id-before-row crash: receipt remembered, row missing.
+        remember_applied(
+            &mut upgrading.0.state.lock().unwrap(),
+            &blobs[0].id,
+        );
+        upgrading.0.store.mark_blob_applied(&blobs[0].id).unwrap();
+        upgrading.0.save_state_now();
+        assert!(upgrading.0.store.attention_rows().unwrap().is_empty());
+        assert!(upgrading
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .applied_blob_ids
+            .contains(&blobs[0].id));
+
+        let (url, server) = serve_attention_paged(blobs, None, vec![]).await;
+        attention_upgrade_replay(
+            &upgrading.0,
+            &url,
+            "token",
+            &upgrading.0.machine_file().unwrap(),
+        )
+        .await
+        .unwrap();
+        let rows = upgrading.0.store.attention_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, expected_ids[0]);
+        assert!(upgrading.0.store.attention_upgrade_done().unwrap());
+        assert_no_plaintext(&upgrading.0, needle);
+        server.abort();
+    }
+
+    #[test]
+    fn attention_upgrade_marker_upserts_when_metadata_row_is_missing() {
+        let scratch = scratch_app();
+        crate::identity::create(&scratch.0, Some("Marker".into())).unwrap();
+        scratch.0.store.delete_metadata_for_tests().unwrap();
+        assert!(!scratch.0.store.attention_upgrade_done().unwrap());
+        scratch.0.store.set_attention_upgrade_done(true).unwrap();
+        assert!(scratch.0.store.attention_upgrade_done().unwrap());
+        // Sync path must not error when recording the marker on a fresh upsert.
+        mark_attention_upgrade_after_first_sync(&scratch.0).unwrap();
+        assert!(scratch.0.store.attention_upgrade_done().unwrap());
+    }
+
+    #[tokio::test]
+    async fn attention_upgrade_marker_waits_for_first_sync_when_last_seq_is_zero() {
+        let scratch = scratch_app();
+        crate::identity::create(&scratch.0, Some("First".into())).unwrap();
+        assert_eq!(scratch.0.state.lock().unwrap().last_seq, 0);
+        assert!(!scratch.0.store.attention_upgrade_done().unwrap());
+        let (url, server) = serve_log(vec![]).await;
+        pull_blobs(
+            &scratch.0,
+            &url,
+            "token",
+            &scratch.0.machine_file().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            scratch.0.store.attention_upgrade_done().unwrap(),
+            "marker is set only after first_sync succeeds"
+        );
+        assert!(scratch.0.attention_backfilled.load(Ordering::Relaxed));
         server.abort();
     }
 

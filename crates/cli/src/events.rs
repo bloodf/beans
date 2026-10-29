@@ -14,6 +14,8 @@ pub enum Event {
     RosterChanged { devices: Vec<Value>, bots: Vec<Bot>, chats: Vec<ChatSummary>, routines: Vec<Value>, auto_review: AutoReview, paused: bool, providers: Vec<ProviderStatus>, models: Vec<Value>, memory: Value },
     #[serde(rename = "memory.changed")]
     MemoryChanged { bot_id: Option<String>, status: String },
+    #[serde(rename = "attention.changed")]
+    AttentionChanged(crate::attention::View),
     #[serde(rename = "message.added")]
     MessageAdded { chat_id: String, message: Message },
     #[serde(rename = "message.updated")]

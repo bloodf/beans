@@ -13,8 +13,6 @@ import (
 	"unsafe"
 )
 
-var desktopSetNamedSecurity = desktopControlSecurity.NewProc("SetNamedSecurityInfoW")
-
 // prepareWindowsDesktopTestControlHome applies the private control DACL to a
 // disposable home and its format marker. Production never repairs existing
 // objects; fixtures recreate a creator-owned directory and exclusive marker,

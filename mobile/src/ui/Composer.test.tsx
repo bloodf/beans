@@ -89,7 +89,9 @@ mock.module("../core/prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {}
 mock.module("../core/push", () => ({ clearPushes: () => {}, installPushHandlers: () => {}, registerForPushes: async () => {} }));
 const frames = new Set<(frame: any) => void>();
 let request: (method: string, params: any) => Promise<any> = async () => null;
-mock.module("expo-modules-core", () => ({ requireNativeModule: () => ({
+mock.module("expo-modules-core", () => ({
+  requireNativeViewManager: () => "ImagePasteView",
+  requireNativeModule: () => ({
   start: () => {}, wake: () => {},
   addListener: (_name: string, listener: any) => { const receive = (frame: any) => listener({ json: JSON.stringify(frame) }); frames.add(receive); return { remove: () => frames.delete(receive) }; },
   request: async (method: string, params: string) => JSON.stringify(await request(method, JSON.parse(params))),

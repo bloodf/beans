@@ -9,14 +9,16 @@
       "MarkdownViewModule",
       "CompactWidthViewModule",
       "SoftScrollEdgeViewModule",
-      "ShimmerViewModule"
+      "ShimmerViewModule",
+      "ImagePasteViewModule"
     ]
   },
   "android": {
     "modules": [
       "app.beans.core.BeansCoreModule",
       "app.beans.core.MarkdownViewModule",
-      "app.beans.core.ShimmerViewModule"
+      "app.beans.core.ShimmerViewModule",
+      "app.beans.core.ImagePasteViewModule"
     ]
   }
 }

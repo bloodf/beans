@@ -1,9 +1,8 @@
 //! HTTP client for the relay. Signs identity-level requests, authenticates machines with the
 //! challenge, and moves ciphertext.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -275,7 +274,7 @@ impl SyncSocket {
             tokio::pin!(changed);
             changed.as_mut().enable();
             {
-                let mut heard = self.shared.heard.lock();
+                let mut heard = self.shared.heard.lock().unwrap();
                 let signals = std::mem::take(&mut heard.signals);
                 if signals != Signals::default() {
                     return Ok(signals);
@@ -304,7 +303,7 @@ impl Drop for SyncSocket {
 /// Reads the socket until it ends, answering pings as they come.
 async fn read_socket(mut stream: SocketStream, shared: Arc<SocketShared>) {
     let ended = read_until_end(&mut stream, &shared).await;
-    shared.heard.lock().ended = Some(ended);
+    shared.heard.lock().unwrap().ended = Some(ended);
     shared.changed.notify_one();
 }
 
@@ -334,12 +333,10 @@ async fn read_until_end(stream: &mut SocketStream, shared: &SocketShared) -> Str
         };
         due = tokio::time::Instant::now() + SOCKET_SILENCE;
         let signal = match message {
-            Message::Text(text) => serde_json::from_str::<Value>(&text).ok().and_then(|v| match v["type"].as_str() {
-                Some("blobs") => Some(false),
-                Some("machines") => Some(true),
-                _ => None,
-            }),
-            // The pong has to be flushed by hand when nothing else is written.
+            Message::Text(text) => serde_json::from_str::<Value>(&text).ok().and_then(|v| v["type"].as_str().map(str::to_string)),
+            // The pong has to be flushed by hand when nothing else is written. Bound the flush so
+            // a stalled write ends the reader instead of hanging it (intentional Beans hardening
+            // beyond upstream lorca 9277722).
             Message::Ping(_) => {
                 match tokio::time::timeout_at(due, stream.flush()).await {
                     Ok(Ok(())) => {}
@@ -351,10 +348,10 @@ async fn read_until_end(stream: &mut SocketStream, shared: &SocketShared) -> Str
             Message::Close(_) => return "the relay closed the sync socket".into(),
             _ => None,
         };
-        let mut heard = shared.heard.lock();
-        match signal {
-            Some(false) => heard.signals.blobs = true,
-            Some(true) => heard.signals.machines = true,
+        let mut heard = shared.heard.lock().unwrap();
+        match signal.as_deref() {
+            Some("blobs") => heard.signals.blobs = true,
+            Some("machines") => heard.signals.machines = true,
             _ => continue,
         }
         drop(heard);
@@ -420,7 +417,7 @@ impl RelayClient {
     }
 
     fn http(&self) -> reqwest::Client {
-        self.http.lock().clone()
+        self.http.lock().unwrap().clone()
     }
 
     /// Requests from here on open new connections. A phone's pooled ones may have died while
@@ -428,13 +425,13 @@ impl RelayClient {
     /// a request sent on one of those waits out its whole timeout.
     pub fn reset_connections(&self) {
         match Self::http_client() {
-            Ok(http) => *self.http.lock() = http,
+            Ok(http) => *self.http.lock().unwrap() = http,
             Err(error) => tracing::warn!(%error, "building the relay client"),
         }
     }
 
     pub fn forget_token(&self) {
-        *self.token.lock() = None;
+        *self.token.lock().unwrap() = None;
     }
 
     async fn check(response: reqwest::Response) -> RelayResult<Value> {
@@ -520,12 +517,12 @@ impl RelayClient {
         .await?;
         let token = verified["token"].as_str().ok_or_else(|| RelayError { status: None, message: "no token".into() })?.to_string();
         let expires_at = verified["expires_at"].as_i64().unwrap_or(now_unix() + 600);
-        *self.token.lock() = Some((token.clone(), expires_at));
+        *self.token.lock().unwrap() = Some((token.clone(), expires_at));
         Ok(token)
     }
 
     pub async fn token(&self, url: &str, machine: &Machine) -> RelayResult<String> {
-        if let Some((token, expires_at)) = self.token.lock().clone() {
+        if let Some((token, expires_at)) = self.token.lock().unwrap().clone() {
             if expires_at - 60 > now_unix() {
                 return Ok(token);
             }
@@ -857,6 +854,34 @@ mod tests {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
+    /// Wait until the reader has folded the machines flag, without calling `next` (so a busy
+    /// round's pongs are still answered). A loaded runner, Windows especially, can take longer
+    /// than a tight spin to drain a flood, so the budget is generous.
+    async fn wait_until_machines_heard(socket: &SyncSocket) {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !socket.shared.heard.lock().unwrap().signals.machines {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the reader did not consume the machine signal");
+    }
+
+    /// Fold every `next` until both flags have been seen, or the deadline expires.
+    async fn take_until_both(socket: &mut SyncSocket) -> Signals {
+        let mut got = Signals::default();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !(got.blobs && got.machines) {
+                let signals = socket.next().await.unwrap();
+                got.blobs |= signals.blobs;
+                got.machines |= signals.machines;
+            }
+            got
+        })
+        .await
+        .expect("timed out waiting for both signal flags")
+    }
+
     /// A relay that floods the socket with signals while the sync round is busy elsewhere still
     /// gets its pong, and the round then takes every signal at once.
     #[tokio::test]
@@ -870,10 +895,12 @@ mod tests {
                 socket.send(Message::Text(r#"{"type":"blobs"}"#.into())).await.unwrap();
             }
             socket.send(Message::Text(r#"{"type":"machines"}"#.into())).await.unwrap();
+            // Flush before the ping so a slow Windows peer has the flood before the control frame.
+            socket.flush().await.unwrap();
             socket.send(Message::Ping(Default::default())).await.unwrap();
             let mut ponged = false;
             let mut probed = false;
-            let waited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let waited = tokio::time::timeout(std::time::Duration::from_secs(15), async {
                 while let Some(Ok(message)) = socket.next().await {
                     match message {
                         Message::Pong(_) => ponged = true,
@@ -894,17 +921,11 @@ mod tests {
         let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync")).await.unwrap();
         let mut socket = SyncSocket::start(stream);
         // The round is busy and reads no signal until the relay has said all it had to.
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !socket.shared.heard.lock().signals.machines {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the reader did not consume the machine signal");
+        wait_until_machines_heard(&socket).await;
         socket.probe();
         assert_eq!(socket.next().await.unwrap(), Signals { blobs: true, machines: true });
         relay.await.unwrap();
-        assert!(tokio::time::timeout(std::time::Duration::from_secs(5), socket.next()).await.unwrap().is_err());
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(15), socket.next()).await.unwrap().is_err());
     }
 
     #[tokio::test]
@@ -914,7 +935,7 @@ mod tests {
         let relay = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut stream = tokio_tungstenite::accept_async(tcp).await.unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await.unwrap()
+            tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()).await.unwrap()
         });
         let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync")).await.unwrap();
         let socket = SyncSocket::start(stream);
@@ -922,16 +943,14 @@ mod tests {
         assert!(!matches!(relay.await.unwrap(), Some(Ok(_))));
     }
 
-    /// The sync upgrade still carries protocol 5 and `beans-v2` unchanged through the request.
+    /// `RelayClient::sync_socket` still sends protocol 5 and `beans-v2` on the upgrade.
     #[tokio::test]
     async fn beans_protocol_and_format_headers_survive_the_sync_upgrade_round_trip() {
-        use std::sync::Mutex as StdMutex;
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let seen = Arc::new(StdMutex::new((None, None)));
+        let seen = Arc::new(Mutex::new((None, None)));
         let relay_seen = seen.clone();
         let relay = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
@@ -946,15 +965,8 @@ mod tests {
             socket.close(None).await.unwrap();
         });
 
-        let address = format!("ws://{address}/v1/sync");
-        let mut request = address.into_client_request().unwrap();
-        request.headers_mut().insert("authorization", "Bearer test-token".parse().unwrap());
-        request.headers_mut().insert("beans-protocol", PROTOCOL.into());
-        request.headers_mut().insert("beans-format", crate::config::FORMAT.parse().unwrap());
-        assert_eq!(request.headers().get("beans-protocol").and_then(|v| v.to_str().ok()), Some("5"));
-        assert_eq!(request.headers().get("beans-format").and_then(|v| v.to_str().ok()), Some("beans-v2"));
-        let (stream, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-        let mut socket = SyncSocket::start(stream);
+        let client = RelayClient::new().unwrap();
+        let mut socket = client.sync_socket(&format!("http://{address}"), "test-token").await.expect("sync_socket opens");
         assert_eq!(socket.next().await.unwrap(), Signals { blobs: true, machines: false });
         relay.await.unwrap();
         let (protocol, format) = seen.lock().unwrap().clone();
@@ -1010,8 +1022,9 @@ mod tests {
             // Main behavior: a write signals every socket of the identity, writer included.
             socket.send(Message::Text(r#"{"type":"blobs"}"#.into())).await.unwrap();
             socket.send(Message::Text(r#"{"type":"machines"}"#.into())).await.unwrap();
+            socket.flush().await.unwrap();
             socket.send(Message::Ping(Default::default())).await.unwrap();
-            let pong = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let pong = tokio::time::timeout(std::time::Duration::from_secs(15), async {
                 while let Some(Ok(message)) = socket.next().await {
                     if matches!(message, Message::Pong(_)) {
                         return true;
@@ -1027,7 +1040,9 @@ mod tests {
 
         let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync")).await.unwrap();
         let mut socket = SyncSocket::start(stream);
-        assert_eq!(socket.next().await.unwrap(), Signals { blobs: true, machines: true });
+        // `next` returns as soon as any flag is set, so blobs and machines may land across
+        // separate calls on a loaded runner. Fold until both are seen.
+        assert_eq!(take_until_both(&mut socket).await, Signals { blobs: true, machines: true });
         relay.await.unwrap();
     }
 

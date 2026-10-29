@@ -3,7 +3,9 @@ package l10n
 // Shell strings for the opt-in native desktop path. Memory-note keys remain in
 // native_language.go until the note surface moves onto this table.
 var zh = map[string]string{
-	"Divider":                          "分隔线",
+	"Sidebar divider":                  "侧边栏分隔线",
+	"Inspector divider":                "检查器分隔线",
+	"Port":                             "端口",
 	"Toggle Sidebar":                   "切换边栏",
 	"Toggle Sidebar (%@)":              "切换边栏（%@）",
 	"Toggle Inspector":                 "切换检查器",

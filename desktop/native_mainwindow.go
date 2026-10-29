@@ -11,6 +11,8 @@ import (
 // layout adapted from Lorca commits 1fb21829…d94feac8. Content still binds to
 // NativeStore from #259/#268 rather than a parallel store.
 
+var nativeWindowTitle string
+
 func (n *nativeDesktop) shellView(c *ui.Context) {
 	applyNativeTheme(c)
 	n.nativeShortcuts(c)
@@ -28,13 +30,14 @@ func (n *nativeDesktop) shellView(c *ui.Context) {
 
 	sidebar, inspector := n.shell.panes(width)
 	title, subtitle := n.shellTitle()
-	if n.win != nil {
-		name := appName()
-		windowTitle := name
-		if title != "" && title != name {
-			windowTitle = title + " - " + name
-		}
+	name := appName()
+	windowTitle := name
+	if title != "" && title != name {
+		windowTitle = title + " - " + name
+	}
+	if n.win != nil && nativeWindowTitle != windowTitle {
 		n.win.SetTitle(windowTitle)
+		nativeWindowTitle = windowTitle
 	}
 
 	vibrant := c.Vibrancy()
@@ -142,14 +145,28 @@ func (n *nativeDesktop) paneHeader(c *ui.Context) ui.Element {
 }
 
 func (n *nativeDesktop) divider(c *ui.Context, x float32, sidebar bool) {
-	key := "inspector-divider"
+	key, label := "inspector-divider", L("Inspector divider")
 	if sidebar {
-		key = "sidebar-divider"
+		key, label = "sidebar-divider", L("Sidebar divider")
 	}
-	h := ui.Box(c.Key(key)).Absolute().Top(0).Bottom(0).Left(x-3).Width(7).Cursor(ui.CursorResizeEW).Label(L("Divider"))
+	h := ui.Box(c.Key(key)).Absolute().Top(0).Bottom(0).Left(x - 3).Width(7).Cursor(ui.CursorResizeEW).Focusable().Label(label)
 	dragging := ui.Local(h, "drag", func() dividerDrag { return dividerDrag{} })
 	if dragging == nil {
 		return
+	}
+	if h.Focused() {
+		if c.Shortcut(0, ui.KeyLeft) {
+			n.moveDivider(sidebar, -12)
+		}
+		if c.Shortcut(0, ui.KeyRight) {
+			n.moveDivider(sidebar, 12)
+		}
+		if c.Shortcut(ui.Shift, ui.KeyLeft) {
+			n.moveDivider(sidebar, -40)
+		}
+		if c.Shortcut(ui.Shift, ui.KeyRight) {
+			n.moveDivider(sidebar, 40)
+		}
 	}
 	dx, _, held := h.Dragged()
 	if held {
@@ -159,6 +176,15 @@ func (n *nativeDesktop) divider(c *ui.Context, x float32, sidebar bool) {
 		}
 	} else if dragging.active {
 		n.shell.finishDivider(dragging, sidebar)
+	}
+}
+
+func (n *nativeDesktop) moveDivider(sidebar bool, delta float32) {
+	drag := &dividerDrag{}
+	n.shell.applyDividerMove(drag, sidebar, delta)
+	n.shell.finishDivider(drag, sidebar)
+	if n.win != nil {
+		n.win.Invalidate()
 	}
 }
 

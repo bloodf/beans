@@ -5,16 +5,19 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"unsafe"
 )
 
+var desktopSetNamedSecurity = desktopControlSecurity.NewProc("SetNamedSecurityInfoW")
+
 // prepareWindowsDesktopTestControlHome applies the private control DACL to a
 // disposable home and its format marker. Production never repairs existing
-// objects; fixtures recreate the directory and marker with the private SDDL at
-// create time so GitHub-hosted runners (which refuse WRITE_DAC on TempDir
-// inheritance) still get a private home.
+// objects; fixtures recreate a creator-owned directory and exclusive marker,
+// then apply the same private SDDL production uses (TempDir inheritance on
+// GitHub-hosted runners refuses WRITE_DAC on the original TempDir inode).
 func prepareWindowsDesktopTestControlHome(t *testing.T, home string) {
 	t.Helper()
 	marker := filepath.Join(home, "format.json")
@@ -26,11 +29,34 @@ func prepareWindowsDesktopTestControlHome(t *testing.T, home string) {
 	if err := os.Rename(home, aside); err != nil {
 		failDesktopControlFixture(t, err)
 	}
-	if err := createDesktopControlDirectory(home); err != nil {
+	if err := os.Mkdir(home, 0o700); err != nil {
 		_ = os.Rename(aside, home)
 		failDesktopControlFixture(t, err)
 	}
-	if err := createDesktopControlFile(marker, data); err != nil {
+	if err := secureDesktopControlPath(home); err != nil {
+		_ = os.RemoveAll(home)
+		_ = os.Rename(aside, home)
+		failDesktopControlFixture(t, err)
+	}
+	file, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		_ = os.RemoveAll(home)
+		_ = os.Rename(aside, home)
+		failDesktopControlFixture(t, err)
+	}
+	if err := secureDesktopControlFile(file); err != nil {
+		_ = file.Close()
+		_ = os.RemoveAll(home)
+		_ = os.Rename(aside, home)
+		failDesktopControlFixture(t, err)
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		_ = os.RemoveAll(home)
+		_ = os.Rename(aside, home)
+		failDesktopControlFixture(t, err)
+	}
+	if err := file.Close(); err != nil {
 		_ = os.RemoveAll(home)
 		_ = os.Rename(aside, home)
 		failDesktopControlFixture(t, err)
@@ -49,25 +75,14 @@ func failDesktopControlFixture(t *testing.T, err error) {
 	t.Fatal("private Windows fixture", err)
 }
 
-func desktopControlSecurityAttributes(extra string) (*syscall.SecurityAttributes, uintptr, error) {
+// secureDesktopControlPath sets the private control DACL on an existing path
+// (directory or file) the fixture just created and therefore owns.
+func secureDesktopControlPath(path string) error {
 	sid, err := desktopControlCurrentUserSID()
 	if err != nil {
-		return nil, 0, err
+		return err
 	}
-	_, descriptor, err := desktopControlParseDACL(desktopControlPrivateSDDL(sid, extra))
-	if err != nil {
-		return nil, 0, err
-	}
-	sa := &syscall.SecurityAttributes{
-		Length:             uint32(unsafe.Sizeof(syscall.SecurityAttributes{})),
-		SecurityDescriptor: descriptor,
-		InheritHandle:      0,
-	}
-	return sa, descriptor, nil
-}
-
-func createDesktopControlDirectory(path string) error {
-	sa, descriptor, err := desktopControlSecurityAttributes("")
+	acl, descriptor, err := desktopControlParseDACL(desktopControlPrivateSDDL(sid, ""))
 	if err != nil {
 		return err
 	}
@@ -76,24 +91,11 @@ func createDesktopControlDirectory(path string) error {
 	if err != nil {
 		return err
 	}
-	return syscall.CreateDirectory(pathPtr, sa)
-}
-
-func createDesktopControlFile(path string, data []byte) error {
-	sa, descriptor, err := desktopControlSecurityAttributes("")
-	if err != nil {
-		return err
+	// SE_FILE_OBJECT; DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION.
+	status, _, _ := desktopSetNamedSecurity.Call(uintptr(unsafe.Pointer(pathPtr)), 1, 0x80000004, 0, 0, acl, 0)
+	runtime.KeepAlive(pathPtr)
+	if status != 0 {
+		return syscall.Errno(status)
 	}
-	defer desktopFreeSecurity.Call(descriptor)
-	pathPtr, err := syscall.UTF16PtrFromString(path)
-	if err != nil {
-		return err
-	}
-	handle, err := syscall.CreateFile(pathPtr, syscall.GENERIC_WRITE, 0, sa, syscall.CREATE_NEW, syscall.FILE_ATTRIBUTE_NORMAL, 0)
-	if err != nil {
-		return err
-	}
-	defer syscall.CloseHandle(handle)
-	var written uint32
-	return syscall.WriteFile(handle, data, &written, nil)
+	return nil
 }

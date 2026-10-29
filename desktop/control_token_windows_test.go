@@ -73,22 +73,28 @@ func failDesktopControlFixture(t *testing.T, err error) {
 	t.Fatal("private Windows fixture", err)
 }
 
-// secureDesktopControlPath sets a protected DACL granting only the current
-// user full control, matching desktopControlPrivateSDDL.
+// secureDesktopControlPath sets the object owner to the current user and a
+// protected DACL granting only that user and LocalSystem full control, matching
+// desktopControlPrivateSDDL / desktopControlACLPrivate (GHA admin runners often
+// create TempDir children owned by BUILTIN\Administrators).
 func secureDesktopControlPath(path string) error {
 	sid, err := desktopControlCurrentUserSID()
 	if err != nil {
 		return err
 	}
+	owner := "*" + sid
+	if out, err := exec.Command("takeown", "/F", path).CombinedOutput(); err != nil {
+		return fmt.Errorf("takeown: %w: %s", err, out)
+	}
+	if out, err := exec.Command("icacls", path, "/setowner", owner).CombinedOutput(); err != nil {
+		return fmt.Errorf("icacls setowner: %w: %s", err, out)
+	}
 	// /inheritance:r drops inherited TempDir ACEs; /grant:r replaces grants for
-	// this SID with Full Control. SYSTEM is added so LocalSystem remains a
-	// trusted owner/grantee under desktopControlACLPrivate.
-	grant := "*" + sid + ":(F)"
+	// each SID with Full Control only.
+	grant := owner + ":(F)"
 	system := "*S-1-5-18:(F)"
-	cmd := exec.Command("icacls", path, "/inheritance:r", "/grant:r", grant, "/grant:r", system)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("icacls: %w: %s", err, out)
+	if out, err := exec.Command("icacls", path, "/inheritance:r", "/grant:r", grant, "/grant:r", system).CombinedOutput(); err != nil {
+		return fmt.Errorf("icacls grant: %w: %s", err, out)
 	}
 	return nil
 }

@@ -2,9 +2,8 @@
 // row when several of one bot's outputs sit back to back.
 
 import { Image } from "expo-image";
-import { useRouter } from "expo-router";
 import { useEffect } from "react";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { Platform, StyleSheet, Text, View } from "react-native";
 import { engine } from "../core/engine";
 import {
   evidenceStatus,
@@ -19,7 +18,7 @@ import {
   type OutputKind,
 } from "../core/model";
 import { useStore } from "../core/store";
-import { t, useLanguage } from "../i18n";
+import { useLanguage } from "../i18n";
 import { Symbol } from "./Symbol";
 import { accentColor, Font, usePalette, type Palette } from "./theme";
 
@@ -52,16 +51,18 @@ function outputTint(output: Output, p: Palette) {
   return accent ? accentColor(accent, p.dark) : p.secondaryLabel;
 }
 
+/// Tap is a no-op until `/chat-info/output/[id]` ships with the output detail slice.
+export const OUTPUT_CARD_OPENS_DETAIL = false;
+
 /// A published output in the transcript, standing without a bubble or a time: an image's preview
 /// (the top of a tall one, as a page's screenshot starts at its top), the file's icon, name, type
-/// and size, and what the bot checked. A tap opens the output's screen, or fetches again a file
-/// that has not landed yet. A run of one bot's outputs joins into one list (`stack` says whether
-/// the cards above and below are in it), a compact row each: the icon (an image's own picture),
-/// name, type and size, and the check's symbol; the check's words are on the output's screen.
+/// and size, and what the bot checked. A run of one bot's outputs joins into one list (`stack`
+/// says whether the cards above and below are in it), a compact row each: the icon (an image's
+/// own picture), name, type and size, and the check's symbol. The card is not pressable yet; the
+/// detail route lands with the output detail slice.
 export function OutputCard({ message, maxWidth, stack }: { message: Message; maxWidth: number; stack?: { above: boolean; below: boolean } }) {
   useLanguage();
   const p = usePalette();
-  const router = useRouter();
   const output = message.output!;
   const attachment = outputAttachment(message);
   const uri = useStore((s) => (attachment ? s.files[attachment.id] : undefined));
@@ -83,24 +84,15 @@ export function OutputCard({ message, maxWidth, stack }: { message: Message; max
   const checkSymbol = evidence?.status === "passed" ? "checkmark.circle.fill" : evidence?.status === "failed" ? "xmark.circle.fill" : "circle.dashed";
   const summary = evidence?.summary.trim() ?? "";
   const spoken = [output.name, detail, evidence ? `${evidenceTitle(evidence)} · ${evidenceStatus(evidence)}: ${summary}` : ""].filter(Boolean).join(", ");
-  const open = () => {
-    if (attachment && !uri) {
-      void engine.fetchFile(attachment);
-      return;
-    }
-    router.push({ pathname: "/chat-info/output/[id]", params: { id: output.id, chat: message.chat_id } });
-  };
   if (stacked) {
     return (
-      <Pressable
-        onPress={open}
+      <View
         style={[
           styles.stackRow,
           { width, backgroundColor: p.outputCard, borderColor: p.separator },
           !stack.above && styles.roundedAbove,
           !stack.below && styles.roundedBelow,
         ]}
-        accessibilityRole="button"
         accessibilityLabel={spoken}
       >
         {stack.above && <View style={[styles.stackRule, { backgroundColor: p.separator }]} />}
@@ -122,16 +114,11 @@ export function OutputCard({ message, maxWidth, stack }: { message: Message; max
           ) : null}
         </View>
         {evidence && <Symbol name={checkSymbol} size={15} color={checkTint} />}
-      </Pressable>
+      </View>
     );
   }
   return (
-    <Pressable
-      onPress={open}
-      style={[styles.card, { width, backgroundColor: p.outputCard, borderColor: p.separator }]}
-      accessibilityRole="button"
-      accessibilityLabel={spoken}
-    >
+    <View style={[styles.card, { width, backgroundColor: p.outputCard, borderColor: p.separator }]} accessibilityLabel={spoken}>
       {preview !== undefined && (
         <View style={[styles.preview, { height: preview, backgroundColor: p.code, borderBottomColor: p.separator }]}>
           <Image source={uri ? { uri } : undefined} style={StyleSheet.absoluteFill} contentFit="cover" contentPosition="top" transition={150} />
@@ -166,7 +153,7 @@ export function OutputCard({ message, maxWidth, stack }: { message: Message; max
           </View>
         </View>
       )}
-    </Pressable>
+    </View>
   );
 }
 

@@ -41,6 +41,7 @@ mock.module("../ui/theme", () => ({ Font: { message: 16, small: 13, caption: 12 
 mock.module("react-native-gesture-handler", () => ({ Gesture: { Pan: () => ({ runOnJS() { return this; }, enabled() { return this; }, activeOffsetX() { return this; }, failOffsetX() { return this; }, failOffsetY() { return this; }, onTouchesDown() { return this; }, onUpdate() { return this; }, onEnd() { return this; }, onFinalize() { return this; } }) }, GestureDetector: "Detector" }));
 
 const { documentUrl, evidenceStatus, groupOutputs, outputKind, outputSymbol, outputTypeName } = await import("./model");
+const { OUTPUT_CARD_OPENS_DETAIL } = await import("../ui/outputs");
 const { buildRows, isOutputCard } = await import("../ui/transcript");
 
 function version(id: string, n: number, minutesAgo: number, output: Partial<Output> = {}): Message {
@@ -84,6 +85,10 @@ test("an output says what kind of file it is, for its card's icon and type", () 
   expect(outputTypeName(output("blob", "application/octet-stream"))).toBe("");
   expect(outputKind(output("Report", "text/html", "https://www.example.com/r"))).toBe("link");
   expect(outputTypeName(output("Report", "text/html", "https://www.example.com/r"))).toBe("example.com");
+});
+
+test("an output card does not open a detail route until that slice ships", () => {
+  expect(OUTPUT_CARD_OPENS_DETAIL).toBe(false);
 });
 
 test("back-to-back outputs from one bot join into one compact list", () => {

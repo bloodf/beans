@@ -590,6 +590,17 @@ async fn a_stopping_relay_delivers_the_pushes_it_took() {
     apns.abort();
 }
 
+/// Polls `done` for up to ten seconds, and fails the test naming `what` when it never holds.
+async fn until(what: &str, done: impl Fn() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting until {what}");
+}
+
 /// A computer that joined by pairing pairs the next one: the identity device attests the first
 /// with the identity key, that one attests the next with its machine key, and the newest gets
 /// the account. Once unpaired, a computer pairs nobody.
@@ -612,17 +623,83 @@ async fn a_paired_computer_pairs_another() {
     assert_eq!(joined.account_dek, account.account_dek);
     assert_eq!(relay.state.db.machines_for(&account.identity_pubkey).await.unwrap().len(), 3);
     third.relay.token(&relay.url, &joined.machine().unwrap()).await.unwrap();
-    for _ in 0..50 {
-        if beans::pairing::status(&second, &nonce)["state"] == "completed" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    until("the second computer sees the pairing complete", || beans::pairing::status(&second, &nonce)["state"] == "completed").await;
     assert_eq!(beans::pairing::status(&second, &nonce)["device"]["name"], "Third");
 
     beans::sync::unpair_device(&first, &second.this_device_id().unwrap()).await.unwrap();
     let error = beans::pairing::start(second.clone()).await.unwrap_err();
     assert!(error.to_string().contains("unpaired"), "{error}");
+}
+
+/// Through a relay: what a phone signs reaches its Runner and the answer comes back. What the
+/// relay plants for the Runner, sealed with nothing but its public key, changes nothing.
+#[tokio::test]
+async fn a_runner_answers_only_what_a_device_signed() {
+    let relay = Relay::start(0).await;
+    let app = |name: &str| beans::app::App::load(beans::config::Config { home: relay.home.join(name), port: 0 }).unwrap();
+    let (runner, phone) = (app("runner"), app("phone"));
+    beans::identity::create(&runner, Some("Runner".into())).unwrap();
+    runner.set_relay_url(Some(relay.url.clone())).unwrap();
+    let (_, code) = beans::pairing::start(runner.clone()).await.unwrap();
+    beans::pairing::accept(phone.clone(), &code, Some("Phone".into())).await.unwrap();
+    let loops = [tokio::spawn(beans::sync::run(runner.clone())), tokio::spawn(beans::sync::run(phone.clone()))];
+    let (runner_id, phone_id) = (runner.this_device_id().unwrap(), phone.this_device_id().unwrap());
+    // Each knows the other from the account's records, and the phone sees the Runner online.
+    // The relay can list the Runner online before its machine blob reaches the phone, and
+    // `requests::ask` refuses a Runner the phone holds no record and key for.
+    until("the phone knows the Runner and its key", || phone.device(&runner_id).is_some_and(|runner| !runner.box_pubkey.is_empty())).await;
+    until("the phone sees the Runner online", || phone.device_is_online(&runner_id)).await;
+    until("the Runner knows the phone", || runner.device(&phone_id).is_some()).await;
+    let chef = runner.state.lock().unwrap().bots[0].id.clone();
+    beans::requests::ask(&phone, &runner_id, "memory.read", serde_json::json!({ "bot_id": chef })).await.unwrap();
+
+    let mcp = runner.config.mcp_path();
+    let servers = || std::fs::read_to_string(&mcp).unwrap_or_default();
+    let token = phone.relay.token(&relay.url, &phone.machine_file().unwrap().machine().unwrap()).await.unwrap();
+    let upload = |id: &str, ciphertext: Vec<u8>| {
+        let item = OutboxItem { id: id.into(), kind: "request".into(), recipient: Some(runner_id.clone()), ciphertext, slot: None, group: None };
+        relay.client.put_blob(&relay.url, &token, item, 0)
+    };
+    let runner_device = phone.device(&runner_id).unwrap();
+    let save = |name: &str| beans::model::Request {
+        id: format!("req-{name}"),
+        verb: "mcp.save".into(),
+        requested_by: phone_id.clone(),
+        body: serde_json::json!({ "name": name, "config": { "command": "true" } }),
+        created_at: beans::config::now_secs(),
+    };
+    // Beans signs the request body under `beans-request-v1` (no separate envelope module).
+    let signed = {
+        let mut request = save("docs");
+        let body = request.body.clone();
+        let machine = phone.machine_file().unwrap().machine().unwrap();
+        let bytes = serde_json::to_vec(&(
+            "beans-request-v1",
+            &request.id,
+            &request.verb,
+            &request.requested_by,
+            &runner_id,
+            request.created_at,
+            &body,
+        ))
+        .unwrap();
+        request.body = serde_json::json!({ "payload": body, "signature": machine.sign(&bytes) });
+        beans::crypto::seal_json(&runner_device.box_pubkey, &request).unwrap()
+    };
+    upload("signed", signed).await.unwrap();
+    until("the Runner saves the signed request's server", || servers().contains("docs")).await;
+    beans::requests::ask(&phone, &runner_id, "mcp.remove", serde_json::json!({ "name": "docs" })).await.unwrap();
+    assert!(!servers().contains("docs"));
+
+    let unsigned = beans::crypto::seal_json(&runner_device.box_pubkey, &save("planted")).unwrap();
+    upload("planted", unsigned).await.unwrap();
+    // The Runner reads its envelopes in the order the relay took them, so once it answers a
+    // question asked after these, it has read them.
+    beans::requests::ask(&phone, &runner_id, "memory.read", serde_json::json!({ "bot_id": chef })).await.unwrap();
+    assert!(!servers().contains("planted"));
+    for task in loops {
+        task.abort();
+    }
 }
 
 /// `POST /v1/machines` takes a paired machine's bearer and new keys, refuses a key paired with

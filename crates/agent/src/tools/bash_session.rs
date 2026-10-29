@@ -1397,27 +1397,21 @@ mod tests {
 
             let more = call(&t.output, json!({"session_id": id, "wait_seconds": 0.3})).await.unwrap();
             assert!(more.text_content().starts_with("tick\n"), "{}", more.text_content());
-            // Ctrl-C on a while-loop that keeps printing may or may not end it; either way the call
-            // must return at the background settle instead of waiting for a quiet spell forever.
+            // Ctrl-C must end the loop (SIGINT). The wait cap only bounds a hang if it does not;
+            // do not accept a still-running outcome here — that would hide a delivery bug.
             let stopped = tokio::time::timeout(
                 BACKGROUND_SETTLE + Duration::from_secs(5),
                 call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})),
             )
             .await
-            .expect("bash_input returned while the background command kept printing")
+            .expect("bash_input returned after Ctrl-C")
             .unwrap();
-            let stopped_text = stopped.text_content();
-            if stopped_text.contains("Command terminated by signal 2") {
-                assert!(t.host.0.lock().unwrap().is_empty());
-            } else {
-                assert!(
-                    stopped_text.contains(&format!("Running in the background as session {id}")),
-                    "{stopped_text}"
-                );
-                let session = t.host.get(&id).expect("session kept while it runs");
-                session.stop("Stopped");
-                t.host.0.lock().unwrap().remove(&id);
-            }
+            assert!(
+                stopped.text_content().ends_with("Command terminated by signal 2"),
+                "{}",
+                stopped.text_content()
+            );
+            assert!(t.host.0.lock().unwrap().is_empty());
 
             // One that ends first reads as it would have without it.
             let failed = call(&t.bash, json!({"command": "echo 'port 3000 is in use' >&2; exit 1", "background": true})).await.unwrap_err();

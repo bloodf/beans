@@ -52,9 +52,10 @@ routed a report marks its other completed text as quiet so the user hears the ne
 Bootstrap includes `attention { items, briefs, preferences }`. `attention.changed` replaces that
 projection. Devices take attention blobs in live pulls and during first sync. A Device upgrading
 from a build that skipped this kind replays attention slots once and records a persisted
-`attention_upgrade` marker when the replay finishes; an interrupt leaves the marker unset so the
-next start resumes. `receive` upserts by id, so a resume never duplicates rows, and rows stay
-ciphertext at rest.
+`attention_upgrade` marker when the replay finishes (or after first sync when `last_seq` was 0);
+an interrupt or DEK/decrypt failure leaves the marker unset so the next start retries. `receive`
+loads only the incoming id, upserts ciphertext, and commits the relay receipt in the same
+transaction as the row. Undecryptable neighbors are skipped. Rows stay ciphertext at rest.
 
 ## In the apps
 

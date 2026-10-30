@@ -34,7 +34,13 @@ Use staggered scroll assembly for the bento, timed message reveals in the demo, 
 
 ## Design direction
 
-Build a tactile editorial system from Beans' own geometry: oversized type, offset section headers, layered product surfaces, coral light, fine grain, responsive spotlight borders and one clear motion idea per section. Use native scrolling and transform/opacity animation, preserve visible server-rendered content, and keep the pause and reduced-motion controls authoritative. Docs share the palette and graphic details without acquiring marketing motion.
+- **Product:** Beans gives people persistent AI teammates that work on their own computers with their existing providers.
+- **Character:** warm, precise, quietly playful.
+- **World:** a tidy physical desk with one sculpted coral object and a working screen.
+- **Moments:** the tactile bean sculpture in the hero and the real app preview; pricing and the closing action use the same coral with confidence.
+- **Signature:** compact coral section indices and rules guide the editorial page without competing with the product.
+
+Build a tactile editorial system from Beans' own geometry: oversized type, offset section headers, layered neutral surfaces and one clear motion idea per section. Coral belongs to the brand object, key figures, selection and action. Keep chrome quiet, use native scrolling and transform/opacity animation, preserve visible server-rendered content, and keep the pause and reduced-motion controls authoritative. Meaningful task demonstrations may animate; decorative breathing, ambient washes and pointer glows do not belong. Docs share the palette and graphic details without acquiring marketing motion.
 
 ## Scars
 
@@ -42,3 +48,4 @@ Build a tactile editorial system from Beans' own geometry: oversized type, offse
 - Preserve the WebGL SVG fallback, capped pixel ratio and offscreen/hidden-tab pauses.
 - Small screens intentionally scroll the desktop preview horizontally; this must not create document-level horizontal overflow.
 - Comparison tables may scroll internally, while sources and absence claims remain factual and readable.
+- The closing panel needs its coral background and dark text from the same visual-system rule; the older global tint override made its copy invisible in dark mode (fixed after browser inspection, 2026-10-30).

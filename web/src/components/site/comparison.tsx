@@ -64,7 +64,7 @@ export function ComparisonPage({ slug }: { slug?: ComparisonSlug }) {
       <Nav />
       <main className="comparison-page story-section">
         <header className="comparison-hero motion-island">
-          <div className="gradient-wash" aria-hidden="true" />
+
           <img
             className="comparison-mark"
             src="/brand/beans-mark.svg"
@@ -110,7 +110,7 @@ export function ComparisonPage({ slug }: { slug?: ComparisonSlug }) {
               />
             </article>
             {slugs.map((key) => (
-              <article data-spotlight className="comparison-bento-card" key={key}>
+              <article className="comparison-bento-card" key={key}>
                 <h2>{products[key].name}</h2>
                 <ProsCons
                   pros={c.pros}
@@ -211,7 +211,7 @@ export function ComparisonPage({ slug }: { slug?: ComparisonSlug }) {
               id="costs"
               className="comparison-costs comparison-section motion-island"
             >
-              <div className="gradient-wash" aria-hidden="true" />
+
               <h2 className="display">{c.costTitle}</h2>
               <p className="comparison-section-intro">{c.costBody}</p>
               <dl className="comparison-cost-breakdown">
@@ -298,7 +298,7 @@ export function ComparisonPage({ slug }: { slug?: ComparisonSlug }) {
               ))}
             </section>
             <section className="comparison-section comparison-final motion-island">
-              <div className="gradient-wash" aria-hidden="true" />
+
               <h2 className="display">{c.start}</h2>
               <p>{c.startBody}</p>
               <div>

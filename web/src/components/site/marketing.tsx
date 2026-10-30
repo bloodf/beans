@@ -112,7 +112,6 @@ export function BentoFeatures() {
         {c.cards.map((card, index) => (
           <article
             key={card.title}
-            data-spotlight
             className={`bento-card bento-${index} motion-island`}
           >
             <div className="bento-art" aria-hidden="true">

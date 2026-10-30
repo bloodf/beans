@@ -882,54 +882,8 @@
   }
 }
 
-/* Warm coral fields move behind the content. */
-.gradient-wash {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  overflow: hidden;
-  pointer-events: none;
-  border-radius: inherit;
-  background:
-    radial-gradient(ellipse at 80% 30%, rgb(242 103 68 / 24%), transparent 65%),
-    radial-gradient(ellipse at 15% 85%, rgb(239 172 126 / 17%), transparent 60%);
-}
-.gradient-wash::after {
-  content: "";
-  position: absolute;
-  inset: -35%;
-  background: conic-gradient(
-    from 40deg at 65% 50%,
-    transparent 5%,
-    rgb(242 103 68 / 14%) 25%,
-    transparent 45%,
-    rgb(229 139 109 / 13%) 65%,
-    transparent 85%
-  );
-  animation: beans-gradient-drift 18s var(--motion-ease-in-out) infinite
-    alternate;
-  animation-play-state: var(--loop-state, paused);
-  mask-image: radial-gradient(ellipse, black 20%, transparent 70%);
-}
-@keyframes beans-gradient-drift {
-  from {
-    transform: translate(-5%, 2%) rotate(-18deg) scale(0.95);
-    opacity: 0.55;
-  }
-  to {
-    transform: translate(7%, -4%) rotate(25deg) scale(1.1);
-    opacity: 1;
-  }
-}
 .beans-hero {
   isolation: isolate;
-}
-.beans-hero > .gradient-wash {
-  border-radius: 0;
-  mask-image: linear-gradient(to bottom, transparent, black 18%, black 65%, transparent);
-  background:
-    radial-gradient(ellipse at 78% 42%, rgb(242 103 68 / 20%), transparent 55%),
-    radial-gradient(ellipse at 26% 60%, rgb(239 172 126 / 10%), transparent 60%);
 }
 .site-language-select {
   width: 136px;
@@ -1186,11 +1140,6 @@
 .beans-experience:lang(ja) .display,
 .beans-experience:lang(zh) .display {
   line-height: 1.25;
-}
-@media (prefers-reduced-motion: reduce) {
-  .gradient-wash::after {
-    animation: none;
-  }
 }
 @media (max-width: 767px) {
   .site-nav .w-36 {

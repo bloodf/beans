@@ -202,7 +202,6 @@
 
 .beans-hero-art { max-width: 440px; justify-self: center; transform: rotate(-8deg); }
 .beans-stage { background: color-mix(in srgb, #F26744 8%, var(--card)); }
-.beans-cta { border: 1px solid var(--border); background: color-mix(in srgb, #F26744 8%, var(--card)); }
 .beans-hero-art img { filter: drop-shadow(0 28px 32px rgb(242 103 68 / 12%)); }
 @media (max-width: 1023px) { .beans-hero-art { max-width: 260px; } }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .wire::after { animation: none; } }

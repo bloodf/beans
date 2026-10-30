@@ -10,20 +10,7 @@
   --motion-duration-slow: 480ms;
   --motion-ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
   position: relative;
-  background:
-    radial-gradient(ellipse at 100% 0%, color-mix(in srgb, var(--coral) 3%, transparent), transparent 32rem),
-    var(--background);
-}
-
-/* A nearly invisible analogue field keeps large quiet areas from feeling digitally flat. */
-.beans-experience::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  pointer-events: none;
-  opacity: 0.025;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='.7'/%3E%3C/svg%3E");
+  background: var(--background);
 }
 
 .beans-experience :is(a[href], button, select, summary) {
@@ -82,18 +69,6 @@
   align-items: center;
 }
 
-.beans-hero::before {
-  content: "";
-  position: absolute;
-  inset: 9% -12% 11% 51%;
-  z-index: -1;
-  pointer-events: none;
-  border: 1px solid color-mix(in srgb, var(--coral) 13%, transparent);
-  border-radius: 50%;
-  opacity: 0.7;
-  transform: rotate(-14deg);
-}
-
 .hero-copy::before {
   content: "";
   display: block;
@@ -120,7 +95,6 @@
 
 .hero-title .brush {
   color: var(--coral-ink);
-  text-shadow: 0 0.08em 0.5em color-mix(in srgb, var(--coral) 8%, transparent);
 }
 
 .hero-copy > p:not(.hero-free, .hero-platforms) {
@@ -137,7 +111,7 @@
 }
 
 .hero-copy [data-slot="button"]:hover {
-  box-shadow: 0 16px 34px -18px color-mix(in srgb, var(--coral) 32%, transparent);
+  box-shadow: 0 16px 34px -20px color-mix(in srgb, var(--foreground) 45%, transparent);
 }
 
 .hero-free {
@@ -152,7 +126,6 @@
   height: 6px;
   border-radius: 50%;
   background: var(--coral);
-  box-shadow: 0 0 0 5px color-mix(in srgb, var(--coral) 10%, transparent);
 }
 
 .hero-platforms {
@@ -162,23 +135,7 @@
 
 .beans-hero .hero-scene {
   width: min(100%, 620px);
-  filter: drop-shadow(0 2.5rem 2.5rem color-mix(in srgb, var(--coral) 10%, transparent));
-}
-
-.hero-scene::after {
-  content: "";
-  position: absolute;
-  inset: 9%;
-  z-index: -1;
-  border-radius: 50%;
-  background: radial-gradient(circle, color-mix(in srgb, var(--coral) 10%, transparent), transparent 68%);
-  transform: scale(0.9);
-  animation: scene-breathe 7s var(--motion-ease-in-out) infinite alternate;
-  animation-play-state: var(--loop-state, paused);
-}
-
-@keyframes scene-breathe {
-  to { transform: scale(1.08); opacity: 0.55; }
+  filter: drop-shadow(0 2.5rem 2.5rem rgb(0 0 0 / 12%));
 }
 
 .scene-orbit {
@@ -247,9 +204,7 @@
   border: 1px solid color-mix(in srgb, var(--foreground) 12%, transparent);
   border-radius: 16px;
   background: #202022;
-  box-shadow:
-    0 3rem 7rem -3rem color-mix(in srgb, var(--coral) 22%, transparent),
-    0 1.5rem 3rem -2rem rgb(0 0 0 / 35%);
+  box-shadow: 0 2rem 4rem -2.5rem rgb(0 0 0 / 32%);
 }
 
 .app-preview-shell::before {
@@ -265,14 +220,14 @@
 }
 
 .app-preview-shell::after {
-  content: "BEANS / WORKSPACE";
+  content: "Beans workspace";
   position: absolute;
   top: 1.05rem;
   right: 1.25rem;
-  color: rgb(255 255 255 / 42%);
+  color: rgb(255 255 255 / 52%);
   font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
+  font-size: 11px;
+  letter-spacing: 0;
 }
 
 .app-preview-frame {
@@ -286,54 +241,24 @@
   text-align: right;
 }
 
-/* Spotlight light is local to a surface and never moves layout. */
-[data-spotlight] {
-  --pointer-x: 50%;
-  --pointer-y: 50%;
-}
-
 .bento-card,
 .comparison-bento-card,
 .comparison-dimension {
   position: relative;
   isolation: isolate;
-  border: 1px solid color-mix(in srgb, var(--foreground) 7%, transparent);
+  border: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
   background: var(--surface-raised);
-  box-shadow: 0 1.5rem 3.5rem -2.75rem color-mix(in srgb, var(--foreground) 28%, transparent);
+  box-shadow: 0 1.5rem 3.5rem -2.75rem color-mix(in srgb, var(--foreground) 24%, transparent);
   transition:
     border-color var(--motion-duration-base) ease,
     box-shadow var(--motion-duration-base) ease;
 }
 
-.bento-card::before,
-.comparison-bento-card::before,
-.comparison-dimension::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  border-radius: inherit;
-  pointer-events: none;
-  opacity: 0;
-  background: radial-gradient(
-    24rem circle at var(--pointer-x) var(--pointer-y),
-    color-mix(in srgb, var(--coral) 13%, transparent),
-    transparent 68%
-  );
-  transition: opacity var(--motion-duration-base) ease;
-}
-
 .bento-card:hover,
 .comparison-bento-card:hover,
 .comparison-dimension:hover {
-  border-color: color-mix(in srgb, var(--coral) 30%, transparent);
-  box-shadow: 0 2rem 4rem -2.5rem color-mix(in srgb, var(--coral) 20%, transparent);
-}
-
-.bento-card:hover::before,
-.comparison-bento-card:hover::before,
-.comparison-dimension:hover::before {
-  opacity: 1;
+  border-color: color-mix(in srgb, var(--foreground) 16%, transparent);
+  box-shadow: 0 1.75rem 3.5rem -2.5rem color-mix(in srgb, var(--foreground) 28%, transparent);
 }
 
 .bento-grid {
@@ -342,18 +267,6 @@
 
 .bento-card {
   min-height: 410px;
-}
-
-.bento-0 {
-  background:
-    radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--coral) 18%, transparent), transparent 62%),
-    var(--surface-raised);
-}
-
-.bento-5 {
-  background:
-    radial-gradient(ellipse at 85% 20%, color-mix(in srgb, var(--coral) 12%, transparent), transparent 58%),
-    var(--surface-raised);
 }
 
 .bento-art {
@@ -499,34 +412,8 @@
   overflow: hidden;
   min-height: 520px;
   padding: clamp(2rem, 4vw, 3.5rem);
-  background:
-    radial-gradient(circle at 100% 0%, rgb(255 255 255 / 24%), transparent 46%),
-    var(--coral);
-  box-shadow: 0 2.5rem 5rem -3rem color-mix(in srgb, var(--coral) 55%, transparent);
-}
-
-.free-panel::before,
-.free-panel::after {
-  content: "";
-  position: absolute;
-  z-index: -1;
-  border: 1px solid rgb(23 23 23 / 18%);
-  border-radius: 50%;
-  pointer-events: none;
-}
-
-.free-panel::before {
-  width: 28rem;
-  height: 28rem;
-  right: -12rem;
-  top: -10rem;
-}
-
-.free-panel::after {
-  width: 20rem;
-  height: 20rem;
-  right: -8rem;
-  top: -6rem;
+  background: var(--coral);
+  box-shadow: 0 2rem 4rem -3rem color-mix(in srgb, var(--foreground) 32%, transparent);
 }
 
 .free-price {
@@ -641,9 +528,7 @@
   flex-direction: column;
   justify-content: center;
   border: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
-  background:
-    linear-gradient(115deg, color-mix(in srgb, var(--coral) 8%, transparent), transparent 55%),
-    var(--surface-inset);
+  background: var(--surface-inset);
 }
 
 .comparison-hero .marketing-button {
@@ -684,10 +569,8 @@
 .comparison-bento-beans {
   position: relative;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--coral) 15%, transparent);
-  background:
-    radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--coral) 17%, transparent), transparent 52%),
-    var(--surface-raised);
+  border: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
+  background: var(--surface-raised);
 }
 
 .comparison-bento-beans h2 {
@@ -730,22 +613,8 @@
 .beans-cta {
   min-height: 460px;
   border: 0;
-  background:
-    radial-gradient(circle at 5% 100%, rgb(255 255 255 / 20%), transparent 45%),
-    var(--coral);
-  box-shadow: 0 3rem 6rem -4rem color-mix(in srgb, var(--coral) 55%, transparent);
-}
-
-.beans-cta::after {
-  content: "";
-  position: absolute;
-  width: 34rem;
-  height: 34rem;
-  left: -12rem;
-  top: -14rem;
-  border: 1px solid rgb(23 23 23 / 16%);
-  border-radius: 50%;
-  pointer-events: none;
+  background: var(--coral);
+  box-shadow: 0 2rem 4rem -3rem color-mix(in srgb, var(--foreground) 32%, transparent);
 }
 
 .cta-copy {
@@ -772,7 +641,8 @@
 }
 
 .cta-mark {
-  filter: drop-shadow(0 2rem 2rem rgb(23 23 23 / 14%));
+  filter: brightness(0);
+  opacity: 0.9;
 }
 
 .marketing-footer {
@@ -798,7 +668,6 @@
 .reading-progress {
   height: 2px;
   background: var(--coral);
-  box-shadow: 0 0 12px color-mix(in srgb, var(--coral) 45%, transparent);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -809,11 +678,6 @@
 
   .hero-title .brush {
     color: var(--coral);
-  }
-
-  .beans-experience::before {
-    opacity: 0.035;
-    mix-blend-mode: screen;
   }
 
   .bento-conversation > div {
@@ -847,10 +711,6 @@
   .beans-hero {
     min-height: 0;
     padding-top: 3rem;
-  }
-
-  .beans-hero::before {
-    inset: 48% -42% 3% 12%;
   }
 
   .hero-copy::before {
@@ -1026,8 +886,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .hero-copy::before,
-  .hero-scene::after {
+  .hero-copy::before {
     animation: none;
   }
 

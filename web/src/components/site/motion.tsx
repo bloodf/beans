@@ -50,28 +50,9 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
     }
     visibility()
     document.addEventListener('visibilitychange', visibility)
-
-    const finePointer = matchMedia('(pointer: fine)')
-    let pointerFrame = 0
-    const moveSpotlight = (event: PointerEvent) => {
-      if (!finePointer.matches || !(event.target instanceof Element)) return
-      const surface = event.target.closest<HTMLElement>('[data-spotlight]')
-      if (!surface) return
-      const { clientX, clientY } = event
-      cancelAnimationFrame(pointerFrame)
-      pointerFrame = requestAnimationFrame(() => {
-        const bounds = surface.getBoundingClientRect()
-        surface.style.setProperty('--pointer-x', `${clientX - bounds.left}px`)
-        surface.style.setProperty('--pointer-y', `${clientY - bounds.top}px`)
-      })
-    }
-    element.addEventListener('pointermove', moveSpotlight, { passive: true })
-
     return () => {
       observer.disconnect()
       document.removeEventListener('visibilitychange', visibility)
-      element.removeEventListener('pointermove', moveSpotlight)
-      cancelAnimationFrame(pointerFrame)
     }
   }, [])
 
@@ -110,17 +91,6 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
                 start: 'top top',
                 end: 'bottom bottom',
                 scrub: true,
-              },
-            })
-            gsap.to('.hero-scene', {
-              yPercent: 18,
-              rotation: 8,
-              ease: 'none',
-              scrollTrigger: {
-                trigger: '.beans-hero',
-                start: 'top top',
-                end: 'bottom top',
-                scrub: 0.8,
               },
             })
             ScrollTrigger.create({

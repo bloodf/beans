@@ -1,6 +1,6 @@
 # Computer ownership
 
-**[#34](https://github.com/bloodf/beans/issues/34) discovery; not implemented.** Proposed behavior below is not shipped API or verified virtualization. No prerequisite issue. Cross-P8 reconciliation gates closure, not implementation. #35 owns [display transport](relay.md), codecs/network/controller framing; this subject owns authority/config/status/admission.
+**[#34](https://github.com/bloodf/beans/issues/34) discovery; not implemented.** Proposed behavior below is not shipped API or verified virtualization. Discovery has no prerequisite issue. Unresolved shared authority, lifecycle and input decisions block the affected implementation; recorded cross-P8 reconciliation also gates closure. [#32](https://github.com/bloodf/beans/issues/32) owns the lifecycle, lease and input-owner/epoch contract; [#33](https://github.com/bloodf/beans/issues/33) owns guest-side enforcement. #35 owns [display transport](relay.md) and framing; this subject owns encrypted bot/Runner ownership, config/status, policy and operation admission.
 
 ## Current evidence and boundary
 
@@ -60,7 +60,9 @@ All AppKit, Windows/Linux and phone/tablet stores use one core schema. Desktop w
 
 The destructive confirmation is minted through `computer.delete.preview` (same binding); returns sanitized retained-data summary plus one-use token, never private disk paths. Preview/confirmation is trusted user flow, not bot tool. Token invalidates on account/assignment/generation/revision change or attempted consumption. Errors preserve existing `{ error: { message } }` envelope with bounded codes: `computer_unsupported`, `computer_offline`, `computer_paused`, `computer_revoked`, `computer_conflict`, `computer_expired`, `computer_operation_unknown`, `computer_confirmation_required`, `computer_cleanup_pending`. Unsupported method follows current `unknown method <name>`; UI disables action rather than retries a different method. No hidden host-shell fallback.
 
-`computer.changed` and `computer.operation.changed` events/snapshot entries expose binding, status seq and sanitized outcomes; `computer.view.closed` reports revocation/disconnect. Clients refresh after timeout/foreground/reconnect and clear all cached computer/session state on identity/relay-source change. Stop/delete remain available as safety actions while Pause/access is revoked; view/control/start/provision are blocked. Physical input uses #35's authenticated transport, **not** per-keystroke websocket RPC/sealed requests. Shared grants bind account, bot, Runner, requesting paired Device, generation, policy revision, mode and expiry; #35 owns controller arbitration, transport/key framing and disconnect behavior. No cached grant survives epoch/policy change or is reused for another computer.
+`computer.changed` and `computer.operation.changed` events/snapshot entries expose binding, status seq and sanitized outcomes; `computer.view.closed` reports revocation/disconnect. Clients refresh after timeout/foreground/reconnect and clear all cached computer/session state on identity/relay-source change. Stop/delete remain available as safety actions while Pause/access is revoked; view/control/start/provision are blocked. Physical input uses #35's authenticated transport, **not** per-keystroke websocket RPC/sealed requests. Shared grants bind account, bot, Runner, requesting paired Device, generation, policy revision, mode and expiry. #35 owns transport/key framing and reports disconnects into the shared lifecycle contract; it does not own a separate arbitration lock. Input ownership, lease and epoch rules belong to #32, with guest-side enforcement in #33. No cached grant survives epoch/policy change or is reused for another computer.
+
+The shared lease/epoch decision remains pending. Before implementing control grants, arbitration or guest input, #32–35 must record one agreed contract for the authoritative state owner, persisted epoch and restart behavior, acquisition/handoff/release ordering, and expiry/renewal under membership, policy and generation changes. The [input-fencing implementation scope](https://github.com/bloodf/beans/issues/53) already requires persisted owner/epoch state and enforcement at Runner dispatch and the guest controller; it does not supply the missing final state machine. Display timing proposals do not settle lifecycle lease parameters. Neither this document nor #35 authorizes an independent transport lock.
 
 ## Proposed capability, Pause and revocation
 
@@ -95,48 +97,6 @@ Bot deletion's durable policy tombstone dominates config/status. Runner fences w
 
 Account deletion still requires successful relay deletion before current local forget. Proposed teardown additionally fences local computer work and purges reachable local guest resources/journals/session secrets. Other/offline Runners may retain disks until they observe revoked account/`410`; publish no promise of remote disk erasure from relay deletion. Local account forget/unpair fences then deletes that Runner's account-owned computer resources with durable retry evidence; interrupted cleanup blocks replacement-account reuse. Never transfer resources/secrets across account incarnation. Host filesystem snapshots/backups and SSD secure erasure are operator responsibilities, not guaranteed by opaque relay deletion. Stop is non-destructive, delete requires explicit retained-data confirmation, and failed cleanup remains visible/retryable without restoring authority.
 
-The recorded source-extracted old-client fixture below proves default preservation, nested unknown-field rejection, Bot extension loss and whole-field capability merge; it adds no permanent source tests or Cargo build. Evidence excludes private host paths. `bun run check:docs` validates size/links only, not VM feasibility, client implementations or future floor safety.
+The [recorded source-extracted old-client fixture](computer-ownership-compatibility.md) proves default preservation, nested unknown-field rejection, Bot extension loss and whole-field capability merge; it adds no permanent source tests or Cargo build. Evidence excludes private host paths. `bun run check:docs` validates size/links only, not VM feasibility, client implementations or future floor safety.
 
-Before closure, supervisor must record reconciliation against probe thresholds, image provenance, threat model, lifecycle, controller, ownership and #35 display outputs; resolve P/storage admission, freshness/clock/resource limits and shared session binding. Downstream API/client issues must reference this section and receive changed-input notes for whole-field permission merge, mandatory floor, async receipts/20 s, cleanup pending and transport authority. Those updates and merged/recorded decision links remain acceptance evidence, not fabricated success or prerequisites. No GH lease, implementation/build, live VM, installed-client, display or deletion verification is claimed by this discovery contract.
-
-## Recorded compatibility fixture
-
-At the source revision above, rustc `1.99.0 (b940084d7 2026-09-28)` (Homebrew) compiled and ran this isolated fixture on darwin 25.6.0 arm64; Bun `1.4.2` is available. Existing serde artifacts were linked, without Cargo. `Attachment`/`BotLook` are JSON substitutes for unrelated fields; `Roster` is minimal. Capabilities declaration/default, Bot declaration and bot merge macro/invocation are source-extracted, not a reimplementation. This exercises deserialization and bot field merge, not policy projection, whole-core startup or installed clients.
-
-SHA-256 source bindings:
-
-- `crates/cli/src/model.rs`: `a3b15eea514e058df8ad3773a86fa2cc161935cd1832d73dbd7ccb9aea7bbbce`
-- `crates/cli/src/sync.rs`: `20c213aa779bc431f14dad7f6db2c05aab07df599c193677d038cb1685411b4d`
-- Fixture: `f686d817c5c3a039b35d5ada8f050d9f13548d3a7f7588f138e4d6200ec7ecb2`
-
-Write the following unchanged to `$SCRATCH/fixture.rs`; set `DEPS` to the existing matching Rust artifact directory. No build of Beans is required.
-
-```sh
-rustc --edition=2021 "$SCRATCH/fixture.rs" -L dependency="$DEPS" --extern serde="$DEPS/libserde-492747a8269cbb1d.rlib" --extern serde_json="$DEPS/libserde_json-8466cd8d0e3ab640.rlib" -o "$SCRATCH/fixture" && "$SCRATCH/fixture"
-```
-
-Raw output, exit 0:
-
-```text
-PASS missing capabilities keeps shell/write/plugin defaults
-PASS nested computer capability rejects: unknown field `computer`, expected one of `shell`, `write`, `plugins`
-PASS unknown bot-level computer field is discarded on typed round trip (unsafe rollout)
-PASS unrelated name edit preserves remote capability restriction
-PASS concurrent capability edit replaces whole capability field before policy projection; not per-key merge
-```
-
-Generate the source-extracted fixture from the pinned checkout with Python 3, then move `fixture.rs` into `$SCRATCH` before the compile command above. The generator preserves the recorded fixture bytes, including source comments.
-
-```python
-from pathlib import Path
-model = Path("crates/cli/src/model.rs").read_text()
-sync = Path("crates/cli/src/sync.rs").read_text()
-cap = model[model.index('#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]\n#[serde(default, deny_unknown_fields)]'):model.index('\nimpl Capabilities {')]
-bot = model[model.index('#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]\npub struct Bot {'):model.index('\n/// One Auto-review')]
-merge = sync[sync.index('    macro_rules! merge_entities {', sync.index('fn merge_rosters(')):sync.index('    merge_entities!(chats,', sync.index('fn merge_rosters('))]
-prefix = 'use serde::{Serialize,Deserialize};\nuse serde_json::{Value,json};\ntype Attachment = Value;\nmod appearance {pub type BotLook = serde_json::Value;}\n'
-harness = '\n#[derive(Clone)] struct Roster {bots: Vec<Bot>}\nfn merge(mut remote:Roster,base:&Roster,queued:&Roster)->Roster {\n'
-tests = 'fn main(){\n let raw=json!({"id":"bot-fixture","name":"base","description":"","symbol_name":"","accent":"","runner_id":"runner-fixture","provider":"fixture","created_at":0});\n let baseline:Bot=serde_json::from_value(raw.clone()).unwrap();\n assert_eq!(baseline.capabilities,Capabilities{shell:true,write:true,plugins:None});\n println!("PASS missing capabilities keeps shell/write/plugin defaults");\n let mut nested=raw.clone(); nested["capabilities"]=json!({"computer":true});\n let err=serde_json::from_value::<Bot>(nested).unwrap_err(); assert!(err.to_string().contains("unknown field `computer`"));\n println!("PASS nested computer capability rejects: {}",err);\n let mut top=raw; top["computer"]=json!({"version":1,"enabled":true});\n let old:Bot=serde_json::from_value(top).unwrap(); assert!(serde_json::to_value(old).unwrap().get("computer").is_none());\n println!("PASS unknown bot-level computer field is discarded on typed round trip (unsafe rollout)");\n let base=Roster{bots:vec![baseline.clone()]}; let mut remote=base.clone(); remote.bots[0].capabilities.shell=false;\n let mut local=base.clone(); local.bots[0].name="renamed".into();\n let merged=merge(remote.clone(),&base,&local);assert_eq!(merged.bots[0].name,"renamed");assert!(!merged.bots[0].capabilities.shell);\n println!("PASS unrelated name edit preserves remote capability restriction");\n local.bots[0].capabilities.write=false;let merged=merge(remote,&base,&local);assert!(merged.bots[0].capabilities.shell);assert!(!merged.bots[0].capabilities.write);\n println!("PASS concurrent capability edit replaces whole capability field before policy projection; not per-key merge");\n}\n'
-fixture = prefix + cap + bot.replace('crate::appearance::BotLook', 'appearance::BotLook') + harness + merge + 'remote}\n' + tests
-Path("fixture.rs").write_text(fixture)
-```
+Before closure, supervisor must record reconciliation against probe thresholds, image provenance, threat model, lifecycle, controller, ownership and #35 display outputs; resolve P/storage admission, freshness/clock/resource limits and shared session binding. Downstream API/client issues must reference this section and receive changed-input notes for whole-field permission merge, mandatory floor, async receipts/20 s, cleanup pending and transport authority. Those updates and merged/recorded decision links remain closure evidence, not fabricated success. Discovery has no new issue dependencies; unresolved contract decisions still block the affected implementation as stated above. No GH lease, implementation/build, live VM, installed-client, display or deletion verification is claimed by this discovery contract.

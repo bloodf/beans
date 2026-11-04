@@ -123,4 +123,4 @@ options.messages = serde_json::from_str(&json)?;
 let mut agent = Agent::new(options);
 ```
 
-To save as you go, append each `message_end` message from the event stream.
+To save as you go, append each `message_end` message from the event stream. On `bound_thinking_dropped { model }`, apply `providers::anthropic::drop_bound_thinking` to the saved messages with that model before appending later replies. This keeps rejected thinking out of subsequent prompts while preserving text, tool calls, results, and other server blocks.

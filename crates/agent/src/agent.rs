@@ -416,6 +416,9 @@ impl Agent {
 
     fn process_event(&mut self, event: &AgentEvent) {
         match event {
+            AgentEvent::BoundThinkingDropped { model } => {
+                crate::providers::anthropic::drop_bound_thinking(model, &mut self.messages);
+            }
             AgentEvent::MessageStart { message } | AgentEvent::MessageUpdate { message, .. } => {
                 self.streaming_message = Some(message.clone());
             }

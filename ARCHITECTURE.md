@@ -89,6 +89,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds and submission |
 | [Website](docs/architecture/website.md) | Website, documentation and install scripts |
 | [Languages](docs/architecture/languages.md) | English and Simplified Chinese across clients |
+| [Portable setup](docs/architecture/portable-setup.md) | Secret-free configuration recipe boundaries, versioning, ownership, validation and import transaction contract |
 
 ## Repo layout
 

@@ -7,62 +7,41 @@ const workflows = await Promise.all(["test.yml", "docs.yml", "catalog.yml"].map(
   workflow: Bun.YAML.parse(await Bun.file(join(ROOT, ".github/workflows", file)).text()),
 })));
 
-function evaluate(expression: string, github: object, env: object = {}, inputs: object = {}) {
+function evaluate(expression: string, github: object, env: object = {}) {
   const body = expression.replace(/^\s*\$\{\{\s*|\s*\}\}\s*$/g, "");
-  return new Function("github", "env", "inputs", `return (${body});`)(github, env, inputs);
+  return new Function("github", "env", `return (${body});`)(github, env);
 }
 
 for (const { file, workflow } of workflows) {
-  test(`${file}: validation triggers admit main PRs without path filters`, () => {
-    expect(workflow.on.pull_request).toEqual({ branches: ["main"] });
-    expect(Object.hasOwn(workflow.on, "workflow_dispatch")).toBe(true);
+  test(`${file}: PRs targeting main and manual dispatch trigger validation`, () => {
+    expect(workflow.on).toEqual({ pull_request: { branches: ["main"] }, workflow_dispatch: null });
   });
 
-  test(`${file}: runner admission follows event and platform scope`, () => {
+  test(`${file}: any same-repository PR and manual dispatch allocate runners, forks do not`, () => {
     for (const [name, job] of Object.entries(workflow.jobs) as [string, { if: string }][]) {
-      const deferred = file === "test.yml" && ["rust-windows", "desktop", "mobile"].includes(name);
-      for (const repo of ["bloodf/beans", "contributor/beans"]) {
+      for (const [head, repo, expected] of [
+        ["release/1.0.15", "bloodf/beans", true],
+        ["release/integration/1.0.15", "bloodf/beans", true],
+        ["feature/chat", "bloodf/beans", true],
+        ["fleet/r20261014a-ci", "bloodf/beans", true],
+        ["main", "bloodf/beans", true],
+        ["release-fix", "bloodf/beans", true],
+        ["release/1.0.15", "contributor/beans", false],
+        ["feature/chat", "contributor/beans", false],
+      ] as const) {
         const github = {
           repository: "bloodf/beans",
           event_name: "pull_request",
+          head_ref: head,
           event: { pull_request: { head: { repo: { full_name: repo } } } },
         };
-        expect(Boolean(evaluate(job.if, github)), `${file} ${name}: ${repo}`).toBe(!deferred && repo === "bloodf/beans");
+        expect(evaluate(job.if, github), `${file} ${name}: ${repo}:${head}`).toBe(expected);
       }
-      const dispatch = { repository: "bloodf/beans", event_name: "workflow_dispatch", event: {} };
-      for (const full_platform of [undefined, false, true]) {
-        expect(Boolean(evaluate(job.if, dispatch, {}, { full_platform })), `${file} ${name}: ${full_platform}`).toBe(!deferred || full_platform === true);
-      }
-      if (file === "test.yml") {
-        expect(Boolean(evaluate(job.if, { repository: "bloodf/beans", event_name: "pull_request", event: {} }))).toBe(false);
-        expect(Boolean(evaluate(job.if, { repository: "bloodf/beans", event_name: "push", event: {} }))).toBe(false);
-      }
+      // Dispatch has no pull_request payload; short-circuit admission must not dereference it.
+      expect(evaluate(job.if, { repository: "bloodf/beans", event_name: "workflow_dispatch", event: {} }), `${file} ${name}: dispatch`).toBe(true);
     }
   });
 }
-
-test("manual full-platform input is a native boolean, defaulting to server/AppKit", () => {
-  const workflow = workflows.find(({ file }) => file === "test.yml")!.workflow;
-  const input = workflow.on.workflow_dispatch.inputs.full_platform;
-  expect(input.type).toBe("boolean");
-  expect(input.default).toBe(false);
-  for (const name of ["rust-linux", "rust-macos"]) {
-    const job = workflow.jobs[name];
-    const workspace = job.steps.find((step: { run?: string }) => step.run === "cargo test --locked --workspace --exclude beans-mobile");
-    expect(workspace.if).toBeUndefined();
-    const phone = job.steps.find((step: { run?: string }) => step.run === "cargo test --locked -p beans-mobile");
-    for (const full_platform of [undefined, false, true]) {
-      expect(Boolean(evaluate(phone.if, { event_name: "workflow_dispatch" }, {}, { full_platform }))).toBe(full_platform === true);
-      expect(Boolean(evaluate(phone.if, { event_name: "pull_request" }, {}, { full_platform }))).toBe(false);
-    }
-  }
-  expect(workflow.jobs["rust-linux"].steps.some((step: { run?: string }) => step.run === "python3 -I -B scripts/server-updater.test.py -v")).toBe(true);
-  expect(workflow.jobs["rust-linux"].services.postgres.image).toBe("postgres:17");
-  expect(workflow.jobs["macos-app"].steps.filter((step: { run?: string }) => step.run).map((step: { run: string }) => step.run)).toEqual([
-    'bun -e \'import { buildMarkdown } from "./scripts/app.ts"; if (!(await buildMarkdown("debug")).ok) process.exit(1)\'',
-    "swift test", "bun run test:mac-startup", "sh macos/Tests/run-settings-layout.sh",
-  ]);
-});
 
 test("workflow check names are unique across validation workflows", () => {
   const names = workflows.flatMap(({ workflow }) => Object.entries(workflow.jobs).map(([id, job]) => {
@@ -72,6 +51,24 @@ test("workflow check names are unique across validation workflows", () => {
   expect(new Set(names).size).toBe(names.length);
   expect(names).toContain("docs");
   expect(names).toContain("catalog");
+});
+
+test("Tests rejects unrelated events and missing PR payloads without disabling platform jobs", () => {
+  const workflow = workflows.find(({ file }) => file === "test.yml")!.workflow;
+  for (const [name, job] of Object.entries(workflow.jobs) as [string, { if: string }][]) {
+    for (const github of [
+      { repository: "bloodf/beans", event_name: "pull_request", event: {} },
+      { repository: "bloodf/beans", event_name: "push", event: {} },
+      { repository: "bloodf/beans", event_name: "push", event: { pull_request: { head: { repo: { full_name: "bloodf/beans" } } } } },
+    ]) {
+      expect(Boolean(evaluate(job.if, github)), name).toBe(false);
+    }
+  }
+  for (const name of ["rust-linux", "rust-macos"]) {
+    const mobile = workflow.jobs[name].steps.find((step: { run?: string }) => step.run === "cargo test --locked -p beans-mobile");
+    expect(mobile, `${name}: phone core remains covered`).toBeDefined();
+    expect(mobile.if, `${name}: phone core is not dispatch-only`).toBeUndefined();
+  }
 });
 
 test("catalog uses PR base or main for dispatch in both fetch and comparison", () => {
@@ -89,5 +86,21 @@ test("catalog uses PR base or main for dispatch in both fetch and comparison", (
     const check = job.steps.find((step: { run?: string }) => step.run === "bun run check:catalog");
     const base = check.env.CATALOG_BASE.replace(/\$\{\{(.*?)\}\}/g, (_: string, expression: string) => evaluate(expression, github, env));
     expect(base).toBe(`origin/${expected}`);
+  }
+});
+
+
+test("every Rust aggregate receives a prebuilt real relay for the revocation fixture", () => {
+  const jobs = workflows.find(({ file }) => file === "test.yml")!.workflow.jobs;
+  for (const name of ["rust-linux", "rust-macos", "rust-windows"]) {
+    const steps = jobs[name].steps as { run?: string; if?: string }[];
+    const build = steps.findIndex((step) => step.run?.includes("cargo build --locked -p beans-relay --bin beans-relay"));
+    const aggregate = steps.findIndex((step) => step.run?.includes("cargo test --locked"));
+    expect(build, `${name}: build relay before tests`).toBeGreaterThanOrEqual(0);
+    expect(build).toBeLessThan(aggregate);
+    expect(steps[build].if).toBeUndefined();
+    expect(steps[build].run).toContain("BEANS_REVOCATION_RELAY_BIN=");
+    expect(steps[build].run).toContain("GITHUB_ENV");
+    expect(steps[build].run).toContain("cargo metadata --locked --no-deps --format-version 1");
   }
 });

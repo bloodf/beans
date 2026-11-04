@@ -178,6 +178,7 @@ fn signed_library_compare_is_readonly_and_root_bounded() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
     runtime.block_on(async {
         let home = std::env::temp_dir().join(format!("beans-library-compare-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let _cleanup = Cleanup(home.clone());
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Synthetic Runner".into())).unwrap();
@@ -289,6 +290,7 @@ mod custom_provider_tests {
     async fn phone_request_executes_catalog_http_only_on_selected_runner() {
         use std::io::{Read, Write};
         let home = std::env::temp_dir().join(format!("beans-guided-origin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Fixture Runner".into())).unwrap();
         let runner = app.this_device_id().unwrap();

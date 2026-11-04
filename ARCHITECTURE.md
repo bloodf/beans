@@ -86,6 +86,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [macOS chat](docs/architecture/macos-chat.md) | AppKit transcript, composer, attachments, dictation, and working state |
 | [Windows and Linux app](docs/architecture/desktop-app.md) | The MyGo app: its Go side and Solid page, title bar, commands, updates, development and builds |
 | [Phone app](docs/architecture/phone-app.md) | The Expo app over the Rust core: the native module, pairing, relay status, attachments, dictation, notifications, turns |
+| [Phone releases and updates](docs/architecture/phone-updates.md) | TestFlight builds, Android APK releases, and the Android app's self-update: the native gate, daily check and offer, the progress dialog, the package installer |
 | [Phone interface](docs/architecture/phone-interface.md) | Native screens, transcript presentation and adaptive navigation |
 | [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds, testing submissions, accounts and credentials |
 | [Website](docs/architecture/website.md) | `web/`: the site, its docs, and the install scripts it serves |
@@ -113,7 +114,7 @@ beans/
   mobile/              # Expo app for iOS and Android: a paired Device over the core (modules/beans-core)
   web/                 # the site
   scripts/             # bun scripts: dev loop, bundle build, macOS release, the desktop app's dev loop and builds, string and doc checks
-  .github/workflows/   # release.yml: manual signed releases; test.yml: server/AppKit PR checks and opt-in full-platform dispatch; docs.yml/catalog.yml: PR/manual validation
+  .github/workflows/   # release.yml: manual signed Beans releases; test.yml: full PR/manual test matrix; docs.yml: PR/manual doc check; catalog.yml: PR/manual catalog/index check
 ```
 
 `bun run android` rebuilds the Rust core for Android, then builds and runs the Expo dev client on the Android emulator. `cd mobile && bun run core` rebuilds the Rust core for both phone platforms; `bun run mobile:dev` is the iOS development loop described below.

@@ -1106,7 +1106,7 @@ Helpers:
 - `store(key, value)` and `load(key)` keep JSON values for later scripts in this conversation. Storing `undefined` deletes a key. Writes count only when the script succeeds.
 - `ALL_TOOLS` lists `{ name, description }` of every tool known when the script starts.
 - `await searchTools(query, { limit?, namespace? })` resolves to the tools that best match the query (default limit 8), as `{ name, description }` with their declarations. It also finds tools that are not listed below.
-- `await describeTool(name)` resolves to a tool's description and declaration, or `undefined`. `describeNamespace(name)` gives its description, whole instructions, and visible tools, or `undefined`.";
+- `await describeTool(name)` resolves to a tool's description and declaration, or `undefined`. `await describeNamespace(name)` gives its description, whole instructions, and visible tools, or `undefined`.";
 
 const MCP_RESULT_GUIDANCE: &str = "Shared MCP types. An MCP tool resolves to its whole `CallToolResult`: `structuredContent` when \
 its declaration types it, else `content`, usually one text block of JSON (`JSON.parse(result.content[0].text)`). `isError: true` \

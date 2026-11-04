@@ -723,6 +723,31 @@ mod format_tests {
 
     #[test]
     #[cfg(unix)]
+    fn missing_fixture_homes_require_independent_existing_parents() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        // Missing siblings contend on the same parent, even though their names differ.
+        // Reproduce this only inside an owned root, never against the OS temp directory.
+        let held = StorageAdmission::acquire_creation(&first).unwrap();
+        assert!(StorageAdmission::acquire_creation(&second).is_err());
+        assert!(!first.exists() && !second.exists());
+        drop(held);
+
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let held = StorageAdmission::acquire_creation(&first.join("home")).unwrap();
+        let independent = Config { home: second.join("home"), port: 0 };
+        independent.ensure_home().unwrap();
+        assert!(!first.join("home").exists());
+        assert!(independent.home.join("format.json").is_file());
+        // The original creation exclusion still rejects the same fixture's startup.
+        assert!(Config { home: first.join("home"), port: 0 }.ensure_home().is_err());
+        drop(held);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_private_write_is_private_before_its_first_byte() {
         use std::os::unix::fs::MetadataExt;
         thread_local! {

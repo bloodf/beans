@@ -50,7 +50,8 @@ try {
       try {
         const run = async () => {
           const page = await context.newPage();
-          page.setDefaultTimeout(30_000);
+          // Keep below the outer consumer deadline so Playwright can report its own timeout first.
+          page.setDefaultTimeout(25_000);
           const errors: string[] = [];
           page.on("pageerror", (error) => errors.push(error.stack ?? error.message));
           page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });

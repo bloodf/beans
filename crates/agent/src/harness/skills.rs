@@ -319,10 +319,10 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             assert!(result.skills.iter().any(|s| s.path == Path::new("valid/SKILL.md")), "{result:?}");
+            assert!(!result.skills.iter().any(|s| s.path == Path::new("oversize/SKILL.md")), "oversized skill was admitted: {result:?}");
             assert!(!result.skills.iter().any(|s| s.fields.get("name").map(String::as_str) == Some("outside")), "{result:?}");
-            for fragment in ["symlink rejected", "exceeds"] {
-                assert!(result.diagnostics.iter().any(|d| d.message.contains(fragment)), "missing {fragment}: {:?}", result.diagnostics);
-            }
+            assert!(result.diagnostics.iter().any(|d| d.message.contains("symlink rejected")), "{result:?}");
+            assert!(result.diagnostics.iter().any(|d| d.path == Path::new("oversize/SKILL.md") && d.message.contains("exceeds")), "missing oversize diagnostic: {:?}", result.diagnostics);
         }
         #[cfg(not(target_os = "linux"))]
         {

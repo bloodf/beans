@@ -1,5 +1,5 @@
 export interface UpdateOffer { id: string; version: string; notes: string }
-interface Transport { check(): Promise<UpdateOffer | null>; install(id: string): Promise<void>; cancel(): void }
+interface Transport { check(): Promise<UpdateOffer | null>; install(id: string): Promise<void>; cancel(): "cancelled" | "committed" }
 export class UpdateController {
   offer: UpdateOffer | null = null;
   busy = false;
@@ -15,7 +15,13 @@ export class UpdateController {
       if (generation === this.generation) this.offer = offer;
     } finally { this.busy = false; }
   }
-  dismiss(): void { this.generation++; this.offer = null; this.transport.cancel(); }
+  dismiss(): boolean {
+    // Cancellation and commit share the native lock. A delayed progress event cannot make
+    // a committed PackageInstaller session look like an abandoned download.
+    if (this.transport.cancel() === "committed") return false;
+    this.generation++; this.offer = null;
+    return true;
+  }
   async install(id: string, hasDrafts: boolean): Promise<void> {
     if (this.busy || this.offer?.id !== id) throw new Error("Consent expired; check again");
     if (hasDrafts) throw new Error("Save or send drafts before installing");

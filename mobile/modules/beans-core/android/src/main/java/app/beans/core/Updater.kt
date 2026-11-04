@@ -16,13 +16,14 @@ import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
 
-internal class Updater(private val context: Context, private val progress: (Long, Long) -> Unit = { _, _ -> }) {
+internal class Updater(private val context: Context, private val foreground: () -> Boolean, private val progress: (String, String, Long, Long) -> Unit = { _, _, _, _ -> }) {
   private data class Offer(val id: String, val version: String, val code: Long, val size: Long, val hash: String, val notes: String, val readinessHash: String)
   private var offer: Offer? = null
   private var busy = false
   private var session: Int? = null
   private var committed = false
   private var downloadSize = 0L
+  private var downloadId: String? = null
   private var operation: UpdateOperation? = null
   private val pm get() = context.packageManager
   init {
@@ -37,7 +38,7 @@ internal class Updater(private val context: Context, private val progress: (Long
     if (Build.VERSION.SDK_INT < 28) return "native_verifier_unavailable"
     if (pm.getApplicationInfo(context.packageName, PackageManager.GET_META_DATA).metaData?.getBoolean("app.beans.GITHUB_UPDATES", false) != true) return "store_managed"
     val source = if (Build.VERSION.SDK_INT >= 30) pm.getInstallSourceInfo(context.packageName).installingPackageName else pm.getInstallerPackageName(context.packageName)
-    return if (source == "com.android.vending") "store_managed" else "supported"
+    return if (UpdateDistribution.allowsInstaller(source, context.packageName)) "supported" else "store_managed"
   }
   @Synchronized fun result(): String? {
     val prefs = context.getSharedPreferences("beans-updates", Context.MODE_PRIVATE)
@@ -58,7 +59,7 @@ internal class Updater(private val context: Context, private val progress: (Long
   private fun digest(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
   private fun fetch(url: String, limit: Long, output: java.io.OutputStream): Long =
     (operation ?: error("No active update")).fetch(url, limit, output) { count ->
-      if (downloadSize > 0) progress(count, downloadSize)
+      downloadId?.let { if (downloadSize > 0) progress(it, "downloading", count, downloadSize) }
     }
   private fun bytes(url: String, limit: Long): ByteArray {
     val output = java.io.ByteArrayOutputStream()
@@ -123,17 +124,18 @@ internal class Updater(private val context: Context, private val progress: (Long
     return null
     } finally { synchronized(this) { operation?.close(); operation = null; busy = false } }
   }
-  fun cancel() {
+  fun cancel(): String {
     synchronized(this) {
       offer = null
       operation?.cancel()
       if (!committed) { session?.let { runCatching { pm.packageInstaller.abandonSession(it) } }; session = null }
+      return if (committed) "committed" else "cancelled"
     }
   }
   fun install(id: String, activity: Activity) {
     val selected = synchronized(this) {
       eligible(); check(!busy && session == null) { "Update already running" }
-      check(activity.hasWindowFocus()) { "Return to Beans before installing" }
+      check((foreground() && !activity.isFinishing && !activity.isDestroyed)) { "Return to Beans before installing" }
       val value = offer ?: error("Check for updates again")
       require(value.id == id) { "Release consent expired" }; offer = null
       if (!pm.canRequestPackageInstalls()) {
@@ -147,6 +149,7 @@ internal class Updater(private val context: Context, private val progress: (Long
       val fresh = verified(selected.version, selected.notes) ?: error("Release is no longer Android-ready")
       require(fresh.readinessHash == selected.readinessHash && fresh.hash == selected.hash && fresh.size == selected.size && fresh.code == selected.code) { "Release changed; consent again" }
       downloadSize = selected.size
+      downloadId = selected.id
       file.outputStream().use { require(fetch(asset(selected.version, "Beans-${selected.version}.apk"), selected.size, it) == selected.size) { "Truncated APK" } }
       val hash = MessageDigest.getInstance("SHA-256")
       file.inputStream().use { input -> val buffer = ByteArray(65536); while (true) { operation!!.ensureActive(); val n = input.read(buffer); if (n < 0) break; hash.update(buffer, 0, n) } }
@@ -158,7 +161,7 @@ internal class Updater(private val context: Context, private val progress: (Long
       val history = archive.signingInfo?.signingCertificateHistory?.map { digest(it.toByteArray()) }?.toSet() ?: emptySet()
       require(UpdateTrust.compatible(signers(local), signers(archive), history)) { "APK signer incompatible with installed Beans" }
       operation!!.ensureActive()
-      check(activity.hasWindowFocus()) { "Installation cancelled in background; consent again" }
+      check((foreground() && !activity.isFinishing && !activity.isDestroyed)) { "Installation cancelled in background; consent again" }
       eligible()
       val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
       params.setAppPackageName(context.packageName); params.setSize(selected.size)
@@ -179,11 +182,13 @@ internal class Updater(private val context: Context, private val progress: (Long
         val pending = PendingIntent.getBroadcast(context, sessionId, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
         synchronized(this) {
           operation!!.ensureActive()
+          check(foreground() && !activity.isFinishing && !activity.isDestroyed) { "Installation cancelled in background; consent again" }
           target.commit(pending.intentSender)
           committed = true
+          progress(selected.id, "installing", selected.size, selected.size)
         }
       }
     } catch (error: Exception) { cancel(); throw error }
-    finally { file.delete(); synchronized(this) { operation?.close(); operation = null; busy = false; downloadSize = 0 } }
+    finally { file.delete(); synchronized(this) { operation?.close(); operation = null; busy = false; downloadSize = 0; downloadId = null } }
   }
 }

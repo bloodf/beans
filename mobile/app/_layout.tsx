@@ -9,6 +9,7 @@ import { engine } from "../src/core/engine";
 import { useStore } from "../src/core/store";
 import { initializeUpdates } from "../src/core/updates";
 import { useStackScreenOptions } from "../src/ui/navigation";
+import { UpdateProgress } from "../src/ui/UpdateProgress";
 import { usePalette } from "../src/ui/theme";
 
 export default function RootLayout() {
@@ -89,6 +90,7 @@ export default function RootLayout() {
               <Stack.Screen name="pair" options={{ headerShown: false, gestureEnabled: false }} />
             </Stack.Protected>
           </Stack>
+          <UpdateProgress />
         </ThemeProvider>
       </KeyboardProvider>
     </GestureHandlerRootView>

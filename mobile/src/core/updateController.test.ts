@@ -4,7 +4,7 @@ import { UpdateController } from "./updateController";
 const offer = { id: "snapshot", version: "1.10.0", notes: "untrusted notes" };
 test("checks and background never install; consent expires on dismissal", async () => {
   let installs = 0;
-  const controller = new UpdateController({ check: async () => offer, install: async () => { installs++; }, cancel: () => {} });
+  const controller = new UpdateController({ check: async () => offer, install: async () => { installs++; }, cancel: () => "cancelled" });
   await controller.check();
   expect(installs).toBe(0);
   controller.dismiss();
@@ -19,7 +19,7 @@ test("checks and background never install; consent expires on dismissal", async 
 test("late check cannot resurrect background consent and concurrent checks collapse", async () => {
   let resolve!: (value: typeof offer) => void;
   let checks = 0;
-  const controller = new UpdateController({ check: () => { checks++; return new Promise(r => { resolve = r; }); }, install: async () => {}, cancel: () => {} });
+  const controller = new UpdateController({ check: () => { checks++; return new Promise(r => { resolve = r; }); }, install: async () => {}, cancel: () => "cancelled" });
   const pending = controller.check();
   await controller.check();
   expect(checks).toBe(1);

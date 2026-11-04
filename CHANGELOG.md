@@ -6,6 +6,8 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Android signed updates use the current progress dialog with consent-bound events, native commit-aware cancellation and conservative installer-source gating.
+
 - Android update installation guards share the current composer draft state, including replies, pending sends and dictation; explicit draft deletion updates recovery previews immediately.
 
 - Production GitHub Android builds include bounded signed Beans release discovery, consent-bound APK verification and a system-confirmed installer. Play/iOS/Dev stay excluded; installed package signing identity supplies compatibility evidence. Settings provides daily checks, Later and exact-version Skip; unsent composer drafts block installation. Native installed-upgrade acceptance remains separate.

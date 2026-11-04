@@ -219,7 +219,7 @@ export default function SettingsScreen() {
           {!updateReason && <>
             <ToggleRow title={t("Check daily")} value={updates.checks} onValueChange={setUpdateChecks} />
             <Row title={t("Check for updates")} detail={updates.status} onPress={() => void checkUpdates()} />
-            {updates.status === "installing" && <Row title={t("Downloading update")} detail={`${updates.progress}%`} />}
+            {updates.status === "downloading" && <Row title={t("Downloading update")} detail={`${Math.round(updates.progress * 100)}%`} />}
             {updates.error && <Row title={t("Update failed")} subtitle={updates.error} subtitleLines={5} />}
             {updates.offer && <>
               <Row title={updates.offer.version} subtitle={updates.offer.notes} subtitleLines={12} />

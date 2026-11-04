@@ -12,8 +12,8 @@ import uniffi.beans_mobile.EventListener
 /// then one request at a time and a stream of events.
 class BeansCoreModule : Module() {
   private var core: Core? = null
-  private val updater by lazy { Updater(requireNotNull(appContext.reactContext)) { downloaded, total ->
-    sendEvent("updateProgress", mapOf("downloaded" to downloaded, "total" to total))
+  private val updater by lazy { Updater(requireNotNull(appContext.reactContext), { PushService.inFront }) { id, phase, downloaded, total ->
+    sendEvent("updateProgress", mapOf("id" to id, "phase" to phase, "downloaded" to downloaded, "total" to total))
   } }
 
   override fun definition() = ModuleDefinition {

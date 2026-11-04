@@ -520,6 +520,7 @@ async fn stream_assistant_response(
     let hooks = &config.hooks;
     let policy = config.retry.as_ref().filter(|p| p.enabled);
     let mut attempt = 0u32;
+    let mut rebound = false;
 
     loop {
         let transformed = hooks.transform_context(context.messages.clone(), cancel).await;
@@ -569,6 +570,26 @@ async fn stream_assistant_response(
         }
 
         let mut final_message = acc.finish(cancel.is_cancelled());
+
+        // A thinking block the provider will not take back, because what preceded it changed
+        // since it was made, would fail every request that carries it: the transcript goes on
+        // without its thinking and the request is asked again, once.
+        if !rebound
+            && final_message.stop_reason == StopReason::Error
+            && final_message.content.is_empty()
+            && !cancel.is_cancelled()
+            && final_message.error_message.as_deref().is_some_and(crate::providers::anthropic::is_bound_thinking_error)
+        {
+            // The failed attempt's own message is empty, so it has no thinking to drop.
+            if crate::providers::anthropic::drop_bound_thinking(provider.model_id(), &mut context.messages) {
+                rebound = true;
+                if added_partial {
+                    context.messages.pop();
+                }
+                tracing::warn!(error = final_message.error_message.as_deref().unwrap_or_default(), "thinking refused; asking again without it");
+                continue;
+            }
+        }
 
         let retryable = policy.is_some_and(|p| attempt < p.max_retries)
             && crate::retry::is_retryable_assistant_error(&final_message)
@@ -1063,7 +1084,7 @@ mod tests {
     use super::*;
     use crate::provider::{channel_stream, AssistantEventStream};
     use crate::tool::{ToolError, ToolUpdateFn};
-    use crate::types::Usage;
+    use crate::types::{AssistantPart, Usage};
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -1646,6 +1667,147 @@ mod tests {
         let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
         assert_eq!((last.stop_reason, last.text().as_str()), (StopReason::Stop, "finally"));
         assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    }
+
+    const BOUND_THINKING_ERROR: &str = "400 Bad Request: messages.1.content.0: Invalid signature in thinking block. The block is bound to a different conversation.";
+
+    /// Records rejected thinking requests without contacting a provider.
+    struct Binds {
+        requests: Mutex<Vec<ModelRequest>>,
+        model: &'static str,
+        error: &'static str,
+        failures: usize,
+        started: bool,
+        partial: bool,
+        aborted: bool,
+        cancel_on_failure: bool,
+    }
+
+    impl Default for Binds {
+        fn default() -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()), model: "claude-opus-5-5", error: BOUND_THINKING_ERROR,
+                failures: 1, started: false, partial: false, aborted: false, cancel_on_failure: false,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for Binds {
+        fn provider_id(&self) -> &str { "anthropic" }
+        fn model_id(&self) -> &str { self.model }
+        async fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream {
+            let failed = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                requests.len() <= self.failures
+            };
+            let (started, partial, aborted, cancel_on_failure, error) = (self.started, self.partial, self.aborted, self.cancel_on_failure, self.error);
+            let (tx, rx) = mpsc::channel(16);
+            tokio::spawn(async move {
+                if !failed || started || partial {
+                    let _ = tx.send(AssistantEvent::Start).await;
+                }
+                if !failed || partial {
+                    let _ = tx.send(AssistantEvent::TextStart { index: 0 }).await;
+                    let _ = tx.send(AssistantEvent::TextDelta { index: 0, delta: if failed { "partial" } else { "again" }.into() }).await;
+                    let _ = tx.send(AssistantEvent::TextEnd { index: 0 }).await;
+                }
+                if failed {
+                    if cancel_on_failure { cancel.cancel(); }
+                    let _ = tx.send(AssistantEvent::Error { message: error.into(), aborted }).await;
+                } else {
+                    let _ = tx.send(AssistantEvent::Done { stop_reason: StopReason::Stop, usage: Usage::default() }).await;
+                }
+            });
+            channel_stream(rx)
+        }
+    }
+
+    fn bound_history() -> Vec<AgentMessage> {
+        let mut earlier = AssistantMessage::empty("anthropic", "claude-opus-5-5");
+        earlier.content = vec![
+            AssistantPart::Thinking { thinking: "hm".into(), signature: Some("sig".into()) },
+            AssistantPart::ServerBlock { block: json!({"type":"redacted_thinking","data":"sealed"}) },
+            AssistantPart::Text { text: "Earlier.".into() },
+        ];
+        vec![AgentMessage::user("hi"), AgentMessage::Assistant(earlier)]
+    }
+
+    async fn run_bound(provider: Arc<Binds>, messages: Vec<AgentMessage>) -> (Vec<AgentMessage>, Vec<AgentEvent>) {
+        let context = AgentContext { system_prompt: String::new(), messages, tools: vec![], cache_points: Vec::new() };
+        // This repair is independent of the optional transient-error retry policy.
+        let config = AgentLoopConfig::new(provider);
+        let (tx, mut rx) = mpsc::channel(256);
+        let run = tokio::spawn(async move { run_agent_loop(vec![AgentMessage::user("go")], context, &config, &tx, CancellationToken::new()).await });
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await { events.push(event); }
+        (run.await.unwrap(), events)
+    }
+
+    #[tokio::test]
+    async fn refused_thinking_is_dropped_and_the_request_asked_again_once() {
+        for started in [false, true] {
+            let provider = Arc::new(Binds { started, ..Binds::default() });
+            let (messages, events) = run_bound(provider.clone(), bound_history()).await;
+            let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
+            assert_eq!((last.stop_reason, last.text().as_str()), (StopReason::Stop, "again"));
+            assert_eq!(messages.len(), 2, "only the new prompt and successful reply are returned");
+            assert_eq!(events.iter().filter(|e| matches!(e, AgentEvent::MessageEnd { message: AgentMessage::Assistant(_) })).count(), 1);
+            let requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            let LlmMessage::Assistant(original) = &requests[0].messages[1] else { panic!() };
+            assert_eq!(original.content.len(), 3, "the first request carries its original thinking");
+            let LlmMessage::Assistant(replayed) = &requests[1].messages[1] else { panic!() };
+            assert_eq!(replayed.content, vec![AssistantPart::Text { text: "Earlier.".into() }]);
+            assert_eq!(requests[1].messages.len(), 3, "the failed attempt's empty partial is removed");
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_thinking_that_fails_again_ends_without_another_repair() {
+        let provider = Arc::new(Binds { failures: usize::MAX, ..Binds::default() });
+        let (messages, _) = run_bound(provider.clone(), bound_history()).await;
+        assert_eq!(provider.requests.lock().unwrap().len(), 2);
+        let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
+        assert_eq!(last.stop_reason, StopReason::Error);
+        assert_eq!(last.error_message.as_deref(), Some(BOUND_THINKING_ERROR));
+    }
+
+    #[tokio::test]
+    async fn refused_thinking_without_an_eligible_block_is_not_retried() {
+        for (model, history) in [("claude-opus-5", bound_history()), ("claude-opus-5-5", vec![AgentMessage::user("hi")])] {
+            let provider = Arc::new(Binds { model, ..Binds::default() });
+            let (messages, _) = run_bound(provider.clone(), history).await;
+            assert_eq!(provider.requests.lock().unwrap().len(), 1, "{model}");
+            let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
+            assert_eq!(last.stop_reason, StopReason::Error);
+        }
+    }
+
+    #[tokio::test]
+    async fn bound_thinking_repair_preserves_partial_and_unrelated_errors() {
+        for provider in [Binds { partial: true, ..Binds::default() }, Binds { error: "400: Invalid signature on request", ..Binds::default() }] {
+            let partial = provider.partial;
+            let provider = Arc::new(provider);
+            let (messages, _) = run_bound(provider.clone(), bound_history()).await;
+            assert_eq!(provider.requests.lock().unwrap().len(), 1);
+            let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
+            assert_eq!(last.stop_reason, StopReason::Error);
+            assert_eq!(last.text(), if partial { "partial" } else { "" });
+        }
+    }
+
+    #[tokio::test]
+    async fn bound_thinking_repair_never_restarts_an_aborted_or_cancelled_request() {
+        for provider in [Binds { aborted: true, ..Binds::default() }, Binds { cancel_on_failure: true, ..Binds::default() }] {
+            let expected = if provider.aborted { StopReason::Aborted } else { StopReason::Error };
+            let provider = Arc::new(provider);
+            let (messages, _) = run_bound(provider.clone(), bound_history()).await;
+            assert_eq!(provider.requests.lock().unwrap().len(), 1);
+            let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
+            assert_eq!(last.stop_reason, expected, "preserve the provider's terminal event");
+        }
     }
 
     #[tokio::test]

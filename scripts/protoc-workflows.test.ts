@@ -57,3 +57,15 @@ test("test.yml limits the Windows Rust job to one compiler process", async () =>
   const all = (await Bun.YAML.parse(await Bun.file(join(ROOT, ".github/workflows/test.yml")).text())).jobs;
   expect(all["rust-windows"].env?.CARGO_BUILD_JOBS).toBe("1");
 });
+
+test("test.yml limits Linux Rust disk overhead without removing test commands", async () => {
+  const all = Bun.YAML.parse(await Bun.file(join(ROOT, ".github/workflows/test.yml")).text()).jobs;
+  const linux = all["rust-linux"];
+  expect(linux.env?.CARGO_PROFILE_DEV_DEBUG).toBe("0");
+  expect(linux.env?.CARGO_PROFILE_TEST_DEBUG).toBe("0");
+  expect(linux.env?.CARGO_INCREMENTAL).toBe("0");
+  const commands = linux.steps.map((step: Step) => step.run ?? "").join("\n");
+  expect(commands).toContain("cargo test --locked --workspace --exclude beans-mobile");
+  expect(commands).toContain("cargo test --locked -p beans-mobile");
+  expect(commands).toContain("cargo build --locked -p beans-relay --bin beans-relay");
+});

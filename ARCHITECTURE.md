@@ -50,9 +50,7 @@ Fresh Beans accounts use format `beans-v2`, HKDF salt `beans-v2`, version-prefix
 
 ## Beans releases and server updates
 
-Stable `beans-v<root version>` releases carry signed schema-1 readiness. Manual dispatch selects immutable `server` or `all` scope before building. Each updater requires its own inventory; server readiness does not authorize clients. All scope coordinates desktop installers and exact-source EAS APK/AAB/store IPA builds. Store submission is separate and manual. See [Releases](docs/architecture/releases.md).
-
-The Linux server updater verifies readiness, upgrades and checks the relay first, then drains and replaces Runners using renewable admission leases. Automation requires trusted bootstrap, root-owned target configuration, configured Runner update tokens and explicit timer enablement after a successful manual pass. These mechanisms do not establish publication or live rollout. See [Runner update drain](docs/architecture/service-updates.md#runner-update-drain).
+Signed release scopes and client inventories are defined in [Releases](docs/architecture/releases.md). The [server updater](docs/architecture/service-updates.md#runner-update-drain) verifies readiness, updates the relay first and drains Runners before replacement.
 
 ## Subjects
 

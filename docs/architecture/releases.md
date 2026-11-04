@@ -1,5 +1,7 @@
 # Releases and mobile accounts
 
+Stable `beans-v<root version>` releases carry signed schema-1 readiness. Manual dispatch selects immutable `server` or `all` scope before building. Each updater requires its own inventory; server readiness does not authorize clients. All scope coordinates desktop installers and exact-source EAS APK/AAB/store IPA builds. Store submission is separate and manual.
+
 ## Validation gates
 
 Feature changes run relevant checks locally before integration: the affected Rust, Swift, desktop or phone suites, `bun test scripts/*.test.ts` for release scripts and workflow contracts, `bun run check:docs` for documentation, and `bun run check:catalog` for catalog and marketplace index changes. The Tests, Docs and Catalog workflows run on same-repository PRs targeting `main` and on manual dispatch, regardless of changed paths. Pushes alone do not trigger these workflows.

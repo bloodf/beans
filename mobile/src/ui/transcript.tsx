@@ -20,6 +20,7 @@ import { AttachmentBlock } from "./attachments";
 import { BotAvatar } from "./Avatar";
 import { daySeparator, firstLine, workingActivity } from "./format";
 import { Markdown } from "./Markdown";
+import { OutputCard } from "./outputs";
 import { Symbol } from "./Symbol";
 import { usePaneWidth } from "./layout";
 import { Font, usePalette } from "./theme";
@@ -36,7 +37,7 @@ const NOTICE_ICON = 14;
 
 export type Row =
   | { key: string; type: "day"; at: number }
-  | { key: string; type: "message"; message: Message; groupStart: boolean; groupEnd: boolean; showsName: boolean }
+  | { key: string; type: "message"; message: Message; groupStart: boolean; groupEnd: boolean; showsName: boolean; stackAbove: boolean; stackBelow: boolean }
   | { key: string; type: "marker"; text: string; bot: Bot | undefined; tooltip?: string; groupStart: boolean }
   | { key: string; type: "notice"; text: string; groupStart: boolean }
   | { key: string; type: "permission"; message: Message; body: Extract<Body, { kind: "permission" }>; bot: Bot | undefined; groupStart: boolean }
@@ -65,6 +66,8 @@ export function buildRows(chat: Chat, bots: Map<string, Bot>, workingBotIds: str
         const nextKey = next ? (next.author.kind === "bot" ? `bot:${next.author.bot_id}` : next.author.kind) : null;
         const nextSeparated = next ? next.created_at - message.created_at >= SEPARATOR_GAP_SECS : true;
         const groupEnd = nextSeparated || nextKey !== authorKey || next?.body.kind !== "text";
+        // A run of one bot's outputs joins into one list.
+        const output = isOutputCard(message);
         rows.push({
           key: message.id,
           type: "message",
@@ -72,6 +75,8 @@ export function buildRows(chat: Chat, bots: Map<string, Bot>, workingBotIds: str
           groupStart,
           groupEnd,
           showsName: chat.kind === "group" && message.author.kind === "bot" && groupStart,
+          stackAbove: output && !groupStart && isOutputCard(shown[i - 1]),
+          stackBelow: output && !groupEnd && isOutputCard(next),
         });
         previousAuthorKey = authorKey;
         break;
@@ -133,6 +138,11 @@ export function quoteAuthorName(author: Author, bots: Map<string, Bot>): string 
   if (author.kind === "you") return t("You");
   if (author.kind === "bot") return bots.get(author.bot_id)?.name ?? t("Bot");
   return "Beans";
+}
+
+/// A bot's published output, which shows as a card of its own.
+export function isOutputCard(message: Message | undefined): boolean {
+  return !!message && message.output !== undefined && message.author.kind !== "you";
 }
 
 /// Only the bubble owns the detector; the whole row follows its rightward drag.
@@ -197,7 +207,7 @@ export function MessageRow({
   useLanguage();
   const p = usePalette();
   const paneWidth = usePaneWidth();
-  const { message, groupStart, groupEnd, showsName } = row;
+  const { message, groupStart, groupEnd, showsName, stackAbove, stackBelow } = row;
   const quote = message.body.kind === "text" ? message.body.reply_to : undefined;
   const pulse = useSharedValue(1);
   useEffect(() => {
@@ -211,6 +221,8 @@ export function MessageRow({
   const attachments = message.body.kind === "text" ? (message.body.attachments ?? []) : [];
   const failed = message.state.kind === "failed";
   const showsAvatar = isGroup && !isYou;
+  // A bot's published output is a card of its own, without a bubble.
+  const isOutput = isOutputCard(message);
   // The bubble column is 80% of the pane, up to a readable line; the bubble pads 13 a side.
   // Attachments and the text both fit that width.
   const columnWidth = Math.min(Math.floor(paneWidth * 0.8), BUBBLE_COLUMN_MAX);
@@ -223,7 +235,7 @@ export function MessageRow({
       <Symbol name="arrowshape.turn.up.left.fill" size={16} color={p.secondaryLabel} />
     </Animated.View>
     <Animated.View style={swipe.follow}>
-    <View style={[styles.messageRow, { paddingTop: groupStart ? 14 : 3 }, isYou ? styles.messageRowYou : styles.messageRowBot]}>
+    <View style={[styles.messageRow, { paddingTop: stackAbove ? 0 : groupStart ? 14 : 3 }, isYou ? styles.messageRowYou : styles.messageRowBot]}>
       {showsAvatar && <View style={{ width: AVATAR + GUTTER, alignSelf: "flex-end" }}>{groupEnd && <BotAvatar bot={bot} chatId={message.chat_id} size={AVATAR} />}</View>}
       <View style={[styles.bubbleColumn, { maxWidth: columnWidth }, isYou && styles.bubbleColumnYou]}>
         {showsName && (
@@ -246,6 +258,11 @@ export function MessageRow({
           </Pressable>
         )}
         <GestureDetector gesture={swipe.pan}>
+        {isOutput ? (
+          <Animated.View style={pulsing}>
+            <OutputCard message={message} maxWidth={columnWidth - (showsAvatar ? AVATAR + GUTTER : 0)} stack={{ above: stackAbove, below: stackBelow }} />
+          </Animated.View>
+        ) : (
         <Animated.View
           style={[
             styles.bubble,
@@ -262,6 +279,7 @@ export function MessageRow({
             </View>
           )}
         </Animated.View>
+        )}
         </GestureDetector>
         {held && (
           <Pressable

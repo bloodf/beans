@@ -93,17 +93,6 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
                 scrub: true,
               },
             })
-            gsap.to('.hero-scene', {
-              yPercent: 18,
-              rotation: 8,
-              ease: 'none',
-              scrollTrigger: {
-                trigger: '.beans-hero',
-                start: 'top top',
-                end: 'bottom top',
-                scrub: 0.8,
-              },
-            })
             ScrollTrigger.create({
               trigger: '#relay',
               start: 'top bottom',
@@ -206,6 +195,50 @@ export function MotionExperience({ children }: { children: React.ReactNode }) {
                 },
               },
             )
+            gsap.from('.provider-tile', {
+              y: 42,
+              opacity: 0.35,
+              stagger: 0.09,
+              duration: 0.8,
+              ease: 'power3.out',
+              scrollTrigger: {
+                trigger: '.provider-grid',
+                start: 'top 82%',
+                once: true,
+              },
+              clearProps: 'all',
+            })
+            gsap.fromTo(
+              '.free-panel',
+              { y: 55, rotate: -2.5 },
+              {
+                y: 0,
+                rotate: 0,
+                ease: 'none',
+                scrollTrigger: {
+                  trigger: '.pricing-layout',
+                  start: 'top 92%',
+                  end: 'center 68%',
+                  scrub: 0.6,
+                },
+              },
+            )
+            for (const [index, link] of gsap.utils
+              .toArray<HTMLElement>('.comparison-links .comparison-grid a')
+              .entries()) {
+              gsap.from(link, {
+                x: index % 2 === 0 ? -28 : 28,
+                opacity: 0.35,
+                duration: 0.75,
+                ease: 'power3.out',
+                scrollTrigger: {
+                  trigger: link,
+                  start: 'top 92%',
+                  once: true,
+                },
+                clearProps: 'all',
+              })
+            }
             gsap.from('.setup-step', {
               y: 28,
               stagger: 0.08,

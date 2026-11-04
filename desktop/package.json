@@ -23,7 +23,7 @@
     "solid-js": "2.0.0-rc.10"
   },
   "devDependencies": {
-    "@solidjs/vite-plugin": "3.0.0-next.35",
+    "@solidjs/vite-plugin": "3.0.0-next.56",
     "@types/bun": "latest",
     "mygo-cli": "0.1.22",
     "playwright": "1.59.1",

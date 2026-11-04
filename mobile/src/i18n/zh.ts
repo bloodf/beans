@@ -492,5 +492,17 @@ export const zh: Record<string, string> = {
   "Report Review": "检查报告",
   "Sanitized diagnostics report": "已过滤的诊断报告",
   "Copy Report": "复制报告",
-  "Share Report": "分享报告"
+  "Share Report": "分享报告",
+  "Beans {version} is available": "Beans {version} 已推出",
+  "You have {version}.": "当前版本为 {version}。",
+  "Skip This Version": "跳过此版本",
+  "Remind Me Later": "稍后提醒我",
+  "Install Update": "安装更新",
+  "GitHub answered {status}": "GitHub 返回了 {status}",
+  "This build cannot install updates": "此版本无法安装更新",
+  "Hide": "隐藏",
+  "Updating Beans": "正在更新 Beans",
+  "Downloading {latest}… {percent}%": "正在下载 {latest}… {percent}%",
+  "Installing {latest}… Beans restarts when it is done.": "正在安装 {latest}… 完成后 Beans 会重新启动。",
+  "Couldn’t install the update": "无法安装更新",
 };

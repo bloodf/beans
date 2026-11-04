@@ -6,7 +6,9 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { engine } from "../src/core/engine";
 import { useStore } from "../src/core/store";
+import { startUpdateChecks } from "../src/core/updates";
 import { useStackScreenOptions } from "../src/ui/navigation";
+import { UpdateProgress } from "../src/ui/UpdateProgress";
 import { usePalette } from "../src/ui/theme";
 
 export default function RootLayout() {
@@ -18,6 +20,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     void engine.start();
+    startUpdateChecks();
   }, []);
 
   const navigationTheme = useMemo(() => {
@@ -86,6 +89,7 @@ export default function RootLayout() {
               <Stack.Screen name="pair" options={{ headerShown: false, gestureEnabled: false }} />
             </Stack.Protected>
           </Stack>
+          <UpdateProgress />
         </ThemeProvider>
       </KeyboardProvider>
     </GestureHandlerRootView>

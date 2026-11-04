@@ -40,8 +40,7 @@
 .hero-copy a:active { transform: translateY(0); }
 .hero-title .brush { position: relative; display: inline-block; }
 .animated-word { white-space: nowrap; }
-.headline-letter { display: inline-block; animation: letter-wave 7s var(--motion-ease) infinite; animation-play-state: var(--loop-state, paused); }
-@keyframes letter-wave { 0%, 28%, 100% { transform: translateY(0) rotate(0); } 10% { transform: translateY(-0.09em) rotate(-3deg); } 18% { transform: translateY(0.025em) rotate(1deg); } }
+.headline-letter { display: inline-block; }
 .hero-copy .hero-platforms { font-size: 13px; margin-top: 1.5rem; line-height: 1.6; }
 .motion-island { --loop-state: paused; }
 .beans-experience[data-motion="running"][data-page-visible="true"] .motion-island[data-active="true"] { --loop-state: running; }

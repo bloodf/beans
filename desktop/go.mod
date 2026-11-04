@@ -6,6 +6,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/dop251/goja v0.0.0-20261008155754-5519fb8d7b83
 	github.com/egoist/mygo v0.6.4-0.20261024094029-23ac61d856d7
+	github.com/yuin/goldmark v1.8.6
 	golang.org/x/image v0.46.0
 )
 

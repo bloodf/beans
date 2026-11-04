@@ -90,6 +90,15 @@ const ANDROID: Record<string, string> = {
   "arrow.counterclockwise": "restart_alt",
   "doc.text.magnifyingglass": "pageview",
   "arrow.triangle.2.circlepath": "sync",
+  // What a published output is.
+  "richtext.page": "picture_as_pdf",
+  "text.page": "description",
+  "zipper.page": "folder_zip",
+  document: "draft",
+  curlybraces: "data_object",
+  tablecells: "table",
+  "circle.dashed": "radio_button_unchecked",
+  film: "movie",
 };
 
 export interface SymbolProps {

@@ -87,6 +87,7 @@ func (n *nativeDesktop) settingsGeneral(c *ui.Context, p nativePalette) {
 		if ui.Button(c.Key("lang-"+opt.id), opt.title).Selected(language == opt.id).Clicked() {
 			v := opt.id
 			prefs.update(PreferencesPatch{AppLanguage: &v})
+			syncNativeLanguage()
 			if n.win != nil {
 				n.win.Invalidate()
 			}

@@ -1,9 +1,9 @@
 # Runs the full test matrix on same-repository pull requests targeting main and manual dispatch: the Rust workspace on Linux,
 # where the relay's store suite runs on SQLite and on a Postgres service, and on macOS; the crates
 # a Windows Runner runs, on Windows; the macOS app's XCTest suite over the markdown crate it links;
-# the Windows and Linux app's page and Go side; and the phone app's TypeScript. Jobs that compile
-# the CLI install a pinned protoc first. The end-to-end scripts, which need a live relay, a model,
-# or a simulator, run locally.
+# the Windows and Linux app's page and Go side on Ubuntu, plus Go-only desktop builds and tests on
+# macOS and Windows; and the phone app's TypeScript. Jobs that compile the CLI install a pinned
+# protoc first. The end-to-end scripts, which need a live relay, a model, or a simulator, run locally.
 name: Tests
 
 on:
@@ -66,6 +66,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:17
@@ -100,11 +101,25 @@ jobs:
           printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
+      # #427: same hang on Linux as macOS — bash_input waited forever on continuous output.
+      - name: Stress bash_session hang regression (#427)
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            echo "=== hang regression $i/20 ==="
+            cargo test --locked -p beans-agent --lib \
+              tools::bash_session::tests::a_background_command_returns_while_it_prints \
+              -- --exact --test-threads=1
+            cargo test --locked -p beans-agent --lib \
+              tools::bash_session::tests::input_returns_while_the_command_keeps_printing \
+              -- --exact --test-threads=1
+          done
 
   rust-macos:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (macOS)
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -121,6 +136,21 @@ jobs:
           printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
+      # #427: bash_input used to hang forever on a command that keeps printing; prove the
+      # bounded return and the background settle path stay green under repetition on macOS
+      # (and Linux, same step on rust-linux).
+      - name: Stress bash_session hang regression (#427)
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 20); do
+            echo "=== hang regression $i/20 ==="
+            cargo test --locked -p beans-agent --lib \
+              tools::bash_session::tests::a_background_command_returns_while_it_prints \
+              -- --exact --test-threads=1
+            cargo test --locked -p beans-agent --lib \
+              tools::bash_session::tests::input_returns_while_the_command_keeps_printing \
+              -- --exact --test-threads=1
+          done
 
   rust-windows:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
@@ -131,6 +161,7 @@ jobs:
     # the login shell's environment) are #[cfg(unix)]. The release builds x86_64-pc-windows-gnu with zig, and the
     # tests build with the runner's MSVC toolchain.
     runs-on: windows-latest
+    timeout-minutes: 90
     env:
       # rustc ran out of memory (STATUS_STACK_BUFFER_OVERRUN after a failed allocation) compiling
       # the CLI's test targets with the Lance dependencies; one job at a time keeps the peak down.
@@ -184,7 +215,8 @@ jobs:
   desktop:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Windows and Linux app
-    runs-on: ubuntu-latest
+    # Playwright 1.59.1 has no Chromium build for ubuntu26.04; pin until the pin is raised.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: desktop
@@ -203,6 +235,41 @@ jobs:
         run: bun ./node_modules/playwright/cli.js install --with-deps chromium
       - run: bun run test
       - run: go test -count=1 ./...
+
+  # Go module of desktop/ on macOS (MyGo host compiles without the Solid page or mygo-cli).
+  desktop-go-macos:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Desktop Go (macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - run: go build ./...
+      - run: go test -count=1 ./...
+
+  # Go module of desktop/ on Windows (same compile/test surface as desktop-go-macos).
+  desktop-go-windows:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Desktop Go (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+      - run: go build ./...
+      # -v so control-token PASS/FAIL lines are visible in the job log.
+      - run: go test -count=1 -v ./...
 
   mobile:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository

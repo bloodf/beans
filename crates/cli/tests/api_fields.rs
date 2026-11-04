@@ -31,7 +31,7 @@ struct Snapshot {
 impl Scratch {
     fn new(paused: bool) -> Self {
         let id = uuid::Uuid::new_v4();
-        let home = std::env::temp_dir().join(format!("beans-api-fields-{id}"));
+        let home = tempfile::tempdir().unwrap().keep();
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         beans::identity::create(&app, Some("fixture".into())).unwrap();
         app.set_paused(paused);

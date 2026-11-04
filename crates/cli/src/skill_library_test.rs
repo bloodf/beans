@@ -9,6 +9,7 @@ fn signed_library_confirmation_boundary() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
     runtime.block_on(async {
         let home = std::env::temp_dir().join(format!("beans-library-consumer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let _cleanup = Cleanup(home.clone());
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Synthetic Runner".into())).unwrap();

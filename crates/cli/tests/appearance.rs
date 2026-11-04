@@ -11,7 +11,7 @@ impl Drop for Scratch {
     fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
 }
 fn setup() -> (Scratch, std::sync::Arc<App>, String) {
-    let scratch = Scratch(std::env::temp_dir().join(format!("beans-appearance-{}", uuid::Uuid::new_v4())));
+    let scratch = Scratch(tempfile::tempdir().unwrap().keep());
     let app = scratch.app();
     identity::create(&app, Some("Appearance test".into())).unwrap();
     let runner = app.this_device_id().unwrap();

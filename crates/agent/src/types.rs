@@ -221,6 +221,12 @@ pub enum AgentEvent {
         delay_ms: u64,
         error: String,
     },
+    /// Rejected bound thinking was removed from the history before retrying. Apply
+    /// `anthropic::drop_bound_thinking` to the stored transcript with this model too.
+    /// Text, calls, results, and other server blocks are unchanged.
+    BoundThinkingDropped {
+        model: String,
+    },
     MessageStart {
         message: AgentMessage,
     },

@@ -409,7 +409,7 @@ async fn run_loop(
             // A step is one reply and the tool calls it makes; an interrupt ends only the step.
             let step = config.interrupt.as_ref().map_or_else(|| cancel.clone(), |interrupt| interrupt.begin(&cancel));
             let interrupted = || step.is_cancelled() && !cancel.is_cancelled();
-            let message = stream_assistant_response(context, &provider, config, emit, &step).await;
+            let message = stream_assistant_response(context, new_messages, &provider, config, emit, &step).await;
 
             if message.stop_reason == StopReason::Aborted && interrupted() {
                 // The reply stays as far as it got; the loop goes on to what the user said.
@@ -512,6 +512,7 @@ async fn run_loop(
 /// again after a wait when the config has a retry policy; the failed attempt leaves no message.
 async fn stream_assistant_response(
     context: &mut AgentContext,
+    new_messages: &mut [AgentMessage],
     provider: &Arc<dyn Provider>,
     config: &AgentLoopConfig,
     emit: &Emitter<'_>,
@@ -586,8 +587,18 @@ async fn stream_assistant_response(
                 if added_partial {
                     context.messages.pop();
                 }
+                // Keep both the returned messages and stateful consumers' transcripts in
+                // step with the repaired context, including replies from earlier this run.
+                crate::providers::anthropic::drop_bound_thinking(provider.model_id(), new_messages);
+                emit.send(AgentEvent::BoundThinkingDropped { model: provider.model_id().to_string() }).await;
                 tracing::warn!(error = final_message.error_message.as_deref().unwrap_or_default(), "thinking refused; asking again without it");
-                continue;
+                if !cancel.is_cancelled() {
+                    continue;
+                }
+                // An awaited event listener can cancel while it persists the repair.
+                final_message.stop_reason = StopReason::Aborted;
+                final_message.error_message = Some("Request aborted".into());
+                added_partial = false;
             }
         }
 
@@ -1803,8 +1814,9 @@ mod tests {
         for provider in [Binds { aborted: true, ..Binds::default() }, Binds { cancel_on_failure: true, ..Binds::default() }] {
             let expected = if provider.aborted { StopReason::Aborted } else { StopReason::Error };
             let provider = Arc::new(provider);
-            let (messages, _) = run_bound(provider.clone(), bound_history()).await;
+            let (messages, events) = run_bound(provider.clone(), bound_history()).await;
             assert_eq!(provider.requests.lock().unwrap().len(), 1);
+            assert!(!events.iter().any(|event| matches!(event, AgentEvent::BoundThinkingDropped { .. })));
             let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
             assert_eq!(last.stop_reason, expected, "preserve the provider's terminal event");
         }

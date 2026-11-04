@@ -399,7 +399,7 @@ enum AttentionApply {
 /// one transaction inside `receive_blob` (the 2000-entry applied_blob_ids ring is not the
 /// idempotency source). A receipt without a row still re-applies so upgrade can restore it.
 ///
-/// - Missing DEK → `Err` (marker stays unset; caller must not abort the rest of sync).
+/// - Missing DEK → `Err` (upgrade marker stays unset; live pulls keep their cursor).
 /// - Present DEK but corrupt/undecryptable ciphertext → `SkippedCorrupt` (log + skip;
 ///   replay may still complete and set the marker).
 fn apply_attention_blob(
@@ -1056,6 +1056,13 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
     if blob.kind == "chat" {
         return apply_chat_blob(app, machine_file, blob, remember, false);
     }
+    if blob.kind == "attention" {
+        // Propagate unavailable keys and storage failures before the page advances its
+        // cursor. An upgrade replay can retry old slots; a live pull has no second pass.
+        apply_attention_blob(app, machine_file, blob)
+            .map_err(|message| RelayError { status: None, message })?;
+        return Ok(());
+    }
     if blob.kind == "memory_config" {
         let _edit = app.roster_edit.lock().unwrap();
         if remember && app.state.lock().unwrap().applied_blob_ids.contains(&blob.id) { return Ok(()); }
@@ -1145,21 +1152,9 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
 }
 
 pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
-    if matches!(blob.kind.as_str(), "roster" | "memory_config" | "chat") {
+    if matches!(blob.kind.as_str(), "roster" | "memory_config" | "chat" | "attention") {
         if let Err(error) = apply_incoming_blob(app, machine_file, blob, true) {
             tracing::warn!(%error, "applying incoming blob");
-        }
-        return;
-    }
-    // Attention records the applied id only after the encrypted row commits. A corrupt
-    // blob under a present DEK is skipped (see apply_attention_blob); last_seq still
-    // advances, so there is no later upgrade replay for it once the marker is set.
-    if blob.kind == "attention" {
-        match apply_attention_blob(app, machine_file, blob) {
-            Ok(AttentionApply::Applied | AttentionApply::SkippedCorrupt) => {}
-            Err(error) => {
-                tracing::warn!(blob_id = %blob.id, seq = blob.seq, %error, "attention blob");
-            }
         }
         return;
     }
@@ -4400,6 +4395,64 @@ mod tests {
             "controls still sync after a skipped corrupt attention blob"
         );
         assert_no_plaintext(&upgrading.0, needle);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn attention_live_pull_retries_missing_dek_without_advancing_cursor_or_receipts() {
+        let needle = "LIVE-ATTENTION-KEY-RETRY";
+        let (publisher, mut blobs, expected_ids) = publish_attention_blobs(needle, 2);
+        let receiving = upgrading_device(&publisher);
+        // This is the normal forward pull after upgrade replay has already finished.
+        receiving.0.store.set_attention_upgrade_done(true).unwrap();
+        receiving.0.attention_backfilled.store(true, Ordering::Relaxed);
+        for blob in &mut blobs {
+            blob.seq += 9;
+        }
+        let last_seq = blobs.last().unwrap().seq;
+        let blob_ids: Vec<_> = blobs.iter().map(|blob| blob.id.clone()).collect();
+        let good = receiving.0.machine_file().unwrap();
+        let mut unavailable = good.clone();
+        unavailable.account_dek = "not-valid-key".into();
+        *receiving.0.machine.lock().unwrap() = Some(unavailable.clone());
+        let (url, server) = serve_attention_paged(vec![], None, blobs).await;
+        let mut events = receiving.0.subscribe();
+
+        let error = pull_blobs(&receiving.0, &url, "token", &unavailable).await.unwrap_err();
+        assert_eq!(error.message, "Account key unavailable");
+        assert_eq!(receiving.0.state.lock().unwrap().last_seq, 9);
+        assert_eq!(receiving.0.store.load_state().unwrap().last_seq, 9);
+        assert!(receiving.0.store.attention_rows().unwrap().is_empty());
+        assert!(receiving.0.state.lock().unwrap().applied_blob_ids.is_empty());
+        assert!(receiving.0.store.load_state().unwrap().applied_blob_ids.is_empty());
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(event, Event::AttentionChanged(_)));
+        }
+
+        *receiving.0.machine.lock().unwrap() = Some(good.clone());
+        pull_blobs(&receiving.0, &url, "token", &good).await.unwrap();
+        assert_eq!(receiving.0.state.lock().unwrap().last_seq, last_seq);
+        assert_eq!(receiving.0.store.load_state().unwrap().last_seq, last_seq);
+        let mut actual: Vec<_> = receiving.0.store.attention_rows().unwrap()
+            .into_iter().map(|(id, _)| id).collect();
+        let mut expected = expected_ids;
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
+        let saved = receiving.0.store.load_state().unwrap();
+        for blob_id in &blob_ids {
+            assert_eq!(saved.applied_blob_ids.iter().filter(|id| *id == blob_id).count(), 1);
+        }
+        let mut changes = 0;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, Event::AttentionChanged(_)) { changes += 1; }
+        }
+        assert_eq!(changes, expected.len(), "each newly received record publishes once");
+        pull_blobs(&receiving.0, &url, "token", &good).await.unwrap();
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(event, Event::AttentionChanged(_)), "caught-up pull must not republish records");
+        }
+        assert_no_plaintext(&receiving.0, needle);
         server.abort();
     }
 

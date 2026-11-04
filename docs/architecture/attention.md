@@ -57,7 +57,9 @@ A missing account key or a relay error leaves the marker unset so the next start
 does not abort the rest of sync. A blob that fails to decrypt under a present key is logged by
 id, skipped, and the replay may still complete and set the marker. On a live pull the same skip
 applies and `last_seq` moves past it, so there is no later upgrade replay for that blob once the
-marker is set. `receive` loads only the incoming id, upserts ciphertext, and commits the relay
+marker is set. A live pull with a missing account key or a storage failure stops before advancing
+`last_seq` or recording the failed blob's receipt; the next pull retries it when the key or store
+is available. `receive` loads only the incoming id, upserts ciphertext, and commits the relay
 receipt in the same transaction as the row. Undecryptable neighbors are skipped. Rows stay
 ciphertext at rest.
 

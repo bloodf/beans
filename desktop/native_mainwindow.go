@@ -11,7 +11,25 @@ import (
 // layout adapted from Lorca commits 1fb21829…d94feac8. Content still binds to
 // NativeStore from #259/#268 rather than a parallel store.
 
-var nativeWindowTitle string
+// Queue native title mutations after the current frame; each window owns its
+// cache so closing and reopening cannot inherit a prior window's title.
+var postNativeWindowTitle = postMain
+var setNativeWindowTitle = func(win *mygo.Window, title string) { win.SetTitle(title) }
+
+func (n *nativeDesktop) queueWindowTitle(title string) {
+	win := n.win
+	if win == nil || (n.titleWindow == win && n.windowTitle == title) {
+		return
+	}
+	n.titleWindow, n.windowTitle = win, title
+	n.windowTitleRevision++
+	revision := n.windowTitleRevision
+	postNativeWindowTitle(func() {
+		if n.win == win && n.titleWindow == win && n.windowTitleRevision == revision {
+			setNativeWindowTitle(win, title)
+		}
+	})
+}
 
 func (n *nativeDesktop) shellView(c *ui.Context) {
 	applyNativeTheme(c)
@@ -35,10 +53,7 @@ func (n *nativeDesktop) shellView(c *ui.Context) {
 	if title != "" && title != name {
 		windowTitle = title + " - " + name
 	}
-	if n.win != nil && nativeWindowTitle != windowTitle {
-		n.win.SetTitle(windowTitle)
-		nativeWindowTitle = windowTitle
-	}
+	n.queueWindowTitle(windowTitle)
 
 	vibrant := c.Vibrancy()
 	if vibrant {

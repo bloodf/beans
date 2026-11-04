@@ -22,6 +22,9 @@ type NativeStore struct {
 	LoadingOlder   map[string]bool
 	AccountID      string
 	ArchivedDrafts map[string]map[string]*NativeDraft
+	// Perform sends a fire-and-forget CLI method on the host's admitted transport
+	// (Solid `perform` / Go Store.perform). Tests record calls; nil skips the wire.
+	Perform func(method string, params map[string]any)
 }
 
 type NativeBot struct {
@@ -34,6 +37,17 @@ type NativeBot struct {
 	// Keep future appearance keys intact; unrelated edits never author look.
 	Look json.RawMessage `json:"look"`
 }
+
+// NativeReplyQuote is the quoted message a reply points at, as the CLI sends it.
+type NativeReplyQuote struct {
+	MessageID string `json:"message_id"`
+	Author    struct {
+		Kind  string `json:"kind"`
+		BotID string `json:"bot_id"`
+	} `json:"author"`
+	Text string `json:"text"`
+}
+
 type NativeMessage struct {
 	ID     string `json:"id"`
 	ChatID string `json:"chat_id"`
@@ -47,19 +61,21 @@ type NativeMessage struct {
 		Summary     string            `json:"summary"`
 		Detail      string            `json:"detail"`
 		Attachments []json.RawMessage `json:"attachments"`
-		ReplyTo     json.RawMessage   `json:"reply_to"`
+		ReplyTo     *NativeReplyQuote `json:"reply_to"`
 	} `json:"body"`
 	State struct {
 		Kind  string `json:"kind"`
 		Error string `json:"error"`
 	} `json:"state"`
+	CreatedAt float64 `json:"created_at"`
 }
 type NativeChat struct {
-	ID       string          `json:"id"`
-	Title    string          `json:"title"`
-	BotIDs   []string        `json:"bot_ids"`
-	Messages []NativeMessage `json:"messages"`
-	HasMore  bool            `json:"has_more"`
+	ID          string          `json:"id"`
+	Title       string          `json:"title"`
+	BotIDs      []string        `json:"bot_ids"`
+	Messages    []NativeMessage `json:"messages"`
+	HasMore     bool            `json:"has_more"`
+	UnreadCount int             `json:"unread_count"`
 }
 type NativeAttachment struct {
 	ID     string `json:"id"`
@@ -139,6 +155,42 @@ func (s *NativeStore) Title(chat *NativeChat) string {
 	}
 	return strings.Join(names, ", ")
 }
+
+// DisplayText is the message body for the native transcript: Markdown folded to plain words when
+// the body is text, otherwise the summary the CLI already prepared.
+func (m NativeMessage) DisplayText() string {
+	text := m.Body.Text
+	if text == "" {
+		text = m.Body.Summary
+	}
+	if m.Body.Kind == "text" && text != "" {
+		return PlainText(MarkdownBlocks(text))
+	}
+	return text
+}
+
+// SelectChat selects a chat and marks it read through the CLI, matching Solid's focus path.
+func (s *NativeStore) SelectChat(id string) {
+	if s.Chat(id) == nil {
+		return
+	}
+	s.Selected = id
+	s.MarkRead(id)
+}
+
+// MarkRead clears local unread and performs `chats.mark_read`, as Solid and the ported Store do,
+// so the next snapshot does not restore the count.
+func (s *NativeStore) MarkRead(id string) {
+	chat := s.Chat(id)
+	if chat == nil || chat.UnreadCount <= 0 {
+		return
+	}
+	chat.UnreadCount = 0
+	if s.Perform != nil {
+		s.Perform("chats.mark_read", map[string]any{"chat_id": id})
+	}
+}
+
 func (s *NativeStore) Apply(name string, data json.RawMessage) error {
 	if !s.HasIdentity && name != "snapshot" && name != "identity.changed" {
 		return nil
@@ -169,6 +221,7 @@ func (s *NativeStore) Apply(name string, data json.RawMessage) error {
 			IdentityID string `json:"identity_id"`
 		}
 		if err := json.Unmarshal(data, &v); err != nil {
+			// Malformed roster/snapshot must not wipe an admitted account.
 			return err
 		}
 		if name == "snapshot" {
@@ -196,6 +249,10 @@ func (s *NativeStore) Apply(name string, data json.RawMessage) error {
 				if name == "roster.changed" {
 					v.Chats[i].Messages = old.Messages
 					v.Chats[i].HasMore = old.HasMore
+					// Roster updates omit unread; keep the live count unless the wire sent one.
+					if !chatUnreadPresent(data, v.Chats[i].ID) {
+						v.Chats[i].UnreadCount = old.UnreadCount
+					}
 				} else {
 					// Preserve only history preceding the authoritative newest page.
 					if len(v.Chats[i].Messages) > 0 {
@@ -211,29 +268,44 @@ func (s *NativeStore) Apply(name string, data json.RawMessage) error {
 			}
 		}
 		s.Bots, s.Chats = v.Bots, v.Chats
+		previous := s.Selected
 		if s.Chat(s.Selected) == nil {
 			s.Selected = ""
 			if len(s.Chats) > 0 {
 				s.Selected = s.Chats[0].ID
 			}
 		}
+		// Clear unread only when a snapshot (or lost selection) establishes focus — not on every roster.
+		if name == "snapshot" || (previous != "" && previous != s.Selected) {
+			if s.Selected != "" {
+				s.MarkRead(s.Selected)
+			}
+		}
 	case "message.added", "message.updated":
 		var v struct {
-			ChatID  string        `json:"chat_id"`
-			Message NativeMessage `json:"message"`
+			ChatID  string          `json:"chat_id"`
+			Message json.RawMessage `json:"message"`
 		}
 		if err := json.Unmarshal(data, &v); err != nil {
 			return err
 		}
-		if c := s.Chat(v.ChatID); c != nil {
-			for i := range c.Messages {
-				if c.Messages[i].ID == v.Message.ID {
-					c.Messages[i] = v.Message
-					return nil
-				}
-			}
-			c.Messages = append(c.Messages, v.Message)
+		msg, err := decodeNativeMessage(v.Message)
+		if err != nil {
+			return err
 		}
+		c := s.Chat(v.ChatID)
+		if c == nil {
+			return nil
+		}
+		for i := range c.Messages {
+			if c.Messages[i].ID == msg.ID {
+				c.Messages[i] = msg
+				return nil
+			}
+		}
+		// Upsert unknown ids for both added and updated (Solid upsert; a missed added
+		// must not drop the message). Unread comes only from the CLI's unread_count.
+		c.Messages = append(c.Messages, msg)
 	case "message.removed":
 		var v struct {
 			ChatID string `json:"chat_id"`
@@ -269,8 +341,58 @@ func (s *NativeStore) Apply(name string, data json.RawMessage) error {
 		if s.Selected == v.ID {
 			s.Selected = ""
 		}
+	default:
+		// Unsupported Beans/upstream events stay ignored; stored state is unchanged.
 	}
 	return nil
+}
+
+func chatUnreadPresent(data json.RawMessage, chatID string) bool {
+	var probe struct {
+		Chats []struct {
+			ID          string `json:"id"`
+			UnreadCount *int   `json:"unread_count"`
+		} `json:"chats"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	for _, chat := range probe.Chats {
+		if chat.ID == chatID {
+			return chat.UnreadCount != nil
+		}
+	}
+	return false
+}
+
+func decodeNativeMessage(data json.RawMessage) (NativeMessage, error) {
+	var msg NativeMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return NativeMessage{}, err
+	}
+	if msg.ID == "" {
+		return NativeMessage{}, errors.New("message id is missing")
+	}
+	// Cross-check Beans wire decoding so unsupported body shapes cannot invent a corrupt quote.
+	var wire WireMessage
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return NativeMessage{}, err
+	}
+	decoded := ToMessage(wire)
+	if decoded != nil && decoded.ReplyTo != nil {
+		quote := NativeReplyQuote{MessageID: decoded.ReplyTo.MessageID, Text: decoded.ReplyTo.Text}
+		switch decoded.ReplyTo.Author.Kind {
+		case AuthorYou:
+			quote.Author.Kind = "you"
+		case AuthorBot:
+			quote.Author.Kind = "bot"
+			quote.Author.BotID = decoded.ReplyTo.Author.BotID
+		default:
+			quote.Author.Kind = "system"
+		}
+		msg.Body.ReplyTo = &quote
+	}
+	return msg, nil
 }
 
 // BeginSend captures immutable intent. Completion cannot erase edits made while

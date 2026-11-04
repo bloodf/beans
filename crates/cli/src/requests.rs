@@ -177,6 +177,7 @@ fn signed_library_keep_both_preserves_edited_original() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let home = std::env::temp_dir().join(format!("beans-keep-both-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let _cleanup = Cleanup(home.clone());
         let app = App::load(crate::config::Config { home:home.clone(),port:0 }).unwrap();
         crate::identity::create(&app,Some("Synthetic Runner".into())).unwrap();

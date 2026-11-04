@@ -7,7 +7,7 @@ use crate::app::{remember_applied, upsert_device, App, OutboxItem, Slot};
 use crate::events::{Event, RelayProblem};
 use crate::keys::unb64;
 use crate::model::*;
-use crate::relay::{BlobIn, RelayError, Signal};
+use crate::relay::{BlobIn, RelayError};
 
 /// A pull page at least this long is applied as a backlog: see `App::bulk_sync`.
 const BULK_BLOBS: usize = 20;
@@ -224,15 +224,12 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         *failures = 0;
 
         refresh = tokio::select! {
-            signal = socket.next() => match signal? {
-                Signal::Blobs => false,
-                Signal::Machines => true,
-            },
+            signals = socket.next() => signals?.machines,
             _ = &mut queued => {
                 let woken = app.sync_wakes.load(Ordering::Relaxed);
                 if woken != wakes {
                     wakes = woken;
-                    socket.probe().await?;
+                    socket.probe();
                 }
                 false
             }

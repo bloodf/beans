@@ -15,15 +15,15 @@
   "dependencies": {
     "@beans/blobatar": "file:../packages/beans-blobatar",
     "@solidjs/router": "2.0.0-next.30",
-    "@solidjs/web": "2.0.0-rc.10",
+    "@solidjs/web": "2.0.0-rc.21",
     "lucide": "1.48.0",
     "markdown-it": "15.0.2",
     "mygo-runtime": "0.1.22",
     "qrcode-generator": "2.0.4",
-    "solid-js": "2.0.0-rc.10"
+    "solid-js": "2.0.0-rc.21"
   },
   "devDependencies": {
-    "@solidjs/vite-plugin": "3.0.0-next.35",
+    "@solidjs/vite-plugin": "3.0.0-next.56",
     "@types/bun": "latest",
     "mygo-cli": "0.1.22",
     "playwright": "1.59.1",

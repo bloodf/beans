@@ -70,6 +70,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Local storage and startup admission](docs/architecture/storage-admission.md) | Data directory, format admission, staged scratch preload, creation guards and final startup persistence |
 | [CLI service and updates](docs/architecture/service-updates.md) | CLI installation, standalone services, Runner admission drain and update availability |
 | [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review |
+| [Computer attack scenarios](docs/architecture/computer-attack-scenarios.md) | Planned control behavior under guest compromise, rogue Devices and prompt injection |
 | [Computer threat model](docs/architecture/computer-threat-model.md) | Planned per-bean computer boundaries, fail-closed requirements, residual risks and incomplete sibling-contract evidence |
 | [Terminal sessions](docs/architecture/terminal-sessions.md) | A bot's commands in terminals of their own: when a call returns, background commands, the command's card, answering and stopping, Running tasks |
 | [Codemode and Plugins](docs/architecture/plugins.md) | Scripts that call plugin tools, MCP plugins and their installs, sign-in, plugin calls at turn time |
@@ -87,6 +88,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [macOS chat](docs/architecture/macos-chat.md) | AppKit transcript, composer, attachments, dictation, and working state |
 | [Windows and Linux app](docs/architecture/desktop-app.md) | The MyGo app: its Go side and Solid page, title bar, commands, updates, development and builds |
 | [Phone app](docs/architecture/phone-app.md) | The Expo app over the Rust core: the native module, pairing, relay status, attachments, dictation, notifications, turns |
+| [Phone releases and updates](docs/architecture/phone-updates.md) | TestFlight builds, Android APK releases, and the Android app's self-update: the native gate, daily check and offer, the progress dialog, the package installer |
 | [Phone interface](docs/architecture/phone-interface.md) | Native screens, transcript presentation and adaptive navigation |
 | [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds, testing submissions, accounts and credentials |
 | [Website](docs/architecture/website.md) | `web/`: the site, its docs, and the install scripts it serves |

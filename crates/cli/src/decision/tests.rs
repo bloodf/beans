@@ -221,7 +221,7 @@ fn a_probability_sum_of_1_01_is_accepted() -> CaseResult {
 }
 
 fn a_probability_sum_of_1_02_is_rejected() -> CaseResult {
-    with_choice_probability(CHOICE_RESPONSE, "billing", 0.52)
+    with_choice_distribution(CHOICE_RESPONSE, 0.5, 0.52)
 }
 
 fn a_missing_answer_is_rejected() -> CaseResult {
@@ -773,10 +773,8 @@ fn capability_preflight_preserves_unknowns_and_enforces_known_limits() {
 
 #[test]
 fn a_duplicate_json_key_is_rejected_where_it_can_reach_a_struct() {
-    // serde_json keeps the last occurrence of a repeated key, so an untyped
-    // `Value` cannot see a duplicate. Into `DecisionRequest` it errors, and
-    // Beans builds the request in code, so a duplicate never reaches
-    // `validate` either way.
+    // An untyped `Value` has already lost duplicate keys. Typed struct fields
+    // reject duplicates, independently of the response-map checks below.
     let body = r#"{"state":"ready","model":"jev-1.13.0","model":"jev-9.9.9","questions":{}}"#;
     let parsed: Value = serde_json::from_str(body).expect("parses");
     assert_eq!(parsed["model"], "jev-9.9.9", "an untyped parse is last-wins, not duplicate-safe");
@@ -784,4 +782,144 @@ fn a_duplicate_json_key_is_rejected_where_it_can_reach_a_struct() {
     assert!(error.to_string().contains("duplicate field `model`"), "{error}");
     let unique = body.replace("\"model\":\"jev-1.13.0\",", "");
     assert!(serde_json::from_str::<DecisionRequest>(&unique).is_ok(), "the fixture is otherwise valid");
+}
+
+#[test]
+fn response_maps_reject_duplicate_keys_in_raw_json() {
+    let cases = [
+        (
+            NOUL_REQUEST,
+            NOUL_RESPONSE,
+            r#""answers":{"#,
+            "regression",
+            r"\u0072egression",
+            r#"{"type":"noul","noul":0.1}"#,
+            r#"{"type":"noul","noul":0.95}"#,
+        ),
+        (
+            CHOICE_REQUEST,
+            CHOICE_RESPONSE,
+            r#""probabilities":{"#,
+            "billing",
+            r"\u0062illing",
+            "0.9",
+            "0.12",
+        ),
+        (
+            SCORE_REQUEST,
+            SCORE_RESPONSE,
+            r#""probabilities":{"#,
+            "1",
+            r"\u0031",
+            "0.1",
+            "0.95",
+        ),
+        (
+            SCORE_REQUEST,
+            SCORE_RESPONSE,
+            r#""legend":{"#,
+            "0",
+            r"\u0030",
+            r#""Wrong level""#,
+            r#""Calm""#,
+        ),
+    ];
+    for (request, response, map_start, key, escaped_key, conflicting, identical) in cases {
+        assert!(matches!(run(request, response), CaseResult::Accepted(_)));
+        assert_eq!(response.matches(map_start).count(), 1, "fixture target");
+        for raw_key in [key, escaped_key] {
+            for value in [conflicting, identical] {
+                // Insert into the bytes, not a Value or BTreeMap: those would
+                // erase the duplicate before the typed decoder could see it.
+                let raw = response.replacen(
+                    map_start,
+                    &format!("{map_start}\"{raw_key}\":{value},"),
+                    1,
+                );
+                for error in [
+                    serde_json::from_str::<DecisionResponse>(&raw).unwrap_err(),
+                    serde_json::from_slice::<DecisionResponse>(raw.as_bytes()).unwrap_err(),
+                ] {
+                    assert!(
+                        error.to_string().contains(&format!("duplicate map key `{key}`")),
+                        "{map_start} {raw_key}: {error}"
+                    );
+                }
+                assert_eq!(run(request, &raw), CaseResult::ParseFailed);
+            }
+        }
+    }
+}
+
+#[test]
+fn response_maps_keep_the_valid_wire_contract() {
+    for (request, response, answer_type) in [
+        (CHOICE_REQUEST, CHOICE_RESPONSE, "choice"),
+        (SCORE_REQUEST, SCORE_RESPONSE, "score"),
+        (NOUL_REQUEST, NOUL_RESPONSE, "noul"),
+    ] {
+        // The tag may follow the map fields, and vendor extras stay ignored.
+        let reordered = response
+            .replace(&format!("\"type\":\"{answer_type}\","), "")
+            .replace(
+                "}},\"usage\"",
+                &format!(",\"type\":\"{answer_type}\",\"routing\":\"test\"}}}},\"usage\""),
+            );
+        let parsed: DecisionResponse = serde_json::from_str(&reordered).expect("tag-last response");
+        let serialized = serde_json::to_string(&parsed).expect("serialized response");
+        assert_eq!(
+            serde_json::from_str::<Value>(&serialized).unwrap(),
+            serde_json::from_str::<Value>(response).unwrap(),
+            "the response's public shape stays unchanged"
+        );
+        assert_eq!(run(request, &reordered), run(request, response));
+    }
+}
+
+#[test]
+fn probability_sum_boundaries_are_inclusive_without_normalizing() {
+    for (sum, accepted) in [
+        (0.98, false),
+        (0.99, true),
+        (1.0, true),
+        (1.01, true),
+        (1.02, false),
+    ] {
+        for (request, response) in [
+            (CHOICE_REQUEST, CHOICE_RESPONSE),
+            (SCORE_REQUEST, SCORE_RESPONSE),
+        ] {
+            let request: DecisionRequest = serde_json::from_str(request).unwrap();
+            let mut response: DecisionResponse = serde_json::from_str(response).unwrap();
+            let question = response.answers.keys().next().unwrap().clone();
+            let probabilities = match response.answers.values_mut().next().unwrap() {
+                DecisionAnswer::Choice { probabilities, .. } => {
+                    probabilities.insert("billing".into(), 0.4);
+                    probabilities.insert("technical".into(), sum - 0.4);
+                    probabilities
+                }
+                DecisionAnswer::Score {
+                    probabilities,
+                    score,
+                    ..
+                } => {
+                    probabilities.insert("0".into(), 0.4);
+                    probabilities.insert("1".into(), sum - 0.4);
+                    probabilities.insert("2".into(), 0.0);
+                    *score = sum - 0.4;
+                    probabilities
+                }
+                DecisionAnswer::Noul { .. } => unreachable!(),
+            };
+            assert!((probabilities.values().sum::<f64>() - sum).abs() < f64::EPSILON);
+            let before = serde_json::to_value(&response).unwrap();
+            let result = validate(&request, &response);
+            if accepted {
+                assert!(result.is_ok(), "{question}: sum {sum}: {result:?}");
+            } else {
+                assert_eq!(result, Err(DecisionRejection::ProbabilitySum { question }));
+            }
+            assert_eq!(serde_json::to_value(&response).unwrap(), before);
+        }
+    }
 }

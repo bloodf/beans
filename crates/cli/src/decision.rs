@@ -124,10 +124,13 @@ pub enum DecisionPreflight {
     Unverified,
 }
 
+/// Deserialize directly from raw JSON: parsing through `Value` first erases
+/// duplicate keys before the response maps can reject them.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DecisionResponse {
     /// The versioned id that answered.
     pub model: String,
+    #[serde(deserialize_with = "deserialize_unique_map")]
     pub answers: BTreeMap<String, DecisionAnswer>,
     pub usage: DecisionUsage,
 }
@@ -148,16 +151,59 @@ pub enum DecisionAnswer {
     },
     Choice {
         choice: String,
+        #[serde(deserialize_with = "deserialize_unique_map")]
         probabilities: BTreeMap<String, f64>,
         confidence: f64,
     },
     Score {
         score: f64,
-        #[serde(rename = "legend")]
+        #[serde(rename = "legend", deserialize_with = "deserialize_unique_map")]
         level_legend: BTreeMap<String, Value>,
+        #[serde(deserialize_with = "deserialize_unique_map")]
         probabilities: BTreeMap<String, f64>,
         confidence: f64,
     },
+}
+
+/// Keep the public map shape while rejecting ambiguous wire entries, including
+/// identical values and keys that decode to the same string after JSON escapes.
+fn deserialize_unique_map<'de, D, T>(deserializer: D) -> Result<BTreeMap<String, T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct UniqueMap<T>(std::marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for UniqueMap<T> {
+        type Value = BTreeMap<String, T>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object with unique keys")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut values = BTreeMap::new();
+            while let Some(key) = map.next_key::<String>()? {
+                match values.entry(key) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(map.next_value()?);
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry) => {
+                        return Err(serde::de::Error::custom(format_args!(
+                            "duplicate map key `{}`",
+                            entry.key()
+                        )));
+                    }
+                }
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueMap(std::marker::PhantomData))
 }
 
 impl DecisionAnswer {

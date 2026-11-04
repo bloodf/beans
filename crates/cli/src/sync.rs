@@ -420,7 +420,7 @@ fn apply_attention_blob(
                 "attention blob encoding invalid; skipping"
             );
             // Permanently bad under this account: remember so live pulls do not re-warn.
-            let _ = app.store.mark_blob_applied(&blob.id);
+            app.store.mark_blob_applied(&blob.id).map_err(|error| error.to_string())?;
             remember_applied(&mut app.state.lock().unwrap(), &blob.id);
             return Ok(AttentionApply::SkippedCorrupt);
         }
@@ -437,7 +437,7 @@ fn apply_attention_blob(
                 seq = blob.seq,
                 "attention blob could not be decrypted; skipping"
             );
-            let _ = app.store.mark_blob_applied(&blob.id);
+            app.store.mark_blob_applied(&blob.id).map_err(|error| error.to_string())?;
             remember_applied(&mut app.state.lock().unwrap(), &blob.id);
             Ok(AttentionApply::SkippedCorrupt)
         }
@@ -4396,6 +4396,34 @@ mod tests {
         );
         assert_no_plaintext(&upgrading.0, needle);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn attention_live_pull_keeps_cursor_when_corrupt_blob_receipt_cannot_commit() {
+        let (publisher, _, _) = publish_attention_blobs("CORRUPT-RECEIPT-FAILURE", 1);
+        let receiving = upgrading_device(&publisher);
+        receiving.0.store.connection.lock().unwrap().execute_batch(
+            "CREATE TRIGGER reject_attention_receipt BEFORE INSERT ON applied_blobs
+             BEGIN SELECT RAISE(ABORT, 'receipt write refused'); END;"
+        ).unwrap();
+        let blob = BlobIn {
+            id: "corrupt-attention".into(), kind: "attention".into(),
+            recipient_machine_pubkey: None, ciphertext: "invalid-base64!".into(),
+            seq: 10, created_at: 10,
+        };
+        let key = receiving.0.machine_file().unwrap();
+        let error = apply_pull_page(&receiving.0, &key, vec![blob.clone()]).unwrap_err();
+        assert!(error.message.contains("receipt write refused"));
+        assert_eq!(receiving.0.state.lock().unwrap().last_seq, 9);
+        assert_eq!(receiving.0.store.load_state().unwrap().last_seq, 9);
+        assert!(receiving.0.state.lock().unwrap().applied_blob_ids.is_empty());
+        assert!(receiving.0.store.load_state().unwrap().applied_blob_ids.is_empty());
+        receiving.0.store.connection.lock().unwrap().execute_batch(
+            "DROP TRIGGER reject_attention_receipt;"
+        ).unwrap();
+        apply_pull_page(&receiving.0, &key, vec![blob]).unwrap();
+        assert_eq!(receiving.0.state.lock().unwrap().last_seq, 10);
+        assert_eq!(receiving.0.store.load_state().unwrap().applied_blob_ids, ["corrupt-attention"]);
     }
 
     #[tokio::test]

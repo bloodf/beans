@@ -62,8 +62,9 @@ export function SkillDiscoverySheet(props: { dismiss: () => void }) {
     const request = ++revision, selected = runner()!;
     selectedBinding = { id: selected.id, os: selected.os, key: selected.machineKey };
     setBusy(true); setFailure(""); setWarning(false);
-    // Confirmation is spent even when request fails. Never automatically retry a mutation.
-    if (action === "import") setPreview(undefined);
+    // Both copy outcomes spend the same approval before dispatch, even on failure.
+    // Never offer the consumed preview for another import or KeepBoth attempt.
+    if (action === "import" || action === "keep_both") setPreview(undefined);
     if (action === "uninstall") setRemoveConfirmation(false);
     if (action === "keep_both") { setKeepBothConfirmation(false); setBoth(undefined); }
     if (action === "compare") setCompare(undefined);

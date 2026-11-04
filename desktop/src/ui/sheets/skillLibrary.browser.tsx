@@ -109,6 +109,14 @@ export async function checkSkillKeepBothConsumer() {
     click("Preview copy"); finish(preview); await settle(); click("Confirm import"); finish(imported); await settle();
     click("Preview copy"); finish(preview); await settle();
   };
+  const approvalSpent = (stage: string) => {
+    assert(!button("Confirm import") && !button("Cancel import") && !root.textContent?.includes(preview.destination), `${stage}: spent preview remains visible`);
+    assert(!button("Confirm KeepBoth") && button("Keep both copies…")?.disabled, `${stage}: spent approval still permits KeepBoth`);
+    const before = calls.length;
+    button("Keep both copies…")!.click(); flush();
+    assert(calls.length === before && !button("Confirm KeepBoth"), `${stage}: spent approval can be retried`);
+    assert(root.textContent?.includes(original) && button("Remove managed copy…"), `${stage}: original copy lost with approval`);
+  };
   try {
     flush(); await settle(); assert(calls.length === 0, "Mount automatically requested KeepBoth");
     const chooser = button("Select a Runner")!;
@@ -128,7 +136,9 @@ export async function checkSkillKeepBothConsumer() {
     const beforeApproval = calls.length; click("Keep both copies…"); click("Confirm KeepBoth");
     const request = calls.at(-1)!;
     assert(calls.length === beforeApproval + 1 && request.method === "skills.library.keep_both" && request.params.token === token && request.params.managed_id === original && request.params.confirmed === true && !("root" in request.params) && !("destination" in request.params), "KeepBoth not an explicit exact-ID confirmation");
+    approvalSpent("pending");
     finish({ version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: "selected-source", digest, summary, durability_warning: false }); await settle();
+    approvalSpent("success");
     const shown = root.textContent ?? "";
     assert(shown.includes(original) && shown.includes(copy), "KeepBoth did not render both copies");
     assert(shown.includes("selected-source") && shown.includes(digest.slice(0, 12)) && !shown.includes(digest), "KeepBoth omitted bounded label or short digest");
@@ -143,6 +153,7 @@ export async function checkSkillKeepBothConsumer() {
     assert(root.textContent?.includes(longLabel), "Bounded 256-byte label not rendered");
     assert(root.querySelector("[role=alert]")?.textContent?.includes("durability or private cleanup needs attention"), "Durability warning not reported with the committed copy");
     assert(root.textContent?.includes("Not authenticated provenance"), "Durability warning dropped the outcome");
+    approvalSpent("committed with durability warning");
     // A scan over the same sheet must not leave the previous copy, confirmation or outcome up.
     click("Scan");
     assert(!root.textContent?.includes(original) && !root.textContent?.includes(copy) && !button("Confirm KeepBoth"), "Scan left a stale copy, confirmation or outcome");
@@ -158,7 +169,27 @@ export async function checkSkillKeepBothConsumer() {
     reject(new Error("skill_library_source_changed")); await settle();
     assert(calls.length === beforeFailure + 1 && root.querySelector("[role=alert]")?.textContent?.includes("Preview again"), "KeepBoth failure did not render error state");
     assert(!root.textContent?.includes("Not authenticated provenance"), "Failed KeepBoth published an outcome");
-    await installed();
+    approvalSpent("source changed");
+    // Only a fresh preview may authorize another copy, including after a rejected or
+    // ambiguous result. The existing original is kept throughout, without re-importing it.
+    for (const outcome of ["malformed", "transport failure", "success"] as const) {
+      const freshToken = (calls.length + 1).toString(16).padStart(32, "0");
+      const beforePreview = calls.length;
+      click("Preview copy"); finish({ ...preview, token: freshToken }); await settle();
+      assert(calls.length === beforePreview + 1 && !button("Keep both copies…")?.disabled && button("Confirm import"), "Fresh preview did not restore explicit copy choices");
+      click("Keep both copies…");
+      assert(calls.length === beforePreview + 1, "Fresh preview reused old confirmation");
+      click("Confirm KeepBoth");
+      assert(calls.length === beforePreview + 2 && calls.at(-1)?.params.token === freshToken && calls.at(-1)?.params.managed_id === original, "Retry did not use fresh approval and preserve original ID");
+      approvalSpent(`retry pending: ${outcome}`);
+      if (outcome === "malformed") finish(null);
+      else if (outcome === "transport failure") reject(new Error("connection lost"));
+      else finish({ version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: "selected-source", digest, summary, durability_warning: false });
+      await settle();
+      approvalSpent(`retry settled: ${outcome}`);
+      if (outcome === "success") assert(root.textContent?.includes(copy) && !root.querySelector("[role=alert]"), "Fresh approval did not recover from failure");
+      else assert(root.querySelector("[role=alert]")?.textContent?.includes("Preview again") && !root.textContent?.includes("Not authenticated provenance"), "Failed retry did not retain error without publishing outcome");
+    }
     for (const transition of ["account", "key"] as const) {
       await installed();
       click("Keep both copies…"); click("Confirm KeepBoth");
@@ -180,7 +211,7 @@ export async function checkSkillKeepBothConsumer() {
     const uncorrelated = store.keepBothSkillLibrary(selected.id, token, "e".repeat(32)).then(() => false, () => true);
     finish({ version: 1, runner_id: selected.id, original_managed_id: original, managed_id: copy, source_label: "selected-source", digest, summary, durability_warning: false });
     assert(await uncorrelated, "Uncorrelated KeepBoth reply accepted");
-    return { mounted: true, automaticRequests: 0, confirmation: "explicit", originalPreserved: true, duplicateDistinguishable: true, provenanceClaim: "absent", failureState: "visible", accountABA: "fenced", runnerKeyABA: "fenced", boundedLabelBytes: longLabel.length, durabilityWarning: "committed-with-warning", scanClearsCopy: true, zhPlaceholders: "positional", malformedRejected: invalid.length, uncorrelated: "rejected" };
+    return { mounted: true, automaticRequests: 0, confirmation: "explicit", approvalConsumed: "before-dispatch", retry: "fresh-preview-only", originalPreserved: true, duplicateDistinguishable: true, provenanceClaim: "absent", failureState: "visible", accountABA: "fenced", runnerKeyABA: "fenced", boundedLabelBytes: longLabel.length, durabilityWarning: "committed-with-warning", scanClearsCopy: true, zhPlaceholders: "positional", malformedRejected: invalid.length, uncorrelated: "rejected" };
   } finally { dispose(); root.remove(); Object.assign(store, saved); internals.transport = transport; }
 }
 

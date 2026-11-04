@@ -86,10 +86,12 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [macOS chat](docs/architecture/macos-chat.md) | AppKit transcript, composer, attachments, dictation, and working state |
 | [Windows and Linux app](docs/architecture/desktop-app.md) | The MyGo app: its Go side and Solid page, title bar, commands, updates, development and builds |
 | [Phone app](docs/architecture/phone-app.md) | The Expo app over the Rust core: the native module, pairing, relay status, attachments, dictation, notifications, turns |
+| [Phone releases and updates](docs/architecture/phone-updates.md) | TestFlight builds, Android APK releases, and the Android app's self-update: the native gate, daily check and offer, the progress dialog, the package installer |
 | [Phone interface](docs/architecture/phone-interface.md) | Native screens, transcript presentation and adaptive navigation |
 | [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds, testing submissions, accounts and credentials |
 | [Website](docs/architecture/website.md) | `web/`: the site, its docs, and the install scripts it serves |
 | [Languages](docs/architecture/languages.md) | English and Simplified Chinese in each app, and what the CLI words |
+| [Portable setup](docs/architecture/portable-setup.md) | Secret-free configuration recipe boundaries, versioning, ownership, validation and import transaction contract |
 
 ## Repo layout
 

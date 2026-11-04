@@ -27,4 +27,3 @@ fn admission_contention_preserves_errno_and_private_stage_diagnostics() {
     drop(held);
     new.ensure_home().unwrap();
 }
-

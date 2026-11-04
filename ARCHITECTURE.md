@@ -58,37 +58,37 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 
 | Doc | Read it for |
 | --- | --- |
-| [Account model](docs/architecture/account-model.md) | Entity relationships, Device/relay data ownership and cross-Runner job routing |
-| [Identity](docs/architecture/identity.md) | Key pairs and the identity device, pairing and unpairing, Devices and Runners, what the relay sees, the account's provider credentials |
-| [Relay](docs/architecture/relay.md) | `crates/relay`: storage on SQLite or Postgres, files, housekeeping, quotas, metrics, rate limits, auth, tables and migrations, the blob, sync socket, and push APIs, deploys |
-| [Protocols](docs/architecture/protocols.md) | The app ↔ CLI websocket and the CLI ↔ relay requests and blobs |
-| [Managed policy receipts and replay](docs/architecture/managed-policy-replay.md) | Staged opaque policy/roster commits, durable receipt retention, authenticated finite replay cuts and teardown boundaries |
-| [Local API](docs/architecture/local-api.md) | The `/ws` socket: trust boundary, field errors, every method with params and results, events, secret-bearing methods, memory and setup bodies |
-| [CLI (runtime)](docs/architecture/runtime.md) | Commands, local websocket access, proxy/certificate trust, diagnostics, agent loop and notifications |
-| [Local storage and startup admission](docs/architecture/storage-admission.md) | Data directory, format admission, staged scratch preload, creation guards and final startup persistence |
-| [CLI service and updates](docs/architecture/service-updates.md) | CLI installation, standalone services, Runner admission drain and update availability |
-| [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review |
-| [Terminal sessions](docs/architecture/terminal-sessions.md) | A bot's commands in terminals of their own: when a call returns, background commands, the command's card, answering and stopping, Running tasks |
-| [Codemode and Plugins](docs/architecture/plugins.md) | Scripts that call plugin tools, MCP plugins and their installs, sign-in, plugin calls at turn time |
-| [Skills](docs/architecture/skills.md) | Bounded metadata discovery, Runner and desktop discovery contract, managed copies, provenance and uninstall |
-| [Marketplace](docs/architecture/marketplace.md) | The relay-backed index of plugins and bot templates, offline fallback and updates, bots added from a template, the marketplace sheet |
-| [MCP servers](docs/architecture/mcp-servers.md) | The user's own MCP servers in a Runner's `mcp.json`: the file and other apps' spellings, sign-in, the `mcp.*` methods and `beans mcp`, the apps' MCP Servers section and server sheet |
-| [Bots, Routines, and Memory](docs/architecture/bots.md) | The lead bot, DMs and groups, group descriptions and ownership, who answers, handoffs between bots, routines and their checks, a bot's memory |
-| [Memory service UI](docs/architecture/memory-ui.md) | Client drafts, masked replies, secret/options patches, consent and capability gates |
-| [Memory services](docs/architecture/memory-services.md) | Encrypted config, dispatch, queues, deletion and embeddings |
-| [Bot avatars](docs/architecture/avatars.md) | Generated appearance contract, independent photos, validated API edits, encrypted persistence and fresh-format protocol compatibility |
-| [Providers](docs/architecture/providers.md) | Each model provider and its sign-in, custom providers, thinking levels, compaction, retries |
-| [Model catalog and cost](docs/architecture/model-catalog.md) | Shared model metadata, pricing completeness, usage, and public catalog refresh |
-| [macOS app](docs/architecture/macos-app.md) | AppKit launch, windows, onboarding, settings, updates, inspector, Blobatar |
-| [macOS sidebar](docs/architecture/macos-sidebar.md) | Sidebars, search, native chrome, toolbar navigation |
-| [macOS chat](docs/architecture/macos-chat.md) | AppKit transcript, composer, attachments, dictation, and working state |
-| [Windows and Linux app](docs/architecture/desktop-app.md) | The MyGo app: its Go side and Solid page, title bar, commands, updates, development and builds |
-| [Phone app](docs/architecture/phone-app.md) | The Expo app over the Rust core: the native module, pairing, relay status, attachments, dictation, notifications, turns |
-| [Phone releases and updates](docs/architecture/phone-updates.md) | TestFlight builds, Android APK releases, and the Android app's self-update: the native gate, daily check and offer, the progress dialog, the package installer |
-| [Phone interface](docs/architecture/phone-interface.md) | Native screens, transcript presentation and adaptive navigation |
-| [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds, testing submissions, accounts and credentials |
-| [Website](docs/architecture/website.md) | `web/`: the site, its docs, and the install scripts it serves |
-| [Languages](docs/architecture/languages.md) | English and Simplified Chinese in each app, and what the CLI words |
+| [Account model](docs/architecture/account-model.md) | Entities, Device/relay ownership and cross-Runner routing |
+| [Identity](docs/architecture/identity.md) | Keys, pairing, Devices/Runners and encrypted credentials |
+| [Relay](docs/architecture/relay.md) | Storage backends, auth, quotas, sync, files and push APIs |
+| [Protocols](docs/architecture/protocols.md) | App/CLI websocket and encrypted CLI/relay messages |
+| [Managed policy receipts and replay](docs/architecture/managed-policy-replay.md) | Opaque policy commits, receipts, replay cuts and teardown |
+| [Local API](docs/architecture/local-api.md) | Methods, events, validation and secret-bearing responses |
+| [CLI (runtime)](docs/architecture/runtime.md) | Commands, transport, agent loop and diagnostics |
+| [Local storage and startup admission](docs/architecture/storage-admission.md) | Data directories, format checks and startup persistence |
+| [CLI service and updates](docs/architecture/service-updates.md) | Services, admission drain and update availability |
+| [Tools](docs/architecture/tools.md) | Team, memory and coding tools; Auto-review |
+| [Terminal sessions](docs/architecture/terminal-sessions.md) | Commands, background sessions, input and cancellation |
+| [Codemode and Plugins](docs/architecture/plugins.md) | Scripts, MCP installs, sign-in and tool calls |
+| [Skills](docs/architecture/skills.md) | Discovery, managed copies, provenance and removal |
+| [Marketplace](docs/architecture/marketplace.md) | Plugin/bot index, offline fallback, templates and updates |
+| [MCP servers](docs/architecture/mcp-servers.md) | Runner configuration, sign-in, API and client settings |
+| [Bots, Routines, and Memory](docs/architecture/bots.md) | Chats, handoffs, routines and bot memory |
+| [Memory service UI](docs/architecture/memory-ui.md) | Drafts, masked replies, consent and capabilities |
+| [Memory services](docs/architecture/memory-services.md) | Encrypted config, queues, deletion and embeddings |
+| [Bot avatars](docs/architecture/avatars.md) | Appearance validation, photos and encrypted persistence |
+| [Providers](docs/architecture/providers.md) | Providers, custom connections, thinking and retries |
+| [Model catalog and cost](docs/architecture/model-catalog.md) | Model metadata, pricing, usage and refresh |
+| [macOS app](docs/architecture/macos-app.md) | AppKit lifecycle, onboarding, settings and updates |
+| [macOS sidebar](docs/architecture/macos-sidebar.md) | Navigation, search and native chrome |
+| [macOS chat](docs/architecture/macos-chat.md) | Transcript, composer, attachments and dictation |
+| [Windows and Linux app](docs/architecture/desktop-app.md) | MyGo host, Solid page, commands, updates and builds |
+| [Phone app](docs/architecture/phone-app.md) | Expo/Rust core, pairing, sync, notifications and turns |
+| [Phone releases and updates](docs/architecture/phone-updates.md) | TestFlight, Android releases and signed app updates |
+| [Phone interface](docs/architecture/phone-interface.md) | Native screens, transcript and adaptive navigation |
+| [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds and submission |
+| [Website](docs/architecture/website.md) | Website, documentation and install scripts |
+| [Languages](docs/architecture/languages.md) | English and Simplified Chinese across clients |
 
 ## Repo layout
 

@@ -13,12 +13,12 @@
       "dependencies": {
         "@beans/blobatar": "file:../packages/beans-blobatar",
         "@solidjs/router": "2.0.0-next.30",
-        "@solidjs/web": "2.0.0-rc.10",
+        "@solidjs/web": "2.0.0-rc.21",
         "lucide": "1.48.0",
         "markdown-it": "15.0.2",
         "mygo-runtime": "0.1.22",
         "qrcode-generator": "2.0.4",
-        "solid-js": "2.0.0-rc.10",
+        "solid-js": "2.0.0-rc.21",
       },
       "devDependencies": {
         "@solidjs/vite-plugin": "3.0.0-next.56",
@@ -461,11 +461,11 @@
 
     "@solidjs/router": ["@solidjs/router@2.0.0-next.30", "http://registry.npmjs.org/@solidjs/router/-/router-2.0.0-next.30.tgz", { "peerDependencies": { "@solidjs/web": "^2.0.0-rc.9", "filesystem-routing": ">=0.4.0", "solid-js": "^2.0.0-rc.9" }, "optionalPeers": ["filesystem-routing"] }, "sha512-Nl7i8Y00yn8HAQBc34WtJYabvzNK6t35lb2sXqBQKCBL6qrBGbSFXFUeakyRA8Toh0gErWcDsKTMEGeyozTJkQ=="],
 
-    "@solidjs/signals": ["@solidjs/signals@2.0.0-rc.10", "http://registry.npmjs.org/@solidjs/signals/-/signals-2.0.0-rc.10.tgz", {}, "sha512-+5JN0259Scjqft7kTCv1pc3rMRniAxNr1We748UU2zz7MrE8MVn65IPt8VS3rA/7DubRCxoiBdDl+aUlJY9v5g=="],
+    "@solidjs/signals": ["@solidjs/signals@2.0.0-rc.21", "", {}, "sha512-F1TUMO/nd1XC//+tcaWxibOOgXBHQGmNQnAeiDnpLh+1smnlwIgKF6pc20evlyfQwqf0gP6rH4sNEqCPBNcpgg=="],
 
     "@solidjs/vite-plugin": ["@solidjs/vite-plugin@3.0.0-next.56", "", { "dependencies": { "@ampproject/remapping": "^2.3.0", "@babel/core": "^7.23.3", "@solidjs/babel-plugin": "^2.0.0-rc.19", "@solidjs/compiler": "^2.0.0-rc.19", "@types/babel__core": "^7.20.4", "magic-string": "^0.30.21", "merge-anything": "^5.1.7", "vitefu": "^1.0.4" }, "peerDependencies": { "@solidjs/start-devtools": "^1.0.0-next.2", "@solidjs/web": "^2.0.0-rc.19", "@testing-library/jest-dom": "^5.16.6 || ^5.17.0 || ^6.0.0 || ^7.0.0", "solid-js": "^2.0.0-rc.19", "vite": "^8.0.0 || ^9.0.0" }, "optionalPeers": ["@solidjs/start-devtools", "@testing-library/jest-dom"] }, "sha512-ox+Y0+UTC38/n7ky3z11jp9nDGMk/yjX8DbSIKri2S4SzE8fA7RA65z3yFQNd+Cs17fGTVnN4wpKgkItHlg2sw=="],
 
-    "@solidjs/web": ["@solidjs/web@2.0.0-rc.10", "http://registry.npmjs.org/@solidjs/web/-/web-2.0.0-rc.10.tgz", { "dependencies": { "seroval": "~1.6.7", "seroval-plugins": "~1.6.7" }, "peerDependencies": { "solid-js": "^2.0.0-rc.10" } }, "sha512-CHXXV5BtqUkuxz/AM45WUKCYF/OiBhC6fOe9gyiktES2bpKj6SUL2xxIciM7q7G+ewYXAN/SGy1/SNFSrxjrOQ=="],
+    "@solidjs/web": ["@solidjs/web@2.0.0-rc.21", "", { "dependencies": { "seroval": "1.7.0", "seroval-plugins": "1.7.0" }, "peerDependencies": { "solid-js": "^2.0.0-rc.21" } }, "sha512-1E9dvR3/+5fQTI3oxxACBX2Rg4rezXgrljerhWDHR5uQZ04p5Z8qXROI7dIDJKyANtsnLKYbM2OyI/p/FmjGUA=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "http://registry.npmjs.org/@standard-schema/spec/-/spec-1.1.0.tgz", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
@@ -1163,15 +1163,15 @@
 
     "semver": ["semver@6.3.1", "http://registry.npmjs.org/semver/-/semver-6.3.1.tgz", { "bin": { "semver": "bin/semver.js" } }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
 
-    "seroval": ["seroval@1.6.7", "http://registry.npmjs.org/seroval/-/seroval-1.6.7.tgz", {}, "sha512-AeDcLh0yO2SFm9W71essgnSzLV9DI8ZH0x0knXn2DMnUZj728mpLbxjlbB6IqKCmqh8JA3cEqRyGoNkt584JcQ=="],
+    "seroval": ["seroval@1.7.0", "", {}, "sha512-FU+LUkmDzWNsJ6oubZFN3dGPKny53DRhPJG6nftEaXDL8MIn19+kEE1Gvc+63Go+qPOwVUlKIdKhsu2HN6tksw=="],
 
-    "seroval-plugins": ["seroval-plugins@1.6.7", "http://registry.npmjs.org/seroval-plugins/-/seroval-plugins-1.6.7.tgz", { "peerDependencies": { "seroval": "^1.0" } }, "sha512-4Nk35ttD3DTDJW4hgw5StsVAPeU6qnDFnULAouw6tQ7oLTV/ICXrWpsXo2EE52eSP2joUMazbVf52mFEcADqRw=="],
+    "seroval-plugins": ["seroval-plugins@1.7.0", "", { "peerDependencies": { "seroval": "^1.0" } }, "sha512-WM4rArfPtLZriTuxC5DBvNulEwAaRcjNe/dkMOEesOcuvXf5nEwKf5Bw3AT92WHohqcc45+57GdtsCuBTI0mjw=="],
 
     "shell-quote": ["shell-quote@1.10.0", "http://registry.npmjs.org/shell-quote/-/shell-quote-1.10.0.tgz", {}, "sha512-w1aiOKwKuRgtwAReIIj89puqg+I7GvX4IbLrvmhXbzQsj1+Zwi4VO3+fa6ZF91TWSjIxoEkKnMeHcLEODK5ZXA=="],
 
     "shiki": ["shiki@4.4.3", "http://registry.npmjs.org/shiki/-/shiki-4.4.3.tgz", { "dependencies": { "@shikijs/core": "4.4.3", "@shikijs/engine-javascript": "4.4.3", "@shikijs/engine-oniguruma": "4.4.3", "@shikijs/langs": "4.4.3", "@shikijs/themes": "4.4.3", "@shikijs/types": "4.4.3", "@shikijs/vscode-textmate": "^10.0.2", "@types/hast": "^3.0.5" } }, "sha512-Mb/GvXPHBAXdgGIcnfU5L3ldpn1XcxrGkPHwqgRx17/I2XRfqlFKk2vGkHWINn1kdXvzJZeuO3is6I9KLPFm0g=="],
 
-    "solid-js": ["solid-js@2.0.0-rc.10", "http://registry.npmjs.org/solid-js/-/solid-js-2.0.0-rc.10.tgz", { "dependencies": { "@solidjs/signals": "^2.0.0-rc.10", "csstype": "^3.1.0", "seroval": "~1.6.7", "seroval-plugins": "~1.6.7" } }, "sha512-eh25kmg7yXuJCVN2VpS03bUuTJ0rvb7MnJyIw+8tcSRwnINaugyI5RLwPMy9Rji94CqsMbDrD9Ixh9bRuBMwwQ=="],
+    "solid-js": ["solid-js@2.0.0-rc.21", "", { "dependencies": { "@solidjs/signals": "^2.0.0-rc.21", "csstype": "^3.1.0", "seroval": "1.7.0", "seroval-plugins": "1.7.0" } }, "sha512-0Z8/qiJKnK6A2g8QspGthwxR0W8WauMOD2/LQtNmxBT8gpZkKaXmo/fdek/+cB+84w4HYejWJixSAn4fcAI0Uw=="],
 
     "source-map": ["source-map@0.7.6", "http://registry.npmjs.org/source-map/-/source-map-0.7.6.tgz", {}, "sha512-i5uvt8C3ikiWeNZSVZNWcfZPItFQOsYTUAOkcUPGd8DqDy1uOUikjt5dG+uRlwyvR108Fb9DOd4GvXfT0N2/uQ=="],
 
@@ -1321,13 +1321,23 @@
 
     "@tanstack/devtools-ui/solid-js": ["solid-js@1.9.15", "http://registry.npmjs.org/solid-js/-/solid-js-1.9.15.tgz", { "dependencies": { "csstype": "^3.1.0", "seroval": "~1.5.4", "seroval-plugins": "~1.5.4" } }, "sha512-EeiY2xfpZJqPLjXspVEKjAII4yv8NyG//NxZ3IpOFHdUNnnTyL0uJOeS9LWGvA7cFCz5y94cjFwYlmw5Luncsg=="],
 
+    "@tanstack/router-core/seroval": ["seroval@1.6.7", "http://registry.npmjs.org/seroval/-/seroval-1.6.7.tgz", {}, "sha512-AeDcLh0yO2SFm9W71essgnSzLV9DI8ZH0x0knXn2DMnUZj728mpLbxjlbB6IqKCmqh8JA3cEqRyGoNkt584JcQ=="],
+
+    "@tanstack/router-core/seroval-plugins": ["seroval-plugins@1.6.7", "http://registry.npmjs.org/seroval-plugins/-/seroval-plugins-1.6.7.tgz", { "peerDependencies": { "seroval": "^1.0" } }, "sha512-4Nk35ttD3DTDJW4hgw5StsVAPeU6qnDFnULAouw6tQ7oLTV/ICXrWpsXo2EE52eSP2joUMazbVf52mFEcADqRw=="],
+
     "@tanstack/router-generator/@tanstack/router-core": ["@tanstack/router-core@1.171.32", "http://registry.npmjs.org/@tanstack/router-core/-/router-core-1.171.32.tgz", { "dependencies": { "@tanstack/history": "1.162.4", "cookie-es": "^3.0.0", "seroval": "^1.6.2", "seroval-plugins": "^1.6.2" } }, "sha512-X86Jqk3vB2KJcUfS6oLi7B7yxbaa59QEhZRPPP1fRx3k+Jw/Fu1UYVBcRtdwK/OccQnrlQdVoKvNO3QXmyEBOw=="],
 
     "@tanstack/router-plugin/@tanstack/router-generator": ["@tanstack/router-generator@1.167.40", "", { "dependencies": { "@babel/types": "^7.29.8", "@tanstack/router-core": "1.171.34", "@tanstack/router-utils": "1.162.3", "@tanstack/virtual-file-routes": "1.162.0", "jiti": "^2.7.0", "magic-string": "^0.30.21", "prettier": "^3.9.6", "zod": "^4.5.4" } }, "sha512-WkEueqEvsBBudzO0fx1nWfOmRNW8OAvBoVABTGls9bAWzjdC+KDGHvjCNrvn88ofs1F6gqL8aWnzKCbxW3dCyQ=="],
 
+    "@tanstack/start-client-core/seroval": ["seroval@1.6.7", "http://registry.npmjs.org/seroval/-/seroval-1.6.7.tgz", {}, "sha512-AeDcLh0yO2SFm9W71essgnSzLV9DI8ZH0x0knXn2DMnUZj728mpLbxjlbB6IqKCmqh8JA3cEqRyGoNkt584JcQ=="],
+
     "@tanstack/start-plugin-core/@tanstack/router-generator": ["@tanstack/router-generator@1.167.40", "", { "dependencies": { "@babel/types": "^7.29.8", "@tanstack/router-core": "1.171.34", "@tanstack/router-utils": "1.162.3", "@tanstack/virtual-file-routes": "1.162.0", "jiti": "^2.7.0", "magic-string": "^0.30.21", "prettier": "^3.9.6", "zod": "^4.5.4" } }, "sha512-WkEueqEvsBBudzO0fx1nWfOmRNW8OAvBoVABTGls9bAWzjdC+KDGHvjCNrvn88ofs1F6gqL8aWnzKCbxW3dCyQ=="],
 
+    "@tanstack/start-plugin-core/seroval": ["seroval@1.6.7", "http://registry.npmjs.org/seroval/-/seroval-1.6.7.tgz", {}, "sha512-AeDcLh0yO2SFm9W71essgnSzLV9DI8ZH0x0knXn2DMnUZj728mpLbxjlbB6IqKCmqh8JA3cEqRyGoNkt584JcQ=="],
+
     "@tanstack/start-plugin-core/srvx": ["srvx@0.11.22", "http://registry.npmjs.org/srvx/-/srvx-0.11.22.tgz", { "bin": { "srvx": "bin/srvx.mjs" } }, "sha512-LqZxxBDMKuMAZzFzJnDCkFOrs9MZQZr0LvHiO/SuSZVdQaXD7xQ5UWTUxheJrQPve1qk9MG2B/yttUvJxw8egQ=="],
+
+    "@tanstack/start-server-core/seroval": ["seroval@1.6.7", "http://registry.npmjs.org/seroval/-/seroval-1.6.7.tgz", {}, "sha512-AeDcLh0yO2SFm9W71essgnSzLV9DI8ZH0x0knXn2DMnUZj728mpLbxjlbB6IqKCmqh8JA3cEqRyGoNkt584JcQ=="],
 
     "beans-desktop/@beans/blobatar": ["@beans/blobatar@file:packages/beans-blobatar", { "peerDependencies": { "react": ">=18", "react-native-reanimated": ">=4", "react-native-svg": ">=13", "react-native-worklets": ">=0.5" }, "optionalPeers": ["react", "react-native-reanimated", "react-native-svg", "react-native-worklets"] }],
 
@@ -1398,6 +1408,10 @@
     "@tanstack/devtools/solid-js/seroval": ["seroval@1.5.6", "http://registry.npmjs.org/seroval/-/seroval-1.5.6.tgz", {}, "sha512-rVQVWjjSvlINzaQPZH5JFqsqEsIWdTxY3iJZCnTL/5gQbXIRooVZKI60tVCkOVfzcRPejboxO2t0P89dg5mQaA=="],
 
     "@tanstack/devtools/solid-js/seroval-plugins": ["seroval-plugins@1.5.6", "http://registry.npmjs.org/seroval-plugins/-/seroval-plugins-1.5.6.tgz", { "peerDependencies": { "seroval": "^1.0" } }, "sha512-HXuLAX2pu/UByPpaeo/TaMfvMIi+1QqIoPJYCcAtU8QkVNwgR6MPlGuCQTErV1JwraaMbYaWVIBX7mppzGLATQ=="],
+
+    "@tanstack/router-generator/@tanstack/router-core/seroval": ["seroval@1.6.7", "http://registry.npmjs.org/seroval/-/seroval-1.6.7.tgz", {}, "sha512-AeDcLh0yO2SFm9W71essgnSzLV9DI8ZH0x0knXn2DMnUZj728mpLbxjlbB6IqKCmqh8JA3cEqRyGoNkt584JcQ=="],
+
+    "@tanstack/router-generator/@tanstack/router-core/seroval-plugins": ["seroval-plugins@1.6.7", "http://registry.npmjs.org/seroval-plugins/-/seroval-plugins-1.6.7.tgz", { "peerDependencies": { "seroval": "^1.0" } }, "sha512-4Nk35ttD3DTDJW4hgw5StsVAPeU6qnDFnULAouw6tQ7oLTV/ICXrWpsXo2EE52eSP2joUMazbVf52mFEcADqRw=="],
 
     "beans-desktop/@types/bun/bun-types": ["bun-types@1.4.3", "", { "dependencies": { "@types/node": "*", "undici-types": "*" } }, "sha512-tinRJNGOmUN+tEAsn2y2e942n9JHRHR42iUYzDH75NmhJqVBokGSQkkfSFdNWwsANIdrK6ACH9t01M452YyTwg=="],
 

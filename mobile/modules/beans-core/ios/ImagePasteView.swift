@@ -10,15 +10,70 @@ import UniformTypeIdentifiers
 public class ImagePasteViewModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ImagePasteView")
-    OnCreate { ImagePasteView.hookTextViews() }
+    OnCreate {
+      PasteImageCache.queue.async { PasteImageCache.pruneOnce() }
+      ImagePasteView.hookTextViews()
+    }
+    AsyncFunction("deleteFiles") { (uris: [String]) in
+      PasteImageCache.queue.sync { PasteImageCache.deleteFiles(uris) }
+    }
     View(ImagePasteView.self) {
       Events("onPasteImages")
     }
   }
 }
 
+/// All cache mutations share one queue. A module reload must not prune live JS drafts.
+private enum PasteImageCache {
+  static let queue = DispatchQueue(label: "app.beans.pasted-images", qos: .userInitiated)
+  static let directory = FileManager.default.temporaryDirectory
+    .resolvingSymlinksInPath().appendingPathComponent("Pasted", isDirectory: true)
+  private static var pruned = false
+
+  static func safeDirectory() -> Bool {
+    guard let values = try? directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return false }
+    return values.isDirectory == true && values.isSymbolicLink != true
+      && directory.resolvingSymlinksInPath().path == directory.path
+  }
+
+  static func ownedFile(_ uri: String) -> URL? {
+    guard safeDirectory(), let url = URL(string: uri), url.isFileURL,
+          url.host == nil || url.host == "" || url.host == "localhost",
+          url.query == nil, url.fragment == nil,
+          url.deletingLastPathComponent().path == directory.path,
+          url.resolvingSymlinksInPath().path == url.path,
+          UUID(uuidString: url.deletingPathExtension().lastPathComponent) != nil,
+          UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true,
+          let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+          values.isRegularFile == true, values.isSymbolicLink != true
+    else { return nil }
+    return url
+  }
+
+  static func deleteFiles(_ uris: [String]) {
+    for uri in uris {
+      if let url = ownedFile(uri) { try? FileManager.default.removeItem(at: url) }
+    }
+  }
+
+  static func pruneOnce() {
+    guard !pruned else { return }
+    pruned = true
+    guard safeDirectory(), let files = try? FileManager.default.contentsOfDirectory(
+      at: directory, includingPropertiesForKeys: nil
+    ) else { return }
+    deleteFiles(files.map { $0.absoluteString })
+  }
+}
+
 final class ImagePasteView: ExpoView {
   let onPasteImages = EventDispatcher()
+  private var attachmentGeneration = 0
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window == nil { attachmentGeneration += 1 }
+  }
 
   /// The images on the pasteboard, read here on the main thread as the paste happens, then
   /// written out off it.
@@ -39,10 +94,18 @@ final class ImagePasteView: ExpoView {
       images = (pasteboard.images ?? []).compactMap { image in image.pngData().map { ($0, UTType.png) } }
     }
     guard !images.isEmpty else { return }
-    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+    let generation = attachmentGeneration
+    PasteImageCache.queue.async { [weak self] in
+      PasteImageCache.pruneOnce()
       let files = images.compactMap { Self.write($0.0, type: $0.1) }
       DispatchQueue.main.async {
-        guard let self, !files.isEmpty else { return }
+        guard !files.isEmpty else { return }
+        guard let self, self.window != nil, self.attachmentGeneration == generation else {
+          PasteImageCache.queue.async {
+            PasteImageCache.deleteFiles(files.compactMap { $0["uri"] as? String })
+          }
+          return
+        }
         self.onPasteImages(["files": files])
       }
     }
@@ -58,12 +121,17 @@ final class ImagePasteView: ExpoView {
       data = jpeg
       type = .jpeg
     }
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Pasted", isDirectory: true)
+    let directory = PasteImageCache.directory
     let url = directory.appendingPathComponent(UUID().uuidString).appendingPathExtension(type.preferredFilenameExtension ?? "png")
     do {
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-      try data.write(to: url)
+      guard PasteImageCache.safeDirectory() else { return nil }
+      try data.write(to: url, options: .withoutOverwriting)
     } catch {
+      let failure = error as NSError
+      if failure.domain != NSCocoaErrorDomain || failure.code != NSFileWriteFileExistsError {
+        PasteImageCache.deleteFiles([url.absoluteString])
+      }
       return nil
     }
     var file: [String: Any] = ["uri": url.absoluteString, "mime": type.preferredMIMEType ?? "image/png", "size": data.count]

@@ -14,10 +14,10 @@ export function pasteTimestamp(now = new Date()): string {
 }
 
 /// Turns pasted image payloads into attachment files named like picked photos.
-export function namePastedImages<T extends PastableImage>(images: T[], stamp: string): Array<T & { name: string }> {
+export function namePastedImages<T extends PastableImage>(images: T[], stamp: string): Array<T & { name: string; pasted: true }> {
   return images.map((image, index) => {
     const extension = image.mime === "image/jpeg" ? "jpg" : image.mime.slice("image/".length).split("+")[0] || "png";
     const suffix = images.length > 1 ? ` ${index + 1}` : "";
-    return { ...image, name: `Pasted Image ${stamp}${suffix}.${extension}` };
+    return { ...image, name: `Pasted Image ${stamp}${suffix}.${extension}`, pasted: true };
   });
 }

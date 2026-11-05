@@ -108,16 +108,33 @@ export default function ChatScreen() {
   const relayUrl = useStore(s => s.relayUrl);
   const deviceId = useStore(s => s.deviceId);
   const paired = useStore(s => s.paired);
-  const sendPresentation = useRef({ active: true, id });
+  const authorityEpoch = useRef(0);
+  const sendPresentation = useRef({ active: true, id, identityId, relayUrl, deviceId, paired, epoch: authorityEpoch.current });
+  const previousPresentation = sendPresentation.current;
+  if (previousPresentation.id !== id || previousPresentation.identityId !== identityId
+    || previousPresentation.relayUrl !== relayUrl || previousPresentation.deviceId !== deviceId
+    || previousPresentation.paired !== paired || previousPresentation.epoch !== authorityEpoch.current) {
+    previousPresentation.active = false;
+    sendPresentation.current = { active: true, id, identityId, relayUrl, deviceId, paired, epoch: authorityEpoch.current };
+  }
+  const presentation = sendPresentation.current;
+  const revokeScroll = useRef<() => void>(() => {});
   useEffect(() => {
-    const owner = { active: true, id };
-    sendPresentation.current = owner;
+    const owner = presentation;
+    const state = useStore.getState();
+    if (sendPresentation.current === owner && owner.epoch === authorityEpoch.current
+      && state.identityId === owner.identityId && state.deviceId === owner.deviceId
+      && state.relayUrl === owner.relayUrl && state.paired === owner.paired) owner.active = true;
     const unsubscribe = useStore.subscribe((state, previous) => {
       if (state.identityId !== previous.identityId || state.relayUrl !== previous.relayUrl
-        || state.deviceId !== previous.deviceId || state.paired !== previous.paired) owner.active = false;
+        || state.deviceId !== previous.deviceId || state.paired !== previous.paired) {
+        owner.active = false;
+        authorityEpoch.current += 1;
+        revokeScroll.current();
+      }
     });
-    return () => { owner.active = false; unsubscribe(); };
-  }, [id, identityId, relayUrl, deviceId, paired]);
+    return () => { owner.active = false; unsubscribe(); revokeScroll.current(); };
+  }, [presentation]);
   const listRef = useRef<FlashListRef<Row>>(null);
   // The composer floats over the transcript and rides the keyboard (KeyboardFoot). The
   // list is never resized: the chat scroll view keeps a bottom inset for the composer and adds
@@ -288,6 +305,7 @@ export default function ChatScreen() {
   const releaseAnchor = useCallback(() => {
     anchorKey.current = null;
     anchorTarget.current = null;
+    anchoredRef.current = false;
     if (anchorWatch.current) clearTimeout(anchorWatch.current);
     anchorWatch.current = null;
     setAnchored(false);
@@ -588,15 +606,20 @@ export default function ChatScreen() {
     dragging.current = true;
     beginDrag();
   }, [beginDrag]);
+  const finishUserScroll = useCallback(() => {
+    const list = listRef.current;
+    following.current = !!list && keepsFollowing(restingEnd() - list.getAbsoluteLastScrollOffset());
+    userScrolling.current = false;
+  }, [restingEnd]);
   // A fling's momentum starts right after the drag ends; without one, the drag's end is the rest.
   const onScrollEndDrag = useCallback(() => {
     dragging.current = false;
     if (restTimer.current) clearTimeout(restTimer.current);
     restTimer.current = setTimeout(() => {
       restTimer.current = null;
-      userScrolling.current = false;
+      finishUserScroll();
     }, 50);
-  }, []);
+  }, [finishUserScroll]);
   const onMomentumScrollBegin = useCallback(() => {
     if (restTimer.current) clearTimeout(restTimer.current);
     restTimer.current = null;
@@ -604,8 +627,8 @@ export default function ChatScreen() {
   // Scrolls sent from here end with this event too, so it does not end a drag.
   const onMomentumScrollEnd = useCallback(() => {
     if (dragging.current || restTimer.current) return;
-    userScrolling.current = false;
-  }, []);
+    if (userScrolling.current) finishUserScroll();
+  }, [finishUserScroll]);
   const onScrollToTop = useCallback(() => {
     following.current = false;
     beginDrag();
@@ -637,6 +660,26 @@ export default function ChatScreen() {
       composerActual.current <= composerCompact.current + 1;
     if (settling.current) stopSettling();
     if (height > 0) liftAnchored(height);
+  };
+  revokeScroll.current = () => {
+    releaseAnchor();
+    if (blankPending.current) clearTimeout(blankPending.current);
+    blankPending.current = null;
+    if (restTimer.current) clearTimeout(restTimer.current);
+    restTimer.current = null;
+    anchorTouched.current = false;
+    anchorLifted.current = false;
+    anchorSpaced.current = false;
+    following.current = true;
+    userScrolling.current = false;
+    dragging.current = false;
+    spacerRef.current = 0;
+    setSpacer(0);
+    holdRef.current = 0;
+    setHold(0);
+    blankSet.current = restingSpace();
+    composerBlank.value = blankSet.current;
+    stopSettling();
   };
   useEffect(() => {
     settling.current = true;
@@ -1071,15 +1114,18 @@ export default function ChatScreen() {
             isGroup={isGroup}
             placeholder={placeholder}
             onSend={async (text, files, mentions, replyTo) => {
+              if (!presentation.active || presentation.id !== id || presentation.epoch !== authorityEpoch.current) return false;
+              const authority = useStore.getState();
+              if (authority.identityId !== presentation.identityId || authority.deviceId !== presentation.deviceId
+                || authority.relayUrl !== presentation.relayUrl || authority.paired !== presentation.paired) return false;
               // The anchor is measured against the screen without the keyboard.
               void KeyboardController.dismiss();
-              // Before the message reaches the list: FlashList notes "near the end" on a commit
-              // made while its catch-up is on, and scrolls to the end on the change after it.
+              // Suspend following until the acknowledged message establishes its anchor.
+              anchoredRef.current = true;
               setAnchored(true);
-              const presentation = sendPresentation.current;
               try {
                 const message = await engine.sendMessage(id, text, files, mentions, replyTo);
-                if (!presentation.active || sendPresentation.current !== presentation) return true;
+                if (!presentation.active || sendPresentation.current !== presentation || presentation.epoch !== authorityEpoch.current) return false;
                   stopSettling();
                   following.current = true;
                   anchorKey.current = message.id;
@@ -1090,7 +1136,7 @@ export default function ChatScreen() {
                   syncInsetTop();
                 return true;
               } catch (error) {
-                if (!presentation.active || sendPresentation.current !== presentation) return false;
+                if (!presentation.active || sendPresentation.current !== presentation || presentation.epoch !== authorityEpoch.current) return false;
                 if (!anchorKey.current) releaseAnchor();
                 Alert.alert(
                   t("Could not send"),

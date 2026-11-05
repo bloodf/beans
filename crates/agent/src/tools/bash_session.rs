@@ -1408,7 +1408,11 @@ mod tests {
             let t = tools(WAITING_AFTER);
             assert_eq!(t.bash.parameters()["properties"]["background"]["type"], "boolean");
             assert!(BashTool::new(std::env::temp_dir()).parameters()["properties"].get("background").is_none(), "not on pipes");
-            let command = "echo listening; while true; do echo tick; sleep 0.1; done";
+            // Keep a stable foreground executable for Ctrl-C. Non-interactive bash may
+            // continue after SIGINT if the child it waits for did not die from that signal;
+            // repeatedly starting sleep makes this a race. exec replaces that shell with
+            // cat, which streams the same ticks and dies from the terminal's signal.
+            let command = "echo listening; exec cat < <(while true; do echo tick; sleep 0.1; done)";
             // Login-shell capture is outside the settle window the assertion measures.
             crate::login_shell::environment().await;
             let started = std::time::Instant::now();
@@ -1424,21 +1428,15 @@ mod tests {
 
             let more = call(&t.output, json!({"session_id": id, "wait_seconds": 0.3})).await.unwrap();
             assert!(more.text_content().starts_with("tick\n"), "{}", more.text_content());
-            // Ctrl-C must end the loop (SIGINT). Its input call may reach the background
-            // settle deadline before the child is reaped, so read the final result within
-            // the same bounded wait. A still-running outcome never satisfies this assertion.
+            // Ctrl-C must end the foreground command (SIGINT). The wait cap only bounds a hang if it does not;
+            // do not accept a still-running outcome here — that would hide a delivery bug.
             let stopped = tokio::time::timeout(
                 BACKGROUND_SETTLE + Duration::from_secs(5),
-                async {
-                    let mut result = call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await.unwrap();
-                    while t.host.get(&id).is_some() {
-                        result = call(&t.output, json!({"session_id": id, "wait_seconds": 0.2})).await.unwrap();
-                    }
-                    result
-                },
+                call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})),
             )
             .await
-            .expect("the command terminated after Ctrl-C");
+            .expect("bash_input returned after Ctrl-C")
+            .unwrap();
             assert!(
                 stopped.text_content().ends_with("Command terminated by signal 2"),
                 "{}",
@@ -1478,6 +1476,10 @@ mod tests {
         // One deadline, both waits: how long the call may hold a command that never goes quiet.
         for background in [true, false] {
             let mut t = tools(Duration::from_millis(400));
+            // This tests the deadline, not the idle return: a scheduling gap between ticks
+            // must not win at 400 ms before the background's two-second deadline. Keep the
+            // shorter idle only for the initial foreground command waiting for its answer.
+            t.input.waiting_after = WAITING_AFTER;
             t.input.longest_wait = Duration::from_millis(500);
             let (command, longest) = if background {
                 (ticks.to_string(), BACKGROUND_SETTLE)
@@ -1491,9 +1493,6 @@ mod tests {
 
             let running = t.host.get(&id).unwrap();
             let unread = running.total();
-            // This exercises the deadline, not scheduler-dependent silence between ticks.
-            // Keep the initial prompt wait short, but prevent input's idle timer winning.
-            t.input.waiting_after = longest + Duration::from_secs(1);
             let elapsed = std::time::Instant::now();
             let typed = tokio::time::timeout(Duration::from_secs(20), call(&t.input, json!({"session_id": id, "text": "x"})))
                 .await

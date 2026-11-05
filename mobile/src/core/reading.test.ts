@@ -36,6 +36,7 @@ mock.module("expo-notifications", () => ({
   dismissNotificationAsync: async (id: string) => { cleared.push(id); },
 }));
 mock.module("../../modules/beans-core", () => ({
+  deletePastedImages: async () => {},
   start: () => {}, wake: () => {},
   onEvent: (listener: Listener) => { listeners.add(listener); return () => listeners.delete(listener); },
   request: async (method: string, params: Record<string, any> = {}) => {

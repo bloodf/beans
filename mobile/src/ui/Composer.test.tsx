@@ -87,12 +87,13 @@ mock.module("expo-web-browser", () => ({}));
 mock.module("../core/host", () => ({ hostFacts: () => ({ name: "Phone", os: "ios", os_version: "", model: "" }) }));
 mock.module("../core/prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {}, coreHome: () => "/unused", pathOf: (path: string) => path, wipePrefs: () => {} }));
 mock.module("../core/push", () => ({ clearPushes: () => {}, installPushHandlers: () => {}, registerForPushes: async () => {} }));
+const removedPastes: string[] = [];
 const frames = new Set<(frame: any) => void>();
 let request: (method: string, params: any) => Promise<any> = async () => null;
 mock.module("expo-modules-core", () => ({
   requireNativeViewManager: () => "ImagePasteView",
   requireNativeModule: () => ({
-  start: () => {}, wake: () => {},
+  start: () => {}, wake: () => {}, deleteFiles: async (uris: string[]) => { removedPastes.push(...uris); },
   addListener: (_name: string, listener: any) => { const receive = (frame: any) => listener({ json: JSON.stringify(frame) }); frames.add(receive); return { remove: () => frames.delete(receive) }; },
   request: async (method: string, params: string) => JSON.stringify(await request(method, JSON.parse(params))),
 }) }));
@@ -104,7 +105,7 @@ const chat = (id: string) => ({ id, kind: "group" as const, bot_ids: [], is_pinn
 const snapshot = { has_identity: true, identity_id: "consumer", this_device_id: "phone", relay_url: "relay", relay_connected: true, devices: [], bots: [], chats: [chat("chat"), chat("other")], running_turns: [] };
 request = async method => method === "bootstrap" ? { result: snapshot } : { result: null };
 await engine.start();
-function reset() { dispose(); resetStore(); event("snapshot", snapshot); route = "chat"; starts = 0; aborts = 0; sends = 0; startError = false; permission = async () => ({ granted: true }); }
+function reset() { dispose(); resetStore(); event("snapshot", snapshot); route = "chat"; removedPastes.length = 0; starts = 0; aborts = 0; sends = 0; startError = false; permission = async () => ({ granted: true }); }
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); render(); };
 const { Composer } = await import("./Composer");
 
@@ -299,6 +300,51 @@ test("effectful Composer revokes permission ABA and resets recording on owner ch
   expect(composerDraft("consumer", "relay", "other").text).toBe("new recording");
   route = "chat"; render(); expect(input().props.value).toBe("heard");
   dispose(); resetStore();
+});
+
+test("production Composer cleans rejected, removed and late pastes without deleting retained drafts", async () => {
+  reset(); platform = "ios"; render();
+  const image = (id: string, size = 12) => ({ uri: `file:///cache/Pasted/${id}.png`, mime: "image/png", size });
+  const paste = (files: ReturnType<typeof image>[]) => find(node => node.type === "ImagePasteView")!.props.onPasteImages({ nativeEvent: { files } });
+  paste([image("kept"), image("oversized", 100 * 1024 * 1024 + 1)]); render();
+  expect(composerDraft("consumer", "relay", "chat").attachments.map(file => file.uri)).toEqual([image("kept").uri]);
+  expect(removedPastes).toEqual([image("oversized").uri]);
+  paste(Array.from({ length: 11 }, (_, index) => image(`extra-${index}`))); render();
+  expect(composerDraft("consumer", "relay", "chat").attachments).toHaveLength(10);
+  expect(removedPastes.slice(1)).toEqual([image("extra-9").uri, image("extra-10").uri]);
+  const oldPaste = find(node => node.type === "ImagePasteView")!.props.onPasteImages;
+  route = "other"; render();
+  oldPaste({ nativeEvent: { files: [image("late")] } });
+  expect(removedPastes.at(-1)).toBe(image("late").uri);
+  expect(composerDraft("consumer", "relay", "other").attachments).toEqual([]);
+  route = "chat"; render();
+  tap(find(node => node.props.accessibilityLabel === "Remove {name}")!); render();
+  expect(removedPastes.at(-1)).toBe(image("kept").uri);
+  expect(composerDraft("consumer", "relay", "chat").attachments).toHaveLength(9);
+  dispose();
+  expect(removedPastes).toHaveLength(5);
+  resetStore();
+  expect(removedPastes).toHaveLength(14);
+});
+
+test("production send retains a paste after invalid acknowledgement and deletes it after success", async () => {
+  reset(); platform = "ios"; render();
+  const file = { uri: "file:///cache/Pasted/sent.png", mime: "image/png", size: 12 };
+  find(node => node.type === "ImagePasteView")!.props.onPasteImages({ nativeEvent: { files: [file] } }); render();
+  let resolve!: (response: any) => void;
+  request = async method => method === "chats.send" ? new Promise(yes => { resolve = yes; }) : { result: null };
+  tap(find(node => node.props.accessibilityLabel === "Send")!);
+  resolve({ result: {} }); await flush();
+  expect(removedPastes).toEqual([]);
+  const draft = composerDraft("consumer", "relay", "chat");
+  expect(draft.attachments).toHaveLength(1);
+  tap(find(node => node.props.accessibilityLabel === "Send")!);
+  expect(removedPastes).toEqual([]);
+  resolve({ result: { message: { id: "msg-paste", chat_id: "chat", author: { kind: "you" }, body: { kind: "text", text: "", attachments: [{ id: "att-paste", name: draft.attachments[0].name, mime: file.mime, size: file.size }] }, state: { kind: "complete" }, created_at: 1 } } });
+  await flush();
+  expect(draft.attachments).toEqual([]);
+  expect(removedPastes).toEqual([file.uri]);
+  dispose();
 });
 if (process.env.BEANS_COMPOSER_TOUCH_SMOKE === "1") {
   console.log(JSON.stringify(checkComposerTouchOwnership()));

@@ -9,6 +9,26 @@ export interface ComposerDraft {
   listeners: Set<() => void>;
 }
 const drafts = new Map<string, ComposerDraft>();
+// The core may still be reading a send's files after its draft is edited, removed or reset.
+const sendingFiles = new Set<PickedFile[]>();
+let deletePastedImages: (uris: string[]) => void | Promise<void> = () => {};
+export function setPastedImageCleanup(cleanup: typeof deletePastedImages) { deletePastedImages = cleanup; }
+
+/** Release only app-created pastes with no remaining draft or send owner. */
+export function discardPastedImages(files: PickedFile[]) {
+  const retained = new Set([
+    ...Array.from(drafts.values(), draft => draft.attachments).flat(),
+    ...Array.from(sendingFiles).flat(),
+  ].map(file => file.uri));
+  const uris = [...new Set(files.filter(file => file.pasted && !retained.has(file.uri)).map(file => file.uri))];
+  if (!uris.length) return;
+  try {
+    // Cleanup is best effort: a filesystem error must not turn an acknowledged send into
+    // a failed one or put discarded content back. Startup pruning retries abandoned files.
+    void Promise.resolve(deletePastedImages(uris)).catch(() => {});
+  } catch { /* The native module can also reject synchronously. */ }
+}
+
 const key = (identity: string | null, relay: string | null, chat: string) => JSON.stringify([identity, relay, chat]);
 export function composerDraft(identity: string | null, relay: string | null, chat: string): ComposerDraft {
   const id = key(identity, relay, chat);
@@ -26,7 +46,9 @@ export function releaseComposerDraft(draft: ComposerDraft) {
 }
 export function editComposerDraft(draft: ComposerDraft, patch: Partial<Pick<ComposerDraft, "text" | "attachments" | "mentions" | "reply">>) {
   if (draft.invalidated) return;
+  const previousFiles = draft.attachments;
   Object.assign(draft, patch);
+  if (patch.attachments) discardPastedImages(previousFiles);
   if (patch.text === "") draft.mentions = [];
   draft.revision++;
   notifyComposerDraft(draft);
@@ -42,8 +64,10 @@ export function invalidateComposerSends() {
   }
 }
 function discard(draft: ComposerDraft) {
+  const previousFiles = draft.attachments;
   draft.invalidated = true;
   draft.text = ""; draft.attachments = []; draft.mentions = []; draft.reply = null;
+  discardPastedImages(previousFiles);
   draft.permission = null;
   draft.recording = null;
   draft.revision++;
@@ -64,12 +88,14 @@ export async function submitComposerDraft(draft: ComposerDraft, send: (text: str
   const operation = {};
   const revision = draft.revision;
   const text = draft.text;
+  const files = [...draft.attachments];
   const mentions = draft.mentions.filter(bot => text.toLowerCase().includes(`@${bot.name.toLowerCase()}`)).map(bot => bot.id);
   draft.pending = operation;
+  sendingFiles.add(files);
   draft.uncertain = false;
   notifyComposerDraft(draft);
   try {
-    const acknowledged = await send(text, draft.attachments, mentions, draft.reply?.messageID);
+    const acknowledged = await send(text, files, mentions, draft.reply?.messageID);
     if (!acknowledged) draft.uncertain = true;
     else if (!draft.invalidated && draft.revision === revision) {
       editComposerDraft(draft, { text: "", attachments: [], mentions: [], reply: null });
@@ -77,6 +103,8 @@ export async function submitComposerDraft(draft: ComposerDraft, send: (text: str
   } catch {
     draft.uncertain = true;
   } finally {
+    sendingFiles.delete(files);
+    discardPastedImages(files);
     if (draft.pending === operation) draft.pending = null;
     notifyComposerDraft(draft);
     releaseComposerDraft(draft);

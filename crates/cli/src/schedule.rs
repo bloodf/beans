@@ -644,6 +644,9 @@ mod tests {
         assert_eq!(parse("every 120m").unwrap().canonical(), "every 2h");
         assert!(parse("every 2m").unwrap_err().contains("too often"));
         assert!(parse("every fortnight").is_err());
+        for unit in ["m", "h", "d"] {
+            assert!(parse(&format!("every {}{unit}", i64::MAX)).unwrap_err().contains("longer than a year"));
+        }
         assert_eq!(parse("every 30m").unwrap().next_after(1000), Some(2800));
     }
 

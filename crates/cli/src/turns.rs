@@ -4112,6 +4112,17 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(2), waiting).await.expect("the wait gave way").unwrap().unwrap();
         assert!(result.text_content().contains("[The user wrote while you waited"), "{}", result.text_content());
         assert!(app.shell_sessions.contains(&id) && !queue.is_empty(), "the command runs on, and the loop reads the message next");
+        let pending = queue.drain();
+        assert!(app.message("chat", &message.id).unwrap().queued, "ending the wait does not consume the message");
+        for message in &pending {
+            turn.handle(AgentEvent::MessageStart { message: message.clone() });
+            turn.handle(AgentEvent::MessageEnd { message: message.clone() });
+        }
+        let steered = materialize_steering_messages(app, &chef, &scratch.1, pending).await;
+        assert!(matches!(&steered[..], [AgentMessage::User(user)] if user.content[0].as_text() == Some("haha")));
+        let consumed = app.message("chat", &message.id).unwrap();
+        assert!(!consumed.queued && consumed.promoted_at.is_some());
+        assert!(app.take_steering_message("chat", &message.id), "the replacement job observes consumption by the active turn");
         app.shell_sessions.find("chat", "b1", &id).unwrap().stop("Stopped");
     }
 

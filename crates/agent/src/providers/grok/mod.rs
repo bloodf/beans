@@ -160,6 +160,11 @@ impl Provider for GrokProvider {
         self.info.as_deref()
     }
 
+    fn default_max_output_tokens(&self) -> Option<u64> {
+        // The retained wire fixture has no adapter-imposed cap; this does not enable OAuth.
+        None
+    }
+
     async fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream {
         let (tx, rx) = mpsc::channel(64);
         let mut body = self.body(&request);
@@ -183,11 +188,8 @@ impl Provider for GrokProvider {
                 let request = client.post(&url).bearer_auth(&tokens.access_token).header("Accept", "text/event-stream");
                 options.apply_to(request).json(&body)
             };
-            let response = match send_with_retry(build, 2, DEFAULT_MAX_RETRY_DELAY_MS, &cancel).await {
-                Ok(response) => {
-                    options.report(&response);
-                    response
-                }
+            let response = match send_with_retry(build, 2, DEFAULT_MAX_RETRY_DELAY_MS, &cancel, &options).await {
+                Ok(response) => response,
                 Err(failure) => {
                     let aborted = matches!(failure, RequestFailure::Aborted);
                     let _ = tx.send(AssistantEvent::Error { message: failure.message(), aborted }).await;

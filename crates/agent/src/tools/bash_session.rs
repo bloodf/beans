@@ -1424,15 +1424,21 @@ mod tests {
 
             let more = call(&t.output, json!({"session_id": id, "wait_seconds": 0.3})).await.unwrap();
             assert!(more.text_content().starts_with("tick\n"), "{}", more.text_content());
-            // Ctrl-C must end the loop (SIGINT). The wait cap only bounds a hang if it does not;
-            // do not accept a still-running outcome here — that would hide a delivery bug.
+            // Ctrl-C must end the loop (SIGINT). Its input call may reach the background
+            // settle deadline before the child is reaped, so read the final result within
+            // the same bounded wait. A still-running outcome never satisfies this assertion.
             let stopped = tokio::time::timeout(
                 BACKGROUND_SETTLE + Duration::from_secs(5),
-                call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})),
+                async {
+                    let mut result = call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await.unwrap();
+                    while t.host.get(&id).is_some() {
+                        result = call(&t.output, json!({"session_id": id, "wait_seconds": 0.2})).await.unwrap();
+                    }
+                    result
+                },
             )
             .await
-            .expect("bash_input returned after Ctrl-C")
-            .unwrap();
+            .expect("the command terminated after Ctrl-C");
             assert!(
                 stopped.text_content().ends_with("Command terminated by signal 2"),
                 "{}",
@@ -1485,6 +1491,9 @@ mod tests {
 
             let running = t.host.get(&id).unwrap();
             let unread = running.total();
+            // This exercises the deadline, not scheduler-dependent silence between ticks.
+            // Keep the initial prompt wait short, but prevent input's idle timer winning.
+            t.input.waiting_after = longest + Duration::from_secs(1);
             let elapsed = std::time::Instant::now();
             let typed = tokio::time::timeout(Duration::from_secs(20), call(&t.input, json!({"session_id": id, "text": "x"})))
                 .await

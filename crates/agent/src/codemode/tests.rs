@@ -106,11 +106,11 @@ struct Refusing(&'static str);
 
 #[async_trait]
 impl ToolRunner for Refusing {
-    async fn run(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken) -> ToolOutcome {
+    async fn run_scoped(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken, scope: &crate::tool::ExecutionScope) -> ToolOutcome {
         if tool.name() == self.0 {
             return ToolOutcome { result: ToolResult { terminate: true, ..ToolResult::text("The user did not allow it.") }, is_error: true, blocked: true };
         }
-        DirectRunner.run(tool, tool_call_id, args, cancel).await
+        DirectRunner.run_scoped(tool, tool_call_id, args, cancel, scope).await
     }
 }
 
@@ -511,12 +511,12 @@ struct Counting {
 
 #[async_trait]
 impl ToolRunner for Counting {
-    async fn run(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken) -> ToolOutcome {
+    async fn run_scoped(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken, scope: &crate::tool::ExecutionScope) -> ToolOutcome {
         self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if tool.name() == self.refused {
             return ToolOutcome { result: ToolResult::text("not allowed"), is_error: true, blocked: true };
         }
-        DirectRunner.run(tool, tool_call_id, args, cancel).await
+        DirectRunner.run_scoped(tool, tool_call_id, args, cancel, scope).await
     }
 }
 

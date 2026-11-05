@@ -3568,7 +3568,7 @@ mod tests {
             let Body::Tool { summary, description, is_running, .. } = message.body else { unreachable!() };
             (summary, description, is_running)
         };
-        let calls = |status: &str| ToolResult { details: json!({ "calls": [{ "id": "c1/1", "name": "linear__list_issues", "args": "{}", "status": status }] }), ..ToolResult::default() };
+        let calls = |status: &str| ToolResult::default().with_details(json!({ "calls": [{ "id": "c1/1", "name": "linear__list_issues", "args": "{}", "status": status }] }));
 
         turn.handle(AgentEvent::ToolExecutionStart { tool_call_id: "c1".into(), tool_name: "codemode".into(), args: args.clone() });
         assert_eq!(row(&turn), ("Running a script…".to_string(), None, true));
@@ -3603,7 +3603,7 @@ mod tests {
             let Body::Tool { summary, description, script_command, .. } = app.message("chat", &message_id).unwrap().body else { unreachable!() };
             (summary, description, script_command)
         };
-        let update = |calls: Value| ToolResult { details: json!({ "calls": calls }), ..ToolResult::default() };
+        let update = |calls: Value| ToolResult::default().with_details(json!({ "calls": calls }));
         let issues = |status: &str| json!({ "id": "c1/1", "name": "linear__list_issues", "args": "{}", "status": status });
         let tests = |status: &str| json!({ "id": "c1/2", "name": "bash", "args": "{}", "description": "Run the tests\nwith cargo", "status": status });
         let read = json!({ "id": "c1/3", "name": "read", "args": "{}", "status": "ok" });
@@ -3644,7 +3644,7 @@ mod tests {
             let Body::Tool { summary, script_command, .. } = app.message("chat", message_id).unwrap().body else { unreachable!() };
             (summary, script_command)
         };
-        let update = |calls: Value| ToolResult { details: json!({ "calls": calls }), ..ToolResult::default() };
+        let update = |calls: Value| ToolResult::default().with_details(json!({ "calls": calls }));
         turn.handle(AgentEvent::ToolExecutionStart { tool_call_id: "c1".into(), tool_name: "codemode".into(), args: args.clone() });
         turn.handle(AgentEvent::ToolExecutionUpdate { tool_call_id: "c1".into(), tool_name: "codemode".into(), args: args.clone(), partial_result: update(json!([call("bash", "running")])) });
         assert_eq!(row(&turn).1.as_deref(), Some("Run the tests"));

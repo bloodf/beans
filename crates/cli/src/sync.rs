@@ -1644,10 +1644,18 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, relay).await.unwrap() });
         let turn = |job_id: &str| LiveTurn { job_id: job_id.into(), chat_id: "chat".into(), bot_id: "bot".into(), routine_id: None, activity: None };
         let mut events = app.events.subscribe();
-        let mut heard = |pick: fn(Event) -> Option<String>| -> std::collections::BTreeSet<String> { std::iter::from_fn(|| events.try_recv().ok()).filter_map(pick).collect() };
+        let mut heard = |pick: fn(Event) -> Option<String>| -> Vec<String> {
+            let mut ids: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).filter_map(pick).collect();
+            ids.sort();
+            ids
+        };
         let started = |event: Event| match event { Event::JobStarted { job_id, .. } => Some(job_id), _ => None };
         let finished = |event: Event| match event { Event::JobFinished { job_id, .. } => Some(job_id), _ => None };
-        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<std::collections::BTreeSet<_>>();
+        let ids = |ids: &[&str]| {
+            let mut ids: Vec<_> = ids.iter().map(|id| id.to_string()).collect();
+            ids.sort();
+            ids
+        };
 
         app.running_jobs.lock().unwrap().insert(
             "sent-job".into(),

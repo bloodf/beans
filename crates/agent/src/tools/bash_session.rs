@@ -1397,15 +1397,22 @@ mod tests {
 
             let more = call(&t.output, json!({"session_id": id, "wait_seconds": 0.3})).await.unwrap();
             assert!(more.text_content().starts_with("tick\n"), "{}", more.text_content());
-            // Ctrl-C must end the loop (SIGINT). The wait cap only bounds a hang if it does not;
-            // do not accept a still-running outcome here — that would hide a delivery bug.
-            let stopped = tokio::time::timeout(
-                BACKGROUND_SETTLE + Duration::from_secs(5),
-                call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})),
-            )
+            let session = t.host.get(&id).unwrap();
+            assert!(session.end().is_none(), "the printing loop is alive before Ctrl-C");
+            // bash_input may return at its background cap before the shell is reaped.
+            // Keep one bounded deadline for delivery, reap, and observing SIGINT through a tool.
+            let stopped = tokio::time::timeout(BACKGROUND_SETTLE + Duration::from_secs(5), async {
+                let reply = call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await.unwrap();
+                session.ended().await;
+                assert_eq!(session.end(), Some(SessionEnd::Signaled(2)));
+                if t.host.get(&id).is_some() {
+                    call(&t.output, json!({"session_id": id})).await.unwrap()
+                } else {
+                    reply
+                }
+            })
             .await
-            .expect("bash_input returned after Ctrl-C")
-            .unwrap();
+            .expect("Ctrl-C ended the printing loop and its result was read");
             assert!(
                 stopped.text_content().ends_with("Command terminated by signal 2"),
                 "{}",

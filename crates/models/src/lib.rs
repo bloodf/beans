@@ -192,6 +192,21 @@ mod tests {
     }
 
     #[test]
+    fn haiku_long_context_tier_counts_cached_input_at_the_boundary() {
+        for provider in ["anthropic", "opencode", "opencode-go"] {
+            let model = find(provider, "claude-haiku-5-5").unwrap();
+            let boundary = Usage { input: 100_000, output: 1_000, ..Usage::default() };
+            assert!((model.cost_of(&boundary).total - 0.0105).abs() < 1e-9);
+            let above = Usage { input: 100_001, ..boundary };
+            assert!((model.cost_of(&above).total - 0.0525005).abs() < 1e-9);
+            let cached = Usage { input: 1, cache_read: 100_000, ..Usage::default() };
+            let cost = model.cost_of(&cached);
+            assert!((cost.total - 0.0050005).abs() < 1e-9);
+            assert_eq!(cost.known, Some(true));
+        }
+    }
+
+    #[test]
     fn dated_ids_and_unknown_models() {
         assert_eq!(find("anthropic", "claude-haiku-4-5-20251001").as_ref().map(|m| m.id.as_str()), Some("claude-haiku-4-5"));
         assert!(find("anthropic", "claude-haiku-4").is_none());

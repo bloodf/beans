@@ -1,6 +1,8 @@
 // Build the Rust phone core and a production, release-signed Android APK.
 // Signing material stays outside the repository (BEANS_ANDROID_ENV overrides its location).
-import { copyFile, mkdir, stat } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { copyFile, mkdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { ROOT, readVersion } from "./app.ts";
@@ -10,11 +12,10 @@ const envPath = resolve((process.env.BEANS_ANDROID_ENV ?? "~/.config/beans/andro
 const env = { ...process.env } as Record<string, string>;
 const names = ["BEANS_ANDROID_KEYSTORE", "BEANS_ANDROID_KEYSTORE_PASSWORD", "BEANS_ANDROID_KEY_ALIAS", "BEANS_ANDROID_KEY_PASSWORD"];
 
-const file = Bun.file(envPath);
-if (!(await file.exists())) throw new Error(`Missing signing environment: ${envPath}`);
+if (!existsSync(envPath)) throw new Error(`Missing signing environment: ${envPath}`);
 if (((await stat(envPath)).mode & 0o777) !== 0o600) throw new Error(`Signing environment must have mode 0600: ${envPath}`);
 const signing: Record<string, string> = {};
-for (const line of (await file.text()).split(/\r?\n/)) {
+for (const line of (await readFile(envPath, "utf8")).split(/\r?\n/)) {
   if (!line || line.startsWith("#")) continue;
   const match = /^([A-Z_]+)=(.*)$/.exec(line);
   if (!match || !names.includes(match[1]) || Object.hasOwn(signing, match[1])) throw new Error(`Invalid signing environment entry in ${envPath}`);
@@ -24,23 +25,29 @@ for (const name of names) {
   if (!signing[name]) throw new Error(`Missing ${name} in ${envPath}`);
   env[name] = signing[name];
 }
-if (!(await Bun.file(env.BEANS_ANDROID_KEYSTORE).exists())) throw new Error(`Missing keystore: ${env.BEANS_ANDROID_KEYSTORE}`);
+if (!existsSync(env.BEANS_ANDROID_KEYSTORE)) throw new Error(`Missing keystore: ${env.BEANS_ANDROID_KEYSTORE}`);
 if (((await stat(env.BEANS_ANDROID_KEYSTORE)).mode & 0o777) !== 0o600) throw new Error(`Keystore must have mode 0600: ${env.BEANS_ANDROID_KEYSTORE}`);
 delete env.BEANS_MOBILE_VARIANT;
 delete env.EAS_BUILD_PROFILE;
 // Homebrew cargo can be first on PATH, but Android target libraries live in rustup's toolchain.
-const rustc = Bun.spawnSync(["rustup", "which", "rustc"], { stdout: "pipe", stderr: "pipe" });
-if (rustc.exitCode === 0) env.RUSTC = rustc.stdout.toString().trim();
+const rustc = spawnSync("rustup", ["which", "rustc"], { stdio: ["ignore", "pipe", "pipe"] });
+if (!rustc.error && rustc.status === 0) env.RUSTC = rustc.stdout.toString().trim();
 
 async function run(command: string[], cwd: string) {
   console.log(`$ ${command.join(" ")}`);
-  const proc = Bun.spawn(command, { cwd, env, stdout: "inherit", stderr: "inherit" });
-  if ((await proc.exited) !== 0) throw new Error(`${command[0]} failed with exit code ${proc.exitCode}`);
+  const proc = spawn(command[0]!, command.slice(1), { cwd, env, stdio: "inherit" });
+  // Wait for the close: a spawn failure and a signalled child are failures, never a success.
+  const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((settle, reject) => {
+    proc.once("error", reject);
+    proc.once("close", (exitCode, exitSignal) => settle([exitCode, exitSignal]));
+  });
+  if (code === null) throw new Error(`${command[0]} was terminated by signal ${signal ?? "unknown"}`);
+  if (code !== 0) throw new Error(`${command[0]} failed with exit code ${code}`);
 }
 
 const started = Date.now();
-await run(["bun", "run", "core", "android"], mobile);
-await run(["bunx", "expo", "prebuild", "--clean", "--platform", "android", "--no-install"], mobile);
+await run(["pnpm", "run", "core", "android"], mobile);
+await run(["pnpm", "exec", "expo", "prebuild", "--clean", "--platform", "android", "--no-install"], mobile);
 await run(["./gradlew", "app:assembleRelease"], join(mobile, "android"));
 const apk = join(mobile, "android/app/build/outputs/apk/release/app-release.apk");
 const size = (await stat(apk)).size;

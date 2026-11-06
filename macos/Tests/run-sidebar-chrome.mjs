@@ -1,14 +1,15 @@
 // Compile production sidebar controllers without the app, CLI, providers, or avatar renderer.
-import { mkdtemp, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-const root = resolve(import.meta.dir, '../..');
+import { spawnSync } from 'node:child_process';
+const root = resolve(import.meta.dirname, '../..');
 const output = await mkdtemp(join(tmpdir(), 'beans-sidebar-chrome-'));
 try {
-  const rows = await Bun.file(join(root, 'macos/Sources/Beans/Sidebar/SidebarRows.swift')).text();
+  const rows = await readFile(join(root, 'macos/Sources/Beans/Sidebar/SidebarRows.swift'), 'utf8');
   const marker = '// MARK: - Chat row';
   if (!rows.includes(marker)) throw new Error('Sidebar row extraction boundary missing');
-  await Bun.write(join(output, 'SidebarRows.swift'), rows.slice(0, rows.indexOf(marker)));
+  await writeFile(join(output, 'SidebarRows.swift'), rows.slice(0, rows.indexOf(marker)));
   const inputs = [
     'macos/Tests/SidebarChrome.swift',
     'macos/Tests/Notifications/NativeChromeRenderingChecks.swift',
@@ -17,10 +18,12 @@ try {
     'macos/Sources/Beans/Sidebar/SidebarViewController.swift',
     'macos/Sources/Beans/Sidebar/SettingsSidebarViewController.swift',
   ].map(path => join(root, path));
-  const build = Bun.spawn(['swiftc', '-parse-as-library', '-swift-version', '5', '-D', 'BEANS_CHROME_STANDALONE', '-D', 'BEANS_SIDEBAR_STANDALONE', ...inputs, join(output, 'SidebarRows.swift'), '-o', join(output, 'sidebar-chrome')], { stdout: 'inherit', stderr: 'inherit' });
-  if (await build.exited !== 0) process.exitCode = 1;
+  const build = spawnSync('swiftc', [ '-parse-as-library', '-swift-version', '5', '-D', 'BEANS_CHROME_STANDALONE', '-D', 'BEANS_SIDEBAR_STANDALONE', ...inputs, join(output, 'SidebarRows.swift'), '-o', join(output, 'sidebar-chrome')], { stdio: 'inherit' });
+  if (build.error) throw build.error;
+  if (build.status !== 0 || build.signal) process.exitCode = 1;
   else {
-    const run = Bun.spawn([join(output, 'sidebar-chrome')], { env: { ...process.env, HOME: output, CFFIXED_USER_HOME: output, BEANS_CHROME_SHOW: process.argv.includes('--show') ? '1' : '0' }, stdout: 'inherit', stderr: 'inherit' });
-    process.exitCode = await run.exited;
+    const run = spawnSync(join(output, 'sidebar-chrome'), [], { env: { ...process.env, HOME: output, CFFIXED_USER_HOME: output, BEANS_CHROME_SHOW: process.argv.includes('--show') ? '1' : '0' }, stdio: 'inherit' });
+    if (run.error) throw run.error;
+    process.exitCode = run.signal ? 1 : (run.status ?? 1);
   }
 } finally { await rm(output, { recursive: true, force: true }); }

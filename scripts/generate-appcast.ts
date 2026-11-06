@@ -1,17 +1,46 @@
 // Sign Beans-<root version>.zip and write appcast.xml for beans-v<root version>.
 // The parent provides BEANS_UPDATE_PRIVATE_KEY (Ed25519 PKCS8 PEM).
 // No login-keychain fallback or upstream release history is used.
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { spawn } from "node:child_process"
+import { accessSync, constants, existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs"
+import { delimiter, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { RELEASES_URL, SPARKLE_TOOLS, readVersion } from "./app.ts"
 import { rawReleaseSecret } from "./release-signing.ts"
+
+/** Locate an executable on PATH. */
+function which(command: string): string | null {
+  const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""]
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    for (const extension of extensions) {
+      const candidate = join(directory, command + extension)
+      try {
+        if (statSync(candidate).isFile() && accessSync(candidate, constants.X_OK)) return candidate
+      } catch {
+        continue
+      }
+    }
+  }
+  return null
+}
 
 /** `SPARKLE_BIN`, then the copy SwiftPM unpacked beside the framework, then PATH. */
 export function sparkleTool(name: string): string | null {
   const candidates = [process.env.SPARKLE_BIN && join(process.env.SPARKLE_BIN, name), join(SPARKLE_TOOLS, name)]
-  return candidates.find((path): path is string => Boolean(path) && existsSync(path as string)) ?? Bun.which(name)
+  return candidates.find((path): path is string => Boolean(path) && existsSync(path as string)) ?? which(name)
 }
 
+/** Run a Sparkle tool with the seed on stdin: secrets never appear in argv. */
+function runTool(command: string[], secret: string): Promise<number | null> {
+  return new Promise((settle, reject) => {
+    const child = spawn(command[0]!, command.slice(1), { stdio: ["pipe", "inherit", "inherit"] })
+    // A tool that stops reading closes the pipe: that is the tool's answer, not a crash.
+    child.stdin?.on("error", () => {})
+    child.once("error", reject)
+    child.once("close", (code) => settle(code))
+    child.stdin?.end(`${secret}\n`)
+  })
+}
 
 export async function generateAppcast(updatesDir: string, downloadURLPrefix: string, requiredProtocol: number): Promise<boolean> {
   const version = readVersion()
@@ -31,28 +60,39 @@ export async function generateAppcast(updatesDir: string, downloadURLPrefix: str
     return false
   }
   // Sparkle accepts a base64 seed on stdin. Secrets never appear in argv or the keychain.
-  const proc = Bun.spawn(
+  const code = await runTool(
     [tool, "--ed-key-file", "-", "--maximum-deltas", "0", "--maximum-versions", "1",
       "--download-url-prefix", expectedPrefix, "--release-notes-url-prefix", expectedPrefix, updatesDir],
-    { stdin: new Blob([secret + "\n"]), stdout: "inherit", stderr: "inherit" },
+    secret,
   )
-  if ((await proc.exited) !== 0) return false
+  if (code !== 0) return false
   const feedPath = join(updatesDir, "appcast.xml")
   const feed = readFileSync(feedPath, "utf8").replaceAll(/<beansProtocol>[^<]*<\/beansProtocol>\s*/g, "")
   if ((feed.match(/<item>/g) ?? []).length !== 1) throw new Error("expected one Beans appcast item")
   writeFileSync(feedPath, feed.replace("<item>", `<item>\n      <beansProtocol>${requiredProtocol}</beansProtocol>`))
   // Changing a custom element invalidates Sparkle's embedded feed signature. Re-sign last.
-  const signed = Bun.spawn([signer, "--ed-key-file", "-", feedPath], {
-    stdin: new Blob([secret + "\n"]), stdout: "inherit", stderr: "inherit",
-  })
-  return (await signed.exited) === 0
+  return (await runTool([signer, "--ed-key-file", "-", feedPath], secret)) === 0
 }
 
-if (import.meta.main) {
+/** Dispatch only when this file is the process entry; importing it must stay inert. */
+const isMain = (() => {
+  const meta = import.meta as ImportMeta & { main?: boolean }
+  if (meta.main === true) return true
+  const entry = process.argv[1]
+  if (!entry) return false
+  const canonical = (path: string) => { try { return realpathSync(path) } catch { return resolve(path) } }
+  try {
+    return canonical(fileURLToPath(meta.url)) === canonical(resolve(entry))
+  } catch {
+    return false
+  }
+})()
+
+if (isMain) {
   const updatesDir = process.argv[2]
   const protocol = Number(process.argv[3])
   if (!updatesDir || !Number.isSafeInteger(protocol) || protocol < 5) {
-    console.error("usage: bun scripts/generate-appcast.ts <updates-dir> <protocol>")
+    console.error("usage: pnpm exec tsx scripts/generate-appcast.ts <updates-dir> <protocol>")
     process.exit(1)
   }
   process.exit((await generateAppcast(updatesDir, RELEASES_URL, protocol)) ? 0 : 1)

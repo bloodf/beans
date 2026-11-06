@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { defaultModelId, selectedModelIds } from "../core/model";
 import { addModel, chooseDefaultModel, startModelDraft, takeModelListing, toggleModel, useModelDraft } from "./modelDraft";
 

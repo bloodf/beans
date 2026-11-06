@@ -2,7 +2,7 @@
 
 ## Validation gates
 
-Feature changes run relevant checks locally before integration: the affected Rust, Swift, desktop or phone suites, `bun test scripts/*.test.ts` for release scripts and workflow contracts, `bun run check:docs` for documentation, and `bun run check:catalog` for catalog and marketplace index changes. The Tests, Docs and Catalog workflows run on same-repository PRs targeting `main` and on manual dispatch, regardless of changed paths. Pushes alone do not trigger these workflows.
+Feature changes run relevant checks locally before integration: the affected Rust, Swift, desktop or phone suites, `pnpm run test:scripts` for release scripts and workflow contracts, `pnpm run check:docs` for documentation, and `pnpm run check:catalog` for catalog and marketplace index changes. The Tests, Docs and Catalog workflows run on same-repository PRs targeting `main` and on manual dispatch, regardless of changed paths. Pushes alone do not trigger these workflows.
 
 [Tests](../../.github/workflows/test.yml) runs the full platform matrix, [Docs](../../.github/workflows/docs.yml) checks architecture budgets and links, and [Catalog](../../.github/workflows/catalog.yml) checks model catalog and marketplace index update timestamps. Jobs accept any same-repository PR head branch; fork PRs are skipped, including fork branches named `release/**`. Manual dispatch does not require a PR. Catalog fetches the PR base branch, falling back to `main` on manual dispatch. Docs and Catalog use distinct `docs` and `catalog` check names. `scripts/release-pr-gates.test.ts` checks triggers, job admission and catalog base selection locally.
 

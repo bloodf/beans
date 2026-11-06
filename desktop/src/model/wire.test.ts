@@ -2,8 +2,8 @@
 // as a bot's provider, and a command's card.
 
 import { expect, test } from "bun:test";
-import { runsInForeground } from "./models";
-import { toBot, toCustomModel, toMessage, toProviders, type WireBot } from "./wire";
+import { contextSummary, runsInForeground } from "./models";
+import { toUsage, toBot, toCustomModel, toMessage, toProviders, type WireBot } from "./wire";
 
 test("statuses keep custom providers after the built-in ones and leave out unknown kinds", () => {
   const providers = toProviders([
@@ -88,4 +88,15 @@ test("Run in Background is offered while the bot's call waits on a command that 
   // Its call returned; the bot is no longer waiting on it.
   expect(runsInForeground(row(false, {}))).toBe(false);
   expect(runsInForeground(row(true, { state: "checking", session_id: null }))).toBe(false);
+});
+
+
+test("compacted context stays approximate through wire mapping until measured again", () => {
+  const wire = { context_tokens: 40_000, context_window: 1_000_000, input_tokens: 140_000,
+    output_tokens: 1_000, cache_read_tokens: 0, cost_usd: 0.42, cost_known: true, turns: 1, model: "fixture" };
+  expect(contextSummary(toUsage({ ...wire, context_estimated: true }))).toBe("≈ 40k of 1.0M · 4%");
+  expect(contextSummary(toUsage({ ...wire, context_estimated: true, context_window: 0 }))).toBe("≈ 40k");
+  for (const context_estimated of [false, null, undefined]) {
+    expect(contextSummary(toUsage({ ...wire, context_estimated }))).toBe("40k of 1.0M · 4%");
+  }
 });

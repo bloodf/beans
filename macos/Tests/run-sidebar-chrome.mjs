@@ -18,11 +18,11 @@ try {
     'macos/Sources/Beans/Sidebar/SidebarViewController.swift',
     'macos/Sources/Beans/Sidebar/SettingsSidebarViewController.swift',
   ].map(path => join(root, path));
-  const build = spawnSync('swiftc', [ '-parse-as-library', '-swift-version', '5', '-D', 'BEANS_CHROME_STANDALONE', '-D', 'BEANS_SIDEBAR_STANDALONE', ...inputs, join(output, 'SidebarRows.swift'), '-o', join(output, 'sidebar-chrome')], { stdio: 'inherit' });
+  const build = spawnSync('swiftc', [ '-parse-as-library', '-swift-version', '5', '-D', 'BEANS_CHROME_STANDALONE', '-D', 'BEANS_SIDEBAR_STANDALONE', ...inputs, join(output, 'SidebarRows.swift'), '-o', join(output, 'sidebar-chrome')], { stdio: ['ignore', 'inherit', 'inherit'] });
   if (build.error) throw build.error;
   if (build.status !== 0 || build.signal) process.exitCode = 1;
   else {
-    const run = spawnSync(join(output, 'sidebar-chrome'), [], { env: { ...process.env, HOME: output, CFFIXED_USER_HOME: output, BEANS_CHROME_SHOW: process.argv.includes('--show') ? '1' : '0' }, stdio: 'inherit' });
+    const run = spawnSync(join(output, 'sidebar-chrome'), [], { env: { ...process.env, HOME: output, CFFIXED_USER_HOME: output, BEANS_CHROME_SHOW: process.argv.includes('--show') ? '1' : '0' }, stdio: ['ignore', 'inherit', 'inherit'] });
     if (run.error) throw run.error;
     process.exitCode = run.signal ? 1 : (run.status ?? 1);
   }

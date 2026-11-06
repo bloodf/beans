@@ -46,4 +46,4 @@ Install `react-native-svg` in app (Expo: `npx expo install react-native-svg`). N
 
 ## Regenerating committed JavaScript
 
-Run `bun packages/beans-blobatar/build.ts` to regenerate `index.js` and `frame.js` (ESM) and `dist/blobatar.jsc.js` (IIFE that installs every export of `index.ts` as a global); two runs produce identical bytes. `pnpm run test` in this directory runs the schema, geometry, morph, frame and upstream golden tests. Keep pinned upstream SHA, license, and core/native source in sync when upgrading. The committed bundles are source-derived; consumers never compile the JSCore bundle on device.
+Run `pnpm run build:blobatar` to regenerate `index.js` and `frame.js` (ESM) and `dist/blobatar.jsc.js` (IIFE that installs every export of `index.ts` as a global); two runs produce identical bytes. `pnpm run test` in this directory runs the schema, geometry, morph, frame and upstream golden tests. Keep pinned upstream SHA, license, and core/native source in sync when upgrading. The committed bundles are source-derived; consumers never compile the JSCore bundle on device.

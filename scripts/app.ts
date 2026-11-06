@@ -147,7 +147,7 @@ ${updates}
 async function run(cmd: string[], opts: { cwd?: string; capture?: boolean } = {}) {
   const proc = spawn(cmd[0], cmd.slice(1), {
     cwd: opts.cwd ?? PACKAGE_DIR,
-    stdio: opts.capture ? ["ignore", "pipe", "pipe"] : "inherit",
+    stdio: opts.capture ? ["ignore", "pipe", "pipe"] : ["ignore", "inherit", "inherit"],
   })
   const failure = new Promise<never>((_, reject) => {
     proc.once("error", reject)

@@ -15,7 +15,7 @@ const wantAndroid = platforms.length === 0 || platforms.includes("android");
 
 async function run(cmd: string[], env: Record<string, string> = {}) {
   console.log("$", cmd.join(" "));
-  const proc = spawn(cmd[0]!, cmd.slice(1), { cwd: ROOT, env: { ...process.env, ...env }, stdio: "inherit" });
+  const proc = spawn(cmd[0]!, cmd.slice(1), { cwd: ROOT, env: { ...process.env, ...env }, stdio: ["ignore", "inherit", "inherit"] });
   // Wait for the close: a spawn failure and a signalled child are failures, never a success.
   const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((settle, reject) => {
     proc.once("error", reject);

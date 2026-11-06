@@ -28,7 +28,7 @@ if (process.env.EAS_BUILD === "true") {
   const platform = process.env.EAS_BUILD_PLATFORM;
   if (platform !== "ios" && platform !== "android") throw new Error("EAS_BUILD_PLATFORM must be ios or android");
   async function run(command: string[]) {
-    const child = spawn(command[0]!, command.slice(1), { cwd: ROOT, env: { ...process.env, PATH: `${process.env.HOME}/.cargo/bin:${process.env.PATH}` }, stdio: "inherit" });
+    const child = spawn(command[0]!, command.slice(1), { cwd: ROOT, env: { ...process.env, PATH: `${process.env.HOME}/.cargo/bin:${process.env.PATH}` }, stdio: ["ignore", "inherit", "inherit"] });
     // Wait for the close: a spawn failure and a signalled child are failures, never a success.
     const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((settle, reject) => {
       child.once("error", reject);

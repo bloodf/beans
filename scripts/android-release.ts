@@ -35,7 +35,7 @@ if (!rustc.error && rustc.status === 0) env.RUSTC = rustc.stdout.toString().trim
 
 async function run(command: string[], cwd: string) {
   console.log(`$ ${command.join(" ")}`);
-  const proc = spawn(command[0]!, command.slice(1), { cwd, env, stdio: "inherit" });
+  const proc = spawn(command[0]!, command.slice(1), { cwd, env, stdio: ["ignore", "inherit", "inherit"] });
   // Wait for the close: a spawn failure and a signalled child are failures, never a success.
   const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((settle, reject) => {
     proc.once("error", reject);

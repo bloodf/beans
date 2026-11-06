@@ -1434,6 +1434,49 @@ mod tests {
         .unwrap_or_else(|_| panic!("{text} was printed"));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn session_wait_distinguishes_quiet_return_from_output_deadline() {
+        let now = Instant::now();
+        let session = BashSession {
+            id: new_id(), command: "controlled output".into(), pid: 0, started: now,
+            background: false.into(),
+            state: Mutex::new(SessionState { output: Output::new(), last_output: now,
+                last_input: now, end: None, read: 0, drained: false }),
+            changed: watch::channel(0).0,
+            #[cfg(unix)]
+            master: Mutex::new(None),
+            closed: CancellationToken::new(),
+        };
+        let cancel = CancellationToken::new();
+        let idle = Idle { after: Duration::from_millis(400), needs_output: false };
+        {
+            let since = Instant::now();
+            let mut wait = std::pin::pin!(session.wait(session.total(), since, idle,
+                Some(since + BACKGROUND_SETTLE), &cancel, |_| {}));
+            assert!(futures::poll!(wait.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_millis(399)).await;
+            assert!(futures::poll!(wait.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert_eq!(wait.await, Stop::Waiting);
+            assert_eq!(Instant::now() - since, Duration::from_millis(400));
+        }
+        for cap in [Duration::from_millis(500), BACKGROUND_SETTLE] {
+            let since = Instant::now();
+            let mut wait = std::pin::pin!(session.wait(session.total(), since, idle,
+                Some(since + cap), &cancel, |_| {}));
+            assert!(futures::poll!(wait.as_mut()).is_pending());
+            while Instant::now() - since + Duration::from_millis(100) < cap {
+                tokio::time::advance(Duration::from_millis(100)).await;
+                session.push_output(b"tick\n");
+                assert!(futures::poll!(wait.as_mut()).is_pending());
+            }
+            tokio::time::advance(since + cap - Instant::now()).await;
+            assert_eq!(wait.await, Stop::Deadline);
+            assert_eq!(Instant::now() - since, cap);
+            assert!(session.end().is_none());
+        }
+    }
+
     /// Typing into a command that keeps printing returns what it printed instead of waiting for a
     /// quiet spell that never comes: at the background's own settle time for a command started
     /// there, at the longest wait otherwise. The command runs on either way, with the output it
@@ -1445,6 +1488,9 @@ mod tests {
         // One deadline, both waits: how long the call may hold a command that never goes quiet.
         for background in [true, false] {
             let mut t = tools(Duration::from_millis(400));
+            // This case measures the deadline, independently of gaps in shell/PTY scheduling.
+            // The controlled waiter test below proves the shorter quiet-return path separately.
+            t.input.waiting_after = WAITING_AFTER;
             t.input.longest_wait = Duration::from_millis(500);
             let (command, longest) = if background {
                 (ticks.to_string(), BACKGROUND_SETTLE)

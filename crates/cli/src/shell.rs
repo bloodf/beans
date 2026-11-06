@@ -190,6 +190,16 @@ impl Sessions {
         }
     }
 
+    /// The user wrote in the chat, and the turn there holds the message: a wait on a command in
+    /// the background gives way to it (`TurnSessions::user_wrote`), so the bot answers at once.
+    pub fn user_wrote(&self, chat_id: &str) {
+        let sessions: Vec<Arc<BashSession>> =
+            self.entries.lock().unwrap().iter().filter(|e| e.chat_id == chat_id).filter_map(|e| e.session.clone()).filter(|s| s.background()).collect();
+        for session in sessions {
+            session.nudge();
+        }
+    }
+
     /// Stop in the chat: every session there ends, and its card says so, except a command
     /// running in the background, which Running tasks stops.
     pub fn stop_chat(&self, chat_id: &str) {
@@ -645,5 +655,10 @@ impl BashSessions for TurnSessions {
 
     fn remove(&self, id: &str) {
         self.app.shell_sessions.remove(&self.app, id);
+    }
+
+    /// A message waits in the turn's steering queue.
+    fn user_wrote(&self) -> bool {
+        self.app.steering_queue(&self.chat_id).is_some_and(|queue| !queue.is_empty())
     }
 }

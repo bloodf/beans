@@ -501,14 +501,17 @@ pub fn send_now(app: &Arc<App>, chat_id: &str, message_id: &str) -> Result<bool,
 }
 
 /// A new message from the user reached this Runner. The direct-chat loop that owns the chat
-/// takes it as steering, and the questions the chat's turn waits on are dismissed: the user
-/// wrote instead of answering, and the turn could not read what they wrote until its question
-/// let go. Steering comes first, so the loop finds the message when the dismissed call returns.
+/// takes it as steering, a wait on a command in the background gives way to it, and the
+/// questions the chat's turn waits on are dismissed: the user wrote instead of answering, and
+/// the turn could not read what they wrote until its question let go. Steering comes first, so
+/// the loop finds the message when the dismissed call returns.
 pub(crate) fn hear_user_message(app: &App, message: &Message) {
     if message.author != Author::You || !message.is_complete() {
         return;
     }
-    steer_message(app, message);
+    if steer_message(app, message) {
+        app.shell_sessions.user_wrote(&message.chat_id);
+    }
     crate::plugins::mcp::dismiss_questions(app, &message.chat_id);
 }
 
@@ -4071,6 +4074,56 @@ mod tests {
         let card = run_of(&app.message("chat", &asks.id).unwrap()).unwrap();
         assert_eq!((card.state.as_str(), card.prompt.as_deref(), card.handed_over), ("waiting", Some("Password:"), true));
         app.shell_sessions.stop_chat("chat");
+    }
+
+    /// The user writes while the bot waits on a command in the background: the wait gives way,
+    /// so the loop reads the message next, and the command runs on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_message_ends_a_wait_on_a_background_command() {
+        use beans_agent::tools::{BashOutputTool, BashSessions, BashTool};
+        let (scratch, chef) = chef_in_a_dm();
+        let app = &scratch.0;
+        let queue = AgentMessageQueue::new(QueueMode::All);
+        app.register_steering_queue("chat", "job-1", queue.clone());
+        let mut turn = turn_state(app, &chef, "dev");
+        let sessions: Arc<dyn BashSessions> = Arc::new(crate::shell::TurnSessions::new(app, "chat", "b1"));
+        let bash = BashTool::with_sessions(scratch.1.clone(), sessions.clone());
+        let args = json!({ "command": "sleep 30", "description": "Watch", "background": true });
+        let (row, _) = call_tool(&mut turn, &bash, "call-1", args).await;
+        let id = run_of(&row).unwrap().session_id.unwrap();
+        let output = BashOutputTool::new(sessions);
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let waiting = tokio::spawn({
+            let id = id.clone();
+            async move {
+                let waiting = output.execute("call-2", json!({ "session_id": id, "wait_seconds": 30 }), CancellationToken::new(), Arc::new(|_| {}));
+                tokio::pin!(waiting);
+                assert!(futures::poll!(&mut waiting).is_pending(), "it waits before the user writes");
+                ready.send(()).unwrap();
+                waiting.await
+            }
+        });
+        started.await.unwrap();
+
+        let message = said("chat", Author::You, "haha", 3.0);
+        app.upsert_message(message.clone(), false);
+        hear_user_message(app, &message);
+        let result = tokio::time::timeout(Duration::from_secs(2), waiting).await.expect("the wait gave way").unwrap().unwrap();
+        assert!(result.text_content().contains("[The user wrote while you waited"), "{}", result.text_content());
+        assert!(app.shell_sessions.contains(&id) && !queue.is_empty(), "the command runs on, and the loop reads the message next");
+        let pending = queue.drain();
+        assert!(app.message("chat", &message.id).unwrap().queued, "ending the wait does not consume the message");
+        for message in &pending {
+            turn.handle(AgentEvent::MessageStart { message: message.clone() });
+            turn.handle(AgentEvent::MessageEnd { message: message.clone() });
+        }
+        let steered = materialize_steering_messages(app, &chef, &scratch.1, pending).await;
+        assert!(matches!(&steered[..], [AgentMessage::User(user)] if user.content[0].as_text() == Some("haha")));
+        let consumed = app.message("chat", &message.id).unwrap();
+        assert!(!consumed.queued && consumed.promoted_at.is_some());
+        assert!(app.take_steering_message("chat", &message.id), "the replacement job observes consumption by the active turn");
+        app.shell_sessions.find("chat", "b1", &id).unwrap().stop("Stopped");
     }
 
     #[cfg(unix)]

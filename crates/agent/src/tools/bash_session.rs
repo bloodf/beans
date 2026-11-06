@@ -1406,7 +1406,8 @@ mod tests {
                 session.ended().await;
                 assert_eq!(session.end(), Some(SessionEnd::Signaled(2)));
                 if t.host.get(&id).is_some() {
-                    call(&t.output, json!({"session_id": id})).await.unwrap()
+                    // The input tool must also observe an end recorded after its first reply.
+                    call(&t.input, json!({"session_id": id, "text": "", "enter": false})).await.unwrap()
                 } else {
                     reply
                 }

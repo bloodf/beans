@@ -1749,7 +1749,7 @@ final class AppStore {
     func models(for kind: ProviderCredential.Kind) -> [ProviderModel] {
         guard kind.isCustom else { return catalog.filter { $0.provider == kind } }
         return (credential(for: kind)?.models ?? []).map {
-            ProviderModel(provider: kind, id: $0.id, label: $0.displayName, levels: $0.levels)
+            ProviderModel(provider: kind, id: $0.id, label: $0.displayName, levels: $0.levels ?? [])
         }
     }
 

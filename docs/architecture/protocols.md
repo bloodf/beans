@@ -27,6 +27,7 @@ All sealed remote request verbs wrap their body in `{ payload, signature }`. The
 Custom credentials and provider statuses add optional `capabilities { context_window?, images?, tools? }`; status deserialization defaults absent declarations. Positive integer context windows and boolean/null support values are validated before HTTP. Omitted saves keep declarations, null clears them, objects replace them. Model statuses carry effective declarations ahead of discovery; declaration status separately lets sheets reopen Unknown/Yes/No choices. This is an additive protocol-5 field, without storage-format or home migration.
 
 Account alias merge and recovery: [Device names](device-names.md).
+A presence refresh immediately emits `job.finished` for advertised turns whose Runner the relay now lists offline, including locally tracked remote jobs awaiting a result. It announces new starts only after the sync pull. Initial or unlisted presence does not hide those waiting jobs. Visibility ending preserves the running job, cancellation token and result waiter; eventual results still complete the wait. Reconnection re-advertises turns through the next machine blob and sync notification. Bulk sync defers turn events until after its snapshot.
 
 ## CLI ↔ relay
 

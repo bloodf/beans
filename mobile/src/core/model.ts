@@ -58,6 +58,8 @@ export interface Device {
   /// The machine signing public key, base64url.
   id: string;
   name: string;
+  /// The original machine name, before the account's alias.
+  machine_name?: string;
   model: string;
   os: string;
   os_version: string;

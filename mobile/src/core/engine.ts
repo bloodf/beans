@@ -604,6 +604,14 @@ class Engine {
     await core.request("device.rename", { name });
   }
 
+  /// Names any paired Device; blank restores its original machine name.
+  async setDeviceName(id: string, name: string) {
+    const trimmed = name.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+    if (Array.from(trimmed).length > 64) throw new Error(t("Device names must be 64 characters or fewer."));
+    const result = await core.request<unknown>("device.set_name", { id, name: trimmed });
+    if (result !== null) throw new Error(t("Could not rename Device"));
+  }
+
   /// Joins the identity the pairing string names. The core posts the request (`pair.posted`
   /// marks that) and waits for the other Device to accept; `signal` aborts the wait in the core too,
   /// which answers "Pairing cancelled".

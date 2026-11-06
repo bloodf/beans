@@ -22,6 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
+      - run: bun run sync:models --self-check
       - run: git fetch --depth=1 origin "+refs/heads/$CATALOG_BASE_REF:refs/remotes/origin/$CATALOG_BASE_REF"
       - run: bun run check:catalog
         env:

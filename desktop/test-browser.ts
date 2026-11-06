@@ -9,6 +9,7 @@ import type { ViteDevServer } from "vite";
 
 const expected: Record<string, string> = {
   "src/ui/compact.browser.tsx": "checkCompactActionRow",
+  "src/ui/settings/deviceNames.browser.tsx": "checkDeviceNamingConsumer",
   "src/ui/chat/cards.browser.tsx": "checkCommandCardInput",
   "src/ui/chat/composer.browser.tsx": "checkComposerSendAck",
   "src/ui/motion.browser.tsx": "checkReducedMotion",

@@ -2,7 +2,7 @@
 // controllers: section cards and footnotes in one scrolling column, the window's title bar carrying
 // the page title. General and Advanced also fill the small Settings window onboarding opens.
 
-import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { files, host, hostInfo, onUpdaterChanged, preferences, setPreferences, type UpdaterState } from "../../host";
 import { parseCLIPort } from "../../host/cliPort";
@@ -29,7 +29,7 @@ import {
 import { onStoreEvent, track } from "../../model/reactive";
 import { errorText, store } from "../../model/store";
 import { newBot, presentMarketplace } from "../actions";
-import { HoverButton, PopUpButton, Switch, TextArea } from "../controls";
+import { HoverButton, PopUpButton, Switch, TextArea, TextField } from "../controls";
 import { Icon } from "../icons";
 import { alert, presentSheet, Sheet } from "../overlay";
 import { open, revealed, settingsDeviceID } from "../root";
@@ -773,9 +773,49 @@ function StatusDot(props: { status: Device["status"] }) {
   return <span class={["status-dot", props.status]} />;
 }
 
+function DeviceNamePrompt(props: { device: Device; owns: () => boolean; dismiss: () => void }) {
+  const [name, setName] = createSignal(props.device.name);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  const stop = store.subscribe(() => { if (!props.owns()) props.dismiss(); });
+  onCleanup(stop);
+  const save = async () => {
+    if (busy() || !props.owns()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await store.setDeviceName(props.device.id, name(), props.owns);
+      if (props.owns()) props.dismiss();
+    } catch (failure) {
+      if (props.owns()) setError(errorText(failure));
+    } finally {
+      if (props.owns()) setBusy(false);
+    }
+  };
+  return <Sheet title={L("Rename Device")} subtitle={L("Leave blank to use the machine name.")} confirm={L("Rename")} confirmDisabled={busy()} onConfirm={() => void save()} onCancel={props.dismiss}>
+    <TextField label={L("Name")} value={name()} placeholder={props.device.machineName ?? props.device.name} autofocus disabled={busy()} onInput={setName} />
+    <Show when={error()}>{(message) => <div class="field-note" role="alert">{message()}</div>}</Show>
+  </Sheet>;
+}
+
 /** The picked Device itself: what it is, whether it is online, its machine key, and Unpair. */
 function DevicePane() {
   const device = pickedDevice;
+  let namingSheet: { dismiss(): void } | undefined;
+  let namingActive = true;
+  onCleanup(() => { namingActive = false; namingSheet?.dismiss(); });
+  createEffect(() => settingsDeviceID.read(), () => { namingSheet?.dismiss(); });
+  const rename = () => {
+    const current = device();
+    if (!current) return;
+    const admitted = store.deviceNamingOwner(current.id);
+    let open = true;
+    const owns = () => open && namingActive && settingsDeviceID.get() === current.id && admitted();
+    if (!owns()) return;
+    namingSheet?.dismiss();
+    namingSheet = presentSheet((dismiss) => <DeviceNamePrompt device={current} owns={owns} dismiss={dismiss} />, () => { open = false; });
+  };
+
   const relay = () => {
     track.roster();
     track.connection();
@@ -825,6 +865,7 @@ function DevicePane() {
               </Show>
               <KeyValueRow label={Entries.machineKey().row} value={current().machineKey} monospaced />
               <Show when={current().os !== "unknown"}>
+                <ActionRow label={L("Name")} value={current().name} actionTitle={store.deviceNamingOwner(current().id)() ? L("Rename…") : undefined} onAction={rename} />
                 <KeyValueRow label={L("OS")} value={`${osDisplayName(current().os)} · ${current().osVersion}`} />
               </Show>
               <Show when={current().version}><KeyValueRow label={L("Beans CLI")} value={current().version} /></Show>

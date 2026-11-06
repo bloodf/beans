@@ -155,10 +155,11 @@ fn parse_value(text: &str, min: u32, max: u32, names: &[&str]) -> Result<u32, St
 
 impl Schedule {
     /// The first time this schedule fires strictly after `after` (unix seconds), in the local
-    /// time zone. `None` when nothing matches in the next two years.
+    /// time zone. `None` when an interval exceeds the timestamp range or no cron matches
+    /// in the next two years.
     pub fn next_after(&self, after: i64) -> Option<i64> {
         match self {
-            Schedule::Every(secs) => Some(after + secs),
+            Schedule::Every(secs) => after.checked_add(*secs),
             Schedule::Cron(cron) => cron.next_after(after),
         }
     }
@@ -352,6 +353,26 @@ mod tests {
 
     fn at(date: &str, clock: &str) -> i64 {
         local_unix(date, Some(clock)).unwrap()
+    }
+
+    #[test]
+    fn oversized_intervals_reject_without_overflow_or_wraparound() {
+        for input in [
+            "every 9223372036854775807m", "every 9223372036854775807h",
+            "every 9223372036854775807d", "every 144115188075855873d",
+        ] {
+            assert!(parse(input).is_err(), "accepted {input}");
+        }
+        assert_eq!(parse("every 366d").unwrap(), Schedule::Every(366 * 86_400));
+        assert!(parse("every 367d").is_err());
+    }
+
+    #[test]
+    fn interval_next_firing_does_not_wrap_timestamp() {
+        let schedule = parse("every 5m").unwrap();
+        assert_eq!(schedule.next_after(i64::MAX - 300), Some(i64::MAX));
+        assert_eq!(schedule.next_after(i64::MAX - 299), None);
+        assert_eq!(schedule.next_after(i64::MIN), Some(i64::MIN + 300));
     }
 
     #[test]

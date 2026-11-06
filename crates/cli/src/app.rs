@@ -1853,11 +1853,14 @@ impl App {
 
     /// Retains the provider's prompt overhead while estimating the context left after compaction.
     #[cfg(feature = "runner")]
-    pub fn record_compacted_context(&self, chat_id: &str, before: u64, after: u64) {
+    pub fn record_compacted_context(&self, chat_id: &str, bot_id: &str, model: &str, before: u64, after: u64) {
+        if after >= before { return; }
         let updated = {
             let mut state = self.state.lock().unwrap();
             let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
-            let Some(entry) = chat.usage.as_mut().filter(|usage| usage.context_tokens > 0) else { return };
+            // Group usage has no responder identity, so its transcript delta cannot be attributed.
+            if chat.meta.kind != "dm" || chat.meta.bot_ids.len() != 1 || chat.meta.bot_ids[0] != bot_id { return; }
+            let Some(entry) = chat.usage.as_mut().filter(|usage| usage.context_tokens > 0 && usage.model == model) else { return };
             entry.context_tokens = entry.context_tokens.saturating_sub(before.saturating_sub(after)).max(after);
             entry.context_estimated = true;
             entry.updated_at = crate::config::now_secs();
@@ -2524,8 +2527,8 @@ mod tests {
     fn compacted_context_preserves_spending_and_next_turn_replaces_estimate() {
         let scratch = scratch_app();
         let app = &scratch.0;
-        app.state.lock().unwrap().chats.push(chat("compact", "dm", &[], None));
-        app.record_compacted_context("compact", 100_000, 20_000);
+        app.state.lock().unwrap().chats.push(chat("compact", "dm", &["bot"], None));
+        app.record_compacted_context("compact", "bot", "fixture", 100_000, 20_000);
         assert!(app.chat("compact").unwrap().usage.is_none());
         let mut usage = beans_agent::Usage { input: 140_000, output: 1_000, total_tokens: 141_000, ..Default::default() };
         usage.cost.total = 0.42;
@@ -2533,7 +2536,7 @@ mod tests {
         app.record_usage("compact", "fixture", &usage, 1_000_000);
         let before = app.chat("compact").unwrap().usage.unwrap();
         let mut events = app.events.subscribe();
-        app.record_compacted_context("compact", 120_000, 25_000);
+        app.record_compacted_context("compact", "bot", "fixture", 120_000, 25_000);
         let shown = app.chat("compact").unwrap().usage.unwrap();
         assert_eq!((shown.context_tokens, shown.context_estimated), (46_000, true));
         assert_eq!((shown.input_tokens, shown.output_tokens, shown.cost_usd, shown.cost_known, shown.turns),
@@ -2543,13 +2546,38 @@ mod tests {
         assert_eq!(app.store.load_state().unwrap().chats[0].usage.as_ref().unwrap().context_tokens, 46_000);
         app.add_side_usage("compact", &beans_agent::Usage::default());
         assert!(app.chat("compact").unwrap().usage.unwrap().context_estimated);
-        app.record_compacted_context("compact", 200_000, 30_000);
+        app.record_compacted_context("compact", "bot", "fixture", 200_000, 30_000);
         assert_eq!(app.chat("compact").unwrap().usage.unwrap().context_tokens, 30_000);
-        app.record_compacted_context("compact", 10_000, 40_000);
-        assert_eq!(app.chat("compact").unwrap().usage.unwrap().context_tokens, 40_000);
+        app.record_compacted_context("compact", "bot", "fixture", 10_000, 40_000);
+        assert_eq!(app.chat("compact").unwrap().usage.unwrap().context_tokens, 30_000);
         app.record_usage("compact", "fixture", &usage, 1_000_000);
         assert!(!app.chat("compact").unwrap().usage.unwrap().context_estimated);
-        app.record_compacted_context("missing", 100_000, 20_000);
+        app.record_compacted_context("missing", "bot", "fixture", 100_000, 20_000);
+    }
+
+    #[cfg(feature = "runner")]
+    #[test]
+    fn compacted_context_skips_unattributed_and_unchanged_transcripts() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        for (kind, bots, bot, model, before, after) in [
+            ("group", vec!["a", "b"], "b", "fixture", 120_000, 25_000),
+            ("group", vec!["a"], "a", "fixture", 120_000, 25_000),
+            ("dm", vec!["a"], "b", "fixture", 120_000, 25_000),
+            ("dm", vec!["a"], "a", "other-model", 120_000, 25_000),
+            ("dm", vec!["a"], "a", "fixture", 120_000, 120_000),
+            ("dm", vec!["a"], "a", "fixture", 10_000, 40_000),
+        ] {
+            app.state.lock().unwrap().chats = vec![chat("skip", kind, &bots, None)];
+            app.record_usage("skip", "fixture", &beans_agent::Usage {
+                input: 140_000, output: 1_000, total_tokens: 141_000, ..Default::default()
+            }, 1_000_000);
+            let original = app.chat("skip").unwrap().usage.unwrap();
+            let mut events = app.events.subscribe();
+            app.record_compacted_context("skip", bot, model, before, after);
+            assert_eq!(app.chat("skip").unwrap().usage.unwrap(), original);
+            assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        }
     }
 
     #[cfg(feature = "runner")]

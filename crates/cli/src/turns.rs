@@ -745,7 +745,7 @@ async fn compact_chat(app: &Arc<App>, chat: &Chat, bot: &Bot, provider: &Arc<dyn
     if result.is_some() {
         if let Some(latest) = app.chat(&chat.meta.id) {
             let after = estimate_context_tokens(&transcript_for(app, &latest, bot, &workdir)).tokens;
-            app.record_compacted_context(&chat.meta.id, before, after);
+            app.record_compacted_context(&chat.meta.id, &bot.id, provider.model_id(), before, after);
         }
     }
     Ok(result.map(|(_, tokens_before)| tokens_before))

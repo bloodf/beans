@@ -1,5 +1,7 @@
 # Beans
 
+For T3 onboarding, retrieval, command output and model reservations, follow [AI tooling](docs/ai-tooling.md). Product work remains HOLD until Heitor explicitly says OK.
+
 Read [ARCHITECTURE.md](./ARCHITECTURE.md) before writing code, then the subject docs it lists for the parts you change.
 
 Identity is a local key pair. Paired Devices sync through an E2E relay. Provider credentials belong to the account: they sync to every paired Device as a blob encrypted with the account key. The AppKit app talks to the local CLI.

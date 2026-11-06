@@ -1637,7 +1637,7 @@ mod tests {
         let listed = online.clone();
         let relay = Router::new().route("/v1/machines", get(move || {
             let online = listed.load(Ordering::Relaxed);
-            async move { Json(serde_json::json!({ "machines": [{ "machine_pubkey": "mac", "last_seen": 1, "created_at": 1, "online": online }], "now": crate::config::now_unix() })) }
+            async move { Json(serde_json::json!({ "machines": [{ "machine_pubkey": "mac", "box_pubkey": "box", "last_seen": 1, "created_at": 1, "online": online }], "now": crate::config::now_unix() })) }
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1662,6 +1662,7 @@ mod tests {
             crate::app::RunningJob { chat_id: "chat".into(), bot_id: "bot".into(), routine_id: None, runner_id: Some("mac".into()), cancel: Default::default(), activity: None },
         );
         refresh_presence(app, &url, "test").await.unwrap();
+        assert!(app.device_is_online("mac"), "the fixture establishes the Runner online before it leaves");
         app.set_device_turns("mac", vec![turn("mac-job"), turn("sent-job")]);
         assert_eq!(heard(started), ids(&["mac-job", "sent-job"]));
 

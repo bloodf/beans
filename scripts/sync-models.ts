@@ -123,7 +123,8 @@ function levelsFrom(options: unknown): string[] | undefined {
       }
     }
   }
-  return LEVELS.filter((level) => levels.has(level))
+  const supported = LEVELS.filter((level) => levels.has(level))
+  return supported.length || options.length === 0 ? supported : undefined
 }
 
 // Keep unknown endpoints visible. In particular, SystemOne is not Chat Completions.
@@ -307,6 +308,24 @@ if (import.meta.main) {
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, version: 2 }), sources), /version 1/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, updated: "2026-02-30T00:00:00Z" }), sources), /UTC/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, padding: "x".repeat(MAX_BYTES) }), sources), /1 MiB/)
+    const curatedLevels = JSON.stringify({ ...input, models: [{ ...row, levels: ["low", "medium"] }] })
+    for (const options of [
+      [{ type: "future-effort", values: ["high"] }],
+      [{ type: "effort", values: ["future-level"] }],
+      [{ type: "budget_tokens", values: [1024] }],
+    ]) {
+      modelsDev.opencode.models.chat.reasoning_options = options
+      assert.deepEqual(validate(syncCatalog(curatedLevels, sources).text).models[0].levels, ["low", "medium"])
+    }
+    for (const [options, expected] of [
+      [[], []],
+      [[{ type: "effort", values: ["low", "future-level"] }], ["low"]],
+      [[{ type: "toggle" }], ["off"]],
+    ]) {
+      modelsDev.opencode.models.chat.reasoning_options = options
+      assert.deepEqual(validate(syncCatalog(curatedLevels, sources).text).models[0].levels, expected)
+    }
+    delete modelsDev.opencode.models.chat.reasoning_options
     console.log("Offline model sync self-check passed; no network or catalog writes.")
     process.exit(0)
   }

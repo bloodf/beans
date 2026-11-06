@@ -588,6 +588,11 @@ impl LocalStore {
                  seq INTEGER NOT NULL,
                  json TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS device_names (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 position INTEGER NOT NULL,
+                 json TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS blob_deletes (
                  id       TEXT PRIMARY KEY NOT NULL,
                  position INTEGER NOT NULL
@@ -756,6 +761,7 @@ impl LocalStore {
         let policy: crate::model::RosterBlob = serde_json::from_str(&policy_json).context("decoding policy state")?;
         Ok(State {
             devices: load_json_table(&connection, "devices")?,
+            device_names: load_json_table::<(String, String)>(&connection, "device_names")?.into_iter().collect(),
             bots: load_json_table(&connection, "bots")?,
             chats: load_json_table(&connection, "chats")?,
             routines: load_json_table(&connection, "routines")?,
@@ -785,14 +791,19 @@ impl LocalStore {
     }
 
     pub fn save_state(&self, state: &State) -> anyhow::Result<()> {
-        self.save_state_removing_device_turns(state, None)
+        self.save_state_removing_device_turns(state, None, None)
     }
 
-    pub(crate) fn save_state_removing_device_turns(&self, state: &State, device_id: Option<&str>) -> anyhow::Result<()> {
+    pub(crate) fn save_state_removing_device_turns(&self, state: &State, device_id: Option<&str>, roster: Option<&OutboxItem>) -> anyhow::Result<()> {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
         save_state_tx(&tx, state)?;
         if let Some(id) = device_id { tx.execute("DELETE FROM device_turns WHERE id = ?1", [id])?; }
+        if let Some(item) = roster {
+            tx.execute("INSERT OR IGNORE INTO roster_baseline (name, seq, json) SELECT 'queued', seq, json FROM roster_baseline WHERE name = 'observed'", [])?;
+            tx.execute("INSERT OR IGNORE INTO roster_baseline (name, seq, json) VALUES ('queued', 0, ?1)", [serde_json::to_string(&crate::model::RosterBlob::default())?])?;
+            queue_outbox_tx(&tx, item)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -1535,6 +1546,9 @@ impl LocalStore {
             )?;
         }
         save_metadata_tx(&tx, state)?;
+        sync_json_table(&tx, "device_names", state.device_names.iter()
+            .map(|(id, name)| (id.clone(), serde_json::to_string(&(id, name))))
+            .collect())?;
         sync_json_table(
             &tx,
             "devices",
@@ -1745,6 +1759,7 @@ impl LocalStore {
             "outbox",
             "sent_jobs",
             "device_turns",
+            "device_names",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
@@ -1810,6 +1825,9 @@ fn reconcile_schedules_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result
 fn save_state_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
     reconcile_schedules_tx(tx,state)?;
     save_metadata_tx(tx, state)?;
+    sync_json_table(tx, "device_names", state.device_names.iter()
+        .map(|(id, name)| (id.clone(), serde_json::to_string(&(id, name))))
+        .collect())?;
     sync_json_table(
         tx,
         "devices",

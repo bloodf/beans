@@ -716,7 +716,7 @@ async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), Rela
                     if let (Some(current), Some((_, base))) = (newer, baseline) {
                         let dek = app.dek().ok_or_else(|| roster_conflict("account key unavailable"))?;
                         let local: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &current.ciphertext).map_err(local_relay_error)?;
-                        let base = accepted_roster_baseline(base, &roster);
+                        let base = accepted_roster_baseline(base, &roster, None);
                         let merged = merge_rosters(roster, &base, &local);
                         validate_merged_groups(&merged)?;
                         let rebased = OutboxItem { id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
@@ -927,11 +927,26 @@ fn commit_unpair(app: &Arc<App>, id: &str, owner: &RelayAuthority) -> Result<Res
         state.listed_machines.remove(id);
         state.unknown_machines.remove(id);
         state.device_turns.remove(id);
-        Ok(app.store.save_state_removing_device_turns(&state, Some(id)).map_err(local_relay_error))
+        let persisted = (|| -> anyhow::Result<()> {
+            let mut snapshot = state.clone();
+            let roster = if snapshot.device_names.remove(id).is_some() {
+                let dek = app.dek().ok_or_else(|| anyhow::anyhow!("account key unavailable"))?;
+                let item = OutboxItem { id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
+                    ciphertext: crate::crypto::encrypt_json(&dek, "roster", &App::roster_from_state(&snapshot))?,
+                    slot: Some(Slot::latest("roster")), group: None };
+                crate::app::remember_applied(&mut snapshot, &item.id);
+                Some(item)
+            } else { None };
+            app.store.save_state_removing_device_turns(&snapshot, Some(id), roster.as_ref())?;
+            *state = snapshot;
+            Ok(())
+        })();
+        Ok(persisted.map_err(local_relay_error))
     })
 }
 
 fn publish_unpair(app: &Arc<App>) {
+    app.outbox_notify.notify_waiters();
     // Ownership is released before notification; this tail cannot purge a replacement
     // account's turns or write its SQLite state.
     app.emit(app.roster_summary());
@@ -1087,16 +1102,21 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
         |((_, base), (submitted_seq, sent))| blob.seq > *submitted_seq
             && sent.routines.iter().any(|routine| !base.routines.iter().any(|old| old.id == routine.id)
                 && roster.routines.iter().any(|remote| remote.id == routine.id && remote.bot_id == routine.bot_id)));
-    let recovering = own_accepted || !accepted_ids.is_empty() || routine_creation_accepted;
+    let alias_change_accepted = baseline.as_ref().zip(submitted.as_ref()).is_some_and(
+        |((_, base), (submitted_seq, sent))| blob.seq > *submitted_seq
+            && base.device_names.keys().chain(sent.device_names.keys()).any(|id|
+                base.device_names.get(id) != sent.device_names.get(id)
+                    && roster.device_names.get(id) == sent.device_names.get(id)));
+    let recovering = own_accepted || !accepted_ids.is_empty() || routine_creation_accepted || alias_change_accepted;
     let projection = match (&queue, baseline) {
         (Some(item), Some((_, base))) => {
             let queued: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &item.ciphertext).map_err(local_relay_error)?;
             let base = if !recovering { base }
-                else if own_accepted { accepted_roster_baseline(base, &roster) }
+                else if own_accepted { accepted_roster_baseline(base, &roster, None) }
                 else {
                     let (_, submitted) = submitted
                         .ok_or_else(|| roster_conflict("accepted creation lacks its original submitted roster"))?;
-                    accepted_roster_baseline(base, &submitted)
+                    accepted_roster_baseline(base, &submitted, Some(&roster))
                 };
             let projected = merge_rosters(roster.clone(), &base, &queued);
             validate_merged_groups(&projected)?;
@@ -1415,6 +1435,15 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
             }
         };
     }
+    // Apply only locally changed aliases; unrelated remote names and resets survive CAS rebase.
+    for id in base.device_names.keys().chain(queued.device_names.keys()) {
+        if queued.device_names.get(id) != base.device_names.get(id) {
+            match queued.device_names.get(id) {
+                Some(name) => { remote.device_names.insert(id.clone(), name.clone()); }
+                None => { remote.device_names.remove(id); }
+            }
+        }
+    }
     merge_entities!(bots, name, description, symbol_name, accent, avatar, look, runner_id, provider,
         model, thinking, legacy_instructions, workdir, capabilities);
     merge_entities!(chats, kind, title, description, owner_bot_id, is_pinned);
@@ -1452,7 +1481,7 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
 
 // Only creations from our submitted snapshot have become a common ancestor.
 // A later remote roster can also contain unrelated creations by other Devices.
-fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob) -> RosterBlob {
+fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob, observed: Option<&RosterBlob>) -> RosterBlob {
     macro_rules! accept_creations {
         ($field:ident) => {
             for entry in &submitted.$field {
@@ -1466,6 +1495,16 @@ fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob) -> Ros
     accept_creations!(chats);
     accept_creations!(routines);
     accept_creations!(workflows);
+    // Extend the accepted ancestor only with alias intent actually submitted by this Device.
+    for id in base.device_names.keys().chain(submitted.device_names.keys()).cloned().collect::<std::collections::BTreeSet<_>>() {
+        if base.device_names.get(&id) == submitted.device_names.get(&id) { continue; }
+        // A different Device's later roster proves acceptance only for matching keys.
+        if observed.is_some_and(|remote| remote.device_names.get(&id) != submitted.device_names.get(&id)) { continue; }
+        match submitted.device_names.get(&id) {
+            Some(name) => { base.device_names.insert(id, name.clone()); }
+            None => { base.device_names.remove(&id); }
+        }
+    }
     base
 }
 
@@ -1609,6 +1648,7 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
         let kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
         state.bots = roster.bots;
         state.routines = roster.routines;
+        state.device_names = roster.device_names;
         let bot_ids = state.bots.iter().map(|bot| bot.id.clone()).collect();
         let admitted = crate::workflow::admit(std::mem::take(&mut roster.workflows), &state.workflows, &bot_ids);
         state.workflows = admitted;
@@ -2167,6 +2207,54 @@ mod tests {
         wire["look"] = look;
         bot = serde_json::from_value(wire).unwrap();
         bot
+    }
+
+    #[test]
+    fn device_alias_rebase_preserves_concurrent_names_and_reset_after_restart() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let mut base = RosterBlob::default();
+        base.device_names.insert("a".into(), "Old A".into());
+        base.device_names.insert("b".into(), "Old B".into());
+        let mut local = base.clone();
+        local.device_names.insert("a".into(), "Local A".into());
+        let mut remote = base.clone();
+        remote.device_names.insert("b".into(), "Remote B".into());
+        remote.device_names.insert("c".into(), "Remote C".into());
+        let merged = merge_rosters(remote, &base, &local);
+        assert_eq!(merged.device_names.get("a").unwrap(), "Local A");
+        assert_eq!(merged.device_names.get("b").unwrap(), "Remote B");
+        assert_eq!(merged.device_names.get("c").unwrap(), "Remote C");
+        apply_roster(app, merged.clone());
+        let restarted = App::load(crate::config::Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(restarted.state.lock().unwrap().device_names, merged.device_names);
+        let accepted = accepted_roster_baseline(base, &local, None);
+        local.device_names.remove("a");
+        let reset = merge_rosters(merged, &accepted, &local);
+        assert!(!reset.device_names.contains_key("a"));
+        assert_eq!(reset.device_names.get("b").unwrap(), "Remote B");
+        assert!(!accepted_roster_baseline(accepted, &local, None).device_names.contains_key("a"));
+    }
+
+    #[test]
+    fn partial_alias_acceptance_does_not_advance_unmatched_keys() {
+        let mut base = RosterBlob::default();
+        base.device_names.insert("a".into(), "Old A".into());
+        base.device_names.insert("b".into(), "Old B".into());
+        let mut sent = base.clone();
+        sent.device_names.insert("a".into(), "Sent A".into());
+        sent.device_names.insert("b".into(), "Sent B".into());
+        let mut remote = sent.clone();
+        remote.device_names.insert("b".into(), "Remote B".into());
+        let mut queued = sent.clone();
+        queued.device_names.insert("b".into(), "Old B".into());
+        let accepted = accepted_roster_baseline(base, &sent, Some(&remote));
+        assert_eq!(accepted.device_names.get("a").unwrap(), "Sent A");
+        assert_eq!(accepted.device_names.get("b").unwrap(), "Old B");
+        let merged = merge_rosters(remote, &accepted, &queued);
+        assert_eq!(merged.device_names.get("a").unwrap(), "Sent A");
+        assert_eq!(merged.device_names.get("b").unwrap(), "Remote B");
     }
 
     #[test]
@@ -3648,6 +3736,33 @@ mod tests {
         assert!(recovered.bots.iter().any(|bot| bot.id == "remote-bot"));
         assert!(recovered.chats.iter().any(|chat| chat.id == "remote-group"));
         assert_eq!(recovered.chats.iter().find(|chat| chat.id == "G").unwrap().title.as_deref(), Some("Local edit after upload"));
+    }
+
+    #[test]
+    fn lost_alias_reply_then_reset_preserves_another_devices_name() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        app.store.observe_roster(0, &RosterBlob::default()).unwrap();
+        app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+        app.set_device_name("peer", "Submitted").unwrap();
+        let item = app.store.queued_roster().unwrap().unwrap();
+        let sent: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &item.ciphertext).unwrap();
+        app.store.record_submitted_roster(0, &sent).unwrap();
+        app.set_device_name("peer", "").unwrap();
+        let reopened = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let mut remote = sent;
+        remote.device_names.insert("other".into(), "Remote".into());
+        let blob = BlobIn { id: "peer-alias-roster".into(), kind: "roster".into(), recipient_machine_pubkey: None,
+            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&reopened.dek().unwrap(), "roster", &remote).unwrap()),
+            seq: 2, created_at: 2 };
+        apply_incoming_blob(&reopened, &reopened.machine_file().unwrap(), &blob, true).unwrap();
+        let queued = reopened.store.queued_roster().unwrap().unwrap();
+        let result: RosterBlob = crate::crypto::decrypt_json(&reopened.dek().unwrap(), "roster", &queued.ciphertext).unwrap();
+        assert!(!result.device_names.contains_key("peer"));
+        assert_eq!(result.device_names.get("other").unwrap(), "Remote");
     }
 
     #[test]

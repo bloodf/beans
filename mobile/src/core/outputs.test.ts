@@ -1,10 +1,10 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 import type { Chat, Message, Output } from "./model";
 
-mock.module("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {}, coreHome: () => "/unused", pathOf: (p: string) => p, wipePrefs: () => {} }));
-mock.module("expo-localization", () => ({ getLocales: () => [{ languageCode: "en", languageTag: "en-US" }] }));
-mock.module("react", () => ({ useMemo: (fn: any) => fn(), useRef: (value: any) => ({ current: value }), useEffect: () => {}, useState: (value: any) => [value, () => {}] }));
-mock.module("react-native", () => ({
+vi.doMock("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {}, coreHome: () => "/unused", pathOf: (p: string) => p, wipePrefs: () => {} }));
+vi.doMock("expo-localization", () => ({ getLocales: () => [{ languageCode: "en", languageTag: "en-US" }] }));
+vi.doMock("react", () => ({ useMemo: (fn: any) => fn(), useRef: (value: any) => ({ current: value }), useEffect: () => {}, useState: (value: any) => [value, () => {}] }));
+vi.doMock("react-native", () => ({
   Alert: {},
   Linking: {},
   View: "View",
@@ -15,7 +15,7 @@ mock.module("react-native", () => ({
   Platform: { OS: "ios" },
   StyleSheet: { create: (value: any) => value, hairlineWidth: 1, absoluteFill: {} },
 }));
-mock.module("react-native-reanimated", () => ({
+vi.doMock("react-native-reanimated", () => ({
   default: { View: "AnimatedView" },
   useSharedValue: (value: any) => ({ value }),
   useAnimatedStyle: (fn: any) => fn,
@@ -23,22 +23,22 @@ mock.module("react-native-reanimated", () => ({
   withSequence: () => 1,
   withTiming: (value: any) => value,
 }));
-mock.module("expo-haptics", () => ({ ImpactFeedbackStyle: { Light: "light" }, impactAsync: () => Promise.resolve() }));
-mock.module("expo-clipboard", () => ({}));
-mock.module("expo-linear-gradient", () => ({ LinearGradient: "Gradient" }));
-mock.module("expo-image", () => ({ Image: "Image" }));
-mock.module("expo-router", () => ({ useRouter: () => ({ push: () => {} }) }));
-mock.module("../../modules/beans-core/ShimmerView", () => ({ ShimmerView: "Shimmer" }));
-mock.module("./engine", () => ({ engine: { fetchFile: async () => {} } }));
-mock.module("./store", () => ({ useStore: () => undefined }));
-mock.module("../i18n", () => ({ useLanguage: () => {}, t: (value: string) => value, language: "en", tc: (value: string) => value }));
-mock.module("../ui/attachments", () => ({ AttachmentBlock: "Attachments" }));
-mock.module("../ui/Avatar", () => ({ BotAvatar: "Avatar" }));
-mock.module("../ui/Markdown", () => ({ Markdown: "Markdown" }));
-mock.module("../ui/Symbol", () => ({ Symbol: "Symbol" }));
-mock.module("../ui/layout", () => ({ usePaneWidth: () => 400 }));
-mock.module("../ui/theme", () => ({ Font: { message: 16, small: 13, caption: 12 }, usePalette: () => ({ dark: false }), accentColor: () => "#000" }));
-mock.module("react-native-gesture-handler", () => ({ Gesture: { Pan: () => ({ runOnJS() { return this; }, enabled() { return this; }, activeOffsetX() { return this; }, failOffsetX() { return this; }, failOffsetY() { return this; }, onTouchesDown() { return this; }, onUpdate() { return this; }, onEnd() { return this; }, onFinalize() { return this; } }) }, GestureDetector: "Detector" }));
+vi.doMock("expo-haptics", () => ({ ImpactFeedbackStyle: { Light: "light" }, impactAsync: () => Promise.resolve() }));
+vi.doMock("expo-clipboard", () => ({}));
+vi.doMock("expo-linear-gradient", () => ({ LinearGradient: "Gradient" }));
+vi.doMock("expo-image", () => ({ Image: "Image" }));
+vi.doMock("expo-router", () => ({ useRouter: () => ({ push: () => {} }) }));
+vi.doMock("../../modules/beans-core/ShimmerView", () => ({ ShimmerView: "Shimmer" }));
+vi.doMock("./engine", () => ({ engine: { fetchFile: async () => {} } }));
+vi.doMock("./store", () => ({ useStore: () => undefined }));
+vi.doMock("../i18n", () => ({ useLanguage: () => {}, t: (value: string) => value, language: "en", tc: (value: string) => value }));
+vi.doMock("../ui/attachments", () => ({ AttachmentBlock: "Attachments" }));
+vi.doMock("../ui/Avatar", () => ({ BotAvatar: "Avatar" }));
+vi.doMock("../ui/Markdown", () => ({ Markdown: "Markdown" }));
+vi.doMock("../ui/Symbol", () => ({ Symbol: "Symbol" }));
+vi.doMock("../ui/layout", () => ({ usePaneWidth: () => 400 }));
+vi.doMock("../ui/theme", () => ({ Font: { message: 16, small: 13, caption: 12 }, usePalette: () => ({ dark: false }), accentColor: () => "#000" }));
+vi.doMock("react-native-gesture-handler", () => ({ Gesture: { Pan: () => ({ runOnJS() { return this; }, enabled() { return this; }, activeOffsetX() { return this; }, failOffsetX() { return this; }, failOffsetY() { return this; }, onTouchesDown() { return this; }, onUpdate() { return this; }, onEnd() { return this; }, onFinalize() { return this; } }) }, GestureDetector: "Detector" }));
 
 const { documentUrl, evidenceStatus, groupOutputs, outputKind, outputSymbol, outputTypeName } = await import("./model");
 const { OUTPUT_CARD_OPENS_DETAIL } = await import("../ui/outputs");

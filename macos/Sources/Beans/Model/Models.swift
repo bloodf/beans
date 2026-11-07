@@ -423,6 +423,8 @@ struct Device: Identifiable, Hashable {
     /// Set for a CLI that updates itself (one installed with the site's script); a CLI an app
     /// carries updates with the app.
     var update: CLIUpdate? = nil
+    /// Original machine-reported name, independent of the account alias.
+    var machineName: String = ""
 
     /// A self-updating CLI's updates, as its `machine` blob says.
     struct CLIUpdate: Hashable {
@@ -1150,6 +1152,7 @@ struct Chat: Identifiable, Hashable {
 /// turn's; the rest accumulate.
 struct ChatUsage: Hashable {
     var contextTokens: Int
+    var contextEstimated: Bool = false
     var contextWindow: Int
     var inputTokens: Int
     var outputTokens: Int
@@ -1161,9 +1164,12 @@ struct ChatUsage: Hashable {
 
     /// "128k of 1M · 13%", or "128k" when the window is unknown.
     var contextSummary: String {
-        guard contextWindow > 0 else { return Format.tokens(contextTokens) }
-        let percent = Int((Double(contextTokens) / Double(contextWindow) * 100).rounded())
-        return L("%@ of %@ · %d%%", Format.tokens(contextTokens), Format.tokens(contextWindow), percent)
+        var summary = Format.tokens(contextTokens)
+        if contextWindow > 0 {
+            let percent = Int((Double(contextTokens) / Double(contextWindow) * 100).rounded())
+            summary = L("%@ of %@ · %d%%", summary, Format.tokens(contextWindow), percent)
+        }
+        return contextEstimated ? "≈ " + summary : summary
     }
 
     /// "$0.42 · 18 turns"
@@ -1199,5 +1205,30 @@ extension Format {
         if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000) }
         if count >= 1_000 { return "\(count / 1_000)k" }
         return "\(count)"
+    }
+}
+
+/// A naming prompt's target excludes mutable labels and presence.
+struct DeviceNameTarget: Equatable {
+    let id: Device.ID
+    let machineKey: String
+    let os: Device.OS
+    init(_ device: Device) { id = device.id; machineKey = device.machineKey; os = device.os }
+}
+
+/// Connection/account epochs and membership changes revoke old naming intents.
+struct DeviceNameOwnership {
+    private(set) var generation: UInt64 = 0
+    private var targets: [Device.ID: DeviceNameTarget] = [:]
+    mutating func observe(_ event: StoreEvent, devices: [Device]) {
+        let reset: Bool
+        switch event {
+        case .connectionChanged, .snapshotReplaced, .identityChanged: reset = true
+        case .rosterChanged: reset = false
+        default: return
+        }
+        let next = devices.reduce(into: [Device.ID: DeviceNameTarget]()) { $0[$1.id] = DeviceNameTarget($1) }
+        if reset || next != targets { generation &+= 1 }
+        targets = next
     }
 }

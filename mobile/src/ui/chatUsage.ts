@@ -16,7 +16,7 @@ export function chatUsageRows(usage: ChatUsage) {
       : zh ? "费用未知" : "Unknown cost";
   const turns = zh ? `${usage.turns} 轮` : `${usage.turns} ${usage.turns === 1 ? "turn" : "turns"}`;
   return [
-    { title: zh ? "上下文" : "Context", subtitle: context },
+    { title: zh ? "上下文" : "Context", subtitle: usage.context_estimated ? `≈ ${context}` : context },
     { title: zh ? "已花费" : "Spent", subtitle: `${cost} · ${turns}` },
   ];
 }

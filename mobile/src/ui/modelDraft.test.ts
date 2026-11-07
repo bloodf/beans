@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, vi } from "vitest";
+
+vi.mock("../core/prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
 import { defaultModelId, selectedModelIds } from "../core/model";
 import { addModel, chooseDefaultModel, startModelDraft, takeModelListing, toggleModel, useModelDraft } from "./modelDraft";
 

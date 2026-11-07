@@ -7,13 +7,15 @@ import { Alert, Platform, ScrollView, StyleSheet, Text, View } from "react-nativ
 import { engine } from "../../src/core/engine";
 import { CUSTOM_PRESETS, customProviderNamed, deviceName, isCustomProvider, isRunner, providerLabel } from "../../src/core/model";
 import { deviceIsOnline, useStore } from "../../src/core/store";
+import { checkUpdates, dismissUpdate, installUpdate, setUpdateChecks, useUpdates } from "../../src/core/updates";
 import { deviceLanguage, languageNames, languages, setAppLanguage, t, useLanguage } from "../../src/i18n";
-import { FieldRow, MenuRow, Row, Section, ToggleRow, type MenuChoice } from "../../src/ui/forms";
+import { MenuRow, Row, Section, ToggleRow, type MenuChoice } from "../../src/ui/forms";
 import { lastSeen } from "../../src/ui/format";
 import { Symbol } from "../../src/ui/Symbol";
 import { usePalette } from "../../src/ui/theme";
 import { deviceSymbol } from "../../src/ui/devices";
 import { CloseToolbar } from "../../src/ui/navigation";
+import { DeviceRename } from "../../src/ui/DeviceRename";
 import {
   automaticLanguage,
   languageName,
@@ -36,13 +38,14 @@ export default function SettingsScreen() {
   const paused = useStore((s) => s.paused);
   const providers = useStore((s) => s.providers);
   const thisDevice = devices.find((d) => d.is_this_device);
-  const [name, setName] = useState(thisDevice?.name ?? "");
   const [addingRule, setAddingRule] = useState(false);
   const [ruleText, setRuleText] = useState("");
   const [ruleBehavior, setRuleBehavior] = useState<"allow" | "ask">("allow");
   const [savingPause, setSavingPause] = useState(false);
   const dictation = useDictationLanguage();
   const appLanguage = useLanguage();
+  const updates = useUpdates();
+  const updateReason = updates.reason;
 
   // The Mac app's pop-up: Automatic with the language it resolves to, a separator, then every
   // language the recognizer knows, by name.
@@ -78,11 +81,6 @@ export default function SettingsScreen() {
   const sorted = [...devices].sort((a, b) =>
     a.id === thisId ? -1 : b.id === thisId ? 1 : Number(!!a.unknown) - Number(!!b.unknown) || a.name.localeCompare(b.name),
   );
-
-  function commitName() {
-    if (thisDevice && name.trim() && name.trim() !== thisDevice.name)
-      void engine.renameDevice(name);
-  }
 
   function addRule() {
     if (Platform.OS === "android") {
@@ -186,23 +184,38 @@ export default function SettingsScreen() {
           title={t("This phone")}
           footer={t("How this phone shows up in the Device list on your other Devices.")}
         >
-          <FieldRow
-            label={t("Name")}
-            value={name}
-            onChangeText={setName}
-            onBlur={commitName}
-            onSubmitEditing={commitName}
-            returnKeyType="done"
-            autoCapitalize="words"
-            // A value among values: on the trailing edge in their color, as Role and App Language are.
-            style={{ textAlign: "right", color: p.secondaryLabel }}
-          />
+          {thisDevice ? <DeviceRename device={thisDevice} /> : null}
           <Row title={t("Role")} detail={t("Device")} />
           <Row
             title={t("App Language")}
             menu={{ title: t("App Language"), value: appLanguage.chosen ? languageNames[appLanguage.chosen] : systemLanguage, choices: appLanguageChoices }}
           />
           <Row title={t("Diagnostics")} chevron onPress={() => router.push("/settings/diagnostics")} />
+        </Section>
+
+        <Section title={t("App updates")} footer={
+          updateReason === "development" ? t("Beans Dev does not install release updates.") :
+          updateReason === "store_managed" ? t("Use your store or TestFlight to update Beans.") :
+          updateReason ? t("Signed Android update verification is unavailable in this build. No APK is downloaded or installed. Use your existing distribution channel.") :
+          t("Save or send drafts before installing. Android asks for installation confirmation. Release notes are untrusted text.")
+        }>
+          <Row title={t("Version")} detail={Application.nativeApplicationVersion ?? "—"} />
+          <Row title={t("Build")} detail={Application.nativeBuildVersion ?? "—"} />
+          {!updateReason && <>
+            <ToggleRow title={t("Check daily")} value={updates.checks} onValueChange={setUpdateChecks} />
+            <Row title={t("Check for updates")} detail={updates.status} onPress={() => void checkUpdates()} />
+            {updates.status === "downloading" && <Row title={t("Downloading update")} detail={`${Math.round(updates.progress * 100)}%`} />}
+            {updates.error && <Row title={t("Update failed")} subtitle={updates.error} subtitleLines={5} />}
+            {updates.offer && <>
+              <Row title={updates.offer.version} subtitle={updates.offer.notes} subtitleLines={12} />
+              <Row title={t("Install Update")} onPress={() => Alert.alert(t("Install Update"), t("Save or send all drafts first. Installing replaces this process. Have you saved your changes?"), [
+                { text: t("Later"), style: "cancel", onPress: () => dismissUpdate() },
+                { text: t("Install Update"), onPress: () => void installUpdate(updates.offer!.id, true) },
+              ])} />
+              <Row title={t("Later")} onPress={() => dismissUpdate()} />
+              <Row title={t("Skip this version")} onPress={() => dismissUpdate(true)} />
+            </>}
+          </>}
         </Section>
 
         <Section title={t("Dictation")}>

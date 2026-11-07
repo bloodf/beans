@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 
 // Mount the production search consumer with real store subscriptions and controlled native replies.
 // Hook slots/native tags follow Composer.test.tsx; native layout and navigation need device proof.
@@ -43,38 +43,38 @@ const react = {
     }
   },
 };
-mock.module("react", () => ({ ...react, default: react }));
+vi.doMock("react", () => ({ ...react, default: react }));
 const jsx = (type: unknown, props: Node["props"]) => ({ type, props });
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
-mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
 const platform = { OS: "ios" };
 const opened: string[] = [];
 let searchSurface: "sidebar" | "ios" | "android" = "sidebar";
 let wide = false, pathname = "/";
 const navigated: string[] = [];
-mock.module("react-native", () => ({ Platform: platform, View: "View", Text: "Text", TextInput: "TextInput", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator", Alert: {}, AppState: {}, StyleSheet: { create: (x: unknown) => x, hairlineWidth: 1 }, useWindowDimensions: () => ({ width: 400 }) }));
-mock.module("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
-mock.module("expo-haptics", () => ({}));
-mock.module("expo-router", () => ({ Link: "Link", Stack: { SearchBar: "SearchBar", Toolbar: Object.assign("Toolbar", { Button: "Button", Menu: "Menu", MenuAction: "MenuAction" }), Title: "Title" }, usePathname: () => pathname, useRouter: () => ({ push: (path: string) => opened.push(path), replace: (path: string) => opened.push(path), navigate: (path: string) => navigated.push(path) }) }));
-mock.module("expo-router/unstable-native-tabs", () => ({ NativeTabs: Object.assign("NativeTabs", { Trigger: Object.assign("Trigger", { Icon: "Icon", Label: "Label" }) }) }));
-mock.module("./AvatarFlashList", () => ({ AvatarFlashList: "List" }));
-mock.module("./Avatar", () => ({ AvatarCluster: "Avatar" }));
-mock.module("./ChatPeek", () => ({ ChatPeek: "Peek" }));
-mock.module("./ChatRow", () => ({ ChatRow: "Row" }));
-mock.module("./layout", () => ({ PaneWidth: "PaneWidth", useSidebarWidth: () => 320, useWide: () => wide }));
-mock.module("./relay", () => ({ problemTitle: () => "", showRelayProblem: () => {} }));
-mock.module("./format", () => ({ lastActivity: () => 0, preview: () => "", stamp: () => "" }));
-mock.module("./SidebarSearch", () => ({ SidebarSearch: "Search", useSidebarSearchInset: () => 0 }));
-mock.module("./Symbol", () => ({ Symbol: "Symbol" }));
-mock.module("./theme", () => ({ Font: {}, usePalette: () => ({}) }));
-mock.module("./navigation", () => ({ AndroidIcons: {} }));
-mock.module("../i18n", () => ({ t: (x: string) => x, useLanguage: () => ({ language: "en" }) }));
-mock.module("../core/prefs", () => ({ savePrefs: () => {}, loadPrefs: () => ({}), coreHome: () => "unused", pathOf: (x: string) => x, wipePrefs: () => {} }));
-mock.module("../core/host", () => ({ hostFacts: () => ({}) }));
-mock.module("../core/push", () => ({ clearPushes: () => {}, installPushHandlers: () => {}, registerForPushes: () => {} }));
-mock.module("expo-web-browser", () => ({}));
+vi.doMock("react-native", () => ({ Platform: platform, View: "View", Text: "Text", TextInput: "TextInput", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator", Alert: {}, AppState: {}, StyleSheet: { create: (x: unknown) => x, hairlineWidth: 1 }, useWindowDimensions: () => ({ width: 400 }) }));
+vi.doMock("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
+vi.doMock("expo-haptics", () => ({}));
+vi.doMock("expo-router", () => ({ Link: "Link", Stack: { SearchBar: "SearchBar", Toolbar: Object.assign("Toolbar", { Button: "Button", Menu: "Menu", MenuAction: "MenuAction" }), Title: "Title" }, usePathname: () => pathname, useRouter: () => ({ push: (path: string) => opened.push(path), replace: (path: string) => opened.push(path), navigate: (path: string) => navigated.push(path) }) }));
+vi.doMock("expo-router/unstable-native-tabs", () => ({ NativeTabs: Object.assign("NativeTabs", { Trigger: Object.assign("Trigger", { Icon: "Icon", Label: "Label" }) }) }));
+vi.doMock("./AvatarFlashList", () => ({ AvatarFlashList: "List" }));
+vi.doMock("./Avatar", () => ({ AvatarCluster: "Avatar" }));
+vi.doMock("./ChatPeek", () => ({ ChatPeek: "Peek" }));
+vi.doMock("./ChatRow", () => ({ ChatRow: "Row" }));
+vi.doMock("./layout", () => ({ PaneWidth: "PaneWidth", useSidebarWidth: () => 320, useWide: () => wide }));
+vi.doMock("./relay", () => ({ problemTitle: () => "", showRelayProblem: () => {} }));
+vi.doMock("./format", () => ({ lastActivity: () => 0, preview: () => "", stamp: () => "" }));
+vi.doMock("./SidebarSearch", () => ({ SidebarSearch: "Search", useSidebarSearchInset: () => 0 }));
+vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
+vi.doMock("./theme", () => ({ Font: {}, usePalette: () => ({}) }));
+vi.doMock("./navigation", () => ({ AndroidIcons: {} }));
+vi.doMock("../i18n", () => ({ t: (x: string) => x, useLanguage: () => ({ language: "en" }) }));
+vi.doMock("../core/prefs", () => ({ savePrefs: () => {}, loadPrefs: () => ({}), coreHome: () => "unused", pathOf: (x: string) => x, wipePrefs: () => {} }));
+vi.doMock("../core/host", () => ({ hostFacts: () => ({}) }));
+vi.doMock("../core/push", () => ({ clearPushes: () => {}, installPushHandlers: () => {}, registerForPushes: () => {} }));
+vi.doMock("expo-web-browser", () => ({}));
 const replies: Array<(value: unknown) => void> = [];
-mock.module("../../modules/beans-core", () => ({ request: () => new Promise(resolve => replies.push(resolve)) }));
+vi.doMock("../../modules/beans-core", () => ({ request: () => new Promise(resolve => replies.push(resolve)) }));
 // These imports exercise production consumers after native and React mocks are installed.
 const { useStore, resetStore } = await import("../core/store");
 const { ChatsScreen } = await import("./ChatsScreen");
@@ -185,6 +185,47 @@ test.each(["sidebar", "ios", "android"] as const)("%s search retains authority a
       }
     }
   } finally { dispose(); globalThis.setTimeout = originalTimeout; globalThis.clearTimeout = originalClear; }
+});
+
+test("content changes do not starve search and schedule a follow-up", async () => {
+  searchSurface = "sidebar"; platform.OS = "ios";
+  const originalTimeout = globalThis.setTimeout, originalClear = globalThis.clearTimeout;
+  globalThis.setTimeout = ((run: () => void) => { const id = ++timerID; timers.set(id, run); return id; }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((id: number) => { timers.delete(id); }) as unknown as typeof clearTimeout;
+  const runTimers = () => { for (const [id, run] of [...timers]) { timers.delete(id); run(); } };
+  const rows = () => find(render(), "List")!.props.data.map(row => row.snippet);
+  try {
+    resetStore();
+    useStore.setState({ paired: true, identityId: "A", relayUrl: "relay-A", deviceId: "phone-A", chats: [{ id: "same", title: "Before", kind: "group", bot_ids: [], messages: [], unread_count: 0, is_pinned: false, created_at: 0 }], bots: [] });
+    const root = render();
+    find(root, "Search")!.props.onChangeText("needle"); render();
+    for (let i = 0; i < 5; i++) {
+      useStore.setState(state => ({ chats: state.chats.map(chat => ({ ...chat, title: `Changed ${i}` })) }));
+      render();
+    }
+    expect(timers.size).toBe(1);
+    runTimers();
+    expect(replies.length).toBe(1);
+    useStore.setState(state => ({ chats: state.chats.map(chat => ({ ...chat, title: "needle chat" })) }));
+    useStore.setState(state => ({ bots: [...state.bots, { id: "bot", name: "needle bot" } as never] }));
+    useStore.setState(state => ({ chats: state.chats.map(chat => ({ ...chat, messages: [{ id: "m", content: "needle message", attachments: [{ id: "f", name: "needle file" }] } as never] })) }));
+    expect(replies.length).toBe(1);
+    replies.shift()!(result("first")); await flush();
+    expect(rows()).toEqual(["first", "first", "first"]);
+    expect(timers.size).toBe(1);
+    runTimers();
+    expect(replies.length).toBe(1);
+    useStore.setState(state => ({ chats: state.chats.map(chat => ({ ...chat, title: "other", messages: [] })) }));
+    replies.shift()!(result("updated")); await flush();
+    expect(rows()).toEqual(["updated", "updated", "updated"]);
+    runTimers();
+    replies.shift()!({ chats: [], messages: [], files: [], history_complete: true }); await flush();
+    expect(rows()).toEqual([]);
+  } finally {
+    for (const item of slots) if (item && typeof item === "object" && "cleanup" in item && typeof item.cleanup === "function") item.cleanup();
+    slots = []; timers.clear(); replies.length = 0;
+    globalThis.setTimeout = originalTimeout; globalThis.clearTimeout = originalClear;
+  }
 });
 
 test("widening a Devices or Search tab restores the empty chat pane without replacing an open chat", () => {

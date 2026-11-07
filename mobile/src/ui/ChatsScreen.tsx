@@ -18,6 +18,7 @@ import { SidebarSearch, useSidebarSearchInset } from "./SidebarSearch";
 import { Symbol } from "./Symbol";
 import { Font, usePalette } from "./theme";
 import { AndroidIcons } from "./navigation";
+import { discardComposerDraft, retainedComposerDrafts, subscribeComposerDrafts } from "../core/updateDrafts";
 
 // FlashList keeps the first visible row where it is when rows change, which for a list resting at
 // its top means a chat moving to the top pushes the list down by one row: the new first row lands
@@ -36,13 +37,16 @@ export function ChatsScreen({ sidebar = false, search = false }: { sidebar?: boo
   const floatingSearch = sidebar;
   const searchInset = useSidebarSearchInset();
   const chats = useStore((s) => s.chats);
+  const identityId = useStore((s) => s.identityId);
   const running = useStore((s) => s.running);
+  const [draftRevision, setDraftRevision] = useState(0);
+  useEffect(() => subscribeComposerDrafts(() => setDraftRevision(value => value + 1)), []);
+  const retainedDrafts = useMemo(() => retainedComposerDrafts(), [draftRevision]);
   const paused = useStore((s) => s.paused);
   const connecting = useConnecting();
   const updateRequired = useStore((s) => s.relayUpdateRequired);
   const relayError = useStore((s) => s.relayError);
   const relayUrl = useStore((s) => s.relayUrl);
-  const identityId = useStore(s => s.identityId);
   const deviceId = useStore(s => s.deviceId);
   const paired = useStore(s => s.paired);
   const bots = useBotMap();
@@ -73,36 +77,54 @@ export function ChatsScreen({ sidebar = false, search = false }: { sidebar?: boo
     }
     const owner = { active: true, query: value };
     searchOwner.current = owner;
-    // Observe every core authority transition, not only React's eventual render.
-    // Once revoked, this request/result owner cannot regain authority after ABA.
-    const unsubscribe = useStore.subscribe(state => {
-      if (owner.active && (state.identityId !== source.identityId || state.relayUrl !== source.relayUrl
-        || state.deviceId !== source.deviceId || state.paired !== source.paired)) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let inFlight = false;
+    let dirty = false;
+    let published = false;
+    const schedule = () => {
+      if (!owner.active || timer || inFlight) return;
+      timer = setTimeout(() => {
+        timer = undefined;
+        if (!owner.active) return;
+        dirty = false;
+        inFlight = true;
+        void engine.searchChats(value)
+          .then(results => {
+            if (owner.active) { published = true; setMatches(results); }
+          })
+          .catch(() => {
+            if (owner.active && !published) setMatches({ chats: [], messages: [], files: [], history_complete: false });
+          })
+          .finally(() => {
+            inFlight = false;
+            if (!owner.active) return;
+            setSearching(false);
+            if (dirty) schedule();
+          });
+      }, 140);
+    };
+    // Subscribe synchronously so authority ABA cannot reauthorize a captured owner.
+    const unsubscribe = useStore.subscribe((state, previous) => {
+      if (!owner.active) return;
+      if (state.identityId !== source.identityId || state.relayUrl !== source.relayUrl
+        || state.deviceId !== source.deviceId || state.paired !== source.paired) {
         owner.active = false;
         setMatches({ chats: [], messages: [], files: [], history_complete: true });
         setSearchGeneration(generation => generation + 1);
+      } else if (state.chats !== previous.chats || state.bots !== previous.bots) {
+        dirty = true;
+        schedule();
       }
     });
     setSearching(true);
     setMatches({ chats: [], messages: [], files: [], history_complete: true });
-    const timer = setTimeout(() => {
-      if (!owner.active) return;
-      void engine
-        .searchChats(value)
-        .then((results) => {
-          if (owner.active) setMatches(results);
-        })
-        .catch(() => { if (owner.active) setMatches({ chats: [], messages: [], files: [], history_complete: false }); })
-        .finally(() => {
-          if (owner.active) setSearching(false);
-        });
-    }, 140);
+    schedule();
     return () => {
       owner.active = false;
       unsubscribe();
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     };
-  }, [query, chats, bots, searchGeneration, identityId, deviceId, paired, relayUrl]);
+  }, [query, searchGeneration, identityId, deviceId, paired, relayUrl]);
 
   const items = useMemo(() => {
     const visible = [...chats].sort((a, b) => lastActivity(b) - lastActivity(a));
@@ -158,10 +180,13 @@ export function ChatsScreen({ sidebar = false, search = false }: { sidebar?: boo
       {
         text: t("Delete"),
         style: "destructive",
-        onPress: () => {
-          // The pane beside the sidebar goes back to empty with its chat.
-          if (sidebar && chat.id === openChatId) router.dismissTo("/");
-          engine.deleteChat(chat.id);
+        onPress: async () => {
+          try {
+            await engine.deleteChat(chat.id);
+            if (sidebar && chat.id === openChatId) router.dismissTo("/");
+          } catch (error) {
+            Alert.alert(t("Delete"), error instanceof Error ? error.message : String(error));
+          }
         },
       },
     ]);
@@ -169,6 +194,15 @@ export function ChatsScreen({ sidebar = false, search = false }: { sidebar?: boo
 
   return (
     <>
+      {retainedDrafts.map(([key, draft]) => {
+        const [identity, relay, chatId] = JSON.parse(key) as [string | null, string | null, string];
+        if (identity === identityId && relay === relayUrl && chats.some(chat => chat.id === chatId)) return null;
+        const preview = [draft.text, ...draft.attachments.map(file => file.name)].filter(Boolean).join("\n");
+        return <Pressable key={key} accessibilityRole="button" accessibilityLabel={`${t("Discard")}: ${preview}`} onPress={() => Alert.alert(t("Discard changes?"), preview, [
+          { text: t("Cancel"), style: "cancel" },
+          { text: t("Discard"), style: "destructive", onPress: () => discardComposerDraft(key) },
+        ])}><Text style={{ color: p.label }}>{t("Draft preview")}: {preview || t("Dictation stopped")}</Text><Text style={{ color: p.secondaryLabel }}>{t("Discard")}</Text></Pressable>;
+      })}
       {query.trim() && ownsSearch && !matches.history_complete ? <Text accessibilityRole="text" style={{ color: p.secondaryLabel }}>{t("Search covers downloaded history only")}</Text> : null}
       {!search || Platform.OS !== "ios" ? null : (
         <Stack.SearchBar

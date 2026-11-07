@@ -234,7 +234,7 @@ enum Wire {
         var levels: [String]?
 
         func toModel() -> CustomModel {
-            CustomModel(id: id, name: name, contextWindow: contextWindow, images: images, levels: levels ?? [], maxOutput: maxOutput, reasoning: reasoning, tools: tools, thinkingFormat: thinkingFormat, thinkingCanDisable: thinkingCanDisable)
+            CustomModel(id: id, name: name, contextWindow: contextWindow, images: images, levels: levels, maxOutput: maxOutput, reasoning: reasoning, tools: tools, thinkingFormat: thinkingFormat, thinkingCanDisable: thinkingCanDisable)
         }
     }
 

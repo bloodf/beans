@@ -66,6 +66,34 @@ final class CustomProviderTests: XCTestCase {
         XCTAssertEqual(merged[0].thinkingFormat, "openai")
     }
 
+    func testSparseThinkingDeclarationsPreserveAndExplicitArraysReplace() throws {
+        func discovered(_ fields: String) throws -> CustomModel {
+            try Wire.decoder.decode(Wire.StatusModel.self, from: Data("{\"id\":\"alias\"\(fields)}".utf8)).toModel()
+        }
+        let absent = try discovered("")
+        let empty = try discovered(",\"levels\":[]")
+        let declared = try discovered(",\"levels\":[\"low\",\"xhigh\",\"max\"]")
+        XCTAssertNil(absent.levels)
+        XCTAssertEqual(empty.levels, [])
+        XCTAssertEqual(declared.levels, ["low", "xhigh", "max"])
+
+        let saved = CustomModel(id: "alias", name: "Saved alias", contextWindow: 200_000, images: true,
+                                levels: ["low", "high"], maxOutput: 32_000, reasoning: true, tools: true,
+                                thinkingFormat: "openai", thinkingCanDisable: false)
+        let selected: Set<String> = ["manual", "alias"]
+        let draft = [CustomModel(id: "manual"), saved]
+        for (incoming, expected) in [(absent, ["low", "high"]), (empty, []), (declared, ["low", "xhigh", "max"])] {
+            let merged = ModelChecklist.merge(draft, keeping: { selected.contains($0) }, with: [incoming])
+            var expectedModel = saved
+            expectedModel.levels = expected
+            XCTAssertEqual(merged, [CustomModel(id: "manual"), expectedModel])
+            XCTAssertEqual(ModelChecklist.orderedIDs(merged, selected: selected, defaultID: "alias"), ["alias", "manual"])
+        }
+        XCTAssertNil(absent.merging(try discovered(",\"name\":\"Sparse\"")).levels)
+        XCTAssertEqual(empty.merging(absent).levels, [])
+    }
+
+
     func testTheSearchFieldFiltersOrOffersToAdd() {
         let models = [CustomModel(id: "anthropic/claude-sonnet-5", name: "Anthropic: Claude Sonnet 5"), CustomModel(id: "qwen3:8b")]
         XCTAssertEqual(ModelChecklist.filter(models, "sonnet").map(\.id), ["anthropic/claude-sonnet-5"])

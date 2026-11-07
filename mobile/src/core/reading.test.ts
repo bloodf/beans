@@ -78,7 +78,7 @@ beforeEach(async () => {
 
 async function flush() {
   // markRead imports the native bridge asynchronously.
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await vi.dynamicImportSettled();
 }
 
 function reply(id: string, kind: "reply" | "permission" | "failure" = "reply") {
@@ -96,7 +96,7 @@ function reply(id: string, kind: "reply" | "permission" | "failure" = "reply") {
 
 function notification(chatId: string, body: string): Notification {
   return { date: 1, request: { identifier: chatId, trigger: null, content: {
-    title: "Chef", subtitle: null, body, data: { chat_id: chatId }, sound: "default",
+    title: "Chef", subtitle: null, categoryIdentifier: null, body, data: { chat_id: chatId }, sound: "default",
   } } };
 }
 

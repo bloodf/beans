@@ -145,9 +145,9 @@ ${updates}
 }
 
 async function run(cmd: string[], opts: { cwd?: string; capture?: boolean } = {}) {
-  const executable = cmd[0]
-  if (executable === undefined) throw new Error("Command requires an executable")
-  const proc = spawn(executable, cmd.slice(1), {
+  const [command, ...args] = cmd
+  if (!command) throw new Error("Command must not be empty")
+  const proc = spawn(command, args, {
     cwd: opts.cwd ?? PACKAGE_DIR,
     stdio: opts.capture ? ["ignore", "pipe", "pipe"] : ["ignore", "inherit", "inherit"],
   })

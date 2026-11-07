@@ -57,7 +57,7 @@ for (const { entry, out, format } of bundles) {
   const output = result.outputFiles[0];
   if (!output) throw new Error(`build of ${entry} produced no output`);
   const path = join(dir, out);
-  if (format === "iife") assertJSCGlobals(path, output.contents.toString("utf8"));
+  if (format === "iife") assertJSCGlobals(path, Buffer.from(output.contents).toString("utf8"));
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, output.contents);
 }

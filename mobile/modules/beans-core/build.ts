@@ -1,11 +1,12 @@
 // Builds the Rust core for the phone and drops it where the Expo module picks it up: an
 // xcframework plus Swift bindings under ios/, shared libraries plus Kotlin bindings under
-// android/. Run from mobile/: `bun run core` (or `bun run core ios` / `bun run core android`).
+// android/. Run from mobile/: `pnpm run core` (or `pnpm run core ios` / `pnpm run core android`).
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { androidNdk, hostLibrary } from "../../../scripts/release-build-inputs.ts";
 import { join, resolve } from "node:path";
 
-const MODULE = import.meta.dir;
+const MODULE = import.meta.dirname;
 const ROOT = resolve(MODULE, "../../..");
 const TARGET = join(ROOT, "target");
 const platforms = process.argv.slice(2).filter((a) => a === "ios" || a === "android");
@@ -14,8 +15,13 @@ const wantAndroid = platforms.length === 0 || platforms.includes("android");
 
 async function run(cmd: string[], env: Record<string, string> = {}) {
   console.log("$", cmd.join(" "));
-  const proc = Bun.spawn(cmd, { cwd: ROOT, env: { ...process.env, ...env }, stdout: "inherit", stderr: "inherit" });
-  const code = await proc.exited;
+  const proc = spawn(cmd[0]!, cmd.slice(1), { cwd: ROOT, env: { ...process.env, ...env }, stdio: ["ignore", "inherit", "inherit"] });
+  // Wait for the close: a spawn failure and a signalled child are failures, never a success.
+  const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((settle, reject) => {
+    proc.once("error", reject);
+    proc.once("close", (exitCode, exitSignal) => settle([exitCode, exitSignal]));
+  });
+  if (code === null) throw new Error(`${cmd[0]} was terminated by signal ${signal ?? "unknown"}`);
   if (code !== 0) throw new Error(`${cmd[0]} exited with ${code}`);
 }
 

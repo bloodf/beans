@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readVersion } from "./app.ts";
 import { stageEasBuild, verifyEasBinary } from "./release-eas.ts";
-import { inspectMobileBinary } from "./release-build-inputs.ts";
+import { inspectMobileBinary, type PublicTrustPolicy } from "./release-build-inputs.ts";
 
 test("missing public authority rejects every profile before reading or downloading candidate bytes", async () => {
   const root = await mkdtemp(join(tmpdir(), "beans-binary-assurance-"));
@@ -38,11 +38,12 @@ test("admitted APK and AAB candidates reach archive inspection after temporary s
   // Isolate temporary-file staging from native tool availability. No signature acceptance is mocked.
   const admission = vi.spyOn(trust, "preflightMobileTrust").mockImplementation((profile, policy) => trust.validatePublicTrustPolicy(policy, profile));
   try {
-    for (const policy of [
+    const policies: PublicTrustPolicy[] = [
       { profile: "github", signerSha256: ["a".repeat(64)], rotation: "none" },
       { profile: "production", uploadSignerSha256: "b".repeat(64), rotation: "none" },
-    ] as const) {
-      await expect(verifyEasBinary(new Uint8Array([0x50, 0x4b]), policy.profile, readVersion(), "42", { ...policy, ...(policy.profile === "github" ? { signerSha256: [...policy.signerSha256] } : {}) })).rejects.toThrow("Unsafe binary archive structure or decompressed size");
+    ];
+    for (const policy of policies) {
+      await expect(verifyEasBinary(new Uint8Array([0x50, 0x4b]), policy.profile, readVersion(), "42", policy)).rejects.toThrow("Unsafe binary archive structure or decompressed size");
     }
   } finally { admission.mockRestore(); }
 });

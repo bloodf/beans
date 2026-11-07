@@ -2,6 +2,23 @@
 
 The Runner's `memory_service` modules add account-configured memory beside the existing `MEMORY.md`, daily logs, local `recall`, and compaction memory flush. Configuration is shared by Devices; service operations execute on the bot's assigned Runner. See [Memory UI](memory-ui.md) for app helpers and [Identity](identity.md) for account encryption.
 
+## Group context controls
+
+A group's shared persistent instruction is its description. `ChatMeta` carries the description, membership and owner; it has no group memory store or per-group compaction policy. Changing the owner selects who holds the work. It does not transfer a bot's private notes, merge summaries or grant access to another bot's memory service namespace.
+
+| Mechanism | Scope and persistence | Owner control |
+| --- | --- | --- |
+| Description | Group metadata in the account-encrypted roster | `chats.set_description`; the existing group inspectors edit it |
+| Compaction checkpoint | One `Compaction` per chat and bot, stored locally on the Runner | `chats.compact` summarizes now; without `bot_id` it selects the recorded owner, then the first member |
+| Curated notes and diary | Bot workspace on its assigned Runner, shared across that bot's own chats | `bots.memory` and `bots.memory.write`; writes carry an expected hash to detect a changed draft |
+| Memory service preferences | Per-bot configuration in the separate encrypted `memory_config` blob | Explicit binding, recall budget and capture consent; group capture requires separate opt-in |
+
+Compaction reads only the selected bot's checkpoint. `App::set_compaction` replaces or clears only that bot's record. This internal clear is not a group reset RPC. A checkpoint whose covered message is missing is ignored when rebuilding context. Roster sync updates `ChatMeta` while retaining existing local checkpoints; a newly received chat starts with none. Description edits use the existing roster conflict handling, which keeps conflicting local edits queued. Checkpoints have no cross-Device conflict merge because they are not synced.
+
+Deleting a group removes its chat and checkpoints. It does not erase the bots' workspace notes or their memory service documents. Those have their own edit and [confirmed deletion](memory-services.md#durable-capture-and-deletion) mechanisms. Compacting likewise does not clear memory or delete transcript rows. A bot's own notes and recent-work brief can enter its context in a group, as described in [Memory](bots.md#memory); they are not copied into another member's checkpoint or namespace by an owner or description edit. Shell-enabled bots retain the Runner user's filesystem authority.
+
+Automatic compaction and the pre-compaction local memory flush use Runner process controls, `BEANS_COMPACTION` and `BEANS_MEMORY_FLUSH`, plus the model window and built-in thresholds. They are not owner-visible per-group settings and are not encrypted account settings. The macOS and Windows/Linux inspectors expose Compact; the phone's group details expose description and ownership, without a compaction-policy editor. See [Providers](providers.md) for the summarization mechanism and [Memory services](memory-services.md) for per-bot consent and namespaces.
+
 ## Account configuration
 
 `memory_config` is a separate schema-version-1 blob, encrypted with the account DEK and kind-associated data. Provider credentials have no memory fields. Connections include private secrets, typed backend options and optional embedding-profile references. Per-bot preferences contain binding, automatic-recall budget, future conversation/group capture consent and deletion epoch. Local filesystem/model/database paths remain private Runner bindings, not portable account config.
@@ -23,7 +40,7 @@ The fresh account public key selects a distinct namespace without changing the `
 
 Namespaces are logical isolation, not server authorization. A Hindsight shared key can authorize more than one bank; hosted multi-user deployments need actual bank/tenant authorization at their server or gateway. Shell-enabled bots retain the Runner user's filesystem authority.
 
-Core admission and dispatch recheck bot existence, assignment, account Pause, cancellation, connection revision, consent and deletion epoch. Immutable adapters are bound to scope and constructed explicitly, never through an inference-provider kind or generic backend factory. Saving configuration does not require a preinitialized adapter. Read-only health/setup negotiates an actual adapter; unavailable prerequisites report setup required rather than fabricated capabilities.
+Core admission retains the local account incarnation; dispatch rechecks it alongside bot existence, assignment, account Pause, cancellation, connection revision, consent and deletion epoch. A same-key restore cannot revive a suspended call from the forgotten incarnation. Lifecycle guards cover synchronous admission, queue transitions and adapter/result publication, and end before network awaits. Roster writers take the roster lock first. Immutable adapters are bound to scope and constructed explicitly, never through an inference-provider kind or generic backend factory. Saving configuration does not require a preinitialized adapter. Read-only health/setup negotiates an actual adapter; unavailable prerequisites report setup required rather than fabricated capabilities.
 
 `MemoryBackend` executes health, retain, recall, inspection, supported deletion, operation status/cancel, native reflection and individually capability-gated advanced features. Hindsight profile semantics use supported config operations; directives, mental models/history, observations, curation and documents remain distinct capabilities. OpenViking sessions/resources/tasks do not pretend to be Hindsight reflection. pgvector and Lance use exact scoped vector/document operations and full embedding identity; neither natively extracts facts or reflects. No common-parity claim or paid synthesis fallback is made.
 

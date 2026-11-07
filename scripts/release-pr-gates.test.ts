@@ -86,3 +86,21 @@ test("every Rust aggregate receives a prebuilt real relay for the revocation fix
     expect(steps[build].run).toContain("cargo metadata --locked --no-deps --format-version 1");
   }
 });
+
+test("every release regression executes unconditionally in a hosted fixture gate", async () => {
+  const jobs = workflows.find(({ file }) => file === "test.yml")!.workflow.jobs;
+  const files = [...new Bun.Glob("release*.test.ts").scanSync(join(ROOT, "scripts")), "submit-eas.test.ts", "protoc-workflows.test.ts"];
+  for (const file of files) {
+    const invocations = Object.values(jobs).flatMap((job: any) => job.steps.filter((step: any) =>
+      typeof step.run === "string" && step.run.split(/\s+/).includes(`scripts/${file}`)
+    ).map((step: any) => ({ job, step })));
+    expect(invocations.length, `${file}: hosted invocation`).toBe(1);
+    for (const { job, step } of invocations) {
+      expect(job["continue-on-error"]).toBeUndefined();
+      expect(step.if).toBeUndefined();
+      expect(step["continue-on-error"]).toBeUndefined();
+      expect(step.run).toMatch(/^bun test /);
+      expect(step.run).not.toMatch(/\|\||;|--todo|--test-name-pattern/);
+    }
+  }
+});

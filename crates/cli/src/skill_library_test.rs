@@ -9,6 +9,7 @@ fn signed_library_confirmation_boundary() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
     runtime.block_on(async {
         let home = std::env::temp_dir().join(format!("beans-library-consumer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let _cleanup = Cleanup(home.clone());
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         crate::identity::create(&app, Some("Synthetic Runner".into())).unwrap();
@@ -54,6 +55,23 @@ fn signed_library_confirmation_boundary() {
         assert_eq!(std::fs::read(owned.join(id).join("content/resource")).unwrap(), b"abc");
         let manifest: Value = serde_json::from_slice(&std::fs::read(owned.join(id).join("manifest.json")).unwrap()).unwrap();
         assert!(manifest["files"].as_array().unwrap().iter().any(|f| f["path"] == "resource" && f["sha256"] == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+        let keep_both = |token: &Value, original: &str| make("skills.library.keep_both", json!({"version":1,"runner_id":runner,"token":token,"managed_id":original,"confirmed":true}));
+        let preview = answer(&app, &preview_request()).await.unwrap();
+        let missing = keep_both(&preview["token"], &"0".repeat(32));
+        assert_eq!(answer(&app, &missing).await.unwrap_err(), "skill_library_failed");
+        assert_eq!(answer(&app, &missing).await.unwrap_err(), "skill_library_approval_not_found");
+        assert_eq!(std::fs::read_dir(&owned).unwrap().count(), 1);
+        let original_resource = owned.join(id).join("content/resource");
+        std::fs::write(&original_resource, b"local edit").unwrap();
+        let preview = answer(&app, &preview_request()).await.unwrap();
+        let kept = answer(&app, &keep_both(&preview["token"], id)).await.unwrap();
+        assert_eq!(kept["original_managed_id"], id);
+        let new_id = kept["managed_id"].as_str().unwrap();
+        assert_ne!(new_id, id);
+        assert_eq!(std::fs::read(&original_resource).unwrap(), b"local edit");
+        assert_eq!(std::fs::read(owned.join(new_id).join("content/resource")).unwrap(), b"abc");
+        answer(&app, &make("skills.library.uninstall", json!({"version":1,"runner_id":runner,"managed_id":new_id,"confirmed":true}))).await.unwrap();
+        std::fs::write(&original_resource, b"abc").unwrap();
         std::fs::write(owned.join("unrelated"), b"keep").unwrap();
         let removal = |managed_id: &str, confirmed| make("skills.library.uninstall", json!({"version":1,"runner_id":runner,"managed_id":managed_id,"confirmed":confirmed}));
         assert_eq!(answer(&app, &removal(id, false)).await.unwrap_err(), "skill_library_confirmation_required");

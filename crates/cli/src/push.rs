@@ -193,6 +193,7 @@ mod tests {
         use crate::{config::Config, keys::MachineFile};
 
         let home = std::env::temp_dir().join(format!("beans-push-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         *app.machine.lock().unwrap() = Some(MachineFile { format: crate::config::Format::BeansV2, machine_secret: crate::keys::b64(&crate::keys::random_32()), identity_pubkey: "identity".into(),
         content_pubkey: "content".into(), account_dek: crate::keys::b64(dek), name: "Runner".into(),

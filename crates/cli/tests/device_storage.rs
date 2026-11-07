@@ -9,7 +9,7 @@ impl Drop for Scratch {
 
 #[test]
 fn device_storage_keeps_only_the_app_view_of_tools() {
-    let scratch = Scratch(std::env::temp_dir().join(format!("beans-device-storage-{}", uuid::Uuid::new_v4())));
+    let scratch = Scratch(tempfile::tempdir().unwrap().keep());
     let app = App::load(Config { home: scratch.0.clone(), port: 0 }).unwrap();
     app.state.lock().unwrap().chats.push(Chat {
         meta: ChatMeta {

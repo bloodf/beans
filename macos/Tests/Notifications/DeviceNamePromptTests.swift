@@ -4,6 +4,45 @@ import XCTest
 
 @MainActor
 final class DeviceNamePromptTests: XCTestCase {
+    func testObservedRemovalAndReturnCannotRestoreAnOpenPrompt() throws {
+        _ = NSApplication.shared
+        let json = #"{"id":"peer","name":"Office","machine_name":"MacBook","model":"MacBook","os":"macos","os_version":"26","machine_key":"peer","is_this_device":false,"status":"offline","last_seen":0}"#
+        let device = try Wire.decoder.decode(Wire.Device.self, from: Data(json.utf8)).toModel()
+        var ownership = DeviceNameOwnership()
+        ownership.observe(.snapshotReplaced, devices: [device])
+        let prompt = DeviceNamePrompt(device: device, owner: ownership.generation, generation: 3)
+        prompt.field.stringValue = "Stale alias"
+
+        ownership.observe(.rosterChanged, devices: [])
+        XCTAssertNil(prompt.name(for: .alertFirstButtonReturn, owner: ownership.generation,
+                                 target: device.id, generation: 3))
+        // A returning machine blob can retain the same full id and abbreviated key.
+        ownership.observe(.rosterChanged, devices: [device])
+        XCTAssertNil(prompt.name(for: .alertFirstButtonReturn, owner: ownership.generation,
+                                 target: device.id, generation: 3))
+        let fresh = DeviceNamePrompt(device: device, owner: ownership.generation, generation: 3)
+        fresh.field.stringValue = "Fresh alias"
+        XCTAssertEqual(fresh.name(for: .alertFirstButtonReturn, owner: ownership.generation,
+                                  target: device.id, generation: 3), "Fresh alias")
+    }
+
+    func testUnknownDeviceAndReturnCannotRestoreAnOpenPrompt() throws {
+        _ = NSApplication.shared
+        let knownJSON = #"{"id":"peer","name":"Office","machine_name":"MacBook","model":"MacBook","os":"macos","os_version":"26","machine_key":"peer","is_this_device":false,"status":"offline","last_seen":0}"#
+        let unknownJSON = #"{"id":"peer","name":"","model":"","os":"","os_version":"","machine_key":"peer","is_this_device":false,"status":"offline","last_seen":0,"unknown":true}"#
+        let known = try Wire.decoder.decode(Wire.Device.self, from: Data(knownJSON.utf8)).toModel()
+        let unknown = try Wire.decoder.decode(Wire.Device.self, from: Data(unknownJSON.utf8)).toModel()
+        XCTAssertEqual(unknown.os, .unknown)
+        var ownership = DeviceNameOwnership()
+        ownership.observe(.snapshotReplaced, devices: [known])
+        let prompt = DeviceNamePrompt(device: known, owner: ownership.generation, generation: 3)
+        prompt.field.stringValue = "Stale alias"
+        ownership.observe(.rosterChanged, devices: [unknown])
+        ownership.observe(.rosterChanged, devices: [known])
+        XCTAssertNil(prompt.name(for: .alertFirstButtonReturn, owner: ownership.generation,
+                                 target: known.id, generation: 3))
+    }
+
     func testCancelAndRevokedOwnersDoNotProduceRenameIntent() throws {
         _ = NSApplication.shared
         let json = #"{"id":"peer","name":"Office","machine_name":"MacBook","model":"MacBook","os":"macos","os_version":"26","machine_key":"peer","is_this_device":false,"status":"offline","last_seen":0}"#

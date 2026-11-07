@@ -1,6 +1,6 @@
 # Beans Architecture
 
-Read this before writing code, then the docs in [Subjects](#subjects) for the parts you change.
+Before coding, read this and the relevant [Subjects](#subjects).
 
 Beans is a Grok Bot alternative: persistent named bots, 1:1 chats, group chats, handoff, and orchestration. Work runs on **Devices you own**. The Rust CLI runs on macOS, Linux, and Windows. Each desktop app bundles, launches and provides a UI for the local CLI.
 

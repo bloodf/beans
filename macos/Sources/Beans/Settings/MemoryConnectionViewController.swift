@@ -180,7 +180,7 @@ private final class MemoryOpenVikingBindingForm: NSStackView {
         bot.addItem(withTitle: L("Choose exact bot"))
         for value in bots { bot.addItem(withTitle: "\(value.name) · \(value.id)"); bot.lastItem?.representedObject = value.id }
         mode.addItems(withTitles: [L("Bot USER key"), L("Trusted gateway")])
-        for (label, view) in [("Bot", bot as NSView), ("Authorization mode", mode), ("Account identity", account), ("User identity", user), ("Bot authorization secret", secret)] {
+        for (label, view) in [(L("Bot"), bot as NSView), (L("Authorization mode"), mode), (L("Account identity"), account), (L("User identity"), user), (L("Bot authorization secret"), secret)] {
             let stack = Build.stack([Build.label(L(label), font: .systemFont(ofSize: 12)), view], spacing: 4)
             view.translatesAutoresizingMaskIntoConstraints = false; view.setAccessibilityLabel(L(label))
             addArrangedSubview(stack); stack.widthAnchor.constraint(equalTo: widthAnchor).isActive = true

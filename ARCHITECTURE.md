@@ -61,6 +61,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | --- | --- |
 | [Account model](docs/architecture/account-model.md) | Entity relationships, Device/relay data ownership and cross-Runner job routing |
 | [Identity](docs/architecture/identity.md) | Key pairs and the identity device, pairing and unpairing, Devices and Runners, what the relay sees, the account's provider credentials |
+| [Device names](docs/architecture/device-names.md) | Account aliases, machine names and durable roster intent |
 | [Device revocation](docs/architecture/device-revocation.md) | Lost, un-wiped Device boundaries and the proposed, unimplemented containment and rotation contract |
 | [Relay](docs/architecture/relay.md) | `crates/relay`: storage on SQLite or Postgres, files, housekeeping, quotas, metrics, rate limits, auth, tables and migrations, the blob, sync socket, and push APIs, deploys |
 | [Computer display](docs/architecture/computer-display.md) | Proposed authenticated display/input transport, Device-bound sessions, lifecycle fences, client feasibility and measurement gaps |
@@ -137,7 +138,7 @@ Implemented mechanisms include crypto and blob sync, relay storage, CLI identity
 
 Next: keychain storage, a cost budget per chat.
 
-The phone app (`mobile/`) pairs as a Device with `os` `ios`, `ipados`, or `android`; it is never a Runner and does not hold the master secret. The Device that creates or restores the identity holds the master secret.
+See [Phone app](docs/architecture/phone-app.md) for phone identity and key ownership.
 
 ## Open points
 

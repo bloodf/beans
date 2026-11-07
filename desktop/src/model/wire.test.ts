@@ -1,7 +1,7 @@
 // What the CLI sends, as the app reads it: custom providers in the account's provider statuses and
 // as a bot's provider, and a command's card.
 
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { contextSummary, runsInForeground } from "./models";
 import { toUsage, toBot, toCustomModel, toMessage, toProviders, type WireBot } from "./wire";
 

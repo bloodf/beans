@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 import type { Chat, ChatUsage } from "../core/model";
 
 // Exercise the real Details page and store reducer without native layout or network calls.
@@ -9,23 +9,23 @@ const react = {
   useCallback: (fn: unknown) => fn, useDebugValue: () => {},
   useSyncExternalStore: (_subscribe: unknown, snapshot: () => unknown) => snapshot(),
 };
-mock.module("react", () => ({ ...react, default: react }));
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
-mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
-mock.module("react-native", () => ({
+vi.doMock("react", () => ({ ...react, default: react }));
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
+vi.doMock("react-native", () => ({
   Alert: {}, Platform: { OS: "ios" }, Pressable: "Pressable", ScrollView: "ScrollView",
   Switch: "Switch", Text: "Text", View: "View", StyleSheet: { create: (value: unknown) => value },
 }));
-mock.module("expo-router", () => ({ Stack: { Screen: "Screen" }, useLocalSearchParams: () => ({ id: "chat" }), useRouter: () => ({}) }));
-mock.module("../core/prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
-mock.module("expo-localization", () => ({ getLocales: () => [{ languageCode: "en" }] }));
-mock.module("../core/engine", () => ({ chatTitle: (chat: Chat) => chat.title, engine: {} }));
-mock.module("./avatarVisibility", () => ({ notifyAvatarScroll: () => {} }));
-mock.module("./Avatar", () => ({ AvatarCluster: "AvatarCluster", BotAvatar: "BotAvatar" }));
-mock.module("./forms", () => ({ Section: "Section", Row: "Row", CheckRow: "CheckRow", FieldRow: "FieldRow", ToggleRow: "ToggleRow" }));
-mock.module("./Symbol", () => ({ Symbol: "Symbol" }));
-mock.module("./theme", () => ({ usePalette: () => ({}) }));
-mock.module("./navigation", () => ({ CloseToolbar: "CloseToolbar" }));
+vi.doMock("expo-router", () => ({ Stack: { Screen: "Screen" }, useLocalSearchParams: () => ({ id: "chat" }), useRouter: () => ({}) }));
+vi.doMock("../core/prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
+vi.doMock("expo-localization", () => ({ getLocales: () => [{ languageCode: "en" }] }));
+vi.doMock("../core/engine", () => ({ chatTitle: (chat: Chat) => chat.title, engine: {} }));
+vi.doMock("./avatarVisibility", () => ({ notifyAvatarScroll: () => {} }));
+vi.doMock("./Avatar", () => ({ AvatarCluster: "AvatarCluster", BotAvatar: "BotAvatar" }));
+vi.doMock("./forms", () => ({ Section: "Section", Row: "Row", CheckRow: "CheckRow", FieldRow: "FieldRow", ToggleRow: "ToggleRow" }));
+vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
+vi.doMock("./theme", () => ({ usePalette: () => ({}) }));
+vi.doMock("./navigation", () => ({ CloseToolbar: "CloseToolbar" }));
 const { useStore, setChatUsage } = await import("../core/store");
 const { setAppLanguage } = await import("../i18n");
 const { default: ChatInfoScreen } = await import("../../app/chat-info/[id]");

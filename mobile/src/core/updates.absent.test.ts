@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { afterAll, expect, test, vi } from "vitest";
 
 // When beans-core has no installUpdate/onInstallStatus, the Android production build must not
 // check GitHub or offer an update.
@@ -7,31 +7,37 @@ let prefs: Record<string, unknown> = {};
 const alerts: unknown[] = [];
 let fetches = 0;
 
-mock.module("react-native", () => ({
+vi.doMock("react-native", () => ({
   Platform: { OS: "android" },
   AppState: { addEventListener: () => {} },
   Alert: { alert: (...args: unknown[]) => alerts.push(args) },
 }));
-mock.module("expo-application", () => ({ applicationId: "ai.amoena.beans", nativeApplicationVersion: "1.2.0" }));
-mock.module("./prefs", () => ({
+vi.doMock("expo-application", () => ({ applicationId: "ai.amoena.beans", nativeApplicationVersion: "1.2.0" }));
+vi.doMock("./prefs", () => ({
   loadPrefs: () => prefs,
   savePrefs: (next: Record<string, unknown>) => {
     prefs = next;
   },
 }));
-// Real beans-core at this slice: no Android installer exports.
-mock.module("../../modules/beans-core", () => ({
+// Real beans-core at this slice: no Android installer exports. Absent methods are
+// represented explicitly as undefined rather than omitted, so the mock has no
+// missing-export proxy that could throw on property access.
+vi.doMock("../../modules/beans-core", () => ({
   start: () => {},
   request: async () => ({}),
   onEvent: () => () => {},
   wake: () => {},
   setOpenChat: () => {},
+  installUpdate: undefined,
+  onInstallStatus: undefined,
 }));
 
+const originalFetch = globalThis.fetch;
 globalThis.fetch = (async () => {
   fetches += 1;
   return Response.json([]);
 }) as typeof fetch;
+afterAll(() => { globalThis.fetch = originalFetch; });
 
 const updates = await import("./updates");
 

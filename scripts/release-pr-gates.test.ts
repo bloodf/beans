@@ -1,10 +1,12 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import yaml from "yaml";
 
-const ROOT = join(import.meta.dir, "..");
+const ROOT = join(import.meta.dirname, "..");
 const workflows = await Promise.all(["test.yml", "docs.yml", "catalog.yml"].map(async (file) => ({
   file,
-  workflow: Bun.YAML.parse(await Bun.file(join(ROOT, ".github/workflows", file)).text()),
+  workflow: yaml.parse(await readFile(join(ROOT, ".github/workflows", file), "utf8")),
 })));
 
 function evaluate(expression: string, github: object, env: object = {}) {
@@ -65,7 +67,9 @@ test("catalog uses PR base or main for dispatch in both fetch and comparison", (
     expect(env.CATALOG_BASE_REF).toBe(expected);
     const fetch = job.steps.find((step: { run?: string }) => step.run?.startsWith("git fetch ")).run;
     expect(fetch.replaceAll("$CATALOG_BASE_REF", env.CATALOG_BASE_REF)).toBe(`git fetch --depth=1 origin "+refs/heads/${expected}:refs/remotes/origin/${expected}"`);
-    const check = job.steps.find((step: { run?: string }) => step.run === "bun run check:catalog");
+    const check = job.steps.find((step: { run?: string }) => step.run === "pnpm run check:catalog");
+    expect(check, "catalog check step").toBeDefined();
+    expect(check?.run).toBe("pnpm run check:catalog");
     const base = check.env.CATALOG_BASE.replace(/\$\{\{(.*?)\}\}/g, (_: string, expression: string) => evaluate(expression, github, env));
     expect(base).toBe(`origin/${expected}`);
   }

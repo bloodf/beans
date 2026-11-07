@@ -1,4 +1,4 @@
-import { beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, expect, test, vi } from "vitest";
 
 // The Android app's check for a newer release, against a GitHub API answered here: tags, drafts
 // and prerelease releases, the APK and its digest, and the daily check's alert. Also the progress
@@ -9,7 +9,7 @@ const alerts: { title: string; message?: string; buttons: { text: string; onPres
 const installs: unknown[][] = [];
 let installReject: Error | null = null;
 
-mock.module("react-native", () => ({
+vi.doMock("react-native", () => ({
   Platform: { OS: "android" },
   AppState: { addEventListener: () => {} },
   Alert: {
@@ -18,14 +18,14 @@ mock.module("react-native", () => ({
     },
   },
 }));
-mock.module("expo-application", () => ({ applicationId: "ai.amoena.beans", nativeApplicationVersion: "1.2.0" }));
-mock.module("./prefs", () => ({
+vi.doMock("expo-application", () => ({ applicationId: "ai.amoena.beans", nativeApplicationVersion: "1.2.0" }));
+vi.doMock("./prefs", () => ({
   loadPrefs: () => prefs,
   savePrefs: (next: Record<string, unknown>) => {
     prefs = next;
   },
 }));
-mock.module("../../modules/beans-core", () => ({
+vi.doMock("../../modules/beans-core", () => ({
   installUpdate: async (...args: unknown[]) => {
     if (installReject) throw installReject;
     installs.push(args);
@@ -41,7 +41,9 @@ const githubFetch = (async (input: string | URL) => {
   if (body === undefined) return new Response("{}", { status: 404 });
   return Response.json(body);
 }) as typeof fetch;
+const originalFetch = globalThis.fetch;
 globalThis.fetch = githubFetch;
+afterAll(() => { globalThis.fetch = originalFetch; });
 
 const updates = await import("./updates");
 
@@ -152,7 +154,7 @@ test("the daily check offers a release once, and Skip This Version keeps it from
   routes = { "/git/matching-refs/tags/beans-v": tags("1.3.0"), "/releases/tags/beans-v1.3.0": release("1.3.0") };
   await updates.checkForUpdates(true);
   expect(updates.useUpdates.getState().latest?.version).toBe("1.3.0");
-  expect(prefs.update_checked_at).toBeNumber();
+  expect(prefs.update_checked_at).toBeTypeOf("number");
   expect(alerts.map((a) => a.title)).toEqual(["Beans 1.3.0 is available"]);
   expect(alerts[0]!.buttons.map((b) => b.text)).toEqual(["Skip This Version", "Remind Me Later", "Install Update"]);
 

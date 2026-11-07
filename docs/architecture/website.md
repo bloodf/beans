@@ -8,13 +8,9 @@ The Windows download resolves both the staged `Beans Setup <version>.exe` name a
 
 The Vercel project `hr-teconologia/beans` connects to `bloodf/beans` on GitHub. Pushes to `main` target production at `usebeans.app`; other branches create previews. Its root directory is `web`, with source files outside that directory enabled. Installation runs `cd .. && pnpm install --frozen-lockfile`, and the build runs `pnpm run build`.
 
-The project's Ignored Build Step compares `VERCEL_GIT_PREVIOUS_SHA` with `HEAD` for `web/`, `desktop/`, the root `package.json` and `bun.lock`, `crates/models/catalog.json`, `crates/cli/marketplace/index.json`, and `.vercelignore`. These paths cover the site, embedded desktop demo, workspace dependencies and served catalogs. An unchanged diff skips the build. A missing previous deployment SHA or unavailable Git history allows the build. Vercel's automatic affected-project detection is disabled so it cannot skip changes to the served catalogs outside the JavaScript workspaces.
+The Ignored Build Step in `web/vercel.json` compares `VERCEL_GIT_PREVIOUS_SHA` with `HEAD` for the site, embedded desktop demo, root package and pnpm lock/workspace settings, Blobatar package, served catalogs and `.vercelignore`. Only a successful unchanged diff skips the build. Missing previous deployment SHA or unavailable Git history returns exit 1 to run the build instead of failing deployment with Git's error status. Vercel's automatic affected-project detection is disabled so it cannot skip changes to served catalogs outside the JavaScript workspaces.
 
-`.vercelignore` retains Git metadata so the Ignored Build Step can compare commits. This filter is stored in the Vercel project settings and runs from `web`:
-
-```sh
-test -n "$VERCEL_GIT_PREVIOUS_SHA" && git diff --quiet "$VERCEL_GIT_PREVIOUS_SHA" HEAD -- . ../desktop ../package.json ../bun.lock ../crates/models/catalog.json ../crates/cli/marketplace/index.json ../.vercelignore
-```
+`.vercelignore` retains Git metadata for this comparison. The repository configuration overrides the project's Ignored Build Step and runs from `web`. `python3 scripts/test_vercel_ignore.py` verifies unchanged, changed, empty and unavailable previous revisions using real temporary Git commits.
 
 ## Landing-page motion
 

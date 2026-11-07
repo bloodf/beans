@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { botAvatarGeometry } from "@beans/blobatar";
 import { avatarFrame, avatarMorphProgress, interpolateAvatarGeometry } from "@beans/blobatar/frame";
 import { AvatarMotion } from "./avatarMotion";

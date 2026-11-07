@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readVersion, ROOT } from "./app.ts";
@@ -19,13 +20,14 @@ test("submission verifies signed provenance and bytes before testing-only upload
   try {
     for (const platform of ["android", "ios"]) {
       const mobile = join(directory, platform); await mkdir(mobile);
-      await writeFile(join(mobile, "eas.json"), await Bun.file(join(ROOT, "mobile/eas.json")).text());
+      await writeFile(join(mobile, "eas.json"), await readFile(join(ROOT, "mobile/eas.json"), "utf8"));
       const profile = platform === "android" ? "production" : "testflight";
       const artifact = `Beans-${v}${platform === "android" ? ".aab" : "-store.ipa"}`;
       const proof = { schema: 1, revision, version: v, project, buildId: "22222222-2222-4222-8222-222222222222", buildNumber: "42", profile, artifact, size: binary.length, sha256: sha(binary) };
       const proofBytes = Buffer.from(JSON.stringify(proof));
+      const localProof = Buffer.from(JSON.stringify({ ...proof, kind: "local-exact-source", buildId: undefined }));
       const manifest = Buffer.from(JSON.stringify({ schema: 1, revision, version: v, artifacts: [{ name: `eas-${profile}.json`, size: proofBytes.length, sha256: sha(proofBytes) }, { name: artifact, size: binary.length, sha256: sha(binary) }] }));
-      const originalConfig = await Bun.file(join(mobile, "eas.json")).text();
+      const originalConfig = await readFile(join(mobile, "eas.json"), "utf8");
       await mkdir(join(mobile, ".credentials"));
       await writeFile(join(mobile, ".credentials/keep"), "existing");
       let keyPath = "";
@@ -44,23 +46,39 @@ test("submission verifies signed provenance and bytes before testing-only upload
         if (args[1] === "build:view") return JSON.stringify({ id: proof.buildId, status: "FINISHED", platform: platform.toUpperCase(), buildProfile: profile, gitCommitHash: revision, appVersion: v, appBuildVersion: "42", appIdentifier: "ai.amoena.beans", distribution: "STORE", app: { id: project }, artifacts: { buildUrl: "https://artifacts.eascdn.net/store" } });
         if (args[1] === "submit") {
           expect(args).toContain("--path"); expect(args).not.toContain("--latest");
-          const config = await Bun.file(join(mobile, "eas.json")).json();
+          const config = JSON.parse(await readFile(join(mobile, "eas.json"), "utf8"));
           keyPath = platform === "android" ? config.submit.production.android.serviceAccountKeyPath : config.submit.production.ios.ascApiKeyPath;
-          expect(await Bun.file(keyPath).exists()).toBe(true);
+          expect(existsSync(keyPath)).toBe(true);
           if (failSubmit) throw new Error("fixture submit failed");
           submitted = true; return "";
         }
         throw new Error("Unexpected fixture command");
       };
+      // A local build has no EAS record to view: refuse before any credential exists or any EAS call.
+      const localRunner = async (args: string[]) => {
+        if (args.includes("download")) {
+          const dest = args[args.indexOf("--dir") + 1];
+          const manifest = Buffer.from(JSON.stringify({ schema: 1, revision, version: v, artifacts: [{ name: `eas-${profile}.json`, size: localProof.length, sha256: sha(localProof) }, { name: artifact, size: binary.length, sha256: sha(binary) }] }));
+          await writeFile(join(dest, "beans-update.json"), manifest);
+          await writeFile(join(dest, "beans-update.json.sig"), sign(null, manifest, privateKey).toString("base64"));
+          await writeFile(join(dest, `eas-${profile}.json`), localProof);
+          return "";
+        }
+        expect(args[1]).not.toBe("build:view");
+        return runner(args);
+      };
+      await expect(submitEas([`beans-v${v}`, platform], localRunner, async () => trust, async () => binary, mobile)).rejects.toThrow("no EAS build record");
+      expect(submitted).toBe(false);
+      expect(await readFile(join(mobile, "eas.json"), "utf8")).toBe(originalConfig);
       await submitEas([`beans-v${v}`, platform], runner, async () => trust, async () => binary, mobile);
       expect(submitted).toBe(true);
-      expect(await Bun.file(join(mobile, "eas.json")).text()).toBe(originalConfig);
-      expect(await Bun.file(keyPath).exists()).toBe(false);
-      expect(await Bun.file(join(mobile, ".credentials/keep")).text()).toBe("existing");
+      expect(await readFile(join(mobile, "eas.json"), "utf8")).toBe(originalConfig);
+      expect(existsSync(keyPath)).toBe(false);
+      expect(await readFile(join(mobile, ".credentials/keep"), "utf8")).toBe("existing");
       failSubmit = true;
       await expect(submitEas([`beans-v${v}`, platform], runner, async () => trust, async () => binary, mobile)).rejects.toThrow("submit failed");
-      expect(await Bun.file(join(mobile, "eas.json")).text()).toBe(originalConfig);
-      expect(await Bun.file(keyPath).exists()).toBe(false);
+      expect(await readFile(join(mobile, "eas.json"), "utf8")).toBe(originalConfig);
+      expect(existsSync(keyPath)).toBe(false);
       failSubmit = false;
       submitted = false;
       await expect(submitEas([`beans-v${v}`, platform], runner, async () => trust, async () => new Uint8Array([1]), mobile)).rejects.toThrow("bytes differ");

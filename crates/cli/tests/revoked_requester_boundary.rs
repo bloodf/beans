@@ -52,8 +52,13 @@ async fn queued_request_from_revoked_device_cannot_write_surviving_runner_memory
     let address = listener.local_addr().unwrap();
     drop(listener);
     let url = format!("http://{address}");
-    let _relay = RelayProcess(Command::new(binary).env_clear()
-        .arg("--bind").arg(address.to_string())
+    let mut command = Command::new(binary);
+    command.env_clear();
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", root);
+    }
+    let _relay = RelayProcess(command.arg("--bind").arg(address.to_string())
         .arg("--db").arg(scratch.path().join("relay.sqlite3"))
         .arg("--files-dir").arg(scratch.path().join("relay-files"))
         .stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap());

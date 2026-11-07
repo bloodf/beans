@@ -310,7 +310,7 @@ mod tests {
     }
 
     fn scratch() -> PathBuf {
-        std::env::temp_dir().join(format!("beans-serve-drain-{}", uuid::Uuid::new_v4()))
+        tempfile::tempdir().unwrap().keep()
     }
 
     fn child_command(home: &Path, models_url: &str, drain_ms: u64, port: u16) -> Command {

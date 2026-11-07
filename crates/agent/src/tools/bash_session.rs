@@ -74,6 +74,12 @@ pub trait BashSessions: Send + Sync {
     fn get(&self, id: &str) -> Option<Arc<BashSession>>;
     /// The model has read how the session ended; the host may let it go.
     fn remove(&self, id: &str);
+    /// The user has written something the model has yet to read. A `bash_output` wait on a
+    /// command in the background gives way to it, so the model reads the message first; the
+    /// host wakes the wait with [`BashSession::nudge`] when the message arrives.
+    fn user_wrote(&self) -> bool {
+        false
+    }
 }
 
 /// How a session ended.
@@ -255,6 +261,8 @@ pub(crate) enum Stop {
     Deadline,
     /// The command was sent to the background while the call waited on it.
     Backgrounded,
+    /// The user wrote while the call waited on a command in the background.
+    UserWrote,
     Cancelled,
 }
 
@@ -288,6 +296,12 @@ impl BashSession {
             self.changed.send_modify(|version| *version += 1);
         }
         true
+    }
+
+    /// Wakes the calls waiting on it to look again at what ends their wait: the user wrote
+    /// ([`BashSessions::user_wrote`]).
+    pub fn nudge(&self) {
+        self.changed.send_modify(|version| *version += 1);
     }
 
     /// How it ended, or `None` while it runs.
@@ -459,7 +473,9 @@ impl BashSession {
     /// Waits until the command ends, goes quiet (at a prompt, or past `idle`), `until`
     /// passes, it is sent to the background, or `cancel` fires. `base` is how much output there was when the wait began and
     /// `since` when it began: silence counts from the later of `since` and the last output,
-    /// and only output past `base` counts as new. `on_output` runs after each chunk.
+    /// and only output past `base` counts as new. `on_output` runs after each chunk. A wait on
+    /// a command in the background also ends once `user_wrote` says so.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn wait(
         &self,
         base: u64,
@@ -467,6 +483,7 @@ impl BashSession {
         idle: Idle,
         until: Option<Instant>,
         cancel: &CancellationToken,
+        user_wrote: impl Fn() -> bool,
         mut on_output: impl FnMut(&BashSession),
     ) -> Stop {
         let mut changes = self.changed.subscribe();
@@ -482,6 +499,9 @@ impl BashSession {
             };
             if ended {
                 return Stop::Ended;
+            }
+            if in_background && user_wrote() {
+                return Stop::UserWrote;
             }
             if until.is_some_and(|until| now >= until) {
                 return Stop::Deadline;
@@ -860,6 +880,10 @@ fn running_note(session: &BashSession, stop: Stop, idle: Duration) -> String {
             "[The user sent the command to the background, where it runs on as session {id}: go on with your work. Read what it \
              prints with bash_output, or stop it with bash_input \"\\u0003\".]"
         ),
+        (Stop::UserWrote, _) => format!(
+            "[The user wrote while you waited: answer their message, which follows. The command runs on in the background as \
+             session {id}: read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]"
+        ),
         // Quiet, or in raw mode for its own keys (a dev server's shortcuts), is how a server waits.
         _ if session.background() => format!(
             "[Running in the background as session {id}. Read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]"
@@ -1002,7 +1026,7 @@ impl Tool for BashInputTool {
         // Ctrl-C: the call returns what it printed by then, with where it stands. One in the
         // background waits as long as starting it there does.
         let longest = if session.background() { BACKGROUND_SETTLE } else { self.longest_wait };
-        let stop = session.wait(base, since, idle, Some(since + longest), &cancel, |_| {}).await;
+        let stop = session.wait(base, since, idle, Some(since + longest), &cancel, || false, |_| {}).await;
         session_result(&session, self.sessions.as_ref(), from, stop, self.waiting_after, false)
     }
 }
@@ -1053,7 +1077,7 @@ impl Tool for BashOutputTool {
         let from = session.read_mark();
         let (base, since) = (session.total(), Instant::now());
         let idle = Idle { after: self.waiting_after, needs_output: true };
-        let stop = session.wait(base, since, idle, Some(since + wait.min(MAX_OUTPUT_WAIT)), &cancel, |_| {}).await;
+        let stop = session.wait(base, since, idle, Some(since + wait.min(MAX_OUTPUT_WAIT)), &cancel, || self.sessions.user_wrote(), |_| {}).await;
         session_result(&session, self.sessions.as_ref(), from, stop, self.waiting_after, false)
     }
 }
@@ -1086,7 +1110,7 @@ pub(crate) async fn run(
     // Sent to the background before the wait began, it waits as one started there.
     let until = session.background().then(|| session.started + BACKGROUND_SETTLE);
     let stop = session
-        .wait(0, session.started, idle, until, &cancel, |session| {
+        .wait(0, session.started, idle, until, &cancel, || false, |session| {
             if last_update.elapsed() >= Duration::from_millis(super::bash::UPDATE_THROTTLE_MS) {
                 last_update = Instant::now();
                 on_update(ToolResult::text(session.preview()));
@@ -1102,9 +1126,9 @@ mod tests {
     use crate::tools::BashTool;
     use std::collections::HashMap;
 
-    /// Sessions kept in a map, as a host would.
+    /// Sessions kept in a map, as a host would, and whether the user wrote.
     #[derive(Default)]
-    struct Host(Mutex<HashMap<String, Arc<BashSession>>>);
+    struct Host(Mutex<HashMap<String, Arc<BashSession>>>, std::sync::atomic::AtomicBool);
 
     impl BashSessions for Host {
         fn insert(&self, _call_id: &str, session: Arc<BashSession>) {
@@ -1115,6 +1139,9 @@ mod tests {
         }
         fn remove(&self, id: &str) {
             self.0.lock().unwrap().remove(id);
+        }
+        fn user_wrote(&self) -> bool {
+            self.1.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -1381,7 +1408,11 @@ mod tests {
             let t = tools(WAITING_AFTER);
             assert_eq!(t.bash.parameters()["properties"]["background"]["type"], "boolean");
             assert!(BashTool::new(std::env::temp_dir()).parameters()["properties"].get("background").is_none(), "not on pipes");
-            let command = "echo listening; while true; do echo tick; sleep 0.1; done";
+            // Keep a stable foreground executable for Ctrl-C. Non-interactive bash may
+            // continue after SIGINT if the child it waits for did not die from that signal;
+            // repeatedly starting sleep makes this a race. exec replaces that shell with
+            // cat, which streams the same ticks and dies from the terminal's signal.
+            let command = "echo listening; exec cat < <(while true; do echo tick; sleep 0.1; done)";
             // Login-shell capture is outside the settle window the assertion measures.
             crate::login_shell::environment().await;
             let started = std::time::Instant::now();
@@ -1460,7 +1491,7 @@ mod tests {
         {
             let since = Instant::now();
             let mut wait = std::pin::pin!(session.wait(session.total(), since, idle,
-                Some(since + BACKGROUND_SETTLE), &cancel, |_| {}));
+                Some(since + BACKGROUND_SETTLE), &cancel, || false, |_| {}));
             assert!(futures::poll!(wait.as_mut()).is_pending());
             tokio::time::advance(Duration::from_millis(399)).await;
             assert!(futures::poll!(wait.as_mut()).is_pending());
@@ -1471,7 +1502,7 @@ mod tests {
         for cap in [Duration::from_millis(500), BACKGROUND_SETTLE] {
             let since = Instant::now();
             let mut wait = std::pin::pin!(session.wait(session.total(), since, idle,
-                Some(since + cap), &cancel, |_| {}));
+                Some(since + cap), &cancel, || false, |_| {}));
             assert!(futures::poll!(wait.as_mut()).is_pending());
             while Instant::now() - since + Duration::from_millis(100) < cap {
                 tokio::time::advance(Duration::from_millis(100)).await;
@@ -1595,6 +1626,51 @@ mod tests {
         assert!(result.text_content().contains("The user sent the command to the background"), "{}", result.text_content());
         assert!(session.end().is_none(), "it runs on");
         session.stop("Stopped");
+    }
+
+    /// The user writes while the model waits on a command in the background: the wait gives way
+    /// so the model reads the message, and the command runs on. A wait on any other command
+    /// does not.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_wait_on_a_background_command_gives_way_to_the_user() {
+        let t = Arc::new(tools(Duration::from_millis(400)));
+        // Silence must wake from the message itself, not from the next chunk of output.
+        for command in ["while true; do echo tick; sleep 0.1; done", "sleep 30"] {
+            t.host.1.store(false, std::sync::atomic::Ordering::Relaxed);
+            let background = call(&t.bash, json!({"command": command, "background": true})).await.unwrap();
+            let session = t.host.get(&session_id(&background)).unwrap();
+            let (ready, started) = tokio::sync::oneshot::channel();
+            let waiting = tokio::spawn({
+                let (t, id) = (t.clone(), session.id().to_string());
+                async move {
+                    let waiting = call(&t.output, json!({"session_id": id, "wait_seconds": 30}));
+                    tokio::pin!(waiting);
+                    assert!(futures::poll!(&mut waiting).is_pending(), "it waits before the user writes");
+                    ready.send(()).unwrap();
+                    waiting.await
+                }
+            });
+            started.await.unwrap();
+
+            t.host.1.store(true, std::sync::atomic::Ordering::Relaxed);
+            session.nudge();
+            let result = tokio::time::timeout(Duration::from_secs(2), waiting).await.expect("the wait gave way").unwrap().unwrap();
+            let text = result.text_content();
+            assert!(text.contains("[The user wrote while you waited: answer their message, which follows."), "{text}");
+            assert!(session.end().is_none(), "it runs on");
+            let started = Instant::now();
+            call(&t.output, json!({"session_id": session.id(), "wait_seconds": 30})).await.unwrap();
+            assert!(started.elapsed() < Duration::from_secs(1), "a wait that starts with the message unread returns at once");
+            session.stop("Stopped");
+        }
+
+        let foreground = call(&t.bash, json!({"command": "sleep 30"})).await;
+        let foreground = t.host.get(&session_id(&foreground.unwrap())).unwrap();
+        let started = Instant::now();
+        call(&t.output, json!({"session_id": foreground.id(), "wait_seconds": 0.5})).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(500), "only a background command gives way");
+        foreground.stop("Stopped");
     }
 
     #[cfg(unix)]

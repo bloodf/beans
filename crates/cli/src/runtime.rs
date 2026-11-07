@@ -1290,6 +1290,33 @@ mod tests {
     }
 
     #[test]
+    fn forgetting_identity_cancels_live_work_after_task_update_fails() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let job = user_turn_job(app, "chat", "bot", "message");
+        let lease = app.task_lease(&job).unwrap();
+        assert!(app.store.queue_local_intent(&lease, &job).unwrap());
+        let cancel = CancellationToken::new();
+        app.running_jobs.lock().unwrap().insert(job.id.clone(), RunningJob {
+            chat_id: job.chat_id.clone(), bot_id: job.bot_id.clone(), routine_id: None,
+            runner_id: None, cancel: cancel.clone(), activity: None,
+        });
+        app.store.connection.lock().unwrap().execute_batch(
+            "CREATE TEMP TRIGGER reject_forget BEFORE UPDATE OF cancel_requested ON local_tasks BEGIN SELECT RAISE(ABORT, 'injected forget failure'); END;"
+        ).unwrap();
+
+        let error = app.forget_identity().unwrap_err();
+
+        assert!(format!("{error:#}").contains("injected forget failure"));
+        assert!(cancel.is_cancelled());
+        assert!(app.plugin_admission(None).is_err());
+        assert_eq!(app.store.current_task_account_epoch().unwrap().as_deref(), Some(lease.account_epoch.as_str()));
+        assert!(!app.config.home.join("forget-in-progress.json").exists());
+        app.store.connection.lock().unwrap().execute_batch("DROP TRIGGER reject_forget;").unwrap();
+        app.forget_identity().unwrap();
+    }
+
+    #[test]
     fn cancelling_chat_cancels_live_work_after_task_update_fails() {
         let scratch = scratch_app();
         let app = &scratch.0;

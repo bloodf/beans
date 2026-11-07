@@ -1,7 +1,35 @@
-import { describe, expect, it } from "vitest";
-import { chatContextMenuEntries, openChatContextMenu } from "./sidebar";
-import { select, selection } from "./root";
-import { store } from "../model/store";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { chatContextMenuEntries as getChatContextMenuEntries, openChatContextMenu as getOpenChatContextMenu } from "./sidebar";
+import type { select as getSelect, selection as getSelection } from "./root";
+import type { store as getStore } from "../model/store";
+
+let chatContextMenuEntries: typeof getChatContextMenuEntries;
+let openChatContextMenu: typeof getOpenChatContextMenu;
+let select: typeof getSelect;
+let selection: typeof getSelection;
+let store: typeof getStore;
+
+const locationDescriptor = Object.getOwnPropertyDescriptor(globalThis, "location");
+
+beforeAll(async () => {
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: { search: "?platform=linux", pathname: "/" },
+  });
+  const sidebar = await import("./sidebar");
+  chatContextMenuEntries = sidebar.chatContextMenuEntries;
+  openChatContextMenu = sidebar.openChatContextMenu;
+  const root = await import("./root");
+  select = root.select;
+  selection = root.selection;
+  const storeModule = await import("../model/store");
+  store = storeModule.store;
+});
+
+afterAll(() => {
+  if (locationDescriptor) Object.defineProperty(globalThis, "location", locationDescriptor);
+  else Reflect.deleteProperty(globalThis, "location");
+});
 
 describe("sidebar chat context menu", () => {
   it("leaves the current selection alone and operates on the clicked chat", async () => {

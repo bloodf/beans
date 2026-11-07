@@ -271,3 +271,38 @@ async fn lance_real_temp_scoped_upsert_search_provenance_edit_delete_transfer() 
     .is_err());
     drop(Arc::new(backend));
 }
+
+#[tokio::test]
+async fn lance_index_removal_keeps_notes_and_rebuilds_empty_without_old_evidence() {
+    let notes_directory = tempfile::tempdir().unwrap();
+    let notes = beans::memory::MemoryStore::new(notes_directory.path());
+    notes.append_entry("curated note", None, 0).unwrap();
+    let index = tempfile::tempdir().unwrap();
+    let a = scope("a");
+    let open = |create: bool| {
+        LanceBackend::open(
+            LanceBinding::Local { directory: index.path().join("db"), runner_id: "runner".into() },
+            a.clone(),
+            space(),
+            None,
+            create,
+            CancellationToken::new(),
+        )
+    };
+    let backend = open(true).await.unwrap();
+    backend
+        .retain_vector(&a, doc("one", "derived evidence"), &"a".repeat(64), vec![1., 0., 0.], CancellationToken::new())
+        .await
+        .unwrap();
+    drop(backend);
+    std::fs::remove_dir_all(index.path().join("db")).unwrap();
+    assert!(open(false).await.is_err());
+    assert!(notes.read_index().contains("curated note"));
+    let rebuilt = open(true).await.unwrap();
+    let found = rebuilt
+        .recall_vector(&a, &"a".repeat(64), vec![1., 0., 0.], RecallBudget::default(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(found.evidence.is_empty());
+    assert!(notes.read_index().contains("curated note"));
+}

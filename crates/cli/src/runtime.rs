@@ -1289,6 +1289,51 @@ mod tests {
         assert_eq!(payload.job_id, "remote");
     }
 
+    #[test]
+    fn cancelling_chat_cancels_live_work_after_task_update_fails() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let job = user_turn_job(app, "chat", "bot", "message");
+        let lease = app.task_lease(&job).unwrap();
+        assert!(app.store.queue_local_intent(&lease, &job).unwrap());
+        assert_eq!(app.store.current_task_account_epoch().unwrap().as_deref(), Some(lease.account_epoch.as_str()));
+        let keys = crate::keys::Machine::generate();
+        app.state.lock().unwrap().devices.push(Device {
+            id: "runner".into(), name: "Runner".into(), model: String::new(), os: "macos".into(),
+            os_version: String::new(), box_pubkey: keys.box_pubkey(), plugins: Vec::new(), updated_at: 1,
+            version: String::new(), update: None,
+        });
+        let local = CancellationToken::new();
+        let remote = CancellationToken::new();
+        let survivor = CancellationToken::new();
+        for (id, chat_id, runner_id, cancel) in [
+            ("local", "chat", None, local.clone()),
+            ("remote", "chat", Some("runner".to_string()), remote.clone()),
+            ("survivor", "other", None, survivor.clone()),
+        ] {
+            app.running_jobs.lock().unwrap().insert(id.into(), RunningJob {
+                chat_id: chat_id.into(), bot_id: "bot".into(), routine_id: None,
+                runner_id, cancel, activity: None,
+            });
+        }
+        app.store.connection.lock().unwrap().execute_batch(
+            "CREATE TEMP TRIGGER reject_cancel BEFORE UPDATE OF cancel_requested ON local_tasks BEGIN SELECT RAISE(ABORT, 'injected cancellation failure'); END;"
+        ).unwrap();
+        assert!(app.store.cancel_tasks(&lease.account_epoch, None, Some("chat"), None).is_err());
+
+        cancel_chat(app, "chat");
+
+        assert!(app.plugin_admission(None).is_err());
+        assert!(local.is_cancelled());
+        assert!(remote.is_cancelled());
+        assert!(!survivor.is_cancelled());
+        let cancels: Vec<_> = app.store.outbox().unwrap().into_iter().filter(|item| item.kind == "job_cancel").collect();
+        let [queued] = cancels.try_into().unwrap();
+        assert_eq!(queued.recipient.as_deref(), Some("runner"));
+        let payload: JobCancel = crate::crypto::unseal_json(&keys.box_secret, &queued.ciphertext).unwrap();
+        assert_eq!(payload.job_id, "remote");
+    }
+
     fn turn_on_mac(job_id: &str, chat_id: &str) -> LiveTurn {
         LiveTurn { job_id: job_id.into(), chat_id: chat_id.into(), bot_id: "bot".into(), routine_id: None, activity: Some(JobActivity::Thinking) }
     }

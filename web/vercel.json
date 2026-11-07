@@ -21,5 +21,6 @@
       ]
     }
   ],
-  "installCommand": "pnpm install --frozen-lockfile"
+  "installCommand": "pnpm install --frozen-lockfile",
+  "ignoreCommand": "sh ./vercel-ignore.sh"
 }

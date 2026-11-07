@@ -210,6 +210,7 @@ export const zh: Record<string, string> = {
   "Category": "类别",
   "Change": "更改",
   "Change look": "更改外观",
+  "Change Look…": "更改外观…",
   "Chat": "聊天",
   "Chat name": "聊天名称",
   "Chat names live inside the encrypted roster blob, never on the relay.": "聊天名称保存在加密的名册数据中，不会以明文出现在中继上。",

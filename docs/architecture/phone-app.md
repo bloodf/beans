@@ -56,4 +56,6 @@ The production app icon uses the coral Beans mark. Editable SVG masters in `desi
 
 ## Development loop
 
+`pnpm run android` rebuilds the Rust core for Android, then builds and runs the Expo dev client on the Android emulator. `cd mobile && pnpm run core` rebuilds the Rust core for both phone platforms; `pnpm run mobile:dev` is the iOS development loop described here.
+
 `pnpm run mobile:dev` (`scripts/mobile.ts`) is the Beans Dev phone loop on the iOS Simulator, or on `--device <name or udid>`: it fingerprints the crates the phone links, the prebuild inputs (Expo config, assets, `package.json`, plugins, targets), the pod inputs with the checkout's path, and the native module sources (stamps in `mobile/.expo/dev-stamps.json`), rebuilds what is stale (`pnpm run core ios`, a clean `expo prebuild`, `pod install`, `expo run:ios`), starts Metro, and opens the dev client on it. A Rust save while it runs rebuilds the core and installs the app again. The Mac and phone loops leave production Beans processes alone, so all builds run side by side.

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'vitest';
 import { MemoryServiceAPI, MemoryPreferencesDraft, readMemoryConnections, readMemoryHealth, connectionActivationReason, connectionRequest, secretPatch, type AssetPlan, type MemoryCapabilities, type MemoryConnectionEdit } from './memoryService';
 import { MemoryTask } from '../ui/memoryTask';
 const revision = { counter: 1, device_id: 'phone' };

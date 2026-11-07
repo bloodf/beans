@@ -28,9 +28,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts scripts/release-pr-gates.test.ts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run --config vitest.config.ts scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts scripts/release-pr-gates.test.ts
 
   rust-linux:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
@@ -178,14 +183,20 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: oven-sh/setup-bun@v2
-      # The markdown crate's static library, xcframework, and Swift bindings, as `bun run dev`
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+      - run: pnpm install --frozen-lockfile
+      # The markdown crate's static library, xcframework, and Swift bindings, as `pnpm run dev`
       # builds them into macos/Libraries and macos/Sources/BeansMarkdown.
       - name: Build the markdown crate for Swift
-        run: bun -e 'import { buildMarkdown } from "./scripts/app.ts"; if (!(await buildMarkdown("debug")).ok) process.exit(1)'
+        run: node --import tsx --input-type=module -e 'import { buildMarkdown } from "./scripts/app.ts"; if (!(await buildMarkdown("debug")).ok) process.exit(1)'
       - run: swift test
         working-directory: macos
-      - run: bun run test:mac-startup
+      - run: pnpm run test:mac-startup
       - run: sh macos/Tests/run-settings-layout.sh
 
   desktop:
@@ -198,18 +209,23 @@ jobs:
         working-directory: desktop
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
       - uses: actions/setup-go@v6
         with:
           go-version-file: desktop/go.mod
           cache-dependency-path: desktop/go.sum
-      - run: bun install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile
       # src/mygo.ts, the page's bindings to the Go side, is generated and never committed.
-      - run: bun run generate
-      - run: bun run typecheck
+      - run: pnpm run generate
+      - run: pnpm run typecheck
       - name: Install Chromium for desktop browser checks
-        run: bun ./node_modules/playwright/cli.js install --with-deps chromium
-      - run: bun run test
+        run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm run test
       - run: go test -count=1 ./...
 
   # Go module of desktop/ on macOS (MyGo host compiles without the Solid page or mygo-cli).
@@ -256,7 +272,12 @@ jobs:
         working-directory: mobile
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run test
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run test

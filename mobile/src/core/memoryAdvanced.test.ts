@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, test } from 'vitest';
 import { advancedBody, advancedForms } from './memoryAdvanced';
 import { MemoryPreferencesDraft, MemoryServiceAPI, embeddingRequest, readMemoryHealth, supportsMemoryAction, connectionRequest, validateAssetPlan, type AssetPlan, type MemoryCapabilities, type MemoryAdvancedFeature } from './memoryService';
 const revision = { counter: 1, device_id: 'fixture' };

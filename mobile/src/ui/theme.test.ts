@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 
 // Drive the hook's actual external-store seam, not a second implementation of its cache.
 let scheme: "light" | "dark" | null = "light";
@@ -10,13 +10,13 @@ const appState = { currentState: "active" };
 const listeners = new Set<(state: string) => void>();
 const consumers: { render: () => void; stop?: () => void }[] = [];
 let rendering: (typeof consumers)[number];
-mock.module("react", () => ({
+vi.doMock("react", () => ({
   useSyncExternalStore: (subscribe: (notify: () => void) => () => void, snapshot: () => number) => {
     if (!rendering.stop) rendering.stop = subscribe(rendering.render);
     return snapshot();
   },
 }));
-mock.module("react-native", () => ({
+vi.doMock("react-native", () => ({
   Platform: platform,
   PlatformColor: (name: string) => { ++nativeCalls; return { semantic: name }; },
   useColorScheme: () => scheme,
@@ -27,7 +27,7 @@ mock.module("react-native", () => ({
     },
   }),
 }));
-mock.module("expo-router", () => ({ Color: { android: { dynamic: new Proxy({}, {
+vi.doMock("expo-router", () => ({ Color: { android: { dynamic: new Proxy({}, {
   get: (_, role) => {
     ++nativeCalls;
     if (failColor) throw new Error("native color unavailable");

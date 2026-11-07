@@ -124,7 +124,7 @@ func runMemoryUIFlows() async throws -> [MemoryFormViewController] {
     check(preferenceWrites.count == 2 && preferenceWrites.last!.1["bot_id"] as? String == "bot", "preference failure recovery writes wrong bot")
     check(preferenceWrites.last!.1["unattended_capture"] as? Bool == false, "capture enables unbounded worker")
     button("Check service health / capabilities", bot).performClick(nil); await bot.pendingTask?.value
-    check(bot.retainButton.isEnabled && !bot.reflectButton.isEnabled && bot.reflectButton.isHidden, "negotiated pgvector shows native reflection")
+    check(bot.retainButton.isEnabled && !bot.reflectButton.isEnabled && !bot.reflectButton.isHidden && !button("Open negotiated provider controls…", bot).isHidden, "missing capability hides a control instead of disabling it")
     let editor = descendants(bot.view).compactMap { $0 as? NSTextView }.first { $0.accessibilityLabel() == "Explicit memory text" }!
     editor.string = "synthetic fixture memory"
     var result = ""; bot.resultHandler = { result = $0 }

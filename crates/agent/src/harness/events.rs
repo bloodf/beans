@@ -48,6 +48,8 @@ pub enum HarnessEvent {
     TurnStart { run_id: String },
     TurnEnd { run_id: String, message: AssistantMessage, tool_results: Vec<ToolResultMessage> },
     RetryScheduled { run_id: String, attempt: u32, max_attempts: u32, delay_ms: u64, error: String },
+    /// Apply `anthropic::drop_bound_thinking` to the stored transcript before later appends.
+    BoundThinkingDropped { run_id: String, model: String },
     MessageStart { run_id: String, message: AgentMessage },
     MessageUpdate { run_id: String, message: AgentMessage, event: AssistantEvent },
     MessageEnd { run_id: String, message: AgentMessage },

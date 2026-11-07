@@ -94,6 +94,7 @@ Each queue call returns the message's id and sends a `queue_update` event.
 | `run_start`, `run_end` | A run begins and ends, with its `Outcome`. |
 | `turn_start`, `turn_end` | A turn, with the assistant message and its tool results. |
 | `retry_scheduled` | A model call failed before streaming and will be asked again. |
+| `bound_thinking_dropped` | Rejected thinking was removed before retrying. Apply `providers::anthropic::drop_bound_thinking` with the event's `model` to the stored transcript; the harness and run result already reflect the repair. |
 | `message_start`, `message_update`, `message_end` | The loop's message events. |
 | `tool_start`, `tool_update`, `tool_end` | The loop's tool events. |
 | `queue_update` | A queue changed. |

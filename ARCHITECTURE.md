@@ -84,6 +84,8 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [macOS app](docs/architecture/macos-app.md) | AppKit launch, windows, onboarding, settings, updates, inspector, Blobatar |
 | [macOS sidebar](docs/architecture/macos-sidebar.md) | Sidebars, search, native chrome, toolbar navigation |
 | [macOS chat](docs/architecture/macos-chat.md) | AppKit transcript, composer, attachments, dictation, and working state |
+| [Composer capabilities](docs/architecture/composer-capabilities.md) | Proposed context/action consumers and their implementation boundaries |
+| [Composer](docs/architecture/composer.md) | Current client/catalog inventory and selected discovery-only action/reference syntax, authority, compatibility, preservation and capability dispositions |
 | [Windows and Linux app](docs/architecture/desktop-app.md) | The MyGo app: its Go side and Solid page, title bar, commands, updates, development and builds |
 | [Phone app](docs/architecture/phone-app.md) | The Expo app over the Rust core: the native module, pairing, relay status, attachments, dictation, notifications, turns |
 | [Phone releases and updates](docs/architecture/phone-updates.md) | TestFlight builds, Android APK releases, and the Android app's self-update: the native gate, daily check and offer, the progress dialog, the package installer |

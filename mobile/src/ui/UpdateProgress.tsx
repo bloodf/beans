@@ -4,7 +4,7 @@
 
 import { AlertDialog, Column, Host, LinearProgressIndicator, Spacer, Text as ComposeText, TextButton } from "@expo/ui/jetpack-compose";
 import { fillMaxWidth, height } from "@expo/ui/jetpack-compose/modifiers";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Platform, StyleSheet } from "react-native";
 import { isUpdateProgressActive, useUpdates } from "../core/updates";
 import { t } from "../i18n";
@@ -12,22 +12,20 @@ import { usePalette } from "./theme";
 
 /// Mounted once at the root on Android.
 export function UpdateProgress() {
-  const phase = useUpdates((s) => s.phase);
+  const phase = useUpdates((s) => s.status);
   const progress = useUpdates((s) => s.progress);
-  const latest = useUpdates((s) => s.latest?.version ?? "");
+  const latest = useUpdates((s) => s.installingVersion ?? "");
+  const installId = useUpdates((s) => s.installingId);
   const p = usePalette();
   const active = isUpdateProgressActive(phase);
-  const [hidden, setHidden] = useState(false);
-  // The next install shows it again.
-  useEffect(() => {
-    if (!active) setHidden(false);
-  }, [active]);
-  if (Platform.OS !== "android" || !active || hidden) return null;
+  // Hide belongs to one consented attempt, even if React batches failure and a retry.
+  const [hiddenId, setHiddenId] = useState<string | null>(null);
+  if (Platform.OS !== "android" || !active || !installId || hiddenId === installId) return null;
   const downloading = phase === "downloading";
   return (
     <Host style={StyleSheet.absoluteFill} pointerEvents="box-none">
       <AlertDialog
-        onDismissRequest={() => setHidden(true)}
+        onDismissRequest={() => setHiddenId(installId)}
         properties={{ dismissOnClickOutside: false }}
         colors={{ containerColor: p.cell as string, titleContentColor: p.label as string, textContentColor: p.secondaryLabel as string }}
       >
@@ -47,7 +45,7 @@ export function UpdateProgress() {
           </Column>
         </AlertDialog.Text>
         <AlertDialog.ConfirmButton>
-          <TextButton onClick={() => setHidden(true)} colors={{ contentColor: p.tint as string }}>
+          <TextButton onClick={() => setHiddenId(installId)} colors={{ contentColor: p.tint as string }}>
             <ComposeText>{t("Hide")}</ComposeText>
           </TextButton>
         </AlertDialog.ConfirmButton>

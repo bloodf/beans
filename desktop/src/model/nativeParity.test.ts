@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { botAvatarGeometry, avatarFrame } from "../../../packages/beans-blobatar/index";
 import { MemoryPreferencesDraft, readMemoryConnections, MemoryServiceViewState } from "./memoryService";
 

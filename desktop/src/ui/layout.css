@@ -221,6 +221,8 @@ body.resizing * {
 .inspector-pane {
   flex: none;
   background: var(--inspector);
+  /* The pane's own context for the toast at its foot. */
+  position: relative;
 }
 
 .divider {
@@ -1512,6 +1514,22 @@ body.resizing * {
 
 .inspector-add {
   margin-top: -10px;
+}
+
+/* What an action did, at the foot of the pane: the inverse of the window, so it stands out. */
+.inspector-toast {
+  position: absolute;
+  bottom: 16px;
+  left: 14px;
+  right: 14px;
+  z-index: 3;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--toast);
+  color: var(--toast-text);
+  font-size: 12.5px;
+  line-height: 1.35;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
 }
 
 /* MARK: Settings */

@@ -761,6 +761,7 @@ impl LocalStore {
         let policy: crate::model::RosterBlob = serde_json::from_str(&policy_json).context("decoding policy state")?;
         Ok(State {
             devices: load_json_table(&connection, "devices")?,
+            device_name_edits: policy.device_name_edits,
             device_names: load_json_table::<(String, String)>(&connection, "device_names")?.into_iter().collect(),
             bots: load_json_table(&connection, "bots")?,
             chats: load_json_table(&connection, "chats")?,
@@ -1892,6 +1893,7 @@ fn save_metadata_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
             state.credentials_uploaded,
             state.paused,
             serde_json::to_string(&crate::model::RosterBlob {
+                device_name_edits: state.device_name_edits.clone(),
                 policy_clock: state.policy_clock,
                 pause_version: state.pause_version.clone(),
                 capability_versions: state.capability_versions.clone(),

@@ -74,6 +74,8 @@ jobs:
           relay="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, pathlib, sys; print(pathlib.Path(json.load(sys.stdin)["target_directory"]) / "debug" / "beans-relay")')"
           test -x "$relay"
           printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
+      - name: Compile Device library tests without Runner features
+        run: cargo test --locked -p beans --no-default-features --lib --no-run
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
       # #427: same hang on Linux as macOS — bash_input waited forever on continuous output.

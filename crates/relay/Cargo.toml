@@ -39,4 +39,5 @@ uuid.workspace = true
 webpki-roots.workspace = true
 
 [dev-dependencies]
-beans = { path = "../cli", default-features = false }
+# Relay tests such as a_runner_answers_only_what_a_device_signed need the Runner's mcp.* requests, so `cargo test -p beans-relay` must match workspace feature unification.
+beans = { path = "../cli", default-features = false, features = ["runner"] }

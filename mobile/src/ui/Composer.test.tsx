@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 
 // Same hook-slot/native-tag boundary as avatarRenderer and Markdown consumer checks.
 // This mounts the production Composer, Surface and AttachMenu, not copied handlers.
@@ -45,51 +45,53 @@ const react = {
   useEffect: hookEffect,
 };
 // Zustand's React consumer imports default React; keep both export forms on the same hooks.
-mock.module("react", () => ({ ...react, default: react }));
+vi.doMock("react", () => ({ ...react, default: react }));
 const jsx = (type: Node["type"], props: any): Node => ({ type, props });
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
-mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx }));
-mock.module("react-native", () => ({
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsxDEV: jsx }));
+vi.doMock("react-native", () => ({
   Platform: { get OS() { return platform; } },
   View: "View", Pressable: "Pressable", TextInput: "TextInput", Text: "Text", ScrollView: "ScrollView",
   Alert: { alert: () => {} }, Linking: {}, AppState: { currentState: "active", addEventListener: () => ({ remove() {} }) },
   StyleSheet: { create: (value: any) => value, hairlineWidth: 0.5, absoluteFill: {}, flatten: (value: any) => Object.assign({}, ...[value].flat()) },
 }));
-mock.module("@expo/ui/swift-ui", () => ({ Button: "MenuButton", Host: "SwiftHost", Image: "MenuImage", Menu: "Menu" }));
-mock.module("@expo/ui/swift-ui/modifiers", () => ({ background: () => ({}), frame: () => ({}), shapes: { circle: () => ({}) } }));
-mock.module("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
-mock.module("@expo/ui/jetpack-compose", () => ({ Column: "Column", Host: "ComposeHost", Icon: "Icon", ListItem: "ListItem", ModalBottomSheet: "ModalBottomSheet", Text: "ComposeText" }));
-mock.module("@expo/ui/jetpack-compose/modifiers", () => ({ clickable: () => ({}), fillMaxWidth: () => ({}), padding: () => ({}) }));
-mock.module("expo-document-picker", () => ({}));
-mock.module("expo-glass-effect", () => ({ GlassView: "GlassView", isLiquidGlassAvailable: () => glass }));
-mock.module("expo-haptics", () => ({ selectionAsync: () => Promise.resolve(), impactAsync: () => Promise.resolve(), ImpactFeedbackStyle: { Light: "light", Medium: "medium" } }));
-mock.module("expo-image", () => ({ Image: "Image" }));
-mock.module("expo-image-picker", () => ({}));
+vi.doMock("@expo/ui/swift-ui", () => ({ Button: "MenuButton", Host: "SwiftHost", Image: "MenuImage", Menu: "Menu" }));
+vi.doMock("@expo/ui/swift-ui/modifiers", () => ({ background: () => ({}), frame: () => ({}), shapes: { circle: () => ({}) } }));
+vi.doMock("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
+vi.doMock("@expo/ui/jetpack-compose", () => ({ Column: "Column", Host: "ComposeHost", Icon: "Icon", ListItem: "ListItem", ModalBottomSheet: "ModalBottomSheet", Text: "ComposeText" }));
+vi.doMock("@expo/ui/jetpack-compose/modifiers", () => ({ clickable: () => ({}), fillMaxWidth: () => ({}), padding: () => ({}) }));
+vi.doMock("expo-document-picker", () => ({}));
+vi.doMock("expo-glass-effect", () => ({ GlassView: "GlassView", isLiquidGlassAvailable: () => glass }));
+vi.doMock("expo-haptics", () => ({ selectionAsync: () => Promise.resolve(), impactAsync: () => Promise.resolve(), ImpactFeedbackStyle: { Light: "light", Medium: "medium" } }));
+vi.doMock("expo-image", () => ({ Image: "Image" }));
+vi.doMock("expo-image-picker", () => ({}));
 const speechEvents = new Map<string, (event: any) => void>();
 let permission: () => Promise<{ granted: boolean }> = async () => ({ granted: true });
 let starts = 0;
 let aborts = 0;
 let startError = false;
-mock.module("expo-speech-recognition", () => ({ ExpoSpeechRecognitionModule: {
+vi.doMock("expo-speech-recognition", () => ({ ExpoSpeechRecognitionModule: {
   requestPermissionsAsync: () => permission(), start: () => { if (startError) throw new Error("start refused"); starts++; },
   stop: () => {}, abort: () => { aborts++; },
 }, useSpeechRecognitionEvent: (name: string, handler: any) => {
   hookEffect(() => { speechEvents.set(name, handler); return () => { if (speechEvents.get(name) === handler) speechEvents.delete(name); }; }, [name, handler]);
 } }));
-mock.module("./avatarVisibility", () => ({ notifyAvatarScroll: () => {} }));
-mock.module("./Avatar", () => ({ BotAvatar: "BotAvatar" }));
-mock.module("./dictation", () => ({ automaticLanguage: () => "en", languageName: (tag: string) => tag, pickDictationLanguage: () => {}, setDictationLanguage: () => {}, useDictationLanguage: () => ({ language: "en" }), useSupportedLanguages: () => [] }));
-mock.module("../i18n", () => ({ language: "en", t: (text: string) => text, useLanguage: () => ({ language: "en" }) }));
-mock.module("./Symbol", () => ({ Symbol: "Symbol" }));
-mock.module("./theme", () => ({ Font: { body: 16 }, usePalette: () => ({ fill: "fill", label: "label", cell: "cell" }) }));
-mock.module("./navigation", () => ({ AndroidIcons: {} }));
-mock.module("expo-web-browser", () => ({}));
-mock.module("../core/host", () => ({ hostFacts: () => ({ name: "Phone", os: "ios", os_version: "", model: "" }) }));
-mock.module("../core/prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {}, coreHome: () => "/unused", pathOf: (path: string) => path, wipePrefs: () => {} }));
-mock.module("../core/push", () => ({ clearPushes: () => {}, installPushHandlers: () => {}, registerForPushes: async () => {} }));
+vi.doMock("./avatarVisibility", () => ({ notifyAvatarScroll: () => {} }));
+vi.doMock("./Avatar", () => ({ BotAvatar: "BotAvatar" }));
+vi.doMock("./dictation", () => ({ automaticLanguage: () => "en", languageName: (tag: string) => tag, pickDictationLanguage: () => {}, setDictationLanguage: () => {}, useDictationLanguage: () => ({ language: "en" }), useSupportedLanguages: () => [] }));
+vi.doMock("../i18n", () => ({ language: "en", t: (text: string) => text, useLanguage: () => ({ language: "en" }) }));
+vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
+vi.doMock("./theme", () => ({ Font: { body: 16 }, usePalette: () => ({ fill: "fill", label: "label", cell: "cell" }) }));
+vi.doMock("./navigation", () => ({ AndroidIcons: {} }));
+vi.doMock("expo-web-browser", () => ({}));
+vi.doMock("../core/host", () => ({ hostFacts: () => ({ name: "Phone", os: "ios", os_version: "", model: "" }) }));
+vi.doMock("../core/prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {}, coreHome: () => "/unused", pathOf: (path: string) => path, wipePrefs: () => {} }));
+vi.doMock("../core/push", () => ({ clearPushes: () => {}, installPushHandlers: () => {}, registerForPushes: async () => {} }));
 const frames = new Set<(frame: any) => void>();
 let request: (method: string, params: any) => Promise<any> = async () => null;
-mock.module("expo-modules-core", () => ({ requireNativeModule: () => ({
+vi.doMock("expo-modules-core", () => ({
+  requireNativeViewManager: () => "ImagePasteView",
+  requireNativeModule: () => ({
   start: () => {}, wake: () => {},
   addListener: (_name: string, listener: any) => { const receive = (frame: any) => listener({ json: JSON.stringify(frame) }); frames.add(receive); return { remove: () => frames.delete(receive) }; },
   request: async (method: string, params: string) => JSON.stringify(await request(method, JSON.parse(params))),
@@ -251,8 +253,9 @@ test("production Engine and Composer preserve omission and validate exact admitt
   tap(find(node => node.props.accessibilityLabel === "Send")!);
   useStore.setState({ deviceId: "replacement" }); useStore.setState({ deviceId: "phone" });
   resolve({ result: { message: { ...message, id: "msg-stale" } } }); await flush();
-  expect(draft.text).toBe("submitted");
+  expect(draft.text).toBe("");
   expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages.some(message => message.id === "msg-stale")).toBe(false);
+  editComposerDraft(draft, { text: "submitted" }); render();
   tap(find(node => node.props.accessibilityLabel === "Send")!);
   event("message.added", { message: { ...message, id: "msg-event" } });
   reject(new Error("response lost after event")); await flush(); expect(draft.text).toBe("submitted");

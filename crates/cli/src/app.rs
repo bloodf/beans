@@ -56,6 +56,7 @@ impl Slot {
 pub struct State {
     pub devices: Vec<Device>,
     pub device_names: std::collections::BTreeMap<String, String>,
+    pub device_name_edits: std::collections::BTreeMap<String, String>,
     pub bots: Vec<Bot>,
     pub chats: Vec<Chat>,
     pub routines: Vec<Routine>,
@@ -816,6 +817,7 @@ impl App {
                 Some(name) => { snapshot.device_names.insert(id.to_owned(), name); }
                 None => { snapshot.device_names.remove(id); }
             }
+            snapshot.device_name_edits.insert(id.to_owned(), uuid::Uuid::new_v4().to_string());
             let item = OutboxItem {
                 id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
                 ciphertext: crate::crypto::encrypt_json(&dek, "roster", &Self::roster_from_state(&snapshot))?,
@@ -988,6 +990,7 @@ impl App {
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
                 device_names: state.device_names.clone(),
+                device_name_edits: state.device_name_edits.clone(),
                 routines: state.routines.clone(),
                 workflows: state.workflows.clone(),
                 auto_review: state.auto_review.clone(),
@@ -2644,6 +2647,8 @@ mod tests {
         let persisted = app.store.load_state().unwrap();
         assert_eq!(app.state.lock().unwrap().device_names, before.device_names);
         assert_eq!(persisted.device_names, before.device_names);
+        assert_eq!(persisted.device_name_edits, before.device_name_edits);
+        assert_eq!(app.state.lock().unwrap().device_name_edits, before.device_name_edits);
         assert_eq!(app.state.lock().unwrap().applied_blob_ids, before.applied_blob_ids);
         assert_eq!(persisted.applied_blob_ids, before.applied_blob_ids);
         let retained = app.store.queued_roster().unwrap().unwrap();

@@ -15,6 +15,8 @@ class IgnoreBuildTest(unittest.TestCase):
             root = Path(directory)
             web = root / "web"
             web.mkdir()
+            self.assertLessEqual(len(COMMAND), 256)
+            (web / "vercel-ignore.sh").write_bytes((Path(__file__).resolve().parents[1] / "web/vercel-ignore.sh").read_bytes())
 
             def git(*args):
                 return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()

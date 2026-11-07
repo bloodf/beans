@@ -2,36 +2,17 @@
 // The parent provides BEANS_UPDATE_PRIVATE_KEY (Ed25519 PKCS8 PEM).
 // No login-keychain fallback or upstream release history is used.
 import { spawn } from "node:child_process"
-import { accessSync, constants, existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs"
-import { delimiter, join, resolve } from "node:path"
+import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { RELEASES_URL, SPARKLE_TOOLS, readVersion } from "./app.ts"
+import { findExecutable } from "./executable.ts"
 import { rawReleaseSecret } from "./release-signing.ts"
-
-/** Locate an executable on PATH. */
-function which(command: string): string | null {
-  const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""]
-  if (!process.env.PATH) return null
-  for (const directory of process.env.PATH.split(delimiter)) {
-    for (const extension of extensions) {
-      const candidate = join(directory, command + extension)
-      try {
-        if (statSync(candidate).isFile()) {
-          accessSync(candidate, constants.X_OK)
-          return candidate
-        }
-      } catch {
-        continue
-      }
-    }
-  }
-  return null
-}
 
 /** `SPARKLE_BIN`, then the copy SwiftPM unpacked beside the framework, then PATH. */
 export function sparkleTool(name: string): string | null {
   const candidates = [process.env.SPARKLE_BIN && join(process.env.SPARKLE_BIN, name), join(SPARKLE_TOOLS, name)]
-  return candidates.find((path): path is string => Boolean(path) && existsSync(path as string)) ?? which(name)
+  return candidates.find((path): path is string => Boolean(path) && existsSync(path as string)) ?? findExecutable(name)
 }
 
 /** Run a Sparkle tool with the seed on stdin: secrets never appear in argv. */

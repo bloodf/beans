@@ -1,8 +1,9 @@
 // Build signed/notarized Mac assets for the unified GitHub release. Never upload to upstream hosting.
+import { findExecutable } from "./executable.ts";
 import { spawn } from "node:child_process";
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 import { APP_NAME, buildApp, bundlePath, codesign, color, log, readVersion, ROOT } from "./app.ts";
 import { generateAppcast } from "./generate-appcast.ts";
 import { releasePrivateKey } from "./release-signing.ts";
@@ -39,29 +40,13 @@ async function run(command: string[], options: RunOptions = {}): Promise<string>
   return result.stdout;
 }
 
-/** Locate an executable on PATH. */
-function which(command: string): string | null {
-  const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-    for (const extension of extensions) {
-      const candidate = join(directory, command + extension);
-      try {
-        if (statSync(candidate).isFile() && accessSync(candidate, constants.X_OK)) return candidate;
-      } catch {
-        continue;
-      }
-    }
-  }
-  return null;
-}
-
 const args = process.argv.slice(2);
 if (args.some((arg) => arg !== "--local")) throw new Error("usage: pnpm run release-mac [--local]; set version in source before releasing");
 const version = readVersion();
 if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) throw new Error("Release version must be stable x.y.z");
 await releasePrivateKey();
 for (const tool of ["cargo", "swift", "ditto", "plutil", "xcrun", "create-dmg"]) {
-  if (!which(tool)) throw new Error(`Missing required release tool: ${tool}`);
+  if (!findExecutable(tool)) throw new Error(`Missing required release tool: ${tool}`);
 }
 if (process.env.BEANS_DEFAULT_RELAY_URL?.trim()) {
   throw new Error("Public GitHub releases must not embed private relay metadata; unset BEANS_DEFAULT_RELAY_URL");

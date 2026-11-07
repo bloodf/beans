@@ -6,10 +6,11 @@
 //   pnpm run release-ios --export-method debugging  development-signed IPA
 // Provisioning profiles and certificates must already be installed. Creating/updating
 // Apple provisioning requires the explicit --allow-provisioning flag.
+import { findExecutable } from "./executable.ts";
 import { spawn } from "node:child_process"
-import { accessSync, constants, existsSync, statSync } from "node:fs"
+import { existsSync } from "node:fs"
 import { mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises"
-import { delimiter, dirname, join, relative } from "node:path"
+import { dirname, join, relative } from "node:path"
 import { color, log, readVersion, ROOT } from "./app.ts"
 
 function die(message: string): never {
@@ -39,22 +40,6 @@ async function run(command: string[], options: RunOptions = {}): Promise<string>
   return Buffer.concat(chunks).toString("utf8")
 }
 
-/** Locate an executable on PATH. */
-function which(command: string): string | null {
-  const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""]
-  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
-    for (const extension of extensions) {
-      const candidate = join(directory, command + extension)
-      try {
-        if (statSync(candidate).isFile() && accessSync(candidate, constants.X_OK)) return candidate
-      } catch {
-        continue
-      }
-    }
-  }
-  return null
-}
-
 const args = process.argv.slice(2)
 const local = args.includes("--local")
 const allowProvisioning = args.includes("--allow-provisioning")
@@ -69,7 +54,7 @@ for (let index = 0; index < args.length; index++) {
 }
 
 for (const tool of ["cargo", "xcodebuild", "pod", "pnpm", "plutil", "rsync"]) {
-  if (!which(tool)) die(`missing required tool: ${tool}`)
+  if (!findExecutable(tool)) die(`missing required tool: ${tool}`)
 }
 
 const TEAM_ID = process.env.BEANS_APPLE_TEAM_ID ?? "GJE9R5VE87"

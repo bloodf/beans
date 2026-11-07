@@ -56,6 +56,28 @@ test("workflow check names are unique across validation workflows", () => {
   expect(names).toContain("catalog");
 });
 
+test("Tests rejects unrelated events and missing PR payloads without disabling platform jobs", () => {
+  const workflow = workflows.find(({ file }) => file === "test.yml")!.workflow;
+  expect(Object.keys(workflow.jobs).sort()).toEqual([
+    "desktop", "desktop-go-macos", "desktop-go-windows", "macos-app", "mobile",
+    "release-source", "rust-linux", "rust-macos", "rust-windows",
+  ]);
+  for (const [name, job] of Object.entries(workflow.jobs) as [string, { if: string }][]) {
+    for (const github of [
+      { repository: "bloodf/beans", event_name: "pull_request", event: {} },
+      { repository: "bloodf/beans", event_name: "push", event: {} },
+      { repository: "bloodf/beans", event_name: "push", event: { pull_request: { head: { repo: { full_name: "bloodf/beans" } } } } },
+    ]) {
+      expect(Boolean(evaluate(job.if, github)), name).toBe(false);
+    }
+  }
+  for (const name of ["rust-linux", "rust-macos"]) {
+    const mobile = workflow.jobs[name].steps.find((step: { run?: string }) => step.run === "cargo test --locked -p beans-mobile");
+    expect(mobile, `${name}: phone core remains covered`).toBeDefined();
+    expect(mobile.if, `${name}: phone core is not dispatch-only`).toBeUndefined();
+  }
+});
+
 test("catalog uses PR base or main for dispatch in both fetch and comparison", () => {
   const job = workflows.find(({ file }) => file === "catalog.yml")!.workflow.jobs.catalog;
   for (const [github, expected] of [

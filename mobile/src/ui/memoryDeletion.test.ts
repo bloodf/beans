@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, test } from 'vitest';
 import { MemoryDeletionState } from './memoryTask';
 import { MemoryServiceAPI, type MemoryPreferencesView } from '../core/memoryService';
 

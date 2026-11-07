@@ -6,7 +6,7 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
-- Localization checks now recognize native memory form-helper labels and finite desktop memory lookups. Phone search and diagnostics expose render-time translation keys, and obsolete search/provider/input translations are removed.
+- Localization checks now recognize native memory form-helper labels. Phone search and diagnostics expose render-time translation keys, and obsolete search/provider/input translations are removed.
 - The macOS custom-provider sheet shrinks again after a connection-check error clears.
 - Skills mounted checks follow the shared browser-consumer module names while retaining all assertions and driver source binding.
 

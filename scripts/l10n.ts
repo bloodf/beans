@@ -4,7 +4,6 @@
 // `--merge <fragment.json>…` adds `{ "English": "中文" }` files to the tables first.
 
 import { memorySwiftKeys } from "./l10n-swift.ts"
-import { memoryLookupKeys } from "./l10n-lookups.ts"
 import { globSync, existsSync } from "node:fs"
 import { readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
@@ -138,10 +137,6 @@ for await (const path of scan(join(ROOT, "macos/Sources/Beans"), "**/*.swift")) 
 }
 const phoneKeys = await keysIn(join(ROOT, "mobile"), "{app,src}/**/*.{ts,tsx}", /\bt\(\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/g, (path) => path.includes("i18n/") || path.endsWith(".test.ts"))
 const desktopKeys = await desktopKeysIn(join(ROOT, "desktop"))
-for (const key of memoryLookupKeys(
-  await readFile(join(ROOT, "desktop/src/model/memoryService.ts"), "utf8"),
-  await readFile(join(ROOT, "desktop/src/ui/sheets/memoryService.tsx"), "utf8"),
-)) desktopKeys.set(key, "src/ui/sheets/memoryService.tsx")
 
 const mac = await readMacTable()
 const phone = await readPhoneTable()

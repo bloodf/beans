@@ -16,6 +16,10 @@ const BULK_BLOBS: usize = 20;
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
 pub const POLL_KINDS: &str = "roster,policy,chat,machine,credentials,memory_config,job,job_cancel,job_result,request,response";
 
+// These relay fixtures require the optional server dependency.
+#[cfg(all(test, feature = "server"))]
+mod ownership_tests;
+
 pub async fn run(app: Arc<App>) {
     let mut failures: u32 = 0;
     // The last try's bearer was refused and the next one went at once: a second refusal in a
@@ -574,11 +578,49 @@ pub async fn wait_for_account(app: &App, limit: std::time::Duration) -> bool {
 /// the one that attested it, or a reset one) and this Device holds the identity, it attests
 /// itself again and retries.
 pub async fn token_or_register(app: &Arc<App>, url: &str, machine: &crate::keys::Machine) -> Result<String, RelayError> {
-    match app.relay.token(url, machine).await {
-        Err(error) if error.is_unknown_machine() && app.is_identity_device() => {
+    let owner = RelayAuthority::capture(app, url, &machine.pubkey())?;
+    token_for_authority(app, &owner, machine).await
+}
+
+struct RelayAuthority {
+    incarnation: u64,
+    relay_generation: u64,
+    url: String,
+    machine_id: String,
+}
+
+impl RelayAuthority {
+    fn capture(app: &App, url: &str, machine_id: &str) -> Result<Self, RelayError> {
+        let admission = app.plugin_admission(None).map_err(|message| RelayError { status: None, message })?;
+        let owner = Self { incarnation: admission.get().0,
+            relay_generation: app.relay_generation.load(Ordering::Relaxed),
+            url: url.to_owned(), machine_id: machine_id.to_owned() };
+        owner.with_current(app, || Ok(()))?;
+        Ok(owner)
+    }
+
+    fn with_current<T>(&self, app: &App, apply: impl FnOnce() -> Result<T, RelayError>) -> Result<T, RelayError> {
+        let _admission = app.plugin_admission(Some(self.incarnation)).map_err(|message| RelayError { status: None, message })?;
+        if app.relay_generation.load(Ordering::Relaxed) != self.relay_generation
+            || app.relay_url().as_deref() != Some(self.url.as_str())
+            || app.this_device_id().as_deref() != Some(self.machine_id.as_str()) {
+            return Err(RelayError { status: None, message: "The account or relay changed; start again.".into() });
+        }
+        apply()
+    }
+}
+
+async fn token_for_authority(app: &Arc<App>, owner: &RelayAuthority, machine: &crate::keys::Machine) -> Result<String, RelayError> {
+    let token_context = owner.with_current(app, || Ok(app.relay.token_context(&owner.url, machine)))?;
+    let result = app.relay.token_for_context(&token_context, machine).await;
+    let identity_device = owner.with_current(app, || Ok(app.is_identity_device()))?;
+    match result {
+        Err(error) if error.is_unknown_machine() && identity_device => {
+            let url = &owner.url;
             tracing::info!(url, "relay does not know this machine; attesting it again");
-            ensure_registered(app, url).await?;
-            app.relay.token(url, machine).await
+            register_for_authority(app, owner).await?;
+            let result = app.relay.token_for_context(&token_context, machine).await;
+            owner.with_current(app, || result)
         }
         result => result,
     }
@@ -586,44 +628,55 @@ pub async fn token_or_register(app: &Arc<App>, url: &str, machine: &crate::keys:
 
 /// Registers this machine with the relay. Only an identity device can sign that.
 pub async fn ensure_registered(app: &Arc<App>, url: &str) -> Result<(), RelayError> {
-    let identity = app
-        .identity
-        .lock()
-        .unwrap()
-        .clone()
-        .and_then(|file| file.identity().ok())
-        .ok_or_else(|| RelayError { status: None, message: "this Device is not registered and holds no identity key".into() })?;
-    let machine = app.machine_file().and_then(|m| m.machine().ok()).ok_or_else(|| RelayError { status: None, message: "no machine".into() })?;
-    app.relay.register(url, &identity, &machine.pubkey(), &machine.box_pubkey()).await?;
-    let again = app.machine.lock().unwrap().as_mut().is_some_and(|file| std::mem::replace(&mut file.registered, true));
-    // A relay that had to be told about this machine has none of its blobs either.
-    {
-        let mut state = app.state.lock().unwrap();
-        state.machine_blob_hash = None;
-        state.credentials_uploaded = false;
-        if again {
-            // It numbers its log from one, so the place held in the old log means nothing.
-            state.last_seq = 0;
-            state.roster_slot_seq = 0;
-        }
-    }
-    // A relay that knew this machine before and lost the account (a reset, or the identity
-    // dropped for inactivity) gets back what a Device pairing or restoring needs: the DEK
-    // sealed to the content key, the roster, and the chats' messages as this Device has them.
-    if again {
-        if let Some(dek) = app.dek() {
-            match crate::crypto::seal(&identity.content_pubkey(), &dek) {
-                Ok(sealed) => {
-                    app.push_blob("key", None, sealed);
-                }
-                Err(error) => tracing::error!(%error, "sealing the account key"),
+    let machine_id = app.this_device_id().ok_or_else(|| RelayError { status: None, message: "no machine".into() })?;
+    let owner = RelayAuthority::capture(app, url, &machine_id)?;
+    register_for_authority(app, &owner).await
+}
+
+async fn register_for_authority(app: &Arc<App>, owner: &RelayAuthority) -> Result<(), RelayError> {
+    let (identity, machine) = owner.with_current(app, || {
+        let identity = app
+            .identity
+            .lock()
+            .unwrap()
+            .clone()
+            .and_then(|file| file.identity().ok())
+            .ok_or_else(|| RelayError { status: None, message: "this Device is not registered and holds no identity key".into() })?;
+        let machine = app.machine_file().and_then(|m| m.machine().ok()).ok_or_else(|| RelayError { status: None, message: "no machine".into() })?;
+        Ok((identity, machine))
+    })?;
+    app.relay.register(&owner.url, &identity, &machine.pubkey(), &machine.box_pubkey()).await?;
+    owner.with_current(app, || {
+        let again = app.machine.lock().unwrap().as_mut().is_some_and(|file| std::mem::replace(&mut file.registered, true));
+        // A relay that had to be told about this machine has none of its blobs either.
+        {
+            let mut state = app.state.lock().unwrap();
+            state.machine_blob_hash = None;
+            state.credentials_uploaded = false;
+            if again {
+                // It numbers its log from one, so the place held in the old log means nothing.
+                state.last_seq = 0;
+                state.roster_slot_seq = 0;
             }
         }
-        app.push_roster();
-        app.push_history();
-    }
-    app.save_machine().map_err(|e| RelayError { status: None, message: e.to_string() })?;
-    Ok(())
+        // A relay that knew this machine before and lost the account (a reset, or the identity
+        // dropped for inactivity) gets back what a Device pairing or restoring needs: the DEK
+        // sealed to the content key, the roster, and the chats' messages as this Device has them.
+        if again {
+            if let Some(dek) = app.dek() {
+                match crate::crypto::seal(&identity.content_pubkey(), &dek) {
+                    Ok(sealed) => {
+                        app.push_blob("key", None, sealed);
+                    }
+                    Err(error) => tracing::error!(%error, "sealing the account key"),
+                }
+            }
+            app.push_roster();
+            app.push_history();
+        }
+        app.save_machine().map_err(|e| RelayError { status: None, message: e.to_string() })?;
+        Ok(())
+    })
 }
 
 async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), RelayError> {
@@ -664,7 +717,7 @@ async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), Rela
                     if let (Some(current), Some((_, base))) = (newer, baseline) {
                         let dek = app.dek().ok_or_else(|| roster_conflict("account key unavailable"))?;
                         let local: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &current.ciphertext).map_err(local_relay_error)?;
-                        let base = accepted_roster_baseline(base, &roster);
+                        let base = accepted_roster_baseline(base, &roster, None);
                         let merged = merge_rosters(roster, &base, &local);
                         validate_merged_groups(&merged)?;
                         let rebased = OutboxItem { id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
@@ -842,15 +895,31 @@ fn settle_unknown_machines(app: &Arc<App>) -> bool {
 /// Unpairs another Device: the relay drops its key, and it leaves this roster now rather
 /// than on the next presence refresh. A machine the relay already forgot still leaves.
 pub async fn unpair_device(app: &Arc<App>, id: &str) -> Result<(), String> {
-    let url = app.relay_url().ok_or("Set a relay URL first.")?;
-    let machine = app.machine_file().and_then(|m| m.machine().ok()).ok_or("No identity on this Device")?;
-    let token = token_or_register(app, &url, &machine).await.map_err(|e| e.to_string())?;
-    match app.relay.revoke_machine(&url, &token, id).await {
+    let (owner, machine) = {
+        let _admission = app.plugin_admission(None)?;
+        let url = app.relay_url().ok_or("Set a relay URL first.")?;
+        let machine = app.machine_file().and_then(|m| m.machine().ok()).ok_or("No identity on this Device")?;
+        let owner = RelayAuthority::capture(app, &url, &machine.pubkey()).map_err(|e| e.to_string())?;
+        (owner, machine)
+    };
+    let token = token_for_authority(app, &owner, &machine).await.map_err(|e| e.to_string())?;
+    owner.with_current(app, || Ok(())).map_err(|e| e.to_string())?;
+    match app.relay.revoke_machine(&owner.url, &token, id).await {
         Ok(()) => {}
         Err(error) if error.is_unknown_machine() => {}
         Err(error) => return Err(error.to_string()),
     }
-    {
+    let persisted = commit_unpair(app, id, &owner).map_err(|e| e.to_string())?;
+    publish_unpair(app);
+    persisted.map_err(|e| e.to_string())
+}
+
+// Relay revocation has already happened. A local storage failure must not restore
+// membership in memory, but is returned so the same removal can be retried durably.
+fn commit_unpair(app: &Arc<App>, id: &str, owner: &RelayAuthority) -> Result<Result<(), RelayError>, RelayError> {
+    // Match policy/request admission: roster edits precede the lifecycle boundary.
+    let _edit = app.roster_edit.lock().unwrap();
+    owner.with_current(app, || {
         let mut state = app.state.lock().unwrap();
         state.devices.retain(|d| d.id != id);
         state.device_seen.remove(id);
@@ -858,12 +927,32 @@ pub async fn unpair_device(app: &Arc<App>, id: &str) -> Result<(), String> {
         state.turns_online.remove(id);
         state.listed_machines.remove(id);
         state.unknown_machines.remove(id);
-    }
-    app.save_state();
+        state.device_turns.remove(id);
+        let persisted = (|| -> anyhow::Result<()> {
+            let mut snapshot = state.clone();
+            let roster = if snapshot.device_names.remove(id).is_some() {
+                snapshot.device_name_edits.insert(id.to_owned(), uuid::Uuid::new_v4().to_string());
+                let dek = app.dek().ok_or_else(|| anyhow::anyhow!("account key unavailable"))?;
+                let item = OutboxItem { id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
+                    ciphertext: crate::crypto::encrypt_json(&dek, "roster", &App::roster_from_state(&snapshot))?,
+                    slot: Some(Slot::latest("roster")), group: None };
+                crate::app::remember_applied(&mut snapshot, &item.id);
+                Some(item)
+            } else { None };
+            app.store.save_state_removing_device_turns(&snapshot, Some(id), roster.as_ref())?;
+            *state = snapshot;
+            Ok(())
+        })();
+        Ok(persisted.map_err(local_relay_error))
+    })
+}
+
+fn publish_unpair(app: &Arc<App>) {
+    app.outbox_notify.notify_waiters();
+    // Ownership is released before notification; this tail cannot purge a replacement
+    // account's turns or write its SQLite state.
     app.emit(app.roster_summary());
-    app.set_device_turns(id, Vec::new());
     app.turns_changed();
-    Ok(())
 }
 
 /// Before this Device forgets the identity, it asks the relay to drop its key, so the other
@@ -1015,16 +1104,21 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
         |((_, base), (submitted_seq, sent))| blob.seq > *submitted_seq
             && sent.routines.iter().any(|routine| !base.routines.iter().any(|old| old.id == routine.id)
                 && roster.routines.iter().any(|remote| remote.id == routine.id && remote.bot_id == routine.bot_id)));
-    let recovering = own_accepted || !accepted_ids.is_empty() || routine_creation_accepted;
+    let alias_change_accepted = baseline.as_ref().zip(submitted.as_ref()).is_some_and(
+        |((_, base), (submitted_seq, sent))| blob.seq > *submitted_seq
+            && base.device_names.keys().chain(sent.device_names.keys())
+                .chain(base.device_name_edits.keys()).chain(sent.device_name_edits.keys()).any(|id|
+                !same_device_alias(base, sent, id) && same_device_alias(&roster, sent, id)));
+    let recovering = own_accepted || !accepted_ids.is_empty() || routine_creation_accepted || alias_change_accepted;
     let projection = match (&queue, baseline) {
         (Some(item), Some((_, base))) => {
             let queued: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &item.ciphertext).map_err(local_relay_error)?;
             let base = if !recovering { base }
-                else if own_accepted { accepted_roster_baseline(base, &roster) }
+                else if own_accepted { accepted_roster_baseline(base, &roster, None) }
                 else {
                     let (_, submitted) = submitted
                         .ok_or_else(|| roster_conflict("accepted creation lacks its original submitted roster"))?;
-                    accepted_roster_baseline(base, &submitted)
+                    accepted_roster_baseline(base, &submitted, Some(&roster))
                 };
             let projected = merge_rosters(roster.clone(), &base, &queued);
             validate_merged_groups(&projected)?;
@@ -1321,8 +1415,13 @@ fn merge_ids(remote: &mut Vec<String>, base: &[String], local: &[String]) {
     }
 }
 
-// The queued snapshot describes intent relative to the last roster this Device observed.
-// Compare fields, not whole entities: remote changes to other fields remain intact.
+fn same_device_alias(left: &RosterBlob, right: &RosterBlob, id: &str) -> bool {
+    left.device_names.get(id) == right.device_names.get(id)
+        && left.device_name_edits.get(id) == right.device_name_edits.get(id)
+}
+
+// The queued snapshot describes intent relative to the last observed roster.
+// Compare fields, not whole entities, to preserve unrelated remote edits.
 fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob) -> RosterBlob {
     macro_rules! merge_entities {
         ($field:ident, $($member:ident),+ $(,)?) => {
@@ -1342,6 +1441,20 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
                 }
             }
         };
+    }
+    // Apply only locally changed aliases; unrelated remote names and resets survive CAS rebase.
+    for id in base.device_names.keys().chain(queued.device_names.keys())
+        .chain(base.device_name_edits.keys()).chain(queued.device_name_edits.keys()) {
+        if !same_device_alias(queued, base, id) {
+            match queued.device_name_edits.get(id) {
+                Some(edit) => { remote.device_name_edits.insert(id.clone(), edit.clone()); }
+                None => { remote.device_name_edits.remove(id); }
+            }
+            match queued.device_names.get(id) {
+                Some(name) => { remote.device_names.insert(id.clone(), name.clone()); }
+                None => { remote.device_names.remove(id); }
+            }
+        }
     }
     merge_entities!(bots, name, description, symbol_name, accent, avatar, look, runner_id, provider,
         model, thinking, legacy_instructions, workdir, capabilities);
@@ -1380,7 +1493,7 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
 
 // Only creations from our submitted snapshot have become a common ancestor.
 // A later remote roster can also contain unrelated creations by other Devices.
-fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob) -> RosterBlob {
+fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob, observed: Option<&RosterBlob>) -> RosterBlob {
     macro_rules! accept_creations {
         ($field:ident) => {
             for entry in &submitted.$field {
@@ -1394,6 +1507,21 @@ fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob) -> Ros
     accept_creations!(chats);
     accept_creations!(routines);
     accept_creations!(workflows);
+    // Extend the accepted ancestor only with alias intent actually submitted by this Device.
+    for id in base.device_names.keys().chain(submitted.device_names.keys())
+        .chain(base.device_name_edits.keys()).chain(submitted.device_name_edits.keys()).cloned().collect::<std::collections::BTreeSet<_>>() {
+        if same_device_alias(&base, submitted, &id) { continue; }
+        // A different Device's later roster proves acceptance only for matching keys.
+        if observed.is_some_and(|remote| !same_device_alias(remote, submitted, &id)) { continue; }
+        match submitted.device_name_edits.get(&id) {
+            Some(edit) => { base.device_name_edits.insert(id.clone(), edit.clone()); }
+            None => { base.device_name_edits.remove(&id); }
+        }
+        match submitted.device_names.get(&id) {
+            Some(name) => { base.device_names.insert(id, name.clone()); }
+            None => { base.device_names.remove(&id); }
+        }
+    }
     base
 }
 
@@ -1537,6 +1665,8 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
         let kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
         state.bots = roster.bots;
         state.routines = roster.routines;
+        state.device_name_edits = roster.device_name_edits;
+        state.device_names = roster.device_names;
         let bot_ids = state.bots.iter().map(|bot| bot.id.clone()).collect();
         let admitted = crate::workflow::admit(std::mem::take(&mut roster.workflows), &state.workflows, &bot_ids);
         state.workflows = admitted;
@@ -1698,6 +1828,7 @@ mod tests {
             "done":done,"blobs":blobs})
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn managed_policy_reader_refuses_invalid_cuts_without_activation() {
         use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
@@ -2095,6 +2226,54 @@ mod tests {
         wire["look"] = look;
         bot = serde_json::from_value(wire).unwrap();
         bot
+    }
+
+    #[test]
+    fn device_alias_rebase_preserves_concurrent_names_and_reset_after_restart() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let mut base = RosterBlob::default();
+        base.device_names.insert("a".into(), "Old A".into());
+        base.device_names.insert("b".into(), "Old B".into());
+        let mut local = base.clone();
+        local.device_names.insert("a".into(), "Local A".into());
+        let mut remote = base.clone();
+        remote.device_names.insert("b".into(), "Remote B".into());
+        remote.device_names.insert("c".into(), "Remote C".into());
+        let merged = merge_rosters(remote, &base, &local);
+        assert_eq!(merged.device_names.get("a").unwrap(), "Local A");
+        assert_eq!(merged.device_names.get("b").unwrap(), "Remote B");
+        assert_eq!(merged.device_names.get("c").unwrap(), "Remote C");
+        apply_roster(app, merged.clone());
+        let restarted = App::load(crate::config::Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(restarted.state.lock().unwrap().device_names, merged.device_names);
+        let accepted = accepted_roster_baseline(base, &local, None);
+        local.device_names.remove("a");
+        let reset = merge_rosters(merged, &accepted, &local);
+        assert!(!reset.device_names.contains_key("a"));
+        assert_eq!(reset.device_names.get("b").unwrap(), "Remote B");
+        assert!(!accepted_roster_baseline(accepted, &local, None).device_names.contains_key("a"));
+    }
+
+    #[test]
+    fn partial_alias_acceptance_does_not_advance_unmatched_keys() {
+        let mut base = RosterBlob::default();
+        base.device_names.insert("a".into(), "Old A".into());
+        base.device_names.insert("b".into(), "Old B".into());
+        let mut sent = base.clone();
+        sent.device_names.insert("a".into(), "Sent A".into());
+        sent.device_names.insert("b".into(), "Sent B".into());
+        let mut remote = sent.clone();
+        remote.device_names.insert("b".into(), "Remote B".into());
+        let mut queued = sent.clone();
+        queued.device_names.insert("b".into(), "Old B".into());
+        let accepted = accepted_roster_baseline(base, &sent, Some(&remote));
+        assert_eq!(accepted.device_names.get("a").unwrap(), "Sent A");
+        assert_eq!(accepted.device_names.get("b").unwrap(), "Old B");
+        let merged = merge_rosters(remote, &accepted, &queued);
+        assert_eq!(merged.device_names.get("a").unwrap(), "Sent A");
+        assert_eq!(merged.device_names.get("b").unwrap(), "Remote B");
     }
 
     #[test]
@@ -3119,6 +3298,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn two_offline_bots_claiming_same_dm_id_keep_local_intent_on_conflict() {
         use axum::{extract::{Query, State as HttpState}, http::StatusCode, routing::put, Json, Router};
@@ -3246,6 +3426,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn first_sync_and_normal_pull_recheck_chat_created_while_fetching() {
         use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
@@ -3353,6 +3534,7 @@ mod tests {
         assert!(!app.store.pending_chat_creates().unwrap().contains(&"G".into()));
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn lost_roster_response_recovers_original_group_identity() {
         use axum::{extract::{Query, State as HttpState}, http::StatusCode, routing::put, Json, Router};
@@ -3431,6 +3613,7 @@ mod tests {
         task.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn accepted_group_creation_with_newer_membership_edit_drains() {
         use axum::{extract::State as HttpState, http::StatusCode, routing::put, Json, Router};
@@ -3579,6 +3762,74 @@ mod tests {
     }
 
     #[test]
+    fn lost_alias_reply_then_reset_and_remote_overwrite_preserves_reset() {
+        for desired in ["", "Office"] {
+            let scratch = scratch_app();
+            let app = &scratch.0;
+            crate::identity::create(app, Some("Runner".into())).unwrap();
+            let initial = app.store.queued_roster().unwrap().unwrap();
+            app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+            app.store.observe_roster(0, &RosterBlob::default()).unwrap();
+            app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+            app.set_device_name("peer", "Office").unwrap();
+            let sent = app.store.queued_roster().unwrap().unwrap();
+            let mut remote: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &sent.ciphertext).unwrap();
+            app.store.record_submitted_roster(0, &remote).unwrap();
+            app.set_device_name("peer", "").unwrap();
+            let reopened = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+            remote.device_names.insert("peer".into(), "Remote".into());
+            remote.device_name_edits.insert("peer".into(), "remote-edit".into());
+            remote.device_names.insert("unrelated".into(), "Other".into());
+            remote.device_name_edits.insert("unrelated".into(), "other-edit".into());
+            let blob = BlobIn { id: "remote-overwrite".into(), kind: "roster".into(), recipient_machine_pubkey: None,
+                ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&reopened.dek().unwrap(), "roster", &remote).unwrap()),
+                seq: 2, created_at: 2 };
+            // Reaffirm a reset or return to Office after resetting and restarting.
+            reopened.set_device_name("peer", desired).unwrap();
+            let edit = reopened.state.lock().unwrap().device_name_edits["peer"].clone();
+            let reopened = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+            assert_eq!(reopened.state.lock().unwrap().device_name_edits["peer"], edit);
+            apply_incoming_blob(&reopened, &reopened.machine_file().unwrap(), &blob, true).unwrap();
+            assert_eq!(reopened.state.lock().unwrap().device_names.get("peer").map(String::as_str), (!desired.is_empty()).then_some(desired));
+            let retained = reopened.store.queued_roster().unwrap().unwrap();
+            let queued: RosterBlob = crate::crypto::decrypt_json(&reopened.dek().unwrap(), "roster", &retained.ciphertext).unwrap();
+            assert_eq!(queued.device_names.get("peer").map(String::as_str), (!desired.is_empty()).then_some(desired));
+            assert_eq!(queued.device_name_edits["peer"], edit);
+            assert_eq!(reopened.state.lock().unwrap().device_name_edits["peer"], edit);
+            assert_eq!(reopened.state.lock().unwrap().device_name_edits["unrelated"], "other-edit");
+            assert_eq!(reopened.store.roster_baseline("observed").unwrap().unwrap().0, 2);
+            assert!(reopened.state.lock().unwrap().applied_blob_ids.contains(&blob.id));
+        }
+    }
+
+    #[test]
+    fn lost_alias_reply_then_reset_preserves_another_devices_name() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let initial = app.store.queued_roster().unwrap().unwrap();
+        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+        app.store.observe_roster(0, &RosterBlob::default()).unwrap();
+        app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+        app.set_device_name("peer", "Submitted").unwrap();
+        let item = app.store.queued_roster().unwrap().unwrap();
+        let sent: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &item.ciphertext).unwrap();
+        app.store.record_submitted_roster(0, &sent).unwrap();
+        app.set_device_name("peer", "").unwrap();
+        let reopened = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let mut remote = sent;
+        remote.device_names.insert("other".into(), "Remote".into());
+        let blob = BlobIn { id: "peer-alias-roster".into(), kind: "roster".into(), recipient_machine_pubkey: None,
+            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&reopened.dek().unwrap(), "roster", &remote).unwrap()),
+            seq: 2, created_at: 2 };
+        apply_incoming_blob(&reopened, &reopened.machine_file().unwrap(), &blob, true).unwrap();
+        let queued = reopened.store.queued_roster().unwrap().unwrap();
+        let result: RosterBlob = crate::crypto::decrypt_json(&reopened.dek().unwrap(), "roster", &queued.ciphertext).unwrap();
+        assert!(!result.device_names.contains_key("peer"));
+        assert_eq!(result.device_names.get("other").unwrap(), "Remote");
+    }
+
+    #[test]
     fn lost_routine_creation_reply_preserves_later_deletion_and_remote_edits() {
         let scratch = scratch_app();
         let app = &scratch.0;
@@ -3628,6 +3879,7 @@ mod tests {
             "new account inherited pending ownership from the forgotten account");
     }
     /// A relay log served past `since`, restricted to the requested kinds.
+    #[cfg(feature = "server")]
     async fn serve_log(log: Vec<BlobIn>) -> (String, tokio::task::JoinHandle<()>) {
         use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
         use serde_json::{json, Value};
@@ -3845,6 +4097,7 @@ mod tests {
         assert!(app.queue_local_task(&job).unwrap().is_none(), "a replay never reopens intent");
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn a_lease_holds_the_cursor_before_the_first_job_and_releasing_it_resumes_in_order() {
         let scratch = scratch_owner();
@@ -3910,6 +4163,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn a_held_first_sync_keeps_the_cursor_at_zero_and_saves_what_it_applied() {
         let mut scratch = scratch_owner();
@@ -3958,6 +4212,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn while_held_only_a_running_jobs_cancel_is_applied_and_the_cursor_stays() {
         let scratch = scratch_owner();
@@ -4008,6 +4263,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn while_held_a_remote_turn_this_device_waits_on_still_ends() {
         let scratch = scratch_owner();
@@ -4048,6 +4304,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn while_held_a_request_this_device_asked_still_hears_its_response() {
         let scratch = scratch_app();

@@ -55,6 +55,8 @@ impl Slot {
 #[derive(Debug, Clone, Default)]
 pub struct State {
     pub devices: Vec<Device>,
+    pub device_names: std::collections::BTreeMap<String, String>,
+    pub device_name_edits: std::collections::BTreeMap<String, String>,
     pub bots: Vec<Bot>,
     pub chats: Vec<Chat>,
     pub routines: Vec<Routine>,
@@ -234,6 +236,8 @@ pub struct App {
     pub plugins: Mutex<crate::plugins::Store>,
     /// Serializes local plugin admission/publication with account reset, including callbacks.
     pub(crate) plugin_lifecycle: parking_lot::ReentrantMutex<std::cell::Cell<(u64, bool)>>,
+    /// Selected-relay ownership, including settings changes away and back.
+    pub(crate) relay_generation: AtomicU64,
     /// Public marketplace index from the selected relay, with bundled offline fallback.
     pub marketplace: crate::marketplace::Updates,
     /// Public built-in model catalog checks from the selected relay.
@@ -494,6 +498,7 @@ impl App {
             provider_auth: Mutex::new(CancellationToken::new()),
             plugin_sign_in: Mutex::new(None),
             plugin_lifecycle: parking_lot::ReentrantMutex::new(std::cell::Cell::new((0, false))),
+            relay_generation: AtomicU64::new(0),
             running_jobs: Mutex::new(HashMap::new()),
             announced_turns: Mutex::new(std::collections::BTreeMap::new()),
             #[cfg(feature = "runner")]
@@ -747,14 +752,23 @@ impl App {
     }
 
     pub fn set_relay_url(&self, url: Option<String>) -> anyhow::Result<()> {
+        let authority = self.plugin_lifecycle.lock();
+        let generation = self.relay_generation.load(Ordering::Relaxed).checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Relay setting generation exhausted"))?;
         let mut settings = self.settings.lock().unwrap();
+        let previous = settings.relay_url.clone();
         settings.relay_url = url.map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
-        settings.save(&self.config)?;
+        if let Err(error) = settings.save(&self.config) {
+            settings.relay_url = previous;
+            return Err(error);
+        }
+        self.relay_generation.store(generation, Ordering::Relaxed);
+        self.relay.forget_token();
         drop(settings);
+        drop(authority);
         crate::catalog::enable(self);
         crate::marketplace::enable(self);
         self.emit(self.roster_summary());
-        self.relay.forget_token();
         // Another relay may serve this build and know this Device; the sync loop wakes and
         // finds out.
         let had_problem = self.relay_problem.lock().unwrap().take().is_some();
@@ -782,6 +796,40 @@ impl App {
         }
         self.save_state();
         self.push_machine_blob_if_changed();
+        self.emit(self.roster_summary());
+        Ok(())
+    }
+
+    /// Gives a known Device an account alias; blank restores its machine name.
+    pub fn set_device_name(&self, id: &str, name: &str) -> anyhow::Result<()> {
+        let name = name.trim();
+        anyhow::ensure!(name.chars().count() <= 64, "Device names must be at most 64 characters");
+        let _edit = self.roster_edit.lock().unwrap();
+        let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        let dek = self.machine_file().ok_or_else(|| anyhow::anyhow!("No identity on this Device"))?.dek()?;
+        {
+            let mut state = self.state.lock().unwrap();
+            let device = state.devices.iter().find(|device| device.id == id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown Device"))?;
+            let alias = (!name.is_empty() && name != device.name).then(|| name.to_owned());
+            let mut snapshot = state.clone();
+            match alias {
+                Some(name) => { snapshot.device_names.insert(id.to_owned(), name); }
+                None => { snapshot.device_names.remove(id); }
+            }
+            snapshot.device_name_edits.insert(id.to_owned(), uuid::Uuid::new_v4().to_string());
+            let item = OutboxItem {
+                id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
+                ciphertext: crate::crypto::encrypt_json(&dek, "roster", &Self::roster_from_state(&snapshot))?,
+                slot: Some(Slot::latest("roster")), group: None,
+            };
+            remember_applied(&mut snapshot, &item.id);
+            self.store.queue_outbox_with_state(&item, &snapshot)?;
+            *state = snapshot;
+        }
+        drop(_edit);
+        drop(lifecycle);
+        self.outbox_notify.notify_waiters();
         self.emit(self.roster_summary());
         Ok(())
     }
@@ -929,11 +977,21 @@ impl App {
 
     pub fn push_roster(&self) {
         let Some(dek) = self.dek() else { return };
-        let roster = {
-            let state = self.state.lock().unwrap();
-            RosterBlob {
+        let roster = Self::roster_from_state(&self.state.lock().unwrap());
+        match crate::crypto::encrypt_json(&dek, "roster", &roster) {
+            Ok(ciphertext) => {
+                self.push_slot_blob("roster", Slot::latest("roster"), None, ciphertext);
+            }
+            Err(error) => tracing::error!(%error, "encrypting roster"),
+        }
+    }
+
+    pub(crate) fn roster_from_state(state: &State) -> RosterBlob {
+        RosterBlob {
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
+                device_names: state.device_names.clone(),
+                device_name_edits: state.device_name_edits.clone(),
                 routines: state.routines.clone(),
                 workflows: state.workflows.clone(),
                 auto_review: state.auto_review.clone(),
@@ -944,13 +1002,6 @@ impl App {
                 policy_capabilities: state.policy_capabilities.clone(),
                 deleted_bot_versions: state.deleted_bot_versions.clone(),
                 updated_at: config::now_secs(),
-            }
-        };
-        match crate::crypto::encrypt_json(&dek, "roster", &roster) {
-            Ok(ciphertext) => {
-                self.push_slot_blob("roster", Slot::latest("roster"), None, ciphertext);
-            }
-            Err(error) => tracing::error!(%error, "encrypting roster"),
         }
     }
 
@@ -1072,7 +1123,10 @@ impl App {
     }
 
     pub fn device(&self, id: &str) -> Option<Device> {
-        self.state.lock().unwrap().devices.iter().find(|d| d.id == id).cloned()
+        let state = self.state.lock().unwrap();
+        let mut device = state.devices.iter().find(|d| d.id == id).cloned()?;
+        if let Some(name) = state.device_names.get(id) { device.name = name.clone(); }
+        Some(device)
     }
 
     /// A chat's name as the apps show it: a group's title, else its members' names; a direct
@@ -2258,7 +2312,8 @@ impl App {
     fn devices_out(&self, state: &State) -> Vec<Value> {
         let this_id = self.this_device_id();
         let mut devices: Vec<&Device> = state.devices.iter().collect();
-        devices.sort_by_key(|d| (Some(d.id.clone()) != this_id, d.name.to_lowercase()));
+        let name = |device: &Device| state.device_names.get(&device.id).unwrap_or(&device.name).clone();
+        devices.sort_by_key(|d| (Some(d.id.clone()) != this_id, name(d).to_lowercase()));
         let mut out: Vec<Value> = devices
             .into_iter()
             .map(|device| {
@@ -2267,7 +2322,8 @@ impl App {
                 let status = if is_this || state.device_online.contains(&device.id) { "online" } else { "offline" };
                 json!({
                     "id": device.id,
-                    "name": device.name,
+                    "name": name(device),
+                    "machine_name": device.name,
                     "model": device.model,
                     "os": device.os,
                     "os_version": device.os_version,
@@ -2526,6 +2582,118 @@ mod tests {
         let recovered: Delivery = serde_json::from_str(&recovered).unwrap();
         assert_eq!(recovered.state,OperationState::DeliveryUnknown);
         assert_eq!(recovered.error_code.as_deref(),Some("response_lost"));
+    }
+
+    #[test]
+    fn device_alias_preserves_machine_name_and_survives_restart() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+        app.set_device_name("peer", "  Office  ").unwrap();
+        assert_eq!(app.device("peer").unwrap().name, "Office");
+        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let snapshot = restarted.snapshot();
+        let row = snapshot["devices"].as_array().unwrap().iter().find(|d| d["id"] == "peer").unwrap();
+        assert_eq!(row["name"], "Office");
+        assert_eq!(row["machine_name"], "Machine");
+        assert!(restarted.set_device_name("missing", "Name").is_err());
+        assert!(restarted.set_device_name("peer", &"界".repeat(65)).is_err());
+        restarted.set_device_name("peer", &"界".repeat(64)).unwrap();
+        restarted.state.lock().unwrap().devices.iter_mut().find(|d| d.id == "peer").unwrap().name = "New machine name".into();
+        restarted.set_device_name("peer", " \n ").unwrap();
+        let reset = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert!(!reset.state.lock().unwrap().device_names.contains_key("peer"));
+        assert_eq!(reset.device("peer").unwrap().name, "New machine name");
+    }
+
+    #[tokio::test]
+    async fn device_alias_api_keeps_machine_rename_and_forget_boundaries() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Machine".into())).unwrap();
+        let id = app.this_device_id().unwrap();
+        crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":"Office"})).await.unwrap();
+        crate::api::dispatch(app, "device.rename", json!({"name":"New machine"})).await.unwrap();
+        assert_eq!(app.device(&id).unwrap().name, "Office");
+        assert_eq!(app.machine_file().unwrap().name, "New machine");
+        for value in [Value::Null, json!(17), json!(false)] {
+            assert!(crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":value})).await.is_err());
+        }
+        crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":""})).await.unwrap();
+        assert_eq!(app.device(&id).unwrap().name, "New machine");
+        app.set_device_name(&id, "Old account").unwrap();
+        app.forget_identity().unwrap();
+        assert!(app.set_device_name(&id, "Late alias").is_err());
+        crate::identity::create(app, Some("Replacement".into())).unwrap();
+        assert!(app.state.lock().unwrap().device_names.is_empty());
+        assert!(app.store.load_state().unwrap().device_names.is_empty());
+        assert!(app.set_device_name(&id, "Late alias").is_err());
+    }
+
+    fn assert_device_alias_transaction_failure(table: &str, operation: &str) {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+        app.set_device_name("peer", "Old alias").unwrap();
+        let before = app.store.load_state().unwrap();
+        let queued = app.store.queued_roster().unwrap().unwrap();
+        let ancestor = serde_json::to_value(app.store.roster_baseline("queued").unwrap()).unwrap();
+        let db = rusqlite::Connection::open(app.config.database_path()).unwrap();
+        db.execute_batch(&format!("CREATE TRIGGER fail_alias BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, 'synthetic alias failure'); END;")).unwrap();
+        let mut events = app.events.subscribe();
+        let error = app.set_device_name("peer", "New alias").unwrap_err();
+        assert!(error.to_string().contains("synthetic alias failure"));
+        let persisted = app.store.load_state().unwrap();
+        assert_eq!(app.state.lock().unwrap().device_names, before.device_names);
+        assert_eq!(persisted.device_names, before.device_names);
+        assert_eq!(persisted.device_name_edits, before.device_name_edits);
+        assert_eq!(app.state.lock().unwrap().device_name_edits, before.device_name_edits);
+        assert_eq!(app.state.lock().unwrap().applied_blob_ids, before.applied_blob_ids);
+        assert_eq!(persisted.applied_blob_ids, before.applied_blob_ids);
+        let retained = app.store.queued_roster().unwrap().unwrap();
+        assert_eq!(retained.id, queued.id);
+        assert_eq!(retained.ciphertext, queued.ciphertext);
+        assert_eq!(serde_json::to_value(app.store.roster_baseline("queued").unwrap()).unwrap(), ancestor);
+        assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn device_alias_state_failure_rejects_without_publication() {
+        assert_device_alias_transaction_failure("device_names", "UPDATE");
+    }
+
+    #[test]
+    fn device_alias_outbox_failure_rolls_back_state_and_receipt() {
+        assert_device_alias_transaction_failure("outbox", "UPDATE");
+    }
+
+    #[test]
+    fn device_alias_committed_intent_survives_dropped_app() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config { home: home.path().into(), port: 0 };
+        let (queued_id, dek, ancestor) = {
+            let app = App::load(config.clone()).unwrap();
+            crate::identity::create(&app, Some("Workbench".into())).unwrap();
+            app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+            app.set_device_name("peer", "Office").unwrap();
+            let ancestor = serde_json::to_value(app.store.roster_baseline("queued").unwrap().unwrap()).unwrap();
+            let queued = app.store.queued_roster().unwrap().unwrap();
+            (queued.id, app.dek().unwrap(), ancestor)
+        };
+        // The original App and its SQLite connection are dropped before admission.
+        let reopened = App::load(config).unwrap();
+        assert_eq!(reopened.device("peer").unwrap().name, "Office");
+        let persisted = reopened.store.load_state().unwrap();
+        assert_eq!(persisted.device_names.get("peer").unwrap(), "Office");
+        let queued = reopened.store.queued_roster().unwrap().unwrap();
+        assert_eq!(queued.id, queued_id);
+        assert!(persisted.applied_blob_ids.contains(&queued_id));
+        assert_eq!(queued.slot, Some(Slot::latest("roster")));
+        let roster: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &queued.ciphertext).unwrap();
+        assert_eq!(roster.device_names, persisted.device_names);
+        assert_eq!(serde_json::to_value(reopened.store.roster_baseline("queued").unwrap().unwrap()).unwrap(), ancestor);
     }
 
     #[test]

@@ -1199,6 +1199,7 @@ mod tests {
         assert!(!status.contains("WDJB-MJHT"), "the machine blob's statuses never carry the code");
     }
 
+    #[cfg(feature = "runner")]
     #[tokio::test]
     async fn command_card_answers_require_current_state_chat_and_runner() {
         use crate::model::{Author, Body, CommandRun, Message};

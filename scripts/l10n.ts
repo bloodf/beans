@@ -3,6 +3,7 @@
 // Chinese entry, and a format key and its translation should take the same values. `pnpm run l10n` lists what is missing, unused, or mismatched;
 // `--merge <fragment.json>…` adds `{ "English": "中文" }` files to the tables first.
 
+import { memorySwiftKeys } from "./l10n-swift.ts"
 import { globSync, existsSync } from "node:fs"
 import { readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
@@ -131,6 +132,9 @@ function report(name: string, used: Map<string, string>, table: Table) {
 }
 
 const macKeys = await keysIn(join(ROOT, "macos/Sources/Beans"), "**/*.swift", /\bL\(\s*"((?:[^"\\]|\\.)*)"(?:,\s*context:\s*"((?:[^"\\]|\\.)*)")?/g, () => false)
+for await (const path of scan(join(ROOT, "macos/Sources/Beans"), "**/*.swift")) {
+  for (const key of memorySwiftKeys(await readFile(join(ROOT, "macos/Sources/Beans", path), "utf8"), path)) macKeys.set(key, path)
+}
 const phoneKeys = await keysIn(join(ROOT, "mobile"), "{app,src}/**/*.{ts,tsx}", /\bt\(\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/g, (path) => path.includes("i18n/") || path.endsWith(".test.ts"))
 const desktopKeys = await desktopKeysIn(join(ROOT, "desktop"))
 

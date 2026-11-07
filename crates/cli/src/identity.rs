@@ -161,6 +161,7 @@ mod publication_tests {
         assert!(owner.legacy_execution_closed().unwrap(), "an unproved existing account remains closed");
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn restore_publication_rejects_forget_and_competing_create() {
         use axum::{routing::{get, post}, Json, Router};

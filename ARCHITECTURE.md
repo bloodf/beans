@@ -1,8 +1,8 @@
 # Beans Architecture
 
-Read this before writing code, then the docs in [Subjects](#subjects) for the parts you change.
+Before coding, read this and [Subjects](#subjects).
 
-Beans is a Grok Bot alternative: persistent named bots, 1:1 chats, group chats, handoff, and orchestration. Work runs on **Devices you own**. The Rust CLI runs on macOS, Linux, and Windows. The macOS app, and the app for Windows and Linux, are UIs for the local CLI, which each bundles and launches.
+Beans is a Grok Bot alternative with persistent named bots, 1:1 and group chats, handoff and orchestration on **Devices you own**. Its Rust CLI runs on macOS, Linux and Windows; each desktop UI bundles and launches it.
 
 Identity is a **key pair**. Devices pair. The relay stores public keys and ciphertext, after [Happy’s security model](https://happy.engineering/docs/security/).
 
@@ -55,12 +55,13 @@ The Linux server updater verifies readiness, upgrades and checks the relay first
 
 ## Subjects
 
-One doc per subject under `docs/architecture/`. `pnpm run check:docs` holds this file to 16 KiB and each subject to 24 KiB, and checks that every subject is listed here and that links and their anchors resolve.
+Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces the 16 KiB overview and 24 KiB subject limits, complete subject listings and valid links/anchors.
 
 | Doc | Read it for |
 | --- | --- |
 | [Account model](docs/architecture/account-model.md) | Entity relationships, Device/relay data ownership and cross-Runner job routing |
 | [Identity](docs/architecture/identity.md) | Key pairs and the identity device, pairing and unpairing, Devices and Runners, what the relay sees, the account's provider credentials |
+| [Device names](docs/architecture/device-names.md) | Account aliases, machine names and durable roster intent |
 | [Device revocation](docs/architecture/device-revocation.md) | Lost, un-wiped Device boundaries and the proposed, unimplemented containment and rotation contract |
 | [Relay](docs/architecture/relay.md) | `crates/relay`: storage on SQLite or Postgres, files, housekeeping, quotas, metrics, rate limits, auth, tables and migrations, the blob, sync socket, and push APIs, deploys |
 | [Computer display](docs/architecture/computer-display.md) | Proposed authenticated display/input transport, Device-bound sessions, lifecycle fences, client feasibility and measurement gaps |
@@ -137,7 +138,7 @@ Implemented mechanisms include crypto and blob sync, relay storage, CLI identity
 
 Next: keychain storage, a cost budget per chat.
 
-The phone app (`mobile/`) pairs as a Device with `os` `ios`, `ipados`, or `android`; it is never a Runner and does not hold the master secret. The Device that creates or restores the identity holds the master secret.
+See [Phone app](docs/architecture/phone-app.md) for phone identity and key ownership.
 
 ## Open points
 

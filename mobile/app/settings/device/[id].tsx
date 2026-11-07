@@ -14,6 +14,7 @@ import { Row, Section } from "../../../src/ui/forms";
 import { lastSeen } from "../../../src/ui/format";
 import { Symbol } from "../../../src/ui/Symbol";
 import { usePalette } from "../../../src/ui/theme";
+import { DeviceRename } from "../../../src/ui/DeviceRename";
 
 const OS_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows", ios: "iOS", ipados: "iPadOS", android: "Android" };
 
@@ -94,6 +95,7 @@ export default function DeviceScreen() {
             <Text style={[styles.statusText, { color: online ? p.green : p.secondaryLabel }]}>{online ? t("Online") : lastSeen(seen)}</Text>
           </View>
         </View>
+        <Section><DeviceRename device={device} /></Section>
 
         {runner && (
           <Section title={t("Bots assigned here")}>

@@ -132,6 +132,18 @@ impl RequestOptions {
         }
     }
 
+    /// Applies payload hooks while preserving any effective adapter or host output cap.
+    pub fn before_payload_with_output_cap(&self, body: &mut Value, field: &str) -> Result<(), String> {
+        let cap = body[field].as_u64();
+        self.before_payload(body);
+        if let Some(cap) = cap {
+            if !body[field].as_u64().is_some_and(|tokens| tokens <= cap) {
+                return Err("Request payload exceeds or removes the effective output cap.".into());
+            }
+        }
+        Ok(())
+    }
+
     /// Applies the options to a request: the affinity header, the extra headers, the timeout.
     pub fn apply_to(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(session_id) = &self.session_id {
@@ -180,6 +192,32 @@ pub struct RequestOptionsPatch {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn payload_hooks_preserve_output_caps_on_both_wires() {
+        struct Override(Value);
+        #[async_trait]
+        impl RequestHooks for Override {
+            fn before_payload(&self, payload: &mut Value) {
+                payload["max_tokens"] = self.0.clone();
+                payload["max_output_tokens"] = self.0.clone();
+            }
+        }
+        for field in ["max_tokens", "max_output_tokens"] {
+            for replacement in [serde_json::json!(4096), Value::Null, serde_json::json!("2048")] {
+                let options = RequestOptions::default().with_hooks(Arc::new(Override(replacement)));
+                let mut body = serde_json::json!({(field): 2048});
+                assert_eq!(options.before_payload_with_output_cap(&mut body, field), Err("Request payload exceeds or removes the effective output cap.".into()));
+            }
+            let options = RequestOptions::default().with_hooks(Arc::new(Override(serde_json::json!(1024))));
+            let mut body = serde_json::json!({(field): 2048});
+            assert!(options.before_payload_with_output_cap(&mut body, field).is_ok());
+            assert_eq!(body[field], 1024);
+            let mut uncapped = serde_json::json!({"model": "fixture"});
+            assert!(RequestOptions::default().before_payload_with_output_cap(&mut uncapped, field).is_ok());
+            assert!(uncapped.get(field).is_none());
+        }
+    }
 
     struct Spy(Mutex<Vec<String>>);
 

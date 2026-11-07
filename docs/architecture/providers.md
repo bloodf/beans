@@ -50,6 +50,8 @@ Declared levels take precedence over legacy reasoning flags and format-derived l
 
 Budget-based Messages thinking reserves 1024 output tokens for the answer before choosing its thinking budget, so the budget is at most the declared output cap minus 1024. Enabled thinking also needs a minimum budget of 1024: a cap below 2048 is rejected locally with an answer-reserve explanation. This is the app's answer policy, not a claim that the Messages protocol forbids a smaller answer allowance. Default or Off requests without enabled budget thinking do not require that reserve.
 
+Every adapter preserves an explicit output cap through payload hooks before credential resolution and HTTP attempts. Hooks may lower that cap but cannot raise, remove, or invalidate it. Requests without an explicit cap remain uncapped.
+
 The Messages adapter applies a per-request host output allowance without enlarging it and fits the thinking budget inside the effective cap. Payload hooks cannot raise, remove, or invalidate that cap, including adapter and model limits. Enabled budget thinking remains enabled for validation: an allowance below 2048 fails locally rather than silently disabling thinking.
 
 `Provider::default_max_output_tokens()` exposes the adapter's default reply cap, not the model's published maximum or a price estimate. Anthropic reports its thinking-adjusted default bounded by the model cap. Chat Completions, Responses, ChatGPT, and the retained Grok wire return `None` because they omit an output cap unless the host supplies one. The CLI's OpenCode header wrapper forwards this value unchanged. This metadata does not infer rates or turn unknown costs into zero.

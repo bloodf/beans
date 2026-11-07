@@ -1,10 +1,19 @@
 # Changelog
 
 Unified Beans release notes, versioned by the root `package.json` and tagged
-`beans-v<version>`. `bun run release-mac` attaches the matching section to its
+`beans-v<version>`. `pnpm run release-mac` attaches the matching section to its
 Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desktop notes.
 
 ## [Unreleased]
+
+- Android signed updates use the current progress dialog with consent-bound events, native commit-aware cancellation and conservative installer-source gating.
+
+- Android update installation guards share the current composer draft state, including replies, pending sends and dictation; explicit draft deletion updates recovery previews immediately.
+
+- Production GitHub Android builds include bounded signed Beans release discovery, consent-bound APK verification and a system-confirmed installer. Play/iOS/Dev stay excluded; installed package signing identity supplies compatibility evidence. Settings provides daily checks, Later and exact-version Skip; unsent composer drafts block installation. Native installed-upgrade acceptance remains separate.
+- Android signed-update parsing rejects duplicate JSON keys, nesting beyond 32 levels and coerced numeric authority fields; consent binds exact readiness bytes as well as APK identity and digest. Android below API 28 remains ineligible.
+- Android update cancellation disconnects metadata/APK transport and enforces a total operation deadline, including slow responses. Composer drafts retain recoverable chat ownership across unmount/remount instead of leaving orphaned update blockers.
+- Phone chat deletion discards drafts only after core acknowledgement; rejected deletion retains text/files and newer edits. Snapshots and transient relay/source changes preserve source-keyed drafts and update blockers, with explicit retained-draft preview/discard controls. Generation fences reject callbacks from deleted or forgotten ownership.
 
 - Consumed requests from revoked Devices are removed from the relay without publishing a response or applying their effects.
 

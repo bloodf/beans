@@ -1160,6 +1160,7 @@ export function lastActivity(chat: Chat): number {
  * turn's; the rest accumulate. */
 export interface ChatUsage {
   contextTokens: number;
+  contextEstimated?: boolean;
   contextWindow: number;
   inputTokens: number;
   outputTokens: number;
@@ -1172,9 +1173,12 @@ export interface ChatUsage {
 
 /** "128k of 1M · 13%", or "128k" when the window is unknown. */
 export function contextSummary(usage: ChatUsage): string {
-  if (usage.contextWindow <= 0) return Format.tokens(usage.contextTokens);
-  const percent = Math.round((usage.contextTokens / usage.contextWindow) * 100);
-  return L("%@ of %@ · %d%%", Format.tokens(usage.contextTokens), Format.tokens(usage.contextWindow), percent);
+  let summary = Format.tokens(usage.contextTokens);
+  if (usage.contextWindow > 0) {
+    const percent = Math.round((usage.contextTokens / usage.contextWindow) * 100);
+    summary = L("%@ of %@ · %d%%", summary, Format.tokens(usage.contextWindow), percent);
+  }
+  return usage.contextEstimated ? `≈ ${summary}` : summary;
 }
 
 /** "$0.42 · 18 turns" */

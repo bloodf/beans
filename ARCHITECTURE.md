@@ -63,6 +63,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Account model](docs/architecture/account-model.md) | Entity relationships, Device/relay data ownership and cross-Runner job routing |
 | [Identity](docs/architecture/identity.md) | Key pairs and the identity device, pairing and unpairing, Devices and Runners, what the relay sees, the account's provider credentials |
 | [Relay](docs/architecture/relay.md) | `crates/relay`: storage on SQLite or Postgres, files, housekeeping, quotas, metrics, rate limits, auth, tables and migrations, the blob, sync socket, and push APIs, deploys |
+| [Computer display](docs/architecture/computer-display.md) | Proposed authenticated display/input transport, Device-bound sessions, lifecycle fences, client feasibility and measurement gaps |
 | [Protocols](docs/architecture/protocols.md) | The app ↔ CLI websocket and the CLI ↔ relay requests and blobs |
 | [Managed policy receipts and replay](docs/architecture/managed-policy-replay.md) | Staged opaque policy/roster commits, durable receipt retention, authenticated finite replay cuts and teardown boundaries |
 | [Local API](docs/architecture/local-api.md) | The `/ws` socket: trust boundary, field errors, every method with params and results, events, secret-bearing methods, memory and setup bodies |
@@ -71,6 +72,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [CLI service and updates](docs/architecture/service-updates.md) | CLI installation, standalone services, Runner admission drain and update availability |
 | [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review |
 | [Terminal sessions](docs/architecture/terminal-sessions.md) | A bot's commands in terminals of their own: when a call returns, background commands, the command's card, answering and stopping, Running tasks |
+| [Realtime voice evaluation](docs/architecture/voice-evaluation.md) | Pinned voice stack options: licenses, transports, plaintext recipients, privacy choices and pending live evidence |
 | [Codemode and Plugins](docs/architecture/plugins.md) | Scripts that call plugin tools, MCP plugins and their installs, sign-in, plugin calls at turn time |
 | [Skills](docs/architecture/skills.md) | Bounded metadata discovery, Runner and desktop discovery contract, managed copies, provenance and uninstall |
 | [Marketplace](docs/architecture/marketplace.md) | The relay-backed index of plugins and bot templates, offline fallback and updates, bots added from a template, the marketplace sheet |
@@ -80,10 +82,13 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Memory services](docs/architecture/memory-services.md) | Encrypted config, dispatch, queues, deletion and embeddings |
 | [Bot avatars](docs/architecture/avatars.md) | Generated appearance contract, independent photos, validated API edits, encrypted persistence and fresh-format protocol compatibility |
 | [Providers](docs/architecture/providers.md) | Each model provider and its sign-in, custom providers, thinking levels, compaction, retries |
+| [Zhipu GLM compatibility](docs/architecture/glm-compatibility.md) | Vendor documentation, existing custom-wire evaluation, unsupported reasoning-tool continuation and local transport evidence |
 | [Model catalog and cost](docs/architecture/model-catalog.md) | Shared model metadata, pricing completeness, usage, and public catalog refresh |
 | [macOS app](docs/architecture/macos-app.md) | AppKit launch, windows, onboarding, settings, updates, inspector, Blobatar |
 | [macOS sidebar](docs/architecture/macos-sidebar.md) | Sidebars, search, native chrome, toolbar navigation |
 | [macOS chat](docs/architecture/macos-chat.md) | AppKit transcript, composer, attachments, dictation, and working state |
+| [Composer capabilities](docs/architecture/composer-capabilities.md) | Proposed context/action consumers and their implementation boundaries |
+| [Composer](docs/architecture/composer.md) | Current client/catalog inventory and selected discovery-only action/reference syntax, authority, compatibility, preservation and capability dispositions |
 | [Windows and Linux app](docs/architecture/desktop-app.md) | The MyGo app: its Go side and Solid page, title bar, commands, updates, development and builds |
 | [Phone app](docs/architecture/phone-app.md) | The Expo app over the Rust core: the native module, pairing, relay status, attachments, dictation, notifications, turns |
 | [Phone releases and updates](docs/architecture/phone-updates.md) | TestFlight builds, Android APK releases, and the Android app's self-update: the native gate, daily check and offer, the progress dialog, the package installer |

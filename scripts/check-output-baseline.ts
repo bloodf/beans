@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile, realpath } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 
 export const exampleCommit = "35780590139c9e0b09f3f8e6ea87a1f1e6524db1";
@@ -141,12 +142,19 @@ export async function checkOutputBaseline(receipt: string, repo: string, binary:
   return { schema: 1, example_commit: exampleCommit, fixture_commit: fixtureCommit, executable_sha256: binaryHash, metrics, scope: "Provider-free runtime mechanics only; Unicode scalars and UTF-8 bytes are not provider tokens or quality scores." };
 }
 
-if (import.meta.main) {
+const isEntrypoint = Boolean(
+  import.meta.main ||
+  (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url))
+);
+
+if (isEntrypoint) {
   const args = process.argv.slice(2);
   const run = args[0] === "--run";
   if (run) args.shift();
   const [receipt, repo, binary] = args;
-  if (!receipt || !repo || !binary || args.length !== 3 || !args.every(isAbsolute)) throw new Error("usage: bun run scripts/check-output-baseline.ts [--run] /absolute/actual-receipt /absolute/pinned-example-checkout /absolute/leased-example-binary");
+  if (!receipt || !repo || !binary || args.length !== 3 || !args.every(isAbsolute)) {
+    throw new Error("usage: pnpm run check:output-baseline [--run] /absolute/actual-receipt /absolute/pinned-example-checkout /absolute/leased-example-binary");
+  }
   if (run) {
     assert.equal(git(repo, "rev-parse", "HEAD").toString().trim(), exampleCommit);
     assert.deepEqual(await readFile(join(repo, examplePath)), git(repo, "show", `${exampleCommit}:${examplePath}`));

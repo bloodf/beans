@@ -1,258 +1,186 @@
-// The Android app's updates. Its releases are this repository's on GitHub, tagged beans-vX.Y.Z,
-// each holding the APK Beans-X.Y.Z.apk; the same tag also carries desktop and CLI assets, so the
-// app finds the newest published beans-v release that has a digest-backed APK. Once a day, at
-// launch or back in the foreground, it checks and offers a newer version in an alert (Install
-// Update, Remind Me Later, Skip This Version); prefs hold the switch for the daily check. While
-// it installs, a dialog shows how far the download is (UpdateProgress), and a failure is said in
-// an alert. The native module downloads the APK, checks it against the size and SHA-256 GitHub
-// lists for it, and hands it to the package installer, which replaces the app. Until beans-core
-// exports that installer, the check never runs and nothing is offered. iOS updates through
-// TestFlight, and Beans Dev never updates.
-
-import * as Application from "expo-application";
-import { Alert, AppState, Platform } from "react-native";
+// GitHub metadata discovers candidates; only the native signed-readiness verifier can offer one.
 import { create } from "zustand";
-import type { Prefs } from "./prefs";
-import { loadPrefs, savePrefs } from "./prefs";
+import { Alert, AppState } from "react-native";
+import { androidUpdates } from "../../modules/beans-core";
 import { t } from "../i18n";
-import * as core from "../../modules/beans-core";
+import { loadPrefs, savePrefs } from "./prefs";
+import { UpdateController, type UpdateOffer } from "./updateController";
+import { updateCheckDue, updateIsSkipped } from "./updatePolicy";
+import { hasUpdateDrafts, subscribeComposerDrafts } from "./updateDrafts";
+export { updateCandidates, updateCheckDue, updateIsSkipped, type UpdatePreferences } from "./updatePolicy";
 
-const API = "https://api.github.com/repos/bloodf/beans";
-const TAG_PREFIX = "beans-v";
-const DAY = 24 * 60 * 60 * 1000;
+export type UpdateBlock = "store_managed" | "development" | "native_verifier_unavailable";
+export type UpdateStatus = "blocked" | "idle" | "checking" | "offered" | "downloading" | "installing" | "confirmation" | "error";
 
-/// Pref fields the Android updater keeps in the phone's prefs JSON.
-type UpdatePrefs = Prefs & {
-  update_checks?: boolean;
-  update_checked_at?: number;
-  update_skipped?: string;
-};
-
-function updatePrefs(): UpdatePrefs {
-  return loadPrefs() as UpdatePrefs;
+export function updateBlock(platform: string, applicationId: string | null): UpdateBlock | null {
+  if (applicationId === "ai.amoena.beans.dev") return "development";
+  if (platform !== "android" || applicationId !== "ai.amoena.beans") return "store_managed";
+  const capability = androidUpdates.capability();
+  return capability === "supported" ? null : capability;
 }
 
-function saveUpdatePrefs(next: UpdatePrefs) {
-  savePrefs(next as Prefs);
+export function downloadProgress(downloaded: number, total: number): number {
+  if (!Number.isFinite(downloaded) || !Number.isFinite(total) || total <= 0) return 0;
+  return Math.max(0, Math.min(1, downloaded / total));
 }
 
-/// Android installer surface on beans-core (absent until the native Updater lands).
-type InstallStatus =
-  | { state: "downloading"; received: number; total: number }
-  | { state: "installing" }
-  | { state: "confirming" }
-  | { state: "cancelled" }
-  | { state: "failed"; message: string };
-
-export type UpdateNative = {
-  installUpdate?: (url: string, sha256: string, size: number) => Promise<void>;
-  onInstallStatus?: (listener: (status: InstallStatus) => void) => () => void;
-};
-
-const updateNative = core as typeof core & UpdateNative;
-
-/// True only when beans-core exposes both install entry points the JS layer drives.
-export function hasNativeUpdater(native: UpdateNative = updateNative): boolean {
-  return typeof native.installUpdate === "function" && typeof native.onInstallStatus === "function";
+export function isUpdateProgressActive(status: UpdateStatus): boolean {
+  return status === "downloading" || status === "installing" || status === "confirmation";
 }
 
-/// The release Android build can self-update only when the native installer is present.
-export function computeUpdatesSupported(
-  platform: string,
-  applicationId: string | null | undefined,
-  native: UpdateNative = updateNative,
-): boolean {
-  return platform === "android" && applicationId === "ai.amoena.beans" && hasNativeUpdater(native);
-}
-
-/// A newer release than this build.
-export interface Release {
-  version: string;
-  notes: string;
-  url: string;
-  sha256: string;
-  size: number;
-}
-
-export interface Updates {
-  phase: "idle" | "checking" | "downloading" | "installing";
-  /// The newest release, while it is newer than this build.
-  latest?: Release;
-  /// How much of the APK has arrived while downloading, from 0 to 1.
+const controller = new UpdateController(androidUpdates);
+let generation = 0;
+let activeInstall: string | null = null;
+let warnedDraftInstall: string | null = null;
+let resultTimer: ReturnType<typeof setInterval> | undefined;
+export const useUpdates = create<{
+  status: UpdateStatus;
+  reason: UpdateBlock | null;
+  offer: UpdateOffer | null;
+  installingVersion: string | null;
+  installingId: string | null;
+  error: string | null;
+  checks: boolean;
   progress: number;
-  /// Why the last check or install failed.
-  error?: string;
-  /// A check has answered since launch.
-  checked: boolean;
+}>()(() => ({ status: "blocked", reason: "native_verifier_unavailable", offer: null, installingVersion: null, installingId: null, error: null, checks: true, progress: 0 }));
+
+function stopResultChecks(): void {
+  if (resultTimer !== undefined) clearInterval(resultTimer);
+  resultTimer = undefined;
 }
 
-export const useUpdates = create<Updates>()(() => ({ phase: "idle", progress: 0, checked: false }));
-
-/// The release build on Android installs its own updates when the native installer is linked.
-export const updatesSupported = computeUpdatesSupported(Platform.OS, Application.applicationId);
-
-export const installedVersion = Application.nativeApplicationVersion ?? "0.0.0";
-
-/// `a` is a later version than `b` (both X.Y.Z).
-export function isNewer(a: string, b: string): boolean {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
-  for (let i = 0; i < 3; i++) {
-    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0);
-  }
-  return false;
+function watchInstallResult(): void {
+  if (resultTimer === undefined) resultTimer = setInterval(readInstallResult, 1000);
 }
 
-/// Fraction of the APK that has arrived (0…1). A zero total means no progress yet.
-export function downloadProgress(received: number, total: number): number {
-  return total > 0 ? received / total : 0;
-}
-
-/// Whether the Material progress dialog should show for this phase.
-export function isUpdateProgressActive(phase: Updates["phase"]): boolean {
-  return phase === "downloading" || phase === "installing";
-}
-
-async function github<T>(path: string): Promise<T | null> {
-  const response = await fetch(`${API}${path}`, {
-    headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
-  });
-  if (response.status === 404) return null;
-  if (!response.ok) throw new Error(t("GitHub answered {status}", { status: response.status }));
-  return (await response.json()) as T;
-}
-
-interface GitHubRelease {
-  draft: boolean;
-  prerelease: boolean;
-  body: string | null;
-  assets: { name: string; browser_download_url: string; size: number; digest: string | null }[];
-}
-
-/// The newest published release newer than this build, or null. A tag whose release is still a
-/// draft answers 404, since drafts are hidden, and the one before it is asked.
-export async function newestRelease(): Promise<Release | null> {
-  const refs = (await github<{ ref: string }[]>(`/git/matching-refs/tags/${TAG_PREFIX}`)) ?? [];
-  const versions = refs
-    .map((r) => r.ref.replace(`refs/tags/${TAG_PREFIX}`, ""))
-    .filter((v) => /^\d+\.\d+\.\d+$/.test(v) && isNewer(v, installedVersion))
-    .sort((a, b) => (isNewer(a, b) ? -1 : 1));
-  for (const version of versions) {
-    const release = await github<GitHubRelease>(`/releases/tags/${TAG_PREFIX}${version}`);
-    if (!release || release.draft || release.prerelease) continue;
-    const apk = release.assets.find((a) => a.name === `Beans-${version}.apk`);
-    const sha256 = apk?.digest?.match(/^sha256:([0-9a-f]{64})$/)?.[1];
-    if (!apk || !sha256) continue;
-    return { version, notes: (release.body ?? "").trim(), url: apk.browser_download_url, sha256, size: apk.size };
-  }
-  return null;
-}
-
-let checking: Promise<void> | null = null;
-
-/// Asks GitHub for a newer release. A manual check reports what it found; a daily one offers a
-/// release in an alert unless the user skipped that version.
-export function checkForUpdates(daily = false): Promise<void> {
-  if (!updatesSupported) return Promise.resolve();
-  if (checking) return checking;
-  const { phase } = useUpdates.getState();
-  if (phase === "downloading" || phase === "installing") return Promise.resolve();
-  useUpdates.setState({ phase: "checking", error: undefined });
-  checking = (async () => {
-    try {
-      const latest = (await newestRelease()) ?? undefined;
-      saveUpdatePrefs({ ...updatePrefs(), update_checked_at: Date.now() });
-      useUpdates.setState({ phase: "idle", latest, checked: true });
-      if (latest && daily && updatePrefs().update_skipped !== latest.version) offerUpdate(latest);
-    } catch (error) {
-      useUpdates.setState({ phase: "idle", error: error instanceof Error ? error.message : String(error), checked: true });
-    } finally {
-      checking = null;
-    }
-  })();
-  return checking;
-}
-
-function checkIfDue() {
-  const prefs = updatePrefs();
-  if (prefs.update_checks === false) return;
-  if (Date.now() - (prefs.update_checked_at ?? 0) < DAY) return;
-  void checkForUpdates(true);
-}
-
-/// Sparkle's offer: what is new, then install it, ask again tomorrow, or never for this version.
-export function offerUpdate(release: Release) {
-  const notes = release.notes.length > 1200 ? `${release.notes.slice(0, 1200).trimEnd()}…` : release.notes;
-  Alert.alert(
-    t("Beans {version} is available", { version: release.version }),
-    [t("You have {version}.", { version: installedVersion }), notes].filter(Boolean).join("\n\n"),
-    [
-      { text: t("Skip This Version"), onPress: () => saveUpdatePrefs({ ...updatePrefs(), update_skipped: release.version }) },
-      { text: t("Remind Me Later"), style: "cancel" },
-      { text: t("Install Update"), onPress: () => void installUpdate(release) },
-    ],
-  );
-}
-
-/// Downloads the release and hands it to the package installer. When that installs it, the
-/// system stops this app; a confirmation the user declines leaves the update on offer.
-export async function installUpdate(release: Release) {
-  if (!updatesSupported || !updateNative.installUpdate) {
-    installFailed(t("This build cannot install updates"));
-    return;
-  }
-  useUpdates.setState({ phase: "downloading", progress: 0, error: undefined });
-  try {
-    await updateNative.installUpdate(release.url, release.sha256, release.size);
-  } catch (error) {
-    installFailed(error instanceof Error ? error.message : String(error));
-  }
-}
-
-/// An install the user started and the download or the installer failed: said in an alert, since
-/// the progress dialog it ends may be the only sign of it on screen.
-export function installFailed(message: string) {
-  useUpdates.setState({ phase: "idle", error: message });
+function installFailed(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  activeInstall = null;
+  stopResultChecks();
+  useUpdates.setState({ status: "error", offer: controller.offer, installingVersion: null, installingId: null, error: message, progress: 0 });
   Alert.alert(t("Couldn’t install the update"), message);
 }
 
-let started = false;
+function readInstallResult(): boolean {
+  if (AppState.currentState !== "active") return false;
+  const result = androidUpdates.result();
+  if (!result) return false;
+  generation++;
+  activeInstall = null;
+  stopResultChecks();
+  if (result !== "installed") installFailed(result);
+  else useUpdates.setState({ status: "idle", offer: null, installingVersion: null, installingId: null, error: null, progress: 0 });
+  return true;
+}
 
-/// Once, at launch: follow the installer, and check now and on each return to the foreground
-/// when a day has passed since the last check.
-export function startUpdateChecks() {
-  if (!updatesSupported || started) return;
-  started = true;
-  updateNative.onInstallStatus?.((status) => {
-    switch (status.state) {
-      case "downloading":
-        useUpdates.setState({ phase: "downloading", progress: downloadProgress(status.received, status.total) });
-        break;
-      case "installing":
-      case "confirming":
-        useUpdates.setState({ phase: "installing" });
-        break;
-      case "cancelled":
-        useUpdates.setState({ phase: "idle" });
-        break;
-      case "failed":
-        installFailed(status.message);
-        break;
-      default: {
-        const _exhaustive: never = status;
-        void _exhaustive;
-        break;
+// Both the daily alert and Settings capture the exact native offer id in their button closure.
+export function offerUpdate(offer: UpdateOffer): void {
+  if (useUpdates.getState().reason || AppState.currentState !== "active" || controller.offer?.id !== offer.id) return;
+  Alert.alert(t("Beans {version} is available", { version: offer.version }), `${offer.notes}\n\n${t("Save or send all drafts first. Installing replaces this process. Have you saved your changes?")}`, [
+    { text: t("Skip This Version"), onPress: () => { if (controller.offer?.id === offer.id) dismissUpdate(true); } },
+    { text: t("Remind Me Later"), style: "cancel", onPress: () => { if (controller.offer?.id === offer.id) dismissUpdate(); } },
+    { text: t("Install Update"), onPress: () => void installUpdate(offer.id, true) },
+  ], { cancelable: false });
+}
+
+export async function checkUpdates(manual = true): Promise<void> {
+  const state = useUpdates.getState();
+  if (state.reason || controller.busy || isUpdateProgressActive(state.status) || AppState.currentState !== "active") return;
+  const prefs = loadPrefs();
+  if (!manual && !updateCheckDue(prefs, Date.now())) return;
+  const current = ++generation;
+  useUpdates.setState({ status: "checking", offer: null, error: null });
+  savePrefs({ ...prefs, update_checked_at: Date.now() });
+  try {
+    await controller.check();
+    if (generation !== current) return;
+    if (controller.offer && updateIsSkipped(loadPrefs(), controller.offer.version, manual)) controller.dismiss();
+    useUpdates.setState({ status: controller.offer ? "offered" : "idle", offer: controller.offer });
+    if (!manual && controller.offer) offerUpdate(controller.offer);
+  } catch (error) {
+    if (generation === current) useUpdates.setState({ status: "error", error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+export function dismissUpdate(skip = false): boolean {
+  // System confirmation owns a committed session; hiding the dialog never cancels it.
+  if (useUpdates.getState().status === "installing" || useUpdates.getState().status === "confirmation") return false;
+  const offered = controller.offer;
+  if (!controller.dismiss()) {
+    useUpdates.setState({ status: "confirmation", offer: null, progress: 1 });
+    watchInstallResult();
+    return false;
+  }
+  generation++;
+  activeInstall = null;
+  stopResultChecks();
+  if (skip && offered) savePrefs({ ...loadPrefs(), update_skipped_version: offered.version });
+  useUpdates.setState({ status: "idle", offer: null, installingVersion: null, installingId: null, error: null, progress: 0 });
+  return true;
+}
+
+export function setUpdateChecks(checks: boolean): void {
+  savePrefs({ ...loadPrefs(), update_checks: checks });
+  useUpdates.setState({ checks });
+}
+
+export async function installUpdate(id: string, draftsSaved: boolean): Promise<void> {
+  if (AppState.currentState !== "active" || useUpdates.getState().reason || controller.busy || activeInstall) return;
+  if (controller.offer?.id !== id) return;
+  const current = ++generation;
+  const version = controller.offer.version;
+  try {
+    // Check before opening the progress dialog; the controller checks again at consumption.
+    if (!draftsSaved || hasUpdateDrafts()) throw new Error("Save or send drafts before installing");
+    activeInstall = id;
+    warnedDraftInstall = null;
+    useUpdates.setState({ status: "downloading", offer: null, installingVersion: version, installingId: id, error: null, progress: 0 });
+    await controller.install(id, hasUpdateDrafts());
+    if (generation !== current) return;
+    useUpdates.setState({ status: "confirmation" });
+    if (!readInstallResult()) watchInstallResult();
+  } catch (error) {
+    if (generation === current) installFailed(error);
+  }
+}
+
+export function initializeUpdates(platform: string, applicationId: string | null): () => void {
+  generation++;
+  activeInstall = null;
+  stopResultChecks();
+  const reason = updateBlock(platform, applicationId);
+  useUpdates.setState({ status: reason ? "blocked" : "idle", reason, offer: null, installingVersion: null, installingId: null, error: null, progress: 0, checks: loadPrefs().update_checks !== false });
+  if (reason) return () => {};
+  const removeProgress = androidUpdates.onProgress(({ id, phase, downloaded, total }) => {
+    const state = useUpdates.getState();
+    if (id !== activeInstall || !isUpdateProgressActive(state.status)) return;
+    if (phase === "installing" && state.status === "downloading") useUpdates.setState({ status: "installing", progress: 1 });
+    else if (phase === "downloading" && state.status === "downloading") {
+      useUpdates.setState({ progress: Math.max(state.progress, downloadProgress(downloaded, total)) });
+    }
+  });
+  const removeDrafts = subscribeComposerDrafts(() => {
+    if (isUpdateProgressActive(useUpdates.getState().status) && hasUpdateDrafts()) {
+      if (dismissUpdate()) installFailed(new Error("Save or send drafts before installing"));
+      else if (warnedDraftInstall !== activeInstall) {
+        warnedDraftInstall = activeInstall;
+        Alert.alert(t("Install Update"), t("Android is already confirming this installation. Cancel it to keep new drafts."));
       }
     }
   });
-  checkIfDue();
-  AppState.addEventListener("change", (state) => {
-    if (state === "active") checkIfDue();
+  if (!readInstallResult()) void checkUpdates(false);
+  const subscription = AppState.addEventListener("change", state => {
+    if (state === "active") {
+      if (!readInstallResult()) void checkUpdates(false);
+    } else dismissUpdate();
   });
-}
-
-/// Prefs switch for the daily check.
-export function setDailyChecks(on: boolean) {
-  saveUpdatePrefs({ ...updatePrefs(), update_checks: on });
-  if (on) checkIfDue();
+  return () => {
+    generation++;
+    activeInstall = null;
+    stopResultChecks();
+    subscription.remove();
+    removeProgress();
+    removeDrafts();
+    controller.dismiss();
+  };
 }

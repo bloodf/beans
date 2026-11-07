@@ -1,6 +1,9 @@
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { readVersion, ROOT } from "./app.ts";
 
 const profiles = { github: { platform: "ANDROID", extension: "apk", component: "android" }, production: { platform: "ANDROID", extension: "aab", component: "android-store" }, testflight: { platform: "IOS", extension: "ipa", component: "ios-store" } } as const;
@@ -51,9 +54,16 @@ export async function downloadArtifact(value: string): Promise<Uint8Array> {
   return bytes;
 }
 async function eas(args: string[]): Promise<any> {
-  const child = Bun.spawn(["eas", ...args], { cwd: join(ROOT, "mobile"), stdout: "pipe", stderr: "inherit" });
-  const text = await new Response(child.stdout).text();
-  if (await child.exited !== 0) throw new Error("EAS command failed; no release readiness is published");
+  const child = spawn("eas", args, { cwd: join(ROOT, "mobile"), stdio: ["ignore", "pipe", "inherit"] });
+  const chunks: Buffer[] = [];
+  child.stdout!.on("data", (chunk: Buffer) => chunks.push(chunk));
+  const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((settle, reject) => {
+    child.once("error", reject);
+    child.once("close", (exitCode, exitSignal) => settle([exitCode, exitSignal]));
+  });
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (code === null) throw new Error(`EAS command failed with signal ${signal ?? "unknown"}; no release readiness is published`);
+  if (code !== 0) throw new Error("EAS command failed; no release readiness is published");
   return JSON.parse(text);
 }
 export async function stageEasBuild(build: any, profile: Profile, revision: string, directory: string) {
@@ -67,7 +77,14 @@ export async function stageEasBuild(build: any, profile: Profile, revision: stri
   const provenance = { schema: 1, revision, version: readVersion(), project, buildId: build.id, buildNumber: build.appBuildVersion, profile, platform: build.platform, artifact: name, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
   await writeFile(join(directory, `eas-${profile}.json`), `${JSON.stringify(provenance)}\n`, { flag: "wx" });
 }
-export async function runEasRelease(args: string[], query = eas, git = (args: string[]) => Bun.spawnSync(args, { cwd: ROOT })) {
+/** The release gate reads the checkout state. A spawn failure or a signalled git is a failure,
+ * never a clean tree. */
+function gitState(args: string[]): { exitCode: number; stdout: Buffer } {
+  const result = spawnSync(args[0]!, args.slice(1), { cwd: ROOT });
+  if (result.error || result.status === null) return { exitCode: 1, stdout: Buffer.alloc(0) };
+  return { exitCode: result.status, stdout: result.stdout };
+}
+export async function runEasRelease(args: string[], query = eas, git = gitState) {
   const [command, profile, revision, directory, buildId, ...extra] = args;
   if (command !== "build" || !(profile in profiles) || !revision || !directory || extra.length) throw new Error("usage: release-eas.ts build <github|production|testflight> <revision> <directory> [retry-build-id]");
   if (!process.env.EXPO_TOKEN || !process.env.BEANS_EXPO_OWNER || !uuid.test(process.env.BEANS_EXPO_PROJECT_ID ?? "")) throw new Error("EXPO_TOKEN, BEANS_EXPO_OWNER and linked BEANS_EXPO_PROJECT_ID are required");
@@ -79,4 +96,18 @@ export async function runEasRelease(args: string[], query = eas, git = (args: st
   if (!Array.isArray(builds) || builds.length !== 1) throw new Error("Expected exactly one completed EAS build");
   await stageEasBuild(builds[0], typedProfile, revision, resolve(directory));
 }
-if (import.meta.main) await runEasRelease(process.argv.slice(2));
+/** Dispatch only when this file is the process entry; importing it must stay inert. */
+const isMain = (() => {
+  const meta = import.meta as ImportMeta & { main?: boolean };
+  if (meta.main === true) return true;
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const canonical = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
+  try {
+    return canonical(fileURLToPath(meta.url)) === canonical(resolve(entry));
+  } catch {
+    return false;
+  }
+})();
+
+if (isMain) await runEasRelease(process.argv.slice(2));

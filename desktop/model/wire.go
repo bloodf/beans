@@ -182,14 +182,15 @@ type WireMessage struct {
 }
 
 type WireChatUsage struct {
-	ContextTokens   int     `json:"context_tokens"`
-	ContextWindow   int     `json:"context_window"`
-	InputTokens     int     `json:"input_tokens"`
-	OutputTokens    int     `json:"output_tokens"`
-	CacheReadTokens int     `json:"cache_read_tokens"`
-	CostUSD         float64 `json:"cost_usd"`
-	Turns           int     `json:"turns"`
-	Model           string  `json:"model"`
+	ContextTokens    int     `json:"context_tokens"`
+	ContextEstimated bool    `json:"context_estimated"`
+	ContextWindow    int     `json:"context_window"`
+	InputTokens      int     `json:"input_tokens"`
+	OutputTokens     int     `json:"output_tokens"`
+	CacheReadTokens  int     `json:"cache_read_tokens"`
+	CostUSD          float64 `json:"cost_usd"`
+	Turns            int     `json:"turns"`
+	Model            string  `json:"model"`
 }
 
 type WireChat struct {
@@ -769,14 +770,15 @@ func ToMessage(wire WireMessage) *Message {
 
 func ToUsage(wire WireChatUsage) *ChatUsage {
 	return &ChatUsage{
-		ContextTokens:   wire.ContextTokens,
-		ContextWindow:   wire.ContextWindow,
-		InputTokens:     wire.InputTokens,
-		OutputTokens:    wire.OutputTokens,
-		CacheReadTokens: wire.CacheReadTokens,
-		CostUSD:         wire.CostUSD,
-		Turns:           wire.Turns,
-		Model:           wire.Model,
+		ContextTokens:    wire.ContextTokens,
+		ContextEstimated: wire.ContextEstimated,
+		ContextWindow:    wire.ContextWindow,
+		InputTokens:      wire.InputTokens,
+		OutputTokens:     wire.OutputTokens,
+		CacheReadTokens:  wire.CacheReadTokens,
+		CostUSD:          wire.CostUSD,
+		Turns:            wire.Turns,
+		Model:            wire.Model,
 	}
 }
 

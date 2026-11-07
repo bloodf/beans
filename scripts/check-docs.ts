@@ -2,13 +2,13 @@
 // read in full, stays within 16 KiB and each subject doc in docs/architecture/ within 24 KiB, so
 // one is taken in at a sitting; every subject is listed in the overview's Subjects and every
 // listed one exists; and the relative links in the repo's docs resolve, a `#heading` included.
-// `bun run check:docs` prints each budgeted doc's size and what is wrong, and fails when anything is.
+// `pnpm run check:docs` prints each budgeted doc's size and what is wrong, and fails when anything is.
 
-import { Glob } from "bun"
-import { existsSync } from "node:fs"
+import { globSync, existsSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { dirname, join, relative } from "node:path"
 
-const ROOT = join(import.meta.dir, "..")
+const ROOT = join(import.meta.dirname, "..")
 const OVERVIEW = "ARCHITECTURE.md"
 const SUBJECTS = "docs/architecture"
 const OVERVIEW_BUDGET = 16 * 1024
@@ -21,13 +21,12 @@ const texts = new Map<string, string>()
 
 /// A doc's text with LF line endings, so a Windows checkout measures what CI does.
 async function text(path: string) {
-  if (!texts.has(path)) texts.set(path, (await Bun.file(join(ROOT, path)).text()).replace(/\r\n/g, "\n"))
+  if (!texts.has(path)) texts.set(path, (await readFile(join(ROOT, path), "utf8")).replace(/\r\n/g, "\n"))
   return texts.get(path)!
 }
 
 async function scan(pattern: string) {
-  const paths: string[] = []
-  for await (const path of new Glob(pattern).scan({ cwd: ROOT })) paths.push(path.split("\\").join("/"))
+  const paths: string[] = globSync(pattern, { cwd: ROOT }).map((path) => path.split("\\").join("/"))
   return paths.sort()
 }
 

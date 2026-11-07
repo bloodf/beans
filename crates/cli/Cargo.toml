@@ -79,9 +79,9 @@ memory-postgres-rustls = { package = "tokio-postgres-rustls", version = "=0.14.0
 percent-encoding = { version = "=2.3.2", optional = true }
 lancedb = { version = "=0.40.0", default-features = false, features = ["remote"], optional = true }
 # Arrow 60 is newer but ABI-incompatible with the official SDK's Arrow 58.
-arrow-array = { version = "=58.4.0", optional = true }
-arrow-schema = { version = "=58.4.0", optional = true }
-arrow-ipc = { version = "=58.4.0", optional = true }
+arrow-array = { version = "=58.4.1", optional = true }
+arrow-schema = { version = "=58.4.1", optional = true }
+arrow-ipc = { version = "=58.4.1", optional = true }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-27"], optional = true }
 # Latest compatible stable API; 1.0 RC removes Tokenizer and padding/truncation.
 tokenizers = { version = "=0.22.2", default-features = false, features = ["onig"], optional = true }

@@ -1,11 +1,13 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import yaml from "yaml";
 
 // prost-build, reached through lancedb in the Runner build, runs `protoc` from a build script and
 // does not bundle it. Every job that compiles the CLI must install a pinned, checksummed protoc
 // before its first cargo (or cargo-driving script) step. The phone core and the markdown crate
 // do not reach prost-build, so the macOS app and EAS jobs are outside this contract.
-const ROOT = join(import.meta.dir, "..");
+const ROOT = join(import.meta.dirname, "..");
 const PINNED = /^protoc@\d+\.\d+\.\d+$/;
 const ACTION = /^taiki-e\/install-action@[0-9a-f]{40}$/;
 const COMPILES = /\bcargo\b|release-mac|desktop\.ts release/;
@@ -17,7 +19,7 @@ const EXPECTED = {
 type Step = { uses?: string; run?: string; if?: string; with?: Record<string, string> };
 
 async function jobs(file: string): Promise<Record<string, { steps: Step[] }>> {
-  return Bun.YAML.parse(await Bun.file(join(ROOT, ".github/workflows", file)).text()).jobs;
+  return yaml.parse(await readFile(join(ROOT, ".github/workflows", file), "utf8")).jobs;
 }
 
 for (const [file, names] of Object.entries(EXPECTED)) {
@@ -54,6 +56,17 @@ test("test.yml and release.yml pin the same protoc", async () => {
 });
 
 test("test.yml limits the Windows Rust job to one compiler process", async () => {
-  const all = (await Bun.YAML.parse(await Bun.file(join(ROOT, ".github/workflows/test.yml")).text())).jobs;
+  const all = yaml.parse(await readFile(join(ROOT, ".github/workflows/test.yml"), "utf8")).jobs;
   expect(all["rust-windows"].env?.CARGO_BUILD_JOBS).toBe("1");
+});
+test("test.yml limits Linux Rust disk overhead without removing test commands", async () => {
+  const all = yaml.parse(await readFile(join(ROOT, ".github/workflows/test.yml"), "utf8")).jobs;
+  const linux = all["rust-linux"];
+  expect(linux.env?.CARGO_PROFILE_DEV_DEBUG).toBe("0");
+  expect(linux.env?.CARGO_PROFILE_TEST_DEBUG).toBe("0");
+  expect(linux.env?.CARGO_INCREMENTAL).toBe("0");
+  const commands = linux.steps.map((step: Step) => step.run ?? "").join("\n");
+  expect(commands).toContain("cargo test --locked --workspace --exclude beans-mobile");
+  expect(commands).toContain("cargo test --locked -p beans-mobile");
+  expect(commands).toContain("cargo build --locked -p beans-relay --bin beans-relay");
 });

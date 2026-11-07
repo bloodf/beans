@@ -1,5 +1,7 @@
 # CLI service and updates
 
+The Linux server updater verifies readiness, upgrades and checks the relay first, then drains and replaces Runners using renewable admission leases. Automation requires trusted bootstrap, root-owned target configuration, configured Runner update tokens and explicit timer enablement after a successful manual pass. These mechanisms do not establish publication or live rollout.
+
 Installation, standalone service management and Beans Runner admission drain.
 
 ## Installing the CLI

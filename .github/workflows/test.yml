@@ -23,7 +23,7 @@ env:
 
 jobs:
   release-source:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: Release source fixtures
     runs-on: ubuntu-latest
     steps:
@@ -33,7 +33,7 @@ jobs:
       - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts scripts/release-pr-gates.test.ts
 
   rust-linux:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: Rust (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -86,7 +86,7 @@ jobs:
           done
 
   rust-macos:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: Rust (macOS)
     runs-on: macos-latest
     timeout-minutes: 45
@@ -123,7 +123,7 @@ jobs:
           done
 
   rust-windows:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: Rust (Windows)
     # The crates a Windows Runner runs: the CLI, the agent, the model catalog, and provider
     # sign-in. There paths have drive letters, PATH splits on `;`, and commands run on pipes in
@@ -160,7 +160,7 @@ jobs:
       - run: cargo test --locked --no-fail-fast -p beans -p beans-agent -p beans-models -p beans-provider-auth -p beans-tls
 
   macos-app:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: macOS app
     # The app builds against the macOS 26 SDK.
     runs-on: macos-26
@@ -179,7 +179,7 @@ jobs:
       - run: sh macos/Tests/run-settings-layout.sh
 
   desktop:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: Windows and Linux app
     # Playwright 1.59.1 has no Chromium build for ubuntu26.04; pin until the pin is raised.
     runs-on: ubuntu-24.04
@@ -204,7 +204,7 @@ jobs:
 
   # Go module of desktop/ on macOS (MyGo host compiles without the Solid page or mygo-cli).
   desktop-go-macos:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: Desktop Go (macOS)
     runs-on: macos-latest
     defaults:
@@ -221,7 +221,7 @@ jobs:
 
   # Go module of desktop/ on Windows (same compile/test surface as desktop-go-macos).
   desktop-go-windows:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: Desktop Go (Windows)
     runs-on: windows-latest
     defaults:
@@ -238,7 +238,7 @@ jobs:
       - run: go test -count=1 -v ./...
 
   mobile:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository)
     name: Phone app
     runs-on: ubuntu-latest
     defaults:

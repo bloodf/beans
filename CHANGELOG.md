@@ -6,6 +6,8 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Attention is a shared, encrypted list of what needs you across chats (`attention.list`, `attention.resolve`, `attention.dismiss_brief`, `attention.preferences`, and `attention.changed`). The phone opens it from the chat list; desktop Attention UI follows separately.
+
 - Skills mounted checks follow the shared browser-consumer module names while retaining all assertions and driver source binding.
 
 - Desktop skill comparisons use the Runner's UTF-8 path order and separate 256-file source and managed-copy limits, so valid disjoint inventories remain inspectable.
@@ -19,7 +21,6 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 - Android signed-update parsing rejects duplicate JSON keys, nesting beyond 32 levels and coerced numeric authority fields; consent binds exact readiness bytes as well as APK identity and digest. Android below API 28 remains ineligible.
 - Android update cancellation disconnects metadata/APK transport and enforces a total operation deadline, including slow responses. Composer drafts retain recoverable chat ownership across unmount/remount instead of leaving orphaned update blockers.
 - Phone chat deletion discards drafts only after core acknowledgement; rejected deletion retains text/files and newer edits. Snapshots and transient relay/source changes preserve source-keyed drafts and update blockers, with explicit retained-draft preview/discard controls. Generation fences reject callbacks from deleted or forgotten ownership.
-
 - Fresh Beans accounts use `beans-v2`, isolated v2 homes and ports 4874/4875, mandatory protocol-5/format capability, versioned backup phrases and pairing links; incompatible old storage and phrases are rejected without migration or reset.
 - New releases use Beans-only asset/package names and retain the existing Ed25519 anchor and immutable historical manifests. Update eligibility requires fresh-format relay health and supported protocol floors before Runner replacement.
 - Production Grok OAuth is disabled before callback/network access pending a verified Beans contract; existing provider, avatar and memory mechanisms remain unchanged.

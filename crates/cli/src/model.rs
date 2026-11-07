@@ -511,6 +511,10 @@ pub struct Message {
     /// step's reply and tools are done, or at once when the user asks (`chats.send_now`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub queued: bool,
+    /// Coordinator summaries, urgent escalations, and quiet specialist reports have their
+    /// own notification policy, shared by the Runner and the apps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<crate::attention::Notification>,
 }
 
 /// How much of a tool call's detail the apps get: enough for the "Messaged ◉ X" marker.
@@ -557,6 +561,7 @@ impl Message {
             created_at: crate::config::now_secs(),
             promoted_at: None,
             queued: false,
+            notification: None,
         }
     }
 
@@ -568,7 +573,9 @@ impl Message {
     /// A reply, failure, or pending confirmation the user has not seen. Tool activity and
     /// updates to an answered question do not add to the count.
     pub fn counts_unread(&self) -> bool {
-        if !matches!(self.author, Author::Bot { .. }) {
+        if !matches!(self.author, Author::Bot { .. })
+            || self.notification == Some(crate::attention::Notification::Quiet)
+        {
             return false;
         }
         match &self.body {

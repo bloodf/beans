@@ -23,6 +23,7 @@ export default function ChatInfoLayout() {
       <Stack.Screen name="look/[id]" />
       <Stack.Screen name="description/[id]" />
       <Stack.Screen name="group-description/[id]" />
+      <Stack.Screen name="review/[id]" />
       <Stack.Screen name="memory/[id]" />
       <Stack.Screen name="memory/advanced" />
       <Stack.Screen name="memory/setup" />

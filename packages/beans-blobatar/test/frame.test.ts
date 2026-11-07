@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { BOT_EXPRESSIONS, avatarFrame, botAvatarGeometry, type AvatarMatrix } from "../index";
 import { idleAt, idleTransforms } from "../vendor/core/idle";
 import { idleFrame } from "../vendor/react-native/worklets";

@@ -237,3 +237,12 @@ func TestOrderedModelIDs(t *testing.T) {
 	checklist.DefaultID = ""
 	expect(t, checklist.OrderedIDs(), []string{"a", "c", "d"})
 }
+
+func TestCompactedContextEstimateTravelsFromWireToSummary(t *testing.T) {
+	wire := WireChatUsage{ContextTokens: 40_000, ContextWindow: 1_000_000, ContextEstimated: true}
+	expect(t, ToUsage(wire).ContextSummary(), "≈ 40k of 1.0M · 4%")
+	wire.ContextWindow = 0
+	expect(t, ToUsage(wire).ContextSummary(), "≈ 40k")
+	wire.ContextEstimated = false
+	expect(t, ToUsage(wire).ContextSummary(), "40k")
+}

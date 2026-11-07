@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { browserCLIPort, parseCLIPort, requireCLIPort } from "./cliPort";
 
 test("stable and Dev accept only their matching isolated port", () => {

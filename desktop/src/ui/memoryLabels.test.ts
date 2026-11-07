@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { chosenLanguage, setLanguage } from "../l10n";
 import type { MemoryHealth, MemoryOperationState } from "../model/memoryService";
 import { memoryHealthLabel, memoryOperationLabel } from "./memoryLabels";

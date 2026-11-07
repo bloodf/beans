@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { composerExtra } from "./composerInset";
 
 test("no inset is published before the composer's first layout", () => {

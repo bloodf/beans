@@ -8,6 +8,7 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 - Attention is a shared, encrypted list of what needs you across chats (`attention.list`, `attention.resolve`, `attention.dismiss_brief`, `attention.preferences`, and `attention.changed`). The phone opens it from the chat list; desktop Attention UI follows separately.
 
+- The macOS custom-provider sheet shrinks again after a connection-check error clears.
 - Skills mounted checks follow the shared browser-consumer module names while retaining all assertions and driver source binding.
 
 - Desktop skill comparisons use the Runner's UTF-8 path order and separate 256-file source and managed-copy limits, so valid disjoint inventories remain inspectable.

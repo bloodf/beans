@@ -840,15 +840,18 @@ impl App {
         let lifecycle = self.plugin_lifecycle.lock();
         let (incarnation, _) = lifecycle.get();
         lifecycle.set((incarnation.checked_add(1).expect("plugin incarnation exhausted"), true));
-        self.store.close_task_account()?;
+        let close_result = self.store.close_task_account();
+        for job in self.running_jobs.lock().unwrap().values() {
+            job.cancel.cancel();
+        }
+        #[cfg(feature = "runner")]
+        self.memory_runtime.cancel_all();
+        close_result?;
         let marker = self.config.home.join("forget-in-progress.json");
         config::write_json_private(&marker, &serde_json::json!({ "forget_in_progress": true }))?;
         #[cfg(feature = "runner")]
         self.mcp.reset();
         self.plugins.lock().unwrap().reset_account(&self.config)?;
-        for job in self.running_jobs.lock().unwrap().values() {
-            job.cancel.cancel();
-        }
         #[cfg(feature = "provider-auth")]
         self.cancel_provider_auth();
         self.cancel_plugin_sign_in(None);
@@ -856,8 +859,6 @@ impl App {
         self.steering_queues.lock().unwrap().clear();
         #[cfg(feature = "runner")]
         self.step_interrupts.lock().unwrap().clear();
-        #[cfg(feature = "runner")]
-        self.memory_runtime.cancel_all();
         *self.memory_config.lock() = crate::memory_service::config::MemoryConfig::default();
         *self.identity.lock().unwrap() = None;
         *self.machine.lock().unwrap() = None;

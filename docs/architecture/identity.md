@@ -76,6 +76,7 @@ Create holds the local lifecycle boundary through key publication. When the call
 A machine the relay lists that never sent a `machine` blob is an unknown Device (`sync::settle_unknown_machines`): the snapshot and `roster.changed` list it after the others with `unknown: true` and no name or `os`, and the apps show Unknown Device with a note to unpair a machine nobody recognizes. Any paired Device can attest one, so none stays hidden from the Device list. A Device takes a machine for unknown only once its pull has caught up since its socket opened, so one still reading the log does not mistake the Devices whose blobs it has yet to read, and only ten minutes after the relay attested it, which is time enough for a Device that pairs to send its blob (`beans pair <string>` sends it before it exits). A blob that arrives later makes it a Device like any other.
 
 Account aliases use [Device names](device-names.md).
+See [Device revocation](device-revocation.md) for lost, un-wiped Device boundaries and the proposed, unimplemented containment and rotation contract.
 
 ## Devices and Runners
 

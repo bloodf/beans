@@ -6,6 +6,21 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- The macOS custom-provider sheet shrinks again after a connection-check error clears.
+- Skills mounted checks follow the shared browser-consumer module names while retaining all assertions and driver source binding.
+
+- Desktop skill comparisons use the Runner's UTF-8 path order and separate 256-file source and managed-copy limits, so valid disjoint inventories remain inspectable.
+
+- Local mobile provenance rejects untracked source changes and duplicate cloud/local platform build numbers; native metadata tools inspect the retained snapshot without inherited credentials, with generated APK/IPA regressions in hosted checks.
+- Android signed updates use the current progress dialog with consent-bound events, native commit-aware cancellation and conservative installer-source gating.
+
+- Android update installation guards share the current composer draft state, including replies, pending sends and dictation; explicit draft deletion updates recovery previews immediately.
+
+- Production GitHub Android builds include bounded signed Beans release discovery, consent-bound APK verification and a system-confirmed installer. Play/iOS/Dev stay excluded; installed package signing identity supplies compatibility evidence. Settings provides daily checks, Later and exact-version Skip; unsent composer drafts block installation. Native installed-upgrade acceptance remains separate.
+- Android signed-update parsing rejects duplicate JSON keys, nesting beyond 32 levels and coerced numeric authority fields; consent binds exact readiness bytes as well as APK identity and digest. Android below API 28 remains ineligible.
+- Android update cancellation disconnects metadata/APK transport and enforces a total operation deadline, including slow responses. Composer drafts retain recoverable chat ownership across unmount/remount instead of leaving orphaned update blockers.
+- Phone chat deletion discards drafts only after core acknowledgement; rejected deletion retains text/files and newer edits. Snapshots and transient relay/source changes preserve source-keyed drafts and update blockers, with explicit retained-draft preview/discard controls. Generation fences reject callbacks from deleted or forgotten ownership.
+
 - Consumed requests from revoked Devices are removed from the relay without publishing a response or applying their effects.
 
 - Paused accounts continue to save outgoing chat messages and attachments without admitting or starting bot work.
@@ -21,19 +36,6 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 - Cancelled or superseded queued tasks leave terminal history immediately, preserving replay fences and allowing explicit review without restarting the Runner.
 
 - Durable task startup retains storage admission through execution-owner recovery and rejects unknown future task schemas without downgrading them.
-- Skills mounted checks follow the shared browser-consumer module names while retaining all assertions and driver source binding.
-
-- Desktop skill comparisons use the Runner's UTF-8 path order and separate 256-file source and managed-copy limits, so valid disjoint inventories remain inspectable.
-
-- Local mobile provenance rejects untracked source changes and duplicate cloud/local platform build numbers; native metadata tools inspect the retained snapshot without inherited credentials, with generated APK/IPA regressions in hosted checks.
-- Android signed updates use the current progress dialog with consent-bound events, native commit-aware cancellation and conservative installer-source gating.
-
-- Android update installation guards share the current composer draft state, including replies, pending sends and dictation; explicit draft deletion updates recovery previews immediately.
-
-- Production GitHub Android builds include bounded signed Beans release discovery, consent-bound APK verification and a system-confirmed installer. Play/iOS/Dev stay excluded; installed package signing identity supplies compatibility evidence. Settings provides daily checks, Later and exact-version Skip; unsent composer drafts block installation. Native installed-upgrade acceptance remains separate.
-- Android signed-update parsing rejects duplicate JSON keys, nesting beyond 32 levels and coerced numeric authority fields; consent binds exact readiness bytes as well as APK identity and digest. Android below API 28 remains ineligible.
-- Android update cancellation disconnects metadata/APK transport and enforces a total operation deadline, including slow responses. Composer drafts retain recoverable chat ownership across unmount/remount instead of leaving orphaned update blockers.
-- Phone chat deletion discards drafts only after core acknowledgement; rejected deletion retains text/files and newer edits. Snapshots and transient relay/source changes preserve source-keyed drafts and update blockers, with explicit retained-draft preview/discard controls. Generation fences reject callbacks from deleted or forgotten ownership.
 
 - Fresh Beans accounts use `beans-v2`, isolated v2 homes and ports 4874/4875, mandatory protocol-5/format capability, versioned backup phrases and pairing links; incompatible old storage and phrases are rejected without migration or reset.
 - New releases use Beans-only asset/package names and retain the existing Ed25519 anchor and immutable historical manifests. Update eligibility requires fresh-format relay health and supported protocol floors before Runner replacement.

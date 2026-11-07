@@ -1,7 +1,7 @@
 // Custom providers in the model: their kinds, names, models, and thinking levels; the presets and
 // the base URL the custom provider sheet reads; and its model checklist.
 
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import {
   addCandidate,
   addModel,

@@ -1,6 +1,6 @@
 // The same cases as crates/markdown's autolink tests, so the desktop app links what the others do.
 
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { findAutolinks } from "./autolink";
 
 /** Each link as [its text, its href]. */

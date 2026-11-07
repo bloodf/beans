@@ -1,27 +1,30 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 
 // Only unavailable runtime boundaries are replaced. MessageRow and its gesture callbacks run.
 type Node = { type: any; props: any };
 const jsx = (type: any, props: any): Node => typeof type === "function" ? type(props) : { type, props };
-mock.module("react", () => ({ useMemo: (fn: any) => fn(), useRef: (value: any) => ({ current: value }), useEffect: () => {}, useState: (value: any) => [value, () => {}] }));
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
-mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx }));
-mock.module("react-native", () => ({ Alert: {}, Linking: {}, View: "View", Text: "Text", Pressable: "Pressable", ScrollView: "ScrollView", Modal: "Modal", Platform: { OS: "ios" }, StyleSheet: { create: (value: any) => value } }));
-mock.module("react-native-reanimated", () => ({ default: { View: "AnimatedView" }, useSharedValue: (value: any) => ({ value }), useAnimatedStyle: (fn: any) => fn, withSpring: (value: any) => value, withSequence: () => 1, withTiming: (value: any) => value }));
+vi.doMock("react", () => ({ useMemo: (fn: any) => fn(), useRef: (value: any) => ({ current: value }), useEffect: () => {}, useState: (value: any) => [value, () => {}] }));
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsxDEV: jsx }));
+vi.doMock("react-native", () => ({ Alert: {}, Linking: {}, View: "View", Text: "Text", Pressable: "Pressable", ScrollView: "ScrollView", Modal: "Modal", Platform: { OS: "ios" }, StyleSheet: { create: (value: any) => value } }));
+vi.doMock("react-native-reanimated", () => ({ default: { View: "AnimatedView" }, useSharedValue: (value: any) => ({ value }), useAnimatedStyle: (fn: any) => fn, withSpring: (value: any) => value, withSequence: () => 1, withTiming: (value: any) => value }));
 let haptics = 0;
-mock.module("expo-haptics", () => ({ ImpactFeedbackStyle: { Light: "light" }, impactAsync: () => { haptics++; return Promise.resolve(); } }));
-mock.module("expo-clipboard", () => ({}));
-mock.module("expo-linear-gradient", () => ({ LinearGradient: "Gradient" }));
-mock.module("../../modules/beans-core/ShimmerView", () => ({ ShimmerView: "Shimmer" }));
-mock.module("../core/engine", () => ({ engine: new Proxy({}, { get: () => () => { throw new Error("gesture must not send or request"); } }) }));
-mock.module("../core/store", () => ({ useStore: () => ({}) }));
-mock.module("../i18n", () => ({ useLanguage: () => {}, t: (value: string) => value, language: "en" }));
-mock.module("./attachments", () => ({ AttachmentBlock: "Attachments" }));
-mock.module("./Avatar", () => ({ BotAvatar: "Avatar" }));
-mock.module("./Markdown", () => ({ Markdown: "Markdown" }));
-mock.module("./Symbol", () => ({ Symbol: "Symbol" }));
-mock.module("./layout", () => ({ usePaneWidth: () => 400 }));
-mock.module("./theme", () => ({ Font: {}, usePalette: () => ({}) }));
+vi.doMock("expo-haptics", () => ({ ImpactFeedbackStyle: { Light: "light" }, impactAsync: () => { haptics++; return Promise.resolve(); } }));
+vi.doMock("expo-clipboard", () => ({}));
+vi.doMock("expo-linear-gradient", () => ({ LinearGradient: "Gradient" }));
+vi.doMock("../../modules/beans-core/ShimmerView", () => ({ ShimmerView: "Shimmer" }));
+vi.doMock("../core/engine", () => ({ engine: new Proxy({}, { get: () => () => { throw new Error("gesture must not send or request"); } }) }));
+vi.doMock("../core/store", () => ({ useStore: () => ({}) }));
+vi.doMock("../i18n", () => ({ useLanguage: () => {}, t: (value: string) => value, language: "en" }));
+vi.doMock("./attachments", () => ({ AttachmentBlock: "Attachments" }));
+vi.doMock("./Avatar", () => ({ BotAvatar: "Avatar" }));
+vi.doMock("./Markdown", () => ({ Markdown: "Markdown" }));
+vi.doMock("./outputs", () => ({ OutputCard: "OutputCard" }));
+vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
+vi.doMock("./layout", () => ({ usePaneWidth: () => 400 }));
+vi.doMock("./theme", () => ({ Font: {}, usePalette: () => ({}) }));
+vi.doMock("expo-image", () => ({ Image: "Image" }));
+vi.doMock("expo-router", () => ({ useRouter: () => ({ push: () => {} }) }));
 
 // Native recognizer boundary: deliver lifecycle events, not a copy of reply logic.
 class Pan {
@@ -36,7 +39,7 @@ class Pan {
   onEnd(fn: any) { this.config.end = fn; return this; }
   onFinalize(fn: any) { this.config.finalize = fn; return this; }
 }
-mock.module("react-native-gesture-handler", () => ({ Gesture: { Pan: () => new Pan() }, GestureDetector: "Detector" }));
+vi.doMock("react-native-gesture-handler", () => ({ Gesture: { Pan: () => new Pan() }, GestureDetector: "Detector" }));
 const { MessageRow } = await import("./transcript");
 const children = (node: Node): Node[] => [node.props.children].flat().filter(Boolean);
 const find = (node: Node, predicate: (node: Node) => boolean): Node | undefined => predicate(node) ? node : children(node).map((child) => typeof child === "object" ? find(child, predicate) : undefined).find(Boolean);
@@ -112,4 +115,4 @@ export function gestureConsumerScenario() {
 }
 
 if (process.env.BEANS_GESTURE_SMOKE === "1") console.log(JSON.stringify(gestureConsumerScenario()));
-else test("bubble reply accepts right swipe and rejects edge, whitespace, retreat and native cancellation", gestureConsumerScenario);
+else test("bubble reply accepts right swipe and rejects edge, whitespace, retreat and native cancellation", () => { gestureConsumerScenario(); });

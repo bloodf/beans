@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import {
   BOT_BACKGROUNDS, BOT_EXPRESSIONS, BOT_SHAPES, avatarFrame, avatarMorphProgress, avatarPath,
   botAvatarGeometry, interpolateAvatarGeometry, type AvatarCubicPath, type AvatarGeometry,

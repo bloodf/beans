@@ -1,5 +1,6 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { readFileSync } from "node:fs";
+import { satisfies } from "semver";
 
 type Package = { version: string; peerDependencies?: Record<string, string> };
 
@@ -19,6 +20,6 @@ test("the Solid compiler plugin and web runtime accept the installed runtimes", 
   ] as const) {
     const range = consumer.peerDependencies?.[dependency];
     expect(range).toBeDefined();
-    expect(Bun.semver.satisfies(version, range!)).toBe(true);
+    expect(satisfies(version, range!)).toBe(true);
   }
 });

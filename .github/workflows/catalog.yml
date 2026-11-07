@@ -28,6 +28,7 @@ jobs:
         with:
           version: 12.18.0
       - run: pnpm install --frozen-lockfile
+      - run: pnpm run sync:models --self-check
       - run: git fetch --depth=1 origin "+refs/heads/$CATALOG_BASE_REF:refs/remotes/origin/$CATALOG_BASE_REF"
       - run: pnpm run check:catalog
         env:

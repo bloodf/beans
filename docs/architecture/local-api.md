@@ -41,7 +41,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `chats.send`, `attachments` present and not an array of `{ path, id?, name?, mime?, width?, height? }` | `attachments must be an array of files` |
 | `chats.send`, `mentions` present and not an array of strings | `mentions must be an array of strings` |
 
-`chats.send` checks `chat_id`, chat existence (`Unknown chat`), optional string types, attachment and mention shapes, and missing text before runtime admission. Runtime checks blank text (`Empty message` without attachments), chat existence, quotable `reply_to` and update drain before file preparation. Attachment-only sends remain valid. Absent and `null` mean "not given" except for `chat_id`. Every source is read into private staging before any attachment id is replaced; a rejected source leaves existing bytes, messages, queued blobs and jobs unchanged. Successful preparation moves staged files into `files/`, queues their blobs, then stores the message. This is not a filesystem transaction: a destination I/O failure during commit can leave earlier files committed; concurrent file or chat changes are not guarded.
+`chats.send` checks `chat_id`, chat existence (`Unknown chat`), optional string types, attachment and mention shapes, and missing text before runtime admission. Runtime checks blank text (`Empty message` without attachments), quotable `reply_to`, update drain, Pause and local Runner membership before file preparation. Attachment-only sends remain valid. Absent and `null` mean "not given" except for `chat_id`. [Task admission](tasks.md#admission-and-recovery) describes private attachment staging, rollback backups, atomic task/message/outbox admission, and the separate filesystem/SQLite commit failure boundaries.
 
 ## Methods
 
@@ -102,9 +102,12 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `routines.create` | `bot_id`, `name`, `schedule`, `prompt?`, `enabled?` | `routine` |
 | `routines.update` | `id`, `name?`, `schedule?`, `prompt?`, `enabled?` | `routine` |
 | `routines.delete`, `routines.run` | `id` | `null` |
+| `routines.reauthorize` | `id` | `routine` |
 | `workflows.create`, `workflows.list`, `workflows.delete` | see [Saved workflows](bots.md#saved-workflows) | `{ workflow }`, `{ workflows }`, `null` |
 | `routines.describe` | `schedule` | `schedule`, `text`, `next_run_at` |
 | `auto_review.set` | `is_enabled?`, `rules?` | `auto_review` |
+
+Local-only [schedule authority](tasks.md#routine-checks-and-retention) needs explicit reauthorization.
 
 ### Plugins, MCP, providers
 

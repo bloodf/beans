@@ -1,15 +1,26 @@
+import { spawn } from "node:child_process";
 import { createHash, createPublicKey, verify } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ROOT, readVersion } from "./app.ts";
 import { releasePublicKey } from "./release-signing.ts";
 import { downloadArtifact, validateEasBuild } from "./release-eas.ts";
 
 async function command(args: string[], cwd = ROOT) {
-  const child = Bun.spawn(args, { cwd, stdout: "pipe", stderr: "inherit" });
-  const text = await new Response(child.stdout).text();
-  if (await child.exited !== 0) throw new Error(`${args[0]} failed; submission stopped`);
+  const child = spawn(args[0]!, args.slice(1), { cwd, stdio: ["ignore", "pipe", "inherit"] });
+  const chunks: Buffer[] = [];
+  child.stdout!.on("data", (chunk: Buffer) => chunks.push(chunk));
+  // Drain the pipe and wait for the close: a spawn failure and a signalled child are failures.
+  const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((settle, reject) => {
+    child.once("error", reject);
+    child.once("close", (exitCode, exitSignal) => settle([exitCode, exitSignal]));
+  });
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (code === null) throw new Error(`${args[0]} failed with signal ${signal ?? "unknown"}; submission stopped`);
+  if (code !== 0) throw new Error(`${args[0]} failed; submission stopped`);
   return text;
 }
 export async function submitEas(args: string[], commandRunner = command, publicKey = releasePublicKey, downloader = downloadArtifact, mobileDirectory = join(ROOT, "mobile")) {
@@ -23,14 +34,14 @@ export async function submitEas(args: string[], commandRunner = command, publicK
   const profile = platform === "android" ? "production" : "testflight";
   const names = ["beans-update.json", "beans-update.json.sig", `eas-${profile}.json`];
   await commandRunner(["gh", "release", "download", tag, "--repo", "bloodf/beans", "--dir", directory, ...names.flatMap((name) => ["--pattern", name])]);
-  const bytes = new Uint8Array(await Bun.file(join(directory, names[0])).arrayBuffer());
+  const bytes = new Uint8Array(await readFile(join(directory, names[0])));
   if (bytes.length > 64 * 1024) throw new Error("Readiness manifest exceeds 64 KiB");
-  const signature = (await Bun.file(join(directory, names[1])).text()).trim();
+  const signature = (await readFile(join(directory, names[1]), "utf8")).trim();
   const key = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(await publicKey(), "base64")]), format: "der", type: "spki" });
   if (!verify(null, bytes, key, Buffer.from(signature, "base64"))) throw new Error("Invalid Beans release signature");
   const manifest = JSON.parse(Buffer.from(bytes).toString());
   if (manifest.schema !== 1 || manifest.revision !== revision || manifest.version !== readVersion()) throw new Error("Signed release source differs");
-  const proofBytes = new Uint8Array(await Bun.file(join(directory, names[2])).arrayBuffer());
+  const proofBytes = new Uint8Array(await readFile(join(directory, names[2])));
   const entry = manifest.artifacts.find((asset: any) => asset.name === names[2]);
   if (!entry || entry.size !== proofBytes.length || entry.sha256 !== createHash("sha256").update(proofBytes).digest("hex")) throw new Error("EAS provenance differs from signed release");
   const proof = JSON.parse(Buffer.from(proofBytes).toString());
@@ -72,4 +83,18 @@ export async function submitEas(args: string[], commandRunner = command, publicK
   }
 }
 
-if (import.meta.main) await submitEas(process.argv.slice(2));
+/** Dispatch only when this file is the process entry; importing it must stay inert. */
+const isMain = (() => {
+  const meta = import.meta as ImportMeta & { main?: boolean };
+  if (meta.main === true) return true;
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const canonical = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
+  try {
+    return canonical(fileURLToPath(meta.url)) === canonical(resolve(entry));
+  } catch {
+    return false;
+  }
+})();
+
+if (isMain) await submitEas(process.argv.slice(2));

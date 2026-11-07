@@ -1,4 +1,6 @@
-import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { expect, test } from "vitest";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -14,18 +16,19 @@ import { inspectReleaseArchive } from "./release-build-inputs.ts";
 // artifact directory or signing identity is needed. IPA metadata uses the real unzip/plutil.
 const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT ?? join(homedir(), "Library/Android/sdk");
 const buildTools = join(sdk, "build-tools", "34.0.0");
-if (!existsSync(join(buildTools, "aapt2"))) throw new Error("aapt2 fixture prerequisite missing: Android build-tools 34.0.0");
+
 const env = { PATH: `${buildTools}:/usr/bin:/bin` };
 const plist = (id: string, version = "1.0.14", build = "42") => `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${id}</string><key>CFBundleShortVersionString</key><string>${version}</string><key>CFBundleVersion</key><string>${build}</string></dict></plist>`;
 async function zipped(directory: string, name: string, files: Record<string, string>) {
   const root = await mkdtemp(join(directory, "src-"));
   for (const [file, body] of Object.entries(files)) { await mkdir(join(root, file, ".."), { recursive: true }); await writeFile(join(root, file), body); }
   const output = join(directory, name);
-  if (Bun.spawnSync(["zip", "-X", "-D", "-q", "-r", output, "."], { cwd: root }).exitCode !== 0) throw new Error("zip fixture failed");
+  if (runFixture(["zip", "-X", "-D", "-q", "-r", output, "."], { cwd: root }).exitCode !== 0) throw new Error("zip fixture failed");
   return output;
 }
 
 test("native identity reader: real public APK metadata, real IPA plists, every malformed shape refused", async () => {
+  if (!existsSync(join(buildTools, "aapt2"))) throw new Error("aapt2 fixture prerequisite missing: Android build-tools 34.0.0");
   const dir = await mkdtemp(join(tmpdir(), "beans-native-"));
   try {
     const app = "Payload/Beans.app", appex = `${app}/PlugIns/Notify.appex`;
@@ -54,7 +57,7 @@ test("native identity reader: real public APK metadata, real IPA plists, every m
     try {
       const out = join(dir, "staged");
       await stageLocalBuild(ipa, "testflight", "a".repeat(40), out);
-      const proof = await Bun.file(join(out, "eas-testflight.json")).json();
+      const proof = JSON.parse(await readFile(join(out, "eas-testflight.json"), "utf8"));
       expect(proof).toMatchObject({ kind: "local-exact-source", buildNumber: "42", version: readVersion() });
       expect(proof.buildId).toBeUndefined();
       // A real reading that differs from the release identity is refused and writes nothing.
@@ -66,7 +69,7 @@ test("native identity reader: real public APK metadata, real IPA plists, every m
     for (const identifier of ["ai.amoena.beans", "ai.amoena.beans.dev"]) {
       const manifest = join(dir, `${identifier}.xml`), apk = join(dir, `${identifier}.apk`);
       await writeFile(manifest, `<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="${identifier}" android:versionCode="42" android:versionName="1.0.14"><uses-sdk android:minSdkVersion="24"/><application android:hasCode="false"/></manifest>`);
-      const built = Bun.spawnSync([join(buildTools, "aapt2"), "link", "-I", join(sdk, "platforms/android-34/android.jar"), "--manifest", manifest, "-o", apk], { stdout: "pipe", stderr: "pipe" });
+      const built = runFixture([join(buildTools, "aapt2"), "link", "-I", join(sdk, "platforms/android-34/android.jar"), "--manifest", manifest, "-o", apk], { stdout: "pipe", stderr: "pipe" });
       expect(built.exitCode, built.stderr.toString()).toBe(0);
       expect(readNativeIdentity(apk, "github", env)).toEqual({ identifier, version: "1.0.14", buildNumber: "42" });
     }
@@ -81,7 +84,7 @@ async function markerStubs(dir: string) {
   const quoted = `'${marker.replaceAll("'", "'\\''")}'`;
   for (const tool of ["unzip", "aapt2", "bundletool", "plutil"]) { await writeFile(join(bin, tool), `#!/bin/sh\nprintf x > ${quoted}\nexit 0\n`); await chmod(join(bin, tool), 0o755); }
   for (const tool of ["unzip", "aapt2", "bundletool", "plutil"]) {
-    expect(Bun.spawnSync([join(bin, tool)], { env: { PATH: bin } }).exitCode, `${tool} stub`).toBe(0);
+    expect(runFixture([join(bin, tool)], { env: { PATH: bin } }).exitCode, `${tool} stub`).toBe(0);
     expect(existsSync(marker), `${tool} stub leaves the marker`).toBe(true);
     await rm(marker);
   }
@@ -174,7 +177,7 @@ test("tools read the admitted snapshot even if the original is replaced; symlink
     for (const tool of ["unzip", "aapt2"]) await chmod(join(bin, tool), 0o755);
     const identity = readNativeIdentity(original, "github", { PATH: `${bin}:/usr/bin:/bin` });
     expect(identity).toEqual({ identifier: "ai.amoena.beans", version: "1.0.14", buildNumber: "1" });
-    const rows = (await Bun.file(log).text()).trim().split("\n").map(line => line.split(" "));
+    const rows = (await readFile(log, "utf8")).trim().split("\n").map(line => line.split(" "));
     expect(rows.length).toBe(2);
     const admittedHash = createHash("sha256").update(admitted).digest("hex");
     for (const [path, hash] of rows) {
@@ -182,10 +185,10 @@ test("tools read the admitted snapshot even if the original is replaced; symlink
       expect(hash).toBe(admittedHash);
       expect(existsSync(path)).toBe(false); // snapshot removed after the call
     }
-    expect(createHash("sha256").update(await Bun.file(original).bytes()).digest("hex")).not.toBe(admittedHash); // original really was replaced
+    expect(createHash("sha256").update(await readFile(original)).digest("hex")).not.toBe(admittedHash); // original really was replaced
     // A symlink as the final component is refused before any tool runs.
     await writeFile(join(dir, "real.apk"), admitted);
-    await Bun.spawn(["ln", "-s", join(dir, "real.apk"), join(dir, "link.apk")]).exited;
+    expect(runFixture(["ln", "-s", join(dir, "real.apk"), join(dir, "link.apk")]).exitCode).toBe(0);
     expect(() => readNativeIdentity(join(dir, "link.apk"), "github", { PATH: bin })).toThrow();
     // Relative paths and non-regular files stay refused.
     expect(() => readNativeIdentity("a.apk", "github", { PATH: bin })).toThrow();
@@ -199,7 +202,7 @@ test.skipIf(process.platform === "win32")("a FIFO without a writer is refused fa
   const dir = await mkdtemp(join(tmpdir(), "beans-fifo-"));
   try {
     const fifo = join(dir, "pipe.apk"), marker = join(dir, "spawned"), bin = join(dir, "bin"), out = join(dir, "out");
-    if (Bun.spawnSync(["mkfifo", fifo]).exitCode !== 0) throw new Error("mkfifo unavailable: the FIFO refusal cannot be checked on this platform");
+    if (runFixture(["mkfifo", fifo]).exitCode !== 0) throw new Error("mkfifo unavailable: the FIFO refusal cannot be checked on this platform");
     await mkdir(bin);
     const q = (p: string) => `'${p.replaceAll("'", "'\\''")}'`;
     for (const tool of ["unzip", "aapt2", "bundletool", "plutil"]) { await writeFile(join(bin, tool), `#!/bin/sh\nprintf x > ${q(marker)}\nexit 0\n`); await chmod(join(bin, tool), 0o755); }
@@ -215,13 +218,10 @@ test.skipIf(process.platform === "win32")("a FIFO without a writer is refused fa
       console.log(JSON.stringify({ snapshot: refused(() => snapshotArtifact(fifo)), reader: refused(() => readNativeIdentity(fifo, "github", { PATH: bin })), staged, inspected }));
     `);
     const started = Date.now();
-    const child = Bun.spawn([process.execPath, script, fifo, bin, out], { stdout: "pipe", stderr: "pipe" });
-    const watchdog = setTimeout(() => child.kill(), 10_000);
-    const stdout = await new Response(child.stdout).text();
-    const code = await child.exited;
-    clearTimeout(watchdog);
+    const child = spawnSync(process.execPath, ["--import", "tsx", script, fifo, bin, out], { encoding: "utf8", timeout: 10_000, cwd: ROOT });
+    const stdout = child.stdout;
     expect(Date.now() - started, "refusal must be fast, not a watchdog kill").toBeLessThan(10_000);
-    expect(code, await new Response(child.stderr).text()).toBe(0);
+    expect(child.status, child.stderr).toBe(0);
     expect(JSON.parse(stdout.trim().split("\n").pop()!)).toEqual({ snapshot: "refused", reader: "refused", staged: "refused", inspected: false });
     expect(existsSync(marker)).toBe(false);
     expect(existsSync(out)).toBe(false);
@@ -241,3 +241,8 @@ test("native metadata tools do not inherit credentials or runtime injection vari
     expect(readNativeIdentity(apk, "github", { PATH: bin, EXPO_TOKEN: "secret-fixture", NODE_OPTIONS: "injection", JAVA_TOOL_OPTIONS: "injection", LD_PRELOAD: "injection", DYLD_INSERT_LIBRARIES: "injection" }).identifier).toBe("ai.amoena.beans");
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+function runFixture(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; stdout?: string; stderr?: string } = {}) {
+  const result = spawnSync(args[0]!, args.slice(1), { cwd: options.cwd, env: options.env, timeout: 30_000, maxBuffer: 1024 * 1024 });
+  return { ...result, exitCode: result.error ? 1 : result.status, };
+}

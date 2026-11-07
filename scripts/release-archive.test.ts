@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { inspectReleaseArchive } from "./release-build-inputs.ts";
 import { archiveFixture } from "./release-archive-fixture.ts";
 

@@ -1,9 +1,11 @@
-import { describe, expect, test, spyOn } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+import { describe, expect, test, vi } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readVersion } from "./app.ts";
-import { downloadArtifact, runEasRelease, runLocalEasRelease, stageEasBuild, stageLocalBuild, validateEasBuild } from "./release-eas.ts";
+import { downloadArtifact, runEasRelease, runLocalEasRelease, stageEasBuild, stageLocalBuild, stagePair, validateEasBuild } from "./release-eas.ts";
 import { androidNdk, hostLibrary } from "./release-build-inputs.ts";
 
 const revision = "a".repeat(40);
@@ -13,11 +15,11 @@ test("downloads and stages exact finished APK/AAB/store IPA with hashes, never U
   const directory = await mkdtemp(join(tmpdir(), "beans-eas-test-"));
   const previous = process.env.BEANS_EXPO_PROJECT_ID;
   process.env.BEANS_EXPO_PROJECT_ID = project;
-  const fetcher = spyOn(globalThis, "fetch").mockImplementation(async () => new Response(new Uint8Array([0x50, 0x4b, 3, 4, 1])) as any);
+  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(new Uint8Array([0x50, 0x4b, 3, 4, 1])) as any);
   try {
     for (const [profile, platform, suffix] of [["github", "ANDROID", ".apk"], ["production", "ANDROID", ".aab"], ["testflight", "IOS", "-store.ipa"]] as const) {
       await stageEasBuild({ ...build, appVersion: readVersion(), platform, buildProfile: profile }, profile, revision, directory);
-      const proof = await Bun.file(join(directory, `eas-${profile}.json`)).json();
+      const proof = JSON.parse(await readFile(join(directory, `eas-${profile}.json`), "utf8"));
       expect(proof.artifact).toBe(`Beans-${readVersion()}${suffix}`);
       expect(proof.sha256).toHaveLength(64);
       expect(proof.revision).toBe(revision);
@@ -31,11 +33,11 @@ test("downloads and stages exact finished APK/AAB/store IPA with hashes, never U
       const git = (args: string[]) => ({ exitCode: 0, stdout: Buffer.from(args.includes("rev-parse") ? revision : "") }) as any;
       await runEasRelease(["build", "github", revision, join(directory, "fresh")], async (args) => { expect(args).toContain("--wait"); return [{ ...build, appVersion: readVersion() }]; }, git);
       await runEasRelease(["build", "github", revision, join(directory, "retry"), build.id], async (args) => { expect(args[0]).toBe("build:view"); return { ...build, appVersion: readVersion() }; }, git);
-      await expect(runEasRelease(["build", "github", revision, directory], async () => [], git)).rejects.toThrow("exactly one");
+      await expect(runEasRelease(["build", "github", revision, join(directory, "empty")], async () => [], git)).rejects.toThrow("exactly one");
       await expect(runEasRelease(["build", "github", revision, directory], async () => [], () => ({ exitCode: 0, stdout: Buffer.from("dirty") }) as any)).rejects.toThrow("clean");
       await expect(runEasRelease(["bad"], async () => [], git)).rejects.toThrow("usage");
       delete process.env.EXPO_TOKEN;
-      await expect(runEasRelease(["build", "github", revision, directory], async () => [], git)).rejects.toThrow("required");
+      await expect(runEasRelease(["build", "github", revision, join(directory, "empty")], async () => [], git)).rejects.toThrow("required");
     } finally {
       if (oldToken === undefined) delete process.env.EXPO_TOKEN; else process.env.EXPO_TOKEN = oldToken;
       if (oldOwner === undefined) delete process.env.BEANS_EXPO_OWNER; else process.env.BEANS_EXPO_OWNER = oldOwner;
@@ -106,7 +108,7 @@ describe("local exact-source provenance", () => {
           await runLocalEasRelease([profile, revision, join(directory, profile)], identity(), builder, git());
           expect(args).toEqual(expect.arrayContaining(["--local", "--non-interactive", "--platform", platform, "--profile", profile]));
           for (const forbidden of ["--json", "--wait"]) expect(args).not.toContain(forbidden);
-          const proof = await Bun.file(join(directory, profile, `eas-${profile}.json`)).json();
+          const proof = JSON.parse(await readFile(join(directory, profile, `eas-${profile}.json`), "utf8"));
           expect(proof).toMatchObject({ kind: "local-exact-source", buildNumber: "77", revision, project });
           expect(proof.buildId).toBeUndefined();
           expect(JSON.stringify(proof)).not.toContain("https");
@@ -167,7 +169,7 @@ describe("local staging binds the inspector and the staged hash to one admitted 
       const name = `Beans-${readVersion()}.apk`;
       const staged = new Uint8Array(fs.readFileSync(join(directory, "out", name)));
       expect(staged).toEqual(admitted);
-      const proof = await Bun.file(join(directory, "out", "eas-github.json")).json();
+      const proof = JSON.parse(await readFile(join(directory, "out", "eas-github.json"), "utf8"));
       expect(proof).toMatchObject({ sha256: sha(admitted), size: admitted.length });
       expect(proof.sha256).not.toBe(sha(replacement));
       // The private snapshot is gone after staging.
@@ -185,4 +187,68 @@ describe("local staging binds the inspector and the staged hash to one admitted 
       expect(fs.existsSync(join(directory, "out"))).toBe(false);
     });
   });
+});
+
+test("partial second write rolls back both owned files and permits retry", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "beans-pair-"));
+  const entries = [{ name: "artifact", bytes: Buffer.from("binary") }, { name: "proof", bytes: Buffer.from("proof") }];
+  try {
+    let writes = 0;
+    await expect(stagePair(dir, entries, async (file, bytes) => {
+      await file.writeFile(bytes.subarray(0, 1));
+      if (++writes === 2) throw new Error("injected EIO");
+    })).rejects.toThrow("injected EIO");
+    expect(require("node:fs").readdirSync(dir)).toEqual([]);
+    await stagePair(dir, entries);
+    expect(await readFile(join(dir, "artifact"), "utf8")).toBe("binary");
+    expect(await readFile(join(dir, "proof"), "utf8")).toBe("proof");
+    await expect(stagePair(dir, entries)).rejects.toThrow();
+    expect(await readFile(join(dir, "proof"), "utf8")).toBe("proof");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test("rollback preserves a competing replacement and pre-existing proof", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "beans-pair-race-"));
+  const fs = require("node:fs");
+  try {
+    await expect(stagePair(dir, [{ name: "artifact", bytes: Buffer.from("ours") }, { name: "proof", bytes: Buffer.from("ours") }], async (file, bytes) => {
+      await file.writeFile(bytes);
+      if (bytes.toString() === "ours") {
+        fs.unlinkSync(join(dir, "artifact")); fs.writeFileSync(join(dir, "artifact"), "concurrent");
+        fs.writeFileSync(join(dir, "proof"), "stale");
+        throw new Error("race");
+      }
+    })).rejects.toThrow("race");
+    expect(await readFile(join(dir, "artifact"), "utf8")).toBe("concurrent");
+    expect(await readFile(join(dir, "proof"), "utf8")).toBe("stale");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+test("stale proof and completed pair refuse before cloud payment or local build", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "beans-preflight-"));
+  const old = { ...process.env };
+  Object.assign(process.env, { EXPO_TOKEN: "mock", BEANS_EXPO_OWNER: "mock", BEANS_EXPO_PROJECT_ID: project });
+  const git = (args: string[]) => ({ exitCode: 0, stdout: Buffer.from(args.includes("rev-parse") ? revision : "") });
+  const query = vi.fn(async () => []);
+  const builder = vi.fn(() => ({ exitCode: 0 }));
+  try {
+    require("node:fs").writeFileSync(join(dir, "eas-github.json"), "stale");
+    for (const complete of [false, true]) {
+      if (complete) require("node:fs").writeFileSync(join(dir, `Beans-${readVersion()}.apk`), "existing");
+      await expect(runEasRelease(["build", "github", revision, dir], query, git)).rejects.toThrow("already contains");
+      await expect(runLocalEasRelease(["github", revision, dir], undefined, builder, git)).rejects.toThrow("already contains");
+    }
+    expect(query).not.toHaveBeenCalled(); expect(builder).not.toHaveBeenCalled();
+    expect(await readFile(join(dir, "eas-github.json"), "utf8")).toBe("stale");
+  } finally { process.env = old; await rm(dir, { recursive: true, force: true }); }
+});
+
+test("a concurrent proof creation rolls back only the artifact", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "beans-exclusive-"));
+  try {
+    await expect(stagePair(dir, [{ name: "artifact", bytes: Buffer.from("binary") }, { name: "proof", bytes: Buffer.from("new") }], async (file, bytes) => {
+      await file.writeFile(bytes);
+      require("node:fs").writeFileSync(join(dir, "proof"), "concurrent");
+    })).rejects.toThrow();
+    expect(require("node:fs").existsSync(join(dir, "artifact"))).toBe(false);
+    expect(await readFile(join(dir, "proof"), "utf8")).toBe("concurrent");
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

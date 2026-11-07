@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { closeSync, constants, fstatSync, mkdtempSync, openSync, readSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,9 +13,8 @@ type Env = Record<string, string | undefined>;
 
 // Argument vectors only, finite time and output, isolated locale. A missing tool or nonzero exit refuses.
 function run(args: string[], env: Env, input?: Uint8Array): Buffer {
-  if (!Bun.which(args[0], { PATH: env.PATH ?? "" })) throw new Error(`Binary inspection tool unavailable: ${args[0]}`);
-  const result = Bun.spawnSync(args, { env: { PATH: env.PATH ?? "", ...(env.JAVA_HOME ? { JAVA_HOME: env.JAVA_HOME } : {}), LC_ALL: "C", LANG: "C" }, stdin: input, stdout: "pipe", stderr: "pipe", timeout: 30_000, maxBuffer: 1024 * 1024 });
-  if (result.exitCode !== 0) throw new Error(`Binary inspection tool failed: ${args[0]}`);
+  const result = spawnSync(args[0]!, args.slice(1), { env: { PATH: env.PATH ?? "", ...(env.JAVA_HOME ? { JAVA_HOME: env.JAVA_HOME } : {}), LC_ALL: "C", LANG: "C" }, input, timeout: 30_000, maxBuffer: 1024 * 1024 });
+  if (result.error || result.status !== 0) throw new Error(`Binary inspection tool failed: ${args[0]}`);
   return result.stdout;
 }
 const field = (value: unknown): string => {

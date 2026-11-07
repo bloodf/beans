@@ -302,6 +302,7 @@ impl Tool for BashTool {
             let result = self.execute_owned(id, args, cancel, on_update).await;
             return result;
         }
+        let scope = scope.child(&cancel).map_err(ToolError)?;
         let owned = self.clone();
         let id = id.to_string();
         let worker_id = id.clone();
@@ -566,6 +567,43 @@ impl BashTool {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scoped_pipe_honors_its_call_token_and_preserves_unrelated_process() {
+        struct Canary(std::process::Child);
+        impl Drop for Canary {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut canary = Canary(std::process::Command::new("/bin/sleep")
+            .arg("30").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn().unwrap());
+        let owner_cancel = CancellationToken::new();
+        let scope = ExecutionScope::root(&owner_cancel);
+        let call_cancel = CancellationToken::new();
+        let stop = call_cancel.clone();
+        let update: ToolUpdateFn = Arc::new(move |partial| {
+            if partial.text_content().contains("ready") { stop.cancel(); }
+        });
+        let mut tool = BashTool::for_script(std::env::temp_dir());
+        tool.shell = Some("/bin/bash".into());
+        let result = tokio::time::timeout(Duration::from_secs(5), tool.execute_scoped(
+            "separate-token", json!({"command": "printf ready; sleep 30"}),
+            call_cancel, update, &DirectRunner, &scope,
+        )).await;
+        // Drain even on failure so the regression never abandons its command.
+        let completed = scope.drain().await;
+        assert!(!owner_cancel.is_cancelled());
+        assert!(canary.0.try_wait().unwrap().is_none(), "unrelated process was terminated");
+        let result = result.expect("the call token must cancel a scoped pipe worker").unwrap();
+        assert!(result.is_error);
+        assert!(result.text_content().contains("Command aborted"));
+        assert_eq!(result.structured.as_ref().unwrap()["output"], "ready");
+        assert_eq!(completed.len(), 1);
+    }
 
     #[cfg(unix)]
     #[tokio::test]

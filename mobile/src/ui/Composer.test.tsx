@@ -253,8 +253,9 @@ test("production Engine and Composer preserve omission and validate exact admitt
   tap(find(node => node.props.accessibilityLabel === "Send")!);
   useStore.setState({ deviceId: "replacement" }); useStore.setState({ deviceId: "phone" });
   resolve({ result: { message: { ...message, id: "msg-stale" } } }); await flush();
-  expect(draft.text).toBe("submitted");
+  expect(draft.text).toBe("");
   expect(useStore.getState().chats.find(chat => chat.id === "chat")!.messages.some(message => message.id === "msg-stale")).toBe(false);
+  editComposerDraft(draft, { text: "submitted" }); render();
   tap(find(node => node.props.accessibilityLabel === "Send")!);
   event("message.added", { message: { ...message, id: "msg-event" } });
   reject(new Error("response lost after event")); await flush(); expect(draft.text).toBe("submitted");

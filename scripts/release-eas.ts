@@ -1,13 +1,51 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { lstat, open, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { realpathSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readVersion, ROOT } from "./app.ts";
+import { readNativeSnapshot, snapshotArtifact } from "./release-native-identity.ts";
 
 const profiles = { github: { platform: "ANDROID", extension: "apk", component: "android" }, production: { platform: "ANDROID", extension: "aab", component: "android-store" }, testflight: { platform: "IOS", extension: "ipa", component: "ios-store" } } as const;
 type Profile = keyof typeof profiles;
+function stagingNames(profile: Profile) {
+  return [`Beans-${readVersion()}${profile === "testflight" ? "-store" : ""}.${profiles[profile].extension}`, `eas-${profile}.json`];
+}
+async function assertStageFree(directory: string, names: string[]) {
+  for (const name of names) {
+    try { await lstat(join(directory, name)); }
+    catch (error) { if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") continue; throw error; }
+    throw new Error(`Release staging already contains ${name}`);
+  }
+}
+// Retain open handles through rollback so partial writes are owned before writing starts.
+export async function stagePair(directory: string, entries: { name: string; bytes: Uint8Array }[], write = (file: Awaited<ReturnType<typeof open>>, bytes: Uint8Array) => file.writeFile(bytes)) {
+  await mkdir(directory, { recursive: true });
+  const created: { path: string; file: Awaited<ReturnType<typeof open>>; dev: number; ino: number }[] = [];
+  try {
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      const file = await open(path, "wx", 0o600);
+      const owned = { path, file, dev: -1, ino: -1 };
+      created.push(owned);
+      const identity = await file.stat();
+      owned.dev = identity.dev; owned.ino = identity.ino;
+      await write(file, entry.bytes);
+    }
+  } catch (error) {
+    for (const owned of created.reverse()) {
+      try {
+        const current = await lstat(owned.path);
+        if (current.dev === owned.dev && current.ino === owned.ino) await rm(owned.path);
+      } catch (cleanup) {
+        if (!(cleanup && typeof cleanup === "object" && "code" in cleanup && cleanup.code === "ENOENT")) throw new AggregateError([error, cleanup], "Staging failed and rollback requires inspection");
+      }
+    }
+    throw error;
+  } finally { await Promise.all(created.map(({ file }) => file.close())); }
+}
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 export function validateEasBuild(value: any, profile: Profile, revision: string, version: string, project: string) {
   if (!profiles[profile] || !uuid.test(project) || !/^[a-f0-9]{40}$/.test(revision)) throw new Error("Invalid EAS release identity");
@@ -69,13 +107,55 @@ async function eas(args: string[]): Promise<any> {
 export async function stageEasBuild(build: any, profile: Profile, revision: string, directory: string) {
   const project = process.env.BEANS_EXPO_PROJECT_ID ?? "";
   validateEasBuild(build, profile, revision, readVersion(), project);
+  await assertStageFree(directory, stagingNames(profile));
   const bytes = await downloadArtifact(build.artifacts.buildUrl);
   const name = `Beans-${readVersion()}${profile === "testflight" ? "-store" : ""}.${profiles[profile].extension}`;
-  await mkdir(directory, { recursive: true });
-  await writeFile(join(directory, name), bytes, { flag: "wx" });
   // URLs can carry download tokens; provenance records identifiers and hashes, never URLs.
   const provenance = { schema: 1, revision, version: readVersion(), project, buildId: build.id, buildNumber: build.appBuildVersion, profile, platform: build.platform, artifact: name, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
-  await writeFile(join(directory, `eas-${profile}.json`), `${JSON.stringify(provenance)}\n`, { flag: "wx" });
+  await stagePair(directory, [{ name, bytes }, { name: `eas-${profile}.json`, bytes: Buffer.from(JSON.stringify(provenance) + "\n") }]);
+}
+// Local exact-source builds (`eas build --local`) still draw their number from EAS remote versions,
+// but EAS records no build for them: the proof has no buildId and the number is read from the binary.
+export type NativeIdentity = { identifier: string; version: string; buildNumber: string };
+export type InspectNative = (path: string, profile: Profile) => Promise<NativeIdentity>;
+export async function stageLocalBuild(input: string, profile: Profile, revision: string, directory: string, inspect?: InspectNative) {
+  const project = process.env.BEANS_EXPO_PROJECT_ID ?? "";
+  const version = readVersion();
+  if (!Object.hasOwn(profiles, profile) || !uuid.test(project) || !/^[a-f0-9]{40}$/.test(revision)) throw new Error("Invalid EAS release identity");
+  // One admitted snapshot: the inspector sees the private copy, and the artifact and proof hash are
+  // written from the same retained bytes, so replacing `input` afterwards changes neither.
+  await assertStageFree(directory, stagingNames(profile));
+  const snapshot = snapshotArtifact(input);
+  try {
+    const bytes = snapshot.bytes;
+    if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw new Error("Local artifact must be a nonempty ZIP-format APK/AAB/IPA");
+    const native = await (inspect ? inspect(snapshot.path, profile) : readNativeSnapshot(snapshot, profile));
+    if (native?.identifier !== "ai.amoena.beans" || native.version !== version || !/^[1-9]\d*$/.test(native.buildNumber) || Number(native.buildNumber) > 2_100_000_000) {
+      throw new Error("Local binary differs from the release identity or version, or its build number is not a positive integer at most 2100000000");
+    }
+    const name = `Beans-${version}${profile === "testflight" ? "-store" : ""}.${profiles[profile].extension}`;
+    const provenance = { schema: 1, kind: "local-exact-source", revision, version, project, profile, platform: profiles[profile].platform, buildNumber: native.buildNumber, artifact: name, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+    await stagePair(directory, [{ name, bytes }, { name: `eas-${profile}.json`, bytes: Buffer.from(JSON.stringify(provenance) + "\n") }]);
+  } finally { snapshot.dispose(); }
+}
+export async function runLocalEasRelease(args: string[], inspect: InspectNative | undefined = undefined, run = (args: string[], cwd: string) => ({ exitCode: spawnSync(args[0]!, args.slice(1), { cwd, stdio: "inherit" }).status }), git = gitState) {
+  const [profile, revision, directory, ...extra] = args;
+  if (!Object.hasOwn(profiles, profile) || !revision || !directory || extra.length) throw new Error("usage: <github|production|testflight> <revision> <directory>");
+  if (!process.env.EXPO_TOKEN || !process.env.BEANS_EXPO_OWNER || !uuid.test(process.env.BEANS_EXPO_PROJECT_ID ?? "")) throw new Error("EXPO_TOKEN, BEANS_EXPO_OWNER and linked BEANS_EXPO_PROJECT_ID are required");
+  if (profile === "testflight" && !/^[A-Z0-9]{10}$/.test(process.env.BEANS_APPLE_TEAM_ID ?? "")) throw new Error("BEANS_APPLE_TEAM_ID is required for a local store IPA");
+  const head = git(["git", "rev-parse", "HEAD"]);
+  const dirty = git(["git", "status", "--porcelain", "--untracked-files=all"]);
+  if (head.exitCode || dirty.exitCode || head.stdout.toString().trim() !== revision || dirty.stdout.length) throw new Error("EAS release requires clean exact-revision checkout");
+  const typedProfile = profile as Profile;
+  await assertStageFree(resolve(directory), stagingNames(typedProfile));
+  const scratch = await mkdtemp(join(tmpdir(), "beans-local-build-"));
+  try {
+    const output = join(scratch, `build.${profiles[typedProfile].extension}`);
+    // No BUILD_NUMBER, no --json/--wait: EAS stays the build-number authority and no build record exists.
+    const built = run(["eas", "build", "--local", "--platform", profiles[typedProfile].platform.toLowerCase(), "--profile", profile, "--non-interactive", "--output", output], join(ROOT, "mobile"));
+    if (built.exitCode !== 0) throw new Error("Local EAS build failed; no release readiness is published");
+    await stageLocalBuild(output, typedProfile, revision, resolve(directory), inspect);
+  } finally { await rm(scratch, { recursive: true, force: true }); }
 }
 /** The release gate reads the checkout state. A spawn failure or a signalled git is a failure,
  * never a clean tree. */
@@ -86,12 +166,13 @@ function gitState(args: string[]): { exitCode: number; stdout: Buffer } {
 }
 export async function runEasRelease(args: string[], query = eas, git = gitState) {
   const [command, profile, revision, directory, buildId, ...extra] = args;
-  if (command !== "build" || !(profile in profiles) || !revision || !directory || extra.length) throw new Error("usage: release-eas.ts build <github|production|testflight> <revision> <directory> [retry-build-id]");
+  if (command !== "build" || !Object.hasOwn(profiles, profile) || !revision || !directory || extra.length) throw new Error("usage: release-eas.ts build <github|production|testflight> <revision> <directory> [retry-build-id]");
   if (!process.env.EXPO_TOKEN || !process.env.BEANS_EXPO_OWNER || !uuid.test(process.env.BEANS_EXPO_PROJECT_ID ?? "")) throw new Error("EXPO_TOKEN, BEANS_EXPO_OWNER and linked BEANS_EXPO_PROJECT_ID are required");
   const head = git(["git", "rev-parse", "HEAD"]);
-  const dirty = git(["git", "status", "--porcelain", "--untracked-files=no"]);
+  const dirty = git(["git", "status", "--porcelain", "--untracked-files=all"]);
   if (head.exitCode || dirty.exitCode || head.stdout.toString().trim() !== revision || dirty.stdout.length) throw new Error("EAS release requires clean exact-revision checkout");
   const typedProfile = profile as Profile;
+  await assertStageFree(resolve(directory), stagingNames(typedProfile));
   const builds = buildId ? [await query(["build:view", buildId, "--json"])] : await query(["build", "--platform", profiles[typedProfile].platform.toLowerCase(), "--profile", profile, "--non-interactive", "--wait", "--json"]);
   if (!Array.isArray(builds) || builds.length !== 1) throw new Error("Expected exactly one completed EAS build");
   await stageEasBuild(builds[0], typedProfile, revision, resolve(directory));

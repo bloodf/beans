@@ -140,6 +140,6 @@ The phone app (`mobile/`) pairs as a Device with `os` `ios`, `ipados`, or `andro
 
 ## Open points
 
-- Keychain instead of 0600 files for the master secret and credentials
+- Native keychain backend selection and qualification for master secrets and credentials. The inert [secret-store contract](docs/architecture/identity.md#secret-store-contract) provides verified copying with fake tests; production retains private files.
 
 When those are chosen, update this file.

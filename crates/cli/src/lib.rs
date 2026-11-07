@@ -33,6 +33,7 @@ pub mod providers;
 pub mod push;
 pub mod relay;
 pub mod requests;
+pub mod retention;
 pub mod routines;
 pub mod runtime;
 pub mod schedule;

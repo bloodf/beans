@@ -1697,6 +1697,45 @@ mod tests {
     }
 
     #[test]
+    fn retention_dry_run_is_scoped_read_only_and_never_executable() {
+        use crate::retention::{ChatAdmission::*, RetentionBlocker::*, RetentionPolicy::Before};
+        let scratch = scratch();
+        let store = &scratch.0;
+        for (id, at) in [("expired", 1.0), ("boundary", 10.0), ("recent", 11.0)] {
+            store.upsert(&message(id, at)).unwrap();
+        }
+        let mut queued = message("queued", 1.0);
+        queued.queued = true;
+        store.upsert(&queued).unwrap();
+        let mut promoted = message("promoted", 1.0);
+        promoted.promoted_at = Some(11.0);
+        store.upsert(&promoted).unwrap();
+        let mut other = message("other", 1.0);
+        other.chat_id = "other-chat".into();
+        store.upsert(&other).unwrap();
+        let before = store.all("chat").unwrap();
+        let plan = store.retention_dry_run("chat", Before(10.0), OwnedAndIdle).unwrap();
+        assert_eq!(plan.message_ids, ["expired"]);
+        assert_eq!(plan.chat_id, "chat");
+        assert_eq!(plan.blockers, [InventoryIncomplete]);
+        for (policy, admission, blocker) in [
+            (Default::default(), OwnedAndIdle, Disabled),
+            (Before(10.0), Unknown, OwnershipOrActivityUnknown),
+            (Before(10.0), Active, ActiveTurn),
+            (Before(f64::NAN), OwnedAndIdle, InvalidScopeOrCutoff),
+            (Before(f64::INFINITY), OwnedAndIdle, InvalidScopeOrCutoff),
+            (Before(-1.0), OwnedAndIdle, InvalidScopeOrCutoff),
+        ] {
+            let blocked = store.retention_dry_run("chat", policy, admission).unwrap();
+            assert!(blocked.message_ids.is_empty());
+            assert_eq!(blocked.blockers, [InventoryIncomplete, blocker]);
+        }
+        assert!(store.retention_dry_run("", Before(10.0), OwnedAndIdle).unwrap().message_ids.is_empty());
+        assert_eq!(store.all("chat").unwrap(), before);
+        assert_eq!(store.all("other-chat").unwrap(), [other]);
+    }
+
+    #[test]
     fn older_pages_land_before_what_is_here() {
         let scratch = scratch();
         let store = &scratch.0;

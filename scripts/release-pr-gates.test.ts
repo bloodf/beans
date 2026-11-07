@@ -104,8 +104,8 @@ test("every release regression executes unconditionally in a hosted fixture gate
       expect(job["continue-on-error"]).toBeUndefined();
       expect(step.if).toBeUndefined();
       expect(step["continue-on-error"]).toBeUndefined();
-      expect(step.run).toMatch(/^bun test /);
-      expect(step.run).not.toMatch(/\|\||;|--todo|--test-name-pattern/);
+      expect(step.run).toMatch(/^pnpm exec vitest run --config vitest\.config\.ts /);
+      expect(step.run).not.toMatch(/\|\||;|--todo|--test-name-pattern|--testNamePattern|--exclude/);
     }
   }
 });

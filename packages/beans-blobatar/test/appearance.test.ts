@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import {
   BOT_AVATAR_STATES, BOT_SHAPES, BOT_TONES, blobatar, botAppearanceContrast, botAvatarSVG,
   resolveBotAppearance, validateBotLook, type BotLook,

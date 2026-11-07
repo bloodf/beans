@@ -1,18 +1,18 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 import type { Chat } from "./model";
 
 // Replace only OS I/O. The store and bundled JSON request/error decoder are real.
 const pending: { resolve: (raw: string) => void; reject: (error: Error) => void }[] = [];
-mock.module("expo-modules-core", () => ({
+vi.doMock("expo-modules-core", () => ({
   requireNativeModule: () => ({
     request: (_method: string, _params: string) => new Promise<string>((resolve, reject) => pending.push({ resolve, reject })),
   }),
 }));
-mock.module("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
+vi.doMock("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
 const { markRead, resetStore, useStore } = await import("./store");
 const chat = (unread_count: number): Chat => ({ id: "chat", kind: "dm", bot_ids: [], is_pinned: false, created_at: 0, messages: [], unread_count });
 const unread = () => useStore.getState().chats[0].unread_count;
-const settle = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); };
+const settle = async () => { await vi.dynamicImportSettled(); };
 
 test("read acknowledgement keeps failures and revoked or newer unread state honest", async () => {
   resetStore();
@@ -62,10 +62,12 @@ test("read acknowledgement keeps failures and revoked or newer unread state hone
 
   useStore.setState({ chats: [chat(5)] });
   markRead("chat");
+  await settle();
   const revoked = pending.shift()!;
   useStore.setState({ appActive: false });
   useStore.setState({ appActive: true });
   markRead("chat");
+  await settle();
   const current = pending.shift()!;
   revoked.resolve('{"result":null}');
   await settle();

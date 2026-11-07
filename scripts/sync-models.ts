@@ -1,9 +1,11 @@
 import { strict as assert } from "node:assert"
 // Refresh curated model metadata from public sources. New models remain report-only.
-// Run `bun run sync:models [--report <file>] [--new <file>]` to update the local snapshot.
-import { join } from "node:path"
+// Run `pnpm run sync:models [--report <file>] [--new <file>]` to update the local snapshot.
+import { readFile, writeFile } from "node:fs/promises"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 
-const CATALOG = join(import.meta.dir, "../crates/models/catalog.json")
+const CATALOG = join(dirname(fileURLToPath(import.meta.url)), "../crates/models/catalog.json")
 const MODELS_DEV: Record<string, string> = {
   deepseek: "deepseek", anthropic: "anthropic", chatgpt: "openai", grok: "xai",
   opencode: "opencode", "opencode-go": "opencode-go",
@@ -123,7 +125,8 @@ function levelsFrom(options: unknown): string[] | undefined {
       }
     }
   }
-  return LEVELS.filter((level) => levels.has(level))
+  const supported = LEVELS.filter((level) => levels.has(level))
+  return supported.length || options.length === 0 ? supported : undefined
 }
 
 // Keep unknown endpoints visible. In particular, SystemOne is not Chat Completions.
@@ -258,7 +261,7 @@ async function publicText(url: string) {
   return response.text()
 }
 
-if (import.meta.main) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2)
   if (args.length === 1 && args[0] === "--self-check") {
     const rates = { input: 1, output: 2, cache_read: 0, cache_write: 0, known: false }
@@ -307,24 +310,42 @@ if (import.meta.main) {
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, version: 2 }), sources), /version 1/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, updated: "2026-02-30T00:00:00Z" }), sources), /UTC/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, padding: "x".repeat(MAX_BYTES) }), sources), /1 MiB/)
+    const curatedLevels = JSON.stringify({ ...input, models: [{ ...row, levels: ["low", "medium"] }] })
+    for (const options of [
+      [{ type: "future-effort", values: ["high"] }],
+      [{ type: "effort", values: ["future-level"] }],
+      [{ type: "budget_tokens", values: [1024] }],
+    ]) {
+      modelsDev.opencode.models.chat.reasoning_options = options
+      assert.deepEqual(validate(syncCatalog(curatedLevels, sources).text).models[0].levels, ["low", "medium"])
+    }
+    for (const [options, expected] of [
+      [[], []],
+      [[{ type: "effort", values: ["low", "future-level"] }], ["low"]],
+      [[{ type: "toggle" }], ["off"]],
+    ]) {
+      modelsDev.opencode.models.chat.reasoning_options = options
+      assert.deepEqual(validate(syncCatalog(curatedLevels, sources).text).models[0].levels, expected)
+    }
+    delete modelsDev.opencode.models.chat.reasoning_options
     console.log("Offline model sync self-check passed; no network or catalog writes.")
     process.exit(0)
   }
   const options: Record<string, string> = {}
   for (let i = 0; i < args.length; i += 2) {
-    if (!["--report", "--new"].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith("--")) throw new Error("Usage: bun run sync:models [--report <file>] [--new <file>]")
+    if (!["--report", "--new"].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith("--")) throw new Error("Usage: pnpm run sync:models [--report <file>] [--new <file>]")
     options[args[i]] = args[i + 1]
   }
   const [text, modelsDev, codex, ...docs] = await Promise.all([
-    Bun.file(CATALOG).text(), publicText("https://models.dev/api.json").then(JSON.parse),
+    readFile(CATALOG, "utf8"), publicText("https://models.dev/api.json").then(JSON.parse),
     publicText(CODEX_MODELS).then(JSON.parse).catch(() => undefined),
     ...Object.values(OPENCODE_DOCS).map((url) => publicText(url).catch(() => "")),
   ])
   validate(text, Object.keys(MODELS_DEV))
   const result = syncCatalog(text, { modelsDev, codex, docs: Object.fromEntries(Object.keys(OPENCODE_DOCS).map((p, i) => [p, docs[i]])) })
-  if (result.text !== text) await Bun.write(CATALOG, result.text)
+  if (result.text !== text) await writeFile(CATALOG, result.text)
   console.log(result.report || "The catalog matches upstream.")
-  if (options["--report"]) await Bun.write(options["--report"], result.report)
-  if (options["--new"]) await Bun.write(options["--new"], result.fresh.map((line) => `- ${line}\n`).join(""))
+  if (options["--report"]) await writeFile(options["--report"], result.report)
+  if (options["--new"]) await writeFile(options["--new"], result.fresh.map((line) => `- ${line}\n`).join(""))
   if (result.refused) process.exitCode = 1
 }

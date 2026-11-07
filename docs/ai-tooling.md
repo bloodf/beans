@@ -77,7 +77,7 @@ Give each worker exact scope and file ownership. State that concurrent work must
 
 ## Verify and propagate tooling
 
-Keep the existing Beans gates. `bun run check:docs`, `bun run check:catalog` and the same-repository PR test matrix remain applicable. Inspect the current workflow definitions before execution; a local tooling smoke does not replace hosted checks. Product homes, accounts, relays, signing inputs and deployments are not tooling fixtures.
+Keep the existing Beans gates. `pnpm run check:docs`, `pnpm run check:catalog` and the same-repository PR test matrix remain applicable. Inspect the current workflow definitions before execution; a local tooling smoke does not replace hosted checks. Product homes, accounts, relays, signing inputs and deployments are not tooling fixtures.
 
 Create one tooling PR against current Beans `main` and link it immediately to T3. Merge only after independent exact-head review and the real required checks pass. When waiting for hosted checks, use T3's PR watch and end the run; do not poll CI.
 

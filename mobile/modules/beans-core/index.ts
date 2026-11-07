@@ -8,6 +8,12 @@ interface Native {
   wake(): void;
   /// Android only.
   setOpenChat?(chatId: string | null): void;
+  updateCapability?(): "supported" | "development" | "store_managed" | "native_verifier_unavailable";
+  updateResult?(): string | null;
+  checkUpdate?(): Promise<UpdateOffer | null>;
+  installUpdate?(id: string): Promise<void>;
+  cancelUpdate?(): "cancelled" | "committed";
+  addListener(event: "updateProgress", listener: (payload: UpdateProgress) => void): EventSubscription;
   addListener(event: "event", listener: (payload: { json: string }) => void): EventSubscription;
 }
 
@@ -53,3 +59,26 @@ export function wake() {
 export function setOpenChat(chatId: string | null) {
   native.setOpenChat?.(chatId);
 }
+
+export interface UpdateOffer { id: string; version: string; notes: string }
+export interface UpdateProgress { id: string; phase: "downloading" | "installing"; downloaded: number; total: number }
+export const androidUpdates = {
+  result: () => native.updateResult?.() ?? null,
+  onProgress: (listener: (payload: UpdateProgress) => void) => {
+    const subscription = native.addListener("updateProgress", listener);
+    return () => subscription.remove();
+  },
+  capability: () => {
+    if (![native.updateCapability, native.updateResult, native.checkUpdate, native.installUpdate, native.cancelUpdate, native.addListener].every(fn => typeof fn === "function")) return "native_verifier_unavailable" as const;
+    try { return native.updateCapability!(); } catch { return "native_verifier_unavailable" as const; }
+  },
+  check: async () => {
+    if (!native.checkUpdate) throw new Error("Native update verifier unavailable");
+    return native.checkUpdate();
+  },
+  install: async (id: string) => {
+    if (!native.installUpdate) throw new Error("Native installer unavailable");
+    await native.installUpdate(id);
+  },
+  cancel: () => native.cancelUpdate?.() ?? "cancelled",
+};

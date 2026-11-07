@@ -206,11 +206,11 @@ mod tests {
         for field in ["max_tokens", "max_output_tokens"] {
             for replacement in [serde_json::json!(4096), Value::Null, serde_json::json!("2048")] {
                 let options = RequestOptions::default().with_hooks(Arc::new(Override(replacement)));
-                let mut body = serde_json::json!({field: 2048});
+                let mut body = serde_json::json!({(field): 2048});
                 assert_eq!(options.before_payload_with_output_cap(&mut body, field), Err("Request payload exceeds or removes the effective output cap.".into()));
             }
             let options = RequestOptions::default().with_hooks(Arc::new(Override(serde_json::json!(1024))));
-            let mut body = serde_json::json!({field: 2048});
+            let mut body = serde_json::json!({(field): 2048});
             assert!(options.before_payload_with_output_cap(&mut body, field).is_ok());
             assert_eq!(body[field], 1024);
             let mut uncapped = serde_json::json!({"model": "fixture"});

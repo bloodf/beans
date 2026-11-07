@@ -3,7 +3,7 @@ import { MenuView, type MenuAction, type MenuComponentRef } from "@expo/ui/commu
 import * as Haptics from "expo-haptics";
 import { Link, Stack, useRouter } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Platform, Pressable, StyleSheet, Text, useWindowDimensions, type StyleProp, type TextStyle, View } from "react-native";
+import { ActivityIndicator, Alert, Platform, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, type StyleProp, type TextStyle, View } from "react-native";
 import { chatTitle, engine } from "../core/engine";
 import type { Bot, Chat, ChatSearchResults } from "../core/model";
 import { markRead, useBotMap, useStore, useWorkingBotIds } from "../core/store";
@@ -27,15 +27,14 @@ const KEEP_OFFSET = { disabled: true };
 
 /// The chat list: the first screen of a narrow window, the sidebar of a wide one. In the sidebar
 /// a chat opens in the pane beside the list, in place of the one open there, and its row stays lit.
-export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
+export function ChatsScreen({ sidebar = false, search = false }: { sidebar?: boolean; search?: boolean }) {
   const { language } = useLanguage();
   const p = usePalette();
   const router = useRouter();
   const openChatId = useStore((s) => s.openChatId);
   const sidebarWidth = useSidebarWidth();
-  // The search field sits at the foot of the list. An iPhone's native bar puts it there; the
-  // sidebar and Android have their own (see SidebarSearch).
-  const floatingSearch = sidebar || Platform.OS === "android";
+  // The sidebar retains its keyboard-following field; the phone has a dedicated Search tab.
+  const floatingSearch = sidebar;
   const searchInset = useSidebarSearchInset();
   const chats = useStore((s) => s.chats);
   const identityId = useStore((s) => s.identityId);
@@ -57,8 +56,13 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
   const [searching, setSearching] = useState(false);
   const [searchGeneration, setSearchGeneration] = useState(0);
   const searchOwner = useRef<{ active: boolean; query: string } | null>(null);
+  const inputValue = useRef(query);
 
   function updateQuery(value: string) {
+    if (value === inputValue.current) return;
+    inputValue.current = value;
+    if (searchOwner.current) searchOwner.current.active = false;
+    setSearchGeneration(generation => generation + 1);
     setQuery(value);
     setMatches({ chats: [], messages: [], files: [], history_complete: true });
     setSearching(!!value.trim());
@@ -73,46 +77,62 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
     }
     const owner = { active: true, query: value };
     searchOwner.current = owner;
-    // Observe every core authority transition, not only React's eventual render.
-    // Once revoked, this request/result owner cannot regain authority after ABA.
-    const unsubscribe = useStore.subscribe(state => {
-      if (owner.active && (state.identityId !== source.identityId || state.relayUrl !== source.relayUrl
-        || state.deviceId !== source.deviceId || state.paired !== source.paired)) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let inFlight = false;
+    let dirty = false;
+    let published = false;
+    const schedule = () => {
+      if (!owner.active || timer || inFlight) return;
+      timer = setTimeout(() => {
+        timer = undefined;
+        if (!owner.active) return;
+        dirty = false;
+        inFlight = true;
+        void engine.searchChats(value)
+          .then(results => {
+            if (owner.active) { published = true; setMatches(results); }
+          })
+          .catch(() => {
+            if (owner.active && !published) setMatches({ chats: [], messages: [], files: [], history_complete: false });
+          })
+          .finally(() => {
+            inFlight = false;
+            if (!owner.active) return;
+            setSearching(false);
+            if (dirty) schedule();
+          });
+      }, 140);
+    };
+    // Subscribe synchronously so authority ABA cannot reauthorize a captured owner.
+    const unsubscribe = useStore.subscribe((state, previous) => {
+      if (!owner.active) return;
+      if (state.identityId !== source.identityId || state.relayUrl !== source.relayUrl
+        || state.deviceId !== source.deviceId || state.paired !== source.paired) {
         owner.active = false;
         setMatches({ chats: [], messages: [], files: [], history_complete: true });
         setSearchGeneration(generation => generation + 1);
+      } else if (state.chats !== previous.chats || state.bots !== previous.bots) {
+        dirty = true;
+        schedule();
       }
     });
     setSearching(true);
     setMatches({ chats: [], messages: [], files: [], history_complete: true });
-    const timer = setTimeout(() => {
-      if (!owner.active) return;
-      void engine
-        .searchChats(value)
-        .then((results) => {
-          if (owner.active) setMatches(results);
-        })
-        .catch(() => { if (owner.active) setMatches({ chats: [], messages: [], files: [], history_complete: false }); })
-        .finally(() => {
-          if (owner.active) setSearching(false);
-        });
-    }, 140);
+    schedule();
     return () => {
       owner.active = false;
       unsubscribe();
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     };
-  }, [query, chats, bots, searchGeneration, identityId, deviceId, paired, relayUrl]);
+  }, [query, searchGeneration, identityId, deviceId, paired, relayUrl]);
 
   const items = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const visible = chats
-      .filter((c) => !q || chatTitle(c).toLowerCase().includes(q) || c.bot_ids.some((id) => bots.get(id)?.name.toLowerCase().includes(q)))
-      .sort((a, b) => lastActivity(b) - lastActivity(a));
+    const visible = [...chats].sort((a, b) => lastActivity(b) - lastActivity(a));
     return [...visible.filter((c) => c.is_pinned), ...visible.filter((c) => !c.is_pinned)];
-  }, [chats, bots, query, language]);
+  }, [chats]);
 
-  const ownsSearch = !!searchOwner.current?.active && searchOwner.current.query === query.trim();
+  const renderedSearchOwner = searchOwner.current;
+  const ownsSearch = !!renderedSearchOwner?.active && renderedSearchOwner.query === query.trim();
   const searchRows = useMemo(() => {
     if (!query.trim() || !ownsSearch) return [];
     const byId = new Map(chats.map((chat) => [chat.id, chat]));
@@ -138,7 +158,7 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
   }, [chats, bots, items, matches, query, language, searchGeneration, ownsSearch]);
 
   const searchingText = query.trim();
-  const data: (Chat | SearchRow)[] = searchingText ? searchRows : items;
+  const data: (Chat | SearchRow)[] = searchingText ? searchRows : search ? [] : items;
 
   // Chats with a turn in flight: their rows read "Working…" in place of the preview.
   const responding = useMemo(() => new Set(Object.values(running).map((r) => r.chatId)), [running]);
@@ -184,16 +204,17 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
         ])}><Text style={{ color: p.label }}>{t("Draft preview")}: {preview || t("Dictation stopped")}</Text><Text style={{ color: p.secondaryLabel }}>{t("Discard")}</Text></Pressable>;
       })}
       {query.trim() && ownsSearch && !matches.history_complete ? <Text accessibilityRole="text" style={{ color: p.secondaryLabel }}>{t("Search covers downloaded history only")}</Text> : null}
-            {floatingSearch ? null : (
+      {!search || Platform.OS !== "ios" ? null : (
         <Stack.SearchBar
           placeholder={t("Search")}
           onChangeText={(e) => updateQuery(e.nativeEvent.text)}
           onCancelButtonPress={() => updateQuery("")}
-          hideWhenScrolling
+          placement="stacked"
+          hideWhenScrolling={false}
           autoCapitalize="none"
         />
       )}
-      {Platform.OS === "ios" ? (
+      {!search && (Platform.OS === "ios" ? (
         <>
           <Stack.Toolbar placement="left">
             <Stack.Toolbar.Button icon="gearshape" accessibilityLabel={t("Settings")} onPress={() => router.push("/settings")} />
@@ -225,10 +246,10 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
             </Stack.Toolbar.Menu>
           </Stack.Toolbar>
         </>
-      )}
+      ))}
       {/* The relay status sits in the bar's title slot, so the list never moves. Once a try to
           connect has failed it says so, and a tap shows the error. */}
-      {updateRequired ? (
+      {!search && (updateRequired ? (
         <Stack.Title asChild>
           <View style={styles.status} accessibilityRole="header" accessibilityLabel={t("Update Beans to sync")}>
             <Text style={[styles.statusText, { color: p.secondaryLabel }]} numberOfLines={1}>
@@ -253,7 +274,7 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
       ) : connecting ? (
         <Stack.Title asChild>
           <View style={styles.status} accessibilityRole="header" accessibilityLabel={t("Connecting…")}>
-            <ActivityIndicator size="small" color={p.secondaryLabel as any} />
+            <ActivityIndicator size="small" color={p.secondaryLabel} />
             <Text style={[styles.statusText, { color: p.secondaryLabel }]} numberOfLines={1}>
               {t("Connecting…")}
             </Text>
@@ -266,8 +287,21 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
             <Text style={[styles.statusText, { color: p.secondaryLabel }]} numberOfLines={1}>{t("Bots paused")}</Text>
           </View>
         </Stack.Title>
-      ) : null}
+      ) : null)}
       <View style={styles.screen}>
+        {search && Platform.OS === "android" ? (
+          <TextInput
+            accessibilityLabel={t("Search")}
+            placeholder={t("Search")}
+            placeholderTextColor={p.secondaryLabel}
+            style={{ margin: 16, padding: 16, borderRadius: 28, backgroundColor: p.cell, color: p.label, fontSize: Font.body }}
+            onChangeText={updateQuery}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="search"
+            clearButtonMode="while-editing"
+          />
+        ) : null}
         <AvatarFlashList
           style={styles.list}
           data={data}
@@ -276,16 +310,17 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
           maintainVisibleContentPosition={KEEP_OFFSET}
           keyboardDismissMode="on-drag"
           contentContainerStyle={{ paddingBottom: floatingSearch ? searchInset + 8 : 24 }}
+          keyboardShouldPersistTaps="handled"
           ListEmptyComponent={
             <View style={styles.empty}>
               <Symbol name="sparkles" size={36} color={p.tertiaryLabel} />
-              <Text style={[styles.emptyTitle, { color: p.label }]}>{query ? (searching ? t("Searching…") : t("No matches")) : t("No chats yet")}</Text>
-              <Text style={[styles.emptyText, { color: p.secondaryLabel }]}>{query ? t("Try another word.") : t("Your bots and their chats sync from the relay once this phone hears from your Runner.")}</Text>
+              <Text style={[styles.emptyTitle, { color: p.label }]}>{search && !query ? t("Search") : query ? (searching ? t("Searching…") : t("No matches")) : t("No chats yet")}</Text>
+              <Text style={[styles.emptyText, { color: p.secondaryLabel }]}>{search && !query ? t("Search your chats and messages.") : query ? t("Try another word.") : t("Your bots and their chats sync from the relay once this phone hears from your Runner.")}</Text>
             </View>
           }
           renderItem={({ item }) => {
             if ("key" in item) {
-              return <SearchResultRow item={item} bots={bots} query={searchingText} onPress={() => openChat(item.chat)} />;
+              return <SearchResultRow item={item} bots={bots} query={searchingText} onPress={() => { if (renderedSearchOwner?.active && renderedSearchOwner.query === searchingText) openChat(item.chat); }} />;
             }
             const chat = item;
             const title = chatTitle(chat);

@@ -122,6 +122,18 @@
   opacity: 0.45;
 }
 
+/* An action under way: a spinner where the button sits, and nothing to click. */
+.row-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--label-2);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex: none;
+}
+
 .copy-button {
   display: inline-flex;
   align-items: center;

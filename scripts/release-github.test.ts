@@ -1,8 +1,10 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test } from "vitest";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { buildReleaseManifest } from "./release-github.ts";
 import { readVersion, ROOT } from "./app.ts";
 const paths: string[] = [];
@@ -15,13 +17,33 @@ test("all-platform CLI preflight rejects missing notes before loading private cr
     await copyFile(join(ROOT, "scripts", name), join(path, "scripts", name));
   }
   await copyFile(join(ROOT, "updates", "public-key.txt"), join(path, "updates", "public-key.txt"));
-  await writeFile(join(path, "package.json"), JSON.stringify({ version: "1.0.13" }, null, 2));
+  await writeFile(join(path, "package.json"), JSON.stringify({ type: "module", version: "1.0.13" }, null, 2));
   await writeFile(join(path, "CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\nPending changes.\n");
-  const result = Bun.spawnSync([process.execPath, join(path, "scripts", "release-github.ts"), "check", "beans-v1.0.13", "all"], {
-    cwd: path, env: { ...process.env, BEANS_UPDATE_PRIVATE_KEY: "" },
-  });
-  expect(result.exitCode).not.toBe(0);
-  expect(result.stderr.toString()).toContain("CHANGELOG.md requires notes for 1.0.13");
+  const resolvedTsxURL = (() => {
+    try {
+      return import.meta.resolve("tsx");
+    } catch {
+      return pathToFileURL(resolve(ROOT, "node_modules/tsx/dist/loader.mjs")).href;
+    }
+  })();
+  const childEnv = { ...process.env, BEANS_UPDATE_PRIVATE_KEY: "" };
+  delete childEnv.NODE_OPTIONS;
+  const result = spawnSync(
+    process.execPath,
+    ["--import", resolvedTsxURL, join(path, "scripts", "release-github.ts"), "check", "beans-v1.0.13", "all"],
+    {
+      cwd: path,
+      env: childEnv,
+      timeout: 30000,
+      encoding: "utf8",
+      shell: false,
+    }
+  );
+  expect(result.error, `spawn error: ${result.error?.message}`).toBeUndefined();
+  expect(result.signal, `process terminated by signal ${result.signal}`).toBeNull();
+  expect(result.status, "expected nonzero exit status").not.toBe(0);
+  expect(result.status, "expected exit status to be numeric").not.toBeNull();
+  expect(result.stderr, "expected semantic changelog error in stderr").toContain("CHANGELOG.md requires notes for 1.0.13");
 });
 async function server() {
   const path = await mkdtemp(join(tmpdir(), "beans-release-fixture-")); paths.push(path);

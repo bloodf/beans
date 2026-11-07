@@ -8,7 +8,11 @@ export interface ComposerDraft {
   permission: object | null;
   listeners: Set<() => void>;
 }
-const drafts = new Map<string, ComposerDraft>();
+export const composerDrafts = new Map<string, ComposerDraft>();
+const drafts = composerDrafts;
+const globalListeners = new Set<() => void>();
+const notifyAllComposerDrafts = () => { for (const listener of globalListeners) listener(); };
+export function subscribeAllComposerDrafts(listener: () => void) { globalListeners.add(listener); return () => { globalListeners.delete(listener); }; }
 const key = (identity: string | null, relay: string | null, chat: string) => JSON.stringify([identity, relay, chat]);
 export function composerDraft(identity: string | null, relay: string | null, chat: string): ComposerDraft {
   const id = key(identity, relay, chat);
@@ -19,10 +23,10 @@ export function composerDraft(identity: string | null, relay: string | null, cha
   }
   return draft;
 }
-export function notifyComposerDraft(draft: ComposerDraft) { for (const listener of draft.listeners) listener(); }
+export function notifyComposerDraft(draft: ComposerDraft) { for (const listener of draft.listeners) listener(); notifyAllComposerDrafts(); }
 export function releaseComposerDraft(draft: ComposerDraft) {
   if (draft.listeners.size || draft.pending || draft.recording || draft.permission || draft.text || draft.attachments.length || draft.reply) return;
-  for (const [id, owner] of drafts) if (owner === draft) drafts.delete(id);
+  for (const [id, owner] of drafts) if (owner === draft) { drafts.delete(id); notifyAllComposerDrafts(); }
 }
 export function editComposerDraft(draft: ComposerDraft, patch: Partial<Pick<ComposerDraft, "text" | "attachments" | "mentions" | "reply">>) {
   if (draft.invalidated) return;
@@ -52,12 +56,14 @@ function discard(draft: ComposerDraft) {
 export function clearComposerDrafts() {
   for (const draft of drafts.values()) discard(draft);
   drafts.clear();
+  notifyAllComposerDrafts();
 }
 export function removeComposerDraft(identity: string | null, relay: string | null, chat: string) {
   const id = key(identity, relay, chat);
   const draft = drafts.get(id);
   if (draft) discard(draft);
   drafts.delete(id);
+  notifyAllComposerDrafts();
 }
 export async function submitComposerDraft(draft: ComposerDraft, send: (text: string, files: PickedFile[], mentions: string[], replyTo?: string) => Promise<boolean>) {
   if (draft.invalidated || draft.pending || draft.recording || draft.permission || (!draft.text.trim() && !draft.attachments.length)) return;

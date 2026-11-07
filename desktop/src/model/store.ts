@@ -332,6 +332,7 @@ export class AppStore {
   private started = false;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private bootstrapGeneration = 0;
+  private deviceNamingGeneration = 0;
   private isBootstrapping = true;
   private bootstrapEvents: { name: string; data: unknown }[] = [];
   private isApplyingBootstrap = false;
@@ -788,6 +789,7 @@ export class AppStore {
 
   private emit(event: StoreEvent): void {
     if (this.isApplyingBootstrap) return;
+    if (event.kind === "snapshotReplaced" || event.kind === "identityChanged" || event.kind === "connectionChanged") this.deviceNamingGeneration++;
     for (const listener of [...this.listeners]) listener(event);
   }
 
@@ -1967,6 +1969,38 @@ export class AppStore {
     this.isIdentityDevice = true;
     this.emit({ kind: "identityChanged" });
     return created.phrase;
+  }
+
+  /** Captures account, snapshot, connection and target ownership for a naming prompt. */
+  deviceNamingOwner(id: string): () => boolean {
+    const identity = this.identityID, generation = this.deviceNamingGeneration;
+    const target = this.device(id), key = target?.machineKey, os = target?.os;
+    return () => {
+      const current = this.device(id);
+      return this.isConnected && this.hasIdentity === true && (this.isMock || !!identity)
+        && identity === this.identityID && generation === this.deviceNamingGeneration
+        && !!current && current.os !== "unknown" && current.machineKey === key && current.os === os;
+    };
+  }
+
+  /** Sets an account alias; confirmed blank input resets to the machine-reported name. */
+  async setDeviceName(id: string, name: string, owns: () => boolean): Promise<void> {
+    const admitted = this.deviceNamingOwner(id);
+    if (!owns() || !admitted()) return;
+    if (!this.isMock) {
+      await this.request("device.set_name", { id, name });
+      if (!owns() || !admitted()) return;
+      return;
+    }
+    const trimmed = name.trim();
+    if (Array.from(trimmed).length > 64) throw new RequestError(L("Device names must be at most 64 characters"));
+    if (!owns()) return;
+    this.devices = this.devices.map((device) => {
+      if (device.id !== id) return device;
+      const machineName = device.machineName ?? device.name;
+      return { ...device, machineName, name: trimmed || machineName };
+    });
+    this.emit({ kind: "rosterChanged" });
   }
 
   /** Unpairs another Device. The CLI has the relay drop its key; the Device wipes its copy of the

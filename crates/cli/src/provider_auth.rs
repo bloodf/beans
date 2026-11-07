@@ -215,6 +215,7 @@ pub async fn serve_guided(app: &Arc<App>, verb: &str, body: &Value) -> Result<Va
 }
 
 pub async fn serve_guided_as(app: &Arc<App>, verb: &str, body: &Value, authority: Option<(&str, &str)>) -> Result<Value, String> {
+    let incarnation = { app.plugin_admission(None)?.get().0 };
     check_provider_authority(app, authority)?;
     let this = app.this_device_id().ok_or("Pair a Runner first")?;
     if body["runner_id"].as_str() != Some(this.as_str()) || !app.device(&this).is_some_and(|device| device.is_runner()) { return Err("Provider check must execute on the selected Runner".into()); }
@@ -223,6 +224,7 @@ pub async fn serve_guided_as(app: &Arc<App>, verb: &str, body: &Value, authority
     match verb {
         "providers.custom.preview" => {
             let listed = list_custom_models(app, &text("name"), &text("api"), &text("base_url"), &text("api_key"), body["integration"].as_str()).await?;
+            let _admission = app.plugin_admission(Some(incarnation))?;
             Ok(serde_json::json!({ "listed": listed.is_some(), "models": listed.unwrap_or_default() }))
         }
         "providers.custom.save" => {
@@ -230,11 +232,13 @@ pub async fn serve_guided_as(app: &Arc<App>, verb: &str, body: &Value, authority
                 kind: body["kind"].as_str().map(str::to_string), integration: body["integration"].as_str().map(str::to_string), name: text("name"), api: text("api"), base_url: text("base_url"), api_key: text("api_key"),
                 models: body["models"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect(), capabilities,
             }, authority).await?;
+            let _admission = app.plugin_admission(Some(incarnation))?;
             let stamps = std::collections::BTreeMap::from([(kind.clone(), app.credentials.lock().unwrap().changed_at[&kind])]);
             Ok(serde_json::json!({ "kind": kind, "stamps": stamps }))
         }
         "providers.custom.refresh" => {
             let updated = refresh_custom_models_for(app, body["kind"].as_str(), authority).await?;
+            let _admission = app.plugin_admission(Some(incarnation))?;
             let credentials = app.credentials.lock().unwrap();
             let stamps: std::collections::BTreeMap<_, _> = credentials.changed_at.iter().filter(|(kind, _)| credentials.custom.contains_key(*kind) && body["kind"].as_str().is_none_or(|selected| selected == kind.as_str())).collect();
             Ok(serde_json::json!({ "updated": updated, "stamps": stamps }))
@@ -275,6 +279,7 @@ pub async fn connect_custom(app: &Arc<App>, input: CustomInput) -> Result<String
 }
 
 async fn connect_custom_as(app: &Arc<App>, input: CustomInput, authority: Option<(&str, &str)>) -> Result<String, String> {
+    let incarnation = { app.plugin_admission(None)?.get().0 };
     check_provider_authority(app, authority)?;
     let (snapshot, revision) = {
         let credentials = app.credentials.lock().expect("credentials lock");
@@ -352,6 +357,8 @@ async fn connect_custom_as(app: &Arc<App>, input: CustomInput, authority: Option
         }).collect()
     };
 
+    // Discovery may outlive account forget; commit and publish only in its captured account.
+    let _admission = app.plugin_admission(Some(incarnation))?;
     check_provider_authority(app, authority)?;
     let authority_guard = authority.map(|_| app.state.lock().unwrap());
     if let (Some((id, box_key)), Some(state)) = (authority, authority_guard.as_ref()) {
@@ -399,6 +406,7 @@ pub async fn refresh_custom_models(app: &Arc<App>) -> Result<usize, String> {
 }
 
 async fn refresh_custom_models_for(app: &Arc<App>, selected: Option<&str>, authority: Option<(&str, &str)>) -> Result<usize, String> {
+    let incarnation = { app.plugin_admission(None)?.get().0 };
     let providers: Vec<(String, CustomProvider, Option<f64>)> = {
         let credentials = app.credentials.lock().unwrap();
         credentials.custom.iter().filter(|(kind, _)| selected.is_none_or(|selected| selected == kind.as_str())).map(|(kind, provider)| (kind.clone(), provider.clone(), credentials.changed_at.get(kind).copied())).collect()
@@ -406,11 +414,15 @@ async fn refresh_custom_models_for(app: &Arc<App>, selected: Option<&str>, autho
     let mut changed = 0;
     let mut failed = None;
     for (kind, snapshot, stamp) in providers {
-        check_provider_authority(app, authority)?;
+        {
+            let _admission = app.plugin_admission(Some(incarnation))?;
+            check_provider_authority(app, authority)?;
+        }
         let discovery = match integration_root(snapshot.api, &snapshot.base_url, snapshot.integration) {
             Ok(root) => list_models(&snapshot.name, snapshot.api, &root, &snapshot.api_key).await,
             Err(error) => Err(error),
         };
+        let _admission = app.plugin_admission(Some(incarnation))?;
         let listed = match discovery {
             Ok(Some(listed)) => listed,
             Ok(None) => continue,

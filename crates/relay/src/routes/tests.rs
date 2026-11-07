@@ -693,11 +693,19 @@ async fn a_runner_answers_only_what_a_device_signed() {
     beans::requests::ask(&phone, &runner_id, "mcp.remove", serde_json::json!({ "name": "docs" })).await.unwrap();
     assert!(!servers().contains("docs"));
 
-    let unsigned = beans::crypto::seal_json(&runner_device.box_pubkey, &save("planted")).unwrap();
+    let planted = save("planted");
+    let (answer, refused) = tokio::sync::oneshot::channel();
+    phone.pending_responses.lock().unwrap().insert(planted.id.clone(), answer);
+    let unsigned = beans::crypto::seal_json(&runner_device.box_pubkey, &planted).unwrap();
     upload("planted", unsigned).await.unwrap();
-    // The Runner reads its envelopes in the order the relay took them, so once it answers a
-    // question asked after these, it has read them.
-    beans::requests::ask(&phone, &runner_id, "memory.read", serde_json::json!({ "bot_id": chef })).await.unwrap();
+    // Each request runs in its own task. Wait for this request's refusal through the relay,
+    // not an unrelated request that could finish before the planted one is handled.
+    let response = tokio::time::timeout(beans::requests::REQUEST_TIMEOUT, refused)
+        .await
+        .expect("the Runner answers the planted request")
+        .expect("the planted request's response reaches the phone");
+    assert_eq!(response.request_id, planted.id);
+    assert_eq!(response.error.as_deref(), Some("Unsigned request"));
     assert!(!servers().contains("planted"));
     for task in loops {
         task.abort();

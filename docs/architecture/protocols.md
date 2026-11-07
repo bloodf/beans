@@ -26,6 +26,8 @@ All sealed remote request verbs wrap their body in `{ payload, signature }`. The
 
 Custom credentials and provider statuses add optional `capabilities { context_window?, images?, tools? }`; status deserialization defaults absent declarations. Positive integer context windows and boolean/null support values are validated before HTTP. Omitted saves keep declarations, null clears them, objects replace them. Model statuses carry effective declarations ahead of discovery; declaration status separately lets sheets reopen Unknown/Yes/No choices. This is an additive protocol-5 field, without storage-format or home migration.
 
+Account alias merge and recovery: [Device names](device-names.md).
+
 ## CLI ↔ relay
 
 - Account requests, including registration, challenge/verify, pairing mailboxes and the sync socket upgrade, require exactly one `Beans-Protocol: 5` and one `Beans-Format: beans-v2` capability. Missing, malformed or duplicated capabilities fail closed before account effects. `User-Agent: beans/<version> (<os>)` belongs to the relay client, never a provider. Protocol 5 is the incompatible fresh Beans boundary; it retains paging, attestation, durable policy actions, roster CAS and appearance preservation. Health advertises `format: "beans-v2"`, `protocol`, effective `min_protocol` and `min_roster_protocol`, both at least 5 regardless of an operator lowering the setting. Clients reject missing, malformed, wrong-format or unsupported evidence before sync or pairing. Older account requests receive `426`; there is no old-protocol account-route exception. Public health and plaintext catalogs remain separate from account routes.

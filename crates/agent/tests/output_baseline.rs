@@ -416,12 +416,12 @@ fn provider_free_output_baseline() {
         .output()
         .unwrap();
     print!("{}", String::from_utf8_lossy(&output.stdout));
-    // Remove only synthetic files and real spills inside this test's fresh directory.
-    let cleanup = std::fs::remove_dir_all(&root);
     assert!(
         output.status.success(),
-        "{}",
+        "worker failed; synthetic files and spills retained at {}\n{}",
+        root.display(),
         String::from_utf8_lossy(&output.stderr)
     );
-    cleanup.unwrap();
+    // Remove only this successful test's synthetic files and spills.
+    std::fs::remove_dir_all(&root).unwrap();
 }

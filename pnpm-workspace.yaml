@@ -7,4 +7,4 @@ allowBuilds:
   sharp: true
   workerd: true
 minimumReleaseAgeExclude:
-  - '@solidjs/vite-plugin'
+  - '@solidjs/vite-plugin@3.0.0-next.57'

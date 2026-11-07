@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { setTimeout as delay } from "node:timers/promises";
+import { afterEach, beforeEach, expect, vi, test } from "vitest";
 import type { UpdateProgress } from "../../modules/beans-core";
 
 let prefs: Record<string, unknown> = {};
@@ -17,10 +18,10 @@ let progress: (event: UpdateProgress) => void = () => {};
 let appChanged: (state: string) => void = () => {};
 const appState = { currentState: "active", addEventListener: (_event: string, listener: typeof appChanged) => { appChanged = listener; return { remove: () => {} }; } };
 const alerts: { title: string; message: string; buttons: { onPress?: () => void }[] }[] = [];
-mock.module("react-native", () => ({ AppState: appState, Alert: { alert: (title: string, message: string, buttons = []) => alerts.push({ title, message, buttons }) } }));
-mock.module("./prefs", () => ({ loadPrefs: () => ({ ...prefs }), savePrefs: (value: Record<string, unknown>) => { prefs = value; } }));
-mock.module("./updateDrafts", () => ({ hasUpdateDrafts: () => drafts, subscribeComposerDrafts: (listener: () => void) => { draftChanged = listener; return () => { draftChanged = () => {}; }; } }));
-mock.module("../../modules/beans-core", () => ({ androidUpdates: {
+vi.doMock("react-native", () => ({ AppState: appState, Alert: { alert: (title: string, message: string, buttons = []) => alerts.push({ title, message, buttons }) } }));
+vi.doMock("./prefs", () => ({ loadPrefs: () => ({ ...prefs }), savePrefs: (value: Record<string, unknown>) => { prefs = value; } }));
+vi.doMock("./updateDrafts", () => ({ hasUpdateDrafts: () => drafts, subscribeComposerDrafts: (listener: () => void) => { draftChanged = listener; return () => { draftChanged = () => {}; }; } }));
+vi.doMock("../../modules/beans-core", () => ({ androidUpdates: {
   capability: () => capability,
   check: async () => { checks++; return check(); },
   install: async (id: string) => { installs.push(id); return install(id); },
@@ -218,7 +219,7 @@ test("system completion while foreground is observed without a focus transition"
   await updates.checkUpdates();
   await updates.installUpdate(nextOffer.id, true);
   nativeResult = "Immediate package installer failure";
-  await Bun.sleep(1100);
+  await delay(1100);
   expect(updates.useUpdates.getState().status).toBe("error");
   expect(alerts[0]!.message).toBe("Immediate package installer failure");
 });
@@ -256,7 +257,7 @@ test("commit wins cancellation even when its progress event arrives after backgr
   expect(updates.useUpdates.getState().status).toBe("confirmation");
   foreground();
   nativeResult = "Delayed installer rejection";
-  await Bun.sleep(1100);
+  await delay(1100);
   expect(updates.useUpdates.getState().status).toBe("error");
   expect(alerts[0]!.message).toBe("Delayed installer rejection");
 });

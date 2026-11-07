@@ -1,12 +1,12 @@
-import { expect, mock, test } from "bun:test";
+import { expect, vi, test } from "vitest";
 
 const native: Record<string, unknown> = {};
 let checks = 0;
 let installs = 0;
 let preferencesWritten = 0;
-mock.module("expo-modules-core", () => ({ requireNativeModule: () => native }));
-mock.module("react-native", () => ({ AppState: { currentState: "active", addEventListener: () => { throw new Error("Must not register without native support"); } }, Alert: { alert: () => {} } }));
-mock.module("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => { preferencesWritten++; } }));
+vi.doMock("expo-modules-core", () => ({ requireNativeModule: () => native }));
+vi.doMock("react-native", () => ({ AppState: { currentState: "active", addEventListener: () => { throw new Error("Must not register without native support"); } }, Alert: { alert: () => {} } }));
+vi.doMock("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => { preferencesWritten++; } }));
 const { androidUpdates } = await import("../../modules/beans-core");
 const updates = await import("./updates");
 

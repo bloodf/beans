@@ -1,7 +1,7 @@
 # Changelog
 
 Unified Beans release notes, versioned by the root `package.json` and tagged
-`beans-v<version>`. `bun run release-mac` attaches the matching section to its
+`beans-v<version>`. `pnpm run release-mac` attaches the matching section to its
 Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desktop notes.
 
 ## [Unreleased]

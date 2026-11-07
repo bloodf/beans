@@ -4,7 +4,7 @@ The marketplace (`crates/cli/src/marketplace.rs`), after Grok Bot's, offers plug
 
 ## The index
 
-The bundled index is `crates/cli/marketplace/index.json`: version 1, the UTC time it was `updated`, and the `plugins` and `bots` in order. The configured Beans relay serves `/marketplace/v1.json`; every build retains the bundled index for offline use. A content change must advance `updated` (`bun run check:catalog` and the Catalog pull-request workflow).
+The bundled index is `crates/cli/marketplace/index.json`: version 1, the UTC time it was `updated`, and the `plugins` and `bots` in order. The configured Beans relay serves `/marketplace/v1.json`; every build retains the bundled index for offline use. A content change must advance `updated` (`pnpm run check:catalog` and the Catalog pull-request workflow).
 
 **Updating the index**: startup, app bootstrap and marketplace use check at most hourly; `marketplace.reload` forces a check, and a search or install miss may check every five minutes. Requests send a source-bound ETag and no account credentials; failures keep the current index. A validated cache in `marketplace.json` belongs only to its selected source. Changing relays resets to the bundled index before applying that relay's cache. A newer relay index replaces its predecessor; an explicit custom URL overlays entries by id on bundled entries. `BEANS_MARKETPLACE_URL` or `marketplace_url` selects an override, and `BEANS_MARKETPLACE_FETCH=0` disables network checks. Browser stays pinned to its bundled manifest. Model and marketplace fetches share `crates/cli/src/served.rs` ([Providers](providers.md)).
 

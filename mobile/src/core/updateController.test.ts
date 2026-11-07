@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { UpdateController } from "./updateController";
 
 const offer = { id: "snapshot", version: "1.10.0", notes: "untrusted notes" };

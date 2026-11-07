@@ -1,8 +1,8 @@
-import { expect, mock, test } from "bun:test";
+import { expect, vi, test } from "vitest";
 import type { Prefs } from "./prefs";
 
 let saved: Prefs = { app_lang: "zh", update_checks: false, update_checked_at: 123, update_skipped_version: "1.10.0" };
-mock.module("./prefs", () => ({
+vi.doMock("./prefs", () => ({
   loadPrefs: () => ({ ...saved }),
   savePrefs: (prefs: Prefs) => { saved = { ...prefs }; },
 }));

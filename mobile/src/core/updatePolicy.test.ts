@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { updateCandidates, updateCheckDue, updateIsSkipped } from "./updatePolicy";
 
 const release = (version: string) => ({ tag_name: `beans-v${version}`, draft: false, prerelease: false });

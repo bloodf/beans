@@ -1,9 +1,9 @@
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, expect, vi, test } from "vitest";
 import type { Bot, Chat } from "./model";
 import { composerDraftGeneration, composerDraftKey, discardComposerDraft, hasUpdateDrafts, readComposerDraft, retainedComposerDrafts, writeComposerDraft } from "./updateDrafts";
 import { UpdateController } from "./updateController";
 
-mock.module("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
+vi.doMock("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
 const { applyRoster, removeChat, replaceSnapshot, resetStore, setRelayStatus, useStore } = await import("./store");
 const chat = (id: string): Chat => ({ id, kind: "dm", bot_ids: [], is_pinned: false, created_at: 0, messages: [], unread_count: 0 });
 const snapshot = (ids = ["chat", "other"], identity = "account", relay = "relay") => ({ has_identity: true, identity_id: identity, relay_url: relay, this_device_id: "phone", relay_connected: true, devices: [], bots: [], chats: ids.map(chat), running_turns: [] });
@@ -24,7 +24,7 @@ test("navigation and ordinary reconnect preserve content and installation veto",
   useStore.setState({ openChatId: "chat" });
   expect(readComposerDraft(key)).toEqual({ text: "@Bot unfinished", attachments: [file], mentions: [bot], listening: false });
   let installs = 0;
-  const controller = new UpdateController({ check: async () => ({ id: "fresh", version: "1.2.3", notes: "" }), install: async () => { installs++; }, cancel: () => {} });
+  const controller = new UpdateController({ check: async () => ({ id: "fresh", version: "1.2.3", notes: "" }), install: async () => { installs++; }, cancel: () => "cancelled" });
   await controller.check();
   await expect(controller.install("fresh", hasUpdateDrafts())).rejects.toThrow("Save or send drafts");
   removeChat("chat");

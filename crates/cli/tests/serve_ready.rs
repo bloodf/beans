@@ -349,7 +349,9 @@ async fn cold_executable_preflight_finishes_once_before_concurrent_readiness_tim
     let (script, count) = delayed_preflight_fixture(&home, false);
     let once = OnceCell::new();
     let run = || async {
-        let mut command = Command::new(&script);
+        // Execute the stable shell binary; the freshly written fixture is read as data.
+        let mut command = Command::new("/bin/sh");
+        command.arg(&script);
         command.arg(&count);
         warm_binary(&once, command).await.unwrap();
         timeout(Duration::from_millis(50), Command::new("/usr/bin/true").output()).await.unwrap().unwrap()
@@ -366,7 +368,9 @@ async fn executable_preflight_failure_is_shared() {
     let (script, count) = delayed_preflight_fixture(&home, true);
     let once = OnceCell::new();
     let run = || async {
-        let mut command = Command::new(&script);
+        // Execute the stable shell binary; the freshly written fixture is read as data.
+        let mut command = Command::new("/bin/sh");
+        command.arg(&script);
         command.arg(&count);
         warm_binary(&once, command).await
     };

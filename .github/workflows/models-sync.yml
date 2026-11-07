@@ -23,9 +23,14 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
-      - run: bun run sync:models --self-check
-      - run: bun run sync:models --report "$RUNNER_TEMP/report.md" --new "$RUNNER_TEMP/new.md"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run sync:models --self-check
+      - run: pnpm run sync:models --report "$RUNNER_TEMP/report.md" --new "$RUNNER_TEMP/new.md"
       - if: always()
         run: |
           if [[ -f "$RUNNER_TEMP/report.md" ]]; then
@@ -39,7 +44,7 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
       - if: steps.diff.outputs.changed == 'true'
-        run: bun run check:catalog
+        run: pnpm run check:catalog
         env:
           CATALOG_BASE: origin/main
       - if: steps.diff.outputs.changed == 'true'

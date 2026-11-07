@@ -1,9 +1,11 @@
 import { strict as assert } from "node:assert"
 // Refresh curated model metadata from public sources. New models remain report-only.
-// Run `bun run sync:models [--report <file>] [--new <file>]` to update the local snapshot.
-import { join } from "node:path"
+// Run `pnpm run sync:models [--report <file>] [--new <file>]` to update the local snapshot.
+import { join, dirname } from "node:path"
+import { fileURLToPath } from "node:url"
+import { readFile, writeFile } from "node:fs/promises"
 
-const CATALOG = join(import.meta.dir, "../crates/models/catalog.json")
+const CATALOG = join(dirname(fileURLToPath(import.meta.url)), "../crates/models/catalog.json")
 const MODELS_DEV: Record<string, string> = {
   deepseek: "deepseek", anthropic: "anthropic", chatgpt: "openai", grok: "xai",
   opencode: "opencode", "opencode-go": "opencode-go",
@@ -258,7 +260,7 @@ async function publicText(url: string) {
   return response.text()
 }
 
-if (import.meta.main) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const args = process.argv.slice(2)
   if (args.length === 1 && args[0] === "--self-check") {
     const rates = { input: 1, output: 2, cache_read: 0, cache_write: 0, known: false }
@@ -312,19 +314,19 @@ if (import.meta.main) {
   }
   const options: Record<string, string> = {}
   for (let i = 0; i < args.length; i += 2) {
-    if (!["--report", "--new"].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith("--")) throw new Error("Usage: bun run sync:models [--report <file>] [--new <file>]")
+    if (!["--report", "--new"].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith("--")) throw new Error("Usage: pnpm run sync:models [--report <file>] [--new <file>]")
     options[args[i]] = args[i + 1]
   }
   const [text, modelsDev, codex, ...docs] = await Promise.all([
-    Bun.file(CATALOG).text(), publicText("https://models.dev/api.json").then(JSON.parse),
+    readFile(CATALOG, "utf8"), publicText("https://models.dev/api.json").then(JSON.parse),
     publicText(CODEX_MODELS).then(JSON.parse).catch(() => undefined),
     ...Object.values(OPENCODE_DOCS).map((url) => publicText(url).catch(() => "")),
   ])
   validate(text, Object.keys(MODELS_DEV))
   const result = syncCatalog(text, { modelsDev, codex, docs: Object.fromEntries(Object.keys(OPENCODE_DOCS).map((p, i) => [p, docs[i]])) })
-  if (result.text !== text) await Bun.write(CATALOG, result.text)
+  if (result.text !== text) await writeFile(CATALOG, result.text)
   console.log(result.report || "The catalog matches upstream.")
-  if (options["--report"]) await Bun.write(options["--report"], result.report)
-  if (options["--new"]) await Bun.write(options["--new"], result.fresh.map((line) => `- ${line}\n`).join(""))
+  if (options["--report"]) await writeFile(options["--report"], result.report)
+  if (options["--new"]) await writeFile(options["--new"], result.fresh.map((line) => `- ${line}\n`).join(""))
   if (result.refused) process.exitCode = 1
 }

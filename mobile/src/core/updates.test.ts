@@ -1,195 +1,276 @@
-import { beforeEach, expect, mock, test } from "bun:test";
-
-// The Android app's check for a newer release, against a GitHub API answered here: tags, drafts
-// and prerelease releases, the APK and its digest, and the daily check's alert. Also the progress
-// helpers and install-failure alert from the update dialog.
+import { setTimeout as delay } from "node:timers/promises";
+import { afterEach, beforeEach, expect, vi, test } from "vitest";
+import type { UpdateProgress } from "../../modules/beans-core";
 
 let prefs: Record<string, unknown> = {};
-const alerts: { title: string; message?: string; buttons: { text: string; onPress?: () => void }[] }[] = [];
-const installs: unknown[][] = [];
-let installReject: Error | null = null;
-
-mock.module("react-native", () => ({
-  Platform: { OS: "android" },
-  AppState: { addEventListener: () => {} },
-  Alert: {
-    alert: (title: string, message?: string, buttons?: (typeof alerts)[number]["buttons"]) => {
-      alerts.push({ title, message, buttons: buttons ?? [] });
-    },
-  },
-}));
-mock.module("expo-application", () => ({ applicationId: "ai.amoena.beans", nativeApplicationVersion: "1.2.0" }));
-mock.module("./prefs", () => ({
-  loadPrefs: () => prefs,
-  savePrefs: (next: Record<string, unknown>) => {
-    prefs = next;
-  },
-}));
-mock.module("../../modules/beans-core", () => ({
-  installUpdate: async (...args: unknown[]) => {
-    if (installReject) throw installReject;
-    installs.push(args);
-  },
-  onInstallStatus: () => () => {},
-}));
-
-/// What GitHub answers, by path under the repository.
-let routes: Record<string, unknown> = {};
-const githubFetch = (async (input: string | URL) => {
-  const path = String(input).replace("https://api.github.com/repos/bloodf/beans", "");
-  const body = routes[path];
-  if (body === undefined) return new Response("{}", { status: 404 });
-  return Response.json(body);
-}) as typeof fetch;
-globalThis.fetch = githubFetch;
-
+let capability = "supported";
+let nextOffer = { id: "consent-1", version: "1.10.0", notes: "Release notes are not authority" };
+let check: () => Promise<typeof nextOffer | null> = async () => nextOffer;
+let install: (id: string) => Promise<void> = async () => {};
+let checks = 0;
+let cancels = 0;
+let committed = false;
+let installs: string[] = [];
+let drafts = false;
+let draftChanged = () => {};
+let nativeResult: string | null = null;
+let progress: (event: UpdateProgress) => void = () => {};
+let appChanged: (state: string) => void = () => {};
+const appState = { currentState: "active", addEventListener: (_event: string, listener: typeof appChanged) => { appChanged = listener; return { remove: () => {} }; } };
+const alerts: { title: string; message: string; buttons: { onPress?: () => void }[] }[] = [];
+vi.doMock("react-native", () => ({ AppState: appState, Alert: { alert: (title: string, message: string, buttons = []) => alerts.push({ title, message, buttons }) } }));
+vi.doMock("./prefs", () => ({ loadPrefs: () => ({ ...prefs }), savePrefs: (value: Record<string, unknown>) => { prefs = value; } }));
+vi.doMock("./updateDrafts", () => ({ hasUpdateDrafts: () => drafts, subscribeComposerDrafts: (listener: () => void) => { draftChanged = listener; return () => { draftChanged = () => {}; }; } }));
+vi.doMock("../../modules/beans-core", () => ({ androidUpdates: {
+  capability: () => capability,
+  check: async () => { checks++; return check(); },
+  install: async (id: string) => { installs.push(id); return install(id); },
+  cancel: () => { cancels++; return committed ? "committed" : "cancelled"; },
+  onProgress: (listener: typeof progress) => { progress = listener; return () => {}; },
+  result: () => { const result = nativeResult; nativeResult = null; return result; },
+} }));
 const updates = await import("./updates");
-
-function release(version: string, extra: Record<string, unknown> = {}) {
-  return {
-    draft: false,
-    prerelease: false,
-    body: `Notes for ${version}`,
-    assets: [
-      {
-        name: `Beans-${version}.apk`,
-        browser_download_url: `https://example.test/${version}.apk`,
-        size: 42,
-        digest: `sha256:${"ab".repeat(32)}`,
-      },
-    ],
-    ...extra,
-  };
+let dispose = () => {};
+const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+const background = () => { appState.currentState = "background"; appChanged("background"); };
+const foreground = () => { appState.currentState = "active"; appChanged("active"); };
+const event = (phase: UpdateProgress["phase"], downloaded = 25, id = nextOffer.id) => progress({ id, phase, downloaded, total: 100 });
+function pending<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
-
-function tags(...versions: string[]) {
-  return versions.map((v) => ({ ref: `refs/tags/beans-v${v}` }));
-}
-
 beforeEach(() => {
+  prefs = { update_checks: false };
+  capability = "supported";
+  nextOffer = { id: "consent-1", version: "1.10.0", notes: "Release notes are not authority" };
+  check = async () => nextOffer;
+  install = async () => {};
+  checks = 0; cancels = 0; committed = false; installs = []; drafts = false; nativeResult = null; alerts.length = 0;
+  appState.currentState = "active";
+  dispose = updates.initializeUpdates("android", "ai.amoena.beans");
+});
+afterEach(() => dispose());
+
+test("native eligibility excludes iOS, Dev, unknown packages and store distributions", () => {
+  expect(updates.updateBlock("ios", "ai.amoena.beans")).toBe("store_managed");
+  expect(updates.updateBlock("android", "ai.amoena.beans.dev")).toBe("development");
+  expect(updates.updateBlock("android", null)).toBe("store_managed");
+  expect(updates.updateBlock("android", "other.package")).toBe("store_managed");
+  capability = "store_managed";
+  expect(updates.updateBlock("android", "ai.amoena.beans")).toBe("store_managed");
+  capability = "native_verifier_unavailable";
+  expect(updates.updateBlock("android", "ai.amoena.beans")).toBe("native_verifier_unavailable");
+});
+
+test("daily checks offer only a native verified snapshot and never install", async () => {
+  expect(checks).toBe(0);
   prefs = {};
-  alerts.length = 0;
-  installs.length = 0;
-  installReject = null;
-  routes = {};
-  globalThis.fetch = githubFetch;
-  updates.useUpdates.setState({ phase: "idle", latest: undefined, error: undefined, checked: false, progress: 0 });
-});
-
-test("versions compare by number", () => {
-  expect(updates.isNewer("1.10.0", "1.9.9")).toBe(true);
-  expect(updates.isNewer("2.0.0", "1.99.99")).toBe(true);
-  expect(updates.isNewer("1.2.0", "1.2.0")).toBe(false);
-  expect(updates.isNewer("1.1.9", "1.2.0")).toBe(false);
-});
-
-test("updates stay off without both native install functions", () => {
-  const present = {
-    installUpdate: async () => {},
-    onInstallStatus: () => () => {},
-  };
-  expect(updates.hasNativeUpdater({})).toBe(false);
-  expect(updates.hasNativeUpdater({ installUpdate: present.installUpdate })).toBe(false);
-  expect(updates.hasNativeUpdater({ onInstallStatus: present.onInstallStatus })).toBe(false);
-  expect(updates.hasNativeUpdater(present)).toBe(true);
-  expect(updates.computeUpdatesSupported("android", "ai.amoena.beans", {})).toBe(false);
-  expect(updates.computeUpdatesSupported("android", "ai.amoena.beans.dev", present)).toBe(false);
-  expect(updates.computeUpdatesSupported("ios", "ai.amoena.beans", present)).toBe(false);
-  expect(updates.computeUpdatesSupported("android", "ai.amoena.beans", present)).toBe(true);
-  expect(updates.updatesSupported).toBe(true);
-});
-
-test("download progress is a fraction, zero when the total is unknown", () => {
-  expect(updates.downloadProgress(0, 100)).toBe(0);
-  expect(updates.downloadProgress(25, 100)).toBe(0.25);
-  expect(updates.downloadProgress(50, 0)).toBe(0);
-  expect(updates.downloadProgress(10, -1)).toBe(0);
-});
-
-test("the progress dialog is active only while downloading or installing", () => {
-  expect(updates.isUpdateProgressActive("idle")).toBe(false);
-  expect(updates.isUpdateProgressActive("checking")).toBe(false);
-  expect(updates.isUpdateProgressActive("downloading")).toBe(true);
-  expect(updates.isUpdateProgressActive("installing")).toBe(true);
-});
-
-test("the newest published release newer than the build, past drafts and prereleases", async () => {
-  routes = {
-    "/git/matching-refs/tags/beans-v": tags("1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.10.0"),
-    // 1.10.0 is still a draft, which answers 404 to an unauthenticated read.
-    "/releases/tags/beans-v1.5.0": release("1.5.0", { prerelease: true }),
-    "/releases/tags/beans-v1.4.0": release("1.4.0", { assets: [] }),
-    "/releases/tags/beans-v1.3.0": release("1.3.0"),
-    "/releases/tags/beans-v1.1.0": release("1.1.0"),
-  };
-  expect(await updates.newestRelease()).toEqual({
-    version: "1.3.0",
-    notes: "Notes for 1.3.0",
-    url: "https://example.test/1.3.0.apk",
-    sha256: "ab".repeat(32),
-    size: 42,
-  });
-});
-
-test("nothing newer than the build is up to date", async () => {
-  routes = { "/git/matching-refs/tags/beans-v": tags("1.1.0", "1.2.0"), "/releases/tags/beans-v1.2.0": release("1.2.0") };
-  expect(await updates.newestRelease()).toBeNull();
-  await updates.checkForUpdates();
-  expect(updates.useUpdates.getState()).toMatchObject({ phase: "idle", latest: undefined, checked: true });
-});
-
-test("an APK without a digest is not offered", async () => {
-  routes = {
-    "/git/matching-refs/tags/beans-v": tags("1.3.0"),
-    "/releases/tags/beans-v1.3.0": release("1.3.0", {
-      assets: [{ name: "Beans-1.3.0.apk", browser_download_url: "x", size: 1, digest: null }],
-    }),
-  };
-  expect(await updates.newestRelease()).toBeNull();
-});
-
-test("the daily check offers a release once, and Skip This Version keeps it from asking again", async () => {
-  routes = { "/git/matching-refs/tags/beans-v": tags("1.3.0"), "/releases/tags/beans-v1.3.0": release("1.3.0") };
-  await updates.checkForUpdates(true);
-  expect(updates.useUpdates.getState().latest?.version).toBe("1.3.0");
-  expect(prefs.update_checked_at).toBeNumber();
-  expect(alerts.map((a) => a.title)).toEqual(["Beans 1.3.0 is available"]);
-  expect(alerts[0]!.buttons.map((b) => b.text)).toEqual(["Skip This Version", "Remind Me Later", "Install Update"]);
-
-  alerts[0]!.buttons[0]!.onPress!();
-  expect(prefs.update_skipped).toBe("1.3.0");
-  await updates.checkForUpdates(true);
-  expect(alerts).toHaveLength(1);
-  // A check of the user's own still finds it, for Settings to install.
-  await updates.checkForUpdates();
-  expect(updates.useUpdates.getState().latest?.version).toBe("1.3.0");
-});
-
-test("Install Update hands the APK, its digest, and its size to the native module", async () => {
-  routes = { "/git/matching-refs/tags/beans-v": tags("1.3.0"), "/releases/tags/beans-v1.3.0": release("1.3.0") };
-  await updates.checkForUpdates(true);
+  await updates.checkUpdates(false);
+  expect(checks).toBe(1);
+  expect(installs).toEqual([]);
+  expect(updates.useUpdates.getState()).toMatchObject({ status: "offered", offer: nextOffer });
+  expect(alerts[0]!.title).toBe("Beans 1.10.0 is available");
+  expect(alerts[0]!.message).toContain("Installing replaces this process");
+  await updates.checkUpdates(false);
+  expect(checks).toBe(1);
   alerts[0]!.buttons[2]!.onPress!();
-  await Promise.resolve();
-  expect(installs).toEqual([["https://example.test/1.3.0.apk", "ab".repeat(32), 42]]);
-  expect(updates.useUpdates.getState().phase).toBe("downloading");
+  await settle();
+  expect(installs).toEqual(["consent-1"]);
+  expect(updates.useUpdates.getState()).toMatchObject({ status: "confirmation", installingVersion: "1.10.0", offer: null });
 });
 
-test("a failed install returns to idle and alerts with the reason", async () => {
-  installReject = new Error("digest mismatch");
-  await updates.installUpdate({
-    version: "1.3.0",
-    notes: "",
-    url: "https://example.test/1.3.0.apk",
-    sha256: "ab".repeat(32),
-    size: 42,
-  });
-  expect(updates.useUpdates.getState()).toMatchObject({ phase: "idle", error: "digest mismatch" });
-  expect(alerts.map((a) => a.title)).toEqual(["Couldn’t install the update"]);
-  expect(alerts[0]!.message).toBe("digest mismatch");
+test("Skip and Later consume only their offer and manual checks override exact skip", async () => {
+  prefs = {};
+  await updates.checkUpdates(false);
+  alerts[0]!.buttons[0]!.onPress!();
+  expect(prefs.update_skipped_version).toBe("1.10.0");
+  expect(installs).toEqual([]);
+  prefs.update_checked_at = 0;
+  await updates.checkUpdates(false);
+  expect(alerts).toHaveLength(1);
+  expect(updates.useUpdates.getState().offer).toBeNull();
+  await updates.checkUpdates();
+  expect(updates.useUpdates.getState().offer?.id).toBe("consent-1");
+  nextOffer = { ...nextOffer, id: "consent-2" };
+  await updates.checkUpdates();
+  alerts[0]!.buttons[1]!.onPress!();
+  alerts[0]!.buttons[2]!.onPress!();
+  await settle();
+  expect(updates.useUpdates.getState().offer?.id).toBe("consent-2");
+  expect(installs).toEqual([]);
 });
 
-test("a failed check keeps its reason for Settings", async () => {
-  globalThis.fetch = (async () => new Response("{}", { status: 403 })) as unknown as typeof fetch;
-  await updates.checkForUpdates();
-  expect(updates.useUpdates.getState()).toMatchObject({ phase: "idle", error: "GitHub answered 403", checked: true });
+test("unsaved drafts and unconfirmed saves block replacement without consuming the offer", async () => {
+  await updates.checkUpdates();
+  drafts = true;
+  await updates.installUpdate(nextOffer.id, true);
+  drafts = false;
+  await updates.installUpdate(nextOffer.id, false);
+  expect(installs).toEqual([]);
+  expect(updates.useUpdates.getState()).toMatchObject({ status: "error", offer: nextOffer });
+  expect(alerts).toHaveLength(2);
+});
+
+test("progress is finite, bounded, monotonic and tied to the active consent id", async () => {
+  await updates.checkUpdates();
+  const pendingInstall = pending<void>();
+  install = () => pendingInstall.promise;
+  const run = updates.installUpdate(nextOffer.id, true);
+  event("downloading", 80, "old-consent");
+  expect(updates.useUpdates.getState().progress).toBe(0);
+  event("downloading", 25);
+  event("downloading", 10);
+  event("downloading", NaN);
+  expect(updates.useUpdates.getState().progress).toBe(0.25);
+  event("downloading", 200);
+  expect(updates.useUpdates.getState().progress).toBe(1);
+  event("installing");
+  event("downloading", 10);
+  expect(updates.useUpdates.getState().status).toBe("installing");
+  pendingInstall.resolve();
+  await run;
+  expect(updates.useUpdates.getState().status).toBe("confirmation");
+});
+
+test("double install taps do not consume consent twice or reset the active dialog", async () => {
+  await updates.checkUpdates();
+  const pendingInstall = pending<void>();
+  install = () => pendingInstall.promise;
+  const run = updates.installUpdate(nextOffer.id, true);
+  event("downloading", 40);
+  await updates.installUpdate(nextOffer.id, true);
+  await updates.checkUpdates();
+  expect(installs).toEqual(["consent-1"]);
+  expect(checks).toBe(1);
+  expect(updates.useUpdates.getState()).toMatchObject({ status: "downloading", progress: 0.4 });
+  pendingInstall.resolve(); await run;
+});
+
+test("background cancels download and late success or progress cannot resurrect it", async () => {
+  await updates.checkUpdates();
+  const pendingInstall = pending<void>();
+  install = () => pendingInstall.promise;
+  const run = updates.installUpdate(nextOffer.id, true);
+  background();
+  expect(cancels).toBe(1);
+  event("downloading", 80);
+  event("installing");
+  pendingInstall.resolve(); await run;
+  expect(updates.useUpdates.getState()).toMatchObject({ status: "idle", progress: 0, installingVersion: null });
+  expect(alerts).toHaveLength(0);
+});
+
+test("new drafts cancel an uncommitted download and its late error is ignored", async () => {
+  await updates.checkUpdates();
+  const pendingInstall = pending<void>();
+  install = () => pendingInstall.promise;
+  const run = updates.installUpdate(nextOffer.id, true);
+  drafts = true; draftChanged();
+  expect(cancels).toBe(1);
+  expect(updates.useUpdates.getState().status).toBe("error");
+  pendingInstall.reject(new Error("transport cancelled")); await run;
+  event("installing");
+  expect(alerts).toHaveLength(1);
+  expect(alerts[0]!.message).toBe("Save or send drafts before installing");
+});
+
+test("background expires in-flight discovery and suppresses its late failure", async () => {
+  const pendingCheck = pending<typeof nextOffer | null>();
+  check = () => pendingCheck.promise;
+  const run = updates.checkUpdates();
+  background();
+  pendingCheck.reject(new Error("offline")); await run;
+  expect(updates.useUpdates.getState()).toMatchObject({ status: "idle", offer: null, error: null });
+  expect(alerts).toHaveLength(0);
+});
+
+test("committed installation survives background and system denial clears the dialog", async () => {
+  await updates.checkUpdates();
+  const pendingInstall = pending<void>();
+  install = () => pendingInstall.promise;
+  const run = updates.installUpdate(nextOffer.id, true);
+  event("installing");
+  background();
+  expect(cancels).toBe(0);
+  pendingInstall.resolve(); await run;
+  expect(updates.useUpdates.getState().status).toBe("confirmation");
+  nativeResult = "Installation cancelled or failed. Check and consent again.";
+  foreground();
+  expect(updates.useUpdates.getState().status).toBe("error");
+  event("installing");
+  expect(updates.useUpdates.getState().status).toBe("error");
+  expect(alerts).toHaveLength(1);
+});
+
+test("native failure closes progress and cannot be reopened by late events", async () => {
+  await updates.checkUpdates();
+  install = async () => { throw new Error("APK signer incompatible with installed Beans"); };
+  await updates.installUpdate(nextOffer.id, true);
+  event("installing");
+  expect(updates.useUpdates.getState()).toMatchObject({ status: "error", offer: null, installingVersion: null });
+  expect(alerts[0]!.message).toBe("APK signer incompatible with installed Beans");
+  await updates.installUpdate(nextOffer.id, true);
+  expect(installs).toHaveLength(1);
+});
+
+test("system completion while foreground is observed without a focus transition", async () => {
+  await updates.checkUpdates();
+  await updates.installUpdate(nextOffer.id, true);
+  nativeResult = "Immediate package installer failure";
+  await delay(1100);
+  expect(updates.useUpdates.getState().status).toBe("error");
+  expect(alerts[0]!.message).toBe("Immediate package installer failure");
+});
+
+test("installed result resets progress and opt-out preserves unrelated preferences", async () => {
+  prefs.app_lang = "zh";
+  updates.setUpdateChecks(true);
+  expect(prefs.app_lang).toBe("zh");
+  expect(prefs.update_checks).toBe(true);
+  await updates.checkUpdates();
+  nativeResult = "installed";
+  await updates.installUpdate(nextOffer.id, true);
+  expect(updates.useUpdates.getState()).toMatchObject({ status: "idle", progress: 0, installingVersion: null });
+});
+
+test("progress helpers reject invalid values and preserve installer confirmation", () => {
+  expect(updates.downloadProgress(25, 100)).toBe(0.25);
+  for (const [downloaded, total] of [[NaN, 100], [20, Infinity], [10, 0], [-1, 100]]) expect(updates.downloadProgress(downloaded!, total!)).toBe(0);
+  expect(updates.downloadProgress(200, 100)).toBe(1);
+  for (const phase of ["blocked", "idle", "checking", "offered", "error"] as const) expect(updates.isUpdateProgressActive(phase)).toBe(false);
+  for (const phase of ["downloading", "installing", "confirmation"] as const) expect(updates.isUpdateProgressActive(phase)).toBe(true);
+});
+
+
+test("commit wins cancellation even when its progress event arrives after background", async () => {
+  await updates.checkUpdates();
+  const pendingInstall = pending<void>();
+  install = () => pendingInstall.promise;
+  const run = updates.installUpdate(nextOffer.id, true);
+  committed = true;
+  background();
+  expect(updates.useUpdates.getState()).toMatchObject({ status: "confirmation", installingId: nextOffer.id });
+  event("installing");
+  pendingInstall.resolve(); await run;
+  expect(updates.useUpdates.getState().status).toBe("confirmation");
+  foreground();
+  nativeResult = "Delayed installer rejection";
+  await delay(1100);
+  expect(updates.useUpdates.getState().status).toBe("error");
+  expect(alerts[0]!.message).toBe("Delayed installer rejection");
+});
+
+test("drafts created after native commit do not claim a successful cancellation", async () => {
+  await updates.checkUpdates();
+  const pendingInstall = pending<void>();
+  install = () => pendingInstall.promise;
+  const run = updates.installUpdate(nextOffer.id, true);
+  committed = true;
+  drafts = true; draftChanged();
+  expect(updates.useUpdates.getState().status).toBe("confirmation");
+  expect(alerts[0]!.message).toContain("Cancel it to keep new drafts");
+  pendingInstall.resolve(); await run;
+  expect(updates.useUpdates.getState().status).toBe("confirmation");
 });

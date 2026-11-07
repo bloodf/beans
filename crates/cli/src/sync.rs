@@ -16,7 +16,8 @@ const BULK_BLOBS: usize = 20;
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
 pub const POLL_KINDS: &str = "roster,policy,chat,machine,credentials,memory_config,job,job_cancel,job_result,request,response";
 
-#[cfg(test)]
+// These relay fixtures require the optional server dependency.
+#[cfg(all(test, feature = "server"))]
 mod ownership_tests;
 
 pub async fn run(app: Arc<App>) {

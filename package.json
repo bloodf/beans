@@ -22,6 +22,7 @@
     "l10n": "tsx scripts/l10n.ts",
     "check:docs": "tsx scripts/check-docs.ts",
     "check:catalog": "tsx scripts/check-catalog.ts",
+    "sync:models": "tsx scripts/sync-models.ts",
     "check:output-baseline": "tsx scripts/check-output-baseline.ts",
     "web": "pnpm --dir web run dev",
     "web:build": "pnpm --dir web run build",
@@ -32,8 +33,7 @@
     "test": "vitest run --config vitest.config.ts",
     "test:scripts": "vitest run --config vitest.config.ts scripts",
     "test:blobatar": "vitest run --config vitest.config.ts packages/beans-blobatar",
-    "build:blobatar": "tsx packages/beans-blobatar/build.ts",
-    "sync:models": "tsx scripts/sync-models.ts"
+    "build:blobatar": "tsx packages/beans-blobatar/build.ts"
   },
   "devDependencies": {
     "@types/node": "^24",

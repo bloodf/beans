@@ -77,6 +77,25 @@ pub struct BlobIn {
     pub created_at: i64,
 }
 
+/// Required transport fields must never turn malformed pages into completion evidence.
+#[derive(Deserialize)]
+struct BlobPage {
+    blobs: Vec<BlobIn>,
+    seq: i64,
+}
+
+fn decode_blob_page(value: Value, since: i64) -> RelayResult<(Vec<BlobIn>, i64)> {
+    let invalid = || RelayError { status: None, message: "Invalid blob page".into() };
+    let page: BlobPage = serde_json::from_value(value).map_err(|_| invalid())?;
+    if since < 0 || page.seq < since { return Err(invalid()); }
+    let mut previous = since;
+    for blob in &page.blobs {
+        if blob.seq <= previous || blob.seq > page.seq { return Err(invalid()); }
+        previous = blob.seq;
+    }
+    Ok((page.blobs, page.seq))
+}
+
 const POLICY_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
 fn invalid_policy_replay() -> RelayError {
@@ -598,8 +617,7 @@ impl RelayClient {
                 .await?,
         )
         .await?;
-        let blobs: Vec<BlobIn> = serde_json::from_value(value["blobs"].clone()).unwrap_or_default();
-        Ok((blobs, value["seq"].as_i64().unwrap_or(since)))
+        decode_blob_page(value, since)
     }
 
     /// Inspects opaque commitments only. Completion never supplies activation authority.
@@ -850,6 +868,23 @@ fn decode_optional(value: &Value) -> RelayResult<Option<Vec<u8>>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blob_pages_require_fields_and_forward_order() {
+        use serde_json::json;
+        for value in [json!({}), json!({"seq": 9}), json!({"seq": 9, "blobs": null}),
+            json!({"seq": "9", "blobs": []}), json!({"seq": -1, "blobs": []}),
+            json!({"seq": 8, "blobs": []})] {
+            assert!(super::decode_blob_page(value, 9).is_err());
+        }
+        let row = |seq| json!({"id":"id", "kind":"attention", "seq":seq,
+            "ciphertext":"corrupt-is-handled-by-application", "created_at":0});
+        for rows in [vec![row(9)], vec![row(11), row(10)], vec![row(10), row(10)], vec![row(13)]] {
+            assert!(super::decode_blob_page(json!({"seq":12,"blobs":rows}), 9).is_err());
+        }
+        assert!(super::decode_blob_page(json!({"seq":12,"blobs":[row(10),row(12)]}), 9).is_ok());
+        assert!(super::decode_blob_page(json!({"seq":9,"blobs":[]}), 9).is_ok());
+    }
+
     use super::*;
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;

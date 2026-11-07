@@ -75,6 +75,10 @@ impl LocalStore {
                  paused                   INTEGER NOT NULL DEFAULT 0,
                  policy_json              TEXT NOT NULL DEFAULT '{}'
              );
+             CREATE TABLE IF NOT EXISTS attention (
+                 id         TEXT PRIMARY KEY NOT NULL,
+                 ciphertext BLOB NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS devices (
                  id       TEXT PRIMARY KEY NOT NULL,
                  position INTEGER NOT NULL,
@@ -207,6 +211,17 @@ impl LocalStore {
         }
         if connection.prepare("SELECT roster_slot_seq FROM metadata").is_err() {
             connection.execute("ALTER TABLE metadata ADD COLUMN roster_slot_seq INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+        // Upgrade replay for attention slots that predate this build recognizing the kind.
+        // Kept off the hot State write path so a crash mid-replay does not mark completion.
+        if connection
+            .prepare("SELECT attention_upgrade FROM metadata")
+            .is_err()
+        {
+            connection.execute(
+                "ALTER TABLE metadata ADD COLUMN attention_upgrade INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
         }
         if connection.prepare("SELECT original_json FROM pending_chat_creates").is_err() {
             connection.execute("ALTER TABLE pending_chat_creates ADD COLUMN original_json TEXT", [])?;
@@ -1253,6 +1268,130 @@ impl LocalStore {
             .map_err(Into::into)
     }
 
+    /// Attention contents stay encrypted at rest, including resolutions and preferences.
+    pub fn attention_rows(&self) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT id, ciphertext FROM attention ORDER BY id")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// One attention ciphertext by id, if present.
+    pub fn attention_row(&self, id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .query_row(
+                "SELECT ciphertext FROM attention WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    pub fn delete_metadata_for_tests(&self) -> anyhow::Result<()> {
+        self.connection
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM metadata", [])?;
+        Ok(())
+    }
+
+    /// Whether this Device has finished the one-time attention-slot upgrade replay.
+    pub fn attention_upgrade_done(&self) -> anyhow::Result<bool> {
+        let connection = self.connection.lock().unwrap();
+        let done: i64 = connection
+            .query_row(
+                "SELECT attention_upgrade FROM metadata WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(done != 0)
+    }
+
+    /// Persists upgrade-replay completion. Upserts the metadata row when missing so sync
+    /// never fails on this path. Cleared with the account (`clear` / forget).
+    pub fn set_attention_upgrade_done(&self, done: bool) -> anyhow::Result<()> {
+        let connection = self.connection.lock().unwrap();
+        let flag = done as i64;
+        let updated = connection.execute(
+            "UPDATE metadata SET attention_upgrade = ?1 WHERE id = 1",
+            params![flag],
+        )?;
+        if updated > 0 {
+            return Ok(());
+        }
+        // No settings row yet (identity/save_state has not landed). Insert a minimal row so
+        // the upgrade marker still persists; later save_state fills the other columns.
+        connection.execute(
+            "INSERT INTO metadata (
+                 id, auto_review_json, last_seq, roster_slot_seq, machine_blob_hash,
+                 credentials_uploaded, paused, policy_json, attention_upgrade
+             ) VALUES (1, '{}', 0, 0, NULL, 0, 0, '{}', ?1)
+             ON CONFLICT(id) DO UPDATE SET attention_upgrade = excluded.attention_upgrade",
+            params![flag],
+        )?;
+        Ok(())
+    }
+
+    pub fn put_attention(&self, id: &str, ciphertext: &[u8]) -> anyhow::Result<()> {
+        self.connection.lock().unwrap().execute(
+            "INSERT INTO attention (id, ciphertext) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET ciphertext = excluded.ciphertext",
+            params![id, ciphertext],
+        )?;
+        Ok(())
+    }
+
+    /// Writes the encrypted attention row and its relay receipt in one transaction so a
+    /// crash cannot leave a seen-id without its row (the applied_blob_ids ring alone is
+    /// not enough: it keeps only 2000 entries).
+    pub fn put_attention_with_applied(
+        &self,
+        id: &str,
+        ciphertext: &[u8],
+        blob_id: &str,
+    ) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        tx.execute(
+            "INSERT INTO attention (id, ciphertext) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET ciphertext = excluded.ciphertext",
+            params![id, ciphertext],
+        )?;
+        append_applied_blob_tx(&tx, blob_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records that a relay blob id was fully applied when the row was already present
+    /// (stale/equal revision). Prefer [`put_attention_with_applied`] for new rows.
+    pub fn mark_blob_applied(&self, blob_id: &str) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        append_applied_blob_tx(&tx, blob_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Local content and its encrypted relay write commit together, so a crash cannot leave
+    /// a successfully saved attention update without a durable upload.
+    pub fn queue_attention(&self, id: &str, ciphertext: &[u8], item: &OutboxItem) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        tx.execute(
+            "INSERT INTO attention (id, ciphertext) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET ciphertext = excluded.ciphertext",
+            params![id, ciphertext],
+        )?;
+        queue_outbox_tx(&tx, item)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn clear(&self) -> anyhow::Result<()> {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
@@ -1266,6 +1405,7 @@ impl LocalStore {
             "pending_chat_creates",
             "codemode_store",
             "metadata",
+            "attention",
             "devices",
             "bots",
             "chats",

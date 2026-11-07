@@ -195,7 +195,7 @@ A bot-setup approval is `{token, expires_at, action, runner_id, bot_id, profile_
 
 | Event | Data |
 | --- | --- |
-| `snapshot` | the `bootstrap` result: `roster.changed` fields plus each chat's newest 60 messages, relay state and turns in flight |
+| `snapshot` | bootstrap: roster fields, 60 newest messages/chat, relay, turns, `attention` ([Attention](attention.md)) |
 | `roster.changed` | `devices`, `bots`, `chats`, `routines`, `auto_review`, `paused`, `providers` (masked), `models`, `memory` |
 | `memory.changed` | `bot_id?`, `status` |
 | `message.added`, `message.updated` | `chat_id`, `message` |

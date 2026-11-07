@@ -50,6 +50,13 @@ test("Details consumes stored usage totals without confirming unknown or partial
   const spent = () => rendered().find(row => row.title === "Spent")?.subtitle;
   expect(rendered().find(row => row.title === "Context")?.subtitle).toBe("128,000 / 1,000,000 · 13%");
   expect(spent()).toBe("$0.42 · 18 turns");
+  setChatUsage("chat", { ...usage, context_estimated: true });
+  expect(rendered().find(row => row.title === "Context")?.subtitle).toBe("≈ 128,000 / 1,000,000 · 13%");
+  expect(spent()).toBe("$0.42 · 18 turns");
+  setChatUsage("chat", { ...usage, context_estimated: true, context_window: 0 });
+  expect(rendered().find(row => row.title === "Context")?.subtitle).toBe("≈ 128,000 tokens");
+  setChatUsage("chat", usage);
+  expect(rendered().find(row => row.title === "Context")?.subtitle).toBe("128,000 / 1,000,000 · 13%");
   setChatUsage("chat", { ...usage, cost_known: true, cost_usd: 0, turns: 1 });
   expect(spent()).toBe("$0.00 · 1 turn");
   for (const cost_known of [false, null, undefined]) {

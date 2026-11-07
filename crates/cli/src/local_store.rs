@@ -761,6 +761,7 @@ impl LocalStore {
         let policy: crate::model::RosterBlob = serde_json::from_str(&policy_json).context("decoding policy state")?;
         Ok(State {
             devices: load_json_table(&connection, "devices")?,
+            device_name_edits: policy.device_name_edits,
             device_names: load_json_table::<(String, String)>(&connection, "device_names")?.into_iter().collect(),
             bots: load_json_table(&connection, "bots")?,
             chats: load_json_table(&connection, "chats")?,
@@ -1532,7 +1533,7 @@ impl LocalStore {
         Ok(())
     }
 
-    pub fn queue_outbox_with_state(&self, item: &OutboxItem, state: &State, alias_edit: Option<&str>) -> anyhow::Result<()> {
+    pub fn queue_outbox_with_state(&self, item: &OutboxItem, state: &State) -> anyhow::Result<()> {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
         if item.kind == "roster" {
@@ -1544,29 +1545,6 @@ impl LocalStore {
                 "INSERT OR IGNORE INTO roster_baseline (name, seq, json) VALUES ('queued', 0, ?1)",
                 [serde_json::to_string(&crate::model::RosterBlob::default())?],
             )?;
-        }
-        if let Some(id) = alias_edit {
-            let submitted: Option<String> = tx.query_row(
-                "SELECT json FROM roster_baseline WHERE name = 'submitted'", [], |row| row.get(0),
-            ).optional()?;
-            if let Some(json) = submitted {
-                let sent: crate::model::RosterBlob = serde_json::from_str(&json)?;
-                let json: String = tx.query_row(
-                    "SELECT json FROM roster_baseline WHERE name = 'queued'", [], |row| row.get(0),
-                )?;
-                let mut base: crate::model::RosterBlob = serde_json::from_str(&json)?;
-                // An explicit edit supersedes this key's submitted intent even if
-                // the reply was lost and its value returns to the frozen ancestor.
-                if state.device_names.get(id) == base.device_names.get(id)
-                    && state.device_names.get(id) != sent.device_names.get(id) {
-                    match sent.device_names.get(id) {
-                        Some(name) => { base.device_names.insert(id.to_owned(), name.clone()); }
-                        None => { base.device_names.remove(id); }
-                    }
-                    tx.execute("UPDATE roster_baseline SET json = ?1 WHERE name = 'queued'",
-                        [serde_json::to_string(&base)?])?;
-                }
-            }
         }
         save_metadata_tx(&tx, state)?;
         sync_json_table(&tx, "device_names", state.device_names.iter()
@@ -1915,6 +1893,7 @@ fn save_metadata_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
             state.credentials_uploaded,
             state.paused,
             serde_json::to_string(&crate::model::RosterBlob {
+                device_name_edits: state.device_name_edits.clone(),
                 policy_clock: state.policy_clock,
                 pause_version: state.pause_version.clone(),
                 capability_versions: state.capability_versions.clone(),
@@ -2330,7 +2309,7 @@ mod tests {
         let scratch=scratch(); let store=&scratch.0;
         store.upsert(&message("legacy-message",1.0)).unwrap();
         let item=OutboxItem { id:"legacy-outbox".into(),kind:"job".into(),recipient:Some("remote-runner".into()),ciphertext:vec![1,2,3],slot:None,group:None };
-        store.queue_outbox_with_state(&item,&State::default(),None).unwrap();
+        store.queue_outbox_with_state(&item,&State::default()).unwrap();
         let before_state=store.load_state().unwrap();
         let before_outbox=store.last_outbox().unwrap().unwrap();
         let sent=SentJob { id:"job-legacy".into(),chat_id:"chat-test".into(),bot_id:"bot-test".into(),routine_id:None,runner_id:"runner-test".into(),sent_at:1.0 };

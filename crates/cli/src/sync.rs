@@ -930,6 +930,7 @@ fn commit_unpair(app: &Arc<App>, id: &str, owner: &RelayAuthority) -> Result<Res
         let persisted = (|| -> anyhow::Result<()> {
             let mut snapshot = state.clone();
             let roster = if snapshot.device_names.remove(id).is_some() {
+                snapshot.device_name_edits.insert(id.to_owned(), uuid::Uuid::new_v4().to_string());
                 let dek = app.dek().ok_or_else(|| anyhow::anyhow!("account key unavailable"))?;
                 let item = OutboxItem { id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
                     ciphertext: crate::crypto::encrypt_json(&dek, "roster", &App::roster_from_state(&snapshot))?,
@@ -1104,9 +1105,9 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
                 && roster.routines.iter().any(|remote| remote.id == routine.id && remote.bot_id == routine.bot_id)));
     let alias_change_accepted = baseline.as_ref().zip(submitted.as_ref()).is_some_and(
         |((_, base), (submitted_seq, sent))| blob.seq > *submitted_seq
-            && base.device_names.keys().chain(sent.device_names.keys()).any(|id|
-                base.device_names.get(id) != sent.device_names.get(id)
-                    && roster.device_names.get(id) == sent.device_names.get(id)));
+            && base.device_names.keys().chain(sent.device_names.keys())
+                .chain(base.device_name_edits.keys()).chain(sent.device_name_edits.keys()).any(|id|
+                !same_device_alias(base, sent, id) && same_device_alias(&roster, sent, id)));
     let recovering = own_accepted || !accepted_ids.is_empty() || routine_creation_accepted || alias_change_accepted;
     let projection = match (&queue, baseline) {
         (Some(item), Some((_, base))) => {
@@ -1413,8 +1414,13 @@ fn merge_ids(remote: &mut Vec<String>, base: &[String], local: &[String]) {
     }
 }
 
-// The queued snapshot describes intent relative to the last roster this Device observed.
-// Compare fields, not whole entities: remote changes to other fields remain intact.
+fn same_device_alias(left: &RosterBlob, right: &RosterBlob, id: &str) -> bool {
+    left.device_names.get(id) == right.device_names.get(id)
+        && left.device_name_edits.get(id) == right.device_name_edits.get(id)
+}
+
+// The queued snapshot describes intent relative to the last observed roster.
+// Compare fields, not whole entities, to preserve unrelated remote edits.
 fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob) -> RosterBlob {
     macro_rules! merge_entities {
         ($field:ident, $($member:ident),+ $(,)?) => {
@@ -1436,8 +1442,13 @@ fn merge_rosters(mut remote: RosterBlob, base: &RosterBlob, queued: &RosterBlob)
         };
     }
     // Apply only locally changed aliases; unrelated remote names and resets survive CAS rebase.
-    for id in base.device_names.keys().chain(queued.device_names.keys()) {
-        if queued.device_names.get(id) != base.device_names.get(id) {
+    for id in base.device_names.keys().chain(queued.device_names.keys())
+        .chain(base.device_name_edits.keys()).chain(queued.device_name_edits.keys()) {
+        if !same_device_alias(queued, base, id) {
+            match queued.device_name_edits.get(id) {
+                Some(edit) => { remote.device_name_edits.insert(id.clone(), edit.clone()); }
+                None => { remote.device_name_edits.remove(id); }
+            }
             match queued.device_names.get(id) {
                 Some(name) => { remote.device_names.insert(id.clone(), name.clone()); }
                 None => { remote.device_names.remove(id); }
@@ -1496,10 +1507,15 @@ fn accepted_roster_baseline(mut base: RosterBlob, submitted: &RosterBlob, observ
     accept_creations!(routines);
     accept_creations!(workflows);
     // Extend the accepted ancestor only with alias intent actually submitted by this Device.
-    for id in base.device_names.keys().chain(submitted.device_names.keys()).cloned().collect::<std::collections::BTreeSet<_>>() {
-        if base.device_names.get(&id) == submitted.device_names.get(&id) { continue; }
+    for id in base.device_names.keys().chain(submitted.device_names.keys())
+        .chain(base.device_name_edits.keys()).chain(submitted.device_name_edits.keys()).cloned().collect::<std::collections::BTreeSet<_>>() {
+        if same_device_alias(&base, submitted, &id) { continue; }
         // A different Device's later roster proves acceptance only for matching keys.
-        if observed.is_some_and(|remote| remote.device_names.get(&id) != submitted.device_names.get(&id)) { continue; }
+        if observed.is_some_and(|remote| !same_device_alias(remote, submitted, &id)) { continue; }
+        match submitted.device_name_edits.get(&id) {
+            Some(edit) => { base.device_name_edits.insert(id.clone(), edit.clone()); }
+            None => { base.device_name_edits.remove(&id); }
+        }
         match submitted.device_names.get(&id) {
             Some(name) => { base.device_names.insert(id, name.clone()); }
             None => { base.device_names.remove(&id); }
@@ -1648,6 +1664,7 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
         let kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
         state.bots = roster.bots;
         state.routines = roster.routines;
+        state.device_name_edits = roster.device_name_edits;
         state.device_names = roster.device_names;
         let bot_ids = state.bots.iter().map(|bot| bot.id.clone()).collect();
         let admitted = crate::workflow::admit(std::mem::take(&mut roster.workflows), &state.workflows, &bot_ids);
@@ -3740,32 +3757,43 @@ mod tests {
 
     #[test]
     fn lost_alias_reply_then_reset_and_remote_overwrite_preserves_reset() {
-        let scratch = scratch_app();
-        let app = &scratch.0;
-        crate::identity::create(app, Some("Runner".into())).unwrap();
-        let initial = app.store.queued_roster().unwrap().unwrap();
-        app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
-        app.store.observe_roster(0, &RosterBlob::default()).unwrap();
-        app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
-        app.set_device_name("peer", "Office").unwrap();
-        let sent = app.store.queued_roster().unwrap().unwrap();
-        let mut remote: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &sent.ciphertext).unwrap();
-        app.store.record_submitted_roster(0, &remote).unwrap();
-        app.set_device_name("peer", "").unwrap();
-        let reopened = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
-        remote.device_names.insert("peer".into(), "Remote".into());
-        let blob = BlobIn { id: "remote-overwrite".into(), kind: "roster".into(), recipient_machine_pubkey: None,
-            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&reopened.dek().unwrap(), "roster", &remote).unwrap()),
-            seq: 2, created_at: 2 };
-        // Reaffirming the same reset remains valid after a restart.
-        reopened.set_device_name("peer", "").unwrap();
-        apply_incoming_blob(&reopened, &reopened.machine_file().unwrap(), &blob, true).unwrap();
-        assert!(!reopened.state.lock().unwrap().device_names.contains_key("peer"));
-        let retained = reopened.store.queued_roster().unwrap().unwrap();
-        let desired: RosterBlob = crate::crypto::decrypt_json(&reopened.dek().unwrap(), "roster", &retained.ciphertext).unwrap();
-        assert!(!desired.device_names.contains_key("peer"));
-        assert_eq!(reopened.store.roster_baseline("observed").unwrap().unwrap().0, 2);
-        assert!(reopened.state.lock().unwrap().applied_blob_ids.contains(&blob.id));
+        for desired in ["", "Office"] {
+            let scratch = scratch_app();
+            let app = &scratch.0;
+            crate::identity::create(app, Some("Runner".into())).unwrap();
+            let initial = app.store.queued_roster().unwrap().unwrap();
+            app.store.remove_outbox_roster_with_state(&initial.id, &app.state.lock().unwrap().clone(), &[]).unwrap();
+            app.store.observe_roster(0, &RosterBlob::default()).unwrap();
+            app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+            app.set_device_name("peer", "Office").unwrap();
+            let sent = app.store.queued_roster().unwrap().unwrap();
+            let mut remote: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &sent.ciphertext).unwrap();
+            app.store.record_submitted_roster(0, &remote).unwrap();
+            app.set_device_name("peer", "").unwrap();
+            let reopened = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+            remote.device_names.insert("peer".into(), "Remote".into());
+            remote.device_name_edits.insert("peer".into(), "remote-edit".into());
+            remote.device_names.insert("unrelated".into(), "Other".into());
+            remote.device_name_edits.insert("unrelated".into(), "other-edit".into());
+            let blob = BlobIn { id: "remote-overwrite".into(), kind: "roster".into(), recipient_machine_pubkey: None,
+                ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&reopened.dek().unwrap(), "roster", &remote).unwrap()),
+                seq: 2, created_at: 2 };
+            // Reaffirm a reset or return to Office after resetting and restarting.
+            reopened.set_device_name("peer", desired).unwrap();
+            let edit = reopened.state.lock().unwrap().device_name_edits["peer"].clone();
+            let reopened = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+            assert_eq!(reopened.state.lock().unwrap().device_name_edits["peer"], edit);
+            apply_incoming_blob(&reopened, &reopened.machine_file().unwrap(), &blob, true).unwrap();
+            assert_eq!(reopened.state.lock().unwrap().device_names.get("peer").map(String::as_str), (!desired.is_empty()).then_some(desired));
+            let retained = reopened.store.queued_roster().unwrap().unwrap();
+            let queued: RosterBlob = crate::crypto::decrypt_json(&reopened.dek().unwrap(), "roster", &retained.ciphertext).unwrap();
+            assert_eq!(queued.device_names.get("peer").map(String::as_str), (!desired.is_empty()).then_some(desired));
+            assert_eq!(queued.device_name_edits["peer"], edit);
+            assert_eq!(reopened.state.lock().unwrap().device_name_edits["peer"], edit);
+            assert_eq!(reopened.state.lock().unwrap().device_name_edits["unrelated"], "other-edit");
+            assert_eq!(reopened.store.roster_baseline("observed").unwrap().unwrap().0, 2);
+            assert!(reopened.state.lock().unwrap().applied_blob_ids.contains(&blob.id));
+        }
     }
 
     #[test]

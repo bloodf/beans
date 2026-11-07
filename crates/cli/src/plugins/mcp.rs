@@ -935,7 +935,7 @@ async fn connect_oauth_authorized(app: &Arc<App>, plugin_id: &str, server: &str,
         let flow = match &device {
             _ if admission.enter(&app, &plugin_id).is_err() => Err("The plugin account changed; start again.".into()),
             Some((device_endpoint, token_endpoint)) => device_sign_in(&app, &plugin_id, &server, device_endpoint, token_endpoint, &scopes, &name, client.id.as_deref().unwrap_or(""), card.as_ref(), admission, &actor).await,
-            None => sign_in(&app, &url, &scopes, &name, &client).await,
+            None => sign_in(&app, &plugin_id, admission, &url, &scopes, &name, &client).await,
         };
         let outcome = end_sign_in(&app, &plugin_id, &server, &name, card, flow, admission, &actor);
         let _ = ended.send(outcome);
@@ -1068,6 +1068,7 @@ fn is_ready(app: &App, plugin_id: &str) -> bool {
 /// The plugin is signed in, whichever card or sheet did it: every card of a bot here that asks
 /// for its sign-in, or follows one, reads Signed in.
 pub fn settle_sign_in_cards(app: &Arc<App>, plugin_id: &str, name: &str) {
+    let Ok(_guard) = app.plugin_admission(None) else { return };
     let here = app.this_device_id();
     let cards = app.store.sign_in_cards(None, plugin_id).unwrap_or_else(|error| {
         tracing::error!(%error, plugin = %plugin_id, "reading sign-in cards");
@@ -1190,27 +1191,26 @@ async fn poll_device_token(app: &Arc<App>, token_endpoint: &str, name: &str, cli
 /// `answered` is false when the card was not waiting; `url` is the page the Device that asked
 /// opens, and `sign_in` the id it finishes the sign-in with.
 pub async fn answer_sign_in(app: &Arc<App>, chat_id: &str, message_id: &str, decision: Decision, elsewhere: Option<Elsewhere>) -> Result<Value, String> {
-    let Some(message) = app.message(chat_id, message_id) else { return Ok(json!({ "answered": false })) };
-    let Body::Permission { plugin_id, plugin_name, tool, decision: current, .. } = &message.body else { return Ok(json!({ "answered": false })) };
-    if tool != "connect" || current != "pending" {
-        return Ok(json!({ "answered": false }));
-    }
-    match decision {
-        Decision::Allowed | Decision::Always if is_ready(app, plugin_id) => {
-            set_card(app, chat_id, message_id, "connected", Some(format!("Signed in to {plugin_name}.")), None, None);
-            Ok(json!({ "answered": true }))
+    let (plugin_id, server) = {
+        let _guard = app.plugin_admission(None)?;
+        let Some(message) = app.message(chat_id, message_id) else { return Ok(json!({ "answered": false })) };
+        let Body::Permission { plugin_id, plugin_name, tool, decision: current, .. } = &message.body else { return Ok(json!({ "answered": false })) };
+        if tool != "connect" || current != "pending" { return Ok(json!({ "answered": false })); }
+        match decision {
+            Decision::Allowed | Decision::Always if is_ready(app, plugin_id) => {
+                set_card(app, chat_id, message_id, "connected", Some(format!("Signed in to {plugin_name}.")), None, None);
+                return Ok(json!({ "answered": true }));
+            }
+            Decision::Allowed | Decision::Always => (plugin_id.clone(), oauth_server(app, plugin_id).ok_or("Nothing to sign in to")?),
+            Decision::Denied | Decision::Expired | Decision::Dismissed => {
+                set_card(app, chat_id, message_id, "denied", None, None, None);
+                return Ok(json!({ "answered": true }));
+            }
         }
-        Decision::Allowed | Decision::Always => {
-            let server = oauth_server(app, plugin_id).ok_or("Nothing to sign in to")?;
-            let card = Some((chat_id.to_string(), message_id.to_string()));
-            let started = connect_oauth_for_card(app, plugin_id, &server, card, elsewhere).await?;
-            Ok(json!({ "answered": true, "url": started.url, "sign_in": started.id }))
-        }
-        Decision::Denied | Decision::Expired | Decision::Dismissed => {
-            set_card(app, chat_id, message_id, "denied", None, None, None);
-            Ok(json!({ "answered": true }))
-        }
-    }
+    };
+    let card = Some((chat_id.to_string(), message_id.to_string()));
+    let started = connect_oauth_for_card(app, &plugin_id, &server, card, elsewhere).await?;
+    Ok(json!({ "answered": true, "url": started.url, "sign_in": started.id }))
 }
 
 /// What the manifest and the user supplied for a server that needs a preregistered client.
@@ -1313,14 +1313,14 @@ async fn complete_sign_in(mut state: OAuthState, callback: &str, name: &str) -> 
 }
 
 /// A sign-in in this Runner's own browser, back to its own loopback.
-async fn sign_in(app: &Arc<App>, url: &str, scopes: &[String], name: &str, client: &ClientHint) -> Result<Value, String> {
+async fn sign_in(app: &Arc<App>, plugin_id: &str, admission: Admission, url: &str, scopes: &[String], name: &str, client: &ClientHint) -> Result<Value, String> {
     let callback = if client.has_fixed_redirect() {
         super::sign_in::Callback::bind_fixed(client.callback_port, client.callback_url.as_deref()).await?
     } else {
         super::sign_in::Callback::bind().await?
     };
     let (state, page) = begin_sign_in(app, url, scopes, name, client, callback.redirect_uri()).await?;
-    open_browser(app, &page)?;
+    { let _guard = admission.enter(app, plugin_id)?; open_browser(app, &page)?; }
     let landed = callback.wait(name, super::sign_in::TIMEOUT).await?;
     complete_sign_in(state, &landed, name).await
 }
@@ -2708,6 +2708,7 @@ pub async fn await_answer(app: &Arc<App>, chat_id: &str, message_id: &str, alway
 /// `chats.permission` reached the Runner: hands the answer to the waiting tool. False when
 /// nothing waits on that message (answered already, or expired).
 pub fn answer(app: &Arc<App>, message_id: &str, decision: Decision) -> bool {
+    let Ok(_guard) = app.plugin_admission(None) else { return false };
     if decision == Decision::Always && message_id.starts_with("msg-propose-") { return false; }
     match app.pending_permissions.lock().unwrap().remove(message_id) {
         Some((_, tx)) => tx.send(decision).is_ok(),

@@ -1828,6 +1828,7 @@ mod tests {
             "done":done,"blobs":blobs})
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn managed_policy_reader_refuses_invalid_cuts_without_activation() {
         use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
@@ -3297,6 +3298,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn two_offline_bots_claiming_same_dm_id_keep_local_intent_on_conflict() {
         use axum::{extract::{Query, State as HttpState}, http::StatusCode, routing::put, Json, Router};
@@ -3424,6 +3426,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn first_sync_and_normal_pull_recheck_chat_created_while_fetching() {
         use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
@@ -3531,6 +3534,7 @@ mod tests {
         assert!(!app.store.pending_chat_creates().unwrap().contains(&"G".into()));
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn lost_roster_response_recovers_original_group_identity() {
         use axum::{extract::{Query, State as HttpState}, http::StatusCode, routing::put, Json, Router};
@@ -3609,6 +3613,7 @@ mod tests {
         task.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn accepted_group_creation_with_newer_membership_edit_drains() {
         use axum::{extract::State as HttpState, http::StatusCode, routing::put, Json, Router};
@@ -3874,6 +3879,7 @@ mod tests {
             "new account inherited pending ownership from the forgotten account");
     }
     /// A relay log served past `since`, restricted to the requested kinds.
+    #[cfg(feature = "server")]
     async fn serve_log(log: Vec<BlobIn>) -> (String, tokio::task::JoinHandle<()>) {
         use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
         use serde_json::{json, Value};
@@ -4091,6 +4097,7 @@ mod tests {
         assert!(app.queue_local_task(&job).unwrap().is_none(), "a replay never reopens intent");
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn a_lease_holds_the_cursor_before_the_first_job_and_releasing_it_resumes_in_order() {
         let scratch = scratch_owner();
@@ -4156,6 +4163,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn a_held_first_sync_keeps_the_cursor_at_zero_and_saves_what_it_applied() {
         let mut scratch = scratch_owner();
@@ -4204,6 +4212,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn while_held_only_a_running_jobs_cancel_is_applied_and_the_cursor_stays() {
         let scratch = scratch_owner();
@@ -4254,6 +4263,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn while_held_a_remote_turn_this_device_waits_on_still_ends() {
         let scratch = scratch_owner();
@@ -4294,6 +4304,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn while_held_a_request_this_device_asked_still_hears_its_response() {
         let scratch = scratch_app();

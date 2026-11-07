@@ -3,6 +3,19 @@ import XCTest
 
 final class CustomProviderTests: XCTestCase {
 
+    func testCompactedContextEstimateSurvivesWireMapping() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let base = #"{"context_tokens":40000,"context_window":1000000,"input_tokens":140000,"output_tokens":1000,"cache_read_tokens":0,"cost_usd":0.42,"turns":1,"model":"fixture"}"#
+        let old = try decoder.decode(Wire.ChatUsage.self, from: Data(base.utf8)).toModel()
+        XCTAssertEqual(old.contextSummary, "40k of 1.0M · 4%")
+        let estimated = String(base.dropLast()) + #", "context_estimated":true}"#
+        var shown = try decoder.decode(Wire.ChatUsage.self, from: Data(estimated.utf8)).toModel()
+        XCTAssertEqual(shown.contextSummary, "≈ 40k of 1.0M · 4%")
+        shown.contextWindow = 0
+        XCTAssertEqual(shown.contextSummary, "≈ 40k")
+    }
+
     func testTheNoteNamesTheURLTheCLICalls() {
         XCTAssertEqual(CustomAPI.chatCompletions.endpoint(for: " https://openrouter.ai/api/v1/ "), "https://openrouter.ai/api/v1/chat/completions")
         XCTAssertEqual(CustomAPI.chatCompletions.endpoint(for: "http://localhost:11434/v1/chat/completions"), "http://localhost:11434/v1/chat/completions")

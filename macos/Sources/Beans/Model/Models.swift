@@ -1153,6 +1153,7 @@ struct Chat: Identifiable, Hashable {
 /// turn's; the rest accumulate.
 struct ChatUsage: Hashable {
     var contextTokens: Int
+    var contextEstimated: Bool = false
     var contextWindow: Int
     var inputTokens: Int
     var outputTokens: Int
@@ -1164,9 +1165,12 @@ struct ChatUsage: Hashable {
 
     /// "128k of 1M · 13%", or "128k" when the window is unknown.
     var contextSummary: String {
-        guard contextWindow > 0 else { return Format.tokens(contextTokens) }
-        let percent = Int((Double(contextTokens) / Double(contextWindow) * 100).rounded())
-        return L("%@ of %@ · %d%%", Format.tokens(contextTokens), Format.tokens(contextWindow), percent)
+        var summary = Format.tokens(contextTokens)
+        if contextWindow > 0 {
+            let percent = Int((Double(contextTokens) / Double(contextWindow) * 100).rounded())
+            summary = L("%@ of %@ · %d%%", summary, Format.tokens(contextWindow), percent)
+        }
+        return contextEstimated ? "≈ " + summary : summary
     }
 
     /// "$0.42 · 18 turns"

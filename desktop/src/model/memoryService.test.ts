@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { MemoryPreferencesDraft, MemoryServiceAPI, MemoryServiceViewState, MEMORY_OPERATION_LABELS, MEMORY_STATUS_LABELS, connectionRequest, memoryVectorEditBody, readMemoryConnections, readMemoryHealth, readMemoryOperations, secretPatch, supportsMemoryAction, supportsMemoryAdvancedAction, type MemoryPreferences, type MemoryPreferencesView, type MemoryRequest } from "./memoryService";
 
 const baseline = (): MemoryPreferences => ({

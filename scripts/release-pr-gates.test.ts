@@ -1,10 +1,13 @@
-import { expect, test } from "bun:test";
+import { globSync } from "node:fs";
+import { expect, test } from "vitest";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import yaml from "yaml";
 
-const ROOT = join(import.meta.dir, "..");
+const ROOT = join(import.meta.dirname, "..");
 const workflows = await Promise.all(["test.yml", "docs.yml", "catalog.yml"].map(async (file) => ({
   file,
-  workflow: Bun.YAML.parse(await Bun.file(join(ROOT, ".github/workflows", file)).text()),
+  workflow: yaml.parse(await readFile(join(ROOT, ".github/workflows", file), "utf8")),
 })));
 
 function evaluate(expression: string, github: object, env: object = {}) {
@@ -65,7 +68,9 @@ test("catalog uses PR base or main for dispatch in both fetch and comparison", (
     expect(env.CATALOG_BASE_REF).toBe(expected);
     const fetch = job.steps.find((step: { run?: string }) => step.run?.startsWith("git fetch ")).run;
     expect(fetch.replaceAll("$CATALOG_BASE_REF", env.CATALOG_BASE_REF)).toBe(`git fetch --depth=1 origin "+refs/heads/${expected}:refs/remotes/origin/${expected}"`);
-    const check = job.steps.find((step: { run?: string }) => step.run === "bun run check:catalog");
+    const check = job.steps.find((step: { run?: string }) => step.run === "pnpm run check:catalog");
+    expect(check, "catalog check step").toBeDefined();
+    expect(check?.run).toBe("pnpm run check:catalog");
     const base = check.env.CATALOG_BASE.replace(/\$\{\{(.*?)\}\}/g, (_: string, expression: string) => evaluate(expression, github, env));
     expect(base).toBe(`origin/${expected}`);
   }
@@ -84,5 +89,23 @@ test("every Rust aggregate receives a prebuilt real relay for the revocation fix
     expect(steps[build].run).toContain("BEANS_REVOCATION_RELAY_BIN=");
     expect(steps[build].run).toContain("GITHUB_ENV");
     expect(steps[build].run).toContain("cargo metadata --locked --no-deps --format-version 1");
+  }
+});
+
+test("every release regression executes unconditionally in a hosted fixture gate", async () => {
+  const jobs = workflows.find(({ file }) => file === "test.yml")!.workflow.jobs;
+  const files = [...globSync("release*.test.ts", { cwd: join(ROOT, "scripts") }), "submit-eas.test.ts", "protoc-workflows.test.ts"];
+  for (const file of files) {
+    const invocations = Object.values(jobs).flatMap((job: any) => job.steps.filter((step: any) =>
+      typeof step.run === "string" && step.run.split(/\s+/).includes(`scripts/${file}`)
+    ).map((step: any) => ({ job, step })));
+    expect(invocations.length, `${file}: hosted invocation`).toBe(1);
+    for (const { job, step } of invocations) {
+      expect(job["continue-on-error"]).toBeUndefined();
+      expect(step.if).toBeUndefined();
+      expect(step["continue-on-error"]).toBeUndefined();
+      expect(step.run).toMatch(/^pnpm exec vitest run --config vitest\.config\.ts /);
+      expect(step.run).not.toMatch(/\|\||;|--todo|--test-name-pattern|--testNamePattern|--exclude/);
+    }
   }
 });

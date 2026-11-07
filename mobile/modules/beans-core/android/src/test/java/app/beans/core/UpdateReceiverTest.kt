@@ -50,6 +50,25 @@ class UpdateReceiverTest {
     assertNotNull(installer.getSessionInfo(id))
   }
 
+  @Test fun successfulInstallRecordsInstalledWithoutAbandoning() {
+    val id = session()
+    val intent = broadcast(id).putExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_SUCCESS)
+    UpdateReceiver().onReceive(context, intent)
+    assertFalse(prefs.contains("session"))
+    assertEquals("installed", prefs.getString("result", null))
+    assertNotNull(installer.getSessionInfo(id))
+    assertNull(shadowOf(context).nextStartedActivity)
+  }
+
+  @Test fun intentWithoutExtrasIsInert() {
+    val id = session()
+    UpdateReceiver().onReceive(context, Intent())
+    assertEquals(id, prefs.getInt("session", -1))
+    assertFalse(prefs.contains("result"))
+    assertNotNull(installer.getSessionInfo(id))
+    assertNull(shadowOf(context).nextStartedActivity)
+  }
+
   @Test fun missingConfirmationFailsAndAbandons() {
     val id = session()
     UpdateReceiver().onReceive(context, broadcast(id))

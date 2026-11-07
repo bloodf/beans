@@ -779,6 +779,7 @@ async fn refresh_presence(app: &Arc<App>, url: &str, token: &str) -> Result<(), 
             tracing::error!(%error, "dropping another Device's turns");
         }
     }
+    app.turns_ended();
     Ok(())
 }
 
@@ -1619,6 +1620,125 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.1);
         }
+    }
+
+    /// A Runner that leaves the relay mid-turn ends its turns here as soon as the presence
+    /// refresh hears it, without waiting for the rest of the sync round: the turn it lists, and
+    /// the job this Device sent it and still waits on. Its eventual result reaches the waiter
+    /// while offline, and a reconnect advertises a still-tracked turn once.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_runner_leaving_the_relay_ends_its_turns_here_at_once() {
+        use axum::{routing::get, Json, Router};
+        use std::sync::atomic::AtomicBool;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let online = Arc::new(AtomicBool::new(true));
+        let listed = online.clone();
+        let relay = Router::new().route("/v1/machines", get(move || {
+            let online = listed.load(Ordering::Relaxed);
+            async move { Json(serde_json::json!({ "machines": [{ "machine_pubkey": "mac", "box_pubkey": "box", "last_seen": 1, "created_at": 1, "online": online }], "now": crate::config::now_unix() })) }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, relay).await.unwrap() });
+        let turn = |job_id: &str| LiveTurn { job_id: job_id.into(), chat_id: "chat".into(), bot_id: "bot".into(), routine_id: None, activity: None };
+        let mut events = app.events.subscribe();
+        let mut heard = |pick: fn(Event) -> Option<String>| -> Vec<String> {
+            let mut ids: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).filter_map(pick).collect();
+            ids.sort();
+            ids
+        };
+        let started = |event: Event| match event { Event::JobStarted { job_id, .. } => Some(job_id), _ => None };
+        let finished = |event: Event| match event { Event::JobFinished { job_id, .. } => Some(job_id), _ => None };
+        let ids = |ids: &[&str]| {
+            let mut ids: Vec<_> = ids.iter().map(|id| id.to_string()).collect();
+            ids.sort();
+            ids
+        };
+
+        app.running_jobs.lock().unwrap().insert(
+            "sent-job".into(),
+            crate::app::RunningJob { chat_id: "chat".into(), bot_id: "bot".into(), routine_id: None, runner_id: Some("mac".into()), cancel: Default::default(), activity: None },
+        );
+        refresh_presence(app, &url, "test").await.unwrap();
+        assert!(app.device_is_online("mac"), "the fixture establishes the Runner online before it leaves");
+        app.set_device_turns("mac", vec![turn("mac-job"), turn("sent-job")]);
+        assert_eq!(heard(started), ids(&["mac-job", "sent-job"]));
+
+        let (tx, mut result) = tokio::sync::oneshot::channel();
+        app.pending_results.lock().unwrap().insert("sent-job".into(), tx);
+        let cancel = app.running_jobs.lock().unwrap()["sent-job"].cancel.clone();
+        online.store(false, Ordering::Relaxed);
+        app.bulk_sync.store(true, Ordering::Relaxed);
+        refresh_presence(app, &url, "test").await.unwrap();
+        assert!(heard(finished).is_empty(), "presence refresh respects bulk batching");
+        app.bulk_sync.store(false, Ordering::Relaxed);
+        refresh_presence(app, &url, "test").await.unwrap();
+        assert_eq!(heard(finished), ids(&["mac-job", "sent-job"]), "the refresh alone tells the app");
+        assert!(app.running_turns().is_empty());
+        assert!(app.running_jobs.lock().unwrap().contains_key("sent-job"), "the wait for the result goes on");
+
+        assert!(app.pending_results.lock().unwrap().contains_key("sent-job"));
+        assert!(!cancel.is_cancelled());
+        assert!(matches!(result.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+        crate::runtime::deliver_job_result(app, JobResult {
+            job_id: "sent-job".into(), chat_id: "chat".into(), bot_id: "bot".into(), outcome: "sent".into(),
+        });
+        assert_eq!(result.await.unwrap(), "sent", "an offline Runner's eventual result is accepted");
+        assert!(!app.pending_results.lock().unwrap().contains_key("sent-job"));
+
+        online.store(true, Ordering::Relaxed);
+        refresh_presence(app, &url, "test").await.unwrap();
+        assert!(heard(started).is_empty(), "presence alone must not announce new starts");
+        app.set_device_turns("mac", vec![turn("sent-job")]);
+        assert_eq!(heard(started), ids(&["sent-job"]));
+        app.turns_changed();
+        assert!(heard(started).is_empty(), "reconnect advertises once");
+        app.set_device_turns("mac", Vec::new());
+        app.running_jobs.lock().unwrap().remove("sent-job");
+        app.turns_changed();
+        assert_eq!(heard(finished), ids(&["sent-job"]));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn offline_turn_visibility_preserves_unknown_local_and_bulk_jobs() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        for (id, runner) in [("local", None), ("unknown", Some("unlisted")), ("online", Some("online")), ("offline", Some("offline"))] {
+            app.running_jobs.lock().unwrap().insert(id.into(), crate::app::RunningJob {
+                chat_id: "chat".into(), bot_id: "bot".into(), routine_id: None,
+                runner_id: runner.map(str::to_string), cancel: Default::default(), activity: None,
+            });
+        }
+        let mut events = app.events.subscribe();
+        app.turns_changed();
+        let starts: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|e| matches!(e, Event::JobStarted { .. })).collect();
+        assert_eq!(starts.len(), 4, "initial presence is unknown, not offline");
+        {
+            let mut state = app.state.lock().unwrap();
+            state.listed_machines.insert("offline".into(), 1);
+            state.listed_machines.insert("online".into(), 1);
+            state.turns_online.insert("online".into());
+        }
+        app.bulk_sync.store(true, Ordering::Relaxed);
+        app.turns_ended();
+        app.turns_changed();
+        assert!(events.try_recv().is_err(), "bulk mode defers turn events");
+        app.bulk_sync.store(false, Ordering::Relaxed);
+        app.emit(Event::Snapshot(app.snapshot()));
+        app.turns_changed();
+        assert!(matches!(events.try_recv().unwrap(), Event::Snapshot(_)));
+        assert!(matches!(events.try_recv().unwrap(), Event::JobFinished { job_id, .. } if job_id == "offline"));
+        assert!(events.try_recv().is_err());
+        let visible: std::collections::BTreeSet<_> = app.running_turns().iter()
+            .map(|t| t["job_id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(visible, ["local", "unknown", "online"].into_iter().map(str::to_string).collect());
+        assert_eq!(app.running_jobs.lock().unwrap().len(), 4);
+        app.turns_ended();
+        assert!(events.try_recv().is_err(), "ended visibility emits once");
     }
 
     fn scratch_app() -> ScratchApp {

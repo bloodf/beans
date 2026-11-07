@@ -1,4 +1,5 @@
-import { expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { expect, test } from "vitest";
 import { X509Certificate, createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,8 +8,8 @@ import { readVersion } from "./app.ts";
 import { inspectMobileBinary, preflightMobileTrust } from "./release-build-inputs.ts";
 
 function run(args: string[], cwd?: string): Buffer {
-  const child = Bun.spawnSync(args, { cwd, stdout: "pipe", stderr: "pipe", timeout: 30_000 });
-  if (child.exitCode !== 0) throw new Error(`Test-only fixture command failed: ${args[0]}: ${child.stderr}`);
+  const child = spawnSync(args[0]!, args.slice(1), { cwd, stdio: "pipe", timeout: 30_000 });
+  if (child.status !== 0) throw new Error(`Test-only fixture command failed: ${args[0]}: ${child.stderr}`);
   return Buffer.from(child.stdout);
 }
 

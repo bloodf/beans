@@ -1,7 +1,10 @@
+import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { copyFile, mkdir, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { createReadStream, existsSync, realpathSync } from "node:fs";
+import { copyFile, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { readVersion, ROOT } from "./app.ts";
 import { extractReleaseNotes } from "./changelog.ts";
 import { releasePrivateKey, signReleaseBytes } from "./release-signing.ts";
@@ -46,7 +49,7 @@ function releaseVersion(tag: string): string {
 }
 export async function releaseProtocol(): Promise<number> {
   const values = await Promise.all(["crates/cli/src/relay.rs", "crates/relay/src/routes.rs"].map(async (path) => {
-    const match = (await Bun.file(join(ROOT, path)).text()).match(/^pub const PROTOCOL: u32 = (\d+);$/m);
+    const match = (await readFile(join(ROOT, path), "utf8")).match(/^pub const PROTOCOL: u32 = (\d+);$/m);
     if (!match) throw new Error(`No protocol constant in ${path}`);
     return Number(match[1]);
   }));
@@ -59,7 +62,7 @@ async function digest(path: string): Promise<string> {
   return hash.digest("hex");
 }
 export async function coreVersion(): Promise<string> {
-  const source = await Bun.file(join(ROOT, "Cargo.toml")).text();
+  const source = await readFile(join(ROOT, "Cargo.toml"), "utf8");
   const version = source.match(/\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
   if (!version || !stable.test(version)) throw new Error("Cargo workspace requires a stable version");
   return version;
@@ -129,28 +132,34 @@ export async function buildReleaseManifest(tag: string, revision: string, direct
     const name = `${artifact.name}.sha256`;
     const checksum = artifacts.find((entry) => entry.name === name);
     if (!checksum || checksum.size > 1024) throw new Error(`Release is incomplete: missing or invalid ${name}`);
-    const text = await Bun.file(join(directory, name)).text();
+    const text = await readFile(join(directory, name), "utf8");
     if (text !== `${artifact.sha256}  ${artifact.name}\n` && text !== `${artifact.sha256} *${artifact.name}\n`) {
       throw new Error(`CLI checksum differs from archive: ${name}`);
     }
   }
   if (scope === "all") {
     const identities = new Set<string>();
+    const numbers = new Set<string>();
     for (const profile of ["github", "production", "testflight"] as const) {
-      const proof = await Bun.file(join(directory, `eas-${profile}.json`)).json();
+      const proof = JSON.parse(await readFile(join(directory, `eas-${profile}.json`), "utf8"));
       const name = `Beans-${version}${profile === "testflight" ? "-store.ipa" : profile === "production" ? ".aab" : ".apk"}`;
       const artifact = artifacts.find((entry) => entry.name === name)!;
+      const local = proof.kind === "local-exact-source";
+      const platform = profile === "testflight" ? "IOS" : "ANDROID";
+      // A local build has no EAS build record, so it carries no buildId; a cloud proof must carry a distinct one.
+      const identity = local ? proof.buildId === undefined
+        : proof.kind === undefined && /^[a-f0-9-]{36}$/i.test(proof.buildId ?? "") && !identities.has(proof.buildId);
       if (proof.schema !== 1 || proof.revision !== revision || proof.version !== version || proof.profile !== profile ||
           proof.artifact !== name || proof.sha256 !== artifact.sha256 || proof.size !== artifact.size ||
-          !/^[a-f0-9-]{36}$/i.test(proof.project ?? "") || !/^[a-f0-9-]{36}$/i.test(proof.buildId ?? "") ||
-          !/^[1-9]\d*$/.test(proof.buildNumber ?? "") || Number(proof.buildNumber) > 2_100_000_000 ||
-          proof.platform !== (profile === "testflight" ? "IOS" : "ANDROID") || identities.has(proof.buildId)) {
+          !/^[a-f0-9-]{36}$/i.test(proof.project ?? "") || !identity || numbers.has(`${platform}:${proof.buildNumber}`) ||
+          !/^[1-9]\d*$/.test(proof.buildNumber ?? "") || Number(proof.buildNumber) > 2_100_000_000 || proof.platform !== platform) {
         throw new Error(`Invalid EAS artifact provenance: ${profile}`);
       }
-      identities.add(proof.buildId);
-      const bytes = new Uint8Array(await Bun.file(join(directory, name)).arrayBuffer());
+      const bytes = new Uint8Array(readFileSync(join(directory, name)));
       if (createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) throw new Error(`EAS binary changed during finalization: ${profile}`);
       await verifyEasBinary(bytes, profile, version, proof.buildNumber, policies[profile]);
+      if (!local) identities.add(proof.buildId);
+      numbers.add(`${platform}:${proof.buildNumber}`);
     }
   }
   return { schema: 1, version, revision, protocol: await releaseProtocol(), artifacts };
@@ -168,10 +177,21 @@ export async function writeReleaseManifest(tag: string, revision: string, direct
 }
 
 async function gh(args: string[]): Promise<string> {
-  const process = Bun.spawn(["gh", ...args], { stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, code] = await Promise.all([new Response(process.stdout).text(), new Response(process.stderr).text(), process.exited]);
+  const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"] });
+  const out: Buffer[] = [];
+  const err: Buffer[] = [];
+  child.stdout!.on("data", (chunk: Buffer) => out.push(chunk));
+  child.stderr!.on("data", (chunk: Buffer) => err.push(chunk));
+  // Both pipes drain together and the child is reaped on close: a process blocked on a full
+  // stderr pipe never exits, and a spawn failure is never a silent success.
+  const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((settle, reject) => {
+    child.once("error", reject);
+    child.once("close", (exitCode, exitSignal) => settle([exitCode, exitSignal]));
+  });
+  const stderr = Buffer.concat(err).toString("utf8");
+  if (code === null) throw new Error(`GitHub release operation failed (signal ${signal ?? "unknown"}): ${stderr}`);
   if (code !== 0) throw new Error(`GitHub release operation failed (${code}): ${stderr}`);
-  return stdout;
+  return Buffer.concat(out).toString("utf8");
 }
 async function publish(tag: string, revision: string, directory: string, scope: ReleaseScope, policies: PublicTrustPolicies): Promise<void> {
   preflightReleaseTrust(scope, policies);
@@ -230,7 +250,7 @@ async function collect(source: string, destination: string, scope: ReleaseScope)
       if (!assetName.test(name)) throw new Error("Unsafe collected asset name");
       scopedArtifact(name, version, core, scope);
       const output = join(destination, name);
-      if (await Bun.file(output).exists()) {
+      if (existsSync(output)) {
         if (await digest(current) !== await digest(output)) throw new Error(`Conflicting artifact name: ${name}`);
       } else await copyFile(current, output);
     }
@@ -239,7 +259,7 @@ async function collect(source: string, destination: string, scope: ReleaseScope)
 }
 
 export async function stageDesktopAssets(inventory: string, destination: string): Promise<void> {
-  const value = await Bun.file(inventory).json();
+  const value = JSON.parse(await readFile(inventory, "utf8"));
   const version = readVersion();
   if (value.version !== version || value.tag !== `beans-v${version}` || !Array.isArray(value.assets) || !value.assets.length) {
     throw new Error("Desktop staging inventory does not match this release");
@@ -255,13 +275,27 @@ export async function stageDesktopAssets(inventory: string, destination: string)
     const name = basename(asset) === "install.sh" ? `install-${target}.sh` : basename(asset);
     classify(name, version, await coreVersion());
     const output = join(destination, name);
-    if (await Bun.file(output).exists()) throw new Error(`Duplicate staged desktop asset: ${name}`);
+    if (existsSync(output)) throw new Error(`Duplicate staged desktop asset: ${name}`);
     await copyFile(source, output);
   }
 }
 
 
-if (import.meta.main) {
+/** Dispatch only when this file is the process entry; importing it must stay inert. */
+const isMain = (() => {
+  const meta = import.meta as ImportMeta & { main?: boolean };
+  if (meta.main === true) return true;
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const canonical = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
+  try {
+    return canonical(fileURLToPath(meta.url)) === canonical(resolve(entry));
+  } catch {
+    return false;
+  }
+})();
+
+if (isMain) {
   const parsed = await publicTrustArguments(process.argv.slice(2));
   const [command, first, second, third, fourth, ...extra] = parsed.args;
   if (extra.length) throw new Error("Unexpected release arguments");
@@ -269,7 +303,7 @@ if (import.meta.main) {
     const scope = releaseScope(second);
     const version = releaseVersion(first);
     preflightReleaseTrust(scope, parsed.policies);
-    if (scope === "all" && !extractReleaseNotes(await Bun.file(join(ROOT, "CHANGELOG.md")).text(), version)) {
+    if (scope === "all" && !extractReleaseNotes(readFileSync(join(ROOT, "CHANGELOG.md"), "utf8"), version)) {
       throw new Error(`CHANGELOG.md requires notes for ${version} before all-platform builds`);
     }
     await releasePrivateKey();

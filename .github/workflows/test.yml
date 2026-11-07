@@ -28,10 +28,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun test scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts scripts/release-pr-gates.test.ts scripts/release-archive.test.ts scripts/release-binary-assurance.test.ts scripts/release-ipa-claims.test.ts
-
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run --config vitest.config.ts scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts scripts/release-pr-gates.test.ts scripts/release-archive.test.ts scripts/release-binary-assurance.test.ts scripts/release-ipa-claims.test.ts
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with:
           distribution: temurin
@@ -60,7 +64,7 @@ jobs:
           chmod +x "$fixture_tools/bundletool"
           echo "$fixture_tools" >> "$GITHUB_PATH"
       - name: Verify generated Android fixture signatures and refusals
-        run: bun test scripts/release-trust.test.ts scripts/release-aab-trust.test.ts
+        run: pnpm exec vitest run --config vitest.config.ts scripts/release-trust.test.ts scripts/release-aab-trust.test.ts
 
   rust-linux:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
@@ -81,6 +85,11 @@ jobs:
           --health-retries 30
     env:
       BEANS_RELAY_TEST_POSTGRES: postgres://postgres:beans@127.0.0.1:5432/beans?sslmode=disable
+      # Hosted Linux runners have limited disk. Avoid debug symbols and incremental
+      # object copies for CI tests without changing the crates or test coverage.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
       - run: python3 -I -B scripts/server-updater.test.py -v
@@ -93,6 +102,8 @@ jobs:
           fallback: none
       # Cargo unifies features across the packages of one run, and the phone core takes beans
       # without the runner, so it is tested on its own.
+      - name: Report disk space before Rust build
+        run: df -h .
       - name: Build real relay for revocation fixture
         run: |
           cargo build --locked -p beans-relay --bin beans-relay
@@ -101,6 +112,9 @@ jobs:
           printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
+      - name: Report disk space after Rust tests
+        if: always()
+        run: df -h .
       # #427: same hang on Linux as macOS — bash_input waited forever on continuous output.
       - name: Stress bash_session hang regression (#427)
         run: |
@@ -198,18 +212,43 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          cmdline-tools-version: '12266719'
+          packages: 'build-tools;34.0.0 platforms;android-34'
+      - name: Expose pinned Android fixture tools
+        run: |
+          test -x "$JAVA_HOME/bin/java"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/aapt2"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/apksigner"
+          test -f "$ANDROID_HOME/platforms/android-34/android.jar"
+          echo "$ANDROID_HOME/build-tools/34.0.0" >> "$GITHUB_PATH"
+      - name: Require native Apple metadata tools
+        run: test -x /usr/bin/plutil && command -v zip && command -v unzip
+      - name: Verify generated native release metadata and refusals
+        run: pnpm exec vitest run --config vitest.config.ts scripts/release-native-identity.test.ts
+      # The markdown crate's static library, xcframework, and Swift bindings, as `pnpm run dev`
       - name: Require native Apple fixture tools
         run: test -x /usr/bin/codesign && test -x /usr/bin/plutil && command -v zip && command -v unzip
       - name: Reject unsigned IPA with native Apple tools
-        run: bun test scripts/release-ipa-integrity.test.ts
-      # The markdown crate's static library, xcframework, and Swift bindings, as `bun run dev`
+        run: pnpm exec vitest run --config vitest.config.ts scripts/release-ipa-integrity.test.ts
       # builds them into macos/Libraries and macos/Sources/BeansMarkdown.
       - name: Build the markdown crate for Swift
-        run: bun -e 'import { buildMarkdown } from "./scripts/app.ts"; if (!(await buildMarkdown("debug")).ok) process.exit(1)'
+        run: node --import tsx --input-type=module -e 'import { buildMarkdown } from "./scripts/app.ts"; if (!(await buildMarkdown("debug")).ok) process.exit(1)'
       - run: swift test
         working-directory: macos
-      - run: bun run test:mac-startup
+      - run: pnpm run test:mac-startup
       - run: sh macos/Tests/run-settings-layout.sh
 
   desktop:
@@ -222,18 +261,23 @@ jobs:
         working-directory: desktop
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
       - uses: actions/setup-go@v6
         with:
           go-version-file: desktop/go.mod
           cache-dependency-path: desktop/go.sum
-      - run: bun install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile
       # src/mygo.ts, the page's bindings to the Go side, is generated and never committed.
-      - run: bun run generate
-      - run: bun run typecheck
+      - run: pnpm run generate
+      - run: pnpm run typecheck
       - name: Install Chromium for desktop browser checks
-        run: bun ./node_modules/playwright/cli.js install --with-deps chromium
-      - run: bun run test
+        run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm run test
       - run: go test -count=1 ./...
 
   # Go module of desktop/ on macOS (MyGo host compiles without the Solid page or mygo-cli).
@@ -280,7 +324,12 @@ jobs:
         working-directory: mobile
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun run test
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run typecheck
+      - run: pnpm run test

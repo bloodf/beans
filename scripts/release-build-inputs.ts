@@ -1,7 +1,9 @@
+import { findExecutable } from "./executable.ts";
+import { spawnSync } from "node:child_process";
 import { X509Certificate } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import { inspectIpaSignedClaims } from "./release-ipa-claims.ts";
 
@@ -45,12 +47,17 @@ export function validatePublicTrustPolicy(value: unknown, profile: MobileRelease
   return policy;
 }
 
+export function inspectionToolAvailable(tool: string): boolean {
+  if (!isAbsolute(tool)) return findExecutable(tool) !== null;
+  try { accessSync(tool, constants.X_OK); return true; } catch { return false; }
+}
+
 // Missing public authority fails before tool checks, credentials or cloud work.
 export function preflightMobileTrust(profile: MobileReleaseProfile, value: unknown): PublicTrustPolicy {
   const policy = validatePublicTrustPolicy(value, profile);
   if (profile === "testflight") throw new Error("IPA cryptographic trust verification unsupported; all-platform publication blocked");
   for (const tool of profile === "github" ? ["unzip", "aapt2", "apksigner", "java"] : ["unzip", "bundletool", "jarsigner", "keytool", "java"]) {
-    if (!Bun.which(tool)) throw new Error(`Binary inspection tool unavailable: ${tool}`);
+    if (!inspectionToolAvailable(tool)) throw new Error(`Binary inspection tool unavailable: ${tool}`);
   }
   return policy;
 }
@@ -66,9 +73,9 @@ export async function publicTrustArguments(args: string[]): Promise<{ args: stri
   const index = args.indexOf("--public-trust-policy");
   if (index < 0) return { args, policies: {} };
   if (index !== args.length - 2 || !args[index + 1]) throw new Error("--public-trust-policy <public-json-path> must be the final argument");
-  const file = Bun.file(args[index + 1]);
-  if (file.size > 64 * 1024) throw new Error("Public trust policy exceeds 64 KiB");
-  const value = await file.json();
+  const file = readFileSync(args[index + 1]);
+  if (file.length > 64 * 1024) throw new Error("Public trust policy exceeds 64 KiB");
+  const value = JSON.parse(file.toString("utf8"));
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !["github", "production", "testflight"].includes(key))) throw new Error("Invalid public trust profile map");
   const policies: PublicTrustPolicies = {};
   for (const profile of ["github", "production", "testflight"] as const) {
@@ -135,9 +142,9 @@ export function inspectReleaseArchive(bytes: Uint8Array): string[] {
 
 // These commands inspect public artifacts only. Missing tools never downgrade verification.
 function inspect(args: string[], maxBuffer = 1024 * 1024): string {
-  if (!Bun.which(args[0])) throw new Error(`Binary inspection tool unavailable: ${args[0]}`);
-  const result = Bun.spawnSync(args, { env: { ...process.env, LC_ALL: "C", LANG: "C" }, stdout: "pipe", stderr: "pipe", timeout: 30_000, maxBuffer });
-  if (result.exitCode !== 0) throw new Error(`Binary inspection tool failed: ${args[0]}`);
+  if (!inspectionToolAvailable(args[0])) throw new Error(`Binary inspection tool unavailable: ${args[0]}`);
+  const result = spawnSync(args[0]!, args.slice(1), { env: { ...process.env, LC_ALL: "C", LANG: "C" }, stdio: "pipe", timeout: 30_000, maxBuffer });
+  if (result.status !== 0) throw new Error(`Binary inspection tool failed: ${args[0]}`);
   return result.stdout.toString();
 }
 
@@ -174,10 +181,10 @@ export function inspectMobileBinary(path: string, profile: MobileReleaseProfile,
     const extensions = entries.filter(name => name.startsWith(`${base}PlugIns/`) && /^Payload\/[^/]+\.app\/PlugIns\/[^/]+\.appex\/Info\.plist$/.test(name));
     if (extensions.length !== 1) throw new Error("IPA notification module manifest missing or ambiguous");
     for (const [member, identifier] of [[apps[0], "ai.amoena.beans"], [extensions[0], "ai.amoena.beans.notify"]]) {
-      const bytes = Bun.spawnSync(["unzip", "-p", path, member], { stdout: "pipe", stderr: "pipe", timeout: 30_000, maxBuffer: 1024 * 1024 });
-      if (bytes.exitCode !== 0) throw new Error("IPA binary manifest read failed");
-      const decoded = Bun.spawnSync(["plutil", "-convert", "json", "-o", "-", "-"], { stdin: bytes.stdout, stdout: "pipe", stderr: "pipe", timeout: 30_000, maxBuffer: 1024 * 1024 });
-      if (decoded.exitCode !== 0) throw new Error("IPA binary manifest decode failed");
+      const bytes = spawnSync("unzip", ["-p", path, member], { stdio: "pipe", timeout: 30_000, maxBuffer: 1024 * 1024 });
+      if (bytes.status !== 0) throw new Error("IPA binary manifest read failed");
+      const decoded = spawnSync("plutil", ["-convert", "json", "-o", "-", "-"], { input: bytes.stdout, stdio: "pipe", timeout: 30_000, maxBuffer: 1024 * 1024 });
+      if (decoded.status !== 0) throw new Error("IPA binary manifest decode failed");
       const value = JSON.parse(decoded.stdout.toString());
       if (value.CFBundleIdentifier !== identifier || value.CFBundleShortVersionString !== version || value.CFBundleVersion !== number) throw new Error("IPA native identity differs from release");
     }
@@ -194,8 +201,8 @@ export function inspectMobileBinary(path: string, profile: MobileReleaseProfile,
         // Display uses the default architecture. These claims do not establish
         // all-slice identity or Apple/profile authorization; the gate stays shut.
         const entitlements = inspect(["/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", target], 64 * 1024);
-        const decoded = Bun.spawnSync(["/usr/bin/plutil", "-convert", "json", "-o", "-", "-"], { stdin: Buffer.from(entitlements), stdout: "pipe", stderr: "pipe", timeout: 30_000, maxBuffer: 64 * 1024 });
-        if (decoded.exitCode !== 0) throw new Error("IPA signed entitlement claims decode failed");
+        const decoded = spawnSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", "-"], { input: Buffer.from(entitlements), stdio: "pipe", timeout: 30_000, maxBuffer: 64 * 1024 });
+        if (decoded.status !== 0) throw new Error("IPA signed entitlement claims decode failed");
         inspectIpaSignedClaims(decoded.stdout.toString(), identifier, (approved as Extract<PublicTrustPolicy, { profile: "testflight" }>).teamId);
       }
     } finally { rmSync(temporary, { recursive: true, force: true }); }

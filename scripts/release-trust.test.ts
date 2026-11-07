@@ -1,4 +1,7 @@
-import { expect, spyOn, test } from "bun:test";
+import { inspectionToolAvailable } from "./release-build-inputs.ts";
+import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { expect, vi, test } from "vitest";
 import { createHash, X509Certificate } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,8 +14,8 @@ import type { PublicTrustPolicies } from "./release-build-inputs.ts";
 
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 function run(args: string[]) {
-  const p = Bun.spawnSync(args, { stdout: "pipe", stderr: "pipe", timeout: 30_000 });
-  if (p.exitCode !== 0) throw new Error(`Fixture command failed: ${args[0]}: ${p.stderr}`);
+  const p = spawnSync(args[0]!, args.slice(1), { stdio: "pipe", timeout: 30_000 });
+  if (p.status !== 0) throw new Error(`Fixture command failed: ${args[0]}: ${p.stderr}`);
 }
 
 test("test-only signed APK accepts explicit pin and rejects signer, identity, hash and absent policy at real boundaries", async () => {
@@ -46,7 +49,7 @@ test("test-only signed APK accepts explicit pin and rejects signer, identity, ha
     const corrupted = bytes.slice(); corrupted[50] ^= 1;
     await expect(verifyEasBinary(corrupted, "github", version, "42", policy)).rejects.toThrow();
     const build = { id: "22222222-2222-4222-8222-222222222222", status: "FINISHED", platform: "ANDROID", appIdentifier: "ai.amoena.beans", distribution: "STORE", buildProfile: "github", gitCommitHash: revision, appVersion: version, appBuildVersion: "42", app: { id: project }, artifacts: { buildUrl: "https://artifacts.eascdn.net/test-only.apk" } };
-    fetcher = spyOn(globalThis, "fetch").mockImplementation(async () => new Response(bytes) as any);
+    fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(bytes) as any);
     const inventory = join(root, "inventory");
     await stageEasBuild(build, "github", revision, inventory, policy);
     const proof = JSON.parse(await readFile(join(inventory, "eas-github.json"), "utf8"));
@@ -64,11 +67,11 @@ test("test-only signed APK accepts explicit pin and rejects signer, identity, ha
       queried = false;
       await expect(runEasRelease(["build", "github", revision, join(root, "no-policy")], query, git)).rejects.toThrow("policy unavailable");
       expect(queried).toBe(false);
-      expect(await Bun.file(join(root, "no-policy", "eas-github.json")).exists()).toBe(false);
+      expect(existsSync(join(root, "no-policy", "eas-github.json"))).toBe(false);
       const wrongFile = join(root, "wrong-public-policy.json");
       await writeFile(wrongFile, JSON.stringify({ github: wrongSigner }));
       await expect(runEasRelease(["build", "github", revision, join(root, "caller-unknown"), "--public-trust-policy", wrongFile], query, git)).rejects.toThrow("signer differs");
-      expect(await Bun.file(join(root, "caller-unknown", "eas-github.json")).exists()).toBe(false);
+      expect(existsSync(join(root, "caller-unknown", "eas-github.json"))).toBe(false);
     } finally {
       if (oldToken === undefined) delete process.env.EXPO_TOKEN; else process.env.EXPO_TOKEN = oldToken;
       if (oldOwner === undefined) delete process.env.BEANS_EXPO_OWNER; else process.env.BEANS_EXPO_OWNER = oldOwner;
@@ -82,22 +85,22 @@ test("test-only signed APK accepts explicit pin and rejects signer, identity, ha
     await expect(writeReleaseManifest(`beans-v${version}`, revision, inventory, "all", allPolicies)).rejects.toThrow("IPA cryptographic trust verification unsupported");
     for (const command of ["check", "manifest", "publish"]) {
       const positional = command === "check" ? [`beans-v${version}`, "all"] : [`beans-v${version}`, revision, inventory, "all"];
-      const child = Bun.spawnSync([process.execPath, "scripts/release-github.ts", command, ...positional, "--public-trust-policy", allFile], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
-      expect(child.exitCode).not.toBe(0);
+      const child = spawnSync(process.execPath, ["--import", "tsx", "scripts/release-github.ts", command, ...positional, "--public-trust-policy", allFile], { stdio: "pipe", timeout: 10_000 });
+      expect(child.status).not.toBe(0);
       expect(child.stderr.toString()).toContain("IPA cryptographic trust verification unsupported");
     }
     for (const command of ["check", "manifest", "publish"]) {
       const positional = command === "check" ? [`beans-v${version}`, "all"] : [`beans-v${version}`, revision, inventory, "all"];
-      const child = Bun.spawnSync([process.execPath, "scripts/release-github.ts", command, ...positional], { env: { ...process.env, BEANS_UPDATE_PRIVATE_KEY: "", GH_TOKEN: "", GITHUB_TOKEN: "" }, stdout: "pipe", stderr: "pipe", timeout: 10_000 });
-      expect(child.exitCode).not.toBe(0);
+      const child = spawnSync(process.execPath, ["--import", "tsx", "scripts/release-github.ts", command, ...positional], { env: { ...process.env, BEANS_UPDATE_PRIVATE_KEY: "", GH_TOKEN: "", GITHUB_TOKEN: "" }, stdio: "pipe", timeout: 10_000 });
+      expect(child.status).not.toBe(0);
       expect(child.stderr.toString()).toContain("trust policy unavailable for github");
     }
     const enumeration = `Number of signers: 1\nSigner #1 certificate SHA-256 digest: ${policy.signerSha256[0]}\n`;
     expect(apkCurrentSigners(enumeration)).toEqual(policy.signerSha256);
     for (const malformed of [enumeration.replace("signers: 1", "signers: 2"), enumeration.replace("Signer #1", "Signer #2"), enumeration + enumeration, enumeration.replace(policy.signerSha256[0], "truncated")]) expect(() => apkCurrentSigners(malformed)).toThrow("Incomplete APK signer enumeration");
-    if (!Bun.which("bundletool")) expect(() => preflightMobileTrust("production", allPolicies.production)).toThrow("tool unavailable: bundletool");
+    if (!inspectionToolAvailable("bundletool")) expect(() => preflightMobileTrust("production", allPolicies.production)).toThrow("tool unavailable: bundletool");
     await expect(stageEasBuild(build, "github", revision, join(root, "rejected"), wrongSigner)).rejects.toThrow("signer differs");
-    expect(await Bun.file(join(root, "rejected", "eas-github.json")).exists()).toBe(false);
+    expect(existsSync(join(root, "rejected", "eas-github.json"))).toBe(false);
     await expect(buildReleaseManifest(`beans-v${version}`, revision, inventory, "all")).rejects.toThrow("policy unavailable");
     await expect(buildReleaseManifest(`beans-v${version}`, revision, inventory, "all", allPolicies)).rejects.toThrow("IPA cryptographic trust verification unsupported");
     if (process.env.BEANS_TEST_TRUST_ARTIFACTS) {

@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, test } from 'vitest';
 import { decodeDiagnosticsReport, DiagnosticsReportError } from './diagnosticsReport';
 
 test('production diagnostics decoder preserves schema payload and rejects private or invalid evidence', () => {

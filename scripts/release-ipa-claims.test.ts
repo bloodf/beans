@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { inspectIpaSignedClaims } from "./release-ipa-claims.ts";
 import { preflightMobileTrust, preflightReleaseTrust } from "./release-build-inputs.ts";
 

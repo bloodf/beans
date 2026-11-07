@@ -1,4 +1,5 @@
-import { expect, spyOn, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { expect, vi, test } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,7 +13,7 @@ test("missing public authority rejects every profile before reading or downloadi
   const previous = process.env.BEANS_EXPO_PROJECT_ID;
   process.env.BEANS_EXPO_PROJECT_ID = project;
   let downloaded = false;
-  const fetcher = spyOn(globalThis, "fetch").mockImplementation(async () => {
+  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
     downloaded = true;
     throw new Error("Candidate transport must not run without public authority");
   });
@@ -21,7 +22,7 @@ test("missing public authority rejects every profile before reading or downloadi
       const build = { id: "22222222-2222-4222-8222-222222222222", status: "FINISHED", platform: profile === "testflight" ? "IOS" : "ANDROID", appIdentifier: "ai.amoena.beans", distribution: "STORE", buildProfile: profile, gitCommitHash: revision, appVersion: readVersion(), appBuildVersion: "42", app: { id: project }, artifacts: { buildUrl: "https://artifacts.eascdn.net/fixture.apk" } };
       await expect(stageEasBuild(build, profile, revision, join(root, profile))).rejects.toThrow(`policy unavailable for ${profile}`);
       expect(() => inspectMobileBinary(join(root, "absent-candidate"), profile, readVersion(), "42")).toThrow(`policy unavailable for ${profile}`);
-      expect(await Bun.file(join(root, profile, `eas-${profile}.json`)).exists()).toBe(false);
+      expect(existsSync(join(root, profile, `eas-${profile}.json`))).toBe(false);
     }
     expect(downloaded).toBe(false);
   } finally {

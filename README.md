@@ -102,29 +102,29 @@ The website is available in [English](https://usebeans.app/), [Português do Bra
 
 Read [ARCHITECTURE.md](./ARCHITECTURE.md) before changing code, then the subject docs it lists for the parts you touch. The binary is `beans`, configuration uses `BEANS_*`, and pairing uses exact `beans://pair?v=2&…` links.
 
-Install [Bun](https://bun.sh) and Rust stable. macOS builds need Xcode with Swift 6 and the macOS 26 SDK. Windows/Linux desktop builds need Go 1.27.1 or newer and the host webview dependencies. Phone builds need Xcode for iOS, or JDK 17 and the Android SDK/NDK for Android. See the [macOS](./docs/architecture/macos-app.md), [desktop](./docs/architecture/desktop-app.md), and [phone](./docs/architecture/phone-app.md) build docs.
+Install Node 24.22.2, pnpm 12.18.0 and Rust stable. macOS builds need Xcode with Swift 6 and the macOS 26 SDK. Windows/Linux desktop builds need Go 1.27.1 or newer and the host webview dependencies. Phone builds need Xcode for iOS, or JDK 17 and the Android SDK/NDK for Android. See the [macOS](./docs/architecture/macos-app.md), [desktop](./docs/architecture/desktop-app.md), and [phone](./docs/architecture/phone-app.md) build docs.
 
 ```bash
 git clone https://github.com/bloodf/beans.git
 cd beans
 # To reproduce a release, check out its beans-v<version> tag before installing.
-bun install
+pnpm install
 ```
 
 Choose the command for your platform:
 
 ```bash
-bun run dev           # Build and launch Beans Dev on macOS, with a local relay
-bun run build         # Build Beans.app
-bun run desktop       # Windows/Linux development app with live reload
-bun run desktop:build # Build the desktop release artifacts
-bun run mobile:dev    # iOS simulator development with Metro
-bun run mobile:phone  # Development on a connected iPhone
-bun run android       # Rebuild the Rust phone core and run the Android client
-bun run web           # Website development on localhost:3000
+pnpm run dev           # Build and launch Beans Dev on macOS, with a local relay
+pnpm run build         # Build Beans.app
+pnpm run desktop       # Windows/Linux development app with live reload
+pnpm run desktop:build # Build the desktop release artifacts
+pnpm run mobile:dev    # iOS simulator development with Metro
+pnpm run mobile:phone  # Development on a connected iPhone
+pnpm run android       # Rebuild the Rust phone core and run the Android client
+pnpm run web           # Website development on localhost:3000
 ```
 
-For phone development, first run `bun install --cwd mobile`. The phone app is not a root Bun workspace. Desktop cross-compilation uses `cargo-zigbuild`; platform prerequisites and packaging details are in the build docs above.
+For phone development, first run `pnpm --dir mobile install`. The phone app is not a root pnpm workspace. Desktop cross-compilation uses `cargo-zigbuild`; platform prerequisites and packaging details are in the build docs above.
 
 Beans uses `~/.beans-v2` and CLI port `4874`; Beans Dev uses `~/.beans-dev-v2` and `4875`. Phone cores use `beans-v2/core` or `beans-dev-v2/core` inside the existing OS sandbox. Format `beans-v2`, protocol 5 and versioned backups are intentionally incompatible with old accounts, unversioned phrases and mixed paired Devices. No migration/reset occurs; existing accounts, installed apps and services remain untouched. To run the development CLI directly:
 
@@ -132,7 +132,7 @@ Beans uses `~/.beans-v2` and CLI port `4874`; Beans Dev uses `~/.beans-dev-v2` a
 cargo run -q -p beans -- --home "$HOME/.beans-dev-v2" --port 4875 serve
 ```
 
-`bun run dev` starts its local relay on every network interface so phones can pair. Use a trusted network. `bun run reset` deletes local installation data; it is not a setup prerequisite.
+`pnpm run dev` starts its local relay on every network interface so phones can pair. Use a trusted network. `pnpm run reset` deletes local installation data; it is not a setup prerequisite.
 
 New backup phrases start with the separate token `beans-v2`, followed by thirteen base32 groups. Restore rejects missing/wrong prefixes before decoding. Do not reuse or reset an existing account directory to make a fresh build start. Relay account requests carry `Beans-Protocol: 5` and `Beans-Format: beans-v2`; incompatible storage and peers fail closed.
 
@@ -173,14 +173,14 @@ Run the checks relevant to your change:
 ```bash
 cargo test --locked --workspace --exclude beans-mobile
 cargo test --locked -p beans-mobile # Separate to avoid Runner feature unification
-bun run check:docs
-bun run l10n
-bun run test:mac-startup
+pnpm run check:docs
+pnpm run l10n
+pnpm run test:mac-startup
 swift test --package-path macos
-bun run --cwd mobile typecheck
-bun run --cwd mobile test
-bun run --cwd desktop build:web
-bun run --cwd desktop test
+pnpm --dir mobile typecheck
+pnpm --dir mobile test
+pnpm --dir desktop build:web
+pnpm --dir desktop test
 go -C desktop test ./...
 ```
 
@@ -190,7 +190,7 @@ go -C desktop test ./...
 
 Beans is licensed under [GPL-3.0-only](./LICENSE) and builds on [Lorca](https://github.com/egoist/lorca) by egoist, preserving its source history and required attribution. The vendored Blobatar avatar source by Alain is [MIT-licensed](./packages/beans-blobatar/LICENSE).
 
-The read-only tracked-name check takes the provenance name explicitly: `bun run scripts/check-tracked-names.ts Lorca`. It inspects tracked paths/content, allows provenance only here and preserves its enumerated required legal notices; run it after tracked path moves are reconciled.
+The read-only tracked-name check takes the provenance name explicitly: `pnpm run scripts/check-tracked-names.ts Lorca`. It inspects tracked paths/content, allows provenance only here and preserves its enumerated required legal notices; run it after tracked path moves are reconciled.
 
 
 [Website](https://usebeans.app/) · [Downloads](https://usebeans.app/download) · [Documentation](https://usebeans.app/docs) · [Releases](https://github.com/bloodf/beans/releases) · [Privacy](https://usebeans.app/privacy.html) · [Support](https://usebeans.app/support.html)

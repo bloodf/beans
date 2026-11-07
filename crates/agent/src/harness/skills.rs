@@ -193,7 +193,7 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/skill-hosts").join(host)
     }
 
-    /// The name each host's extended fixture declares: the others match their directory.
+    /// The name each host's extended fixture declares; all differ from the copied parent.
     fn host_name(host: &str) -> String { if host == "pi" { "pi-extended".into() } else { format!("{host}-extended") } }
 
     fn copy_tree(from: &Path, to: &Path) {
@@ -232,14 +232,14 @@ mod tests {
                 let mut want_diagnostics: Vec<String> = want_diagnostics.iter().map(|s| s.to_string()).collect();
                 // Only the cases whose declared name differs from their directory are diagnosed.
                 if matches!(case, "extended" | "duplicate-a" | "duplicate-b") {
-                    want_diagnostics.push(format!("does not match parent directory \"{parent}\""));
+                    want_diagnostics.push(format!("name \"{}\" does not match parent directory \"{parent}\"", want_names[0]));
                 }
                 let loaded = load_skills(&[root]);
                 let names: Vec<&str> = loaded.skills.iter().map(|s| s.name.as_str()).collect();
                 let messages: Vec<&str> = loaded.diagnostics.iter().map(|d| d.message.as_str()).collect();
                 if names != want_names { failures.push(format!("{host}/{case}: loaded {names:?}, expected {want_names:?}")); }
-                for want in &want_diagnostics {
-                    if !messages.iter().any(|m| m.contains(want.as_str())) { failures.push(format!("{host}/{case}: missing diagnostic {want:?} in {messages:?}")); }
+                if messages != want_diagnostics {
+                    failures.push(format!("{host}/{case}: diagnostics {messages:?}, expected {want_diagnostics:?}"));
                 }
                 if case == "extended" {
                     if host == &"claude" && !loaded.skills.iter().any(|s| s.disable_model_invocation) {

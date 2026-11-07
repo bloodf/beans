@@ -3,22 +3,22 @@
   "configurations": [
     {
       "name": "web",
-      "runtimeExecutable": "bun",
+      "runtimeExecutable": "pnpm",
       "runtimeArgs": [
-        "run",
-        "--cwd",
+        "--dir",
         "web",
+        "run",
         "dev"
       ],
       "port": 3000
     },
     {
       "name": "web-preview",
-      "runtimeExecutable": "bun",
+      "runtimeExecutable": "pnpm",
       "runtimeArgs": [
-        "run",
-        "--cwd",
+        "--dir",
         "web",
+        "run",
         "preview",
         "--",
         "--port",
@@ -28,11 +28,11 @@
     },
     {
       "name": "desktop-web",
-      "runtimeExecutable": "bun",
+      "runtimeExecutable": "pnpm",
       "runtimeArgs": [
-        "run",
-        "--cwd",
+        "--dir",
         "desktop",
+        "run",
         "dev:web"
       ],
       "port": 5178,

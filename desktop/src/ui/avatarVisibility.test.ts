@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, expect, test } from "vitest";
 import { AvatarClock } from "./avatarClock";
 import type { AvatarScheduler } from "./avatarClock";
 import type { watchAvatarVisibility } from "./avatarVisibility";

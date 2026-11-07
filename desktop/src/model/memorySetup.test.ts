@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { MemorySetupAPI, BotSetupApproval, LocalAssetApproval, readBotSetupPreview, readLocalAssetPreview, setupPreviewRequest, type AssetPlan } from "./memorySetup";
 
 const revision = { counter: 3, device_id: "device" };

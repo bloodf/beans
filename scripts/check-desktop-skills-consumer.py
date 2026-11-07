@@ -13,6 +13,7 @@ and the playwright Python package with its chromium browser.
 import hashlib
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -23,6 +24,53 @@ import urllib.request
 DESKTOP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "desktop")
 PAGE = "/src/ui/sheets/skillsMountedCheck.html"
 TIMEOUT_SECONDS = 120
+
+
+def stop_owned_session(process: subprocess.Popen, timeout: float = 30) -> None:
+    """Stop the session created by this driver's start_new_session launch."""
+    group = process.pid
+    if os.name != "posix" or group <= 1 or group == os.getpgrp() or timeout <= 0:
+        raise ValueError("an owned POSIX session and positive timeout are required")
+    try:
+        if os.getpgid(group) != group or os.getsid(group) != group:
+            raise ValueError("refusing to signal a process outside its own session")
+    except ProcessLookupError:
+        pass  # The leader may already be gone while its descendants still run.
+
+    def send(sig: int) -> None:
+        try:
+            os.killpg(group, sig)
+        except ProcessLookupError:
+            pass
+
+    def settled(deadline: float) -> bool:
+        while True:
+            if process.poll() is not None:
+                # Reap only adopted children in this group, if this process is a subreaper.
+                while True:
+                    try:
+                        child, _ = os.waitpid(-group, os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if child == 0:
+                        break
+            try:
+                os.killpg(group, 0)
+            except ProcessLookupError:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.02, remaining))
+
+    started = time.monotonic()
+    deadline = started + timeout
+    send(signal.SIGTERM)
+    if not settled(started + timeout / 2):
+        send(signal.SIGKILL)
+        if not settled(deadline):
+            raise RuntimeError(f"owned process group {group} did not settle within {timeout}s")
+    process.wait(timeout=max(0, deadline - time.monotonic()))
 
 
 def free_port() -> int:
@@ -64,13 +112,16 @@ def source_binding() -> dict:
 
 
 def main() -> int:
+    if os.name != "posix":
+        raise SystemExit("the mounted skills driver requires POSIX session ownership")
     generated = os.path.join(DESKTOP, "src", "mygo.ts")
     if not os.path.exists(generated):
         raise SystemExit("desktop/src/mygo.ts is missing; run `pnpm run generate` in desktop/ first")
     port = free_port()
     vite = subprocess.Popen(
         ["pnpm", "exec", "vite", "--port", str(port), "--strictPort"],
-        cwd=DESKTOP, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cwd=DESKTOP, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
     try:
         base = f"http://localhost:{port}"
         wait_for(base + PAGE, vite)
@@ -91,8 +142,7 @@ def main() -> int:
             error = page.evaluate("window.__error")
             browser.close()
     finally:
-        vite.terminate()
-        vite.wait(timeout=30)
+        stop_owned_session(vite)
 
     # A short settle proves nothing; every check must have reported.
     missing = [name for name in ("discovery", "library", "keepBoth", "compare") if not (result or {}).get(name)]

@@ -1,5 +1,5 @@
-import { describe, expect, test, spyOn } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { describe, expect, test, vi } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readVersion } from "./app.ts";
@@ -13,11 +13,11 @@ test("downloads and stages exact finished APK/AAB/store IPA with hashes, never U
   const directory = await mkdtemp(join(tmpdir(), "beans-eas-test-"));
   const previous = process.env.BEANS_EXPO_PROJECT_ID;
   process.env.BEANS_EXPO_PROJECT_ID = project;
-  const fetcher = spyOn(globalThis, "fetch").mockImplementation(async () => new Response(new Uint8Array([0x50, 0x4b, 3, 4, 1])) as any);
+  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(new Uint8Array([0x50, 0x4b, 3, 4, 1])) as any);
   try {
     for (const [profile, platform, suffix] of [["github", "ANDROID", ".apk"], ["production", "ANDROID", ".aab"], ["testflight", "IOS", "-store.ipa"]] as const) {
       await stageEasBuild({ ...build, appVersion: readVersion(), platform, buildProfile: profile }, profile, revision, directory);
-      const proof = await Bun.file(join(directory, `eas-${profile}.json`)).json();
+      const proof = JSON.parse(await readFile(join(directory, `eas-${profile}.json`), "utf8"));
       expect(proof.artifact).toBe(`Beans-${readVersion()}${suffix}`);
       expect(proof.sha256).toHaveLength(64);
       expect(proof.revision).toBe(revision);

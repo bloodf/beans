@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, test, vi } from "vitest";
 import * as React from "react";
 import type { ReactElement, ReactNode } from "react";
 import { botAppearanceContrast, botAvatarGeometry, resolveBotAppearance } from "@beans/blobatar";
@@ -44,9 +44,9 @@ function useEffect(effect: () => void | (() => void), deps?: readonly unknown[])
   item.deps = deps;
   host.effects.push(() => { item.cleanup?.(); item.cleanup = effect() ?? undefined; });
 }
-mock.module("react", () => ({ ...originalReact, useMemo, useRef, useEffect, useCallback: (callback: unknown, deps: readonly unknown[]) => useMemo(() => callback, deps) }));
-mock.module("react-native-svg", () => ({ default: "Svg", G: "G", Path: "Path", Circle: "Circle" }));
-mock.module("react-native-reanimated", () => ({
+vi.doMock("react", () => ({ ...originalReact, useMemo, useRef, useEffect, useCallback: (callback: unknown, deps: readonly unknown[]) => useMemo(() => callback, deps) }));
+vi.doMock("react-native-svg", () => ({ default: "Svg", G: "G", Path: "Path", Circle: "Circle" }));
+vi.doMock("react-native-reanimated", () => ({
   default: { createAnimatedComponent: (component: string) => component },
   createAnimatedPropAdapter: (adapt: (props: Record<string, unknown>) => void) => adapt,
   processColor: (hex: string) => (0xff000000 | parseInt(hex.slice(1), 16)) >>> 0,

@@ -938,11 +938,14 @@ pub fn session_of(details: &Value) -> Option<&str> {
 pub struct BashInputTool {
     sessions: Arc<dyn BashSessions>,
     waiting_after: Duration,
+    /// The longest the call waits on a command that keeps printing, so never goes quiet:
+    /// `bash_output`'s longest wait.
+    longest_wait: Duration,
 }
 
 impl BashInputTool {
     pub fn new(sessions: Arc<dyn BashSessions>) -> Self {
-        BashInputTool { sessions, waiting_after: WAITING_AFTER }
+        BashInputTool { sessions, waiting_after: WAITING_AFTER, longest_wait: MAX_OUTPUT_WAIT }
     }
 
     /// How long the command may stay silent after the input before the call returns.
@@ -959,7 +962,8 @@ impl Tool for BashInputTool {
     }
     fn description(&self) -> &str {
         "Type into a command that bash left running, by its session id: the text, then Enter unless enter is false. Returns \
-         what the command printed since you last read it, once it ends, asks again, or goes quiet. Keys are control \
+         what the command printed since you last read it, once it ends, asks again, or goes quiet, or at most 2 seconds \
+         later for a command in the background and 5 minutes for any other. Keys are control \
          characters: \\u0003 is Ctrl-C (interrupts the command), \\u0004 is Ctrl-D (ends input), \\u001b is Escape. What you \
          type is not echoed back."
     }
@@ -994,7 +998,11 @@ impl Tool for BashInputTool {
         }
         let (base, since) = (session.total(), Instant::now());
         let idle = Idle { after: self.waiting_after, needs_output: false };
-        let stop = session.wait(base, since, idle, None, &cancel, |_| {}).await;
+        // A command that keeps printing never goes quiet, nor does one that took no notice of a
+        // Ctrl-C: the call returns what it printed by then, with where it stands. One in the
+        // background waits as long as starting it there does.
+        let longest = if session.background() { BACKGROUND_SETTLE } else { self.longest_wait };
+        let stop = session.wait(base, since, idle, Some(since + longest), &cancel, |_| {}).await;
         session_result(&session, self.sessions.as_ref(), from, stop, self.waiting_after, false)
     }
 }
@@ -1368,32 +1376,278 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_background_command_returns_while_it_prints() {
-        let t = tools(WAITING_AFTER);
-        assert_eq!(t.bash.parameters()["properties"]["background"]["type"], "boolean");
-        assert!(BashTool::new(std::env::temp_dir()).parameters()["properties"].get("background").is_none(), "not on pipes");
-        let command = "echo listening; while true; do echo tick; sleep 0.1; done";
-        let started = std::time::Instant::now();
-        let running = call(&t.bash, json!({"command": command, "background": true})).await.unwrap();
-        let elapsed = started.elapsed();
-        assert!(elapsed >= BACKGROUND_SETTLE && elapsed < BACKGROUND_SETTLE + Duration::from_secs(2), "{elapsed:?}");
-        let text = running.text_content();
-        let id = session_id(&running);
-        assert!(text.starts_with("listening\ntick\n"), "{text}");
-        assert!(text.ends_with(&format!("[Running in the background as session {id}. Read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]")), "{text}");
-        assert_eq!(running.details["summary"], "Running");
-        assert!(t.host.get(&id).unwrap().background());
+        // A hang here used to eat the whole Rust (macOS) job; fail this test instead.
+        tokio::time::timeout(Duration::from_secs(45), async {
+            let t = tools(WAITING_AFTER);
+            assert_eq!(t.bash.parameters()["properties"]["background"]["type"], "boolean");
+            assert!(BashTool::new(std::env::temp_dir()).parameters()["properties"].get("background").is_none(), "not on pipes");
+            // Keep a stable foreground executable for Ctrl-C. Non-interactive bash may
+            // continue after SIGINT if the child it waits for did not die from that signal;
+            // repeatedly starting sleep makes this a race. exec replaces that shell with
+            // cat, which streams the same ticks and dies from the terminal's signal.
+            let command = "echo listening; exec cat < <(while true; do echo tick; sleep 0.1; done)";
+            // Login-shell capture is outside the settle window the assertion measures.
+            crate::login_shell::environment().await;
+            let started = std::time::Instant::now();
+            let running = call(&t.bash, json!({"command": command, "background": true})).await.unwrap();
+            let elapsed = started.elapsed();
+            assert!(elapsed >= BACKGROUND_SETTLE && elapsed < BACKGROUND_SETTLE + Duration::from_secs(2), "{elapsed:?}");
+            let text = running.text_content();
+            let id = session_id(&running);
+            assert!(text.starts_with("listening\ntick\n"), "{text}");
+            assert!(text.ends_with(&format!("[Running in the background as session {id}. Read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]")), "{text}");
+            assert_eq!(running.details["summary"], "Running");
+            assert!(t.host.get(&id).unwrap().background());
 
-        let more = call(&t.output, json!({"session_id": id, "wait_seconds": 0.3})).await.unwrap();
-        assert!(more.text_content().starts_with("tick\n"), "{}", more.text_content());
-        let stopped = call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await.unwrap();
-        assert!(stopped.text_content().ends_with("Command terminated by signal 2"), "{}", stopped.text_content());
-        assert!(t.host.0.lock().unwrap().is_empty());
+            let more = call(&t.output, json!({"session_id": id, "wait_seconds": 0.3})).await.unwrap();
+            assert!(more.text_content().starts_with("tick\n"), "{}", more.text_content());
+            let session = t.host.get(&id).unwrap();
+            assert!(session.end().is_none(), "the printing loop is alive before Ctrl-C");
+            // bash_input may return at its background cap before the shell is reaped.
+            // Keep one bounded deadline for delivery, reap, and observing SIGINT through a tool.
+            let stopped = tokio::time::timeout(BACKGROUND_SETTLE + Duration::from_secs(5), async {
+                let reply = call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await.unwrap();
+                session.ended().await;
+                assert_eq!(session.end(), Some(SessionEnd::Signaled(2)));
+                if t.host.get(&id).is_some() {
+                    // The input tool must also observe an end recorded after its first reply.
+                    call(&t.input, json!({"session_id": id, "text": "", "enter": false})).await.unwrap()
+                } else {
+                    reply
+                }
+            })
+            .await
+            .expect("Ctrl-C ended the printing loop and its result was read");
+            assert!(
+                stopped.text_content().ends_with("Command terminated by signal 2"),
+                "{}",
+                stopped.text_content()
+            );
+            assert!(t.host.0.lock().unwrap().is_empty());
 
-        // One that ends first reads as it would have without it.
-        let failed = call(&t.bash, json!({"command": "echo 'port 3000 is in use' >&2; exit 1", "background": true})).await.unwrap_err();
-        assert!(failed.0.contains("port 3000 is in use") && failed.0.contains("exited with code 1"), "{}", failed.0);
-        let quick = call(&t.bash, json!({"command": "echo done", "background": true})).await.unwrap();
-        assert_eq!(quick.text_content(), "done\n");
+            // One that ends first reads as it would have without it.
+            let failed = call(&t.bash, json!({"command": "echo 'port 3000 is in use' >&2; exit 1", "background": true})).await.unwrap_err();
+            assert!(failed.0.contains("port 3000 is in use") && failed.0.contains("exited with code 1"), "{}", failed.0);
+            let quick = call(&t.bash, json!({"command": "echo done", "background": true})).await.unwrap();
+            assert_eq!(quick.text_content(), "done\n");
+        })
+        .await
+        .expect("a_background_command_returns_while_it_prints finished within 45s");
+    }
+
+    /// Reads a session until it prints `text`, as a model would before it types.
+    async fn printed(session: &BashSession, text: &str) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !session.preview().contains(text) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{text} was printed"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn session_wait_distinguishes_quiet_return_from_output_deadline() {
+        let now = Instant::now();
+        let session = BashSession {
+            id: new_id(), command: "controlled output".into(), pid: 0, started: now,
+            background: false.into(),
+            state: Mutex::new(SessionState { output: Output::new(), last_output: now,
+                last_input: now, end: None, read: 0, drained: false }),
+            changed: watch::channel(0).0,
+            #[cfg(unix)]
+            master: Mutex::new(None),
+            closed: CancellationToken::new(),
+        };
+        let cancel = CancellationToken::new();
+        let idle = Idle { after: Duration::from_millis(400), needs_output: false };
+        {
+            let since = Instant::now();
+            let mut wait = std::pin::pin!(session.wait(session.total(), since, idle,
+                Some(since + BACKGROUND_SETTLE), &cancel, |_| {}));
+            assert!(futures::poll!(wait.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_millis(399)).await;
+            assert!(futures::poll!(wait.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert_eq!(wait.await, Stop::Waiting);
+            assert_eq!(Instant::now() - since, Duration::from_millis(400));
+        }
+        for cap in [Duration::from_millis(500), BACKGROUND_SETTLE] {
+            let since = Instant::now();
+            let mut wait = std::pin::pin!(session.wait(session.total(), since, idle,
+                Some(since + cap), &cancel, |_| {}));
+            assert!(futures::poll!(wait.as_mut()).is_pending());
+            while Instant::now() - since + Duration::from_millis(100) < cap {
+                tokio::time::advance(Duration::from_millis(100)).await;
+                session.push_output(b"tick\n");
+                assert!(futures::poll!(wait.as_mut()).is_pending());
+            }
+            tokio::time::advance(since + cap - Instant::now()).await;
+            assert_eq!(wait.await, Stop::Deadline);
+            assert_eq!(Instant::now() - since, cap);
+            assert!(session.end().is_none());
+        }
+    }
+
+    /// Typing into a command that keeps printing returns what it printed instead of waiting for a
+    /// quiet spell that never comes: at the background's own settle time for a command started
+    /// there, at the longest wait otherwise. The command runs on either way, with the output it
+    /// printed still unread.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_returns_while_the_command_keeps_printing() {
+        let ticks = "while true; do echo tick; sleep 0.1; done";
+        // One deadline, both waits: how long the call may hold a command that never goes quiet.
+        for background in [true, false] {
+            let mut t = tools(Duration::from_millis(400));
+            // This case measures the deadline, independently of gaps in shell/PTY scheduling.
+            // The controlled waiter test below proves the shorter quiet-return path separately.
+            t.input.waiting_after = WAITING_AFTER;
+            t.input.longest_wait = Duration::from_millis(500);
+            let (command, longest) = if background {
+                (ticks.to_string(), BACKGROUND_SETTLE)
+            } else {
+                (format!("echo ready; read -r x; {ticks}"), Duration::from_millis(500))
+            };
+            let args = json!({"command": command, "background": background});
+            let started = call(&t.bash, args).await.unwrap();
+            let id = session_id(&started);
+            printed(&t.host.get(&id).unwrap(), if background { "tick" } else { "ready" }).await;
+
+            let running = t.host.get(&id).unwrap();
+            let unread = running.total();
+            let elapsed = std::time::Instant::now();
+            let typed = tokio::time::timeout(Duration::from_secs(20), call(&t.input, json!({"session_id": id, "text": "x"})))
+                .await
+                .expect("bash_input returned while the command kept printing")
+                .unwrap();
+            let elapsed = elapsed.elapsed();
+            assert!(elapsed >= longest && elapsed < longest + Duration::from_secs(3), "{background}: {elapsed:?}");
+
+            let text = typed.text_content();
+            let still = if background { "Running in the background as session" } else { "Still running as session" };
+            assert!(text.contains(&format!("[{still} {id}.")), "{text}");
+            assert!(text.contains("tick\n"), "what it printed comes back: {text}");
+            assert!(running.end().is_none(), "the command runs on");
+            assert!(t.host.get(&id).is_some(), "and keeps its session");
+            assert!(running.total() > unread, "the output it printed since is still unread");
+            running.stop("Stopped");
+        }
+    }
+
+    /// Silence may return before the longest wait; the deadline is a cap, not a minimum.
+    /// Each chunk restarts that silence window, even after the original idle deadline.
+    #[tokio::test(start_paused = true)]
+    async fn output_restarts_the_idle_window() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+
+        // Drive the real waiter with its real output notification, but no child process or
+        // wall-clock scheduling. Both bash_input and bash_output use this idle clock.
+        for needs_output in [false, true] {
+            let started = Instant::now();
+            let session = BashSession {
+                id: new_id(), command: "controlled output".into(), pid: 0, started,
+                background: false.into(),
+                state: Mutex::new(SessionState { output: Output::new(), last_output: started,
+                    last_input: started, end: None, read: 0, drained: false }),
+                changed: watch::channel(0).0,
+                #[cfg(unix)]
+                master: Mutex::new(None),
+                closed: CancellationToken::new(),
+            };
+            let idle = Idle { after: Duration::from_millis(400), needs_output };
+            let cancel = CancellationToken::new();
+            let mut wait = std::pin::pin!(session.wait(0, started, idle, None, &cancel, |_| {}));
+            let waker = futures::task::noop_waker();
+            let mut context = Context::from_waker(&waker);
+            assert_eq!(wait.as_mut().poll(&mut context), Poll::Pending);
+
+            // Six ticks cross the original 400 ms deadline. Ignoring last_output would
+            // incorrectly return Waiting on the fourth tick instead of renewing idle.
+            for tick in 1..=6 {
+                tokio::time::advance(Duration::from_millis(100)).await;
+                session.push_output(b"tick\n");
+                assert_eq!(wait.as_mut().poll(&mut context), Poll::Pending, "tick {tick}, needs_output={needs_output}");
+            }
+            tokio::time::advance(idle.after - Duration::from_millis(1)).await;
+            assert_eq!(wait.as_mut().poll(&mut context), Poll::Pending, "the last tick still renews idle");
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert_eq!(wait.as_mut().poll(&mut context), Poll::Ready(Stop::Waiting));
+            assert_eq!(started.elapsed(), Duration::from_secs(1));
+            assert!(session.end().is_none(), "idle ends the wait, not the session");
+        }
+    }
+
+    /// Silence may return before the longest wait; the deadline is a cap, not a minimum.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_returns_when_the_command_goes_quiet_before_its_deadline() {
+        let idle = Duration::from_millis(400);
+        let t = tools(idle);
+        let started = call(&t.bash, json!({
+            "command": "read -r start; echo ready; read -r x; echo got:$x; read -r done",
+        })).await.unwrap();
+        let id = session_id(&started);
+        let session = t.host.get(&id).unwrap();
+        // Force readiness to arrive after bash returned. Seeing it in preview alone does
+        // not consume it: drain the complete line through bash_output before measuring.
+        session.write(b"start\r").await.unwrap();
+        printed(&session, "ready\n").await;
+        let ready = call(&t.output, json!({"session_id": id})).await.unwrap();
+        assert!(ready.text_content().starts_with("ready\n"), "{}", ready.text_content());
+
+        let elapsed = std::time::Instant::now();
+        let answered = tokio::time::timeout(
+            Duration::from_secs(10),
+            call(&t.input, json!({"session_id": id, "text": "hello"})),
+        ).await.expect("bash_input returned after silence").unwrap();
+        assert!(elapsed.elapsed() >= idle);
+        let text = answered.text_content();
+        assert!(text.starts_with("got:hello\n\n\n[No output for 0.4 seconds."), "{text}");
+        assert_eq!(answered.details["state"], "waiting", "{text}");
+        assert!(session.end().is_none(), "silence leaves the command running");
+        session.stop("Stopped");
+    }
+
+    /// A command can deliberately ignore Ctrl-C. Input still returns at its deadline,
+    /// without claiming it stopped or forcing a kill instead of typing terminal keys.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_returns_at_the_deadline_when_ctrl_c_is_ignored() {
+        for background in [true, false] {
+            let mut t = tools(Duration::from_millis(400));
+            t.input.waiting_after = WAITING_AFTER;
+            t.input.longest_wait = Duration::from_millis(500);
+            let started = call(&t.bash, json!({
+                "command": "trap '' INT; read -r start; echo ready; read -r answer; echo unexpected:$answer",
+                "background": background,
+            })).await.unwrap();
+            let id = session_id(&started);
+            let session = t.host.get(&id).unwrap();
+            // The startup read forces ready to be late, for both background modes.
+            // Drain the complete marker rather than assuming printed advanced read_mark.
+            session.write(b"start\r").await.unwrap();
+            printed(&session, "ready\n").await;
+            let ready = call(&t.output, json!({"session_id": id})).await.unwrap();
+            assert!(ready.text_content().starts_with("ready\n"), "{}", ready.text_content());
+            let longest = if background { BACKGROUND_SETTLE } else { t.input.longest_wait };
+
+            let elapsed = std::time::Instant::now();
+            let typed = tokio::time::timeout(
+                Duration::from_secs(20),
+                call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})),
+            ).await.expect("bash_input returned although Ctrl-C was ignored").unwrap();
+            let elapsed = elapsed.elapsed();
+            assert!(elapsed >= longest && elapsed < longest + Duration::from_secs(3), "{background}: {elapsed:?}");
+            let text = typed.text_content();
+            let still = if background { "Running in the background as session" } else { "Still running as session" };
+            assert!(text.starts_with(&format!("[{still} {id}.")), "{text}");
+            assert_eq!(typed.details["state"], "waiting", "{text}");
+            assert!(session.end().is_none(), "ignored Ctrl-C leaves the command running");
+            assert!(t.host.get(&id).is_some(), "the live session is retained");
+            session.stop("Stopped");
+        }
     }
 
     /// The user sends a command the model is waiting on to the background: the call returns and

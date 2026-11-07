@@ -8,7 +8,7 @@ use beans::{app::App,config::Config,memory_service::{types::*,dispatch as d,queu
 struct Scratch { app:Arc<App>, home:std::path::PathBuf, bot:String }
 impl Scratch {
     fn new()->Self{
-        let home=std::env::temp_dir().join(format!("beans-memory-dispatch-{}",uuid::Uuid::new_v4()));
+        let home=tempfile::tempdir().unwrap().keep();
         let app=App::load(Config{home:home.clone(),port:0}).unwrap();
         beans::identity::create(&app,Some("fixture".into())).unwrap();
         let bot=app.state.lock().unwrap().bots[0].id.clone();
@@ -173,4 +173,33 @@ async fn admitted_text_is_frozen_and_capture_consumption_is_atomic_across_restar
     assert!(restored.consent_revision.is_none());
     beans::memory_service::tools::capture_completed(&restarted,&restored,&job.chat_id,&job.trigger_message_id,&[reply_id],CancellationToken::new()).await;
     assert_eq!(restarted.store.memory_deliveries(&s.bot).unwrap().len(),1);
+}
+
+#[tokio::test]
+async fn forgotten_incarnation_cannot_finish_delivery_even_after_same_account_restore(){
+    let s=Scratch::new();let fixture=Fixture::new(true);s.register(fixture.clone());let access=s.access();
+    let delivery=d::enqueue(&s.app,&access,"old account fact",vec![],false,None,&CancellationToken::new()).unwrap();
+    let state=s.app.state.lock().unwrap().clone();
+    let machine=s.app.machine_file().unwrap();
+    let config=s.app.memory_config.lock().clone();
+    let worker={let app=s.app.clone();let access=access.clone();let id=delivery.id.clone();
+        tokio::spawn(async move{d::deliver(&app,&access,&id,false,CancellationToken::new()).await})};
+    fixture.entered.notified().await;
+    let submitted=s.app.store.memory_delivery(&s.bot,&delivery.id).unwrap();
+    assert_eq!(submitted.state,OperationState::Submitted);
+    s.app.forget_identity().unwrap();
+    // Model restoring the same account/Device/config, including an identical durable
+    // operation. Namespace and JSON equality alone cannot identify the old process call.
+    *s.app.machine.lock().unwrap()=Some(machine);
+    *s.app.state.lock().unwrap()=state;
+    *s.app.memory_config.lock()=config;
+    s.app.store.enqueue_memory(&submitted).unwrap();
+    assert_eq!(worker.await.unwrap().unwrap_err().code,"identity_changed");
+    assert_eq!(s.app.store.memory_delivery(&s.bot,&delivery.id).unwrap(),submitted);
+    assert_eq!(d::recheck(&s.app,&access,false,&CancellationToken::new()).unwrap_err().code,"identity_changed");
+    assert_eq!(d::enqueue(&s.app,&access,"stale",vec![],false,None,&CancellationToken::new()).unwrap_err().code,"identity_changed");
+    let fresh=s.access();
+    assert_eq!(fresh.scope,access.scope);
+    assert!(d::recheck(&s.app,&fresh,false,&CancellationToken::new()).is_ok());
+    assert_eq!(fixture.calls.load(Ordering::SeqCst),1);
 }

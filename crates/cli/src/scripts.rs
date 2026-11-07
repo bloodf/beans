@@ -43,6 +43,24 @@ impl CodemodeStore for ScriptStore {
     }
 }
 
+/// A routine check stages writes until its scheduler commits the check and queued task.
+pub(crate) struct CheckStore {
+    values: BTreeMap<String, Value>,
+    writes: std::sync::Mutex<StoreWrites>,
+}
+
+impl CheckStore {
+    pub(crate) fn new(values: BTreeMap<String, Value>) -> Self {
+        Self { values, writes: std::sync::Mutex::new(StoreWrites::default()) }
+    }
+    pub(crate) fn writes(&self) -> StoreWrites { self.writes.lock().unwrap().clone() }
+}
+
+impl CodemodeStore for CheckStore {
+    fn load(&self) -> BTreeMap<String, Value> { self.values.clone() }
+    fn save(&self, writes: &StoreWrites) { *self.writes.lock().unwrap() = writes.clone(); }
+}
+
 /// How many `models.ask()` calls answer at once, and in one turn at most.
 const IN_FLIGHT: usize = 4;
 const MAX_CALLS_PER_TURN: usize = 200;
@@ -140,6 +158,7 @@ mod tests {
     #[tokio::test]
     async fn models_ask_checks_its_arguments_and_its_provider() {
         let home = std::env::temp_dir().join(format!("beans-scripts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
         assert!(ModelsAsk::new(&app, "chat", "unknown").is_none(), "a provider with no small model has no models.ask()");
         let ask = ModelsAsk::new(&app, "chat", "deepseek").unwrap();

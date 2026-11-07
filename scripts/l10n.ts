@@ -1,12 +1,13 @@
 // Checks the apps' string tables against the sources: every `L("…")` in the Mac app, every
 // `t("…")` in the phone app, and every `L("…")` and `Lc("…", "…")` in the desktop app should have a
-// Chinese entry, and a format key and its translation should take the same values. `bun run l10n` lists what is missing, unused, or mismatched;
+// Chinese entry, and a format key and its translation should take the same values. `pnpm run l10n` lists what is missing, unused, or mismatched;
 // `--merge <fragment.json>…` adds `{ "English": "中文" }` files to the tables first.
 
-import { Glob } from "bun"
+import { globSync, existsSync } from "node:fs"
+import { readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
-const ROOT = join(import.meta.dir, "..")
+const ROOT = join(import.meta.dirname, "..")
 const MAC_TABLE = join(ROOT, "macos/Resources/zh-Hans.lproj/Localizable.strings")
 const PHONE_TABLE = join(ROOT, "mobile/src/i18n/zh.ts")
 const DESKTOP_TABLE = join(ROOT, "desktop/src/l10n/zh.ts")
@@ -25,17 +26,17 @@ function escapeFor(text: string) {
   return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\t/g, "\\t")
 }
 
-/// The paths under `dir` that match `pattern`, with `/` between folders on every platform: Bun
+/// The paths under `dir` that match `pattern`, with `/` between folders on every platform:
 /// scans with `\` on Windows, and the skips look for `l10n/` and `i18n/`.
 async function* scan(dir: string, pattern: string) {
-  for await (const path of new Glob(pattern).scan({ cwd: dir })) yield path.replaceAll("\\", "/")
+  for (const path of globSync(pattern, { cwd: dir })) yield path.replaceAll("\\", "/")
 }
 
 async function keysIn(dir: string, pattern: string, call: RegExp, skip: (path: string) => boolean) {
   const keys = new Map<string, string>()
   for await (const path of scan(dir, pattern)) {
     if (skip(path)) continue
-    const source = await Bun.file(join(dir, path)).text()
+    const source = await readFile(join(dir, path), "utf8")
     for (const match of source.matchAll(call)) {
       // `L("Pairing", context: "device state")` is the key `Pairing|device state`.
       if (match[1] === undefined) keys.set(unescape(match[2]), path) // a single-quoted t('…')
@@ -47,9 +48,9 @@ async function keysIn(dir: string, pattern: string, call: RegExp, skip: (path: s
 
 async function readMacTable(): Promise<Table> {
   const table: Table = new Map()
-  const file = Bun.file(MAC_TABLE)
-  if (!(await file.exists())) return table
-  for (const match of (await file.text()).matchAll(/^"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)";/gm)) {
+  if (!existsSync(MAC_TABLE)) return table
+  const content = await readFile(MAC_TABLE, "utf8")
+  for (const match of content.matchAll(/^"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)";/gm)) {
     table.set(unescape(match[1]), unescape(match[2]))
   }
   return table
@@ -60,7 +61,7 @@ async function desktopKeysIn(dir: string) {
   const keys = new Map<string, string>()
   for await (const path of scan(dir, "src/**/*.{ts,tsx}")) {
     if (path.includes("l10n/") || path.endsWith("mygo.ts") || path.endsWith(".test.ts")) continue
-    const source = await Bun.file(join(dir, path)).text()
+    const source = await readFile(join(dir, path), "utf8")
     for (const match of source.matchAll(/\bL\(\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/g)) {
       keys.set(unescape(match[1] ?? match[2]), path)
     }
@@ -73,9 +74,9 @@ async function desktopKeysIn(dir: string) {
 
 async function readPhoneTable(path = PHONE_TABLE): Promise<Table> {
   const table: Table = new Map()
-  const file = Bun.file(path)
-  if (!(await file.exists())) return table
-  for (const match of (await file.text()).matchAll(/^\s*"((?:[^"\\]|\\.)*)":\s*"((?:[^"\\]|\\.)*)",?$/gm)) {
+  if (!existsSync(path)) return table
+  const content = await readFile(path, "utf8")
+  for (const match of content.matchAll(/^\s*"((?:[^"\\]|\\.)*)":\s*"((?:[^"\\]|\\.)*)",?$/gm)) {
     table.set(unescape(match[1]), unescape(match[2]))
   }
   return table
@@ -87,17 +88,17 @@ function sorted(table: Table) {
 
 async function writeMacTable(table: Table) {
   const lines = sorted(table).map(([key, value]) => `"${escapeFor(key)}" = "${escapeFor(value)}";`)
-  await Bun.write(MAC_TABLE, `/* Simplified Chinese. The key is the English text passed to L(); \`bun run l10n\` checks this table. */\n\n${lines.join("\n")}\n`)
+  await writeFile(MAC_TABLE, `/* Simplified Chinese. The key is the English text passed to L(); \`pnpm run l10n\` checks this table. */\n\n${lines.join("\n")}\n`, "utf8")
 }
 
 async function writePhoneTable(table: Table) {
   const lines = sorted(table).map(([key, value]) => `  "${escapeFor(key)}": "${escapeFor(value)}",`)
-  await Bun.write(PHONE_TABLE, `// Simplified Chinese. The key is the English text passed to t(); \`bun run l10n\` checks this table.\n\nexport const zh: Record<string, string> = {\n${lines.join("\n")}\n};\n`)
+  await writeFile(PHONE_TABLE, `// Simplified Chinese. The key is the English text passed to t(); \`pnpm run l10n\` checks this table.\n\nexport const zh: Record<string, string> = {\n${lines.join("\n")}\n};\n`, "utf8")
 }
 
 async function writeDesktopTable(table: Table) {
   const lines = sorted(table).map(([key, value]) => `  "${escapeFor(key)}": "${escapeFor(value)}",`)
-  await Bun.write(DESKTOP_TABLE, `// Simplified Chinese. The key is the English text passed to L(); \`bun run l10n\` checks this table.\n\nexport const zh: Record<string, string> = {\n${lines.join("\n")}\n};\n`)
+  await writeFile(DESKTOP_TABLE, `// Simplified Chinese. The key is the English text passed to L(); \`pnpm run l10n\` checks this table.\n\nexport const zh: Record<string, string> = {\n${lines.join("\n")}\n};\n`, "utf8")
 }
 
 /// The values a sentence takes: `%@`/`%d` (positions ignored) or `{name}`.
@@ -140,7 +141,7 @@ const desktop = await readPhoneTable(DESKTOP_TABLE)
 const mergeAt = process.argv.indexOf("--merge")
 if (mergeAt !== -1) {
   for (const path of process.argv.slice(mergeAt + 1)) {
-    const fragment = (await Bun.file(path).json()) as Record<string, string>
+    const fragment = JSON.parse(await readFile(path, "utf8")) as Record<string, string>
     for (const [key, value] of Object.entries(fragment)) {
       for (const [used, table, name] of [[macKeys, mac, "mac"], [phoneKeys, phone, "phone"], [desktopKeys, desktop, "desktop"]] as const) {
         if (!used.has(key)) continue

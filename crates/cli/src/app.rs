@@ -155,6 +155,9 @@ pub struct SentJob {
 }
 
 pub struct App {
+    /// Exclusive OS lock retained until every callback drops this App.
+    execution_owner: Option<std::fs::File>,
+    execution_epoch: String,
     pub config: Config,
     pub settings: Mutex<Settings>,
     pub identity: Mutex<Option<IdentityFile>>,
@@ -174,7 +177,7 @@ pub struct App {
     pub sync_wakes: AtomicU64,
     /// Held from a message's local write to its outbox enqueue, so a chat's `position` order
     /// and the order its messages reach the relay log are the same on every Device.
-    message_order: Mutex<()>,
+    pub(crate) message_order: Mutex<()>,
     pub relay_connected: AtomicBool,
     /// The relay answered `426`: it no longer serves the protocol this build speaks.
     pub relay_update_required: AtomicBool,
@@ -251,11 +254,190 @@ pub struct App {
 }
 
 impl App {
+    /// Loads a non-executing Device view. Recovery belongs exclusively to load_owner.
     pub fn load(config: Config) -> anyhow::Result<Arc<App>> {
+        Self::load_inner(config, false)
+    }
+
+    pub fn load_owner(config: Config) -> anyhow::Result<Arc<App>> {
+        Self::load_inner(config, true)
+    }
+
+    pub fn is_execution_owner(&self) -> bool { self.execution_owner.is_some() }
+    pub fn legacy_execution_closed(&self) -> anyhow::Result<bool> { self.store.legacy_execution_closed() }
+
+    /// Called only after explicit fresh identity creation clears its account store.
+    /// The caller retains plugin_admission; a Device reader never creates authority.
+    pub(crate) fn initialize_created_task_account(&self) -> anyhow::Result<()> {
+        if self.is_execution_owner() { self.store.task_account_epoch(&self.execution_epoch)?; }
+        Ok(())
+    }
+
+    pub fn task_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(), "Only the execution owner reads an active lease");
+        self.store.active_task_lease(&self.execution_epoch,task_id,lifecycle.get().0)
+    }
+
+    pub fn freeze_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(!self.is_paused(), "Account paused");
+        self.store.insert_invocation(lease,binding)
+    }
+
+    pub fn decide_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, decision: crate::local_store::AuthorizationDecision, kind: crate::local_store::AuthorizationKind, card: Option<&str>, device: Option<&str>, at: i64) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        self.store.decide_invocation(lease,binding,decision,kind,card,device,at)
+    }
+
+    /// The protected recheck MUST validate effective capabilities, installation, target,
+    /// workspace and binding without awaiting. #111 supplies it after preparation.
+    pub fn admit_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, recheck: impl FnOnce(&Self) -> anyhow::Result<()>) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Execution unavailable");
+        recheck(self)?;
+        self.store.admit_invocation(lease,binding)
+    }
+
+    pub fn finish_task_receipt(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, outcome: crate::local_store::ReceiptOutcome) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        self.store.finish_receipt(lease,binding,outcome)
+    }
+    pub fn task_history_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let lifecycle=self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(),"History resolution requires execution ownership");
+        self.store.history_task_lease(&self.execution_epoch,task_id,lifecycle.get().0)
+    }
+    pub fn resolve_task_history(&self, lease: &crate::local_store::TaskLease, at: i64) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(),"History resolution requires execution ownership");
+        self.store.resolve_task(lease,at)
+    }
+    /// Captures the existing account incarnation under the same reset boundary as plugins.
+    pub(crate) fn task_lease(&self, job: &Job) -> anyhow::Result<crate::local_store::TaskLease> {
+        anyhow::ensure!(self.is_execution_owner(), "Only the execution owner admits local tasks");
+        let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        let epoch = self.store.task_account_epoch(&self.execution_epoch)?;
+        Ok(crate::local_store::TaskLease {
+            account_epoch: epoch, owner_epoch: self.execution_epoch.clone(), task_id: job.id.clone(),
+            execution_id: uuid::Uuid::new_v4().to_string(), incarnation: lifecycle.get().0,
+        })
+    }
+
+    /// Caller holds roster_edit; shared ordinary/scheduled admission eligibility.
+    pub(crate) fn check_local_job(&self, job: &Job) -> anyhow::Result<()> {
+        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Execution unavailable");
+        let chat=self.chat(&job.chat_id).ok_or_else(||anyhow::anyhow!("Task chat is unavailable"))?;
+        let bot=self.bot(&job.bot_id).ok_or_else(||anyhow::anyhow!("Task bot is unavailable"))?;
+        anyhow::ensure!(self.this_device_id().as_deref()==Some(bot.runner_id.as_str()) && chat.meta.bot_ids.contains(&job.bot_id), "Task Runner or chat membership changed");
+        if let Some(id)=&job.routine_id {
+            anyhow::ensure!(self.routine(id).is_some_and(|r|r.bot_id==job.bot_id), "Routine bot binding changed");
+        }
+        Ok(())
+    }
+    /// Received Jobs retain the session's account and Device binding across decryption.
+    pub(crate) fn receive_task_envelope(&self, job: &Job, expected: &crate::keys::MachineFile, remember: Option<&str>) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        self.check_sync_account(expected)?;
+        let lease = if self.is_execution_owner() {
+            self.queue_local_task_locked(job)?
+        } else {
+            self.store.quarantine_task_envelope(&expected.identity_pubkey, &job.id)?;
+            None
+        };
+        if let Some(id) = remember { remember_applied(&mut self.state.lock().unwrap(), id); }
+        Ok(lease)
+    }
+
+    /// Caller holds the lifecycle boundary through the associated mutation/publication.
+    pub(crate) fn check_sync_account(&self, expected: &crate::keys::MachineFile) -> anyhow::Result<()> {
+        let current = self.machine_file().ok_or_else(|| anyhow::anyhow!("Sync account changed"))?;
+        anyhow::ensure!(current.identity_pubkey == expected.identity_pubkey && current.machine_secret == expected.machine_secret, "Sync account changed");
+        Ok(())
+    }
+
+    pub(crate) fn queue_local_task(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        self.queue_local_task_at(job, None)
+    }
+
+    pub(crate) fn queue_local_task_at(&self, job: &Job, incarnation: Option<u64>) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
+        self.queue_local_task_locked(job)
+    }
+
+    fn queue_local_task_locked(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        self.check_local_job(job)?;
+        let lease = self.task_lease(job)?;
+        if let Some(id) = &job.routine_id {
+            anyhow::ensure!(!self.store.routine_needs_review(&lease.account_epoch,id)?, "Routine has unresolved work requiring review");
+        }
+        let identity = self.machine_file().ok_or_else(|| anyhow::anyhow!("Device has no account"))?.identity_pubkey;
+        Ok(self.store.queue_task_for_identity(&lease, job, &identity)?.then_some(lease))
+    }
+
+    /// A local user submission creates a new identity, never authorizes a supplied Job id.
+    pub(crate) fn mint_local_intent(&self, mut job: Job, incarnation: Option<u64>) -> anyhow::Result<(Job, crate::local_store::TaskLease)> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
+        self.check_local_job(&job)?;
+        anyhow::ensure!(job.routine_id.is_none(), "Local user intent cannot reopen a routine");
+        job.id = format!("job-{}", uuid::Uuid::new_v4());
+        let lease = self.task_lease(&job)?;
+        anyhow::ensure!(self.store.queue_local_intent(&lease, &job)?, "New local intent identity already fenced");
+        Ok((job, lease))
+    }
+
+    pub(crate) fn start_local_task(&self, lease: &crate::local_store::TaskLease) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Task execution is unavailable");
+        self.store.start_task(lease)
+    }
+
+    pub(crate) fn abandon_queued_task(&self, lease: &crate::local_store::TaskLease) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(), "Task cleanup requires execution ownership");
+        self.store.abandon_queued_task(lease)
+    }
+
+    pub(crate) fn finish_local_task(&self, lease: &crate::local_store::TaskLease, interrupted: bool) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        self.store.finish_task(lease, interrupted)
+    }
+
+    fn persist_task_cancel(&self, task: Option<&str>, chat: Option<&str>, bot: Option<&str>) -> anyhow::Result<()> {
+        let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        if let Some(epoch) = self.store.current_task_account_epoch()? {
+            self.store.cancel_tasks(&epoch,task,chat,bot)?;
+        }
+        Ok(())
+    }
+    fn load_inner(config: Config, owner: bool) -> anyhow::Result<Arc<App>> {
         if config.home.join("forget-in-progress.json").try_exists()? {
             anyhow::bail!("Account forget is incomplete; finish local cleanup before reopening this home");
         }
         let admission = config.ensure_home_admission()?;
+        // Retain the same storage guard through lock acquisition, recovery and final save.
+        let execution_owner = if owner {
+            let path = config.home.join("execution.lock");
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true).create(true).truncate(false);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            }
+            let file = options.open(&path)?;
+            anyhow::ensure!(file.metadata()?.is_file(), "Execution lock must be a regular file");
+            file.try_lock().map_err(|_| anyhow::anyhow!("Execution ownership is busy or unsupported"))?;
+            config::set_private(&path)?;
+            Some(file)
+        } else { None };
         let settings = Settings::load(&config);
         let identity: Option<IdentityFile> = config::read_json_strict(&config.identity_path())?;
         let machine: Option<MachineFile> = config::read_json_strict(&config.machine_path())?;
@@ -264,7 +446,11 @@ impl App {
         let marketplace = crate::marketplace::Updates::load(&config);
         let store = LocalStore::open_with_admission(&config.database_path(), admission.as_ref(), false)?;
         let memory_config = crate::memory_service::load(&store, machine.as_ref().and_then(|m| m.dek().ok()))?;
-        store.recover_memory_queue()?;
+        let execution_epoch = uuid::Uuid::new_v4().to_string();
+        if execution_owner.is_some() {
+            store.recover_task_owner(&execution_epoch)?;
+            store.recover_memory_queue()?;
+        }
         let mut state = store.load_state()?;
         for bot in &mut state.bots {
             bot.normalize_description();
@@ -278,6 +464,8 @@ impl App {
         let http = beans_tls::client_builder().timeout(std::time::Duration::from_secs(60)).build()?;
 
         let app = Arc::new(App {
+            execution_owner,
+            execution_epoch,
             config,
             settings: Mutex::new(settings),
             identity: Mutex::new(identity),
@@ -344,6 +532,7 @@ impl App {
     /// Reconcile again after each pull: a newer remote card can replace startup's dismissal.
     #[cfg(feature = "runner")]
     pub fn close_orphan_proposals(&self) -> anyhow::Result<()> {
+        if !self.is_execution_owner() { return Ok(()); }
         let Some(runner_id) = self.this_device_id() else { return Ok(()); };
         let own_bots: std::collections::HashSet<String> = self.state.lock().unwrap().bots.iter()
             .filter(|bot| bot.runner_id == runner_id).map(|bot| bot.id.clone()).collect();
@@ -506,7 +695,7 @@ impl App {
     pub(crate) fn plugin_admission(&self, expected: Option<u64>) -> Result<parking_lot::ReentrantMutexGuard<'_, std::cell::Cell<(u64, bool)>>, String> {
         let guard = self.plugin_lifecycle.lock();
         let (incarnation, closed) = guard.get();
-        if closed || expected.is_some_and(|expected| expected != incarnation) {
+        if closed || expected.is_some_and(|expected| expected != incarnation) || !crate::requests::admission_matches(self, incarnation) {
             return Err("The plugin account changed; start again.".into());
         }
         Ok(guard)
@@ -603,14 +792,18 @@ impl App {
         let lifecycle = self.plugin_lifecycle.lock();
         let (incarnation, _) = lifecycle.get();
         lifecycle.set((incarnation.checked_add(1).expect("plugin incarnation exhausted"), true));
+        let close_result = self.store.close_task_account();
+        for job in self.running_jobs.lock().unwrap().values() {
+            job.cancel.cancel();
+        }
+        #[cfg(feature = "runner")]
+        self.memory_runtime.cancel_all();
+        close_result?;
         let marker = self.config.home.join("forget-in-progress.json");
         config::write_json_private(&marker, &serde_json::json!({ "forget_in_progress": true }))?;
         #[cfg(feature = "runner")]
         self.mcp.reset();
         self.plugins.lock().unwrap().reset_account(&self.config)?;
-        for job in self.running_jobs.lock().unwrap().values() {
-            job.cancel.cancel();
-        }
         #[cfg(feature = "provider-auth")]
         self.cancel_provider_auth();
         self.cancel_plugin_sign_in(None);
@@ -618,8 +811,6 @@ impl App {
         self.steering_queues.lock().unwrap().clear();
         #[cfg(feature = "runner")]
         self.step_interrupts.lock().unwrap().clear();
-        #[cfg(feature = "runner")]
-        self.memory_runtime.cancel_all();
         *self.memory_config.lock() = crate::memory_service::config::MemoryConfig::default();
         *self.identity.lock().unwrap() = None;
         *self.machine.lock().unwrap() = None;
@@ -1142,6 +1333,11 @@ impl App {
     }
 
     pub fn stop_for_pause(&self) {
+        if let Err(error) = self.persist_task_cancel(None,None,None) {
+            let lifecycle = self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0, true));
+            tracing::error!(%error, "Task cancellation persistence failed; account admission closed");
+        }
         #[cfg(feature = "runner")]
         self.memory_runtime.cancel_all();
         for job in self.running_jobs.lock().unwrap().values() { job.cancel.cancel(); }
@@ -1156,6 +1352,11 @@ impl App {
     /// Replaces the Auto-review setting and publishes the roster.
     pub fn set_auto_review(&self, auto_review: AutoReview) {
         let _edit = self.roster_edit.lock().unwrap();
+        self.set_auto_review_locked(auto_review);
+    }
+
+    /// Caller retains roster_edit; plugin callers take roster before lifecycle.
+    pub(crate) fn set_auto_review_locked(&self, auto_review: AutoReview) {
         self.state.lock().unwrap().auto_review = auto_review;
         self.roster_changed(true);
     }
@@ -1204,6 +1405,12 @@ impl App {
     }
 
     pub fn roster_changed(&self, upload: bool) {
+        let reconciled=self.store.reconcile_schedules(&self.state.lock().unwrap());
+        if let Err(error)=reconciled {
+            let lifecycle=self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0,true));
+            tracing::error!(%error,"Schedule revocation failed; account admission closed");
+        }
         self.save_state();
         if upload {
             self.push_roster();
@@ -1318,6 +1525,7 @@ impl App {
     pub fn delete_bot(&self, id: &str) -> anyhow::Result<()> {
         let _edit = self.roster_edit.lock().unwrap();
         if self.bot(id).is_none() { anyhow::bail!("Unknown bot"); }
+        self.persist_task_cancel(None,None,Some(id))?;
         self.invalidate_bot_memory(id)?;
         let (removed_chat_ids, policy) = {
             let mut state = self.state.lock().unwrap();
@@ -1568,11 +1776,25 @@ impl App {
     /// Changes a routine and publishes the roster.
     pub fn update_routine(&self, id: &str, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
         let _edit = self.roster_edit.lock().unwrap();
+        self.update_routine_locked(id, None, update)
+    }
+
+    pub(crate) fn update_routine_for_incarnation(&self, id: &str, incarnation: u64, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+        let _edit = self.roster_edit.lock().unwrap();
+        self.update_routine_locked(id, Some(incarnation), update)
+    }
+
+    fn update_routine_locked(&self, id: &str, incarnation: Option<u64>, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+        let _guard = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
         let routine = {
             let mut state = self.state.lock().unwrap();
-            let routine = state.routines.iter_mut().find(|r| r.id == id).ok_or_else(|| anyhow::anyhow!("Unknown routine"))?;
-            update(routine);
-            routine.clone()
+            let index=state.routines.iter().position(|r|r.id==id).ok_or_else(||anyhow::anyhow!("Unknown routine"))?;
+            let before=crate::local_store::schedule_binding(&state,&state.routines[index])?;
+            let mut routine=state.routines[index].clone();
+            update(&mut routine);
+            if before!=crate::local_store::schedule_binding(&state,&routine)? { self.store.revoke_schedule(id)?; }
+            state.routines[index]=routine.clone();
+            routine
         };
         self.roster_changed(true);
         Ok(routine)
@@ -1730,6 +1952,10 @@ impl App {
                 return;
             }
         };
+        self.publish_committed_message(message, stored_upsert, upload);
+    }
+
+    pub(crate) fn publish_committed_message(&self, message: Message, stored_upsert: crate::local_store::Upsert, upload: bool) {
         if !stored_upsert.changed {
             return;
         }
@@ -1835,6 +2061,7 @@ impl App {
             let first = chat.usage.is_none();
             let entry = chat.usage.get_or_insert_with(ChatUsage::default);
             entry.context_tokens = beans_agent::estimate::context_tokens(usage);
+            entry.context_estimated = false;
             entry.context_window = context_window;
             entry.input_tokens += usage.input + usage.cache_read + usage.cache_write;
             entry.output_tokens += usage.output;
@@ -1843,6 +2070,25 @@ impl App {
             entry.cost_known = Some((first || entry.cost_known == Some(true)) && usage.cost.known == Some(true));
             entry.turns += 1;
             entry.model = model.to_string();
+            entry.updated_at = crate::config::now_secs();
+            entry.clone()
+        };
+        self.save_state();
+        self.emit(Event::ChatUsageChanged { chat_id: chat_id.to_string(), usage: updated });
+    }
+
+    /// Retains the provider's prompt overhead while estimating the context left after compaction.
+    #[cfg(feature = "runner")]
+    pub fn record_compacted_context(&self, chat_id: &str, bot_id: &str, model: &str, before: u64, after: u64) {
+        if after >= before { return; }
+        let updated = {
+            let mut state = self.state.lock().unwrap();
+            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
+            // Group usage has no responder identity, so its transcript delta cannot be attributed.
+            if chat.meta.kind != "dm" || chat.meta.bot_ids.len() != 1 || chat.meta.bot_ids[0] != bot_id { return; }
+            let Some(entry) = chat.usage.as_mut().filter(|usage| usage.context_tokens > 0 && usage.model == model) else { return };
+            entry.context_tokens = entry.context_tokens.saturating_sub(before.saturating_sub(after)).max(after);
+            entry.context_estimated = true;
             entry.updated_at = crate::config::now_secs();
             entry.clone()
         };
@@ -1891,6 +2137,11 @@ impl App {
     /// Device runs, with that Device, so the caller can forward the cancellation there too:
     /// jobs this Device sent to another Runner, and turns the other Devices list for the chat.
     pub fn cancel_chat(&self, chat_id: &str) -> Vec<(String, String)> {
+        if let Err(error) = self.persist_task_cancel(None,Some(chat_id),None) {
+            let lifecycle = self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0, true));
+            tracing::error!(%error, "Task cancellation persistence failed; admission closed");
+        }
         let mut remote = Vec::new();
         for (id, job) in self.running_jobs.lock().unwrap().iter() {
             if job.chat_id == chat_id {
@@ -1914,6 +2165,11 @@ impl App {
     /// Cancels one job on this Runner. A cancellation envelope can arrive while the job is
     /// waiting for the chat lock because jobs register before they begin.
     pub fn cancel_job(&self, job_id: &str) {
+        if let Err(error) = self.persist_task_cancel(Some(job_id),None,None) {
+            let lifecycle = self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0, true));
+            tracing::error!(%error, "Task cancellation persistence failed; admission closed");
+        }
         if let Some(job) = self.running_jobs.lock().unwrap().get(job_id) {
             job.cancel.cancel();
         }
@@ -2202,8 +2458,74 @@ mod tests {
 
     fn scratch_app() -> ScratchApp {
         let home = std::env::temp_dir().join(format!("beans-app-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    #[test]
+    fn task_owner_process_probe() {
+        let Some(home) = std::env::var_os("BEANS_TEST_OWNER_HOME") else { return; };
+        assert!(App::load_owner(Config { home: home.into(), port: 0 }).is_err(), "a competing process must not acquire ownership");
+    }
+
+    #[test]
+    fn task_owner_excludes_process_and_recovers_only_after_release() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config { home: home.path().into(), port: 0 };
+        let owner = App::load_owner(config.clone()).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","app::tests::task_owner_process_probe","--nocapture"])
+            .env("BEANS_TEST_OWNER_HOME",home.path()).status().unwrap();
+        assert!(status.success());
+        let reader = App::load(config.clone()).unwrap();
+        assert!(!reader.is_execution_owner());
+        assert!(App::load_owner(config.clone()).is_err());
+        drop(owner);
+        let replacement = App::load_owner(config).unwrap();
+        assert!(replacement.is_execution_owner());
+    }
+
+    #[test]
+    fn nonowner_load_preserves_submitted_delivery() {
+        use crate::memory_service::queue::{freeze_document, Delivery};
+        use crate::memory_service::types::{MemoryScope, OperationState, Revision};
+
+        let scratch = scratch_app();
+        let delivery = Delivery {
+            id: "delivery-owner-boundary".into(),
+            bot_id: "bot-owner-boundary".into(),
+            scope: MemoryScope {
+                namespace: "scratch-owner-boundary".into(),
+                connection_id: "scratch-connection".into(),
+                connection_revision: Revision { counter: 1, device_id: "scratch-device".into() },
+                deletion_epoch: 0,
+            },
+            consent_revision: None,
+            document: freeze_document("scratch-owner-boundary", "synthetic content", vec![]).unwrap(),
+            state: OperationState::Submitted,
+            operation_id: None,
+            error_code: None,
+        };
+        scratch.0.store.connection.lock().unwrap().execute(
+            "INSERT INTO memory_deliveries(id,bot_id,state,json) VALUES(?1,?2,'submitted',?3)",
+            rusqlite::params![delivery.id, delivery.bot_id, serde_json::to_string(&delivery).unwrap()],
+        ).unwrap();
+
+        let reader = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let stored: String = reader.store.connection.lock().unwrap().query_row(
+            "SELECT json FROM memory_deliveries WHERE id=?1", [&delivery.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(serde_json::from_str::<Delivery>(&stored).unwrap(), delivery,
+            "loading a non-owner must not recover another process's submitted delivery");
+        drop(reader);
+        let owner = App::load_owner(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let recovered: String = owner.store.connection.lock().unwrap().query_row(
+            "SELECT json FROM memory_deliveries WHERE id=?1", [&delivery.id], |row| row.get(0),
+        ).unwrap();
+        let recovered: Delivery = serde_json::from_str(&recovered).unwrap();
+        assert_eq!(recovered.state,OperationState::DeliveryUnknown);
+        assert_eq!(recovered.error_code.as_deref(),Some("response_lost"));
     }
 
     #[test]
@@ -2503,6 +2825,64 @@ mod tests {
 
     #[cfg(feature = "runner")]
     #[test]
+    fn compacted_context_preserves_spending_and_next_turn_replaces_estimate() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        app.state.lock().unwrap().chats.push(chat("compact", "dm", &["bot"], None));
+        app.record_compacted_context("compact", "bot", "fixture", 100_000, 20_000);
+        assert!(app.chat("compact").unwrap().usage.is_none());
+        let mut usage = beans_agent::Usage { input: 140_000, output: 1_000, total_tokens: 141_000, ..Default::default() };
+        usage.cost.total = 0.42;
+        usage.cost.known = Some(true);
+        app.record_usage("compact", "fixture", &usage, 1_000_000);
+        let before = app.chat("compact").unwrap().usage.unwrap();
+        let mut events = app.events.subscribe();
+        app.record_compacted_context("compact", "bot", "fixture", 120_000, 25_000);
+        let shown = app.chat("compact").unwrap().usage.unwrap();
+        assert_eq!((shown.context_tokens, shown.context_estimated), (46_000, true));
+        assert_eq!((shown.input_tokens, shown.output_tokens, shown.cost_usd, shown.cost_known, shown.turns),
+            (before.input_tokens, before.output_tokens, before.cost_usd, before.cost_known, before.turns));
+        assert!(matches!(events.try_recv(), Ok(Event::ChatUsageChanged { usage, .. }) if usage.context_estimated && usage.context_tokens == 46_000));
+        app.save_state_now();
+        assert_eq!(app.store.load_state().unwrap().chats[0].usage.as_ref().unwrap().context_tokens, 46_000);
+        app.add_side_usage("compact", &beans_agent::Usage::default());
+        assert!(app.chat("compact").unwrap().usage.unwrap().context_estimated);
+        app.record_compacted_context("compact", "bot", "fixture", 200_000, 30_000);
+        assert_eq!(app.chat("compact").unwrap().usage.unwrap().context_tokens, 30_000);
+        app.record_compacted_context("compact", "bot", "fixture", 10_000, 40_000);
+        assert_eq!(app.chat("compact").unwrap().usage.unwrap().context_tokens, 30_000);
+        app.record_usage("compact", "fixture", &usage, 1_000_000);
+        assert!(!app.chat("compact").unwrap().usage.unwrap().context_estimated);
+        app.record_compacted_context("missing", "bot", "fixture", 100_000, 20_000);
+    }
+
+    #[cfg(feature = "runner")]
+    #[test]
+    fn compacted_context_skips_unattributed_and_unchanged_transcripts() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        for (kind, bots, bot, model, before, after) in [
+            ("group", vec!["a", "b"], "b", "fixture", 120_000, 25_000),
+            ("group", vec!["a"], "a", "fixture", 120_000, 25_000),
+            ("dm", vec!["a"], "b", "fixture", 120_000, 25_000),
+            ("dm", vec!["a"], "a", "other-model", 120_000, 25_000),
+            ("dm", vec!["a"], "a", "fixture", 120_000, 120_000),
+            ("dm", vec!["a"], "a", "fixture", 10_000, 40_000),
+        ] {
+            app.state.lock().unwrap().chats = vec![chat("skip", kind, &bots, None)];
+            app.record_usage("skip", "fixture", &beans_agent::Usage {
+                input: 140_000, output: 1_000, total_tokens: 141_000, ..Default::default()
+            }, 1_000_000);
+            let original = app.chat("skip").unwrap().usage.unwrap();
+            let mut events = app.events.subscribe();
+            app.record_compacted_context("skip", bot, model, before, after);
+            assert_eq!(app.chat("skip").unwrap().usage.unwrap(), original);
+            assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        }
+    }
+
+    #[cfg(feature = "runner")]
+    #[test]
     fn chat_cost_distinguishes_absent_zero_priced_and_mixed() {
         use beans_agent::models::{ModelInfo, Rates, ThinkingMode};
         use beans_agent::Usage;
@@ -2574,6 +2954,7 @@ mod tests {
             "output_tokens": 0, "cache_read_tokens": 0, "cost_usd": 3.0,
             "turns": 0, "model": "fixture", "updated_at": 0.0
         })).unwrap();
+        assert!(!old.context_estimated);
         let mut old_chat = chat("historical", "dm", &[], None);
         old_chat.usage = Some(old);
         app.state.lock().expect("test state lock").chats.push(old_chat);
@@ -2959,7 +3340,11 @@ mod tests {
         app.upsert_message(foreign_card, true);
         app.save_state_now();
 
-        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let reader = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        reader.close_orphan_proposals().unwrap();
+        assert!(matches!(reader.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"), "a non-owner must not recover a Runner's proposal");
+        drop(reader);
+        let reloaded = App::load_owner(Config { home: scratch.1.clone(), port: 0 }).unwrap();
         reloaded.close_orphan_proposals().unwrap();
         assert!(matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "dismissed"));
         assert!(matches!(reloaded.message("chat", "other-permission").unwrap().body, Body::Permission { decision, .. } if decision == "pending"));

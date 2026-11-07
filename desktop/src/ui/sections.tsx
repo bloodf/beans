@@ -8,7 +8,7 @@ import { L } from "../l10n";
 import type { Bot, InstalledPlugin } from "../model/models";
 import { pluginSymbol, pluginStateColor } from "../model/models";
 import { Avatar, botAvatar } from "./avatar";
-import { Button, LinkButton, PopUpButton, Switch, type PopUpOption } from "./controls";
+import { Button, LinkButton, PopUpButton, Spinner, Switch, type PopUpOption } from "./controls";
 import { Icon } from "./icons";
 import { showTextPopover } from "./overlay";
 import { pluginMarks } from "./pluginMarks";
@@ -257,6 +257,8 @@ export function ActionRow(props: {
   tooltip?: string;
   /** The action just copied something: a green check and its title, as a copy button shows. */
   actionCopied?: boolean;
+  /** The action is under way: a spinner where it sits, and nothing to click until it ends. */
+  busy?: boolean;
   /** Gets the click, whose target a menu can pop up under. */
   onAction?: (event: MouseEvent) => void;
   /** An action before the main one, when the row has two. */
@@ -273,12 +275,22 @@ export function ActionRow(props: {
         <LinkButton onClick={() => props.onSecondAction?.()}>{props.secondActionTitle}</LinkButton>
       </Show>
       <Show when={props.actionTitle}>
-        <LinkButton class={props.actionCopied ? "copied" : undefined} onClick={(event) => props.onAction?.(event)}>
-          <Show when={props.actionCopied}>
-            <Icon name="checkmark" size={11} strokeWidth={2.6} />
-          </Show>
-          {props.actionTitle}
-        </LinkButton>
+        <Show
+          when={!props.busy}
+          fallback={
+            <span class="row-busy" aria-busy="true">
+              <Spinner size={12} label={props.actionTitle} />
+              {props.actionTitle}
+            </span>
+          }
+        >
+          <LinkButton class={props.actionCopied ? "copied" : undefined} onClick={(event) => props.onAction?.(event)}>
+            <Show when={props.actionCopied}>
+              <Icon name="checkmark" size={11} strokeWidth={2.6} />
+            </Show>
+            {props.actionTitle}
+          </LinkButton>
+        </Show>
       </Show>
     </div>
   );

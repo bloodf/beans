@@ -69,6 +69,9 @@ func TestNativeMemoryNoteMountedConflict(t *testing.T) {
 	n.authority = client.captureAuthority()
 	n.memoryPanel.Open = true
 	n.memoryPanel.Connections = json.RawMessage(`{"connections":[],"embeddings":[]}`)
+	oldPrefs := prefs
+	prefs = &prefsStore{value: Preferences{AppLanguage: "en"}}
+	defer func() { prefs = oldPrefs }()
 	tt := ui.NewTester(n.memoryView, 1000, 1800)
 	if e = tt.Click("MEMORY.md for Fixture"); e != nil {
 		t.Fatal(e)

@@ -4,7 +4,7 @@ import type { Bot } from "./model";
 export interface ComposerReply { messageID: string; name: string; text: string }
 export interface ComposerDraft {
   text: string; attachments: PickedFile[]; mentions: Bot[]; reply: ComposerReply | null;
-  revision: number; pending: object | null; recording: object | null; uncertain: boolean; invalidated: boolean;
+  contentRevision: number; pending: object | null; recording: object | null; uncertain: boolean; invalidated: boolean;
   permission: object | null;
   listeners: Set<() => void>;
 }
@@ -18,7 +18,7 @@ export function composerDraft(identity: string | null, relay: string | null, cha
   const id = key(identity, relay, chat);
   let draft = drafts.get(id);
   if (!draft) {
-    draft = { text: "", attachments: [], mentions: [], reply: null, revision: 0, pending: null, recording: null, permission: null, uncertain: false, invalidated: false, listeners: new Set() };
+    draft = { text: "", attachments: [], mentions: [], reply: null, contentRevision: 0, pending: null, recording: null, permission: null, uncertain: false, invalidated: false, listeners: new Set() };
     drafts.set(id, draft);
   }
   return draft;
@@ -32,15 +32,13 @@ export function editComposerDraft(draft: ComposerDraft, patch: Partial<Pick<Comp
   if (draft.invalidated) return;
   Object.assign(draft, patch);
   if (patch.text === "") draft.mentions = [];
-  draft.revision++;
+  draft.contentRevision++;
   notifyComposerDraft(draft);
   releaseComposerDraft(draft);
 }
 export function invalidateComposerSends() {
   for (const draft of drafts.values()) if (draft.pending || draft.recording || draft.permission) {
     draft.uncertain = true;
-    // Sticky revision change fences source transitions away and back.
-    draft.revision++;
     draft.permission = null;
     notifyComposerDraft(draft);
   }
@@ -50,7 +48,6 @@ function discard(draft: ComposerDraft) {
   draft.text = ""; draft.attachments = []; draft.mentions = []; draft.reply = null;
   draft.permission = null;
   draft.recording = null;
-  draft.revision++;
   notifyComposerDraft(draft);
 }
 export function clearComposerDrafts() {
@@ -68,7 +65,7 @@ export function removeComposerDraft(identity: string | null, relay: string | nul
 export async function submitComposerDraft(draft: ComposerDraft, send: (text: string, files: PickedFile[], mentions: string[], replyTo?: string) => Promise<boolean>) {
   if (draft.invalidated || draft.pending || draft.recording || draft.permission || (!draft.text.trim() && !draft.attachments.length)) return;
   const operation = {};
-  const revision = draft.revision;
+  const revision = draft.contentRevision;
   const text = draft.text;
   const mentions = draft.mentions.filter(bot => text.toLowerCase().includes(`@${bot.name.toLowerCase()}`)).map(bot => bot.id);
   draft.pending = operation;
@@ -77,7 +74,8 @@ export async function submitComposerDraft(draft: ComposerDraft, send: (text: str
   try {
     const acknowledged = await send(text, draft.attachments, mentions, draft.reply?.messageID);
     if (!acknowledged) draft.uncertain = true;
-    else if (!draft.invalidated && draft.revision === revision) {
+    else if (!draft.invalidated && draft.contentRevision === revision) {
+      draft.uncertain = false;
       editComposerDraft(draft, { text: "", attachments: [], mentions: [], reply: null });
     }
   } catch {

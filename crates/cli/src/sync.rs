@@ -4534,7 +4534,7 @@ mod tests {
         unavailable.account_dek = "not-valid-key".into();
         *receiving.0.machine.lock().unwrap() = Some(unavailable.clone());
         let (url, server) = serve_attention_paged(vec![], None, blobs).await;
-        let mut events = receiving.0.subscribe();
+        let mut events = receiving.0.events.subscribe();
 
         let error = pull_blobs(&receiving.0, &url, "token", &unavailable).await.unwrap_err();
         assert_eq!(error.message, "Account key unavailable");

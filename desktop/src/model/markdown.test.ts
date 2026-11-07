@@ -1,6 +1,6 @@
 // The same cases as crates/markdown's tests, so the desktop fold and the crate's agree.
 
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { parseMarkdown, type Block, type Span } from "./markdown";
 
 const text = (spans: Span[]) => spans.map((span) => span.text).join("");

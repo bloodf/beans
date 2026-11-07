@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { AvatarViewability, avatarIntersectsViewport, notifyAvatarScroll, subscribeAvatarScroll } from "./avatarVisibility";
 
 // A recycled/draw-distance cell stays mounted. Key-based viewability (not mount state or index)

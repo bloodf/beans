@@ -1,10 +1,10 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 
 // `Section` lays a separator between every two rows, however the screen passes them: one by
 // one, as a `{list.map(…)}` among other rows, or a list that is empty. The native pieces are
 // plain tags here, and a section reads back as its rows' titles with "—" for each separator.
-mock.module("react-native", () => ({
+vi.doMock("react-native", () => ({
   Platform: { OS: "ios" },
   StyleSheet: { create: <T>(styles: T) => styles, hairlineWidth: 0.5 },
   View: "View",
@@ -14,8 +14,8 @@ mock.module("react-native", () => ({
   TextInput: "TextInput",
   useWindowDimensions: () => ({ width: 402, height: 874 }),
 }));
-mock.module("@expo/ui/swift-ui", () => ({ Button: "Button", Divider: "Divider", HStack: "HStack", Host: "Host", Image: "Image", Menu: "Menu", Text: "Text" }));
-mock.module("@expo/ui/swift-ui/modifiers", () => ({
+vi.doMock("@expo/ui/swift-ui", () => ({ Button: "Button", Divider: "Divider", HStack: "HStack", Host: "Host", Image: "Image", Menu: "Menu", Text: "Text" }));
+vi.doMock("@expo/ui/swift-ui/modifiers", () => ({
   contentShape: () => ({}),
   font: () => ({}),
   foregroundStyle: () => ({}),
@@ -27,9 +27,9 @@ mock.module("@expo/ui/swift-ui/modifiers", () => ({
   tint: () => ({}),
   truncationMode: () => ({}),
 }));
-mock.module("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
-mock.module("./Symbol", () => ({ Symbol: "Symbol" }));
-mock.module("./theme", () => ({ Font: { body: 17, small: 15 }, usePalette: () => ({ cell: "cell", separator: "separator", secondaryLabel: "secondaryLabel" }) }));
+vi.doMock("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
+vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
+vi.doMock("./theme", () => ({ Font: { body: 17, small: 15 }, usePalette: () => ({ cell: "cell", separator: "separator", secondaryLabel: "secondaryLabel" }) }));
 
 const { Section } = await import("./forms");
 

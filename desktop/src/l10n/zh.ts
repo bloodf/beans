@@ -1,6 +1,8 @@
 // Simplified Chinese. The key is the English text passed to L(); `bun run l10n` checks this table.
 
 export const zh: Record<string, string> = {
+  "Degraded": "服务降级",
+  "Setup required": "需要设置",
   "Waiting for send acknowledgement…": "正在等待发送确认…",
   "Send not confirmed. Draft retained; check the chat before sending again.": "发送尚未确认。草稿已保留；再次发送前请检查聊天。",
   "Skill discovery": "技能发现",

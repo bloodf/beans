@@ -797,15 +797,18 @@ impl App {
         let lifecycle = self.plugin_lifecycle.lock();
         let (incarnation, _) = lifecycle.get();
         lifecycle.set((incarnation.checked_add(1).expect("plugin incarnation exhausted"), true));
-        self.store.close_task_account()?;
+        let close_result = self.store.close_task_account();
+        for job in self.running_jobs.lock().unwrap().values() {
+            job.cancel.cancel();
+        }
+        #[cfg(feature = "runner")]
+        self.memory_runtime.cancel_all();
+        close_result?;
         let marker = self.config.home.join("forget-in-progress.json");
         config::write_json_private(&marker, &serde_json::json!({ "forget_in_progress": true }))?;
         #[cfg(feature = "runner")]
         self.mcp.reset();
         self.plugins.lock().unwrap().reset_account(&self.config)?;
-        for job in self.running_jobs.lock().unwrap().values() {
-            job.cancel.cancel();
-        }
         #[cfg(feature = "provider-auth")]
         self.cancel_provider_auth();
         self.cancel_plugin_sign_in(None);
@@ -813,8 +816,6 @@ impl App {
         self.steering_queues.lock().unwrap().clear();
         #[cfg(feature = "runner")]
         self.step_interrupts.lock().unwrap().clear();
-        #[cfg(feature = "runner")]
-        self.memory_runtime.cancel_all();
         *self.memory_config.lock() = crate::memory_service::config::MemoryConfig::default();
         *self.identity.lock().unwrap() = None;
         *self.machine.lock().unwrap() = None;
@@ -2065,6 +2066,7 @@ impl App {
             let first = chat.usage.is_none();
             let entry = chat.usage.get_or_insert_with(ChatUsage::default);
             entry.context_tokens = beans_agent::estimate::context_tokens(usage);
+            entry.context_estimated = false;
             entry.context_window = context_window;
             entry.input_tokens += usage.input + usage.cache_read + usage.cache_write;
             entry.output_tokens += usage.output;
@@ -2073,6 +2075,25 @@ impl App {
             entry.cost_known = Some((first || entry.cost_known == Some(true)) && usage.cost.known == Some(true));
             entry.turns += 1;
             entry.model = model.to_string();
+            entry.updated_at = crate::config::now_secs();
+            entry.clone()
+        };
+        self.save_state();
+        self.emit(Event::ChatUsageChanged { chat_id: chat_id.to_string(), usage: updated });
+    }
+
+    /// Retains the provider's prompt overhead while estimating the context left after compaction.
+    #[cfg(feature = "runner")]
+    pub fn record_compacted_context(&self, chat_id: &str, bot_id: &str, model: &str, before: u64, after: u64) {
+        if after >= before { return; }
+        let updated = {
+            let mut state = self.state.lock().unwrap();
+            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
+            // Group usage has no responder identity, so its transcript delta cannot be attributed.
+            if chat.meta.kind != "dm" || chat.meta.bot_ids.len() != 1 || chat.meta.bot_ids[0] != bot_id { return; }
+            let Some(entry) = chat.usage.as_mut().filter(|usage| usage.context_tokens > 0 && usage.model == model) else { return };
+            entry.context_tokens = entry.context_tokens.saturating_sub(before.saturating_sub(after)).max(after);
+            entry.context_estimated = true;
             entry.updated_at = crate::config::now_secs();
             entry.clone()
         };
@@ -2893,6 +2914,64 @@ mod tests {
 
     #[cfg(feature = "runner")]
     #[test]
+    fn compacted_context_preserves_spending_and_next_turn_replaces_estimate() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        app.state.lock().unwrap().chats.push(chat("compact", "dm", &["bot"], None));
+        app.record_compacted_context("compact", "bot", "fixture", 100_000, 20_000);
+        assert!(app.chat("compact").unwrap().usage.is_none());
+        let mut usage = beans_agent::Usage { input: 140_000, output: 1_000, total_tokens: 141_000, ..Default::default() };
+        usage.cost.total = 0.42;
+        usage.cost.known = Some(true);
+        app.record_usage("compact", "fixture", &usage, 1_000_000);
+        let before = app.chat("compact").unwrap().usage.unwrap();
+        let mut events = app.events.subscribe();
+        app.record_compacted_context("compact", "bot", "fixture", 120_000, 25_000);
+        let shown = app.chat("compact").unwrap().usage.unwrap();
+        assert_eq!((shown.context_tokens, shown.context_estimated), (46_000, true));
+        assert_eq!((shown.input_tokens, shown.output_tokens, shown.cost_usd, shown.cost_known, shown.turns),
+            (before.input_tokens, before.output_tokens, before.cost_usd, before.cost_known, before.turns));
+        assert!(matches!(events.try_recv(), Ok(Event::ChatUsageChanged { usage, .. }) if usage.context_estimated && usage.context_tokens == 46_000));
+        app.save_state_now();
+        assert_eq!(app.store.load_state().unwrap().chats[0].usage.as_ref().unwrap().context_tokens, 46_000);
+        app.add_side_usage("compact", &beans_agent::Usage::default());
+        assert!(app.chat("compact").unwrap().usage.unwrap().context_estimated);
+        app.record_compacted_context("compact", "bot", "fixture", 200_000, 30_000);
+        assert_eq!(app.chat("compact").unwrap().usage.unwrap().context_tokens, 30_000);
+        app.record_compacted_context("compact", "bot", "fixture", 10_000, 40_000);
+        assert_eq!(app.chat("compact").unwrap().usage.unwrap().context_tokens, 30_000);
+        app.record_usage("compact", "fixture", &usage, 1_000_000);
+        assert!(!app.chat("compact").unwrap().usage.unwrap().context_estimated);
+        app.record_compacted_context("missing", "bot", "fixture", 100_000, 20_000);
+    }
+
+    #[cfg(feature = "runner")]
+    #[test]
+    fn compacted_context_skips_unattributed_and_unchanged_transcripts() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        for (kind, bots, bot, model, before, after) in [
+            ("group", vec!["a", "b"], "b", "fixture", 120_000, 25_000),
+            ("group", vec!["a"], "a", "fixture", 120_000, 25_000),
+            ("dm", vec!["a"], "b", "fixture", 120_000, 25_000),
+            ("dm", vec!["a"], "a", "other-model", 120_000, 25_000),
+            ("dm", vec!["a"], "a", "fixture", 120_000, 120_000),
+            ("dm", vec!["a"], "a", "fixture", 10_000, 40_000),
+        ] {
+            app.state.lock().unwrap().chats = vec![chat("skip", kind, &bots, None)];
+            app.record_usage("skip", "fixture", &beans_agent::Usage {
+                input: 140_000, output: 1_000, total_tokens: 141_000, ..Default::default()
+            }, 1_000_000);
+            let original = app.chat("skip").unwrap().usage.unwrap();
+            let mut events = app.events.subscribe();
+            app.record_compacted_context("skip", bot, model, before, after);
+            assert_eq!(app.chat("skip").unwrap().usage.unwrap(), original);
+            assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        }
+    }
+
+    #[cfg(feature = "runner")]
+    #[test]
     fn chat_cost_distinguishes_absent_zero_priced_and_mixed() {
         use beans_agent::models::{ModelInfo, Rates, ThinkingMode};
         use beans_agent::Usage;
@@ -2964,6 +3043,7 @@ mod tests {
             "output_tokens": 0, "cache_read_tokens": 0, "cost_usd": 3.0,
             "turns": 0, "model": "fixture", "updated_at": 0.0
         })).unwrap();
+        assert!(!old.context_estimated);
         let mut old_chat = chat("historical", "dm", &[], None);
         old_chat.usage = Some(old);
         app.state.lock().expect("test state lock").chats.push(old_chat);

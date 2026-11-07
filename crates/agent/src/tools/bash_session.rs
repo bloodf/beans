@@ -1397,15 +1397,23 @@ mod tests {
 
             let more = call(&t.output, json!({"session_id": id, "wait_seconds": 0.3})).await.unwrap();
             assert!(more.text_content().starts_with("tick\n"), "{}", more.text_content());
-            // Ctrl-C must end the loop (SIGINT). The wait cap only bounds a hang if it does not;
-            // do not accept a still-running outcome here — that would hide a delivery bug.
-            let stopped = tokio::time::timeout(
-                BACKGROUND_SETTLE + Duration::from_secs(5),
-                call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})),
-            )
+            let session = t.host.get(&id).unwrap();
+            assert!(session.end().is_none(), "the printing loop is alive before Ctrl-C");
+            // bash_input may return at its background cap before the shell is reaped.
+            // Keep one bounded deadline for delivery, reap, and observing SIGINT through a tool.
+            let stopped = tokio::time::timeout(BACKGROUND_SETTLE + Duration::from_secs(5), async {
+                let reply = call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await.unwrap();
+                session.ended().await;
+                assert_eq!(session.end(), Some(SessionEnd::Signaled(2)));
+                if t.host.get(&id).is_some() {
+                    // The input tool must also observe an end recorded after its first reply.
+                    call(&t.input, json!({"session_id": id, "text": "", "enter": false})).await.unwrap()
+                } else {
+                    reply
+                }
+            })
             .await
-            .expect("bash_input returned after Ctrl-C")
-            .unwrap();
+            .expect("Ctrl-C ended the printing loop and its result was read");
             assert!(
                 stopped.text_content().ends_with("Command terminated by signal 2"),
                 "{}",
@@ -1434,6 +1442,49 @@ mod tests {
         .unwrap_or_else(|_| panic!("{text} was printed"));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn session_wait_distinguishes_quiet_return_from_output_deadline() {
+        let now = Instant::now();
+        let session = BashSession {
+            id: new_id(), command: "controlled output".into(), pid: 0, started: now,
+            background: false.into(),
+            state: Mutex::new(SessionState { output: Output::new(), last_output: now,
+                last_input: now, end: None, read: 0, drained: false }),
+            changed: watch::channel(0).0,
+            #[cfg(unix)]
+            master: Mutex::new(None),
+            closed: CancellationToken::new(),
+        };
+        let cancel = CancellationToken::new();
+        let idle = Idle { after: Duration::from_millis(400), needs_output: false };
+        {
+            let since = Instant::now();
+            let mut wait = std::pin::pin!(session.wait(session.total(), since, idle,
+                Some(since + BACKGROUND_SETTLE), &cancel, |_| {}));
+            assert!(futures::poll!(wait.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_millis(399)).await;
+            assert!(futures::poll!(wait.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert_eq!(wait.await, Stop::Waiting);
+            assert_eq!(Instant::now() - since, Duration::from_millis(400));
+        }
+        for cap in [Duration::from_millis(500), BACKGROUND_SETTLE] {
+            let since = Instant::now();
+            let mut wait = std::pin::pin!(session.wait(session.total(), since, idle,
+                Some(since + cap), &cancel, |_| {}));
+            assert!(futures::poll!(wait.as_mut()).is_pending());
+            while Instant::now() - since + Duration::from_millis(100) < cap {
+                tokio::time::advance(Duration::from_millis(100)).await;
+                session.push_output(b"tick\n");
+                assert!(futures::poll!(wait.as_mut()).is_pending());
+            }
+            tokio::time::advance(since + cap - Instant::now()).await;
+            assert_eq!(wait.await, Stop::Deadline);
+            assert_eq!(Instant::now() - since, cap);
+            assert!(session.end().is_none());
+        }
+    }
+
     /// Typing into a command that keeps printing returns what it printed instead of waiting for a
     /// quiet spell that never comes: at the background's own settle time for a command started
     /// there, at the longest wait otherwise. The command runs on either way, with the output it
@@ -1445,6 +1496,9 @@ mod tests {
         // One deadline, both waits: how long the call may hold a command that never goes quiet.
         for background in [true, false] {
             let mut t = tools(Duration::from_millis(400));
+            // This case measures the deadline, independently of gaps in shell/PTY scheduling.
+            // The controlled waiter test below proves the shorter quiet-return path separately.
+            t.input.waiting_after = WAITING_AFTER;
             t.input.longest_wait = Duration::from_millis(500);
             let (command, longest) = if background {
                 (ticks.to_string(), BACKGROUND_SETTLE)

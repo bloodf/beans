@@ -2,6 +2,41 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn model_lists_preserve_declared_levels_and_sparse_absence() {
+    use beans_models::ThinkingLevel::{Minimal, Low, High, XHigh, Max};
+    let levels = |entry: Value| listed_model(&entry).unwrap().1.levels;
+    assert_eq!(levels(json!({"id":"alias", "supported_reasoning_levels":[{"effort":"max"}, "low", "XHIGH", "high", "high"]})), Some(vec![Low, High, XHigh, Max]));
+    assert_eq!(levels(json!({"id":"alias", "supported_reasoning_levels":["minimal", "off", "turbo", 3]})), Some(vec![Minimal]));
+    assert_eq!(levels(json!({"id":"alias", "supported_reasoning_levels":[]})), Some(vec![]));
+    assert_eq!(levels(json!({"id":"alias", "supported_reasoning_levels":["turbo", "off"]})), None);
+    assert_eq!(levels(json!({"id":"alias", "supported_reasoning_levels":"high"})), None);
+    assert_eq!(levels(json!({"id":"alias", "reasoning":true})), None);
+    assert_eq!(levels(json!({"id":"alias"})), None);
+    assert_eq!(levels(json!({"id":"alias", "reasoning":false, "supported_reasoning_levels":["high"]})), Some(vec![]));
+    assert_eq!(levels(json!({"id":"alias", "capabilities":{"reasoning":false}, "supported_reasoning_levels":["max"]})), Some(vec![]));
+}
+
+
+#[tokio::test]
+async fn declared_levels_persist_across_custom_save_and_sparse_refresh() {
+    use beans_models::ThinkingLevel::{High, Max};
+    let scratch = scratch_app();
+    let (root, server) = serve(vec![
+        ("200 OK", json!({"data":[{"id":"alias", "supported_reasoning_levels":["high","max"]}]}).to_string()),
+        ("200 OK", json!({"data":[{"id":"alias", "context_window":8192}]}).to_string()),
+        ("200 OK", json!({"data":[{"id":"alias", "supported_reasoning_levels":[]}]}).to_string()),
+    ]);
+    let kind = connect_custom(&scratch.0, input("Levels", "chat-completions", &format!("{root}/v1"), &["alias"])).await.unwrap();
+    assert_eq!(Credentials::load(&scratch.0.config).custom[&kind].models[0].levels, Some(vec![High, Max]));
+    assert_eq!(refresh_custom_models(&scratch.0).await.unwrap(), 1);
+    let saved = Credentials::load(&scratch.0.config);
+    assert_eq!(saved.custom[&kind].models[0].levels, Some(vec![High, Max]));
+    assert_eq!(saved.custom[&kind].models[0].context_window, Some(8192));
+    assert_eq!(refresh_custom_models(&scratch.0).await.unwrap(), 1);
+    assert_eq!(Credentials::load(&scratch.0.config).custom[&kind].models[0].levels, Some(vec![]));
+    server.join().unwrap();
+}
+#[test]
 fn durindoor_public_catalog_keeps_combos_without_a_kind() {
     let body = json!({"data": [
         {"id":"image-helper","owned_by":"combo","capabilities":{"tools":true}},

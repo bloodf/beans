@@ -39,7 +39,7 @@ pub struct OpenAiCompatProvider {
     /// Sent as `reasoning_effort`. `Off` is `thinking: { type: "disabled" }` on a model the
     /// catalog says can stop thinking, and sends nothing on any other.
     pub thinking_level: Option<ThinkingLevel>,
-    /// The catalog entry for the model, when it has one.
+    /// Catalog or caller-built model entry; its declared levels bound every sent effort.
     pub info: Option<Arc<ModelInfo>>,
     /// Sends the session id as `prompt_cache_key`, OpenAI's routing hint for its prompt cache.
     /// Off for a server that refuses fields it does not know.
@@ -112,9 +112,9 @@ impl OpenAiCompatProvider {
             None if level == ThinkingLevel::Off => None,
             None => Some(level),
         });
-        // A catalogued model gets the word for its level, since its levels are the words it
-        // takes; any other model gets at most `high`, which every gateway takes.
-        let catalogued = self.info.is_some();
+        // Catalog and caller-built entries both declare exact supported effort words.
+        // An unknown model without an entry gets at most `high`.
+        let declared = self.info.is_some();
         let effort = match level {
             None => None,
             // Only a model the catalog says can stop thinking keeps `Off` through the clamp.
@@ -126,8 +126,8 @@ impl OpenAiCompatProvider {
             Some(ThinkingLevel::Minimal) => Some("minimal"),
             Some(ThinkingLevel::Low) => Some("low"),
             Some(ThinkingLevel::Medium) => Some("medium"),
-            Some(ThinkingLevel::XHigh) if catalogued => Some("xhigh"),
-            Some(ThinkingLevel::Max) if catalogued => Some("max"),
+            Some(ThinkingLevel::XHigh) if declared => Some("xhigh"),
+            Some(ThinkingLevel::Max) if declared => Some("max"),
             Some(ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max) => Some("high"),
         };
         if let Some(effort) = effort {
@@ -645,5 +645,28 @@ mod tests {
         assert_eq!(body("openai", "some-model", ThinkingLevel::Max)["reasoning_effort"], "high");
         let unknown_off = body("openai", "some-model", ThinkingLevel::Off);
         assert!(unknown_off.get("thinking").is_none() && unknown_off.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn caller_declared_levels_bound_effort_without_catalog_inference() {
+        use ThinkingLevel::{Low, Medium, High, XHigh, Max};
+        let request = request(vec![LlmMessage::User(UserMessage::text("hi"))]);
+        let mut info = (*models::find_any("claude-opus-5").unwrap()).clone();
+        info.id = "alias".into();
+        info.levels = vec![Low, High, XHigh, Max];
+        let mut provider = OpenAiCompatProvider::new("custom:lab", "http://localhost/v1", "", "alias");
+        provider.info = Some(Arc::new(info.clone()));
+        for (level, effort) in [(Low, "low"), (Medium, "high"), (XHigh, "xhigh"), (Max, "max")] {
+            provider.thinking_level = Some(level);
+            assert_eq!(provider.body(&request)["reasoning_effort"], effort);
+        }
+        info.levels = vec![Low, High];
+        provider.info = Some(Arc::new(info.clone()));
+        assert_eq!(provider.body(&request)["reasoning_effort"], "high");
+        info.levels.clear();
+        provider.info = Some(Arc::new(info));
+        let body = provider.body(&request);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
     }
 }

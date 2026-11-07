@@ -8,7 +8,7 @@ export function memoryLookupKeys(model: string, view: string): Set<string> {
   const used = new Set([...executable(view).matchAll(/\bL\(\s*(MEMORY_(?:STATUS|OPERATION)_LABELS)\s*\[/g)].map(match => match[1]));
   const keys = new Set<string>();
   const code = executable(model);
-  for (const match of model.matchAll(/export const (MEMORY_(?:STATUS|OPERATION)_LABELS): Record<\w+, string> = \{([^}]+)\};/g)) {
+  for (const match of model.matchAll(/export const (MEMORY_(?:STATUS|OPERATION)_LABELS): Record<\w+(?:\["\w+"\])?, string> = \{([^}]+)\};/g)) {
     if (!used.has(match[1]) || !code.slice(match.index, match.index + 12).startsWith('export const')) continue;
     // Reject non-literal or incomplete objects instead of guessing runtime values.
     const body = match[2]!;

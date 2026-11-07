@@ -1,0 +1,134 @@
+# Manual, same-repository catalog proposals only. No deployment or direct main writes.
+name: Models sync
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: models-sync
+
+jobs:
+  sync:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run sync:models --self-check
+      - run: pnpm run sync:models --report "$RUNNER_TEMP/report.md" --new "$RUNNER_TEMP/new.md"
+      - if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/report.md" ]]; then
+            cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - id: diff
+        run: |
+          if git diff --quiet -- crates/models/catalog.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.diff.outputs.changed == 'true'
+        run: pnpm run check:catalog
+        env:
+          CATALOG_BASE: origin/main
+      - if: steps.diff.outputs.changed == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      # GITHUB_TOKEN-created pull requests do not trigger the PR test workflow.
+      - if: steps.diff.outputs.changed == 'true'
+        run: cargo test --locked -p beans-models
+      - name: Keep the discovery issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: "Models: upstream models the catalog lacks"
+        run: |
+          issue=$(gh issue list --state open --author 'app/github-actions' --search 'in:title' --json number,title --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
+          if grep -Eq 'wire verification unavailable|discovery was not checked' "$RUNNER_TEMP/report.md"; then
+            {
+              echo 'Discovery is incomplete. Existing candidates remain unresolved; verified candidates from this run follow.'
+              echo
+              cat "$RUNNER_TEMP/new.md"
+              echo
+              cat "$RUNNER_TEMP/report.md"
+            } > "$RUNNER_TEMP/incomplete.md"
+            if [[ -n "$issue" ]]; then
+              gh issue comment "$issue" --body-file "$RUNNER_TEMP/incomplete.md"
+            elif [[ -s "$RUNNER_TEMP/new.md" ]]; then
+              gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/incomplete.md"
+            fi
+            exit 0
+          fi
+          if [[ ! -s "$RUNNER_TEMP/new.md" ]]; then
+            if [[ -n "$issue" ]]; then
+              gh issue close "$issue" --comment "No new supported models remain in the discovery report. Unsupported endpoints remain in the run summary."
+            fi
+            exit 0
+          fi
+          {
+            echo 'Public upstream models missing from the Beans catalog. Add models, thinking modes, order, and review mappings by hand. Unsupported endpoints appear only in the run summary.'
+            echo
+            cat "$RUNNER_TEMP/new.md"
+          } > "$RUNNER_TEMP/issue.md"
+          if [[ -n "$issue" ]]; then
+            gh issue edit "$issue" --body-file "$RUNNER_TEMP/issue.md"
+          else
+            gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/issue.md"
+          fi
+      - name: Close obsolete proposal
+        if: steps.diff.outputs.changed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          incomplete=false
+          if grep -Eq 'wire verification unavailable|discovery was not checked' "$RUNNER_TEMP/report.md"; then
+            incomplete=true
+          fi
+          number=$(gh pr list --base main --head automation/models-sync --state open --json number --jq '.[0].number // empty')
+          if [[ -n "$number" && "$incomplete" == true ]]; then
+            gh pr comment "$number" --body 'Latest manual sync has incomplete source verification and produces no verified replacement. This prior proposal is unverified; do not treat it as current.'
+            exit 0
+          fi
+          if [[ -n "$number" ]]; then
+            gh pr close "$number" --comment 'The latest manual sync produces no catalog changes. Closing the obsolete proposal; see the run summary for discovery and verification notes.'
+          fi
+      - name: Propose catalog changes
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          expected=$(git ls-remote origin refs/heads/automation/models-sync | cut -f1)
+          git switch -c automation/models-sync
+          git add -- crates/models/catalog.json
+          git commit -m 'chore(models): sync public rates and limits'
+          git push --force-with-lease="refs/heads/automation/models-sync:$expected" origin HEAD:refs/heads/automation/models-sync
+          {
+            echo 'Manual Beans catalog proposal from public metadata. No deployment occurs. Review before merging.'
+            echo
+            cat "$RUNNER_TEMP/report.md"
+          } > "$RUNNER_TEMP/body.md"
+          number=$(gh pr list --base main --head automation/models-sync --state open --json number --jq '.[0].number // empty')
+          if [[ -n "$number" ]]; then
+            gh pr edit "$number" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --base main --head automation/models-sync --title 'Models: sync public rates and limits' --body-file "$RUNNER_TEMP/body.md"
+          fi

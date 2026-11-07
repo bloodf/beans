@@ -607,7 +607,8 @@ async fn until(what: &str, done: impl Fn() -> bool) {
 #[tokio::test]
 async fn a_paired_computer_pairs_another() {
     let relay = Relay::start(0).await;
-    let app = |name: &str| beans::app::App::load(beans::config::Config { home: relay.home.join(name), port: 0 }).unwrap();
+    let app = |name: &str| beans::app::App::load(beans::config::Config { home: relay.home.join(name), port: 0 })
+        .unwrap_or_else(|error| panic!("loading {name} fixture: {error:#}"));
     let (first, second, third) = (app("first"), app("second"), app("third"));
     beans::identity::create(&first, Some("First".into())).unwrap();
     first.set_relay_url(Some(relay.url.clone())).unwrap();
@@ -636,7 +637,8 @@ async fn a_paired_computer_pairs_another() {
 #[tokio::test]
 async fn a_runner_answers_only_what_a_device_signed() {
     let relay = Relay::start(0).await;
-    let app = |name: &str| beans::app::App::load(beans::config::Config { home: relay.home.join(name), port: 0 }).unwrap();
+    let app = |name: &str| beans::app::App::load(beans::config::Config { home: relay.home.join(name), port: 0 })
+        .unwrap_or_else(|error| panic!("loading {name} fixture: {error:#}"));
     let (runner, phone) = (app("runner"), app("phone"));
     beans::identity::create(&runner, Some("Runner".into())).unwrap();
     runner.set_relay_url(Some(relay.url.clone())).unwrap();

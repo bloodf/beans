@@ -32,7 +32,8 @@
     "test": "vitest run --config vitest.config.ts",
     "test:scripts": "vitest run --config vitest.config.ts scripts",
     "test:blobatar": "vitest run --config vitest.config.ts packages/beans-blobatar",
-    "build:blobatar": "tsx packages/beans-blobatar/build.ts"
+    "build:blobatar": "tsx packages/beans-blobatar/build.ts",
+    "sync:models": "tsx scripts/sync-models.ts"
   },
   "devDependencies": {
     "@types/node": "^24",

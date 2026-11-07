@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from "vitest";
 import type { AppStore } from "./store";
 import type { BotLook } from "./botLook";
 import type { FileInfo, CLIState } from "../host";
@@ -24,13 +24,13 @@ beforeAll(async () => {
 });
 beforeEach(() => {
   now = 10_000;
-  dateSpy = spyOn(Date, "now").mockImplementation(() => now);
-  timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((run: () => void, delay: number) => {
+  dateSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+  timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((run: () => void, delay: number) => {
     const id = nextTimer++;
     callbacks.set(id, { run, due: now + delay });
     return id;
   }) as unknown as typeof setTimeout);
-  clearSpy = spyOn(globalThis, "clearTimeout").mockImplementation(((id: number) => { callbacks.delete(id); }) as typeof clearTimeout);
+  clearSpy = vi.spyOn(globalThis, "clearTimeout").mockImplementation(((id: number) => { callbacks.delete(id); }) as typeof clearTimeout);
   Object.defineProperty(globalThis, "window", { configurable: true, value: { setTimeout: globalThis.setTimeout } });
 });
 afterEach(() => {

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { followsEnd, keepsFollowing } from "./transcriptFollow";
 
 test("a reader who scrolled up while a reply comes in stays where they are", () => {

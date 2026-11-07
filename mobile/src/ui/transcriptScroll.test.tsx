@@ -109,8 +109,10 @@ vi.doMock("../i18n", () => ({ t: (text: string) => text, useLanguage: () => ({ l
 const message: Message = { id: "sent", chat_id: "chat", author: { kind: "you" }, body: { kind: "text", text: "sent" }, state: { kind: "complete" }, created_at: 0 };
 let chat: Chat = { id: "chat", kind: "dm", bot_ids: [], messages: [message], unread_count: 0, is_pinned: false, created_at: 0 };
 vi.doMock("../core/prefs", () => ({ savePrefs: () => {}, loadPrefs: () => ({}), coreHome: () => "unused", pathOf: (value: string) => value, wipePrefs: () => {} }));
-const { useStore }: typeof import("../core/store") = await import("../core/store");
-const { composerDraft, editComposerDraft, submitComposerDraft }: typeof import("../core/composerDraft") = await import("../core/composerDraft");
+let useStore: typeof import("../core/store").useStore;
+let composerDraft: typeof import("../core/composerDraft").composerDraft;
+let editComposerDraft: typeof import("../core/composerDraft").editComposerDraft;
+let submitComposerDraft: typeof import("../core/composerDraft").submitComposerDraft;
 let sendReply: (() => Promise<Message>) | undefined;
 let sendCalls = 0;
 vi.doMock("../core/engine", () => ({ chatTitle: () => "Chat", engine: { sendMessage: async () => {
@@ -121,8 +123,6 @@ vi.doMock("../core/engine", () => ({ chatTitle: () => "Chat", engine: { sendMess
   return message;
 }, loadOlder: async () => {} } }));
 vi.doMock("./transcript", () => ({ buildRows: (current: Chat) => current.messages.map(row => ({ key: row.id, type: "message", message: row })), quoteAuthorName: () => "You", DayRow: "Day", MarkerRow: "Marker", MessageRow: "Message", NoticeRow: "Notice", PermissionRow: "Permission", CommandRow: "Command", StatusRow: "Status", WorkingRow: "Working" }));
-// Native mocks must be installed before this production consumer loads.
-const { default: ChatScreen }: typeof import("../../app/(main)/chat/[id]") = await import("../../app/(main)/chat/[id]");
 function find(node: unknown, type: unknown): Node | undefined {
   if (Array.isArray(node)) return node.map(child => find(child, type)).find(Boolean);
   if (!node || typeof node !== "object" || !("type" in node) || !("props" in node)) return;
@@ -133,6 +133,11 @@ function find(node: unknown, type: unknown): Node | undefined {
 
 test.each(["ios", "android"])("%s transcript yields streaming scroll to reader and anchors acknowledged sends", async os => {
   platform.OS = os; routeId = "chat"; slots = []; cursor = 0; effects.length = 0; scrolls.length = 0; tail = 300; offset = 0; sendReply = undefined; sendCalls = 0;
+  vi.resetModules();
+  ({ useStore } = await import("../core/store"));
+  ({ composerDraft, editComposerDraft, submitComposerDraft } = await import("../core/composerDraft"));
+  // Load the consumer after setting the platform so module constants match this scenario.
+  const { default: ChatScreen } = await import("../../app/(main)/chat/[id]");
   useStore.setState({ identityId: "account", relayUrl: "relay", deviceId: "phone", paired: true, chats: [chat] });
   chat.messages = [{ ...message, id: "earlier" }];
   renderedRows = [];

@@ -193,6 +193,7 @@ export function ToggleRow({ title, value, onValueChange, icon }: { title: string
       {icon ? <Symbol name={icon} size={20} color={p.label} /> : null}
       <Text style={[styles.rowTitle, { color: p.label, flex: 1 }]}>{title}</Text>
       <Switch
+        accessibilityLabel={title}
         value={value}
         onValueChange={onValueChange}
         trackColor={Platform.OS === "android" ? { false: p.fill, true: p.secondaryFill } : undefined}
@@ -217,6 +218,7 @@ export function FieldRow({ label, multiline, style, ...props }: TextInputProps &
         multiline={multiline}
         style={[styles.input, { color: p.label }, multiline && styles.inputMultiline, style]}
         {...props}
+        accessibilityLabel={props.accessibilityLabel ?? label ?? props.placeholder}
       />
     </View>
   );

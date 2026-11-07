@@ -17,7 +17,7 @@ final class MemoryBotSetupViewController: MemoryFormViewController {
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
     override func loadView() {
         super.loadView()
-        note("Bot: \(botID). Setup runs on this bot's assigned Runner. It never replaces existing schemas or silently synchronizes local database files.")
+        note(L("Bot: %@. Setup runs on this bot's assigned Runner. It never replaces existing schemas or silently synchronizes local database files.", botID))
         switch action {
         case .pgvector: heading("pgvector initialization"); note("Preview reads the actual connected database, role, session, schema readiness and complete SQL. Apply can create the previewed extension/schema/tables only after confirmation.")
         case .lanceBinding:

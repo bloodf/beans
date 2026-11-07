@@ -2,10 +2,17 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import ts from 'typescript';
+vi.mock('expo-router', () => ({ Stack: {}, useRouter: vi.fn() }));
+vi.mock('expo-router/react-navigation', () => ({ useNavigation: vi.fn(), usePreventRemove: vi.fn() }));
+vi.mock('react-native', () => ({ ActivityIndicator: 'ActivityIndicator', Alert: { alert: vi.fn() }, ScrollView: 'ScrollView', Text: 'Text', View: 'View' }));
+vi.mock('./forms', () => ({ FieldRow: 'FieldRow', Row: 'Row', Section: 'Section' }));
+vi.mock('./navigation', () => ({ FormToolbar: 'FormToolbar' }));
+vi.mock('./theme', () => ({ usePalette: vi.fn() }));
 vi.mock('../core/prefs', () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
 vi.mock('expo-localization', () => ({ getLocales: () => [{ languageCode: 'en' }] }));
 const { t, setAppLanguage } = await import('../i18n');
 const { zh } = await import('../i18n/zh');
+const { memoryText, plaintextDisclosure } = await import('./memoryUI');
 afterEach(() => setAppLanguage('en'));
 const disclosure = 'The selected memory endpoint and its downstream extraction, embedding, reranking or reflection models may receive plaintext outside the encrypted relay. Usage can cost money; no total-cost ceiling is established by this app. This approves only the named action, not schedules or automatic retries.';
 test('consent preserves English and names scope and cost limits in Chinese', () => {
@@ -21,8 +28,8 @@ test('consent preserves English and names scope and cost limits in Chinese', () 
 });
 test('memory presentation keys have Chinese translations with identical placeholders', () => {
   const dirs = ['app/chat-info/memory', 'app/settings/memory'];
-  const paths = dirs.flatMap(dir => readdirSync(resolve(dir)).filter(f => f.endsWith('.tsx')).map(f => resolve(dir, f)));
-  paths.push(resolve('src/ui/memoryUI.tsx'));
+  const paths = dirs.flatMap(dir => readdirSync(resolve(import.meta.dirname, "../..", dir)).filter(f => f.endsWith('.tsx')).map(f => resolve(import.meta.dirname, "../..", dir, f)));
+  paths.push(resolve(import.meta.dirname, "memoryUI.tsx"));
   let checked = 0;
   for (const path of paths) {
     const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -38,4 +45,19 @@ test('memory presentation keys have Chinese translations with identical placehol
     visit(source);
   }
   expect(checked).toBeGreaterThan(200);
+});
+
+test('dynamic memory labels follow language changes and retain unknown service messages', () => {
+  setAppLanguage('en');
+  expect(memoryText('keep')).toBe('keep');
+  expect(memoryText('Choose and save a connection first.')).toBe('Choose and save a connection first.');
+  expect(memoryText(plaintextDisclosure)).toBe(disclosure);
+  setAppLanguage('zh');
+  expect(memoryText('keep')).toBe('保留');
+  expect(memoryText('Choose and save a connection first.')).toBe('请先选择并保存连接。');
+  expect(memoryText('plaintext_consent_required')).toBe('需要明文同意（plaintext_consent_required）');
+  expect(memoryText(plaintextDisclosure)).toBe(t(disclosure));
+  expect(memoryText('backend_specific_unknown_error')).toBe('backend_specific_unknown_error');
+  setAppLanguage('en');
+  expect(memoryText('keep')).toBe('keep');
 });

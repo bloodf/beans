@@ -5,7 +5,7 @@ import * as Crypto from 'expo-crypto';
 import { memoryService } from '../../../src/core/memoryServiceNative';
 import { secretPatch, type EmbeddingProfileEdit, type LocalModelConfig, type MemoryEmbeddingView, type SecretPatch } from '../../../src/core/memoryService';
 import { FieldRow, Row, Section, ToggleRow } from '../../../src/ui/forms';
-import { confirmMemory, MemoryAction, MemoryChoice, MemoryForm, MemorySecret, useMemoryTask } from '../../../src/ui/memoryUI';
+import { memoryText, confirmMemory, MemoryAction, MemoryChoice, MemoryForm, MemorySecret, useMemoryTask } from '../../../src/ui/memoryUI';
 const localStart: LocalModelConfig = { model_sha256: '', tokenizer_sha256: '', max_tokens: 512, pooling: 'mean', tensors: { input_ids: 'input_ids', attention_mask: 'attention_mask', output: 'last_hidden_state', token_type_ids: null }, add_special_tokens: true, pad_id: 0, pad_type_id: 0, pad_token: '[PAD]' };
 export default function EmbeddingScreen() {
     useLanguage();
@@ -52,7 +52,7 @@ export default function EmbeddingScreen() {
         <FieldRow label={t("Pad type ID")} value={String(l.pad_type_id)} keyboardType="number-pad" onChangeText={v => local('pad_type_id', Number(v))}/>
         <FieldRow label={t("Pad token")} value={l.pad_token} onChangeText={v => local('pad_token', v)}/>
       </Section>
-      <Section title={t("Tensor names")}>{(['input_ids', 'attention_mask', 'output', 'token_type_ids'] as const).map(k => <FieldRow key={t(k)} label={t(k)} value={l.tensors[k] ?? ''} onChangeText={v => local('tensors', { ...l.tensors, [k]: k === 'token_type_ids' ? (v || null) : v })} autoCapitalize="none" autoCorrect={false}/>)}</Section>
+      <Section title={t("Tensor names")}>{(['input_ids', 'attention_mask', 'output', 'token_type_ids'] as const).map(k => <FieldRow key={memoryText(k)} label={memoryText(k)} value={l.tensors[k] ?? ''} onChangeText={v => local('tensors', { ...l.tensors, [k]: k === 'token_type_ids' ? (v || null) : v })} autoCapitalize="none" autoCorrect={false}/>)}</Section>
     </>}
     {saved && <Section footer={t("Removing a profile does not migrate or erase indexes.")}><MemoryAction title={t("Remove Profile")} destructive onPress={() => confirmMemory(t('Remove profile?'), saved.model, () => void task.run(async () => { await memoryService.removeEmbedding(id); setDirty(false); setSaved(undefined); }), true)}/></Section>}
   </MemoryForm>;

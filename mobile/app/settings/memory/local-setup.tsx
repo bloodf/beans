@@ -4,7 +4,7 @@ import { memoryService } from '../../../src/core/memoryServiceNative';
 import type { AssetRequest, LocalPreview, MemoryEmbeddingView } from '../../../src/core/memoryService';
 import { useStore } from '../../../src/core/store';
 import { FieldRow, Row, Section } from '../../../src/ui/forms';
-import { confirmMemory, MemoryAction, MemoryChoice, MemoryForm, MemoryOutput, useMemoryTask } from '../../../src/ui/memoryUI';
+import { memoryText, confirmMemory, MemoryAction, MemoryChoice, MemoryForm, MemoryOutput, useMemoryTask } from '../../../src/ui/memoryUI';
 export default function LocalEmbeddingSetupScreen() {
     useLanguage();
     const task = useMemoryTask(), devices = useStore(s => s.devices);
@@ -28,7 +28,7 @@ export default function LocalEmbeddingSetupScreen() {
       <Row title={t("Profile")} menu={{ title: t('Profile'), value: profile?.model ?? t('Choose saved local_cpu profile'), choices: profiles.map(p => ({ title: p.model, selected: p.id === profileID, onPress: () => change(() => setProfileID(p.id)) })) }}/>
       {!runners.length && <Row title={t("No paired Runner")} subtitle={t("Pair a desktop Runner before installing local assets.")}/>}
     </Section>
-    {assets.map((a, i) => <Section key={t(a.kind)} title={t(a.kind)}>
+    {assets.map((a, i) => <Section key={memoryText(a.kind)} title={memoryText(a.kind)}>
       <MemoryChoice title={t("Source")} value={a.source.kind} values={['supplied', 'download']} onChange={kind => asset(i, { ...a, source: kind === 'supplied' ? { kind, path: '' } : { kind, url: '' } })}/>
       <FieldRow label={a.source.kind === 'supplied' ? t('Runner path') : t('HTTPS URL')} value={a.source.kind === 'supplied' ? a.source.path : a.source.url} onChangeText={v => asset(i, { ...a, source: a.source.kind === 'supplied' ? { kind: 'supplied', path: v } : { kind: 'download', url: v } })} autoCapitalize="none" autoCorrect={false}/>
       <FieldRow label={t("License")} value={a.license} onChangeText={v => asset(i, { ...a, license: v })}/>

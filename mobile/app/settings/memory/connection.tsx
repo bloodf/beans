@@ -6,7 +6,7 @@ import { memoryService } from '../../../src/core/memoryServiceNative';
 import { LANCE_CLOUD_UNAVAILABLE_REASON, secretPatch, type MemoryBackend, type MemoryConnectionView, type MemoryConnectionOptions, type MemoryConnectionsView, type SecretPatch } from '../../../src/core/memoryService';
 import { useStore } from '../../../src/core/store';
 import { FieldRow, Row, Section, ToggleRow } from '../../../src/ui/forms';
-import { confirmMemory, MemoryAction, MemoryChoice, MemoryForm, MemorySecret, useMemoryTask } from '../../../src/ui/memoryUI';
+import { memoryText, confirmMemory, MemoryAction, MemoryChoice, MemoryForm, MemorySecret, useMemoryTask } from '../../../src/ui/memoryUI';
 type Binding = NonNullable<Extract<MemoryConnectionOptions, {
     backend: 'open_viking';
 }>['bindings'][string]>;
@@ -92,10 +92,10 @@ export default function MemoryConnectionScreen() {
     return <MemoryForm title={params.id ? t('Edit Memory Connection') : t('Add Memory Connection')} task={task} dirty={dirty} onSave={save}>
     <Section title={t("Connection")} footer={t("Saved endpoints/options are private and are not read back. Keep preserves them. To change an endpoint with a stored credential, explicitly replace or clear its key in the same save.")}>
       <FieldRow label={t("Name")} value={name} onChangeText={v => edit(() => setName(v))}/>
-      {saved && <Row title={t("Configuration eligibility")} detail={saved.availability === 'supported' ? t('Eligible — not initialized/ready') : t('Activation blocked')} subtitle={saved.reason ? t(saved.reason) : undefined} subtitleLines={3}/>}
+      {saved && <Row title={t("Configuration eligibility")} detail={saved.availability === 'supported' ? t('Eligible — not initialized/ready') : t('Activation blocked')} subtitle={saved.reason ? memoryText(saved.reason) : undefined} subtitleLines={3}/>}
       {saved ? <Row title={t("Backend")} detail={backend}/> : <MemoryChoice title={t("Backend")} value={backend} values={['hindsight', 'open_viking', 'pgvector', 'lance_db']} onChange={v => { edit(() => setBackend(v)); if (v === 'lance_db') useRunnerLocal(); }}/>}
       {backend === 'lance_db' ? <>
-        <Row title={t("LanceDB Cloud activation unavailable")} subtitle={t(LANCE_CLOUD_UNAVAILABLE_REASON)} subtitleLines={6}/>
+        <Row title={t("LanceDB Cloud activation unavailable")} subtitle={memoryText(LANCE_CLOUD_UNAVAILABLE_REASON)} subtitleLines={6}/>
         <Row title={t("LanceDB storage target")} menu={{ title: t('LanceDB storage target'), value: endpointAction === 'clear' ? t('Runner-local') : t('Keep private target'), choices: [
             ...(saved ? [{ title: t('Keep private target'), selected: endpointAction === 'keep', onPress: () => edit(() => { setEndpointAction('keep'); setEndpoint(''); setSecretAction('keep'); setKey(''); setReplaceOptions(false); }) }] : []),
             { title: t('Runner-local (explicit)'), selected: endpointAction === 'clear', onPress: () => saved
@@ -107,7 +107,7 @@ export default function MemoryConnectionScreen() {
         {endpointAction === 'replace' && <FieldRow label={t("Runner URL")} value={endpoint} onChangeText={v => edit(() => setEndpoint(v))} autoCapitalize="none" autoCorrect={false} placeholder={backend === 'pgvector' ? 'postgresql://host/database' : 'https://…'}/>}
       </>}
       <Row title={t("Embedding profile")} menu={{ title: t('Embedding profile'), value: embedding, choices: [{ title: t('None'), selected: embedding === 'none', onPress: () => edit(() => setEmbedding('none')) }, ...(view?.embeddings.map(e => ({ title: e.model, selected: embedding === e.id, onPress: () => edit(() => setEmbedding(e.id)) })) ?? [])] }}/>
-      {backend !== 'lance_db' && <Row title={t("HTTP policy")} menu={{ title: t('HTTP policy'), value: insecure, choices: ['keep', 'allow', 'deny'].map(value => ({ title: t(value), selected: insecure === value, onPress: () => value === 'allow' ? confirmMemory(t('Allow unencrypted HTTP?'), t('Plaintext and credentials may be exposed on the network. Approve only a trusted private endpoint.'), () => edit(() => setInsecure('allow'))) : edit(() => setInsecure(value as 'keep' | 'deny')) })) }}/>}
+      {backend !== 'lance_db' && <Row title={t("HTTP policy")} menu={{ title: t('HTTP policy'), value: insecure, choices: ['keep', 'allow', 'deny'].map(value => ({ title: memoryText(value), selected: insecure === value, onPress: () => value === 'allow' ? confirmMemory(t('Allow unencrypted HTTP?'), t('Plaintext and credentials may be exposed on the network. Approve only a trusted private endpoint.'), () => edit(() => setInsecure('allow'))) : edit(() => setInsecure(value as 'keep' | 'deny')) })) }}/>}
     </Section>
     {backend !== 'lance_db' && <MemorySecret action={secretAction} value={key} hasSecret={saved?.has_secret ?? false} onAction={v => edit(() => { setSecretAction(v); setKey(''); })} onValue={v => edit(() => setKey(v))}/>}
     <Section title={t("Backend options")} footer={backend === 'open_viking' ? t('Per-bot patches preserve every omitted private binding/key. Keep sends no edit; Remove sends an explicit null for that bot only. No whole-map replacement is offered. Stored identities and keys are never read back.') : t('Known options are an atomic replacement. Keep preserves private options.')}>

@@ -5,7 +5,7 @@ import { memoryService } from '../../../src/core/memoryServiceNative';
 import { LANCE_CLOUD_UNAVAILABLE_REASON, connectionActivationReason, type BotPreview, type BotSetupAction, type MemoryConnectionView } from '../../../src/core/memoryService';
 import { useBotMap } from '../../../src/core/store';
 import { FieldRow, Row, Section, ToggleRow } from '../../../src/ui/forms';
-import { confirmMemory, MemoryAction, MemoryChoice, MemoryForm, MemoryOutput, useMemoryTask } from '../../../src/ui/memoryUI';
+import { memoryText, confirmMemory, MemoryAction, MemoryChoice, MemoryForm, MemoryOutput, useMemoryTask } from '../../../src/ui/memoryUI';
 export default function BotMemorySetupScreen() {
     useLanguage();
     const { id } = useLocalSearchParams<{
@@ -29,7 +29,7 @@ export default function BotMemorySetupScreen() {
     return <MemoryForm title={t("Runner Memory Setup")} task={task} dirty={dirty}>
     <Section title={t("Assigned Runner")} footer={t("These are trusted UI-only operations routed to the bot’s assigned Runner. No phone vector database or native runtime. Nothing applies until the exact worker-produced preview is displayed and approved. Tokens expire and are single-use even when apply fails.")}>
       <Row title={t("Bot")} detail={bot?.name ?? id}/><Row title={t("Runner")} detail={bot?.runner_id ?? t('Unavailable')}/><Row title={t("Backend")} detail={backend ?? t('Not configured')}/>
-      {backend === 'lance_db' && <Row title={t("LanceDB Cloud activation unavailable")} subtitle={t(LANCE_CLOUD_UNAVAILABLE_REASON)} subtitleLines={6}/>}
+      {backend === 'lance_db' && <Row title={t("LanceDB Cloud activation unavailable")} subtitle={memoryText(LANCE_CLOUD_UNAVAILABLE_REASON)} subtitleLines={6}/>}
       {actions.length ? <MemoryChoice title={t("Setup action")} value={action} values={actions} onChange={v => change(() => setAction(v))}/> : <Row title={t("Setup unavailable")} subtitle={activationReason ?? t('Choose a pgvector or LanceDB connection for this bot. The Runner reports build/runtime/schema availability through actual RPC errors, never simulated readiness.')} subtitleLines={5}/>}
     </Section>
     {actions.includes(action) && action === 'pgvector.initialize' && <Section footer={t("Preview inspects the actual connected target and returns the complete non-destructive SQL, extension, tables, indexes and permissions. No DDL applies during preview. Apply accepts only the one-use token; no client SQL overrides.")}><Row title={t("Exact pgvector initialization")} subtitle={t("Database/OID/role/address/port/version/session identity and schema SQL must match the preview.")} subtitleLines={4}/></Section>}

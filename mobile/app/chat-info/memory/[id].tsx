@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../../../src/i18n';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
 import * as Crypto from 'expo-crypto';
@@ -10,6 +11,7 @@ import { confirmMemory, MemoryAction, MemoryForm, MemoryOutput, plaintextDisclos
 import { MemoryDeletionState } from '../../../src/ui/memoryTask';
 const advanced: MemoryAdvancedFeature[] = ['bank_profile', 'bank_config', 'directives', 'mental_models', 'mental_model_history', 'observations', 'memory_edit', 'memory_invalidate', 'memory_restore', 'documents', 'sessions', 'resources', 'tasks'];
 export default function BotMemoryScreen() {
+    useLanguage();
     const { id } = useLocalSearchParams<{
         id: string;
     }>(), router = useRouter(), task = useMemoryTask();
@@ -33,7 +35,7 @@ export default function BotMemoryScreen() {
     const connection = config?.connections.find(c => c.id === saved?.connection_id);
     const caps = health?.capabilities ?? {};
     const activationReason = connectionActivationReason(connection);
-    const reason = (action: Parameters<typeof supportsMemoryAction>[1]) => activationReason ?? (dirty ? 'Save or cancel preference changes first.' : !supportsMemoryAction(caps, action) ? 'Not negotiated by this Runner/backend. Check readiness explicitly.' : undefined);
+    const reason = (action: Parameters<typeof supportsMemoryAction>[1]) => activationReason ?? (dirty ? t('Save or cancel preference changes first.') : !supportsMemoryAction(caps, action) ? t('Not negotiated by this Runner/backend. Check readiness explicitly.') : undefined);
     function edit(action: () => void) { action(); setDirty(true); update(n => n + 1); }
     async function save() { if (!draft || !config)
         throw new Error('preferences_not_loaded'); await memoryService.savePreferences(draft, config); setSaved(await memoryService.getPreferences(id)); }
@@ -46,71 +48,71 @@ export default function BotMemoryScreen() {
         return current;
     }
     const deletionPreferences = deletion.preferences;
-    const deletionReason = deletionPreferences ? undefined : 'Deletion confirmation unavailable. Refresh preferences before another attempt.';
+    const deletionReason = deletionPreferences ? undefined : t('Deletion confirmation unavailable. Refresh preferences before another attempt.');
     async function deleteMemory(target: string | undefined, confirmed: MemoryPreferencesView) {
         setOutput(await deletion.run(confirmed,
             () => memoryService.delete(id, target, connection!.revision, confirmed.deletion_epoch, caps, true),
             refreshDeletionPreferences));
     }
-    return <MemoryForm title={bot ? `${bot.name} Memory` : 'Bot Memory'} task={task} dirty={dirty} guardDirty={dirty || !!text || !!query || !!documentID} onSave={save}>
-    <Section title="Own-bot scope" footer="The core derives this bot’s account namespace and routes service operations to its assigned Runner. Rename/model changes do not change the namespace. Namespaces are logical isolation, not server authorization. Pausing, Runner reassignment, consent and connection revisions are rechecked by core.">
-      <Row title="Bot" detail={bot?.name ?? 'Unavailable'}/><Row title="Assigned Runner" detail={runner?.name ?? bot?.runner_id ?? 'Unavailable'}/>
-      <Row title="Local MEMORY.md" subtitle="Independent local editor; never uploads to the memory service." subtitleLines={3} chevron onPress={() => router.push({ pathname: '/chat-info/memory/local', params: { id } })}/>
-      <Row title="Service state" detail={health?.status ?? 'Not checked'}/>
-      <Row title="Configuration eligibility" detail={connection?.availability === 'supported' ? 'Eligible — readiness not checked by configuration' : 'Blocked / unavailable'} subtitle={activationReason} subtitleLines={3}/>
-      {health?.reason && <Row title="Readiness reason" subtitle={health.reason} subtitleLines={3}/>}
-      {connection?.backend === 'lance_db' && <Row title="LanceDB Cloud activation unavailable" subtitle={LANCE_CLOUD_UNAVAILABLE_REASON} subtitleLines={6}/>}
-      {health?.deletion_pending && <Row title="Deletion pending" subtitle="Remote erasure is not verified. Backups and Lance history can retain data." subtitleLines={3}/>}
-      <MemoryAction title="Check Service Readiness" reason={activationReason ?? (dirty ? 'Save preferences first.' : undefined)} onPress={() => confirmMemory('Check this bot’s memory endpoint?', `Read-only readiness on ${runner?.name ?? bot?.runner_id}. No retain, reflect, DDL, asset download or inference.`, () => void task.run(async () => { setHealth(await memoryService.health(id)); }))}/>
-      <Row title="Account Connections" chevron onPress={() => router.push('/settings/memory')}/>
+    return <MemoryForm title={bot ? t("{v0} Memory", { v0: String(bot.name) }) : t('Bot Memory')} task={task} dirty={dirty} guardDirty={dirty || !!text || !!query || !!documentID} onSave={save}>
+    <Section title={t("Own-bot scope")} footer={t("The core derives this bot’s account namespace and routes service operations to its assigned Runner. Rename/model changes do not change the namespace. Namespaces are logical isolation, not server authorization. Pausing, Runner reassignment, consent and connection revisions are rechecked by core.")}>
+      <Row title={t("Bot")} detail={bot?.name ?? t('Unavailable')}/><Row title={t("Assigned Runner")} detail={runner?.name ?? bot?.runner_id ?? t('Unavailable')}/>
+      <Row title={t("Local MEMORY.md")} subtitle={t("Independent local editor; never uploads to the memory service.")} subtitleLines={3} chevron onPress={() => router.push({ pathname: '/chat-info/memory/local', params: { id } })}/>
+      <Row title={t("Service state")} detail={health ? t(health.status) : t('Not checked')}/>
+      <Row title={t("Configuration eligibility")} detail={connection?.availability === 'supported' ? t('Eligible — readiness not checked by configuration') : t('Blocked / unavailable')} subtitle={activationReason && t(activationReason)} subtitleLines={3}/>
+      {health?.reason && <Row title={t("Readiness reason")} subtitle={t(health.reason)} subtitleLines={3}/>}
+      {connection?.backend === 'lance_db' && <Row title={t("LanceDB Cloud activation unavailable")} subtitle={t(LANCE_CLOUD_UNAVAILABLE_REASON)} subtitleLines={6}/>}
+      {health?.deletion_pending && <Row title={t("Deletion pending")} subtitle={t("Remote erasure is not verified. Backups and Lance history can retain data.")} subtitleLines={3}/>}
+      <MemoryAction title={t("Check Service Readiness")} reason={activationReason ?? (dirty ? t('Save preferences first.') : undefined)} onPress={() => confirmMemory(t('Check this bot’s memory endpoint?'), t("Read-only readiness on {v0}. No retain, reflect, DDL, asset download or inference.", { v0: String(runner?.name ?? bot?.runner_id) }), () => void task.run(async () => { setHealth(await memoryService.health(id)); }))}/>
+      <Row title={t("Account Connections")} chevron onPress={() => router.push('/settings/memory')}/>
     </Section>
     {draft && <>
-      <Section title="Recall and connection" footer="Automatic recall sends task text once per eligible normal turn. It injects bounded evidence as untrusted historical data. Outages leave local memory usable.">
-        <Row title="Connection" menu={{ title: 'Connection', value: config?.connections.find(c => c.id === draft.connectionID)?.name ?? 'Off', choices: [{ title: 'Off', selected: !draft.connectionID, onPress: () => edit(() => { draft.connectionID = null; }) }, ...(config?.connections.filter(c => c.availability === 'supported').map(c => ({ title: c.name, selected: c.id === draft.connectionID, onPress: () => edit(() => { draft.connectionID = c.id; }) })) ?? [])] }}/>
-        {config?.connections.filter(c => c.availability === 'blocked').map(c => <Row key={c.id} title={`${c.name} — activation blocked`} subtitle={c.reason ?? 'Connection is blocked.'} subtitleLines={3}/>)}
-        <ToggleRow title="Automatic recall" value={draft.autoRecall} onValueChange={v => edit(() => { draft.autoRecall = v; })}/>
-        {(['timeout_ms', 'max_bytes', 'max_results', 'max_context_chars'] as const).map(k => <FieldRow key={k} label={k} value={String(draft.recallBudget[k])} keyboardType="number-pad" onChangeText={v => edit(() => { draft.recallBudget = { ...draft.recallBudget, [k]: Number(v) }; })}/>)}
+      <Section title={t("Recall and connection")} footer={t("Automatic recall sends task text once per eligible normal turn. It injects bounded evidence as untrusted historical data. Outages leave local memory usable.")}>
+        <Row title={t("Connection")} menu={{ title: t('Connection'), value: config?.connections.find(c => c.id === draft.connectionID)?.name ?? t('Off'), choices: [{ title: t('Off'), selected: !draft.connectionID, onPress: () => edit(() => { draft.connectionID = null; }) }, ...(config?.connections.filter(c => c.availability === 'supported').map(c => ({ title: c.name, selected: c.id === draft.connectionID, onPress: () => edit(() => { draft.connectionID = c.id; }) })) ?? [])] }}/>
+        {config?.connections.filter(c => c.availability === 'blocked').map(c => <Row key={c.id} title={t("{v0} — activation blocked", { v0: String(c.name) })} subtitle={c.reason ? t(c.reason) : t('Connection is blocked.')} subtitleLines={3}/>)}
+        <ToggleRow title={t("Automatic recall")} value={draft.autoRecall} onValueChange={v => edit(() => { draft.autoRecall = v; })}/>
+        {(['timeout_ms', 'max_bytes', 'max_results', 'max_context_chars'] as const).map(k => <FieldRow key={t(k)} label={t(k)} value={String(draft.recallBudget[k])} keyboardType="number-pad" onChangeText={v => edit(() => { draft.recallBudget = { ...draft.recallBudget, [k]: Number(v) }; })}/>)}
       </Section>
-      <Section title="Future conversation capture" footer="Off by default. Only future eligible completed visible user/assistant text is captured after admission and completion consent checks. No history backfill, attachments, hidden thinking, secrets or tool output. Scrubbing is best effort, not DLP.">
-        <ToggleRow title="Capture conversation" value={draft.captureConversation} onValueChange={v => edit(() => { draft.captureConversation = v; if (!v)
+      <Section title={t("Future conversation capture")} footer={t("Off by default. Only future eligible completed visible user/assistant text is captured after admission and completion consent checks. No history backfill, attachments, hidden thinking, secrets or tool output. Scrubbing is best effort, not DLP.")}>
+        <ToggleRow title={t("Capture conversation")} value={draft.captureConversation} onValueChange={v => edit(() => { draft.captureConversation = v; if (!v)
             draft.captureGroupText = false; })}/>
-        <FieldRow label="Per-turn cap" value={String(draft.maxCaptureDeliveriesPerTurn)} keyboardType="number-pad" onChangeText={v => edit(() => { draft.maxCaptureDeliveriesPerTurn = Number(v); })}/>
-        <Row title="Unattended background capture" subtitle="Disabled: an enforced downstream total-cost policy is required. Turn-completion delivery is separately capped at 0–4." subtitleLines={4}/>
+        <FieldRow label={t("Per-turn cap")} value={String(draft.maxCaptureDeliveriesPerTurn)} keyboardType="number-pad" onChangeText={v => edit(() => { draft.maxCaptureDeliveriesPerTurn = Number(v); })}/>
+        <Row title={t("Unattended background capture")} subtitle={t("Disabled: an enforced downstream total-cost policy is required. Turn-completion delivery is separately capped at 0–4.")} subtitleLines={4}/>
       </Section>
-      <Section title="Separate group-text consent" footer="Group context never grants another bot’s bank access. This may send other participants’ visible conversation text to the configured memory endpoint.">
-        <ToggleRow title="Capture group text" value={draft.captureGroupText} onValueChange={v => edit(() => { draft.captureGroupText = v; })}/>
-        <MemoryAction title="Approve Group Capture Choices" reason={!draft.captureGroupText ? 'Enable group capture and conversation capture first.' : undefined} onPress={() => confirmMemory('Approve future group-text capture?', `Bot: ${bot?.name ?? id}\nConnection: ${draft.connectionID}\nCapture conversation: ${draft.captureConversation}\nPer-turn cap: ${draft.maxCaptureDeliveriesPerTurn}\n\nOther participants’ text may be processed outside relay encryption. No historical backfill.`, () => { draft.approveGroupCapture(); update(n => n + 1); })}/>
+      <Section title={t("Separate group-text consent")} footer={t("Group context never grants another bot’s bank access. This may send other participants’ visible conversation text to the configured memory endpoint.")}>
+        <ToggleRow title={t("Capture group text")} value={draft.captureGroupText} onValueChange={v => edit(() => { draft.captureGroupText = v; })}/>
+        <MemoryAction title={t("Approve Group Capture Choices")} reason={!draft.captureGroupText ? t('Enable group capture and conversation capture first.') : undefined} onPress={() => confirmMemory(t('Approve future group-text capture?'), t("Bot: {v0}\nConnection: {v1}\nCapture conversation: {v2}\nPer-turn cap: {v3}\n\nOther participants’ text may be processed outside relay encryption. No historical backfill.", { v0: String(bot?.name ?? id), v1: String(draft.connectionID), v2: String(draft.captureConversation), v3: String(draft.maxCaptureDeliveriesPerTurn) }), () => { draft.approveGroupCapture(); update(n => n + 1); })}/>
       </Section>
-      <Section title="Plaintext approval" footer={plaintextDisclosure}>
-        <MemoryAction title="Approve Exact Recall/Capture Choices" reason={!draft.connectionID ? 'Select a connection first.' : undefined} onPress={() => confirmMemory('Approve this bot’s remote plaintext choices?', `Bot: ${bot?.name ?? id}\nConnection: ${draft.connectionID}\nAutomatic recall: ${draft.autoRecall}\nFuture capture: ${draft.captureConversation}\nGroup text: ${draft.captureGroupText}\nPer-turn cap: ${draft.maxCaptureDeliveriesPerTurn}\n\n${plaintextDisclosure}`, () => { draft.approveRemotePlaintext(); update(n => n + 1); })}/>
+      <Section title={t("Plaintext approval")} footer={t(plaintextDisclosure)}>
+        <MemoryAction title={t("Approve Exact Recall/Capture Choices")} reason={!draft.connectionID ? t('Select a connection first.') : undefined} onPress={() => confirmMemory(t('Approve this bot’s remote plaintext choices?'), t("Bot: {v0}\nConnection: {v1}\nAutomatic recall: {v2}\nFuture capture: {v3}\nGroup text: {v4}\nPer-turn cap: {v5}\n\n{v6}", { v0: String(bot?.name ?? id), v1: String(draft.connectionID), v2: String(draft.autoRecall), v3: String(draft.captureConversation), v4: String(draft.captureGroupText), v5: String(draft.maxCaptureDeliveriesPerTurn), v6: String(t(plaintextDisclosure)) }), () => { draft.approveRemotePlaintext(); update(n => n + 1); })}/>
       </Section>
     </>}
-    <Section title="Explicit save / search" footer="Every action requires its own approval. Only completed means stored. An uncertain delivery can have charged the service; retries are not exactly-once billing.">
-      <FieldRow label="Text to save" multiline value={text} onChangeText={v => { setText(v); setRequestID(Crypto.randomUUID()); }}/>
-      <MemoryAction title="Save Text to Service" reason={reason('retain') ?? (!text.trim() ? 'Enter text first.' : undefined)} onPress={() => confirmMemory('Send and retain this text?', plaintextDisclosure, () => void task.run(async () => { setOutput(await memoryService.retain(id, text, requestID, caps, true)); await refreshOperations(); }))}/>
-      <FieldRow label="Query" multiline value={query} onChangeText={setQuery}/>
-      <MemoryAction title="Search Own-bot Memory" reason={reason('recall') ?? (!query.trim() ? 'Enter a query first.' : undefined)} onPress={() => confirmMemory('Send this search query?', plaintextDisclosure, () => void task.run(async () => setOutput(await memoryService.recall(id, query, caps, true))))}/>
-      <MemoryAction title="Native Hindsight Reflect" reason={reason('reflect') ?? (!query.trim() ? 'Enter a query first.' : undefined)} onPress={() => confirmMemory('Run native reflection?', plaintextDisclosure + ' This is service-native reflect, not similarity search or Beans synthesis.', () => void task.run(async () => setOutput(await memoryService.reflect(id, query, caps, true))))}/>
-      <FieldRow label="Document ID" value={documentID} onChangeText={setDocumentID} autoCapitalize="none"/>
-      <MemoryAction title="Inspect Document / Provenance" reason={reason('inspect') ?? (!documentID ? 'Enter a document ID.' : undefined)} onPress={() => confirmMemory('Inspect this document?', 'Fetch own-bot document and provenance from the assigned Runner’s memory service.', () => void task.run(async () => setOutput(await memoryService.inspect(id, documentID, caps))))}/>
-      <MemoryAction title="Refresh Deletion Confirmation" onPress={() => void task.run(refreshDeletionPreferences)}/>
-      <MemoryAction title="Delete Document" destructive reason={deletionReason ?? reason('delete_document') ?? (!documentID ? 'Enter the exact document ID.' : undefined)} onPress={() => confirmMemory('Delete this document?', `${documentID}\nBot: ${id}\nConnection revision: ${connection?.revision.counter}\nEpoch: ${deletionPreferences?.deletion_epoch}\nPending does not mean erased. Backups/history may remain.`, () => void task.run(() => deleteMemory(documentID, deletionPreferences!)), true)}/>
-      <MemoryAction title="Clear Entire Own-bot Bank" destructive reason={deletionReason ?? reason('clear')} onPress={() => confirmMemory('Clear this bot’s entire bank?', `Bot: ${id}\nConnection: ${connection?.name}\nRevision: ${connection?.revision.counter}\nEpoch: ${deletionPreferences?.deletion_epoch}\nQueued writes are fenced. Pending cleanup is not verified erasure; backups/history can remain.`, () => void task.run(() => deleteMemory(undefined, deletionPreferences!)), true)}/>
+    <Section title={t("Explicit save / search")} footer={t("Every action requires its own approval. Only completed means stored. An uncertain delivery can have charged the service; retries are not exactly-once billing.")}>
+      <FieldRow label={t("Text to save")} multiline value={text} onChangeText={v => { setText(v); setRequestID(Crypto.randomUUID()); }}/>
+      <MemoryAction title={t("Save Text to Service")} reason={reason('retain') ?? (!text.trim() ? t('Enter text first.') : undefined)} onPress={() => confirmMemory(t('Send and retain this text?'), t(plaintextDisclosure), () => void task.run(async () => { setOutput(await memoryService.retain(id, text, requestID, caps, true)); await refreshOperations(); }))}/>
+      <FieldRow label={t("Query")} multiline value={query} onChangeText={setQuery}/>
+      <MemoryAction title={t("Search Own-bot Memory")} reason={reason('recall') ?? (!query.trim() ? t('Enter a query first.') : undefined)} onPress={() => confirmMemory(t('Send this search query?'), t(plaintextDisclosure), () => void task.run(async () => setOutput(await memoryService.recall(id, query, caps, true))))}/>
+      <MemoryAction title={t("Native Hindsight Reflect")} reason={reason('reflect') ?? (!query.trim() ? t('Enter a query first.') : undefined)} onPress={() => confirmMemory(t('Run native reflection?'), t(plaintextDisclosure) + t(' This is service-native reflect, not similarity search or Beans synthesis.'), () => void task.run(async () => setOutput(await memoryService.reflect(id, query, caps, true))))}/>
+      <FieldRow label={t("Document ID")} value={documentID} onChangeText={setDocumentID} autoCapitalize="none"/>
+      <MemoryAction title={t("Inspect Document / Provenance")} reason={reason('inspect') ?? (!documentID ? t('Enter a document ID.') : undefined)} onPress={() => confirmMemory(t('Inspect this document?'), t('Fetch own-bot document and provenance from the assigned Runner’s memory service.'), () => void task.run(async () => setOutput(await memoryService.inspect(id, documentID, caps))))}/>
+      <MemoryAction title={t("Refresh Deletion Confirmation")} onPress={() => void task.run(refreshDeletionPreferences)}/>
+      <MemoryAction title={t("Delete Document")} destructive reason={deletionReason ?? reason('delete_document') ?? (!documentID ? t('Enter the exact document ID.') : undefined)} onPress={() => confirmMemory(t('Delete this document?'), t("{v0}\nBot: {v1}\nConnection revision: {v2}\nEpoch: {v3}\nPending does not mean erased. Backups/history may remain.", { v0: String(documentID), v1: String(id), v2: String(connection?.revision.counter), v3: String(deletionPreferences?.deletion_epoch) }), () => void task.run(() => deleteMemory(documentID, deletionPreferences!)), true)}/>
+      <MemoryAction title={t("Clear Entire Own-bot Bank")} destructive reason={deletionReason ?? reason('clear')} onPress={() => confirmMemory(t('Clear this bot’s entire bank?'), t("Bot: {v0}\nConnection: {v1}\nRevision: {v2}\nEpoch: {v3}\nQueued writes are fenced. Pending cleanup is not verified erasure; backups/history can remain.", { v0: String(id), v1: String(connection?.name), v2: String(connection?.revision.counter), v3: String(deletionPreferences?.deletion_epoch) }), () => void task.run(() => deleteMemory(undefined, deletionPreferences!)), true)}/>
     </Section>
-    <Section title="Delivery operations">
-      <MemoryAction title="Refresh Delivery Queue" reason={activationReason ?? (dirty ? 'Save preferences first.' : undefined)} onPress={() => void task.run(refreshOperations)}/>
-      {operations?.deletion?.pending && <Row title="Pending cleanup" detail={`Epoch ${operations.deletion.deletion_epoch}`}/>}
+    <Section title={t("Delivery operations")}>
+      <MemoryAction title={t("Refresh Delivery Queue")} reason={activationReason ?? (dirty ? t('Save preferences first.') : undefined)} onPress={() => void task.run(refreshOperations)}/>
+      {operations?.deletion?.pending && <Row title={t("Pending cleanup")} detail={t("Epoch {v0}", { v0: String(operations.deletion.deletion_epoch) })}/>}
     </Section>
       {operations?.operations.map(op => <Section key={op.id} title={op.document_id}>
-        <Row title={op.state === 'completed' ? 'Stored' : op.state === 'delivery_unknown' ? 'Delivery unknown — not confirmed stored' : op.state} subtitle={[op.id, op.error_code].filter(Boolean).join(' · ')} subtitleLines={3}/>
-        <MemoryAction title="Check Operation" reason={reason('operation_status')} onPress={() => confirmMemory('Poll this operation?', 'One explicit status call; no automatic polling or retries.', () => void task.run(async () => { setOutput(await memoryService.operation(id, op.id, 'status', caps, true)); await refreshOperations(); }))}/>
-        <MemoryAction title="Retry Delivery" reason={reason('retain') ?? (!['queued', 'failed', 'delivery_unknown'].includes(op.state) ? 'This state is not retryable.' : op.state === 'delivery_unknown' && !caps.idempotent_retain ? 'Uncertain delivery has no verified idempotency; retry disabled.' : undefined)} onPress={() => confirmMemory('Retry this delivery?', plaintextDisclosure + ' Stable IDs do not guarantee exactly-once billing.', () => void task.run(async () => { setOutput(await memoryService.operation(id, op.id, 'retry', caps, true)); await refreshOperations(); }))}/>
-        <MemoryAction title="Cancel Operation" reason={reason('cancel_operation')} onPress={() => confirmMemory('Cancel this operation?', 'Cooperative cancellation does not guarantee no late writes or refunds.', () => void task.run(async () => { setOutput(await memoryService.operation(id, op.id, 'cancel', caps, true)); await refreshOperations(); }))}/>
+        <Row title={op.state === 'completed' ? t('Stored') : op.state === 'delivery_unknown' ? t('Delivery unknown — not confirmed stored') : t(op.state)} subtitle={[op.id, op.error_code].filter(Boolean).join(' · ')} subtitleLines={3}/>
+        <MemoryAction title={t("Check Operation")} reason={reason('operation_status')} onPress={() => confirmMemory(t('Poll this operation?'), t('One explicit status call; no automatic polling or retries.'), () => void task.run(async () => { setOutput(await memoryService.operation(id, op.id, 'status', caps, true)); await refreshOperations(); }))}/>
+        <MemoryAction title={t("Retry Delivery")} reason={reason('retain') ?? (!['queued', 'failed', 'delivery_unknown'].includes(op.state) ? t('This state is not retryable.') : op.state === 'delivery_unknown' && !caps.idempotent_retain ? t('Uncertain delivery has no verified idempotency; retry disabled.') : undefined)} onPress={() => confirmMemory(t('Retry this delivery?'), t(plaintextDisclosure) + t(' Stable IDs do not guarantee exactly-once billing.'), () => void task.run(async () => { setOutput(await memoryService.operation(id, op.id, 'retry', caps, true)); await refreshOperations(); }))}/>
+        <MemoryAction title={t("Cancel Operation")} reason={reason('cancel_operation')} onPress={() => confirmMemory(t('Cancel this operation?'), t('Cooperative cancellation does not guarantee no late writes or refunds.'), () => void task.run(async () => { setOutput(await memoryService.operation(id, op.id, 'cancel', caps, true)); await refreshOperations(); }))}/>
       </Section>)}
-    <Section title="Backend-specific capabilities" footer="Controls use negotiated capabilities, never backend-name parity. OpenViking sessions/resources/tasks are distinct. Vector stores do not offer native reflect or mental models.">
-      {advanced.filter(feature => !activationReason && connection && advancedForms(connection.backend, feature, caps).length > 0).map(feature => <MemoryAction key={feature} title={feature.replaceAll('_', ' ')} reason={reason(feature)} onPress={() => router.push({ pathname: '/chat-info/memory/advanced', params: { id, feature } })}/>)}
-      <Row title="Runner Setup / Lance Transfer" chevron onPress={() => router.push({ pathname: '/chat-info/memory/setup', params: { id } })}/>
+    <Section title={t("Backend-specific capabilities")} footer={t("Controls use negotiated capabilities, never backend-name parity. OpenViking sessions/resources/tasks are distinct. Vector stores do not offer native reflect or mental models.")}>
+      {advanced.filter(feature => !activationReason && connection && advancedForms(connection.backend, feature, caps).length > 0).map(feature => <MemoryAction key={feature} title={t(feature.replaceAll('_', ' '))} reason={reason(feature)} onPress={() => router.push({ pathname: '/chat-info/memory/advanced', params: { id, feature } })}/>)}
+      <Row title={t("Runner Setup / Lance Transfer")} chevron onPress={() => router.push({ pathname: '/chat-info/memory/setup', params: { id } })}/>
     </Section>
-    {output !== undefined && <MemoryOutput title="Result" value={output}/>}
+    {output !== undefined && <MemoryOutput title={t("Result")} value={output}/>}
   </MemoryForm>;
 }

@@ -519,21 +519,27 @@ struct CheckRunner {
 #[cfg(feature = "runner")]
 #[async_trait::async_trait]
 impl ToolRunner for CheckRunner {
-    async fn run(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken) -> ToolOutcome {
+    async fn run_scoped(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken, scope: &beans_agent::tool::ExecutionScope) -> ToolOutcome {
         if self.app.is_paused() || cancel.is_cancelled() {
-            return ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text("Account paused.") }, is_error: true, blocked: true };
+            let mut result = ToolResult::text("Account paused.");
+            result.is_error = true;
+            return ToolOutcome { result, is_error: true, blocked: true };
         }
         let reads = CHECK_FILE_TOOLS.contains(&tool.name()) || crate::plugins::mcp::is_read_only(&self.app, &self.catalog, tool.name(), &cancel).await;
         if !reads {
             let refusal = format!("{} can change things, and a check only looks: leave it to the run the check starts.", tool.name());
-            return ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text(refusal) }, is_error: true, blocked: true };
+            let mut result = ToolResult::text(refusal);
+            result.is_error = true;
+            return ToolOutcome { result, is_error: true, blocked: true };
         }
         let plugin_id = self.catalog.plugin_id(tool.name());
         let allowed = self.app.bot(&self.catalog.bot_id().unwrap_or_default()).is_some_and(|bot| bot.capabilities.permits(tool.name(), plugin_id.as_deref()));
         if self.app.is_paused() || !allowed {
-            return ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text("Account paused or tool access removed.") }, is_error: true, blocked: true };
+            let mut result = ToolResult::text("Account paused or tool access removed.");
+            result.is_error = true;
+            return ToolOutcome { result, is_error: true, blocked: true };
         }
-        DirectRunner.run(tool, tool_call_id, args, cancel).await
+        DirectRunner.run_scoped(tool, tool_call_id, args, cancel, scope).await
     }
 }
 

@@ -3,7 +3,9 @@
 //! Works with [`AgentMessage`] throughout and converts to [`LlmMessage`] only at the provider
 //! boundary. Emits [`AgentEvent`]s over a channel in the same order pi does.
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -13,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::provider::{AssistantAccumulator, AssistantEvent, ModelRequest, Provider};
 use crate::schema::validate_tool_arguments;
-use crate::tool::{Tool, ToolOutcome, ToolResult, ToolRunner};
+use crate::tool::{cleanup_diagnostic, ExecutionScope, Tool, ToolOutcome, ToolResult, ToolRunner};
 use crate::types::{
     AgentEvent, AgentMessage, AssistantMessage, ContentPart, LlmMessage, StopReason, ToolCall,
     ToolResultMessage,
@@ -173,6 +175,10 @@ pub fn default_convert_to_llm(messages: &[AgentMessage]) -> Vec<LlmMessage> {
 pub trait EventSink: Send + Sync {
     async fn on_event(&self, event: &AgentEvent);
 }
+
+/// How long a cancelled hook or execution future may hold the loop. Registered pipe workers
+/// are drained separately before completion; their cleanup deadline belongs to bash.
+pub const STOP_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct AgentLoopConfig {
@@ -832,11 +838,11 @@ async fn prepare_call(
         Err(message) => return Preparation::Immediate { result: error_result(message), is_error: true, blocked: false },
     };
 
-    if let Some(before) = config
-        .hooks
-        .before_tool_call(BeforeToolCallContext { assistant_message: assistant, tool_call, args: &args, context, cancel, parent })
-        .await
-    {
+    let check = config.hooks.before_tool_call(BeforeToolCallContext { assistant_message: assistant, tool_call, args: &args, context, cancel, parent });
+    let Some(before) = unless_stuck(check, cancel, STOP_GRACE).await else {
+        return Preparation::Immediate { result: cut_off(STOP_GRACE), is_error: true, blocked: false };
+    };
+    if let Some(before) = before {
         if cancel.is_cancelled() {
             return Preparation::Immediate { result: error_result("Operation aborted".into()), is_error: true, blocked: false };
         }
@@ -894,7 +900,19 @@ struct LoopRunner<'a> {
 #[async_trait]
 impl ToolRunner for LoopRunner<'_> {
     async fn run(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken) -> ToolOutcome {
+        let root = ExecutionScope::root(&cancel);
+        // run_scoped owns the call's result, error folding, and single cutoff diagnostic.
+        let outcome = self.run_scoped(tool, tool_call_id, args, cancel, &root).await;
+        root.drain().await;
+        outcome
+    }
+
+    async fn run_scoped(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken, scope: &ExecutionScope) -> ToolOutcome {
         let tool_call = ToolCall { id: tool_call_id, name: tool.name().to_string(), arguments: args };
+        let scope = match scope.child(&cancel) {
+            Ok(scope) => scope,
+            Err(error) => return ToolOutcome { result: error_result(error), is_error: true, blocked: true },
+        };
         match prepare_call(tool, self.context, self.assistant, &tool_call, self.config, &cancel, Some(self.parent)).await {
             Preparation::Immediate { result, is_error, blocked } => ToolOutcome { result, is_error, blocked },
             Preparation::Prepared { tool, args } => {
@@ -902,13 +920,37 @@ impl ToolRunner for LoopRunner<'_> {
                     return ToolOutcome { result: error_result(reason), is_error: true, blocked: true };
                 }
                 let nested = LoopRunner { parent: &tool_call, ..*self };
-                let (result, is_error) = match tool.execute_with(&tool_call.id, args.clone(), cancel.clone(), Arc::new(|_| {}), &nested).await {
-                    Ok(result) => {
-                        let is_error = result.is_error;
-                        (result, is_error)
+                let outcome = {
+                    let execution = tool.execute_scoped(&tool_call.id, args.clone(), cancel.clone(), Arc::new(|_| {}), &nested, &scope);
+                    tokio::pin!(execution);
+                    tokio::select! {
+                        biased;
+                        result = &mut execution => Some(result),
+                        _ = stuck_after(&cancel, STOP_GRACE) => {
+                            scope.close_and_cancel();
+                            #[cfg(test)]
+                            {
+                                assert!(scope.child(&CancellationToken::new()).is_err(), "child admission closes before execution disposal");
+                                scope.event("child_admission_closed");
+                            }
+                            None
+                        }
                     }
+                };
+                #[cfg(test)]
+                if outcome.is_none() { scope.event("child_cutoff"); }
+                let completed = scope.drain().await;
+                let cutoff = outcome.is_none();
+                let outcome = outcome.unwrap_or_else(|| Ok(cut_off(STOP_GRACE)));
+                let (mut result, is_error) = match outcome {
+                    Ok(result) => { let is_error = result.is_error; (result, is_error) }
                     Err(error) => (error_result(error.0), true),
                 };
+                if completed.iter().any(|(_, completion)| completion.is_uncertain()) {
+                    result.set_cleanup_uncertainty(cleanup_diagnostic(&completed));
+                } else if cutoff {
+                    result.content.push(ContentPart::text(cleanup_diagnostic(&completed)));
+                }
                 let finalized = finalize_executed(self.context, self.assistant, tool_call, args, result, is_error, self.config, Some(self.parent)).await;
                 ToolOutcome { result: finalized.result, is_error: finalized.is_error, blocked: false }
             }
@@ -929,6 +971,27 @@ fn validate_arguments(arguments: &Value) -> Result<Value, String> {
     }
 }
 
+/// Prefer a completed future, including cleanup completing on the deadline, over cutting it off.
+async fn unless_stuck<F: Future>(future: F, cancel: &CancellationToken, grace: Duration) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        output = future => Some(output),
+        _ = stuck_after(cancel, grace) => None,
+    }
+}
+
+async fn stuck_after(cancel: &CancellationToken, grace: Duration) {
+    cancel.cancelled().await;
+    tokio::time::sleep(grace).await;
+}
+
+fn cut_off(grace: Duration) -> ToolResult {
+    error_result(format!(
+        "Cut off: this call was stopped and had not ended {} seconds later, so nothing waited for its result. It may have done part of its work, and may still be running.",
+        grace.as_secs()
+    ))
+}
+
 async fn execute_prepared(
     tool: &Arc<dyn Tool>,
     tool_call: &ToolCall,
@@ -946,22 +1009,8 @@ async fn execute_prepared(
     let name = tool_call.name.clone();
     let call_args = tool_call.arguments.clone();
 
-    let execution = tool.execute_with(&call_id, args.clone(), cancel.clone(), on_update, tools);
-    tokio::pin!(execution);
-
-    let outcome = loop {
-        tokio::select! {
-            result = &mut execution => break result,
-            Some(partial) = update_rx.recv() => {
-                emit.send(AgentEvent::ToolExecutionUpdate {
-                    tool_call_id: call_id.clone(),
-                    tool_name: name.clone(),
-                    args: call_args.clone(),
-                    partial_result: partial,
-                }).await;
-            }
-        }
-    };
+    let scope = ExecutionScope::root(cancel);
+    let (outcome, uncertainty) = execute_in_scope(tool, &call_id, args, cancel, on_update, tools, &scope, &mut update_rx, emit, &name, &call_args).await;
 
     // Flush updates the tool sent right before it returned.
     while let Ok(partial) = update_rx.try_recv() {
@@ -975,13 +1024,56 @@ async fn execute_prepared(
         .await;
     }
 
-    match outcome {
+    let (mut result, is_error) = match outcome {
         Ok(result) => {
             let is_error = result.is_error;
             (result, is_error)
         }
         Err(error) => (error_result(error.0), true),
+    };
+    if let Some(diagnostic) = uncertainty { result.set_cleanup_uncertainty(diagnostic); }
+    (result, is_error)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_in_scope(
+    tool: &Arc<dyn Tool>, call_id: &str, args: &Value, cancel: &CancellationToken,
+    on_update: crate::tool::ToolUpdateFn, tools: &dyn ToolRunner, scope: &ExecutionScope,
+    update_rx: &mut mpsc::UnboundedReceiver<ToolResult>, emit: &Emitter<'_>, name: &str, call_args: &Value,
+) -> (Result<ToolResult, crate::tool::ToolError>, Option<String>) {
+    let outcome = {
+        let execution = tool.execute_scoped(call_id, args.clone(), cancel.clone(), on_update, tools, scope);
+        tokio::pin!(execution);
+        let stuck = stuck_after(cancel, STOP_GRACE);
+        tokio::pin!(stuck);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut execution => break Some(result),
+                _ = &mut stuck => {
+                    scope.close_and_cancel();
+                    break None;
+                }
+                Some(partial) = update_rx.recv() => {
+                    emit.send(AgentEvent::ToolExecutionUpdate {
+                        tool_call_id: call_id.into(), tool_name: name.into(), args: call_args.clone(), partial_result: partial,
+                    }).await;
+                }
+            }
+        }
+    };
+    #[cfg(test)]
+    if outcome.is_none() { scope.event("root_cutoff"); }
+    let cutoff = outcome.is_none();
+    let completed = scope.drain().await;
+    let mut result = outcome.unwrap_or_else(|| Ok(cut_off(STOP_GRACE)));
+    let uncertainty = completed.iter().any(|(_, completion)| completion.is_uncertain()).then(|| cleanup_diagnostic(&completed));
+    if cutoff && uncertainty.is_none() {
+        if let Ok(result) = &mut result {
+            result.content.push(ContentPart::text(cleanup_diagnostic(&completed)));
+        }
     }
+    (result, uncertainty)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -995,6 +1087,8 @@ async fn finalize_executed(
     config: &AgentLoopConfig,
     parent: Option<&ToolCall>,
 ) -> FinalizedCall {
+    let uncertainty = result.take_cleanup_uncertainty();
+    if uncertainty.is_some() { is_error = true; }
     if let Some(after) = config
         .hooks
         .after_tool_call(AfterToolCallContext {
@@ -1024,6 +1118,10 @@ async fn finalize_executed(
             is_error = flag;
         }
     }
+    if let Some(diagnostic) = uncertainty {
+        is_error = true;
+        result.set_cleanup_uncertainty(diagnostic);
+    }
     FinalizedCall { tool_call, result, is_error }
 }
 
@@ -1035,7 +1133,7 @@ async fn emit_tool_execution_end(finalized: &FinalizedCall, emit: &Emitter<'_>) 
     emit.send(AgentEvent::ToolExecutionEnd {
             tool_call_id: finalized.tool_call.id.clone(),
             tool_name: finalized.tool_call.name.clone(),
-            result: finalized.result.clone(),
+            result: finalized.result.clone().into_reported(),
             is_error: finalized.is_error,
         },
     )
@@ -1046,7 +1144,7 @@ fn tool_result_message(finalized: &FinalizedCall) -> ToolResultMessage {
     ToolResultMessage {
         tool_call_id: finalized.tool_call.id.clone(),
         tool_name: finalized.tool_call.name.clone(),
-        content: finalized.result.content.clone(),
+        content: finalized.result.clone().into_reported().content,
         details: finalized.result.details.clone(),
         is_error: finalized.is_error,
         timestamp: crate::now_ms(),
@@ -1658,6 +1756,685 @@ mod tests {
         assert_eq!(last.stop_reason, StopReason::Error);
         assert_eq!(provider.requests.lock().unwrap().len(), 1);
     }
+
+    /// Models a tool or reviewer that ignores cancellation entirely.
+    struct Hangs {
+        stop: Option<CancellationToken>,
+        interrupt: Option<(crate::AgentMessageQueue, StepInterrupt)>,
+    }
+
+    impl Hangs {
+        fn cancel(&self) {
+            if let Some(stop) = &self.stop {
+                stop.cancel();
+            }
+            if let Some((queue, interrupt)) = &self.interrupt {
+                queue.push(AgentMessage::user("skip that, ship it"));
+                assert!(interrupt.interrupt());
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for Hangs {
+        fn name(&self) -> &str { "hang" }
+        fn description(&self) -> &str { "hangs" }
+        fn parameters(&self) -> Value { json!({ "type": "object", "properties": {} }) }
+        async fn execute(&self, _id: &str, _args: Value, _cancel: CancellationToken, _on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+            self.cancel();
+            std::future::pending().await
+        }
+        async fn execute_scoped(&self, id: &str, args: Value, cancel: CancellationToken, update: ToolUpdateFn, _runner: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+            struct AdmissionAtDrop(ExecutionScope);
+            impl Drop for AdmissionAtDrop {
+                fn drop(&mut self) {
+                    let child_rejected = self.0.child(&CancellationToken::new()).is_err();
+                    let spawn_rejected = self.0.spawn_pipe("dispose-attempt", |_| async { Ok(ToolResult::text("unexpected admission")) }).is_err();
+                    self.0.event(if child_rejected && spawn_rejected { "child_disposed_closed" } else { "child_disposed_open" });
+                }
+            }
+            let _guard = AdmissionAtDrop(scope.clone());
+            self.execute(id, args, cancel, update).await
+        }
+    }
+
+    #[async_trait]
+    impl LoopHooks for Hangs {
+        async fn before_tool_call(&self, _ctx: BeforeToolCallContext<'_>) -> Option<BeforeToolCallResult> {
+            self.cancel();
+            std::future::pending().await
+        }
+        async fn steering_messages(&self) -> Vec<AgentMessage> {
+            self.interrupt.as_ref().map_or_else(Vec::new, |(queue, _)| queue.drain())
+        }
+    }
+
+    /// Stop ends the run; Send now preserves the result, promotes the message, and continues.
+    /// Exercise both preparation and execution in both batch modes.
+    #[tokio::test]
+    async fn stuck_tools_and_checks_release_stop_and_send_now() {
+        for mode in [ToolExecutionMode::Sequential, ToolExecutionMode::Parallel] {
+            for check in [false, true] {
+                for send_now in [false, true] {
+                    let cancel = CancellationToken::new();
+                    let queue = crate::AgentMessageQueue::new(crate::QueueMode::All);
+                    let interrupt = StepInterrupt::new();
+                    let hangs = Arc::new(Hangs {
+                        stop: (!send_now).then(|| cancel.clone()),
+                        interrupt: send_now.then(|| (queue.clone(), interrupt.clone())),
+                    });
+                    let name = if check { "count" } else { "hang" };
+                    let args = if check { r#"{"limit": 1}"# } else { "{}" };
+                    let provider = Scripted::new("p", vec![Turn::Call { name, args, stop: StopReason::ToolUse }, Turn::Text("shipping")]);
+                    let counter = Arc::new(Counter { runs: Mutex::new(vec![]), cancel_on_run: None });
+                    let mut config = AgentLoopConfig::new(provider.clone()).with_interrupt(interrupt);
+                    config.tool_execution = mode;
+                    config.hooks = if check { hangs.clone() } else { Arc::new(Steering(queue)) };
+                    let tool: Arc<dyn Tool> = if check { counter.clone() } else { hangs };
+                    let started = std::time::Instant::now();
+                    let (messages, events) = tokio::time::timeout(Duration::from_secs(5), run_with(config, vec![tool], cancel)).await.expect("cancelled call released the loop");
+                    let grace = STOP_GRACE;
+                    assert!(started.elapsed() >= grace, "the call receives its grace");
+                    let results = tool_results(&messages);
+                    assert_eq!(results.len(), 1);
+                    assert!(results[0].is_error && results[0].text().starts_with("Cut off:"));
+                    assert!(counter.runs.lock().unwrap().is_empty(), "a stuck check never authorizes execution");
+                    assert!(events.iter().any(|event| matches!(event, AgentEvent::ToolExecutionEnd { is_error: true, .. })));
+                    assert!(matches!(events.last(), Some(AgentEvent::AgentEnd { .. })));
+                    let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
+                    if send_now {
+                        assert!(matches!(&messages[3], AgentMessage::User(user) if user.content[0].as_text() == Some("skip that, ship it")));
+                        assert_eq!((last.stop_reason, last.text().as_str()), (StopReason::Stop, "shipping"));
+                    } else {
+                        assert_eq!(last.stop_reason, StopReason::Aborted);
+                    }
+                    // Preserve the existing loop: Stop records one cancelled provider request
+                    // after the tool result; Send now records the next live request instead.
+                    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+                }
+            }
+        }
+    }
+
+    struct StructuredWorkerResult(bool);
+
+    #[async_trait]
+    impl Tool for StructuredWorkerResult {
+        fn name(&self) -> &str { "composite" }
+        fn description(&self) -> &str { "Structured composite fixture" }
+        fn parameters(&self) -> Value { json!({"type":"object","properties":{}}) }
+        fn output_schema(&self) -> Option<Value> { Some(json!({"type":"object"})) }
+        async fn execute(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult { is_error: true, structured: Some(json!({"isError":true})), ..ToolResult::text("ordinary failure") })
+        }
+        async fn execute_scoped(&self, id: &str, args: Value, cancel: CancellationToken, update: ToolUpdateFn, _: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+            if self.0 {
+                let worker = scope.spawn_pipe("private\nworker", |_| async { panic!("private worker output") }).unwrap();
+                assert!(worker.completion().await.result().is_err());
+            }
+            self.execute(id, args, cancel, update).await
+        }
+    }
+
+    struct TransformUncertainContent(u8);
+
+    #[async_trait]
+    impl Tool for TransformUncertainContent {
+        fn name(&self) -> &str { "transform_uncertain" }
+        fn description(&self) -> &str { "Transforms a real uncertain child result" }
+        fn parameters(&self) -> Value { json!({"type":"object","properties":{}}) }
+        async fn execute(&self, _: &str, _: Value, cancel: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+            let mut result = crate::tool::DirectRunner.run(Arc::new(StructuredWorkerResult(true)), "child".into(), json!({}), cancel).await.result;
+            assert!(result.cleanup_is_uncertain());
+            match self.0 {
+                0 => result.content.clear(),
+                1 => result.content = vec![ContentPart::text("replacement")],
+                _ => {
+                    result.content = vec![ContentPart::text("first"), ContentPart::text("second")];
+                    result.content.reverse();
+                }
+            }
+            Ok(result)
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_child_content_transform_survives_outer_finalization() {
+        for mode in 0..3 {
+            let config = AgentLoopConfig::new(Scripted::new("p", vec![]));
+            let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+            let assistant = AssistantMessage::empty("p", "m");
+            let call = ToolCall { id: "outer".into(), name: "transform_uncertain".into(), arguments: json!({}) };
+            let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &call };
+            let tool: Arc<dyn Tool> = Arc::new(TransformUncertainContent(mode));
+            let (tx, mut rx) = mpsc::channel(256);
+            let emit = Emitter::new(&tx, &config);
+            let (result, is_error) = execute_prepared(&tool, &call, &call.arguments, &emit, &CancellationToken::new(), &runner).await;
+            let finalized = finalize_executed(&context, &assistant, call, json!({}), result, is_error, &config, None).await;
+            assert!(finalized.is_error && finalized.result.is_error);
+            assert!(finalized.result.cleanup_is_uncertain());
+            let expected: Vec<&str> = match mode { 0 => vec![], 1 => vec!["replacement"], _ => vec!["second", "first"] };
+            assert_eq!(finalized.result.content.iter().filter_map(ContentPart::as_text).collect::<Vec<_>>(), expected);
+            assert_eq!(finalized.result.text_content().matches("Pipe cleanup:").count(), 1);
+            let message = tool_result_message(&finalized);
+            assert!(message.is_error);
+            assert_eq!(message.content.iter().filter_map(ContentPart::as_text).take(expected.len()).collect::<Vec<_>>(), expected);
+            assert_eq!(message.text().matches("Pipe cleanup:").count(), 1);
+            emit_tool_execution_end(&finalized, &emit).await;
+            let AgentEvent::ToolExecutionEnd { result, is_error, .. } = rx.recv().await.unwrap() else { panic!("execution end expected") };
+            assert!(is_error && result.is_error);
+            assert_eq!(result.text_content().matches("Pipe cleanup:").count(), 1);
+            assert_eq!(result.content.iter().filter_map(ContentPart::as_text).take(expected.len()).collect::<Vec<_>>(), expected);
+        }
+    }
+
+    struct RecoverAfterHook(bool);
+
+    #[async_trait]
+    impl LoopHooks for RecoverAfterHook {
+        async fn after_tool_call(&self, _: AfterToolCallContext<'_>) -> Option<AfterToolCallResult> {
+            Some(AfterToolCallResult {
+                content: self.0.then(|| vec![ContentPart::text("hook replacement")]),
+                structured: Some(json!({"recovered":true})),
+                is_error: Some(false),
+                ..AfterToolCallResult::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn uncertain_cleanup_survives_top_and_nested_hook_recovery() {
+        for replace in [false, true] {
+            for uncertain in [false, true] {
+                let config = AgentLoopConfig::new(Scripted::new("p", vec![])).with_hooks(Arc::new(RecoverAfterHook(replace)));
+                let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+                let assistant = AssistantMessage::empty("p", "m");
+                let call = ToolCall { id: "owner".into(), name: "composite".into(), arguments: json!({}) };
+                let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &call };
+                let tool: Arc<dyn Tool> = Arc::new(StructuredWorkerResult(uncertain));
+                let (tx, _rx) = mpsc::channel(256);
+                let emit = Emitter::new(&tx, &config);
+                let (result, is_error) = execute_prepared(&tool, &call, &call.arguments, &emit, &CancellationToken::new(), &runner).await;
+                let top = finalize_executed(&context, &assistant, call.clone(), json!({}), result, is_error, &config, None).await;
+                let nested = runner.run(tool, "nested".into(), json!({}), CancellationToken::new()).await;
+                for (result, is_error) in [(&top.result, top.is_error), (&nested.result, nested.is_error)] {
+                    assert_eq!(is_error, uncertain);
+                    assert_eq!(result.text_content().matches("Pipe cleanup:").count(), usize::from(uncertain));
+                    assert_eq!(result.structured, Some(json!({"recovered":true})));
+                    assert!(!result.text_content().contains("private worker output"));
+                    if uncertain { assert!(result.is_error); }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "codemode")]
+    #[tokio::test]
+    async fn structured_composite_uncertainty_rejects_before_following_script_effect() {
+        for (uncertain, recovery) in [(false, None), (true, None), (false, Some(false)), (true, Some(false)), (false, Some(true)), (true, Some(true))] {
+            let mut config = AgentLoopConfig::new(Scripted::new("p", vec![]));
+            if let Some(replace) = recovery { config = config.with_hooks(Arc::new(RecoverAfterHook(replace))); }
+            let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+            let assistant = AssistantMessage::empty("p", "m");
+            let call = ToolCall { id: "script".into(), name: "codemode".into(), arguments: json!({}) };
+            let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &call };
+            let counter = Arc::new(Counter { runs: Mutex::new(vec![]), cancel_on_run: None });
+            let catalog = crate::codemode::StaticCatalog::new(vec![Arc::new(StructuredWorkerResult(uncertain)), counter.clone()]);
+            let script = crate::codemode::CodemodeTool::new(Arc::new(catalog), Default::default());
+            let result = script.execute_with("script", json!({"code":"await tools.composite({}); await tools.count({limit:1});"}), CancellationToken::new(), Arc::new(|_| {}), &runner).await.unwrap();
+            assert_eq!(*counter.runs.lock().unwrap(), if uncertain { vec![] } else { vec![json!({"limit":1})] });
+            assert_eq!(result.is_error, uncertain);
+        }
+    }
+
+    struct FailedWorkerCutoff;
+
+    #[async_trait]
+    impl Tool for FailedWorkerCutoff {
+        fn name(&self) -> &str { "failed_worker" }
+        fn description(&self) -> &str { "fixture worker failure" }
+        fn parameters(&self) -> Value { json!({"type":"object","properties":{}}) }
+        async fn execute(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> { unreachable!() }
+        async fn execute_scoped(&self, _: &str, _: Value, cancel: CancellationToken, _: ToolUpdateFn, _: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+            scope.spawn_pipe("private\nworker", |_| async { panic!("private worker output") }).unwrap();
+            cancel.cancel();
+            std::future::pending().await
+        }
+    }
+
+    fn assert_single_cutoff(result: &ToolResult) {
+        let text = result.text_content();
+        assert!(result.is_error);
+        assert_eq!(text.matches("Pipe cleanup:").count(), 1, "{text}");
+        assert!(text.contains("completed=1, failed=1"));
+        assert!(!text.contains("private worker output"));
+        assert!(result.structured.is_none());
+        assert_eq!(result.details, json!({}));
+    }
+
+    #[tokio::test]
+    async fn failed_completion_cutoff_has_one_diagnostic_in_both_owning_paths() {
+        let config = AgentLoopConfig::new(Scripted::new("p", vec![]));
+        let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+        let assistant = AssistantMessage::empty("p", "m");
+        let call = ToolCall { id: "owner".into(), name: "failed_worker".into(), arguments: json!({}) };
+        let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &call };
+        let tool: Arc<dyn Tool> = Arc::new(FailedWorkerCutoff);
+        let (tx, _rx) = mpsc::channel(256);
+        let emit = Emitter::new(&tx, &config);
+        let (result, _) = execute_prepared(&tool, &call, &call.arguments, &emit, &CancellationToken::new(), &runner).await;
+        assert_single_cutoff(&result);
+        let outcome = runner.run(tool, "nested".into(), json!({}), CancellationToken::new()).await;
+        assert_single_cutoff(&outcome.result);
+    }
+
+    struct ParallelHeldWorker(Arc<tokio::sync::Semaphore>);
+
+    #[async_trait]
+    impl Tool for ParallelHeldWorker {
+        fn name(&self) -> &str { "parallel_held" }
+        fn description(&self) -> &str { "fixture held worker" }
+        fn parameters(&self) -> Value { json!({"type":"object","properties":{}}) }
+        async fn execute(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> { unreachable!() }
+        async fn execute_scoped(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn, _: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+            let release = self.0.clone();
+            scope.spawn_pipe("private-child", |_| async move {
+                release.acquire().await.unwrap().forget();
+                Ok(ToolResult::text("private-output"))
+            }).unwrap();
+            Ok(ToolResult::text("held-owner"))
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_execution_end_does_not_wait_for_another_roots_worker() {
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![
+            Arc::new(ParallelHeldWorker(release.clone())),
+            Arc::new(Counter { runs: Mutex::new(vec![]), cancel_on_run: None }),
+        ], cache_points: vec![] };
+        let config = AgentLoopConfig::new(Scripted::new("p", vec![]));
+        let assistant = AssistantMessage::empty("p", "m");
+        let calls = vec![
+            ToolCall { id: "held".into(), name: "parallel_held".into(), arguments: json!({}) },
+            ToolCall { id: "free".into(), name: "count".into(), arguments: json!({"limit":1}) },
+        ];
+        let (tx, mut rx) = mpsc::channel(256);
+        let emit = Emitter::new(&tx, &config);
+        let cancel = CancellationToken::new();
+        let batch = execute_parallel(&context, &assistant, calls, &config, &emit, &cancel);
+        tokio::pin!(batch);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    _ = &mut batch => panic!("held root returned before release"),
+                    event = rx.recv() => if let Some(AgentEvent::ToolExecutionEnd { tool_call_id, result, .. }) = event {
+                        assert_eq!(tool_call_id, "free");
+                        assert!(!result.text_content().contains("private"));
+                        break;
+                    },
+                }
+            }
+        }).await.expect("independent execution-end");
+        assert!(futures::poll!(&mut batch).is_pending());
+        release.add_permits(1);
+        let batch = batch.await;
+        assert_eq!(batch.messages[0].tool_call_id, "held");
+        assert_eq!(batch.messages[1].tool_call_id, "free");
+        assert!(!batch.messages[1].text().contains("private"));
+    }
+
+    struct RecordChildResult(Mutex<Vec<bool>>);
+
+    #[async_trait]
+    impl LoopHooks for RecordChildResult {
+        async fn after_tool_call(&self, ctx: AfterToolCallContext<'_>) -> Option<AfterToolCallResult> {
+            assert_eq!(ctx.parent.unwrap().id, "script");
+            self.0.lock().unwrap().push(ctx.is_error);
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stuck_child_is_cut_off_and_finalized() {
+        let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+        let assistant = AssistantMessage::empty("p", "m");
+        let hooks = Arc::new(RecordChildResult(Mutex::new(vec![])));
+        let config = AgentLoopConfig::new(Scripted::new("p", vec![])).with_hooks(hooks.clone());
+        let parent = ToolCall { id: "script".into(), name: "codemode".into(), arguments: json!({}) };
+        let runner = LoopRunner { context: &context, assistant: &assistant, config: &config, parent: &parent };
+        let cancel = CancellationToken::new();
+        let tool = Arc::new(Hangs { stop: Some(cancel.clone()), interrupt: None });
+        let mut root = ExecutionScope::root(&cancel);
+        let (events, mut observed) = mpsc::unbounded_channel();
+        root.probe = Some(Arc::new(crate::tool::LifecycleProbe { events, release: tokio::sync::Semaphore::new(0), timeout_arm: None, completed: Mutex::new(vec![]) }));
+        let outcome = tokio::time::timeout(Duration::from_secs(5), runner.run_scoped(tool, "child".into(), json!({}), cancel, &root)).await.expect("child released its caller");
+        let mut admission_closed = false;
+        let mut disposed_closed = false;
+        while let Ok(event) = observed.try_recv() {
+            assert_ne!(event, "child_disposed_open");
+            if event == "child_disposed_closed" { disposed_closed = true; }
+            if event == "child_admission_closed" { admission_closed = true; }
+            if event == "child_cutoff" { assert!(admission_closed); }
+        }
+        assert!(admission_closed);
+        assert!(disposed_closed, "actual child execution disposal rejects both admission paths");
+        root.drain().await;
+        assert!(outcome.is_error && !outcome.blocked);
+        assert!(outcome.result.text_content().starts_with("Cut off:"));
+        assert_eq!(*hooks.0.lock().unwrap(), vec![true]);
+    }
+
+    #[cfg(unix)]
+    struct StopOnOutput(CancellationToken);
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl EventSink for StopOnOutput {
+        async fn on_event(&self, event: &AgentEvent) {
+            if let AgentEvent::ToolExecutionUpdate { partial_result, .. } = event {
+                if partial_result.text_content().contains("held") {
+                    self.0.cancel();
+                }
+            }
+        }
+    }
+
+    /// The loop must not drop pipe bash at its own cleanup deadline and lose partial output.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn loop_grace_preserves_pipe_bash_cleanup() {
+        struct HeldPipe(std::path::PathBuf);
+        impl Drop for HeldPipe {
+            fn drop(&mut self) {
+                if let Ok(pid) = std::fs::read_to_string(self.0.join("held.pid")) {
+                    if let Ok(pid) = pid.trim().parse::<i32>() {
+                        if pid > 0 {
+                            unsafe { libc::kill(pid, libc::SIGKILL); }
+                        }
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        // Login-shell discovery has its own five-second budget. The watchdog below covers
+        // command cancellation and cleanup, not that unrelated one-time startup boundary.
+        crate::login_shell::environment().await;
+        for mode in [ToolExecutionMode::Sequential, ToolExecutionMode::Parallel] {
+            for script in [false, true] {
+                let dir = std::env::temp_dir().join(format!("beans-loop-held-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let held = HeldPipe(dir.clone());
+                let tool = if script { crate::tools::BashTool::for_script(dir) } else { crate::tools::BashTool::new(dir) };
+                let provider = Scripted::new("p", vec![Turn::Call {
+                    name: "bash",
+                    args: r#"{"command":"set -m; sh -c 'echo $$ > held.pid; exec sleep 30' & while [ ! -s held.pid ]; do sleep 0.01; done; printf held; wait","description":"Hold a pipe"}"#,
+                    stop: StopReason::ToolUse,
+                }]);
+                let cancel = CancellationToken::new();
+                let mut config = AgentLoopConfig::new(provider).with_sink(Arc::new(StopOnOutput(cancel.clone())));
+                config.tool_execution = mode;
+                let (messages, _) = tokio::time::timeout(Duration::from_secs(5), run_with(config, vec![Arc::new(tool)], cancel)).await.expect("pipe cleanup releases the loop");
+                let results = tool_results(&messages);
+                assert_eq!(results.len(), 1);
+                let result = results[0];
+                let text = result.text();
+                assert!(result.is_error);
+                if text.starts_with("Cut off:") {
+                    assert!(text.contains("Pipe cleanup: completed=1"), "{text}");
+                } else {
+                    assert!(text.contains("held") && text.contains("Command aborted"), "{text}");
+                    assert!(text.contains("deadline reached") && text.contains("not undone"), "{text}");
+                }
+                drop(held);
+            }
+        }
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    struct StuckSibling {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[async_trait]
+    impl Tool for StuckSibling {
+        fn name(&self) -> &str { "stuck" }
+        fn description(&self) -> &str { "stalls" }
+        fn parameters(&self) -> Value { json!({"type":"object","properties":{}}) }
+        async fn execute(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    struct HeldNestedPipe(std::path::PathBuf);
+
+    #[cfg(all(unix, feature = "codemode"))]
+    impl Drop for HeldNestedPipe {
+        fn drop(&mut self) {
+            if let Ok(pid) = std::fs::read_to_string(self.0.join("held.pid")) {
+                if let Ok(pid) = pid.trim().parse::<i32>() {
+                    if pid > 0 { unsafe { libc::kill(pid, libc::SIGKILL); } }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    struct ProbedScript {
+        tool: crate::codemode::CodemodeTool,
+        probe: Arc<crate::tool::LifecycleProbe>,
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[async_trait]
+    impl Tool for ProbedScript {
+        fn name(&self) -> &str { "codemode" }
+        fn description(&self) -> &str { self.tool.description() }
+        fn parameters(&self) -> Value { self.tool.parameters() }
+        async fn execute(&self, _: &str, _: Value, _: CancellationToken, _: ToolUpdateFn) -> Result<ToolResult, ToolError> { unreachable!() }
+        async fn execute_scoped(&self, id: &str, args: Value, cancel: CancellationToken, update: ToolUpdateFn, runner: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+            struct Disposed(Arc<crate::tool::LifecycleProbe>, ExecutionScope);
+            impl Drop for Disposed {
+                fn drop(&mut self) {
+                    let closed = self.1.child(&CancellationToken::new()).is_err();
+                    let _ = self.0.events.send(if closed { "disposed_closed" } else { "disposed_open" });
+                    let _ = self.0.events.send("parent_disposed");
+                }
+            }
+            let _disposed = Disposed(self.probe.clone(), scope.clone());
+            let mut scope = scope.clone();
+            scope.probe = Some(self.probe.clone());
+            self.tool.execute_scoped(id, args, cancel, update, runner, &scope).await
+        }
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    struct NestedHooks {
+        review: bool,
+        entered: Arc<tokio::sync::Notify>,
+        queue: crate::AgentMessageQueue,
+        events: mpsc::UnboundedSender<&'static str>,
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[async_trait]
+    impl LoopHooks for NestedHooks {
+        async fn before_tool_call(&self, ctx: BeforeToolCallContext<'_>) -> Option<BeforeToolCallResult> {
+            if self.review && ctx.tool_call.name == "stuck" {
+                self.entered.notify_one();
+                std::future::pending().await
+            } else { None }
+        }
+        async fn steering_messages(&self) -> Vec<AgentMessage> {
+            let messages = self.queue.drain();
+            if !messages.is_empty() { let _ = self.events.send("promoted"); }
+            messages
+        }
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[tokio::test]
+    async fn real_nested_pipe_survives_parent_cutoff_and_stuck_sibling() {
+        for review in [false, true] {
+            for send_now in [false, true] {
+                let dir = std::env::temp_dir().join(format!("beans-nested-held-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let held = HeldNestedPipe(dir.clone());
+                let entered = Arc::new(tokio::sync::Notify::new());
+                let catalog = crate::codemode::StaticCatalog::new(vec![
+                    Arc::new(crate::tools::BashTool::for_script(dir)),
+                    Arc::new(StuckSibling { entered: entered.clone() }),
+                ]);
+                let cancel = CancellationToken::new();
+                let (events, mut observed) = mpsc::unbounded_channel();
+                let probe = Arc::new(crate::tool::LifecycleProbe { events: events.clone(), release: tokio::sync::Semaphore::new(0), timeout_arm: None, completed: Mutex::new(vec![]) });
+                let tool: Arc<dyn Tool> = Arc::new(ProbedScript {
+                    tool: crate::codemode::CodemodeTool::new(Arc::new(catalog), Default::default()), probe: probe.clone(),
+                });
+                let queue = crate::AgentMessageQueue::new(crate::QueueMode::All);
+                let interrupt = StepInterrupt::new();
+                let code = r#"{"code":"await Promise.all([tools.bash({command:`set -m; sh -c 'echo $$ > held.pid; exec sleep 30' & while [ ! -s held.pid ]; do sleep 0.01; done; printf held; wait`}), tools.stuck({})]);"}"#;
+                let provider = Scripted::new("p", vec![Turn::Call { name: "codemode", args: code, stop: StopReason::ToolUse }, Turn::Text("shipping")]);
+                let hooks = Arc::new(NestedHooks { review, entered: entered.clone(), queue: queue.clone(), events });
+                let config = AgentLoopConfig::new(provider).with_hooks(hooks).with_interrupt(interrupt.clone());
+                let execution = run_with(config, vec![tool], cancel.clone());
+                tokio::pin!(execution);
+                let ready = async {
+                    entered.notified().await;
+                    while observed.recv().await != Some("pipe_ready") {}
+                };
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::select! { _ = &mut execution => panic!("completed before readiness"), _ = ready => {} }
+                }).await.expect("nested calls reached readiness");
+                if send_now {
+                    queue.push(AgentMessage::user("ship now"));
+                    assert!(interrupt.interrupt());
+                } else {
+                    cancel.cancel();
+                }
+                let mut closed_at_disposal = false;
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        tokio::select! {
+                            _ = &mut execution => panic!("parent disposed active pipe cleanup"),
+                            event = observed.recv() => {
+                                assert_ne!(event, Some("promoted"));
+                                assert_ne!(event, Some("disposed_open"), "admission closes before disposal");
+                                assert_ne!(event, Some("cleanup_started"), "worker remains withheld through parent disposal");
+                                if event == Some("disposed_closed") { closed_at_disposal = true; }
+                                if event == Some("parent_disposed") { assert!(closed_at_disposal); break; }
+                            },
+                        }
+                    }
+                }).await.expect("parent reached cutoff disposal");
+                assert!(futures::poll!(&mut execution).is_pending());
+                probe.release.add_permits(1);
+                let (messages, _) = tokio::time::timeout(Duration::from_secs(5), &mut execution).await.expect("root drained");
+                let mut started = 0;
+                let mut finished = 0;
+                let mut captured = 0;
+                let mut promoted = 0;
+                while let Ok(event) = observed.try_recv() {
+                    match event {
+                        "cleanup_started" => { started += 1; assert_eq!(finished, 0); }
+                        "cleanup_finished" => { assert_eq!(started, 1); finished += 1; }
+                        "worker_completed" => { assert_eq!(finished, 1); captured += 1; }
+                        "promoted" => { assert_eq!(captured, 1, "promotion waits for immutable completion"); promoted += 1; }
+                        _ => {}
+                    }
+                }
+                assert_eq!(captured, 1);
+                let retained = probe.completed.lock().unwrap();
+                let pipe = retained[0].result().unwrap();
+                assert_eq!(pipe.structured.as_ref().unwrap()["output"], "held");
+                assert!(pipe.text_content().contains("deadline reached"));
+                assert_eq!((started, finished, promoted), (1, 1, usize::from(send_now)));
+                let result = tool_results(&messages)[0];
+                assert!(result.is_error);
+                assert!(!result.text().contains("held"));
+                assert!(!result.text().contains("deadline reached"));
+                if result.text().starts_with("Cut off:") { assert!(result.text().contains("Pipe cleanup: completed=1")); }
+                if send_now {
+                    assert!(messages.iter().any(|message| matches!(message, AgentMessage::User(user) if user.content[0].as_text() == Some("ship now"))));
+                    assert!(matches!(messages.last(), Some(AgentMessage::Assistant(last)) if last.text() == "shipping"));
+                    assert!(!cancel.is_cancelled());
+                } else {
+                    assert!(matches!(messages.last(), Some(AgentMessage::Assistant(last)) if last.stop_reason == StopReason::Aborted));
+                }
+                drop(held);
+            }
+        }
+    }
+    #[cfg(all(unix, feature = "codemode"))]
+    struct ReturnGate(Arc<tokio::sync::Semaphore>);
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[async_trait]
+    impl crate::codemode::HostFunction for ReturnGate {
+        fn name(&self) -> &str { "gate" }
+        fn description(&self) -> &str { "fixture return gate" }
+        fn signature(&self) -> &str { "(): Promise<string>" }
+        async fn call(&self, _: Vec<Value>, _: &CancellationToken) -> Result<Value, String> {
+            self.0.acquire().await.expect("return gate").forget();
+            Ok(json!("ready"))
+        }
+    }
+
+    #[cfg(all(unix, feature = "codemode"))]
+    #[tokio::test]
+    async fn independent_script_completion_and_timeout_drain_after_wind_down() {
+        for timeout in [false, true] {
+            let dir = std::env::temp_dir().join(format!("beans-script-held-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let held = HeldNestedPipe(dir.clone());
+            let gate = Arc::new(tokio::sync::Semaphore::new(0));
+            let catalog = crate::codemode::StaticCatalog::new(vec![Arc::new(crate::tools::BashTool::for_script(dir))]);
+            let tool = crate::codemode::CodemodeTool::new(Arc::new(catalog), Default::default()).with_functions(vec![Arc::new(ReturnGate(gate.clone()))]);
+            let cancel = CancellationToken::new();
+            let mut root = ExecutionScope::root(&cancel);
+            let (events, mut observed) = mpsc::unbounded_channel();
+            let arm = Arc::new(tokio::sync::Semaphore::new(0));
+            let probe = Arc::new(crate::tool::LifecycleProbe { events, release: tokio::sync::Semaphore::new(0), timeout_arm: Some(arm.clone()), completed: Mutex::new(vec![]) });
+            root.probe = Some(probe.clone());
+            // Await a host-controlled gate before normal return, or let the real host timer end it.
+            let code = if timeout {
+                "// @options: {\"timeout_ms\": 2000}\nawait tools.bash({command:`set -m; sh -c 'echo $$ > held.pid; exec sleep 30' & while [ ! -s held.pid ]; do sleep 0.01; done; printf held; wait`});"
+            } else {
+                "tools.bash({command:`set -m; sh -c 'echo $$ > held.pid; exec sleep 30' & while [ ! -s held.pid ]; do sleep 0.01; done; printf held; wait`}); await gate(); return 'done';"
+            };
+            let direct = crate::tool::DirectRunner;
+            let execution = tool.execute_scoped("script", json!({"code":code}), cancel.clone(), Arc::new(|_| {}), &direct, &root);
+            tokio::pin!(execution);
+            let mut ready = false;
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    tokio::select! {
+                        _ = &mut execution => panic!("script returned before pipe acknowledgement"),
+                        event = observed.recv() => match event {
+                            Some("pipe_ready") => { ready = true; arm.add_permits(1); if !timeout { gate.add_permits(1); } }
+                            Some("wind_down_expired") => { assert!(ready); break; }
+                            _ => {}
+                        },
+                    }
+                }
+            }).await.expect("script reached wind-down barrier");
+            assert!(futures::poll!(&mut execution).is_pending());
+            probe.release.add_permits(1);
+            tokio::time::timeout(Duration::from_secs(5), &mut execution).await.expect("script drained").unwrap();
+            let completed = root.drain().await;
+            assert_eq!(completed.len(), 1);
+            let pipe = completed[0].1.result().unwrap();
+            assert_eq!(pipe.structured.as_ref().unwrap()["output"], "held");
+            assert!(pipe.text_content().contains("deadline reached"));
+            assert!(!cancel.is_cancelled());
+            drop(held);
+        }
+    }
+
 
     #[tokio::test]
     async fn an_abort_during_a_tool_ends_the_turn_without_another_call() {

@@ -1381,7 +1381,11 @@ mod tests {
             let t = tools(WAITING_AFTER);
             assert_eq!(t.bash.parameters()["properties"]["background"]["type"], "boolean");
             assert!(BashTool::new(std::env::temp_dir()).parameters()["properties"].get("background").is_none(), "not on pipes");
-            let command = "echo listening; while true; do echo tick; sleep 0.1; done";
+            // Keep a stable foreground executable for Ctrl-C. Non-interactive bash may
+            // continue after SIGINT if the child it waits for did not die from that signal;
+            // repeatedly starting sleep makes this a race. exec replaces that shell with
+            // cat, which streams the same ticks and dies from the terminal's signal.
+            let command = "echo listening; exec cat < <(while true; do echo tick; sleep 0.1; done)";
             // Login-shell capture is outside the settle window the assertion measures.
             crate::login_shell::environment().await;
             let started = std::time::Instant::now();
@@ -1528,6 +1532,121 @@ mod tests {
             assert!(t.host.get(&id).is_some(), "and keeps its session");
             assert!(running.total() > unread, "the output it printed since is still unread");
             running.stop("Stopped");
+        }
+    }
+
+    /// Silence may return before the longest wait; the deadline is a cap, not a minimum.
+    /// Each chunk restarts that silence window, even after the original idle deadline.
+    #[tokio::test(start_paused = true)]
+    async fn output_restarts_the_idle_window() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+
+        // Drive the real waiter with its real output notification, but no child process or
+        // wall-clock scheduling. Both bash_input and bash_output use this idle clock.
+        for needs_output in [false, true] {
+            let started = Instant::now();
+            let session = BashSession {
+                id: new_id(), command: "controlled output".into(), pid: 0, started,
+                background: false.into(),
+                state: Mutex::new(SessionState { output: Output::new(), last_output: started,
+                    last_input: started, end: None, read: 0, drained: false }),
+                changed: watch::channel(0).0,
+                #[cfg(unix)]
+                master: Mutex::new(None),
+                closed: CancellationToken::new(),
+            };
+            let idle = Idle { after: Duration::from_millis(400), needs_output };
+            let cancel = CancellationToken::new();
+            let mut wait = std::pin::pin!(session.wait(0, started, idle, None, &cancel, |_| {}));
+            let waker = futures::task::noop_waker();
+            let mut context = Context::from_waker(&waker);
+            assert_eq!(wait.as_mut().poll(&mut context), Poll::Pending);
+
+            // Six ticks cross the original 400 ms deadline. Ignoring last_output would
+            // incorrectly return Waiting on the fourth tick instead of renewing idle.
+            for tick in 1..=6 {
+                tokio::time::advance(Duration::from_millis(100)).await;
+                session.push_output(b"tick\n");
+                assert_eq!(wait.as_mut().poll(&mut context), Poll::Pending, "tick {tick}, needs_output={needs_output}");
+            }
+            tokio::time::advance(idle.after - Duration::from_millis(1)).await;
+            assert_eq!(wait.as_mut().poll(&mut context), Poll::Pending, "the last tick still renews idle");
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert_eq!(wait.as_mut().poll(&mut context), Poll::Ready(Stop::Waiting));
+            assert_eq!(started.elapsed(), Duration::from_secs(1));
+            assert!(session.end().is_none(), "idle ends the wait, not the session");
+        }
+    }
+
+    /// Silence may return before the longest wait; the deadline is a cap, not a minimum.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_returns_when_the_command_goes_quiet_before_its_deadline() {
+        let idle = Duration::from_millis(400);
+        let t = tools(idle);
+        let started = call(&t.bash, json!({
+            "command": "read -r start; echo ready; read -r x; echo got:$x; read -r done",
+        })).await.unwrap();
+        let id = session_id(&started);
+        let session = t.host.get(&id).unwrap();
+        // Force readiness to arrive after bash returned. Seeing it in preview alone does
+        // not consume it: drain the complete line through bash_output before measuring.
+        session.write(b"start\r").await.unwrap();
+        printed(&session, "ready\n").await;
+        let ready = call(&t.output, json!({"session_id": id})).await.unwrap();
+        assert!(ready.text_content().starts_with("ready\n"), "{}", ready.text_content());
+
+        let elapsed = std::time::Instant::now();
+        let answered = tokio::time::timeout(
+            Duration::from_secs(10),
+            call(&t.input, json!({"session_id": id, "text": "hello"})),
+        ).await.expect("bash_input returned after silence").unwrap();
+        assert!(elapsed.elapsed() >= idle);
+        let text = answered.text_content();
+        assert!(text.starts_with("got:hello\n\n\n[No output for 0.4 seconds."), "{text}");
+        assert_eq!(answered.details["state"], "waiting", "{text}");
+        assert!(session.end().is_none(), "silence leaves the command running");
+        session.stop("Stopped");
+    }
+
+    /// A command can deliberately ignore Ctrl-C. Input still returns at its deadline,
+    /// without claiming it stopped or forcing a kill instead of typing terminal keys.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_returns_at_the_deadline_when_ctrl_c_is_ignored() {
+        for background in [true, false] {
+            let mut t = tools(Duration::from_millis(400));
+            t.input.waiting_after = WAITING_AFTER;
+            t.input.longest_wait = Duration::from_millis(500);
+            let started = call(&t.bash, json!({
+                "command": "trap '' INT; read -r start; echo ready; read -r answer; echo unexpected:$answer",
+                "background": background,
+            })).await.unwrap();
+            let id = session_id(&started);
+            let session = t.host.get(&id).unwrap();
+            // The startup read forces ready to be late, for both background modes.
+            // Drain the complete marker rather than assuming printed advanced read_mark.
+            session.write(b"start\r").await.unwrap();
+            printed(&session, "ready\n").await;
+            let ready = call(&t.output, json!({"session_id": id})).await.unwrap();
+            assert!(ready.text_content().starts_with("ready\n"), "{}", ready.text_content());
+            let longest = if background { BACKGROUND_SETTLE } else { t.input.longest_wait };
+
+            let elapsed = std::time::Instant::now();
+            let typed = tokio::time::timeout(
+                Duration::from_secs(20),
+                call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})),
+            ).await.expect("bash_input returned although Ctrl-C was ignored").unwrap();
+            let elapsed = elapsed.elapsed();
+            assert!(elapsed >= longest && elapsed < longest + Duration::from_secs(3), "{background}: {elapsed:?}");
+            let text = typed.text_content();
+            let still = if background { "Running in the background as session" } else { "Still running as session" };
+            assert!(text.starts_with(&format!("[{still} {id}.")), "{text}");
+            assert_eq!(typed.details["state"], "waiting", "{text}");
+            assert!(session.end().is_none(), "ignored Ctrl-C leaves the command running");
+            assert!(t.host.get(&id).is_some(), "the live session is retained");
+            session.stop("Stopped");
         }
     }
 

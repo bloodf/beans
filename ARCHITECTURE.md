@@ -1,8 +1,8 @@
 # Beans Architecture
 
-Read this before writing code, then the docs in [Subjects](#subjects) for the parts you change.
+Before coding, read this and [Subjects](#subjects).
 
-Beans is a Grok Bot alternative: persistent named bots, 1:1 chats, group chats, handoff, and orchestration. Work runs on **Devices you own**. The Rust CLI runs on macOS, Linux, and Windows. The macOS app, and the app for Windows and Linux, are UIs for the local CLI, which each bundles and launches.
+Beans is a Grok Bot alternative with persistent named bots, 1:1 and group chats, handoff and orchestration on **Devices you own**. Its Rust CLI runs on macOS, Linux and Windows; each desktop UI bundles and launches it.
 
 Identity is a **key pair**. Devices pair. The relay stores public keys and ciphertext, after [Happy’s security model](https://happy.engineering/docs/security/).
 
@@ -55,12 +55,13 @@ The Linux server updater verifies readiness, upgrades and checks the relay first
 
 ## Subjects
 
-One doc per subject under `docs/architecture/`. `pnpm run check:docs` holds this file to 16 KiB and each subject to 24 KiB, and checks that every subject is listed here and that links and their anchors resolve.
+Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces the 16 KiB overview and 24 KiB subject limits, complete subject listings and valid links/anchors.
 
 | Doc | Read it for |
 | --- | --- |
 | [Account model](docs/architecture/account-model.md) | Entity relationships, Device/relay data ownership and cross-Runner job routing |
 | [Identity](docs/architecture/identity.md) | Key pairs and the identity device, pairing and unpairing, Devices and Runners, what the relay sees, the account's provider credentials |
+| [Device names](docs/architecture/device-names.md) | Account aliases, machine names and durable roster intent |
 | [Device revocation](docs/architecture/device-revocation.md) | Lost, un-wiped Device boundaries and the proposed, unimplemented containment and rotation contract |
 | [Relay](docs/architecture/relay.md) | `crates/relay`: storage on SQLite or Postgres, files, housekeeping, quotas, metrics, rate limits, auth, tables and migrations, the blob, sync socket, and push APIs, deploys |
 | [Computer display](docs/architecture/computer-display.md) | Proposed authenticated display/input transport, Device-bound sessions, lifecycle fences, client feasibility and measurement gaps |
@@ -71,6 +72,7 @@ One doc per subject under `docs/architecture/`. `pnpm run check:docs` holds this
 | [Local API](docs/architecture/local-api.md) | The `/ws` socket: trust boundary, field errors, every method with params and results, events, secret-bearing methods, memory and setup bodies |
 | [CLI (runtime)](docs/architecture/runtime.md) | Commands, local websocket access, proxy/certificate trust, diagnostics, agent loop and notifications |
 | [Local storage and startup admission](docs/architecture/storage-admission.md) | Data directory, format admission, staged scratch preload, creation guards and final startup persistence |
+| [Local task authority](docs/architecture/tasks.md) | Exclusive execution ownership, durable Job.id admission, invocation receipts, recovery and replay fences |
 | [CLI service and updates](docs/architecture/service-updates.md) | CLI installation, standalone services, Runner admission drain and update availability |
 | [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review |
 | [Computer provenance](docs/architecture/computer-provenance.md) | Proposed computer-stack discovery contract, dependency/license provenance, artifact verification and pending deployment gates |
@@ -126,7 +128,7 @@ beans/
   .github/workflows/   # release.yml: manual signed Beans releases; test.yml: full PR/manual test matrix; docs.yml: PR/manual doc check; catalog.yml: PR/manual catalog/index check
 ```
 
-`pnpm run android` rebuilds the Rust core for Android, then builds and runs the Expo dev client on the Android emulator. `cd mobile && pnpm run core` rebuilds the Rust core for both phone platforms; `pnpm run mobile:dev` is the iOS development loop described below.
+See [Phone development](docs/architecture/phone-app.md#development-loop) for phone rebuild commands.
 
 `pnpm run dev` runs the macOS Beans Dev loop; `pnpm run build` produces the Beans release bundle. See [macOS development and builds](docs/architecture/macos-app.md#development-and-builds) for rebuild, launch and SDK-stamping mechanisms. `pnpm run relay` runs a local relay. The [phone development loop](docs/architecture/phone-app.md#development-loop) fingerprints native inputs, rebuilds stale pieces and leaves production Beans processes alone.
 
@@ -136,7 +138,7 @@ Implemented mechanisms include crypto and blob sync, relay storage, CLI identity
 
 Next: keychain storage, a cost budget per chat.
 
-The phone app (`mobile/`) pairs as a Device with `os` `ios`, `ipados`, or `android`; it is never a Runner and does not hold the master secret. The Device that creates or restores the identity holds the master secret.
+See [Phone app](docs/architecture/phone-app.md) for phone identity and key ownership.
 
 ## Open points
 

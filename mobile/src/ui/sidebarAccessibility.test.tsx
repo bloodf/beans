@@ -1,39 +1,39 @@
-import { expect, mock, test } from "bun:test";
+import { expect, vi, test } from "vitest";
 import type { Chat } from "../core/model";
 
 // Invoke production components through the existing native-tag fixture pattern.
 // Native focus order and VoiceOver/TalkBack announcements still require device proof.
 type Node = { type: any; props: any };
 const jsx = (type: any, props: any): Node => typeof type === "function" ? type(props) : { type, props };
-mock.module("react", () => ({
+vi.doMock("react", () => ({
   memo: (component: any) => component,
   useRef: (value: any) => ({ current: value }),
   useEffect: () => {},
   useSyncExternalStore: (_subscribe: any, snapshot: any) => snapshot(),
 }));
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
-mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx }));
-mock.module("react-native", () => ({
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsxDEV: jsx }));
+vi.doMock("react-native", () => ({
   Pressable: "Pressable", Text: "Text", View: "View", TextInput: "TextInput",
   StyleSheet: { create: (value: any) => value },
 }));
-mock.module("react-native-reanimated", () => ({
+vi.doMock("react-native-reanimated", () => ({
   default: { View: "AnimatedView" }, Easing: { linear: "linear" },
   useSharedValue: (value: any) => ({ value }), useAnimatedStyle: (compute: any) => compute,
   withRepeat: (value: any) => value, withTiming: (value: any) => value,
 }));
-mock.module("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ bottom: 0 }) }));
-mock.module("expo-localization", () => ({ getLocales: () => [{ languageCode: "en" }] }));
-mock.module("../core/prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
-mock.module("./Avatar", () => ({ AvatarCluster: "Avatar" }));
-mock.module("./Symbol", () => ({ Symbol: "Symbol" }));
-mock.module("./theme", () => ({ Font: { body: 16 }, usePalette: () => ({}) }));
-mock.module("./Composer", () => ({ Surface: "Surface" }));
-mock.module("./KeyboardFoot", () => ({ KeyboardFoot: "KeyboardFoot" }));
+vi.doMock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ bottom: 0 }) }));
+vi.doMock("expo-localization", () => ({ getLocales: () => [{ languageCode: "en" }] }));
+vi.doMock("../core/prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
+vi.doMock("./Avatar", () => ({ AvatarCluster: "Avatar" }));
+vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
+vi.doMock("./theme", () => ({ Font: { body: 16 }, usePalette: () => ({}) }));
+vi.doMock("./Composer", () => ({ Surface: "Surface" }));
+vi.doMock("./KeyboardFoot", () => ({ KeyboardFoot: "KeyboardFoot" }));
 const { ChatRow } = await import("./ChatRow");
 const { SidebarSearch } = await import("./SidebarSearch");
 const { setAppLanguage, t } = await import("../i18n");
-const { lastActivity, preview, stamp } = await import("./format");
+const { lastActivity, stamp } = await import("./format");
 function find(node: any, type: string): Node | undefined {
   if (Array.isArray(node)) return node.map(child => find(child, type)).find(Boolean);
   if (!node || typeof node !== "object") return;
@@ -48,6 +48,7 @@ test("chat row props expose one localized button label and preserve selection, u
   try {
     for (const language of ["en", "zh"] as const) {
       setAppLanguage(language);
+      const words = language === "en" ? { working: "Working…", unread: "1000 unread", pinned: "Pinned", search: "Search", clear: "Clear" } : { working: "正在处理…", unread: "1000 条未读", pinned: "置顶", search: "搜索", clear: "清除" };
       for (const selected of [undefined, false, true]) {
         for (const responding of [false, true]) {
           let presses = 0, longPresses = 0;
@@ -58,7 +59,7 @@ test("chat row props expose one localized button label and preserve selection, u
           expect(row.props.accessibilityRole).toBe("button");
           expect(row.props.accessibilityState).toEqual(selected === undefined ? undefined : { selected });
           expect(row.props.accessibilityLabel).toBe([
-            "Team chat", stamp(new Date(lastActivity(chat) * 1000)), responding ? t("Working…") : preview(chat, new Map()), t("{count} unread", { count: 1000 }),
+            "Team chat", stamp(new Date(lastActivity(chat) * 1000)), responding ? words.working : "Latest message", words.unread,
           ].join(", "));
           expect(row.props.accessibilityLabel.split(t("{count} unread", { count: 1000 }))).toHaveLength(2);
           expect(find(row, "Avatar")!.props.working).toBe(true);
@@ -72,7 +73,7 @@ test("chat row props expose one localized button label and preserve selection, u
         }
       }
       const read = ChatRow({ chat: { ...chat, unread_count: 0, is_pinned: true }, bots: new Map(), title: "Team chat", working: false, responding: false, onPress: () => {} }) as Node;
-      expect(read.props.accessibilityLabel).toContain(t("Pinned"));
+      expect(read.props.accessibilityLabel).toContain(words.pinned);
       expect(read.props.accessibilityLabel).not.toContain(t("{count} unread", { count: 0 }));
     }
   } finally { setAppLanguage("en"); }
@@ -82,19 +83,20 @@ test("sidebar search props retain its localized name with empty and nonempty inp
   try {
     for (const language of ["en", "zh"] as const) {
       setAppLanguage(language);
+      const words = language === "en" ? { working: "Working…", unread: "1000 unread", pinned: "Pinned", search: "Search", clear: "Clear" } : { working: "正在处理…", unread: "1000 条未读", pinned: "置顶", search: "搜索", clear: "清除" };
       for (const value of ["", "needle"]) {
         const changes: string[] = [];
         const root = SidebarSearch({ value, placeholder: t("Search"), onChangeText: text => changes.push(text) }) as Node;
         const input = find(root, "TextInput")!;
-        expect(input.props.accessibilityLabel).toBe(t("Search"));
-        expect(input.props.placeholder).toBe(t("Search"));
+        expect(input.props.accessibilityLabel).toBe(words.search);
+        expect(input.props.placeholder).toBe(words.search);
         expect(input.props.value).toBeUndefined();
         input.props.onChangeText("typed");
         const clear = find(root, "Pressable");
         expect(!!clear).toBe(!!value);
         if (clear) {
           expect(clear.props.accessibilityRole).toBe("button");
-          expect(clear.props.accessibilityLabel).toBe(t("Clear"));
+          expect(clear.props.accessibilityLabel).toBe(words.clear);
           clear.props.onPress();
         }
         expect(changes).toEqual(value ? ["typed", ""] : ["typed"]);

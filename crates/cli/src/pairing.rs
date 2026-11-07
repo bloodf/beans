@@ -329,6 +329,7 @@ async fn join(app: &Arc<App>, pairing: (String, String, String, String), device_
 mod publication_tests {
     use super::*;
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn join_publication_rejects_forget_and_competing_create() {
         use axum::{routing::{get, post}, Json, Router};

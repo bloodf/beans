@@ -20,11 +20,14 @@ struct UninstallRequest { version: u8, runner_id: String, managed_id: String, co
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompareRequest { version: u8, runner_id: String, root: String, managed_id: String }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeepBothRequest { version: u8, runner_id: String, token: String, managed_id: String, confirmed: bool }
 
-enum Operation { Preview(PreviewRequest), Import(ImportRequest), Uninstall(UninstallRequest), Compare(CompareRequest) }
+enum Operation { Preview(PreviewRequest), Import(ImportRequest), Uninstall(UninstallRequest), Compare(CompareRequest), KeepBoth(KeepBothRequest) }
 impl Operation {
     fn runner(&self) -> &str {
-        match self { Self::Preview(s) => &s.runner_id, Self::Import(s) => &s.runner_id, Self::Uninstall(s) => &s.runner_id, Self::Compare(s) => &s.runner_id }
+        match self { Self::Preview(s) => &s.runner_id, Self::Import(s) => &s.runner_id, Self::Uninstall(s) => &s.runner_id, Self::Compare(s) => &s.runner_id, Self::KeepBoth(s) => &s.runner_id }
     }
 }
 fn parse(method: &str, body: Value) -> Result<Operation, String> {
@@ -40,6 +43,12 @@ fn parse(method: &str, body: Value) -> Result<Operation, String> {
             if s.version != 1 || !opaque(&s.token) { return Err(INVALID.into()); }
             if !s.confirmed { return Err("skill_library_confirmation_required".into()); }
             Operation::Import(s)
+        }
+        "skills.library.keep_both" => {
+            let s: KeepBothRequest = serde_json::from_value(body).map_err(|_| INVALID)?;
+            if s.version != 1 || !opaque(&s.token) || !opaque(&s.managed_id) { return Err(INVALID.into()); }
+            if !s.confirmed { return Err("skill_library_confirmation_required".into()); }
+            Operation::KeepBoth(s)
         }
         "skills.library.uninstall" => {
             let s: UninstallRequest = serde_json::from_value(body).map_err(|_| INVALID)?;
@@ -100,6 +109,12 @@ struct UninstallReply { version: u8, runner_id: String, managed_id: String, clea
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompareReply { version: u8, runner_id: String, managed_id: String, added: Vec<String>, removed: Vec<String>, changed: Vec<String> }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeepBothReply {
+    version: u8, runner_id: String, original_managed_id: String, managed_id: String,
+    source_label: String, digest: String, summary: Summary, durability_warning: bool,
+}
 fn resource_path(path: &str) -> bool {
     !path.is_empty() && text(path, 4096) && !path.contains(['\\', ':'])
         && path.split('/').count() <= 5 && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
@@ -141,6 +156,16 @@ fn decode(method: &str, value: Value, runner: &str, requested_removal: Option<&s
             if r.version != 1 || r.runner_id != runner || !opaque(&r.managed_id) || !valid_summary(&r.summary) { return Err(invalid()); }
             serde_json::to_value(r).map_err(|_| invalid())
         }
+        "skills.library.keep_both" => {
+            summary_record(&value["summary"])?;
+            let r: KeepBothReply = serde_json::from_value(value).map_err(|_| invalid())?;
+            if r.version != 1 || r.runner_id != runner || !opaque(&r.managed_id) || !opaque(&r.original_managed_id)
+                || requested_removal != Some(r.original_managed_id.as_str()) || r.managed_id == r.original_managed_id
+                || r.source_label.is_empty() || !text(&r.source_label, 256) || r.digest.len() != 64
+                || !r.digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                || !valid_summary(&r.summary) { return Err(invalid()); }
+            serde_json::to_value(r).map_err(|_| invalid())
+        }
         "skills.library.uninstall" => {
             let r: UninstallReply = serde_json::from_value(value).map_err(|_| invalid())?;
             if r.version != 1 || r.runner_id != runner || !opaque(&r.managed_id) || requested_removal != Some(r.managed_id.as_str()) { return Err(invalid()); }
@@ -163,7 +188,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, body: Value) -> Result<Value
     let result = if actor == operation.runner() { serve_as(app, method, body, &actor).await? }
         else { crate::requests::ask(app, operation.runner(), method, body).await? };
     let _guards = authority.enter(app, false)?;
-    let requested_removal = match &operation { Operation::Uninstall(s) => Some(s.managed_id.as_str()), Operation::Compare(s) => Some(s.managed_id.as_str()), _ => None };
+    let requested_removal = match &operation { Operation::Uninstall(s) => Some(s.managed_id.as_str()), Operation::Compare(s) => Some(s.managed_id.as_str()), Operation::KeepBoth(s) => Some(s.managed_id.as_str()), _ => None };
     let result = decode(method, result, operation.runner(), requested_removal)?;
     if let Operation::Preview(s) = operation { if result["source"] != s.root { return Err("invalid_skill_library_response".into()); } }
     Ok(result)
@@ -246,6 +271,23 @@ mod runner {
         #[cfg(not(target_os = "linux"))]
         { let _ = app; Err("secure_skill_library_unavailable".into()) }
     }
+    fn import(app: &Arc<App>, s: ImportRequest, authority: Authority, original_id: Option<&str>) -> Result<ImportReply, String> {
+        // Consume before every effect, including refusal due to stale authority or source.
+        let approval = approvals().lock().unwrap().remove(&s.token).ok_or("skill_library_approval_not_found")?;
+        if approval.expires <= Instant::now() || !approval.app.ptr_eq(&Arc::downgrade(app))
+            || approval.authority.actor != authority.actor || approval.authority.runner != authority.runner
+            || approval.authority.incarnation != authority.incarnation || approval.authority.binding != authority.binding { return Err("skill_library_approval_stale".into()); }
+        { let _guards = approval.authority.enter(app, true)?; }
+        let library = { let _guards = approval.authority.enter(app, true)?; library(app)? };
+        let admit = || approval.authority.enter(app, true).map_err(std::io::Error::other);
+        let outcome = match original_id {
+            Some(id) => library.import_approved_keep_both(Path::new(&approval.source), &authority.runner, &approval.inventory, id, admit),
+            None => library.import_approved(Path::new(&approval.source), &authority.runner, &approval.inventory, admit),
+        }.map_err(failure)?;
+        let _guards = authority.enter(app, true)?;
+        Ok(ImportReply { version: 1, runner_id: s.runner_id, managed_id: outcome.manifest.bundle_id,
+            summary: summary(&approval.inventory), durability_warning: outcome.durability_warning.is_some() })
+    }
     pub(super) fn perform(app: &Arc<App>, operation: Operation, authority: Authority) -> Result<Value, String> {
         match operation {
             Operation::Preview(s) => {
@@ -262,18 +304,7 @@ mod runner {
                 serde_json::to_value(reply).map_err(|_| "skill_library_failed".into())
             }
             Operation::Import(s) => {
-                // Consume before every effect, including refusal due to stale authority or source.
-                let approval = approvals().lock().unwrap().remove(&s.token).ok_or("skill_library_approval_not_found")?;
-                if approval.expires <= Instant::now() || !approval.app.ptr_eq(&Arc::downgrade(app))
-                    || approval.authority.actor != authority.actor || approval.authority.runner != authority.runner
-                    || approval.authority.incarnation != authority.incarnation || approval.authority.binding != authority.binding { return Err("skill_library_approval_stale".into()); }
-                { let _guards = approval.authority.enter(app, true)?; }
-                let library = { let _guards = approval.authority.enter(app, true)?; library(app)? };
-                let outcome = library.import_approved(Path::new(&approval.source), &authority.runner, &approval.inventory,
-                    || approval.authority.enter(app, true).map_err(std::io::Error::other)).map_err(failure)?;
-                let _guards = authority.enter(app, true)?;
-                serde_json::to_value(ImportReply { version: 1, runner_id: s.runner_id, managed_id: outcome.manifest.bundle_id,
-                    summary: summary(&approval.inventory), durability_warning: outcome.durability_warning.is_some() }).map_err(|_| "skill_library_failed".into())
+                serde_json::to_value(import(app, s, authority, None)?).map_err(|_| "skill_library_failed".into())
             }
             Operation::Uninstall(s) => {
                 let library = { let _guards = authority.enter(app, true)?; library(app)? };
@@ -281,6 +312,27 @@ mod runner {
                 let _guards = authority.enter(app, true)?;
                 serde_json::to_value(UninstallReply { version: 1, runner_id: s.runner_id, managed_id: s.managed_id,
                     cleanup_warning: outcome.cleanup_warning.is_some(), durability_warning: outcome.durability_warning.is_some() }).map_err(|_| "skill_library_failed".into())
+            }
+            Operation::KeepBoth(s) => {
+                // Publication requires the original directory, without validating edited contents.
+                let (source_label, digest) = {
+                    let pending = approvals().lock().unwrap();
+                    let approval = pending.get(&s.token).ok_or("skill_library_approval_not_found")?;
+                    let label = Path::new(&approval.source).file_name().and_then(|name| name.to_str())
+                        .filter(|label| !label.is_empty() && text(label, 256)).ok_or(INVALID)?.to_string();
+                    use sha2::{Digest, Sha256};
+                    let mut files: Vec<_> = approval.inventory.files.iter().collect();
+                    files.sort_unstable_by(|a,b| a.path.cmp(&b.path));
+                    let identity: Vec<_> = files.iter().map(|file| (&file.path,file.bytes,&file.sha256)).collect();
+                    let digest = format!("{:x}",Sha256::digest(serde_json::to_vec(&identity).map_err(|_| INVALID)?));
+                    (label, digest)
+                };
+                let imported = import(app, ImportRequest {
+                    version: s.version, runner_id: s.runner_id.clone(), token: s.token, confirmed: s.confirmed,
+                }, authority, Some(&s.managed_id))?;
+                serde_json::to_value(KeepBothReply { version: 1, runner_id: s.runner_id,
+                    original_managed_id: s.managed_id, managed_id: imported.managed_id, source_label, digest,
+                    summary: imported.summary, durability_warning: imported.durability_warning }).map_err(|_| "skill_library_failed".into())
             }
             Operation::Compare(s) => {
                 // Compare never creates the library, stages a copy or issues an approval.

@@ -1,3 +1,4 @@
+import { globSync } from "node:fs";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import type { ViteDevServer } from "vite";
 
 const expected: Record<string, string> = {
   "src/ui/settings/deviceNames.browser.tsx": "checkDeviceNamingConsumer",
+  "src/ui/compact.browser.tsx": "checkCompactActionRow",
   "src/ui/chat/cards.browser.tsx": "checkCommandCardInput",
   "src/ui/chat/composer.browser.tsx": "checkComposerSendAck",
   "src/ui/motion.browser.tsx": "checkReducedMotion",
@@ -16,7 +18,7 @@ const expected: Record<string, string> = {
   "src/ui/sheets/skillDiscovery.browser.tsx": "checkSkillDiscoveryConsumer",
   "src/ui/sheets/skillLibrary.browser.tsx": "checkSkillLibraryConsumer",
 };
-const files = [...new Bun.Glob("src/**/*.browser.tsx").scanSync()].sort();
+const files = globSync("src/**/*.browser.tsx").sort();
 if (Object.keys(expected).some((file) => !files.includes(file))) throw new Error("Required browser consumer missing");
 const evidence = process.env.BROWSER_EVIDENCE_DIR;
 if (evidence) await mkdir(evidence, { recursive: true });
@@ -47,7 +49,7 @@ try {
     const settings = file.endsWith("/motion.browser.tsx") ? ["reduce", "no-preference"] as const : ["no-preference"] as const;
     for (const reducedMotion of settings) {
       const context = await browser.newContext({ reducedMotion, viewport: { width: 1200, height: 900 } });
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      let timer: NodeJS.Timeout | undefined;
       try {
         const run = async () => {
           const page = await context.newPage();
@@ -69,7 +71,7 @@ try {
             }
           });
           if (file.endsWith("/palette.browser.tsx")) {
-            // Browser-only state loads in the isolated page, never in the Bun runner.
+            // Browser-only state loads in the isolated page, never in the Node runner.
             await page.evaluate(async (path) => { const { store } = await import(path); store.start(); }, "/src/model/store.ts");
           }
           const result = page.evaluate(async ({ modulePath, required }) => {

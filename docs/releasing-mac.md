@@ -12,7 +12,7 @@ Install Bun, the Rust/Swift toolchains, Xcode and `create-dmg`. SwiftPM resolves
 Provide the matching `BEANS_UPDATE_PRIVATE_KEY` PEM, an installed **Developer ID Application** identity (`SIGN_IDENTITY` selects it), and a notarization keychain profile (`NOTARY_PROFILE`, default `BEANS_NOTARY`). Creating identities, storing Apple credentials and granting provisioning permissions are explicit operator actions, not release-script side effects. Public GitHub packaging refuses a private `BEANS_DEFAULT_RELAY_URL`.
 
 ```sh
-bun run release-mac --local
+pnpm run release-mac --local
 ```
 
 This builds and signs Beans, checks its bundle version, creates/signs/notarizes the DMG, staples the DMG and application, verifies code signing and Gatekeeper acceptance, then archives the stapled application as `Beans-<version>.zip`. `dist/mac` contains the DMG and `updates/` contains the ZIP and signed `appcast.xml`. No upload or version bump occurs. A Finder-customization warning is not accepted as notarization proof: signing and assessment still must succeed.

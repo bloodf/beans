@@ -1,6 +1,6 @@
 # Device names
 
-A Device's machine metadata holds its original name. The account's encrypted roster adds `device_names`, a map from Device id to account alias. Absent maps decode as empty. `App::device`, snapshots and roster events use the alias as `name`; known Device rows also expose the underlying `machine_name`. Unknown Devices keep their existing unknown presentation. Display sorting uses the effective name.
+A Device's machine metadata holds its original name. The account's encrypted roster adds `device_names`, a map from Device id to account alias. Absent maps decode as empty. The encrypted `device_name_edits` map records an opaque UUID for each explicit edit, including resets whose alias value is absent. `App::device`, snapshots and roster events use the alias as `name`; known Device rows also expose the underlying `machine_name`. Unknown Devices keep their existing unknown presentation. Display sorting uses the effective name.
 
 ## Local methods
 
@@ -15,7 +15,7 @@ A Device's machine metadata holds its original name. The account's encrypted ros
 
 Alias edits acquire the roster edit lock before account lifecycle admission. The state snapshot, encrypted latest-roster outbox item, applied receipt and frozen ancestor commit in one SQLite transaction before memory changes or events. State or queue failure leaves the previous alias and pending intent unchanged. Restart recovers the same queued intent. Forget clears the alias table with the rest of the account state.
 
-Roster CAS rebase applies only alias keys changed relative to the frozen baseline, preserving unrelated remote edits and resets. Before upload, the submitted roster remains durable. A known accepted upload advances the alias ancestor for its submitted keys. A later remote roster after a lost response proves acceptance only for matching keys; one matching alias does not acknowledge every submitted alias. Newer local resets survive recovery.
+Roster CAS rebase applies only alias keys changed relative to the frozen baseline, preserving unrelated remote edits and resets. Before upload, the submitted roster remains durable. A known accepted upload advances the alias ancestor for its submitted keys. A later remote roster after a lost response proves acceptance only for matching keys; one matching alias does not acknowledge every submitted alias. Newer local resets survive recovery. Each explicit edit gets a fresh per-key edit id in the same transaction as the state and outbox. Merge and acceptance compare both value and edit id, so resetting and returning to an earlier value remains a newer intent. Reset edit ids remain as tombstones. Unrelated remote values and edit ids are preserved.
 
 Unpair keeps its account and relay ownership checks. Local membership removal, live-turn purge and any alias-removal roster intent commit together. After remote revocation, storage failure keeps membership removed in memory, retains the alias intent for retry and returns an error; retry completes persistence before dropping the retained alias. Notifications do not write account state.
 

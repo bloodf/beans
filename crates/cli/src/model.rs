@@ -654,6 +654,9 @@ pub struct Chat {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ChatUsage {
     pub context_tokens: u64,
+    /// Estimated after compaction until the next provider response counts the context.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub context_estimated: bool,
     pub context_window: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -785,6 +788,9 @@ pub struct RosterBlob {
     /// Account aliases keyed by Device id; machine metadata keeps the original name.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub device_names: std::collections::BTreeMap<String, String>,
+    /// Opaque edit ids include resets, whose alias value is absent.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub device_name_edits: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub routines: Vec<Routine>,
     #[serde(default)]

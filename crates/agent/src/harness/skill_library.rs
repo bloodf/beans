@@ -85,7 +85,7 @@ impl SkillLibrary {
     /// No scanner output is used as authority. No body, hooks or resources are executed.
     pub fn import_authorized(&self, selected_source: &Path, source_host: &str) -> io::Result<ImportOutcome> {
         #[cfg(target_os = "linux")]
-        { linux::import(&self.root, selected_source, source_host, None, || Ok(())) }
+        { linux::import(&self.root, selected_source, source_host, None, None, || Ok(())) }
         #[cfg(not(target_os = "linux"))]
         { let _ = (selected_source, source_host); Err(unsupported()) }
     }
@@ -119,9 +119,20 @@ impl SkillLibrary {
     pub fn import_approved<G>(&self, selected_source: &Path, source_host: &str, expected: &SourcePreview,
         admit_publication: impl FnOnce() -> io::Result<G>) -> io::Result<ImportOutcome> {
         #[cfg(target_os = "linux")]
-        { linux::import(&self.root, selected_source, source_host, Some(expected), admit_publication) }
+        { linux::import(&self.root, selected_source, source_host, Some(expected), None, admit_publication) }
         #[cfg(not(target_os = "linux"))]
         { let _ = (selected_source, source_host, expected, admit_publication); Err(unsupported()) }
+    }
+
+    /// Requires the original directory at publication under the same lock as uninstall.
+    /// Contents may be locally edited; this does not validate or read their inventory.
+    pub fn import_approved_keep_both<G>(&self, selected_source: &Path, source_host: &str,
+        expected: &SourcePreview, original_id: &str,
+        admit_publication: impl FnOnce() -> io::Result<G>) -> io::Result<ImportOutcome> {
+        #[cfg(target_os = "linux")]
+        { linux::import(&self.root, selected_source, source_host, Some(expected), Some(original_id), admit_publication) }
+        #[cfg(not(target_os = "linux"))]
+        { let _ = (selected_source, source_host, expected, original_id, admit_publication); Err(unsupported()) }
     }
 
     /// The returned guard remains owned here through validated tomb publication and cleanup.
@@ -408,8 +419,9 @@ mod linux {
         source_preview(inventory, metadata)
     }
 
-    pub(super) fn import<G>(root: &File, selected: &Path, host: &str, expected: Option<&SourcePreview>,
+    pub(super) fn import<G>(root: &File, selected: &Path, host: &str, expected: Option<&SourcePreview>, original_id: Option<&str>,
         admit_publication: impl FnOnce() -> io::Result<G>) -> io::Result<ImportOutcome> {
+        if original_id.is_some_and(|id| !valid_id(id)) { return Err(invalid("not an exact managed bundle ID")); }
         let _lock = lock(root)?;
         private(root)?;
         if host.is_empty() || host.len() > 1024 || selected.as_os_str().len() > 4096 { return Err(invalid("source provenance exceeds bounds or host is empty")); }
@@ -434,6 +446,12 @@ mod linux {
         write_new(&stage.directory, "manifest.json", &bytes)?;
         stage.directory.sync_all()?;
         let _authority = admit_publication()?;
+        // The library lock excludes cooperating uninstall through the new copy's rename.
+        let _original = original_id.map(|original| {
+            let bundle = open_at(root, Path::new(original), libc::O_RDONLY | libc::O_DIRECTORY, 0, true)?;
+            private(&bundle)?;
+            Ok::<_, io::Error>(bundle)
+        }).transpose()?;
         rename(root, &stage.name, &id)?;
         stage.committed = true;
         Ok(ImportOutcome { manifest, durability_warning: root.sync_all().err().map(|e| e.to_string()) })
@@ -487,6 +505,74 @@ mod linux {
         let durability_warning = root.sync_all().err().map(|e| e.to_string());
         let cleanup = remove_tree(&bundle, &mut 0, 0).and_then(|()| unlink(root, &tomb, true)).and_then(|()| root.sync_all());
         Ok(UninstallOutcome { cleanup_warning: cleanup.err().map(|e| e.to_string()), durability_warning })
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn keep_both_requires_original_at_publication() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("beans-keep-both-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&base).unwrap();
+        let base = base.canonicalize().unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(base.clone());
+        let source = base.join("source");
+        let owned = base.join("library");
+        for path in [&source, &owned] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(source.join("SKILL.md"), b"---\nname: fixture\ndescription: copy\n---\n").unwrap();
+        let library = SkillLibrary::open(&owned).unwrap();
+        let approved = library.preview_source(&source).unwrap();
+        let absent = "0".repeat(32);
+        assert!(library.import_approved_keep_both(&source, "fixture", &approved, &absent, || Ok(())).is_err());
+        assert_eq!(fs::read_dir(&owned).unwrap().count(), 0);
+        let original = library.import_authorized(&source, "fixture").unwrap().manifest.bundle_id;
+        let body = owned.join(&original).join("content/SKILL.md");
+        fs::write(&body, b"locally edited original").unwrap();
+        assert!(library.validated_inventory(&original).is_err());
+        let second = library.import_approved_keep_both(&source, "fixture", &approved, &original, || Ok(())).unwrap();
+        assert_ne!(second.manifest.bundle_id, original);
+        assert_eq!(fs::read(&body).unwrap(), b"locally edited original");
+        library.uninstall(&second.manifest.bundle_id).unwrap();
+        // A disappearance during admission must fail even after all source staging succeeds.
+        let hidden = owned.join(".fixture-original");
+        assert!(library.import_approved_keep_both(&source, "fixture", &approved, &original, || {
+            fs::rename(owned.join(&original), &hidden)?;
+            Ok(())
+        }).is_err());
+        assert_eq!(fs::read_dir(&owned).unwrap().count(), 1);
+        fs::rename(&hidden, owned.join(&original)).unwrap();
+        fs::write(&body, fs::read(source.join("SKILL.md")).unwrap()).unwrap();
+        // A competing lock cannot enter during publication; uninstall observes the new copy.
+        let (start_tx, start_rx) = std::sync::mpsc::channel();
+        let (probed_tx, probed_rx) = std::sync::mpsc::channel();
+        let competitor_root = owned.clone();
+        let competitor_id = original.clone();
+        let competitor = std::thread::spawn(move || {
+            start_rx.recv().unwrap();
+            let other = SkillLibrary::open(&competitor_root).unwrap();
+            let probe = open_at(&other.root, Path::new("."), libc::O_RDONLY | libc::O_DIRECTORY, 0, true).unwrap();
+            // SAFETY: probe owns a live descriptor with an independent open-file description.
+            assert_eq!(unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, -1);
+            assert_eq!(io::Error::last_os_error().kind(), io::ErrorKind::WouldBlock);
+            probed_tx.send(()).unwrap();
+            other.uninstall_guarded(&competitor_id, || {
+                assert_eq!(fs::read_dir(&competitor_root).unwrap().count(), 2);
+                Ok(())
+            }).unwrap();
+        });
+        let copied = library.import_approved_keep_both(&source, "fixture", &approved, &original, || {
+            start_tx.send(()).unwrap();
+            probed_rx.recv().unwrap();
+            Ok(())
+        }).unwrap();
+        competitor.join().unwrap();
+        assert!(!owned.join(&original).exists());
+        assert!(owned.join(&copied.manifest.bundle_id).exists());
     }
 
     #[cfg(test)]

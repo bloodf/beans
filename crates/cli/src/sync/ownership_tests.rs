@@ -196,3 +196,31 @@ async fn unpair_ownership_network_awaits_cannot_publish_into_replacement_source(
         }
     }
 }
+
+#[test]
+fn unpair_alias_intent_and_turn_removal_commit_together() {
+    let (home, app, owner) = fixture("http://127.0.0.1:19001");
+    app.set_device_name("revoked", "Office").unwrap();
+    let queued = app.store.queued_roster().unwrap().unwrap();
+    let db = rusqlite::Connection::open(app.config.database_path()).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_alias_unpair BEFORE UPDATE ON outbox BEGIN SELECT RAISE(ABORT, 'synthetic alias unpair failure'); END;").unwrap();
+    assert!(commit_unpair(&app, "revoked", &owner).unwrap().is_err());
+    assert!(!app.state.lock().unwrap().devices.iter().any(|d| d.id == "revoked"));
+    let saved = app.store.load_state().unwrap();
+    assert_eq!(saved.device_names["revoked"], "Office");
+    assert!(saved.device_turns.contains_key("revoked"));
+    assert_eq!(app.store.queued_roster().unwrap().unwrap().id, queued.id);
+    db.execute_batch("DROP TRIGGER fail_alias_unpair").unwrap();
+    commit_unpair(&app, "revoked", &owner).unwrap().unwrap();
+    drop(db);
+    drop(app);
+    let reopened = App::load(Config { home: home.path().into(), port: 0 }).unwrap();
+    let saved = reopened.store.load_state().unwrap();
+    assert!(!saved.device_names.contains_key("revoked"));
+    assert!(!saved.device_turns.contains_key("revoked"));
+    let item = reopened.store.queued_roster().unwrap().unwrap();
+    assert_ne!(item.id, queued.id);
+    assert!(saved.applied_blob_ids.contains(&item.id));
+    let roster: RosterBlob = crate::crypto::decrypt_json(&reopened.dek().unwrap(), "roster", &item.ciphertext).unwrap();
+    assert!(!roster.device_names.contains_key("revoked"));
+}

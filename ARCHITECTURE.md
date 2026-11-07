@@ -138,7 +138,7 @@ Implemented mechanisms include crypto and blob sync, relay storage, CLI identity
 
 Next: keychain storage, a cost budget per chat.
 
-The phone app (`mobile/`) pairs as a Device with `os` `ios`, `ipados`, or `android`; it is never a Runner and does not hold the master secret. The Device that creates or restores the identity holds the master secret.
+See [Phone app](docs/architecture/phone-app.md) for phone identity and key ownership.
 
 ## Open points
 

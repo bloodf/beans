@@ -1,16 +1,6 @@
-import { expect, mock, test } from "bun:test";
-import { fileURLToPath } from "node:url";
+import { expect, test, vi } from "vitest";
 import type { Device } from "../core/model";
 
-if (process.env.BEANS_DEVICE_RENAME_HOST === "1") install();
-else test("Device naming consumer in an isolated Bun host", () => {
-  const child = Bun.spawnSync([process.execPath, "test", "--isolate", fileURLToPath(import.meta.url)], {
-    env: { ...process.env, BEANS_DEVICE_RENAME_HOST: "1" }, stdout: "pipe", stderr: "pipe",
-  });
-  expect(child.exitCode, child.stdout.toString() + child.stderr.toString()).toBe(0);
-});
-
-function install() {
   // Follow the existing mobile hook-slot boundary; native presentation needs device proof.
   type Node = { type: unknown; props: { children?: unknown; value?: { value: string }; onPress?: () => void; onClick?: () => void; onDismissRequest?: () => void } };
   type Button = { text: string; onPress?: (value?: string) => void };
@@ -26,30 +16,30 @@ function install() {
     useMemo: <T,>(compute: () => T) => compute(),
     useCallback: <T,>(callback: T) => callback,
   };
-  mock.module("react", () => ({ ...react, default: react }));
+  vi.doMock("react", () => ({ ...react, default: react }));
   const jsx = (type: unknown, props: Node["props"]) => ({ type, props });
-  mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
-  mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
+  vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
+  vi.doMock("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
   const platform = { OS: "ios" };
   let buttons: Button[] = [], alerts: string[] = [];
-  mock.module("react-native", () => ({ Platform: platform, AppState: { currentState: "active", addEventListener: () => ({ remove() {} }) }, Alert: {
+  vi.doMock("react-native", () => ({ Platform: platform, AppState: { currentState: "active", addEventListener: () => ({ remove() {} }) }, Alert: {
     prompt: (_title: string, _message: string, actions: Button[]) => { buttons = actions; },
     alert: (title: string) => { alerts.push(title); },
   } }));
-  mock.module("@expo/ui/jetpack-compose", () => ({ useNativeState: (value: string) => slot(() => ({ value })).value, Column: "Column", Host: "Host", Text: "Text", TextButton: "Button", OutlinedTextField: Object.assign(() => null, { displayName: "Input", Placeholder: "Placeholder" }), AlertDialog: Object.assign(() => null, { displayName: "Dialog", Title: "Title", Text: "Body", ConfirmButton: "Confirm", DismissButton: "Dismiss" }) }));
-  mock.module("@expo/ui/jetpack-compose/modifiers", () => ({ fillMaxWidth: () => ({}) }));
-  mock.module("./forms", () => ({ Row: "Row" }));
-  mock.module("../i18n", () => ({ t: (value: string) => value }));
-  mock.module("expo-web-browser", () => ({}));
-  mock.module("../core/host", () => ({ hostFacts: () => ({}) }));
-  mock.module("../core/prefs", () => ({ coreHome: () => "unused", loadPrefs: () => ({}), savePrefs: () => {}, pathOf: (value: string) => value, wipePrefs: () => {} }));
-  mock.module("../core/push", () => ({ clearPushes: () => {}, installPushHandlers: () => {}, registerForPushes: () => {} }));
+  vi.doMock("@expo/ui/jetpack-compose", () => ({ useNativeState: (value: string) => slot(() => ({ value })).value, Column: "Column", Host: "Host", Text: "Text", TextButton: "Button", OutlinedTextField: Object.assign(() => null, { displayName: "Input", Placeholder: "Placeholder" }), AlertDialog: Object.assign(() => null, { displayName: "Dialog", Title: "Title", Text: "Body", ConfirmButton: "Confirm", DismissButton: "Dismiss" }) }));
+  vi.doMock("@expo/ui/jetpack-compose/modifiers", () => ({ fillMaxWidth: () => ({}) }));
+  vi.doMock("./forms", () => ({ Row: "Row" }));
+  vi.doMock("../i18n", () => ({ t: (value: string) => value }));
+  vi.doMock("expo-web-browser", () => ({}));
+  vi.doMock("../core/host", () => ({ hostFacts: () => ({}) }));
+  vi.doMock("../core/prefs", () => ({ coreHome: () => "unused", loadPrefs: () => ({}), savePrefs: () => {}, pathOf: (value: string) => value, wipePrefs: () => {} }));
+  vi.doMock("../core/push", () => ({ clearPushes: () => {}, installPushHandlers: () => {}, registerForPushes: () => {} }));
   const calls: Array<{ method: string; params: unknown }> = [];
   let reply: () => Promise<unknown> = async () => null;
-  mock.module("../../modules/beans-core", () => ({ request: (method: string, params: unknown) => { calls.push({ method, params }); return reply(); } }));
-  const { useStore }: typeof import("../core/store") = require("../core/store");
-  const { deviceName }: typeof import("../core/model") = require("../core/model");
-  const { DeviceRename }: typeof import("./DeviceRename") = require("./DeviceRename");
+  vi.doMock("../../modules/beans-core", () => ({ request: (method: string, params: unknown) => { calls.push({ method, params }); return reply(); } }));
+  const { useStore } = await import("../core/store");
+  const { deviceName } = await import("../core/model");
+  const { DeviceRename } = await import("./DeviceRename");
   const device: Device = { id: "target", name: "Alias", machine_name: "Original", model: "", os: "android", os_version: "", machine_key: "target", is_this_device: false, status: "offline", last_seen: 0, unknown: false };
   function find(node: unknown, type: unknown): Node | undefined {
     if (Array.isArray(node)) return node.map(child => find(child, type)).find(Boolean);
@@ -121,4 +111,3 @@ function install() {
       changedOs(); await Promise.resolve(); expect(calls.length).toBe(admitted);
     } finally { for (const cleanup of cleanups) cleanup(); }
   });
-}

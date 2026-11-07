@@ -535,6 +535,7 @@ export interface ChatMeta {
 /// The tokens and money the turns in a chat used, from its Runner.
 export interface ChatUsage {
   context_tokens: number;
+  context_estimated?: boolean;
   context_window: number;
   input_tokens: number;
   output_tokens: number;

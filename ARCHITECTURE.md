@@ -1,6 +1,6 @@
 # Beans Architecture
 
-Source of truth for how Beans is built. Read this before writing code, then the docs in [Subjects](#subjects) for the parts you change.
+Read this before writing code, then the docs in [Subjects](#subjects) for the parts you change.
 
 Beans is a Grok Bot alternative: persistent named bots, 1:1 chats, group chats, handoff, and orchestration. Work runs on **Devices you own**. The Rust CLI runs on macOS, Linux, and Windows. The macOS app, and the app for Windows and Linux, are UIs for the local CLI, which each bundles and launches.
 
@@ -41,8 +41,7 @@ Beans and Beans Dev on macOS, iOS, and Android retain distribution ids `ai.amoen
 
 If the CLI is down, the app shows a native empty state with the launcher’s status and the manual `beans serve --home … --port …` command for that build.
 
-Fresh Beans accounts use format `beans-v2`, HKDF salt `beans-v2`, version-prefixed backups and mandatory protocol 5 with `Beans-Protocol: 5` and `Beans-Format: beans-v2`. Storage validates `format.json` before mutation. Old accounts, unversioned backup phrases and mixed-format pairing/sync are incompatible; no automatic migration or reset occurs. See [Identity](docs/architecture/identity.md) and [Protocols](docs/architecture/protocols.md). Production Grok OAuth is unavailable pending a verified Beans provider contract; other provider and encrypted credential mechanisms remain unchanged.
-
+Fresh Beans accounts use format `beans-v2`, HKDF salt `beans-v2`, version-prefixed backups and mandatory protocol 5 with `Beans-Protocol: 5` and `Beans-Format: beans-v2`. Storage validates `format.json` before mutation. Old accounts, unversioned backup phrases and mixed-format pairing/sync are incompatible; no automatic migration or reset occurs. See [Identity](docs/architecture/identity.md) and [Protocols](docs/architecture/protocols.md).
 
 ## Domain model
 
@@ -56,7 +55,7 @@ The Linux server updater verifies readiness, upgrades and checks the relay first
 
 ## Subjects
 
-One doc per subject under `docs/architecture/`, each short enough to read in one pass. `pnpm run check:docs` holds this file to 16 KiB and each subject to 24 KiB, and checks that every subject is listed here and that links and their anchors resolve.
+One doc per subject under `docs/architecture/`. `pnpm run check:docs` holds this file to 16 KiB and each subject to 24 KiB, and checks that every subject is listed here and that links and their anchors resolve.
 
 | Doc | Read it for |
 | --- | --- |
@@ -66,6 +65,8 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Relay](docs/architecture/relay.md) | `crates/relay`: storage on SQLite or Postgres, files, housekeeping, quotas, metrics, rate limits, auth, tables and migrations, the blob, sync socket, and push APIs, deploys |
 | [Computer display](docs/architecture/computer-display.md) | Proposed authenticated display/input transport, Device-bound sessions, lifecycle fences, client feasibility and measurement gaps |
 | [Protocols](docs/architecture/protocols.md) | The app ↔ CLI websocket and the CLI ↔ relay requests and blobs |
+| [Computer ownership](docs/architecture/computer-ownership.md) | Proposed encrypted ownership, async lifecycle, capability compatibility and old-client fixture |
+| [Computer ownership compatibility](docs/architecture/computer-ownership-compatibility.md) | Source-extracted fixture, hashes, replay and evidence limits |
 | [Managed policy receipts and replay](docs/architecture/managed-policy-replay.md) | Staged opaque policy/roster commits, durable receipt retention, authenticated finite replay cuts and teardown boundaries |
 | [Local API](docs/architecture/local-api.md) | The `/ws` socket: trust boundary, field errors, every method with params and results, events, secret-bearing methods, memory and setup bodies |
 | [CLI (runtime)](docs/architecture/runtime.md) | Commands, local websocket access, proxy/certificate trust, diagnostics, agent loop and notifications |

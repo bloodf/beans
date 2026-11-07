@@ -16,6 +16,10 @@ const BULK_BLOBS: usize = 20;
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
 pub const POLL_KINDS: &str = "roster,policy,chat,machine,credentials,memory_config,job,job_cancel,job_result,request,response";
 
+// These relay fixtures require the optional server dependency.
+#[cfg(all(test, feature = "server"))]
+mod ownership_tests;
+
 pub async fn run(app: Arc<App>) {
     let mut failures: u32 = 0;
     // The last try's bearer was refused and the next one went at once: a second refusal in a
@@ -574,11 +578,49 @@ pub async fn wait_for_account(app: &App, limit: std::time::Duration) -> bool {
 /// the one that attested it, or a reset one) and this Device holds the identity, it attests
 /// itself again and retries.
 pub async fn token_or_register(app: &Arc<App>, url: &str, machine: &crate::keys::Machine) -> Result<String, RelayError> {
-    match app.relay.token(url, machine).await {
-        Err(error) if error.is_unknown_machine() && app.is_identity_device() => {
+    let owner = RelayAuthority::capture(app, url, &machine.pubkey())?;
+    token_for_authority(app, &owner, machine).await
+}
+
+struct RelayAuthority {
+    incarnation: u64,
+    relay_generation: u64,
+    url: String,
+    machine_id: String,
+}
+
+impl RelayAuthority {
+    fn capture(app: &App, url: &str, machine_id: &str) -> Result<Self, RelayError> {
+        let admission = app.plugin_admission(None).map_err(|message| RelayError { status: None, message })?;
+        let owner = Self { incarnation: admission.get().0,
+            relay_generation: app.relay_generation.load(Ordering::Relaxed),
+            url: url.to_owned(), machine_id: machine_id.to_owned() };
+        owner.with_current(app, || Ok(()))?;
+        Ok(owner)
+    }
+
+    fn with_current<T>(&self, app: &App, apply: impl FnOnce() -> Result<T, RelayError>) -> Result<T, RelayError> {
+        let _admission = app.plugin_admission(Some(self.incarnation)).map_err(|message| RelayError { status: None, message })?;
+        if app.relay_generation.load(Ordering::Relaxed) != self.relay_generation
+            || app.relay_url().as_deref() != Some(self.url.as_str())
+            || app.this_device_id().as_deref() != Some(self.machine_id.as_str()) {
+            return Err(RelayError { status: None, message: "The account or relay changed; start again.".into() });
+        }
+        apply()
+    }
+}
+
+async fn token_for_authority(app: &Arc<App>, owner: &RelayAuthority, machine: &crate::keys::Machine) -> Result<String, RelayError> {
+    let token_context = owner.with_current(app, || Ok(app.relay.token_context(&owner.url, machine)))?;
+    let result = app.relay.token_for_context(&token_context, machine).await;
+    let identity_device = owner.with_current(app, || Ok(app.is_identity_device()))?;
+    match result {
+        Err(error) if error.is_unknown_machine() && identity_device => {
+            let url = &owner.url;
             tracing::info!(url, "relay does not know this machine; attesting it again");
-            ensure_registered(app, url).await?;
-            app.relay.token(url, machine).await
+            register_for_authority(app, owner).await?;
+            let result = app.relay.token_for_context(&token_context, machine).await;
+            owner.with_current(app, || result)
         }
         result => result,
     }
@@ -586,44 +628,55 @@ pub async fn token_or_register(app: &Arc<App>, url: &str, machine: &crate::keys:
 
 /// Registers this machine with the relay. Only an identity device can sign that.
 pub async fn ensure_registered(app: &Arc<App>, url: &str) -> Result<(), RelayError> {
-    let identity = app
-        .identity
-        .lock()
-        .unwrap()
-        .clone()
-        .and_then(|file| file.identity().ok())
-        .ok_or_else(|| RelayError { status: None, message: "this Device is not registered and holds no identity key".into() })?;
-    let machine = app.machine_file().and_then(|m| m.machine().ok()).ok_or_else(|| RelayError { status: None, message: "no machine".into() })?;
-    app.relay.register(url, &identity, &machine.pubkey(), &machine.box_pubkey()).await?;
-    let again = app.machine.lock().unwrap().as_mut().is_some_and(|file| std::mem::replace(&mut file.registered, true));
-    // A relay that had to be told about this machine has none of its blobs either.
-    {
-        let mut state = app.state.lock().unwrap();
-        state.machine_blob_hash = None;
-        state.credentials_uploaded = false;
-        if again {
-            // It numbers its log from one, so the place held in the old log means nothing.
-            state.last_seq = 0;
-            state.roster_slot_seq = 0;
-        }
-    }
-    // A relay that knew this machine before and lost the account (a reset, or the identity
-    // dropped for inactivity) gets back what a Device pairing or restoring needs: the DEK
-    // sealed to the content key, the roster, and the chats' messages as this Device has them.
-    if again {
-        if let Some(dek) = app.dek() {
-            match crate::crypto::seal(&identity.content_pubkey(), &dek) {
-                Ok(sealed) => {
-                    app.push_blob("key", None, sealed);
-                }
-                Err(error) => tracing::error!(%error, "sealing the account key"),
+    let machine_id = app.this_device_id().ok_or_else(|| RelayError { status: None, message: "no machine".into() })?;
+    let owner = RelayAuthority::capture(app, url, &machine_id)?;
+    register_for_authority(app, &owner).await
+}
+
+async fn register_for_authority(app: &Arc<App>, owner: &RelayAuthority) -> Result<(), RelayError> {
+    let (identity, machine) = owner.with_current(app, || {
+        let identity = app
+            .identity
+            .lock()
+            .unwrap()
+            .clone()
+            .and_then(|file| file.identity().ok())
+            .ok_or_else(|| RelayError { status: None, message: "this Device is not registered and holds no identity key".into() })?;
+        let machine = app.machine_file().and_then(|m| m.machine().ok()).ok_or_else(|| RelayError { status: None, message: "no machine".into() })?;
+        Ok((identity, machine))
+    })?;
+    app.relay.register(&owner.url, &identity, &machine.pubkey(), &machine.box_pubkey()).await?;
+    owner.with_current(app, || {
+        let again = app.machine.lock().unwrap().as_mut().is_some_and(|file| std::mem::replace(&mut file.registered, true));
+        // A relay that had to be told about this machine has none of its blobs either.
+        {
+            let mut state = app.state.lock().unwrap();
+            state.machine_blob_hash = None;
+            state.credentials_uploaded = false;
+            if again {
+                // It numbers its log from one, so the place held in the old log means nothing.
+                state.last_seq = 0;
+                state.roster_slot_seq = 0;
             }
         }
-        app.push_roster();
-        app.push_history();
-    }
-    app.save_machine().map_err(|e| RelayError { status: None, message: e.to_string() })?;
-    Ok(())
+        // A relay that knew this machine before and lost the account (a reset, or the identity
+        // dropped for inactivity) gets back what a Device pairing or restoring needs: the DEK
+        // sealed to the content key, the roster, and the chats' messages as this Device has them.
+        if again {
+            if let Some(dek) = app.dek() {
+                match crate::crypto::seal(&identity.content_pubkey(), &dek) {
+                    Ok(sealed) => {
+                        app.push_blob("key", None, sealed);
+                    }
+                    Err(error) => tracing::error!(%error, "sealing the account key"),
+                }
+            }
+            app.push_roster();
+            app.push_history();
+        }
+        app.save_machine().map_err(|e| RelayError { status: None, message: e.to_string() })?;
+        Ok(())
+    })
 }
 
 async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), RelayError> {
@@ -842,15 +895,31 @@ fn settle_unknown_machines(app: &Arc<App>) -> bool {
 /// Unpairs another Device: the relay drops its key, and it leaves this roster now rather
 /// than on the next presence refresh. A machine the relay already forgot still leaves.
 pub async fn unpair_device(app: &Arc<App>, id: &str) -> Result<(), String> {
-    let url = app.relay_url().ok_or("Set a relay URL first.")?;
-    let machine = app.machine_file().and_then(|m| m.machine().ok()).ok_or("No identity on this Device")?;
-    let token = token_or_register(app, &url, &machine).await.map_err(|e| e.to_string())?;
-    match app.relay.revoke_machine(&url, &token, id).await {
+    let (owner, machine) = {
+        let _admission = app.plugin_admission(None)?;
+        let url = app.relay_url().ok_or("Set a relay URL first.")?;
+        let machine = app.machine_file().and_then(|m| m.machine().ok()).ok_or("No identity on this Device")?;
+        let owner = RelayAuthority::capture(app, &url, &machine.pubkey()).map_err(|e| e.to_string())?;
+        (owner, machine)
+    };
+    let token = token_for_authority(app, &owner, &machine).await.map_err(|e| e.to_string())?;
+    owner.with_current(app, || Ok(())).map_err(|e| e.to_string())?;
+    match app.relay.revoke_machine(&owner.url, &token, id).await {
         Ok(()) => {}
         Err(error) if error.is_unknown_machine() => {}
         Err(error) => return Err(error.to_string()),
     }
-    {
+    let persisted = commit_unpair(app, id, &owner).map_err(|e| e.to_string())?;
+    publish_unpair(app);
+    persisted.map_err(|e| e.to_string())
+}
+
+// Relay revocation has already happened. A local storage failure must not restore
+// membership in memory, but is returned so the same removal can be retried durably.
+fn commit_unpair(app: &Arc<App>, id: &str, owner: &RelayAuthority) -> Result<Result<(), RelayError>, RelayError> {
+    // Match policy/request admission: roster edits precede the lifecycle boundary.
+    let _edit = app.roster_edit.lock().unwrap();
+    owner.with_current(app, || {
         let mut state = app.state.lock().unwrap();
         state.devices.retain(|d| d.id != id);
         state.device_seen.remove(id);
@@ -858,12 +927,16 @@ pub async fn unpair_device(app: &Arc<App>, id: &str) -> Result<(), String> {
         state.turns_online.remove(id);
         state.listed_machines.remove(id);
         state.unknown_machines.remove(id);
-    }
-    app.save_state();
+        state.device_turns.remove(id);
+        Ok(app.store.save_state_removing_device_turns(&state, Some(id)).map_err(local_relay_error))
+    })
+}
+
+fn publish_unpair(app: &Arc<App>) {
+    // Ownership is released before notification; this tail cannot purge a replacement
+    // account's turns or write its SQLite state.
     app.emit(app.roster_summary());
-    app.set_device_turns(id, Vec::new());
     app.turns_changed();
-    Ok(())
 }
 
 /// Before this Device forgets the identity, it asks the relay to drop its key, so the other
@@ -1698,6 +1771,7 @@ mod tests {
             "done":done,"blobs":blobs})
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn managed_policy_reader_refuses_invalid_cuts_without_activation() {
         use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
@@ -3119,6 +3193,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn two_offline_bots_claiming_same_dm_id_keep_local_intent_on_conflict() {
         use axum::{extract::{Query, State as HttpState}, http::StatusCode, routing::put, Json, Router};
@@ -3246,6 +3321,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn first_sync_and_normal_pull_recheck_chat_created_while_fetching() {
         use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
@@ -3353,6 +3429,7 @@ mod tests {
         assert!(!app.store.pending_chat_creates().unwrap().contains(&"G".into()));
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn lost_roster_response_recovers_original_group_identity() {
         use axum::{extract::{Query, State as HttpState}, http::StatusCode, routing::put, Json, Router};
@@ -3431,6 +3508,7 @@ mod tests {
         task.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn accepted_group_creation_with_newer_membership_edit_drains() {
         use axum::{extract::State as HttpState, http::StatusCode, routing::put, Json, Router};
@@ -3628,6 +3706,7 @@ mod tests {
             "new account inherited pending ownership from the forgotten account");
     }
     /// A relay log served past `since`, restricted to the requested kinds.
+    #[cfg(feature = "server")]
     async fn serve_log(log: Vec<BlobIn>) -> (String, tokio::task::JoinHandle<()>) {
         use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
         use serde_json::{json, Value};
@@ -3845,6 +3924,7 @@ mod tests {
         assert!(app.queue_local_task(&job).unwrap().is_none(), "a replay never reopens intent");
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn a_lease_holds_the_cursor_before_the_first_job_and_releasing_it_resumes_in_order() {
         let scratch = scratch_owner();
@@ -3910,6 +3990,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn a_held_first_sync_keeps_the_cursor_at_zero_and_saves_what_it_applied() {
         let mut scratch = scratch_owner();
@@ -3958,6 +4039,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn while_held_only_a_running_jobs_cancel_is_applied_and_the_cursor_stays() {
         let scratch = scratch_owner();
@@ -4008,6 +4090,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn while_held_a_remote_turn_this_device_waits_on_still_ends() {
         let scratch = scratch_owner();
@@ -4048,6 +4131,7 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn while_held_a_request_this_device_asked_still_hears_its_response() {
         let scratch = scratch_app();

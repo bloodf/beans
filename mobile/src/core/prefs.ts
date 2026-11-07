@@ -3,8 +3,9 @@
 
 import { Directory, File, Paths } from "expo-file-system";
 import * as Application from "expo-application";
+import type { UpdatePreferences } from "./updates";
 
-export interface Prefs {
+export interface Prefs extends UpdatePreferences {
   /// Speech recognizer language tag; unset follows the phone's preferred languages.
   dictation_lang?: string;
   /// The app's own language ("en", "zh"); unset follows the phone's.

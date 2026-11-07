@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { resolveBotState, resolveChatBotState, type ActivityState } from "./activity";
 import type { Body, Chat, Message, MessageState } from "./model";
 

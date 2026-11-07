@@ -138,12 +138,19 @@ pub fn cancel_chat(app: &Arc<App>, chat_id: &str) {
 /// Includes queued local jobs and remote turns advertised by their Runner.
 pub fn cancel_removed_bots(app: &Arc<App>, removed_bot_ids: &[String]) {
     if removed_bot_ids.is_empty() { return; }
-    for id in removed_bot_ids {
-        if let Some(epoch) = app.store.current_task_account_epoch().ok().flatten() {
-            if let Err(error) = app.store.cancel_tasks(&epoch,None,None,Some(id)) {
-                tracing::error!(%error,"Deleted bot cancellation persistence failed");
-                return;
+    {
+        let lifecycle = app.plugin_lifecycle.lock();
+        let result = (|| -> anyhow::Result<()> {
+            if let Some(epoch) = app.store.current_task_account_epoch()? {
+                for id in removed_bot_ids {
+                    app.store.cancel_tasks(&epoch, None, None, Some(id))?;
+                }
             }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            lifecycle.set((lifecycle.get().0, true));
+            tracing::error!(%error, "Deleted bot cancellation persistence failed; admission closed");
         }
     }
     let mut remote = Vec::new();
@@ -1218,6 +1225,23 @@ mod tests {
         assert_eq!(queued.recipient.as_deref(), Some("runner"));
         let payload: JobCancel = crate::crypto::unseal_json(&runner_keys.box_secret, &queued.ciphertext).unwrap();
         assert_eq!(payload.job_id, "remote");
+    }
+
+    #[test]
+    fn removing_bot_closes_admission_and_cancels_live_work_when_persistence_fails() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let cancel = CancellationToken::new();
+        app.running_jobs.lock().unwrap().insert("job".into(), RunningJob {
+            chat_id: "group".into(), bot_id: "removed".into(), routine_id: None,
+            runner_id: None, cancel: cancel.clone(), activity: None,
+        });
+        app.store.connection.lock().unwrap().execute_batch("DROP TABLE task_authority;").unwrap();
+
+        cancel_removed_bots(app, &["removed".into()]);
+
+        assert!(cancel.is_cancelled());
+        assert!(app.plugin_admission(None).is_err());
     }
 
     fn turn_on_mac(job_id: &str, chat_id: &str) -> LiveTurn {

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import type { PickedFile } from "../core/engine";
 import { emptyLook, setField, type BotLook } from "../core/look";
 import { isDirty, resetScope, restoreDefaults, savePayload, shuffle, startDraft } from "./lookDraft";

@@ -1,5 +1,5 @@
-import { expect, test } from 'bun:test';
-import { memoryLookupKeys } from './l10n-lookups';
+import { expect, test } from 'vitest';
+import { memoryLookupKeys } from './l10n-lookups.ts';
 const model = 'export const MEMORY_OPERATION_LABELS: Record<State, string> = { queued: "Queued", completed: "Stored" };';
 test('only a finite map translated by its consumer contributes keys', () => {
   expect([...memoryLookupKeys(model, 'L(MEMORY_OPERATION_LABELS[op.state])')]).toEqual(['Queued', 'Stored']);

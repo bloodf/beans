@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test";
-import { memorySwiftKeys } from "./l10n-swift";
+import { expect, test } from "vitest";
+import { memorySwiftKeys } from "./l10n-swift.ts";
 const path = "Settings/MemoryEmbeddingViewController.swift";
 
 test("memory helpers expose only display arguments, including choices and placeholders", () => {

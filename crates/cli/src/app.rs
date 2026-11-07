@@ -234,6 +234,8 @@ pub struct App {
     pub plugins: Mutex<crate::plugins::Store>,
     /// Serializes local plugin admission/publication with account reset, including callbacks.
     pub(crate) plugin_lifecycle: parking_lot::ReentrantMutex<std::cell::Cell<(u64, bool)>>,
+    /// Selected-relay ownership, including settings changes away and back.
+    pub(crate) relay_generation: AtomicU64,
     /// Public marketplace index from the selected relay, with bundled offline fallback.
     pub marketplace: crate::marketplace::Updates,
     /// Public built-in model catalog checks from the selected relay.
@@ -494,6 +496,7 @@ impl App {
             provider_auth: Mutex::new(CancellationToken::new()),
             plugin_sign_in: Mutex::new(None),
             plugin_lifecycle: parking_lot::ReentrantMutex::new(std::cell::Cell::new((0, false))),
+            relay_generation: AtomicU64::new(0),
             running_jobs: Mutex::new(HashMap::new()),
             announced_turns: Mutex::new(std::collections::BTreeMap::new()),
             #[cfg(feature = "runner")]
@@ -747,14 +750,23 @@ impl App {
     }
 
     pub fn set_relay_url(&self, url: Option<String>) -> anyhow::Result<()> {
+        let authority = self.plugin_lifecycle.lock();
+        let generation = self.relay_generation.load(Ordering::Relaxed).checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Relay setting generation exhausted"))?;
         let mut settings = self.settings.lock().unwrap();
+        let previous = settings.relay_url.clone();
         settings.relay_url = url.map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
-        settings.save(&self.config)?;
+        if let Err(error) = settings.save(&self.config) {
+            settings.relay_url = previous;
+            return Err(error);
+        }
+        self.relay_generation.store(generation, Ordering::Relaxed);
+        self.relay.forget_token();
         drop(settings);
+        drop(authority);
         crate::catalog::enable(self);
         crate::marketplace::enable(self);
         self.emit(self.roster_summary());
-        self.relay.forget_token();
         // Another relay may serve this build and know this Device; the sync loop wakes and
         // finds out.
         let had_problem = self.relay_problem.lock().unwrap().take().is_some();

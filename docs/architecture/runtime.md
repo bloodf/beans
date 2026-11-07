@@ -36,6 +36,8 @@ Future routine ticks require explicit local `routines.reauthorize` authority und
 
 The staged `history164_types` module provides closed history event and producer validation, bounded list/export response codecs, and canonical authenticated cursors. Its HMAC helpers borrow an existing purpose key and host-supplied account namespace, distinguishing `LocalTaskEpoch` from `ImportedAccount` without creating task authority. Response validation binds the cursor to the filter, watermark, last-scanned position and captured host context. This pure module is not connected to live history handlers or SQL storage and performs no filesystem export.
 
+Linux CI compiles `beans` library tests with `--no-default-features --lib --no-run`; relay ownership fixtures run with `server` enabled.
+
 The Windows Rust verification job builds the real relay with `cargo build --locked -p beans-relay --bin beans-relay` before its selected-package tests. It resolves `debug/beans-relay.exe` under Cargo metadata's `target_directory`, checks that the executable exists, and exports its absolute path as `BEANS_REVOCATION_RELAY_BIN` through `GITHUB_ENV`. This respects `CARGO_TARGET_DIR` and supplies the revocation fixture's scratch relay without building inside the fixture or excluding Windows coverage.
 
 ## Serve shutdown

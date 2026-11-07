@@ -1,21 +1,23 @@
 // The Windows and Linux app in desktop/, built with MyGo.
 //
-//   bun run desktop                       Beans Dev with live reload: builds the CLI for this
+//   pnpm run desktop                      Beans Dev with live reload: builds the CLI for this
 //                                         computer and runs `mygo dev`, whose app launches it
 //                                         (BEANS_CLI) with BEANS_DEV=1, as the Mac dev loop does.
-//   bun run desktop:build [platforms]     The release apps: the CLI for each platform into
+//   pnpm run desktop:build [platforms]    The release apps: the CLI for each platform into
 //                                         desktop/resources/<goos>-<goarch>/bin, then
 //                                         `mygo build -platform`. Platforms are MyGo's, comma
 //                                         separated (linux/amd64,windows/amd64); the default is
 //                                         this computer's, or Linux and Windows on x86-64 from a
 //                                         Mac. The Linux CLIs are static (musl) and, like other
 //                                         computers' CLIs, build with cargo-zigbuild.
-//   bun scripts/desktop.ts release <platforms> --stage-only
+//   pnpm exec tsx scripts/desktop.ts release <platforms> --stage-only
 //                                         Signed local assets, listed in build/release-assets.json.
-//   bun run release-desktop [platforms]   Upload only release assets to the existing Beans draft.
+//   pnpm run release-desktop [platforms]  Upload only release assets to the existing Beans draft.
 
-import { copyFileSync, chmodSync, mkdirSync, readdirSync } from "node:fs"
-import { join, relative } from "node:path"
+import { copyFileSync, chmodSync, existsSync, mkdirSync, readdirSync } from "node:fs"
+import { writeFile, readFile } from "node:fs/promises"
+import { spawn, spawnSync } from "node:child_process"
+import { delimiter, join, relative } from "node:path"
 import { CLI_NAME, ROOT, buildCLI, color, log, readVersion, RELEASES_REPO, TAG_PREFIX } from "./app.ts"
 import { extractReleaseNotes } from "./changelog.ts"
 import { rawReleaseSecret } from "./release-signing.ts"
@@ -36,15 +38,32 @@ function hostPlatform(): string {
   return `${os}/${arch}`
 }
 
+/** Whether `name` resolves on PATH. */
+function which(name: string): string | null {
+  const names = process.platform === "win32" ? [`${name}.exe`, `${name}.cmd`, name] : [name]
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (!dir) continue
+    for (const candidate of names) {
+      const path = join(dir, candidate)
+      if (existsSync(path)) return path
+    }
+  }
+  return null
+}
+
 async function run(command: string[], options: { cwd?: string; env?: Record<string, string> } = {}): Promise<number> {
-  const child = Bun.spawn(command, {
+  const child = spawn(command[0], command.slice(1), {
     cwd: options.cwd ?? ROOT,
     env: { ...process.env, ...options.env },
-    stdout: "inherit",
-    stderr: "inherit",
-    stdin: "inherit",
+    stdio: "inherit",
   })
-  return await child.exited
+  const failure = new Promise<never>((_, reject) => child.once("error", reject))
+  const code = await Promise.race([
+    new Promise<number | null>((resolveClose) => child.once("close", resolveClose)),
+    failure,
+  ])
+  // A signal-only close has no code; it is a failure, never success.
+  return code ?? 1
 }
 
 async function dev(): Promise<number> {
@@ -96,16 +115,18 @@ async function placeCLI(platform: string): Promise<boolean> {
 
 /** Whether the release `tag` of the releases repository is a draft, published, or not there. */
 function releaseState(tag: string): "draft" | "published" | "none" {
-  const view = Bun.spawnSync(["gh", "release", "view", tag, "--repo", RELEASES_REPO, "--json", "isDraft", "--jq", ".isDraft"])
-  if (view.exitCode !== 0) return "none"
-  return view.stdout.toString().trim() === "true" ? "draft" : "published"
+  const view = spawnSync("gh", ["release", "view", tag, "--repo", RELEASES_REPO, "--json", "isDraft", "--jq", ".isDraft"], {
+    encoding: "utf8",
+  })
+  if (view.error || view.status !== 0) return "none"
+  return view.stdout.trim() === "true" ? "draft" : "published"
 }
 
 async function build(platforms: string[], options: { upload?: boolean } = {}): Promise<number> {
   const version = readVersion()
   const env = { MYGO_UPDATER_PRIVATE_KEY: await rawReleaseSecret() }
   if (options.upload) {
-    if (!Bun.which("gh")) {
+    if (!which("gh")) {
       log(color.red("missing the GitHub CLI, gh"))
       return 1
     }
@@ -114,7 +135,7 @@ async function build(platforms: string[], options: { upload?: boolean } = {}): P
       log(color.red(`the parent must create the ${TAG_PREFIX}${version} draft in ${RELEASES_REPO} before uploading desktop assets`))
       return 1
     }
-    if (!extractReleaseNotes(await Bun.file(join(ROOT, "CHANGELOG.md")).text(), version)) {
+    if (!extractReleaseNotes(await readFile(join(ROOT, "CHANGELOG.md"), "utf8"), version)) {
       log(color.red(`CHANGELOG.md has no "## [${version}]" section`))
       return 1
     }
@@ -146,7 +167,7 @@ async function build(platforms: string[], options: { upload?: boolean } = {}): P
       }
     }
     const manifest = join(DESKTOP, "build", "release-assets.json")
-    await Bun.write(manifest, JSON.stringify({
+    await writeFile(manifest, JSON.stringify({
       version, tag: TAG_PREFIX + version, assets: [...assets.values()],
     }, null, 2) + "\n")
     log(`${color.green("staged")} ${color.dim(relative(ROOT, manifest))}`)
@@ -162,7 +183,7 @@ if (mode === "build" || mode === "release") {
   const unknown = args.find((arg) => arg.startsWith("--") && arg !== "--stage-only")
   const positional = args.filter((arg) => !arg.startsWith("--"))
   if (unknown || positional.length > 1) {
-    throw new Error("usage: bun scripts/desktop.ts build|release [platforms] [--stage-only]")
+    throw new Error("usage: pnpm exec tsx scripts/desktop.ts build|release [platforms] [--stage-only]")
   }
   const host = hostPlatform()
   const platforms = positional[0]?.split(",").filter((platform) => platform !== "") ?? (host.startsWith("darwin") ? ["linux/amd64", "windows/amd64"] : [host])

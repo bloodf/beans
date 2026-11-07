@@ -6,8 +6,6 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
-
-
 - The macOS custom-provider sheet shrinks again after a connection-check error clears.
 - Skills mounted checks follow the shared browser-consumer module names while retaining all assertions and driver source binding.
 

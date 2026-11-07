@@ -1,8 +1,8 @@
 # Beans Architecture
 
-Read this before writing code, then the docs in [Subjects](#subjects) for the parts you change.
+Before coding, read this and the relevant [Subjects](#subjects).
 
-Beans is a Grok Bot alternative: persistent named bots, 1:1 chats, group chats, handoff, and orchestration. Work runs on **Devices you own**. The Rust CLI runs on macOS, Linux, and Windows. The macOS app, and the app for Windows and Linux, are UIs for the local CLI, which each bundles and launches.
+Beans is a Grok Bot alternative with persistent named bots, 1:1 and group chats, handoff and orchestration on **Devices you own**. Its Rust CLI runs on macOS, Linux and Windows; each desktop UI bundles and launches it.
 
 Identity is a **key pair**. Devices pair. The relay stores public keys and ciphertext, after [Happy’s security model](https://happy.engineering/docs/security/).
 
@@ -55,7 +55,7 @@ The Linux server updater verifies readiness, upgrades and checks the relay first
 
 ## Subjects
 
-One doc per subject under `docs/architecture/`. `pnpm run check:docs` holds this file to 16 KiB and each subject to 24 KiB, and checks that every subject is listed here and that links and their anchors resolve.
+Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces the 16 KiB overview and 24 KiB subject limits, complete subject listings and valid links/anchors.
 
 | Doc | Read it for |
 | --- | --- |

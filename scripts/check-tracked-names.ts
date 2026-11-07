@@ -1,27 +1,44 @@
 // Read-only tracked path/content check. Supply retired project names as arguments.
 // README records provenance; the enumerated legal notices retain foreign attribution.
 // Run only after the integration owner reconciles tracked path moves.
+import { spawn } from "node:child_process";
 import { lstat, readFile, readlink } from "node:fs/promises";
 import { join } from "node:path";
 
-const ROOT = join(import.meta.dir, "..");
+const ROOT = join(import.meta.dirname, "..");
 const retired = process.argv.slice(2).map((name) => name.toLowerCase());
 if (!retired.length || retired.some((name) => !name || name.trim() !== name)) {
-  throw new Error("usage: bun run scripts/check-tracked-names.ts <retired-name>...");
+  throw new Error("usage: pnpm run scripts/check-tracked-names.ts <retired-name>...");
 }
 const legalNotices: Record<string, true> = {
   LICENSE: true,
   "packages/beans-blobatar/LICENSE": true,
   "web/public/providers/LICENSE": true,
 };
-const inventory = Bun.spawn(["git", "ls-files", "-z", "--cached"], {
-  cwd: ROOT, stdout: "pipe", stderr: "pipe",
+
+const { stdout, stderr, status } = await new Promise<{ stdout: string; stderr: string; status: number | null }>((resolve, reject) => {
+  const child = spawn("git", ["ls-files", "-z", "--cached"], {
+    cwd: ROOT,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+  child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+  child.on("error", (err) => reject(err));
+  child.on("close", (code, signal) => {
+    if (signal) {
+      reject(new Error(`git ls-files killed by signal ${signal}`));
+    } else {
+      resolve({
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        status: code,
+      });
+    }
+  });
 });
-const [stdout, stderr, status] = await Promise.all([
-  new Response(inventory.stdout).text(),
-  new Response(inventory.stderr).text(),
-  inventory.exited,
-]);
+
 if (status !== 0) throw new Error(`Cannot read tracked inventory: ${stderr}`);
 const paths = [...new Set(stdout.split("\0").filter(Boolean))].sort();
 const problems: string[] = [];

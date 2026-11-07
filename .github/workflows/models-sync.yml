@@ -23,12 +23,11 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24.22.2
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 12.18.0
+          node-version-file: .nvmrc
+          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run sync:models --self-check
       - run: pnpm run sync:models --report "$RUNNER_TEMP/report.md" --new "$RUNNER_TEMP/new.md"

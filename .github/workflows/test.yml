@@ -56,6 +56,11 @@ jobs:
           --health-retries 30
     env:
       BEANS_RELAY_TEST_POSTGRES: postgres://postgres:beans@127.0.0.1:5432/beans?sslmode=disable
+      # Hosted Linux runners have limited disk. Avoid debug symbols and incremental
+      # object copies for CI tests without changing the crates or test coverage.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
       - run: python3 -I -B scripts/server-updater.test.py -v
@@ -68,6 +73,8 @@ jobs:
           fallback: none
       # Cargo unifies features across the packages of one run, and the phone core takes beans
       # without the runner, so it is tested on its own.
+      - name: Report disk space before Rust build
+        run: df -h .
       - name: Build real relay for revocation fixture
         run: |
           cargo build --locked -p beans-relay --bin beans-relay
@@ -76,6 +83,9 @@ jobs:
           printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
+      - name: Report disk space after Rust tests
+        if: always()
+        run: df -h .
       # #427: same hang on Linux as macOS — bash_input waited forever on continuous output.
       - name: Stress bash_session hang regression (#427)
         run: |

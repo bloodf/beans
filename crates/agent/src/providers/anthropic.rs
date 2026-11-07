@@ -373,21 +373,33 @@ fn normalize_tool_call_id(id: &str) -> String {
 /// For a model that binds each thinking block to the conversation that produced it (Opus 5.5,
 /// Fable 5.1, Sonnet 5.5), drops the thinking from every assistant message in `messages`.
 /// Anthropic refuses a block replayed after the system prompt, the tools, or an earlier message
-/// changed, and always takes a history without thinking. Other models keep theirs.
-pub fn drop_bound_thinking(model: &str, messages: &mut [AgentMessage]) {
+/// changed, and always takes a history without thinking. Other models keep theirs. Returns whether any
+/// thinking was dropped.
+pub fn drop_bound_thinking(model: &str, messages: &mut [AgentMessage]) -> bool {
     let model = model.to_ascii_lowercase();
     if !["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"].iter().any(|id| model.starts_with(id)) {
-        return;
+        return false;
     }
+    let mut dropped = false;
     for message in messages {
         if let AgentMessage::Assistant(assistant) = message {
+            let before = assistant.content.len();
             assistant.content.retain(|part| match part {
                 AssistantPart::Thinking { .. } => false,
                 AssistantPart::ServerBlock { block } => block["type"] != "redacted_thinking",
                 _ => true,
             });
+            dropped |= assistant.content.len() != before;
         }
     }
+    dropped
+}
+
+/// Whether Anthropic refused a request for a thinking block replayed after what preceded it
+/// changed ("Invalid signature in thinking block. The block is bound to a different
+/// conversation.").
+pub fn is_bound_thinking_error(error: &str) -> bool {
+    error.contains("thinking block") && (error.contains("Invalid signature") || error.contains("bound to a different conversation"))
 }
 
 /// Models before adaptive thinking and the filtering web tools: Haiku 4.5 and the 4.5 and
@@ -1014,6 +1026,15 @@ mod tests {
     }
 
     #[test]
+    fn bound_thinking_error_requires_both_the_block_and_binding_failure() {
+        assert!(is_bound_thinking_error("400: Invalid signature in thinking block"));
+        assert!(is_bound_thinking_error("thinking block is bound to a different conversation"));
+        for error in ["Invalid signature on request", "thinking block must appear first", "bound to a different conversation", "529: Overloaded"] {
+            assert!(!is_bound_thinking_error(error), "{error}");
+        }
+    }
+
+    #[test]
     fn bound_thinking_is_dropped_only_for_the_models_that_bind_it() {
         let mut own = AssistantMessage::empty("anthropic", "claude-opus-5-5");
         own.content = vec![
@@ -1026,12 +1047,13 @@ mod tests {
         let history = vec![AgentMessage::user("hi"), AgentMessage::Assistant(own)];
 
         let mut kept = history.clone();
-        drop_bound_thinking("claude-opus-5", &mut kept);
+        assert!(!drop_bound_thinking("claude-opus-5", &mut kept));
         assert_eq!(kept, history);
 
         for model in ["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"] {
             let mut dropped = history.clone();
-            drop_bound_thinking(model, &mut dropped);
+            assert!(drop_bound_thinking(model, &mut dropped));
+            assert!(!drop_bound_thinking(model, &mut dropped), "a second pass changes nothing");
             let AgentMessage::Assistant(assistant) = &dropped[1] else { panic!("{model}") };
             let kinds: Vec<_> = assistant
                 .content

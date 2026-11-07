@@ -35,7 +35,7 @@ let config = AgentLoopConfig {
 };
 ```
 
-The loop works on its own copy of the context. Your copy is untouched; add the returned messages to it yourself.
+The loop works on its own copy of the context. Your copy is untouched; add the returned messages to it yourself. If the loop emits `bound_thinking_dropped { model }`, first apply `providers::anthropic::drop_bound_thinking` to your history with that model. The returned messages already reflect the repair; later replies keep their newly generated thinking.
 
 `cache_points` are prefix lengths of `messages` that later model calls, those of later runs included, send again unchanged. The loop passes them on in every `ModelRequest`, counted among the messages the model gets, and an adapter that marks what the provider caches puts a mark at the end of each ([Anthropic](providers.md#anthropic-messages)). Name the end of the rebuilt transcript, before any notes that only this run carries, and where the previous run's transcript ended, so a run finds what the one before it cached even after many tool calls. `transform_context` must leave the messages before them as they are.
 

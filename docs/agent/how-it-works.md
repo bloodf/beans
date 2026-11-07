@@ -111,7 +111,7 @@ turn_end
 agent_end
 ```
 
-A consumer that appends every `message_end` message to a list rebuilds the transcript exactly. `Agent` does this.
+A consumer rebuilds the transcript by appending every `message_end` message and applying `providers::anthropic::drop_bound_thinking` when `bound_thinking_dropped { model }` removes rejected thinking before a retry. `Agent` does this. The repair leaves text, tool calls, results, and other server blocks intact, and is reflected in the run's returned messages too.
 
 `message_update` carries the raw `AssistantEvent`: `TextDelta`, `ThinkingDelta`, `ThinkingSignature`, `ToolCallStart`, `ToolCallDelta`, and so on. It also carries `ServerToolStart` and `ServerToolEnd` for tools the provider runs on its side, such as web search. Those are activity to show, never part of the message content; a provider that needs the call and result back later also sends `ServerBlock`, which does become a part.
 

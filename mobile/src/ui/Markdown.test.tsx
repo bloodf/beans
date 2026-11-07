@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 
 // Replace only the unavailable runtime boundaries; both production adapters run below.
 let platform = "ios";
@@ -14,18 +14,18 @@ const measure = (text: string, width: number, body: number, code: number) => {
   return { width: 173.25, height: 91.5 };
 };
 native.measure = measure;
-mock.module("expo-modules-core", () => ({ requireNativeModule: () => native, requireNativeViewManager: () => "MarkdownView" }));
-mock.module("react", () => ({ useMemo: (compute: () => unknown) => compute() }));
+vi.doMock("expo-modules-core", () => ({ requireNativeModule: () => native, requireNativeViewManager: () => "MarkdownView" }));
+vi.doMock("react", () => ({ useMemo: (compute: () => unknown) => compute() }));
 const jsx = (type: unknown, props: unknown) => ({ type, props });
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
-mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx }));
-mock.module("react-native", () => ({
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsxDEV: jsx }));
+vi.doMock("react-native", () => ({
   Platform: { get OS() { return platform; } },
   useWindowDimensions: () => ({ width: 400, height: 800, scale: 2, fontScale }),
   processColor: (color: unknown) => color,
   PixelRatio: { getFontScale: () => fontScale },
 }));
-mock.module("./theme", () => ({ Font: { message: 16, code: 14 }, usePalette: () => ({ link: "link" }) }));
+vi.doMock("./theme", () => ({ Font: { message: 16, code: 14 }, usePalette: () => ({ link: "link" }) }));
 const { Markdown } = await import("./Markdown");
 const { measureMarkdown } = await import("../../modules/beans-core/MarkdownView");
 const render = (text: string, maxWidth = 280, size = 16) => Markdown({ text, maxWidth, size, color: "text" }).props;

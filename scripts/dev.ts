@@ -1,3 +1,6 @@
+// The Mac app's dev loop: `pnpm run dev` watches the Swift and Rust sources, rebuilds
+// the bundle, and relaunches Beans Dev through LaunchServices.
+import { spawn, type ChildProcess } from "node:child_process"
 import { mkdirSync, watch } from "node:fs"
 import { join, relative } from "node:path"
 import {
@@ -18,16 +21,43 @@ import {
 const CONFIG = "debug" as const
 const DEBOUNCE_MS = 80
 
-let app: Bun.Subprocess | null = null
-let relay: Bun.Subprocess | null = null
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+/** Run a short command and return its stdout; empty on failure, like the old loop. */
+async function output(cmd: string[]): Promise<string> {
+  const proc = spawn(cmd[0], cmd.slice(1), { stdio: ["ignore", "pipe", "pipe"] })
+  let text = ""
+  proc.stdout?.setEncoding("utf8")
+  if (proc.stdout) for await (const chunk of proc.stdout) text += chunk
+  // Drain stderr so a noisy child never blocks on a full pipe.
+  if (proc.stderr) for await (const _ of proc.stderr) { /* discard */ }
+  await new Promise<void>((resolveClose) => proc.once("close", () => resolveClose()))
+  return text
+}
+
+/** Await the child's close, mapping a signal-only exit to a nonzero code. */
+function closeCode(proc: ChildProcess): Promise<number> {
+  return new Promise((resolveClose) =>
+    proc.once("close", (code, _signal) => resolveClose(code ?? 1)),
+  )
+}
+
+/** Settle the child's exit without hanging the loop when it refuses to die. */
+async function settle(proc: ChildProcess, timeoutMs: number): Promise<void> {
+  await Promise.race([
+    new Promise<void>((resolveClose) => proc.once("exit", () => resolveClose())),
+    delay(timeoutMs),
+  ])
+}
+
+let app: ChildProcess | null = null
+let relay: ChildProcess | null = null
 let building = false
 let queued = false
 let stopping = false
 
 async function beansPids(): Promise<number[]> {
-  const proc = Bun.spawn(["pgrep", "-x", APP_NAME], { stdout: "pipe", stderr: "pipe" })
-  const text = await new Response(proc.stdout).text()
-  await proc.exited
+  const text = await output(["pgrep", "-x", APP_NAME])
   const pids = text
     .split("\n")
     .map((line) => Number(line.trim()))
@@ -37,9 +67,7 @@ async function beansPids(): Promise<number[]> {
   const mac: number[] = []
   const developmentExecutable = `${appName(CONFIG)}.app/Contents/MacOS/${APP_NAME}`
   for (const pid of pids) {
-    const ps = Bun.spawn(["ps", "-o", "command=", "-p", String(pid)], { stdout: "pipe", stderr: "pipe" })
-    const command = await new Response(ps.stdout).text()
-    await ps.exited
+    const command = await output(["ps", "-o", "command=", "-p", String(pid)])
     if (command.includes(developmentExecutable)) mac.push(pid)
   }
   return mac
@@ -65,14 +93,14 @@ async function stopApp() {
   for (let attempt = 0; attempt < 40; attempt++) {
     pids = await beansPids()
     if (pids.length === 0) {
-      if (current) await Promise.race([current.exited, Bun.sleep(250)])
+      if (current) await settle(current, 250)
       return
     }
     if (attempt === 10) {
       log(color.yellow(`Beans still running (${pids.join(", ")}) — sending SIGKILL`))
       for (const pid of pids) killPid(pid, "SIGKILL")
     }
-    await Bun.sleep(50)
+    await delay(50)
   }
 
   pids = await beansPids()
@@ -93,15 +121,11 @@ async function relayAnswers(): Promise<boolean> {
 
 /** The pid of a beans-relay listening on the dev port that this loop did not start. */
 async function strayRelayPid(): Promise<number | null> {
-  const proc = Bun.spawn(["lsof", "-ti", `tcp:${RELAY_PORT}`, "-sTCP:LISTEN"], { stdout: "pipe", stderr: "pipe" })
-  const text = await new Response(proc.stdout).text()
-  await proc.exited
+  const text = await output(["lsof", "-ti", `tcp:${RELAY_PORT}`, "-sTCP:LISTEN"])
   for (const line of text.split("\n")) {
     const pid = Number(line.trim())
     if (!Number.isInteger(pid) || pid <= 0) continue
-    const ps = Bun.spawn(["ps", "-o", "command=", "-p", String(pid)], { stdout: "pipe", stderr: "pipe" })
-    const command = await new Response(ps.stdout).text()
-    await ps.exited
+    const command = await output(["ps", "-o", "command=", "-p", String(pid)])
     if (command.includes("beans-relay")) return pid
   }
   return null
@@ -124,31 +148,27 @@ async function startRelay() {
     }
     log(`${color.yellow("relay")} ${color.dim(`replacing the one already listening (pid ${stray})`)}`)
     killPid(stray, "SIGTERM")
-    for (let attempt = 0; attempt < 40 && (await relayAnswers()); attempt++) await Bun.sleep(50)
+    for (let attempt = 0; attempt < 40 && (await relayAnswers()); attempt++) await delay(50)
   }
   // Build, then run the binary itself. Through `cargo run` the stop signal reaches cargo and
   // not the relay, which lives on orphaned and is what the next loop finds "already listening".
-  const build = Bun.spawn(["cargo", "build", "-q", "-p", "beans-relay"], { cwd: ROOT, stdin: "ignore", stdout: "inherit", stderr: "inherit" })
-  if ((await build.exited) !== 0) {
+  const build = spawn("cargo", ["build", "-q", "-p", "beans-relay"], { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"] })
+  if ((await closeCode(build)) !== 0) {
     log(color.red("relay build failed — not started"))
     return
   }
   mkdirSync(join(ROOT, "temp"), { recursive: true })
-  relay = Bun.spawn(
-    [join(ROOT, "target", "debug", "beans-relay"), "--bind", `0.0.0.0:${RELAY_PORT}`, "--db", join(ROOT, "temp", "beans-relay.db"), "--apns-topic", "ai.amoena.beans.dev"],
-    {
-      cwd: ROOT,
-      stdin: "ignore",
-      stdout: "inherit",
-      stderr: "inherit",
-      env: { ...process.env },
-      onExit(_proc, exitCode, signal) {
-        if (stopping || relay === null) return
-        relay = null
-        log(color.yellow(`relay exited (${signal ? `signal ${signal}` : `code ${exitCode}`})`))
-      },
-    },
+  const child = spawn(
+    join(ROOT, "target", "debug", "beans-relay"),
+    ["--bind", `0.0.0.0:${RELAY_PORT}`, "--db", join(ROOT, "temp", "beans-relay.db"), "--apns-topic", "ai.amoena.beans.dev"],
+    { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"], env: { ...process.env } },
   )
+  child.on("exit", (code, signal) => {
+    if (stopping || relay === null) return
+    relay = null
+    log(color.yellow(`relay exited (${signal ? `signal ${signal}` : `code ${code}`})`))
+  })
+  relay = child
   log(`${color.green("relay")} ${color.dim(`0.0.0.0:${RELAY_PORT} · pairing codes carry this Mac's LAN IP`)}`)
 }
 
@@ -157,7 +177,7 @@ async function stopRelay() {
   relay = null
   if (!current) return
   current.kill()
-  await Promise.race([current.exited, Bun.sleep(2000)])
+  await settle(current, 2000)
 }
 
 /** A relay source changed: rebuild it and run the new one. The app is untouched; the CLI
@@ -171,9 +191,7 @@ async function restartRelay() {
 /** The terminal this loop writes to, so the app launched through LaunchServices can print
  * here too. Empty when stdout is not a terminal (piped, or a background task). */
 async function ttyPath(): Promise<string> {
-  const proc = Bun.spawn(["ps", "-o", "tty=", "-p", String(process.pid)], { stdout: "pipe", stderr: "pipe" })
-  const name = (await new Response(proc.stdout).text()).trim()
-  await proc.exited
+  const name = (await output(["ps", "-o", "tty=", "-p", String(process.pid)])).trim()
   return name && name !== "??" ? `/dev/${name}` : ""
 }
 
@@ -186,19 +204,18 @@ async function ttyPath(): Promise<string> {
  * inherited, so BEANS_DEV goes through `--env`. */
 async function startApp() {
   const bundle = bundlePath(CONFIG)
-  const output = (await ttyPath()) || join(PACKAGE_DIR, ".build", "app.log")
-  app = Bun.spawn(["open", "-n", "-W", "--stdout", output, "--stderr", output, "--env", "BEANS_DEV=1", bundle], {
-    stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
-    onExit(_proc, exitCode, signal) {
-      if (stopping || app === null) return
-      app = null
-      const how = signal ? `signal ${signal}` : `code ${exitCode}`
-      log(color.yellow(`${appName(CONFIG)} exited (${how}) — press ${color.bold("r")} to relaunch`))
-    },
+  const outputPath = (await ttyPath()) || join(PACKAGE_DIR, ".build", "app.log")
+  const child = spawn("open", ["-n", "-W", "--stdout", outputPath, "--stderr", outputPath, "--env", "BEANS_DEV=1", bundle], {
+    stdio: ["ignore", "inherit", "inherit"],
   })
-  const where = output.startsWith("/dev/") ? "" : ` · output in ${output}`
+  child.on("exit", (code, signal) => {
+    if (stopping || app === null) return
+    app = null
+    const how = signal ? `signal ${signal}` : `code ${code}`
+    log(color.yellow(`${appName(CONFIG)} exited (${how}) — press ${color.bold("r")} to relaunch`))
+  })
+  app = child
+  const where = outputPath.startsWith("/dev/") ? "" : ` · output in ${outputPath}`
   log(`${color.green("running")} ${color.dim(`via open · CLI 127.0.0.1:4875${where}`)}`)
 }
 

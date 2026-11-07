@@ -51,9 +51,9 @@ Cancellation aborts the Runner's local request/stream. Local socket closure does
 
 ## Evaluation evidence
 
-Runtime tested revision: `ac4f24391358edb82b7dbd99c7d63b1d5bfc9053`. Runtime sources remain unchanged; a temporary executable supplies synthetic local HTTP fixtures. Fixture SHA-256: `da4e6792b4eedcdf98f03cf3bdb040856d2e058af02d52a2427038532f4dfb46`. The fixture is removed from the repository after use; private reproduction source and redacted receipt are retained for independent review.
+Historical runtime tested revision: `ac4f24391358edb82b7dbd99c7d63b1d5bfc9053`. The evaluation used a temporary executable with synthetic local HTTP fixtures. The current PR changes documentation only; its checks do not rerun or certify that historical runtime evidence. Fixture SHA-256: `da4e6792b4eedcdf98f03cf3bdb040856d2e058af02d52a2427038532f4dfb46`. The fixture is removed from the repository after use; private reproduction source and redacted receipt are retained for independent review.
 
-`cargo run --locked -p beans-agent --example glm_compat_check` builds and exercises real `OpenAiCompatProvider`, not a copied parser or mocked provider. It exits 0. Running the same-session built executable independently also exits 0. Both use only synthetic credentials and local HTTP, with no vendor calls or account configuration mutation. Captured output:
+`cargo run --locked -p beans-agent --example glm_compat_check` builds and exercises real `OpenAiCompatProvider`, not a copied parser or mocked provider. The recorded evaluation reports exit 0. Its same-session executable also reportedly exited 0 when run independently. Both use only synthetic credentials and local HTTP, with no vendor calls or account configuration mutation. Captured output:
 
 ```text
 PASS streaming: reasoning, text, usage, terminal stop; bearer and explicit route verified
@@ -69,4 +69,4 @@ PASS cancellation: partial stream aborts, no Done, server observes closed transp
 
 The fixture verifies outgoing bearer/path/model/stream fields, omits speculative thinking/cache fields, assembles fragmented arguments, checks tool IDs on replay, observes absent reasoning replay, rejects successful completion on failures, and verifies cancellation closes the local transport. Retries are disabled for deterministic error fixtures; retry behavior is not evaluated. No permanent runtime change means no new regression suite or broad package tests are needed. Encryption and staged-save mapping are source-traced existing mechanisms, not exercised by the transport fixture.
 
-The upstream [issue 14](https://github.com/egoist/lorca/issues/14) asks “Can you support GLM? or open for PR?” rather than reporting a reproducible transport failure. Reviewed public issue remains open, unassigned, with no development branch/PR. Its single reviewed timeline page contains only this evaluation issue's cross-reference. Unlinked/private PR activity remains unknown; no upstream patch is imported. This is an independent existing/unsupported disposition, not a before/after runtime fix.
+The upstream [issue 14](https://github.com/egoist/lorca/issues/14) asks “Can you support GLM? or open for PR?” rather than reporting a reproducible transport failure. At the dated review, the public issue was open and unassigned, with no linked development branch/PR. Its single reviewed timeline page contains only this evaluation issue's cross-reference. Unlinked/private PR activity remains unknown; no upstream patch is imported. This is an independent existing/unsupported disposition, not a before/after runtime fix.

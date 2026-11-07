@@ -280,20 +280,20 @@ impl StorageAdmission {
         use std::os::unix::ffi::OsStrExt;
         let (mut directory, normalized, mut ancestors) = Self::platform_entry(home)?;
         let path = normalized.as_ref();
-        for ancestor in &ancestors { Self::lock(ancestor, libc::LOCK_SH)?; }
+        for ancestor in &ancestors { Self::lock(ancestor, libc::LOCK_SH, "platform-prefix")?; }
         let segments: Vec<_> = path.components().filter_map(|part| match part {
             std::path::Component::Normal(segment) => Some(Ok(segment)),
             std::path::Component::RootDir | std::path::Component::CurDir => None,
             _ => Some(Err(anyhow::anyhow!("Storage admission refuses parent traversal"))),
         }).collect::<anyhow::Result<_>>()?;
         for segment in segments {
-            Self::lock(&directory, libc::LOCK_SH)?;
+            Self::lock(&directory, libc::LOCK_SH, "ancestor")?;
             let name = std::ffi::CString::new(segment.as_bytes())?;
             let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
             if fd < 0 {
                 let error = std::io::Error::last_os_error();
                 if allow_missing && error.kind() == std::io::ErrorKind::NotFound {
-                    Self::lock(&directory, libc::LOCK_EX)?;
+                    Self::lock(&directory, libc::LOCK_EX, "creation-parent")?;
                     return Ok(Self { directory, home: home.into(), ancestors });
                 }
                 return Err(error.into());
@@ -301,15 +301,23 @@ impl StorageAdmission {
             ancestors.push(directory);
             directory = unsafe { std::fs::File::from_raw_fd(fd) };
         }
-        Self::lock(&directory, libc::LOCK_EX)?;
+        Self::lock(&directory, libc::LOCK_EX, "home")?;
         Ok(Self { directory, home: home.into(), ancestors })
     }
 
     #[cfg(unix)]
-    fn lock(file: &std::fs::File, mode: i32) -> anyhow::Result<()> {
+    fn lock(file: &std::fs::File, mode: i32, stage: &'static str) -> anyhow::Result<()> {
         use std::os::fd::AsRawFd;
         if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } != 0 {
-            anyhow::bail!("Storage admission is busy or uncertain");
+            // Capture errno before formatting or any other system call. Keep the source for
+            // callers, without putting home paths or account identifiers in diagnostics.
+            let error = std::io::Error::last_os_error();
+            let kind = error.kind();
+            let errno = error.raw_os_error();
+            let lock = if mode == libc::LOCK_SH { "shared" } else { "exclusive" };
+            return Err(anyhow::Error::new(error).context(format!(
+                "Storage admission is busy or uncertain (stage={stage}, lock={lock}, kind={kind:?}, errno={errno:?})"
+            )));
         }
         Ok(())
     }
@@ -320,7 +328,7 @@ impl StorageAdmission {
         let directory = Self::open_directory(&self.home)?;
         if directory.metadata()?.dev() != self.directory.metadata()?.dev()
             || directory.metadata()?.ino() != self.directory.metadata()?.ino() {
-            Self::lock(&directory, libc::LOCK_EX)?;
+            Self::lock(&directory, libc::LOCK_EX, "created-home")?;
             let ancestor = std::mem::replace(&mut self.directory, directory);
             self.ancestors.push(ancestor);
         }

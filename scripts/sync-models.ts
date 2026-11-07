@@ -1,9 +1,9 @@
 import { strict as assert } from "node:assert"
 // Refresh curated model metadata from public sources. New models remain report-only.
 // Run `pnpm run sync:models [--report <file>] [--new <file>]` to update the local snapshot.
-import { join, dirname } from "node:path"
-import { fileURLToPath } from "node:url"
 import { readFile, writeFile } from "node:fs/promises"
+import { dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 
 const CATALOG = join(dirname(fileURLToPath(import.meta.url)), "../crates/models/catalog.json")
 const MODELS_DEV: Record<string, string> = {
@@ -125,7 +125,8 @@ function levelsFrom(options: unknown): string[] | undefined {
       }
     }
   }
-  return LEVELS.filter((level) => levels.has(level))
+  const supported = LEVELS.filter((level) => levels.has(level))
+  return supported.length || options.length === 0 ? supported : undefined
 }
 
 // Keep unknown endpoints visible. In particular, SystemOne is not Chat Completions.
@@ -260,7 +261,7 @@ async function publicText(url: string) {
   return response.text()
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2)
   if (args.length === 1 && args[0] === "--self-check") {
     const rates = { input: 1, output: 2, cache_read: 0, cache_write: 0, known: false }
@@ -309,6 +310,24 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, version: 2 }), sources), /version 1/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, updated: "2026-02-30T00:00:00Z" }), sources), /UTC/)
     assert.throws(() => syncCatalog(JSON.stringify({ ...input, padding: "x".repeat(MAX_BYTES) }), sources), /1 MiB/)
+    const curatedLevels = JSON.stringify({ ...input, models: [{ ...row, levels: ["low", "medium"] }] })
+    for (const options of [
+      [{ type: "future-effort", values: ["high"] }],
+      [{ type: "effort", values: ["future-level"] }],
+      [{ type: "budget_tokens", values: [1024] }],
+    ]) {
+      modelsDev.opencode.models.chat.reasoning_options = options
+      assert.deepEqual(validate(syncCatalog(curatedLevels, sources).text).models[0].levels, ["low", "medium"])
+    }
+    for (const [options, expected] of [
+      [[], []],
+      [[{ type: "effort", values: ["low", "future-level"] }], ["low"]],
+      [[{ type: "toggle" }], ["off"]],
+    ]) {
+      modelsDev.opencode.models.chat.reasoning_options = options
+      assert.deepEqual(validate(syncCatalog(curatedLevels, sources).text).models[0].levels, expected)
+    }
+    delete modelsDev.opencode.models.chat.reasoning_options
     console.log("Offline model sync self-check passed; no network or catalog writes.")
     process.exit(0)
   }

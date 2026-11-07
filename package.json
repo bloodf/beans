@@ -22,6 +22,7 @@
     "l10n": "tsx scripts/l10n.ts",
     "check:docs": "tsx scripts/check-docs.ts",
     "check:catalog": "tsx scripts/check-catalog.ts",
+    "sync:models": "tsx scripts/sync-models.ts",
     "check:output-baseline": "tsx scripts/check-output-baseline.ts",
     "web": "pnpm --dir web run dev",
     "web:build": "pnpm --dir web run build",

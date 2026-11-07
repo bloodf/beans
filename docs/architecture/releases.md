@@ -8,6 +8,8 @@ Feature changes run relevant checks locally before integration: the affected Rus
 
 Each Rust test job builds the real relay first and exports its executable path through `BEANS_REVOCATION_RELAY_BIN`. The revocation integration fixture starts that binary against isolated temporary storage; it never builds inside the test or uses a live relay. Linux also exercises the relay store against its temporary PostgreSQL service. Local aggregate runs must supply the same prebuilt executable, and PostgreSQL coverage requires `BEANS_RELAY_TEST_POSTGRES`.
 
+The Linux Rust job disables debug symbols in the dev and test profiles and disables incremental compilation to reduce disk pressure. Linux backtraces can therefore lack source-line detail. It reports free disk before the relay build and after the aggregate tests, including on failure; the latter reading precedes the bash session stress step. `scripts/protoc-workflows.test.ts` checks these settings and the aggregate Cargo commands. The PostgreSQL service, relay fixture, timeout and test matrix remain in place.
+
 Hosted release gates run portable archive checks on Linux and generated APK/IPA metadata checks on macOS with SDK 34/JDK 17. Every release regression has an unconditional invocation. Release publication and mobile submission remain manual-only. E2E scripts remain manual/local and are not added to these validation workflows.
 
 ## Source and readiness

@@ -1135,9 +1135,11 @@ export class AppStore {
     this.perform("bots.update", { id, provider, model: model ?? "", thinking: thinking ?? "" });
   }
 
-  /** Summarizes the chat's older part for its bot now, on the Runner. */
-  compactChat(id: string): void {
-    this.perform("chats.compact", { chat_id: id });
+  /** Summarizes the chat's older part for its bot now, on the Runner. It answers once the Runner
+   * is done, after a running turn and the memory flush, or throws why it did not compact. */
+  async compactChat(id: string): Promise<void> {
+    if (this.isMock) return;
+    await this.request("chats.compact", { chat_id: id });
   }
 
   // MARK: - Plugins

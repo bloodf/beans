@@ -271,6 +271,23 @@ mod runner {
         #[cfg(not(target_os = "linux"))]
         { let _ = app; Err("secure_skill_library_unavailable".into()) }
     }
+    fn import(app: &Arc<App>, s: ImportRequest, authority: Authority, original_id: Option<&str>) -> Result<ImportReply, String> {
+        // Consume before every effect, including refusal due to stale authority or source.
+        let approval = approvals().lock().unwrap().remove(&s.token).ok_or("skill_library_approval_not_found")?;
+        if approval.expires <= Instant::now() || !approval.app.ptr_eq(&Arc::downgrade(app))
+            || approval.authority.actor != authority.actor || approval.authority.runner != authority.runner
+            || approval.authority.incarnation != authority.incarnation || approval.authority.binding != authority.binding { return Err("skill_library_approval_stale".into()); }
+        { let _guards = approval.authority.enter(app, true)?; }
+        let library = { let _guards = approval.authority.enter(app, true)?; library(app)? };
+        let admit = || approval.authority.enter(app, true).map_err(std::io::Error::other);
+        let outcome = match original_id {
+            Some(id) => library.import_approved_keep_both(Path::new(&approval.source), &authority.runner, &approval.inventory, id, admit),
+            None => library.import_approved(Path::new(&approval.source), &authority.runner, &approval.inventory, admit),
+        }.map_err(failure)?;
+        let _guards = authority.enter(app, true)?;
+        Ok(ImportReply { version: 1, runner_id: s.runner_id, managed_id: outcome.manifest.bundle_id,
+            summary: summary(&approval.inventory), durability_warning: outcome.durability_warning.is_some() })
+    }
     pub(super) fn perform(app: &Arc<App>, operation: Operation, authority: Authority) -> Result<Value, String> {
         match operation {
             Operation::Preview(s) => {
@@ -287,18 +304,7 @@ mod runner {
                 serde_json::to_value(reply).map_err(|_| "skill_library_failed".into())
             }
             Operation::Import(s) => {
-                // Consume before every effect, including refusal due to stale authority or source.
-                let approval = approvals().lock().unwrap().remove(&s.token).ok_or("skill_library_approval_not_found")?;
-                if approval.expires <= Instant::now() || !approval.app.ptr_eq(&Arc::downgrade(app))
-                    || approval.authority.actor != authority.actor || approval.authority.runner != authority.runner
-                    || approval.authority.incarnation != authority.incarnation || approval.authority.binding != authority.binding { return Err("skill_library_approval_stale".into()); }
-                { let _guards = approval.authority.enter(app, true)?; }
-                let library = { let _guards = approval.authority.enter(app, true)?; library(app)? };
-                let outcome = library.import_approved(Path::new(&approval.source), &authority.runner, &approval.inventory,
-                    || approval.authority.enter(app, true).map_err(std::io::Error::other)).map_err(failure)?;
-                let _guards = authority.enter(app, true)?;
-                serde_json::to_value(ImportReply { version: 1, runner_id: s.runner_id, managed_id: outcome.manifest.bundle_id,
-                    summary: summary(&approval.inventory), durability_warning: outcome.durability_warning.is_some() }).map_err(|_| "skill_library_failed".into())
+                serde_json::to_value(import(app, s, authority, None)?).map_err(|_| "skill_library_failed".into())
             }
             Operation::Uninstall(s) => {
                 let library = { let _guards = authority.enter(app, true)?; library(app)? };
@@ -308,8 +314,7 @@ mod runner {
                     cleanup_warning: outcome.cleanup_warning.is_some(), durability_warning: outcome.durability_warning.is_some() }).map_err(|_| "skill_library_failed".into())
             }
             Operation::KeepBoth(s) => {
-                // The original is a label, never read/validated/rewritten: edited copies remain intact.
-                // Existing no-replace publication protects every occupied managed ID.
+                // Publication requires the original directory, without validating edited contents.
                 let (source_label, digest) = {
                     let pending = approvals().lock().unwrap();
                     let approval = pending.get(&s.token).ok_or("skill_library_approval_not_found")?;
@@ -322,10 +327,9 @@ mod runner {
                     let digest = format!("{:x}",Sha256::digest(serde_json::to_vec(&identity).map_err(|_| INVALID)?));
                     (label, digest)
                 };
-                let imported = perform(app, Operation::Import(ImportRequest {
+                let imported = import(app, ImportRequest {
                     version: s.version, runner_id: s.runner_id.clone(), token: s.token, confirmed: s.confirmed,
-                }), authority)?;
-                let imported: ImportReply = serde_json::from_value(imported).map_err(|_| "invalid_skill_library_response")?;
+                }, authority, Some(&s.managed_id))?;
                 serde_json::to_value(KeepBothReply { version: 1, runner_id: s.runner_id,
                     original_managed_id: s.managed_id, managed_id: imported.managed_id, source_label, digest,
                     summary: imported.summary, durability_warning: imported.durability_warning }).map_err(|_| "skill_library_failed".into())

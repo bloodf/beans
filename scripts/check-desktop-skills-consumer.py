@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -132,6 +133,53 @@ def validate_owned_asset(body, source, url, base, frozen):
         raise RuntimeError(f"served asset does not bind frozen bytes: {source}")
 
 
+def stop_owned_session(process: subprocess.Popen, timeout: float = 30) -> None:
+    """Stop the session created by this driver's start_new_session launch."""
+    group = process.pid
+    if os.name != "posix" or group <= 1 or group == os.getpgrp() or timeout <= 0:
+        raise ValueError("an owned POSIX session and positive timeout are required")
+    try:
+        if os.getpgid(group) != group or os.getsid(group) != group:
+            raise ValueError("refusing to signal a process outside its own session")
+    except ProcessLookupError:
+        pass  # The leader may already be gone while its descendants still run.
+
+    def send(sig: int) -> None:
+        try:
+            os.killpg(group, sig)
+        except ProcessLookupError:
+            pass
+
+    def settled(deadline: float) -> bool:
+        while True:
+            if process.poll() is not None:
+                # Reap only adopted children in this group, if this process is a subreaper.
+                while True:
+                    try:
+                        child, _ = os.waitpid(-group, os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if child == 0:
+                        break
+            try:
+                os.killpg(group, 0)
+            except ProcessLookupError:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.02, remaining))
+
+    started = time.monotonic()
+    deadline = started + timeout
+    send(signal.SIGTERM)
+    if not settled(started + timeout / 2):
+        send(signal.SIGKILL)
+        if not settled(deadline):
+            raise RuntimeError(f"owned process group {group} did not settle within {timeout}s")
+    process.wait(timeout=max(0, deadline - time.monotonic()))
+
+
 def free_port():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -235,6 +283,8 @@ def run_browser(base, frozen):
 def main():
     receipt = {"result": None, "error": None}
     try:
+        if os.name != "posix":
+            raise RuntimeError("the mounted skills driver requires POSIX session ownership")
         if not (DESKTOP / "src/mygo.ts").is_file() or not (DESKTOP / "node_modules").is_dir():
             raise RuntimeError("existing desktop/node_modules and desktop/src/mygo.ts required; no installation performed")
         binding = source_binding()
@@ -245,17 +295,16 @@ def main():
             (frozen / "desktop/node_modules").symlink_to(DESKTOP / "node_modules", target_is_directory=True)
             port = free_port()
             base = f"http://localhost:{port}"
-            vite = subprocess.Popen(["bun", str(DESKTOP / "node_modules/vite/bin/vite.js"), "--host", "127.0.0.1",
+            vite = subprocess.Popen(["node", str(DESKTOP / "node_modules/vite/bin/vite.js"), "--host", "127.0.0.1",
                                      "--port", str(port), "--strictPort"], cwd=frozen / "desktop",
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             try:
                 wait_for(base + PAGE, vite)
                 receipt.update(run_browser(base, frozen))
                 if source_binding() != binding:
                     raise RuntimeError("candidate tree changed while checks ran")
             finally:
-                vite.terminate()
-                vite.wait(timeout=30)
+                stop_owned_session(vite)
     except Exception as error:
         receipt["error"] = "; ".join(filter(None, [receipt.get("error"), str(error)]))
     print(json.dumps(receipt, indent=2))

@@ -56,6 +56,9 @@
   --popover: #ffffff;
   --shadow: 0 10px 40px rgba(0, 0, 0, 0.18), 0 0 0 0.5px rgba(0, 0, 0, 0.12);
   --scrim: rgba(0, 0, 0, 0.22);
+  /* The toast at the foot of a pane: the inverse of the window, so it stands out from it. */
+  --toast: #1c1c1e;
+  --toast-text: #ffffff;
 
   --text-message: 13.5px;
   --text-body: 13px;
@@ -112,6 +115,8 @@
   --popover: #2c2c2e;
   --shadow: 0 10px 40px rgba(0, 0, 0, 0.5), 0 0 0 0.5px rgba(255, 255, 255, 0.14);
   --scrim: rgba(0, 0, 0, 0.4);
+  --toast: #f2f2f7;
+  --toast-text: #000000;
 }
 
 * {

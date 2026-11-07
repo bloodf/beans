@@ -192,6 +192,7 @@ export interface WireMessage {
 
 export interface WireChatUsage {
   context_tokens: number;
+  context_estimated?: boolean | null;
   context_window: number;
   input_tokens: number;
   output_tokens: number;
@@ -639,6 +640,7 @@ export function toMessage(wire: WireMessage): Message {
 export function toUsage(wire: WireChatUsage): ChatUsage {
   return {
     contextTokens: wire.context_tokens,
+    contextEstimated: wire.context_estimated === true,
     contextWindow: wire.context_window,
     inputTokens: wire.input_tokens,
     outputTokens: wire.output_tokens,

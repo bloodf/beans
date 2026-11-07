@@ -10,10 +10,12 @@ import { deviceSymbol, isDM, isGroup, paneSymbol, paneTitle, settingsPanes, type
 import { track } from "../model/reactive";
 import { store } from "../model/store";
 import { AvatarCluster, botAvatar, sameAvatar, type AvatarContent } from "./avatar";
+import { addBotToChat } from "./actions";
 import { commands, shortcutText } from "./commands";
 import { HoverButton, SearchField } from "./controls";
 import { Icon } from "./icons";
-import { popupMenu, separator } from "./menu";
+import { popupMenu, separator, type MenuEntry } from "./menu";
+import { presentBotLook } from "./sheets/botLook";
 import {
   botsAvailableToAdd,
   closeSettings,
@@ -103,7 +105,41 @@ function watchShortcutKey(): () => void {
   };
 }
 
-function ChatRow(props: { id: string; index: number }) {
+export function chatContextMenuEntries(chat: ReturnType<typeof store.chat>): MenuEntry[] {
+  if (!chat) return [];
+  const bots = store.botsIn(chat);
+  return [
+    { id: "pin", label: chat.isPinned ? L("Unpin") : L("Pin") },
+    ...(isGroup(chat)
+      ? [
+          { id: "rename", label: L("Rename…") },
+          { id: "add", label: L("Add Bot…"), disabled: botsAvailableToAdd(chat.id).length === 0 },
+        ]
+      : bots.length > 0
+        ? [{ id: "look", label: L("Change Look…") }]
+        : []),
+    separator,
+    { id: "delete", label: isDM(chat) ? L("Delete Bot") : L("Delete Chat") },
+  ];
+}
+
+export async function openChatContextMenu(
+  chatID: string,
+  at: { x: number; y: number },
+  popup: typeof popupMenu = popupMenu,
+): Promise<void> {
+  const chat = store.chat(chatID);
+  if (!chat) return;
+  const bots = store.botsIn(chat);
+  const picked = await popup(chatContextMenuEntries(chat), at);
+  if (picked === "pin") togglePinChat(chatID);
+  else if (picked === "rename") void renameChat(chatID);
+  else if (picked === "add") addBotToChat(chatID);
+  else if (picked === "look" && bots.length > 0) presentBotLook(bots[0]!.id);
+  else if (picked === "delete") void deleteChat(chatID);
+}
+
+export function ChatRow(props: { id: string; index: number }) {
   const content = createMemo(
     () => {
       track.chats();
@@ -119,23 +155,8 @@ function ChatRow(props: { id: string; index: number }) {
   const shortcut = () => (showsShortcuts() && props.index < 9 ? shortcutText(`CmdOrCtrl+${props.index + 1}`) : null);
   const menu = async (event: MouseEvent) => {
     event.preventDefault();
-    // Acting on the clicked row means selecting it first; the commands read the selection.
-    select({ kind: "chat", id: props.id });
-    const chat = store.chat(props.id);
-    if (!chat) return;
-    const picked = await popupMenu(
-      [
-        { id: "pin", label: chat.isPinned ? L("Unpin") : L("Pin") },
-        ...(isGroup(chat) ? [{ id: "rename", label: L("Rename…") }, { id: "add", label: L("Add Bot…"), disabled: botsAvailableToAdd(props.id).length === 0 }] : []),
-        separator,
-        { id: "delete", label: isDM(chat) ? L("Delete Bot") : L("Delete Chat") },
-      ],
-      { x: event.clientX, y: event.clientY },
-    );
-    if (picked === "pin") togglePinChat();
-    else if (picked === "rename") void renameChat();
-    else if (picked === "add") commands.run("addBot");
-    else if (picked === "delete") void deleteChat();
+    // The menu acts on the clicked row and leaves the selection where it is.
+    await openChatContextMenu(props.id, { x: event.clientX, y: event.clientY });
   };
   return (
     <Show when={content()}>
@@ -150,7 +171,7 @@ function ChatRow(props: { id: string; index: number }) {
             if (event.button === 0) select({ kind: "chat", id: props.id });
           }}
           onDblClick={() => {
-            if (row().isGroup) void renameChat();
+            if (row().isGroup) void renameChat(props.id);
           }}
           onContextMenu={menu}
         >

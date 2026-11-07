@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { Compacts, compactShown, type CompactScheduler } from "./compact";
 
 /** A clock the test moves by hand, so a two-second moment costs nothing. */

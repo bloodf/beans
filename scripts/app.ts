@@ -1,9 +1,10 @@
 import { existsSync, readFileSync } from "node:fs"
-import { cp, rm, mkdir, chmod, readdir, readFile, rename, writeFile } from "node:fs/promises"
+import { cp, rm, mkdir, chmod, copyFile, readdir, readFile, rename, writeFile } from "node:fs/promises"
+import { spawn } from "node:child_process"
 import { join, resolve } from "node:path"
 import { releasePublicKey } from "./release-signing.ts"
 
-export const ROOT = resolve(import.meta.dir, "..")
+export const ROOT = resolve(import.meta.dirname, "..")
 export const PACKAGE_DIR = join(ROOT, "macos")
 export const RESOURCES_DIR = join(PACKAGE_DIR, "Resources")
 export const SOURCES_DIR = join(PACKAGE_DIR, "Sources")
@@ -144,17 +145,31 @@ ${updates}
 }
 
 async function run(cmd: string[], opts: { cwd?: string; capture?: boolean } = {}) {
-  const proc = Bun.spawn(cmd, {
+  const [command, ...args] = cmd
+  if (!command) throw new Error("Command must not be empty")
+  const proc = spawn(command, args, {
     cwd: opts.cwd ?? PACKAGE_DIR,
-    stdout: opts.capture ? "pipe" : "inherit",
-    stderr: opts.capture ? "pipe" : "inherit",
+    stdio: opts.capture ? ["ignore", "pipe", "pipe"] : ["ignore", "inherit", "inherit"],
   })
-  // Both pipes drain together: a process blocked on a full stderr pipe never exits.
-  const [stdout, stderr] = opts.capture
-    ? await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])
-    : ["", ""]
-  const exitCode = await proc.exited
-  return { exitCode, stdout, stderr }
+  const failure = new Promise<never>((_, reject) => {
+    proc.once("error", reject)
+  })
+  const done = (async () => {
+    // Both pipes drain together: a process blocked on a full stderr pipe never exits.
+    let stdout = ""
+    let stderr = ""
+    if (opts.capture && proc.stdout && proc.stderr) {
+      proc.stdout.setEncoding("utf8")
+      proc.stderr.setEncoding("utf8")
+      const readOut = (async () => { for await (const chunk of proc.stdout!) stdout += chunk })()
+      const readErr = (async () => { for await (const chunk of proc.stderr!) stderr += chunk })()
+      await Promise.all([readOut, readErr])
+    }
+    // A signal termination leaves no exit code; it is a failure, not a success.
+    const code = await new Promise<number | null>((resolveClose) => proc.once("close", resolveClose))
+    return { exitCode: code ?? 1, stdout, stderr }
+  })()
+  return Promise.race([done, failure])
 }
 
 /** Run codesign, printing its error when it fails. A secure timestamp (`--timestamp`) is a request
@@ -308,7 +323,7 @@ async function signBundle(bundle: string, sparkle: string, identity: string, con
   }
 
   const entitlements = join(PACKAGE_DIR, ".build", "entitlements.plist")
-  await Bun.write(entitlements, ENTITLEMENTS)
+  await writeFile(entitlements, ENTITLEMENTS)
   return sign(bundle, ["--identifier", identifier, ...(hardened ? ["--entitlements", entitlements] : [])])
 }
 
@@ -347,8 +362,8 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   const macos = join(bundle, "Contents", "MacOS")
   await mkdir(macos, { recursive: true })
   await mkdir(join(bundle, "Contents", "Resources"), { recursive: true })
-  await Bun.write(join(bundle, "Contents", "Info.plist"), infoPlist(readVersion(), config))
-  await Bun.write(join(bundle, "Contents", "PkgInfo"), "APPL????")
+  await writeFile(join(bundle, "Contents", "Info.plist"), infoPlist(readVersion(), config))
+  await writeFile(join(bundle, "Contents", "PkgInfo"), "APPL????")
 
   // The string tables (macos/Resources/<language>.lproj): what `L()` reads through Bundle.main.
   for (const entry of await readdir(RESOURCES_DIR)) {
@@ -371,7 +386,7 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   // Unlink before writing: macOS refuses to overwrite a running executable in place.
   const destination = join(macos, APP_NAME)
   await rm(destination, { force: true })
-  await Bun.write(destination, Bun.file(source))
+  await copyFile(source, destination)
   if (!(await stampSDK(destination))) {
     return { ok: false, ms: performance.now() - started }
   }
@@ -383,7 +398,7 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   await mkdir(cliBinDir, { recursive: true })
   const cliDestination = join(cliBinDir, CLI_NAME)
   await rm(cliDestination, { force: true })
-  await Bun.write(cliDestination, Bun.file(cli.path))
+  await copyFile(cli.path, cliDestination)
   await chmod(cliDestination, 0o755)
 
   options.onStep?.(`bundling the CLI and Sparkle, signing with ${options.signIdentity ?? "an ad-hoc identity"}`)

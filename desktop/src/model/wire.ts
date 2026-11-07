@@ -92,6 +92,7 @@ export interface WireParsedServers {
 export interface WireDevice {
   id: string;
   name: string;
+  machine_name?: string;
   model: string;
   os: string;
   os_version: string;
@@ -489,6 +490,7 @@ export function toDevice(wire: WireDevice): Device {
   return {
     id: wire.id,
     name: wire.unknown ? L("Unknown Device") : wire.name,
+    machineName: wire.machine_name ?? wire.name,
     model: wire.model,
     os: wire.unknown ? "unknown" : (oses as string[]).includes(wire.os) ? (wire.os as DeviceOS) : "linux",
     osVersion: wire.os_version,

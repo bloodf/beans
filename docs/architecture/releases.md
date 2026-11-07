@@ -8,7 +8,7 @@ Feature changes run relevant checks locally before integration: the affected Rus
 
 Each Rust test job builds the real relay first and exports its executable path through `BEANS_REVOCATION_RELAY_BIN`. The revocation integration fixture starts that binary against isolated temporary storage; it never builds inside the test or uses a live relay. Linux also exercises the relay store against its temporary PostgreSQL service. Local aggregate runs must supply the same prebuilt executable, and PostgreSQL coverage requires `BEANS_RELAY_TEST_POSTGRES`.
 
-Release publication and mobile submission remain manual-only. E2E scripts remain manual/local and are not added to these validation workflows.
+Hosted release gates cover every release regression; their admission tests reject missing or conditional fixture invocations. Release publication and mobile submission remain manual-only. E2E scripts remain manual/local and are not added to these validation workflows.
 
 ## Source and readiness
 
@@ -44,6 +44,8 @@ Profiles:
 - `development`: simulator development client.
 
 A store IPA is not an ad-hoc installer and cannot generally be sideloaded from GitHub. Preview/ad-hoc iOS installs require provisioned devices and are not required by all-scope readiness. Existing legacy `release-ios` is independent and exports only ad-hoc/development distributions.
+
+The production EAS `github` profile enables the Android signed-update consumer and `REQUEST_INSTALL_PACKAGES`; `production`, TestFlight, preview and development do not inherit that capability. Play-installed packages use store updates even if installer capability is present. The phone bundles unchanged `updates/public-key.txt`, authenticates signed readiness and `eas-github.json`, and compares candidate APK identity/signing history with the installed package at runtime. No static Android release signer pin is introduced. Each update requires fresh app consent and Android system confirmation. Native compilation and installed-device acceptance remain separate from release staging assurance and publication.
 
 Run EAS from `mobile/`; the Git repository root is the upload context. Release profiles pin Node `24.22.2` and pnpm `12.18.0`; EAS installs from the mobile pnpm lockfile. Root `.easignore` excludes build output, native prebuild directories and credentials, retaining Cargo workspace/lock, scripts, root package metadata and `packages/beans-blobatar`. Do not upload only `mobile/`. Mobile `postinstall` runs `scripts/release-eas-native.ts` on EAS workers before Expo prebuild and CocoaPods; EAS's `eas-build-post-install` hook runs after pods and is too late. Rust is installed if missing, targets/cargo-ndk are prepared, then locked host and phone builds generate bindings/libraries. Host metadata uses `.so` on Linux and `.dylib` on macOS. Android accepts `ANDROID_NDK_HOME`/`ANDROID_NDK_ROOT`, or `ANDROID_HOME`/`ANDROID_SDK_ROOT` with `BEANS_ANDROID_NDK_VERSION`; EAS profile pins installed NDK `27.1.12297006`.
 

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { namePastedImages, pasteTimestamp } from "./composerPaste";
 
 test("namePastedImages maps MIME to extension and suffixes multi-image pastes", () => {

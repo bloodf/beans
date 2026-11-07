@@ -163,7 +163,10 @@ impl Provider for ChatGptProvider {
         let (tx, rx) = mpsc::channel(64);
         let mut body = self.body(&request);
         let options = request.options.clone();
-        options.before_payload(&mut body);
+        if let Err(message) = options.before_payload_with_output_cap(&mut body, "max_output_tokens") {
+            let _ = tx.send(AssistantEvent::Error { message, aborted: false }).await;
+            return channel_stream(rx);
+        }
         let client = self.client.clone();
         let info = self.info.clone();
         let tokens = match self.fresh_tokens().await {

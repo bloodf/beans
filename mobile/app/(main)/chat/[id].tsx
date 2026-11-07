@@ -1125,7 +1125,7 @@ export default function ChatScreen() {
               setAnchored(true);
               try {
                 const message = await engine.sendMessage(id, text, files, mentions, replyTo);
-                if (!presentation.active || sendPresentation.current !== presentation || presentation.epoch !== authorityEpoch.current) return false;
+                if (!presentation.active || sendPresentation.current !== presentation || presentation.epoch !== authorityEpoch.current) return true;
                   stopSettling();
                   following.current = true;
                   anchorKey.current = message.id;

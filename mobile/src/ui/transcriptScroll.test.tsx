@@ -240,7 +240,7 @@ test.each(["ios", "android"])("%s transcript yields streaming scroll to reader a
       else pending.resolve(message);
       await sent;
       expect(draft.text).toBe("new presentation draft");
-      expect(origin.text).toBe(origin === draft ? "new presentation draft" : "pending");
+      expect(origin.text).toBe(origin === draft ? "new presentation draft" : "");
       scrolls.length = 0;
       fresh.onContentSizeChange(400, 2200); expect(scrolls.pop()?.kind).toBe("end");
       useStore.setState({ [field]: original }); render();
@@ -270,7 +270,7 @@ test.each(["ios", "android"])("%s transcript yields streaming scroll to reader a
     expect(sendCalls).toBe(admitted);
     expect(await revoked).toBe(false);
     pending.resolve(message);
-    expect(await sending).toBe(false);
+    expect(await sending).toBe(true);
     render();
     const previousRouteSend = find(root, "Composer")!.props.onSend;
     useStore.setState({ chats: [chat, { ...chat, id: "other" }] });

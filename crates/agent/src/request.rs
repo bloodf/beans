@@ -1,6 +1,6 @@
 //! What travels with every model call besides the messages: headers, a timeout, a session id
-//! for cache affinity, provider metadata, and hooks that see the key, the payload, and the
-//! response. After pi's stream options and its `before_payload` / `after_response` hooks.
+//! for cache affinity, provider metadata, and hooks that admit each HTTP attempt and see the
+//! key, the payload, and every response. After pi's stream options and its hooks.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -29,6 +29,12 @@ pub(crate) fn bearer_auth(request: reqwest::RequestBuilder, key: &str) -> reqwes
 /// Hooks the adapters call around one request. Every method has a default that does nothing.
 #[async_trait]
 pub trait RequestHooks: Send + Sync {
+    /// Admission for every HTTP attempt, including adapter retries. A host can enforce a
+    /// shared budget before the request reaches the service. Refusal is final.
+    async fn before_request(&self, _retry: bool, _cancel: &tokio_util::sync::CancellationToken) -> Result<(), String> {
+        Ok(())
+    }
+
     /// A key to use for this call instead of the adapter's own, for tokens that expire.
     async fn api_key(&self) -> Option<String> {
         None
@@ -37,7 +43,7 @@ pub trait RequestHooks: Send + Sync {
     /// The request body, right before it is sent. Change it in place.
     fn before_payload(&self, _payload: &mut Value) {}
 
-    /// The response, once its status and headers are in and before its body streams.
+    /// Each HTTP attempt's response, including failures, once headers arrive and before its body streams.
     fn after_response(&self, _response: &ResponseInfo) {}
 }
 

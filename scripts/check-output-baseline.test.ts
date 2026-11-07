@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect } from "vitest";
 import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,7 @@ const receipt = process.env.OUTPUT_BASELINE_RECEIPT;
 const checkout = process.env.OUTPUT_BASELINE_CHECKOUT;
 const binary = process.env.OUTPUT_BASELINE_BINARY;
 test("rejects unpinned checkout; verifies real receipts when supplied", async () => {
-  await expect(checkOutputBaseline("/unused-receipt", import.meta.dir + "/..", "/unused-binary")).rejects.toThrow("example checkout must be pinned");
+  await expect(checkOutputBaseline("/unused-receipt", join(import.meta.dirname, ".."), "/unused-binary")).rejects.toThrow("example checkout must be pinned");
   if (!receipt || !checkout || !binary) {
     console.log("Runtime receipt checks NOT RUN: supply OUTPUT_BASELINE_RECEIPT, OUTPUT_BASELINE_CHECKOUT and OUTPUT_BASELINE_BINARY after central lease.");
     return;

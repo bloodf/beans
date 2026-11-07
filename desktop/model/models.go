@@ -1574,23 +1574,28 @@ func (c *Chat) Message(id string) *Message {
 // ChatUsage is the tokens and money the turns in a chat used. ContextTokens and ContextWindow are
 // the last turn's; the rest accumulate.
 type ChatUsage struct {
-	ContextTokens   int
-	ContextWindow   int
-	InputTokens     int
-	OutputTokens    int
-	CacheReadTokens int
-	CostUSD         float64
-	Turns           int
-	Model           string
+	ContextTokens    int
+	ContextEstimated bool
+	ContextWindow    int
+	InputTokens      int
+	OutputTokens     int
+	CacheReadTokens  int
+	CostUSD          float64
+	Turns            int
+	Model            string
 }
 
 // ContextSummary is "128k of 1M · 13%", or "128k" when the window is unknown.
 func (u ChatUsage) ContextSummary() string {
-	if u.ContextWindow <= 0 {
-		return Tokens(u.ContextTokens)
+	summary := Tokens(u.ContextTokens)
+	if u.ContextWindow > 0 {
+		percent := int(math.Round(float64(u.ContextTokens) / float64(u.ContextWindow) * 100))
+		summary = L("%@ of %@ · %d%%", Tokens(u.ContextTokens), Tokens(u.ContextWindow), percent)
 	}
-	percent := int(math.Round(float64(u.ContextTokens) / float64(u.ContextWindow) * 100))
-	return L("%@ of %@ · %d%%", Tokens(u.ContextTokens), Tokens(u.ContextWindow), percent)
+	if u.ContextEstimated {
+		return "≈ " + summary
+	}
+	return summary
 }
 
 // SpendSummary is "$0.42 · 18 turns".

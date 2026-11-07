@@ -154,7 +154,7 @@ test("the daily check offers a release once, and Skip This Version keeps it from
   routes = { "/git/matching-refs/tags/beans-v": tags("1.3.0"), "/releases/tags/beans-v1.3.0": release("1.3.0") };
   await updates.checkForUpdates(true);
   expect(updates.useUpdates.getState().latest?.version).toBe("1.3.0");
-  expect(prefs.update_checked_at).toBeNumber();
+  expect(prefs.update_checked_at).toBeTypeOf("number");
   expect(alerts.map((a) => a.title)).toEqual(["Beans 1.3.0 is available"]);
   expect(alerts[0]!.buttons.map((b) => b.text)).toEqual(["Skip This Version", "Remind Me Later", "Install Update"]);
 

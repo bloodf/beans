@@ -1,22 +1,14 @@
+"use strict";
 (() => {
   var __defProp = Object.defineProperty;
-  var __returnValue = (v) => v;
-  function __exportSetter(name, newValue) {
-    this[name] = __returnValue.bind(null, newValue);
-  }
   var __export = (target, all) => {
     for (var name in all)
-      __defProp(target, name, {
-        get: all[name],
-        enumerable: true,
-        configurable: true,
-        set: __exportSetter.bind(all, name)
-      });
+      __defProp(target, name, { get: all[name], enumerable: true });
   };
 
   // index.ts
-  var exports_beans_blobatar = {};
-  __export(exports_beans_blobatar, {
+  var index_exports = {};
+  __export(index_exports, {
     BOT_AVATAR_STATES: () => BOT_AVATAR_STATES,
     BOT_BACKGROUNDS: () => BOT_BACKGROUNDS,
     BOT_EXPRESSIONS: () => BOT_EXPRESSIONS,
@@ -41,7 +33,7 @@
     const saccade = Math.round(t.num("motion.saccade", 4200, 7600));
     const lookX = t.num("motion.lookX", 1, 2.2);
     const lookY = t.num("motion.lookY", 0.8, 1.7);
-    const r2 = (v) => Math.round(v * 100) / 100;
+    const r22 = (v) => Math.round(v * 100) / 100;
     return {
       phase: Math.round(t.num("motion.phase", 0, 2800)),
       bob: Math.round(t.num("motion.bob", 0, 3400)),
@@ -49,10 +41,10 @@
       blinkPhase: Math.round(t.num("motion.blinkPhase", 0, blink)),
       saccade,
       saccadePhase: Math.round(t.num("motion.saccadePhase", 0, saccade)),
-      lookX: r2(lookX) * (t.bool("motion.lookXFlip") ? -1 : 1),
-      lookY: r2(lookY) * (t.bool("motion.lookYFlip") ? -1 : 1),
-      lookMX: r2(lookX),
-      lookMY: r2(lookY)
+      lookX: r22(lookX) * (t.bool("motion.lookXFlip") ? -1 : 1),
+      lookY: r22(lookY) * (t.bool("motion.lookYFlip") ? -1 : 1),
+      lookMX: r22(lookX),
+      lookMY: r22(lookY)
     };
   }
 
@@ -73,18 +65,16 @@
       -0.0041960863 * L - 0.7034186147 * M + 1.707614701 * S
     ];
   }
-  var inGamut = (rgb) => rgb.every((v) => v >= -0.0001 && v <= 1 + 0.0001);
+  var inGamut = (rgb) => rgb.every((v) => v >= -1e-4 && v <= 1 + 1e-4);
   function resolve(color) {
     let rgb = toLinear(color);
     if (!inGamut(rgb)) {
       let lo = 0;
       let hi = color.c;
-      for (let i = 0;i < 12; i++) {
+      for (let i = 0; i < 12; i++) {
         const mid = (lo + hi) / 2;
-        if (inGamut(toLinear({ ...color, c: mid })))
-          lo = mid;
-        else
-          hi = mid;
+        if (inGamut(toLinear({ ...color, c: mid }))) lo = mid;
+        else hi = mid;
       }
       rgb = toLinear({ ...color, c: lo });
     }
@@ -100,17 +90,14 @@
     return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
   }
   function ensureContrast(fg, bg, min) {
-    if (contrast(fg, bg) >= min)
-      return fg;
+    if (contrast(fg, bg) >= min) return fg;
     const lean = fg.l >= bg.l ? 1 : -1;
     for (const dir of [lean, -lean]) {
       const probe = { ...fg };
-      for (let i = 0;i < 60; i++) {
+      for (let i = 0; i < 60; i++) {
         probe.l = Math.min(1, Math.max(0, probe.l + dir * 0.02));
-        if (contrast(probe, bg) >= min)
-          return probe;
-        if (probe.l === 0 || probe.l === 1)
-          break;
+        if (contrast(probe, bg) >= min) return probe;
+        if (probe.l === 0 || probe.l === 1) break;
       }
     }
     const black = { ...fg, l: 0, c: 0 };
@@ -119,15 +106,15 @@
   }
   function toHex(color) {
     return "#" + resolve(color).map((v) => {
-      const s = v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+      const s = v <= 31308e-7 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
       return Math.round(s * 255).toString(16).padStart(2, "0");
     }).join("");
   }
   function fromHex(hex) {
     const n = parseInt(hex.slice(1), 16);
     const [r, g, b] = [n >> 16 & 255, n >> 8 & 255, n & 255].map((v) => {
-      const s = v / 255;
-      return s <= 0.04045 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+      const s2 = v / 255;
+      return s2 <= 0.04045 ? s2 / 12.92 : Math.pow((s2 + 0.055) / 1.055, 2.4);
     });
     const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
     const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
@@ -172,29 +159,42 @@
     let hotEye = ensureContrast(baseEye, hotHead, TINT_FLOOR);
     const dir = hotEye.l >= hotHead.l ? 1 : -1;
     const headHex = toHex(hotHead);
-    for (let pass = 0;pass < 40; pass++) {
+    for (let pass = 0; pass < 40; pass++) {
       const eyeHex = toHex(hotEye);
       let worst = Infinity;
-      for (let i = 0;i <= 10; i++) {
-        const t = i / 10;
-        worst = Math.min(worst, contrast(fromHex(mixHex(eye, eyeHex, t)), fromHex(mixHex(head, headHex, t))));
+      for (let i = 0; i <= 10; i++) {
+        const t2 = i / 10;
+        worst = Math.min(
+          worst,
+          contrast(
+            fromHex(mixHex(eye, eyeHex, t2)),
+            fromHex(mixHex(head, headHex, t2))
+          )
+        );
       }
-      if (worst >= TINT_FLOOR)
-        return [headHex, eyeHex];
+      if (worst >= TINT_FLOOR) return [headHex, eyeHex];
       const l = Math.min(1, Math.max(0, hotEye.l + dir * 0.02));
-      if (l === hotEye.l)
-        return [headHex, eyeHex];
+      if (l === hotEye.l) return [headHex, eyeHex];
       hotEye = { ...hotEye, l };
     }
     return [headHex, toHex(hotEye)];
   }
   var TONES = [
     [0.2, { l: 0.86, c: 0.085 }],
+    // pastel
     [0.36, { l: 0.9, c: 0.028 }],
+    // pale neutral
     [0.62, { l: 0.73, c: 0.135 }],
+    // mid
     [0.8, { l: 0.62, c: 0.165 }],
+    // deep
     [0.93, { l: 0.87, c: 0.16 }],
+    // bright
+    // Dark, but not darker than a dark host surface. At l 0.17 this swatch scored
+    // 1.03:1 against a near-black page and the body simply vanished, leaving two
+    // floating eyes. l 0.34 still reads as the ink tone and clears both ends.
     [1, { l: 0.34, c: 0.035 }]
+    // ink
   ];
   var toneAt = (v) => TONES.find(([edge]) => v < edge)?.[1] ?? TONES[0][1];
   var DARK_SURFACE = { l: 0.145, c: 0, h: 0 };
@@ -205,6 +205,8 @@
     return {
       bg: { l: 0.965, c: 0.01, h },
       head,
+      // Polarity follows the body: dark eyes on a light body, light eyes on a
+      // dark one. Without this the ink tone would render an invisible face.
       eye: head.l >= 0.5 ? { l: 0.17, c: 0.02, h } : { l: 0.97, c: 0.012, h }
     };
   };
@@ -224,8 +226,7 @@
   function palette(hue, enforce = true, tone = 0) {
     const r = ramp(hue, enforce, tone);
     const out = {};
-    for (const k in r)
-      out[k] = toHex(r[k]);
+    for (const k in r) out[k] = toHex(r[k]);
     return out;
   }
 
@@ -258,13 +259,12 @@
     const t = rot * Math.PI / 180;
     const cos = Math.cos(t);
     const sin = Math.sin(t);
-    const at = (i) => {
+    const at2 = (i) => {
       const [x, y] = pts[i];
       return `${r2(cx + x * cos - y * sin)} ${r2(cy + x * sin + y * cos)}`;
     };
-    let d = `M${at(0)}`;
-    for (let i = 1;i < 13; i += 3)
-      d += `C${at(i)} ${at(i + 1)} ${at(i + 2)}`;
+    let d = `M${at2(0)}`;
+    for (let i = 1; i < 13; i += 3) d += `C${at2(i)} ${at2(i + 1)} ${at2(i + 2)}`;
     return d + "Z";
   }
   function blobPath(cx, cy, rx, ry, radii, rot = 0) {
@@ -274,36 +274,35 @@
       const a = t0 + 2 * Math.PI * i / n;
       return [cx + rx * m * Math.cos(a), cy + ry * m * Math.sin(a)];
     });
-    const at = (i) => p[(i % n + n) % n];
-    let d = `M${r2(at(0)[0])} ${r2(at(0)[1])}`;
-    for (let i = 0;i < n; i++) {
-      const [x0, y0] = at(i - 1);
-      const [x1, y1] = at(i);
-      const [x2, y2] = at(i + 1);
-      const [x3, y3] = at(i + 2);
-      d += `C${r2(x1 + (x2 - x0) / 6)} ${r2(y1 + (y2 - y0) / 6)}` + ` ${r2(x2 - (x3 - x1) / 6)} ${r2(y2 - (y3 - y1) / 6)}` + ` ${r2(x2)} ${r2(y2)}`;
+    const at2 = (i) => p[(i % n + n) % n];
+    let d = `M${r2(at2(0)[0])} ${r2(at2(0)[1])}`;
+    for (let i = 0; i < n; i++) {
+      const [x0, y0] = at2(i - 1);
+      const [x1, y1] = at2(i);
+      const [x2, y2] = at2(i + 1);
+      const [x3, y3] = at2(i + 2);
+      d += `C${r2(x1 + (x2 - x0) / 6)} ${r2(y1 + (y2 - y0) / 6)} ${r2(x2 - (x3 - x1) / 6)} ${r2(y2 - (y3 - y1) / 6)} ${r2(x2)} ${r2(y2)}`;
     }
     return d + "Z";
   }
-  function polygon({ cx, cy, rx, ry, sides, round = 0.3, rot = 0 }) {
-    const k = round > 0 ? round < 1 ? round / 2 : 0.5 : 0;
+  function polygon({ cx, cy, rx, ry, sides, round: round2 = 0.3, rot = 0 }) {
+    const k = round2 > 0 ? round2 < 1 ? round2 / 2 : 0.5 : 0;
     const t0 = rot * Math.PI / 180 - Math.PI / 2;
     const v = Array.from({ length: sides }, (_, i) => {
       const a = t0 + 2 * Math.PI * i / sides;
       return [cx + rx * Math.cos(a), cy + ry * Math.sin(a)];
     });
-    const at = (i) => v[(i % sides + sides) % sides];
+    const at2 = (i) => v[(i % sides + sides) % sides];
     const cut = (i, j) => {
-      const [x0, y0] = at(i);
-      const [x1, y1] = at(j);
+      const [x0, y0] = at2(i);
+      const [x1, y1] = at2(j);
       return `${r2(x0 + (x1 - x0) * k)} ${r2(y0 + (y1 - y0) * k)}`;
     };
     let d = `M${cut(0, -1)}`;
-    for (let i = 0;i < sides; i++) {
-      const [x, y] = at(i);
+    for (let i = 0; i < sides; i++) {
+      const [x, y] = at2(i);
       d += `Q${r2(x)} ${r2(y)} ${cut(i, i + 1)}`;
-      if (k < 0.5)
-        d += `L${cut(i + 1, i)}`;
+      if (k < 0.5) d += `L${cut(i + 1, i)}`;
     }
     return d + "Z";
   }
@@ -319,13 +318,13 @@
     const apex = cy - t * ry;
     const px = tx * 0.14;
     const py = ty + 0.86 * (apex - ty);
-    return `M${r2(cx - tx)} ${r2(ty)}` + `L${r2(cx - px)} ${r2(py)}` + `Q${r2(cx)} ${r2(apex)} ${r2(cx + px)} ${r2(py)}` + `L${r2(cx + tx)} ${r2(ty)}Z`;
+    return `M${r2(cx - tx)} ${r2(ty)}L${r2(cx - px)} ${r2(py)}Q${r2(cx)} ${r2(apex)} ${r2(cx + px)} ${r2(py)}L${r2(cx + tx)} ${r2(ty)}Z`;
   }
 
   // vendor/core/hash.ts
   var SEP = 255;
   function feed(h, bytes) {
-    for (let i = 0;i < bytes.length; i++) {
+    for (let i = 0; i < bytes.length; i++) {
       h = Math.imul(h ^ bytes[i], 3432918353);
       h = h << 13 | h >>> 19;
     }
@@ -336,7 +335,7 @@
     h = Math.imul(h ^ h >>> 13, 3266489909);
     return (h ^ h >>> 16) >>> 0;
   }
-  var utf8 = () => new TextEncoder;
+  var utf8 = () => new TextEncoder();
   function normalizeSeed(seed) {
     return seed.normalize("NFC").trim().toLowerCase();
   }
@@ -351,14 +350,14 @@
   // vendor/core/traits.ts
   function traits(seed, normalize = true, overrides) {
     const state = seedState(seed, normalize);
-    const t = (key) => {
+    const t = ((key) => {
       const v = overrides?.[key];
       const o = Array.isArray(v) ? v[Math.floor(stream(state, key) * v.length)] : v;
-      return o === undefined ? stream(state, key) : o > 0 ? o < 1 ? o : 0.999999 : 0;
-    };
+      return o === void 0 ? stream(state, key) : o > 0 ? o < 1 ? o : 0.999999 : 0;
+    });
     t.num = (key, min, max) => min + t(key) * (max - min);
     t.int = (key, min, max) => min + Math.floor(t(key) * (max - min + 1));
-    t.pick = (key, options) => options[Math.floor(t(key) * options.length)];
+    t.pick = (key, options2) => options2[Math.floor(t(key) * options2.length)];
     t.bool = (key, p = 0.5) => t(key) < p;
     t.jitter = (key, amount) => (t(key) * 2 - 1) * amount;
     return t;
@@ -367,28 +366,33 @@
   // vendor/core/render.ts
   function posed(l, opts, animate) {
     const e = opts.expression;
-    if (animate || !e)
-      return { l, wrap: "" };
+    if (animate || !e) return { l, wrap: "" };
     return e.bake(l, e.p);
   }
   var tinted2 = (p, e) => e?.tint ? e.tint(p, e.p) : p;
   var wrap = (body, t) => t ? `<g transform="${t}">${body}</g>` : body;
-  var escape = (s) => s.replace(/[&<>]/g, (c) => c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;");
+  var escape = (s) => s.replace(
+    /[&<>]/g,
+    (c) => c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;"
+  );
   function resolve2(seed, opts) {
     const t = traits(seed, opts.normalize ?? true, opts.traits);
     return {
       t,
       palette: {
-        ...palette(opts.hue ?? t.num("hue", 0, 360), opts.contrast ?? true, opts.tone ?? t("tone")),
+        ...palette(
+          opts.hue ?? t.num("hue", 0, 360),
+          opts.contrast ?? true,
+          opts.tone ?? t("tone")
+        ),
         ...opts.palette
       }
     };
   }
   var label = (opts) => opts.title ? `<title>${escape(opts.title)}</title>` : "";
-  function backdrop(style, opts, p) {
-    const bg = opts.background ?? style.background;
-    if (bg === false)
-      return;
+  function backdrop(style2, opts, p) {
+    const bg = opts.background ?? style2.background;
+    if (bg === false) return void 0;
     return {
       d: bg === "square" ? "M0 0H100V100H0Z" : superellipse({
         cx: 50,
@@ -397,17 +401,20 @@
         ry: 50,
         n: bg === "circle" ? 2 : 6
       }),
+      // `Palette` is partial because each style fills only the slots it needs,
+      // but every ramp in `color.ts` fills `bg` — and a backdrop with no colour
+      // is not a thing this can be asked to draw.
       fill: p.bg
     };
   }
   var plate = (b) => b ? `<path d="${b.d}" fill="${b.fill}"/>` : "";
-  function makeBlobatar(style) {
+  function makeBlobatar(style2) {
     return (name, opts = {}) => {
-      const { t, palette } = resolve2(name, opts);
-      const p = tinted2(palette, opts.expression);
+      const { t, palette: palette2 } = resolve2(name, opts);
+      const p = tinted2(palette2, opts.expression);
       const dim = opts.size ? ` width="${opts.size}" height="${opts.size}"` : "";
-      const pose = posed(style.layout(t), opts);
-      const body = label(opts) + plate(backdrop(style, opts, p)) + wrap(style.render(pose.l, p), pose.wrap);
+      const pose = posed(style2.layout(t), opts);
+      const body = label(opts) + plate(backdrop(style2, opts, p)) + wrap(style2.render(pose.l, p), pose.wrap);
       return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"${dim}>${body}</svg>`;
     };
   }
@@ -427,7 +434,10 @@
     const gy = t.num("gaze.y", -0.2, 0.08) * face.ry;
     const dy = t.jitter("eye.dy", 0.04) * face.ry;
     const reach = Math.hypot(wide, tall);
-    const need = Math.hypot((Math.abs(gx) + gap0 + reach) / face.rx, (Math.abs(gy) + Math.abs(dy) + reach) / face.ry);
+    const need = Math.hypot(
+      (Math.abs(gx) + gap0 + reach) / face.rx,
+      (Math.abs(gy) + Math.abs(dy) + reach) / face.ry
+    );
     const fit = need > 0.9 ? 0.9 / need : 1;
     const er = er0 * fit;
     const eyeRy = er * ratio;
@@ -479,21 +489,21 @@
       };
     }
     function render(l, p, mo) {
-      const r2 = (v) => Math.round(v * 100) / 100;
+      const r22 = (v) => Math.round(v * 100) / 100;
       const eye = (e, i) => {
         const path = `<path d="${superellipse(e)}"/>`;
-        return mo ? `<g class="mo-eye" style="--mo-wrap:${i ? 1 : -1};--mo-lean:${r2(e.rot)};transform-origin:${r2(e.cx)}px ${r2(e.cy)}px">${path}</g>` : path;
+        return mo ? `<g class="mo-eye" style="--mo-wrap:${i ? 1 : -1};--mo-lean:${r22(e.rot)};transform-origin:${r22(e.cx)}px ${r22(e.cy)}px">${path}</g>` : path;
       };
-      const body = `<g fill="${p.head}">` + l.petals.map((d) => `<circle cx="${r2(d.cx)}" cy="${r2(d.cy)}" r="${r2(d.r)}"/>`).join("") + l.extra.map((d) => `<path d="${d}"/>`).join("") + `<path d="${l.draw ? l.draw(l.body) : superellipse(l.body)}"/>` + `</g>` + `<g fill="${p.eye}"${mo ? ` class="mo-eyes"` : ""}>` + l.eyes.map(eye).join("") + `</g>`;
+      const body = `<g fill="${p.head}">` + l.petals.map((d) => `<circle cx="${r22(d.cx)}" cy="${r22(d.cy)}" r="${r22(d.r)}"/>`).join("") + l.extra.map((d) => `<path d="${d}"/>`).join("") + `<path d="${l.draw ? l.draw(l.body) : superellipse(l.body)}"/></g><g fill="${p.eye}"${mo ? ` class="mo-eyes"` : ""}>` + l.eyes.map(eye).join("") + `</g>`;
       return mo ? `<g class="mo-breathe"><g class="mo-bob">${body}</g></g>` : body;
     }
     return { layout, render, background: false };
   }
   function marks(l, p) {
-    const r2 = (v) => Math.round(v * 100) / 100;
+    const r22 = (v) => Math.round(v * 100) / 100;
     const head = p.head;
     return [
-      ...l.petals.map((d) => ({ kind: "circle", cx: r2(d.cx), cy: r2(d.cy), r: r2(d.r), fill: head })),
+      ...l.petals.map((d) => ({ kind: "circle", cx: r22(d.cx), cy: r22(d.cy), r: r22(d.r), fill: head })),
       ...l.extra.map((d) => ({ kind: "path", d, fill: head })),
       { kind: "path", d: l.draw ? l.draw(l.body) : superellipse(l.body), fill: head },
       ...l.eyes.map((e) => ({ kind: "path", d: superellipse(e), fill: p.eye }))
@@ -534,8 +544,7 @@
     },
     face: shrunk(0.94),
     decorate: (_t, b, out) => {
-      for (const s of [-1, 1])
-        out.petals.push({ cx: b.cx + s * (b.rx - b.ry), cy: b.cy, r: b.ry });
+      for (const s of [-1, 1]) out.petals.push({ cx: b.cx + s * (b.rx - b.ry), cy: b.cy, r: b.ry });
     },
     path: (b) => box(b.cx, b.cy, b.rx - b.ry, b.ry)
   };
@@ -544,7 +553,7 @@
     core: 0.88,
     decorate: (t, b, out) => {
       const count = t.int("nub.n", 1, 2);
-      for (let i = 0;i < count; i++) {
+      for (let i = 0; i < count; i++) {
         const a = t.num(`nub.a${i}`, 0, 2 * Math.PI);
         out.petals.push({
           cx: b.cx + Math.cos(a) * b.rx * 0.88,
@@ -561,7 +570,7 @@
     path: spline,
     decorate: (t, b, out) => {
       const count = t.int("cloud.n", 4, 6);
-      for (let i = 0;i < count; i++) {
+      for (let i = 0; i < count; i++) {
         const a = Math.PI + Math.PI * (i + 0.5) / count;
         out.petals.push({
           cx: b.cx + Math.cos(a) * b.rx * 0.8,
@@ -574,6 +583,9 @@
   var droplet = {
     name: "droplet",
     core: 0.78,
+    // Shifted down by what the taper adds above, so the whole silhouette — head
+    // and point together — sits centred in the frame rather than the head alone.
+    // `n` is pinned to a true ellipse, which is the curve the taper is tangent to.
     body: (_t, b) => {
       b.cy += 0.22 * b.ry;
       b.n = 2;
@@ -602,7 +614,7 @@
       const dist = b.rx * t.num("sun.dist", 1, 1.08);
       const pr = b.rx * t.num("sun.r", 0.2, 0.26);
       const off = t.num("sun.rot", 0, 2 * Math.PI);
-      for (let i = 0;i < count; i++) {
+      for (let i = 0; i < count; i++) {
         const a = off + 2 * Math.PI * i / count;
         out.petals.push({ cx: b.cx + Math.cos(a) * dist, cy: b.cy + Math.sin(a) * dist, r: pr });
       }
@@ -655,17 +667,42 @@
     rock: 0,
     bdy: 0
   };
-  var r3 = (v) => String(Math.round(v * 1000) / 1000);
+  var r3 = (v) => String(Math.round(v * 1e3) / 1e3);
   function bakePose(l, p) {
     return {
       l: {
         ...l,
         eyes: l.eyes.map((e, i) => ({
           ...e,
+          // `--mo-wrap`'s sign, spelled out: -1 on the left eye, +1 on the right,
+          // so a positive tilt leans both tops outward and brings the inner edges
+          // down. That asymmetry is the entire brow vocabulary available here.
           cx: e.cx + p.edx * (i ? 1 : -1),
+          // `edy2` lands on the right eye only, like every other differential —
+          // and unlike them it has a moving counterpart, which is what decides the
+          // shape of `--mo-ph` on the animated side rather than the other way
+          // round. The seesaw swings the pair symmetrically about its own centre,
+          // so its share of the differential is `(1 + wrap·phase) / 2`; that
+          // expression *is* `--mo-sel` at phase +1, on both eyes, because `wrap`
+          // is ±1. So the stagger baked here is exactly the loop's own extreme,
+          // with no compensating term anywhere and nothing to keep in step by
+          // hand. `probe-compose.ts` check A measures the two against each other.
           cy: e.cy + p.edy + (i ? p.edy2 : 0),
+          // The `*2` differential lands on the right eye only, which is
+          // `--mo-sel`'s job on the animated side. It is added *before* the
+          // mirroring on `tilt`, matching `calc(var(--mo-t) * var(--mo-wrap))` —
+          // adding it after would flip its sign on the left eye and turn a
+          // one-sided brow into a symmetric one.
           rx: e.rx * (p.esx + (i ? p.esx2 : 0)),
           ry: e.ry * (p.esy + (i ? p.esy2 : 0)),
+          // `lock` fades the seeded lean out rather than switching it off, which
+          // is what lets it interpolate on the animated side. At 0 this is the
+          // plain sum it always was.
+          //
+          // The animated path cannot bake it away — the lean is already in the
+          // path's coordinates — so it subtracts the same amount on `.mo-eye`'s
+          // `rotate` instead. Both resolve to R(tilt·wrap) · scale about the eye's
+          // own centre; `probe-compose.ts` check A measures that they agree.
           rot: e.rot * (1 - p.lock) + (p.tilt + (i ? p.tilt2 : 0)) * (i ? 1 : -1)
         }))
       },
@@ -677,11 +714,9 @@
   function poseVars(p) {
     const out = {};
     for (const k in IDENT) {
-      if (k === "heat")
-        continue;
+      if (k === "heat") continue;
       const v = p[k];
-      if (v !== IDENT[k])
-        out["--mo-" + k] = r3(v);
+      if (v !== IDENT[k]) out["--mo-" + k] = r3(v);
     }
     return out;
   }
@@ -702,6 +737,9 @@
       tilt: 8,
       edy: -1.5,
       edx: 1.5,
+      // A touch of asymmetry, well short of a wink. The pair reads as *drawn*
+      // rather than as stamped twice, which is the whole reason the channel
+      // exists — see `docs/references/asymmetric.png` for the loud version.
       esx2: 0.08,
       esy2: 0.05,
       tilt2: -16,
@@ -1014,128 +1052,96 @@
   };
   var HEX = /^#[0-9A-F]{6}$/;
   var APPEARANCE_KEYS = ["shape", "expression", "background", "hue", "tone", "palette", "motion"];
-
-  class LookError extends Error {
-  }
+  var LookError = class extends Error {
+  };
   var fail = (path, message) => {
     throw new LookError(`${path} ${message}`);
   };
   var isRecord = (v) => {
-    if (typeof v !== "object" || v === null || Array.isArray(v))
-      return false;
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
     const proto = Object.getPrototypeOf(v);
     return proto === Object.prototype || proto === null;
   };
   var onlyKeys = (o, allowed, path) => {
-    for (const k of Object.keys(o))
-      if (!allowed.includes(k))
-        fail(path, `has unknown field "${k}"`);
+    for (const k of Object.keys(o)) if (!allowed.includes(k)) fail(path, `has unknown field "${k}"`);
   };
   function oneOf(v, list, path) {
-    if (typeof v !== "string" || !list.includes(v))
-      fail(path, `must be one of ${list.join(", ")}`);
+    if (typeof v !== "string" || !list.includes(v)) fail(path, `must be one of ${list.join(", ")}`);
     return v;
   }
   function appearance(v, path) {
-    if (!isRecord(v))
-      return fail(path, "must be an object");
+    if (!isRecord(v)) return fail(path, "must be an object");
     onlyKeys(v, APPEARANCE_KEYS, path);
     const out = {};
-    if ("shape" in v)
-      out.shape = oneOf(v.shape, BOT_SHAPES, `${path}.shape`);
-    if ("expression" in v)
-      out.expression = oneOf(v.expression, BOT_EXPRESSIONS, `${path}.expression`);
-    if ("background" in v)
-      out.background = oneOf(v.background, BOT_BACKGROUNDS, `${path}.background`);
+    if ("shape" in v) out.shape = oneOf(v.shape, BOT_SHAPES, `${path}.shape`);
+    if ("expression" in v) out.expression = oneOf(v.expression, BOT_EXPRESSIONS, `${path}.expression`);
+    if ("background" in v) out.background = oneOf(v.background, BOT_BACKGROUNDS, `${path}.background`);
     if ("hue" in v) {
       const h = v.hue;
-      if (typeof h !== "number" || !Number.isFinite(h) || h < 0 || h >= 360)
-        fail(`${path}.hue`, "must be a finite number in [0, 360)");
+      if (typeof h !== "number" || !Number.isFinite(h) || h < 0 || h >= 360) fail(`${path}.hue`, "must be a finite number in [0, 360)");
       out.hue = h;
     }
-    if ("tone" in v)
-      out.tone = oneOf(v.tone, BOT_TONES, `${path}.tone`);
+    if ("tone" in v) out.tone = oneOf(v.tone, BOT_TONES, `${path}.tone`);
     if ("palette" in v) {
       const p = v.palette;
-      if (!isRecord(p))
-        return fail(`${path}.palette`, "must be an object");
+      if (!isRecord(p)) return fail(`${path}.palette`, "must be an object");
       onlyKeys(p, ["head", "eye", "bg"], `${path}.palette`);
-      const palette = {};
+      const palette2 = {};
       for (const k of ["head", "eye", "bg"]) {
-        if (!(k in p))
-          continue;
+        if (!(k in p)) continue;
         const c = p[k];
-        if (typeof c !== "string" || !HEX.test(c))
-          fail(`${path}.palette.${k}`, "must be uppercase #RRGGBB");
-        palette[k] = c;
+        if (typeof c !== "string" || !HEX.test(c)) fail(`${path}.palette.${k}`, "must be uppercase #RRGGBB");
+        palette2[k] = c;
       }
-      out.palette = palette;
+      out.palette = palette2;
     }
     if ("motion" in v) {
-      if (typeof v.motion !== "boolean")
-        fail(`${path}.motion`, "must be a boolean");
+      if (typeof v.motion !== "boolean") fail(`${path}.motion`, "must be a boolean");
       out.motion = v.motion;
     }
     return out;
   }
   function validateBotLook(input) {
     try {
-      if (!isRecord(input))
-        fail("look", "must be an object");
+      if (!isRecord(input)) fail("look", "must be an object");
       const v = input;
       onlyKeys(v, ["version", "base", "states"], "look");
-      if (v.version !== 1)
-        fail("look.version", "must be 1");
+      if (v.version !== 1) fail("look.version", "must be 1");
       const look = { version: 1, base: appearance(v.base, "look.base") };
       if ("states" in v) {
         const s = v.states;
-        if (!isRecord(s))
-          return fail("look.states", "must be an object");
+        if (!isRecord(s)) return fail("look.states", "must be an object");
         onlyKeys(s, BOT_AVATAR_STATES, "look.states");
         const states = {};
-        for (const k of BOT_AVATAR_STATES)
-          if (k in s)
-            states[k] = appearance(s[k], `look.states.${k}`);
+        for (const k of BOT_AVATAR_STATES) if (k in s) states[k] = appearance(s[k], `look.states.${k}`);
         look.states = states;
       }
       return { ok: true, look };
     } catch (e) {
-      if (e instanceof LookError)
-        return { ok: false, error: e.message };
+      if (e instanceof LookError) return { ok: false, error: e.message };
       throw e;
     }
   }
   function effective(look, state) {
-    if (state !== undefined && !BOT_AVATAR_STATES.includes(state))
-      throw new TypeError(`unknown avatar state "${state}"`);
-    if (look == null)
-      return {};
+    if (state !== void 0 && !BOT_AVATAR_STATES.includes(state)) throw new TypeError(`unknown avatar state "${state}"`);
+    if (look == null) return {};
     const checked = validateBotLook(look);
-    if (!checked.ok)
-      throw new TypeError(checked.error);
+    if (!checked.ok) throw new TypeError(checked.error);
     const { base, states } = checked.look;
-    const over = state ? states?.[state] : undefined;
-    if (!over)
-      return base;
+    const over = state ? states?.[state] : void 0;
+    if (!over) return base;
     const merged = { ...base, ...over };
-    if (base.palette || over.palette)
-      merged.palette = { ...base.palette, ...over.palette };
+    if (base.palette || over.palette) merged.palette = { ...base.palette, ...over.palette };
     return merged;
   }
   function options(a) {
     const opts = {};
-    if (a.shape)
-      opts.traits = { shape: SHAPE_POSITION[a.shape] };
-    if (a.hue !== undefined)
-      opts.hue = a.hue;
-    if (a.tone)
-      opts.tone = TONE_POSITION[a.tone];
-    if (a.palette)
-      opts.palette = { ...a.palette };
-    if (a.background && a.background !== "none")
-      opts.background = a.background;
-    if (a.expression && a.expression !== "idle")
-      opts.expression = EXPRESSIONS[a.expression];
+    if (a.shape) opts.traits = { shape: SHAPE_POSITION[a.shape] };
+    if (a.hue !== void 0) opts.hue = a.hue;
+    if (a.tone) opts.tone = TONE_POSITION[a.tone];
+    if (a.palette) opts.palette = { ...a.palette };
+    if (a.background && a.background !== "none") opts.background = a.background;
+    if (a.expression && a.expression !== "idle") opts.expression = EXPRESSIONS[a.expression];
     return opts;
   }
   var upper = (p) => ({
@@ -1146,7 +1152,7 @@
   function prepare(botID, look, state) {
     const a = effective(look, state);
     const opts = options(a);
-    const { t, palette } = resolve2(botID, opts);
+    const { t, palette: palette2 } = resolve2(botID, opts);
     const layout = style.layout(t);
     const resolved = {
       shape: layout.shape,
@@ -1154,10 +1160,10 @@
       background: a.background ?? "none",
       hue: opts.hue ?? t.num("hue", 0, 360),
       tone: a.tone ?? toneName(t("tone")),
-      palette: upper(palette),
+      palette: upper(palette2),
       motion: a.motion ?? true
     };
-    return { opts, t, palette, layout, resolved, expression: opts.expression };
+    return { opts, t, palette: palette2, layout, resolved, expression: opts.expression };
   }
   function resolveBotAppearance(botID, look, state) {
     return prepare(botID, look, state).resolved;
@@ -1169,10 +1175,11 @@
       headOnBg: contrast(head, fromHex(a.palette.bg))
     };
   }
+
   // geometry.ts
-  function botAvatarSVG(botID, look, state, options = {}) {
+  function botAvatarSVG(botID, look, state, options2 = {}) {
     const { opts } = prepare(botID, look, state);
-    return blobatar(botID, { ...opts, size: options.size, title: options.title });
+    return blobatar(botID, { ...opts, size: options2.size, title: options2.title });
   }
   var CORE_SEGMENTS = 24;
   var EXTRA_SEGMENTS = 4;
@@ -1187,21 +1194,18 @@
     let cmd = "";
     const num = () => {
       const v = Number(tokens[i++]);
-      if (!Number.isFinite(v))
-        throw new Error(`malformed path data: ${d}`);
+      if (!Number.isFinite(v)) throw new Error(`malformed path data: ${d}`);
       return v;
     };
     const line = (to) => {
-      if (to[0] === cur[0] && to[1] === cur[1])
-        return;
+      if (to[0] === cur[0] && to[1] === cur[1]) return;
       const dx = to[0] - cur[0];
       const dy = to[1] - cur[1];
       out.push([cur, [cur[0] + dx / 3, cur[1] + dy / 3], [cur[0] + 2 * dx / 3, cur[1] + 2 * dy / 3], to]);
       cur = to;
     };
     while (i < tokens.length) {
-      if (/^[A-Za-z]$/.test(tokens[i]))
-        cmd = tokens[i++];
+      if (/^[A-Za-z]$/.test(tokens[i])) cmd = tokens[i++];
       switch (cmd) {
         case "M":
           cur = start = [num(), num()];
@@ -1265,16 +1269,13 @@
       return [[c[0], ab, abc, m], [m, bcd, cd, c[3]]];
     };
     const tail = t0 > 0 ? split(b, t0)[1] : b;
-    if (t1 >= 1)
-      return tail;
+    if (t1 >= 1) return tail;
     return split(tail, (t1 - t0) / (1 - t0))[0];
   }
   function normalizeContour(src, count, centre) {
-    if (src.length === 0 || src.length > count)
-      throw new Error(`contour has ${src.length} segments; need 1..${count}`);
+    if (src.length === 0 || src.length > count) throw new Error(`contour has ${src.length} segments; need 1..${count}`);
     let area = 0;
-    for (const b of src)
-      area += b[0][0] * b[3][1] - b[3][0] * b[0][1];
+    for (const b of src) area += b[0][0] * b[3][1] - b[3][0] * b[0][1];
     const pieces = area >= 0 ? src.slice() : src.slice().reverse().map((b) => [b[3], b[2], b[1], b[0]]);
     const angle = (p) => Math.atan2(p[1] - centre[1], p[0] - centre[0]);
     const sweep = (from, to) => {
@@ -1289,25 +1290,23 @@
     while (pieces.length < count) {
       let widest = 0;
       let most = -1;
-      pieces.forEach((b, i) => {
-        const s = span(b);
-        if (s > most + 0.000000000001) {
+      pieces.forEach((b2, i) => {
+        const s = span(b2);
+        if (s > most + 1e-12) {
           most = s;
           widest = i;
         }
       });
       const b = pieces[widest];
       let t = 0.5;
-      if (most > 0.000000001) {
+      if (most > 1e-9) {
         const a0 = angle(b[0]);
         let lo = 0;
         let hi = 1;
-        for (let k = 0;k < 60; k++) {
+        for (let k = 0; k < 60; k++) {
           const mid = (lo + hi) / 2;
-          if (sweep(a0, angle(at(b, mid))) < most / 2)
-            lo = mid;
-          else
-            hi = mid;
+          if (sweep(a0, angle(at(b, mid))) < most / 2) lo = mid;
+          else hi = mid;
         }
         t = (lo + hi) / 2;
       }
@@ -1318,7 +1317,7 @@
     pieces.forEach((p, i) => {
       const s = sweep(-Math.PI / 2, angle(p[0]));
       const dist = Math.min(s, 2 * Math.PI - s);
-      if (dist < best - 0.000000001) {
+      if (dist < best - 1e-9) {
         best = dist;
         first = i;
       }
@@ -1334,22 +1333,17 @@
     segments: Array.from({ length: count }, () => [c[0], c[1], c[0], c[1], c[0], c[1]])
   });
   function botAvatarGeometry(botID, look, state) {
-    const { opts, t, palette, layout, resolved, expression } = prepare(botID, look, state);
-    const p = tinted2(palette, expression);
+    const { opts, t, palette: palette2, layout, resolved, expression } = prepare(botID, look, state);
+    const p = tinted2(palette2, expression);
     const centre = [layout.body.cx, layout.body.cy];
     const drawn = marks(layout, p);
     const petals = [];
-    for (const m of drawn)
-      if (m.kind === "circle")
-        petals.push({ cx: m.cx, cy: m.cy, r: m.r });
-    if (petals.length > PETAL_SLOTS)
-      throw new Error(`${petals.length} petals exceed ${PETAL_SLOTS} slots`);
-    while (petals.length < PETAL_SLOTS)
-      petals.push({ cx: centre[0], cy: centre[1], r: 0 });
+    for (const m of drawn) if (m.kind === "circle") petals.push({ cx: m.cx, cy: m.cy, r: m.r });
+    if (petals.length > PETAL_SLOTS) throw new Error(`${petals.length} petals exceed ${PETAL_SLOTS} slots`);
+    while (petals.length < PETAL_SLOTS) petals.push({ cx: centre[0], cy: centre[1], r: 0 });
     const coreD = layout.draw ? layout.draw(layout.body) : superellipse(layout.body);
     const extraD = layout.extra[0];
-    if (layout.extra.length > 1)
-      throw new Error("more than one extra outline");
+    if (layout.extra.length > 1) throw new Error("more than one extra outline");
     const bg = backdrop(style, opts, p);
     const bgD = bg?.d ?? superellipse({ cx: 50, cy: 50, rx: 50, ry: 50, n: 2 });
     const eye = (i) => {
@@ -1374,6 +1368,7 @@
       seeds: motionSeeds(t)
     };
   }
+
   // vendor/react-native/worklets.ts
   function solve(x, x1, y1, x2, y2) {
     "worklet";
@@ -1384,13 +1379,11 @@
     const by = 3 * (y2 - y1) - cy;
     const ay = 1 - cy - by;
     let t = x;
-    for (let i = 0;i < 8; i++) {
+    for (let i = 0; i < 8; i++) {
       const err = ((ax * t + bx) * t + cx) * t - x;
-      if (Math.abs(err) < 0.00001)
-        break;
+      if (Math.abs(err) < 1e-5) break;
       const d = (3 * ax * t + 2 * bx) * t + cx;
-      if (Math.abs(d) < 0.000001)
-        break;
+      if (Math.abs(d) < 1e-6) break;
       t -= err / d;
     }
     return ((ay * t + by) * t + cy) * t;
@@ -1425,16 +1418,16 @@
   var WRAP = [
     [0, 0, 0, 0, 0],
     [0.15, 0, 0, 0, 0],
-    [0.165, -0.0176, 0.008, -0.027, 0.648],
-    [0.31, -0.0176, 0.008, -0.027, 0.648],
-    [0.325, -0.022, -0.01, -0.003, 0.09],
-    [0.47, -0.022, -0.01, -0.003, 0.09],
-    [0.485, -0.0033, 0.0015, -0.0255, -0.115],
-    [0.63, -0.0033, 0.0015, -0.0255, -0.115],
-    [0.645, -0.0165, -0.0075, -0.024, -0.54],
-    [0.79, -0.0165, -0.0075, -0.024, -0.54],
-    [0.805, -0.022, 0.01, -0.0045, 0.135],
-    [0.985, -0.022, 0.01, -0.0045, 0.135],
+    [0.165, -0.0176, 8e-3, -0.027, 0.648],
+    [0.31, -0.0176, 8e-3, -0.027, 0.648],
+    [0.325, -0.022, -0.01, -3e-3, 0.09],
+    [0.47, -0.022, -0.01, -3e-3, 0.09],
+    [0.485, -33e-4, 15e-4, -0.0255, -0.115],
+    [0.63, -33e-4, 15e-4, -0.0255, -0.115],
+    [0.645, -0.0165, -75e-4, -0.024, -0.54],
+    [0.79, -0.0165, -75e-4, -0.024, -0.54],
+    [0.805, -0.022, 0.01, -45e-4, 0.135],
+    [0.985, -0.022, 0.01, -45e-4, 0.135],
     [1, 0, 0, 0, 0]
   ];
   var SHAKE = [
@@ -1446,13 +1439,11 @@
   ];
   function stops(u, table, col) {
     "worklet";
-    for (let i = table.length - 1;i >= 0; i--) {
+    for (let i = table.length - 1; i >= 0; i--) {
       const row = table[i];
-      if (u < row[0])
-        continue;
+      if (u < row[0]) continue;
       const next = table[i + 1];
-      if (!next)
-        return row[col];
+      if (!next) return row[col];
       const span = next[0] - row[0];
       return span <= 0 ? row[col] : row[col] + (next[col] - row[col]) * ((u - row[0]) / span);
     }
@@ -1498,7 +1489,7 @@
   }
   function n3(v) {
     "worklet";
-    return Math.round(v * 1000) / 1000;
+    return Math.round(v * 1e3) / 1e3;
   }
   function rootT(f) {
     "worklet";
@@ -1552,10 +1543,9 @@
   // frame.ts
   function lerpPath(a, b, t) {
     "worklet";
-    if (a.segments.length !== b.segments.length)
-      throw new Error("avatar paths have different segment counts");
+    if (a.segments.length !== b.segments.length) throw new Error("avatar paths have different segment counts");
     const segments = [];
-    for (let i = 0;i < b.segments.length; i++) {
+    for (let i = 0; i < b.segments.length; i++) {
       const s = a.segments[i];
       const e = b.segments[i];
       segments.push([
@@ -1571,12 +1561,10 @@
   }
   function lerpColor(a, b, t) {
     "worklet";
-    if (t <= 0)
-      return a;
-    if (t >= 1)
-      return b;
+    if (t <= 0) return a;
+    if (t >= 1) return b;
     let out = "#";
-    for (let i = 1;i < 7; i += 2) {
+    for (let i = 1; i < 7; i += 2) {
       const v = Math.round(parseInt(a.slice(i, i + 2), 16) * (1 - t) + parseInt(b.slice(i, i + 2), 16) * t);
       out += (v < 16 ? "0" : "") + v.toString(16).toUpperCase();
     }
@@ -1586,8 +1574,7 @@
     "worklet";
     const u = t <= 0 ? 0 : t >= 1 ? 1 : t;
     const m = (a, b) => a * (1 - u) + b * u;
-    if (from.petals.length !== to.petals.length)
-      throw new Error("avatar geometries have different petal counts");
+    if (from.petals.length !== to.petals.length) throw new Error("avatar geometries have different petal counts");
     const pose = {};
     for (const k in to.pose) {
       const c = k;
@@ -1631,13 +1618,11 @@
     const by = 3 * (y2 - y1) - cy;
     const ay = 1 - cy - by;
     let t = x;
-    for (let i = 0;i < 8; i++) {
+    for (let i = 0; i < 8; i++) {
       const err = ((ax * t + bx) * t + cx) * t - x;
-      if (Math.abs(err) < 0.00001)
-        break;
+      if (Math.abs(err) < 1e-5) break;
       const d = (3 * ax * t + 2 * bx) * t + cx;
-      if (Math.abs(d) < 0.000001)
-        break;
+      if (Math.abs(d) < 1e-6) break;
       t -= err / d;
     }
     return ((ay * t + by) * t + cy) * t;
@@ -1647,10 +1632,8 @@
     const p = toward.pose;
     const expressive = p.esx !== 1 || p.esy !== 1 || p.tilt !== 0 || p.edy !== 0 || p.edx !== 0 || p.esx2 !== 0 || p.esy2 !== 0 || p.tilt2 !== 0 || p.edy2 !== 0 || p.lock !== 0 || p.heat !== 0 || p.shake !== 0 || p.rock !== 0 || p.bdy !== 0;
     const x = elapsedMs / (expressive ? 300 : 400);
-    if (!(x < 1))
-      return { t: 1, done: true };
-    if (x <= 0)
-      return { t: 0, done: false };
+    if (!(x < 1)) return { t: 1, done: true };
+    if (x <= 0) return { t: 0, done: false };
     return { t: expressive ? cubicBezier(x, 0.45, 0.05, 0.5, 1) : cubicBezier(x, 0.42, 0, 0.58, 1), done: false };
   }
   function mul(a, b) {
@@ -1666,14 +1649,17 @@
   }
   function poseMatrix(e, p, i) {
     "worklet";
-    const wrap = i ? 1 : -1;
+    const wrap2 = i ? 1 : -1;
     const sel = i ? 1 : 0;
-    const r = ((p.tilt + sel * p.tilt2) * wrap + e.rot * (1 - p.lock)) * Math.PI / 180;
+    const r = ((p.tilt + sel * p.tilt2) * wrap2 + e.rot * (1 - p.lock)) * Math.PI / 180;
     const q = -e.rot * Math.PI / 180;
     const sx = p.esx + sel * p.esx2;
     const sy = p.esy + sel * p.esy2;
-    const lin = mul(mul([Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0], [sx, 0, 0, sy, 0, 0]), [Math.cos(q), Math.sin(q), -Math.sin(q), Math.cos(q), 0, 0]);
-    const tx = e.cx + p.edx * wrap;
+    const lin = mul(
+      mul([Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0], [sx, 0, 0, sy, 0, 0]),
+      [Math.cos(q), Math.sin(q), -Math.sin(q), Math.cos(q), 0, 0]
+    );
+    const tx = e.cx + p.edx * wrap2;
     const ty = e.cy + p.edy + sel * p.edy2;
     return [lin[0], lin[1], lin[2], lin[3], tx - lin[0] * e.cx - lin[2] * e.cy, ty - lin[1] * e.cx - lin[3] * e.cy];
   }
@@ -1716,12 +1702,12 @@
     const cos = Math.cos(t);
     const sin = Math.sin(t);
     const xy = [];
-    for (let i = 0;i < pts.length; i += 2) {
+    for (let i = 0; i < pts.length; i += 2) {
       xy.push(Math.round((e.cx + pts[i] * cos - pts[i + 1] * sin) * 100) / 100);
       xy.push(Math.round((e.cy + pts[i] * sin + pts[i + 1] * cos) * 100) / 100);
     }
     const segments = [];
-    for (let s = 0;s < 4; s++) {
+    for (let s = 0; s < 4; s++) {
       const o = 2 + s * 6;
       segments.push([xy[o], xy[o + 1], xy[o + 2], xy[o + 3], xy[o + 4], xy[o + 5]]);
     }
@@ -1759,8 +1745,7 @@
       return r === 0 ? "0" : String(r);
     };
     let d = `M${n(p.start[0])} ${n(p.start[1])}`;
-    for (const s of p.segments)
-      d += `C${n(s[0])} ${n(s[1])} ${n(s[2])} ${n(s[3])} ${n(s[4])} ${n(s[5])}`;
+    for (const s of p.segments) d += `C${n(s[0])} ${n(s[1])} ${n(s[2])} ${n(s[3])} ${n(s[4])} ${n(s[5])}`;
     return d + "Z";
   }
 
@@ -1768,8 +1753,8 @@
   function botAvatarSeed(botID) {
     return botID;
   }
-  function blobatar2(botID, options) {
-    return blobatar(botAvatarSeed(botID), options);
+  function blobatar2(botID, options2) {
+    return blobatar(botAvatarSeed(botID), options2);
   }
 
   // jsc.ts
@@ -1777,29 +1762,23 @@
     globalThis.TextEncoder = class {
       encode(text) {
         const bytes = [];
-        for (let i = 0;i < text.length; i++) {
+        for (let i = 0; i < text.length; i++) {
           let cp = text.charCodeAt(i);
           if (cp >= 55296 && cp <= 56319) {
             const next = text.charCodeAt(i + 1);
             if (next >= 56320 && next <= 57343) {
               cp = 65536 + (cp - 55296 << 10) + next - 56320;
               i++;
-            } else
-              cp = 65533;
-          } else if (cp >= 56320 && cp <= 57343)
-            cp = 65533;
-          if (cp < 128)
-            bytes.push(cp);
-          else if (cp < 2048)
-            bytes.push(192 | cp >> 6, 128 | cp & 63);
-          else if (cp < 65536)
-            bytes.push(224 | cp >> 12, 128 | cp >> 6 & 63, 128 | cp & 63);
-          else
-            bytes.push(240 | cp >> 18, 128 | cp >> 12 & 63, 128 | cp >> 6 & 63, 128 | cp & 63);
+            } else cp = 65533;
+          } else if (cp >= 56320 && cp <= 57343) cp = 65533;
+          if (cp < 128) bytes.push(cp);
+          else if (cp < 2048) bytes.push(192 | cp >> 6, 128 | cp & 63);
+          else if (cp < 65536) bytes.push(224 | cp >> 12, 128 | cp >> 6 & 63, 128 | cp & 63);
+          else bytes.push(240 | cp >> 18, 128 | cp >> 12 & 63, 128 | cp >> 6 & 63, 128 | cp & 63);
         }
         return Uint8Array.from(bytes);
       }
     };
   }
-  Object.assign(globalThis, exports_beans_blobatar);
+  Object.assign(globalThis, index_exports);
 })();

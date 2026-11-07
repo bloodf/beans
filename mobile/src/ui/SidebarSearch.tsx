@@ -43,6 +43,7 @@ export function SidebarSearch({ value, placeholder, onChangeText }: { value: str
           // drop the characters typed meanwhile.
           onChangeText={onChangeText}
           placeholder={placeholder}
+          accessibilityLabel={placeholder}
           placeholderTextColor={p.secondaryLabel as any}
           autoCapitalize="none"
           autoCorrect={false}

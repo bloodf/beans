@@ -19,6 +19,7 @@ pub mod artifacts;
 pub mod history164_types;
 pub mod identity;
 pub mod keys;
+pub mod keystore;
 #[cfg(feature = "runner")]
 pub mod local_review;
 pub mod marketplace;

@@ -146,6 +146,6 @@ See [Phone app](docs/architecture/phone-app.md) for phone identity and key owner
 
 ## Open points
 
-- Keychain instead of 0600 files for the master secret and credentials
+- Native keychain backend selection and qualification for master secrets and credentials. The inert [keystore contract](docs/architecture/identity.md#keystore-contract) provides verified copying with fake tests; production retains private files.
 
 When those are chosen, update this file.

@@ -4,14 +4,14 @@ go 1.27.1
 
 require (
 	github.com/coder/websocket v1.8.15
-	github.com/dop251/goja v0.0.0-20261008155754-5519fb8d7b83
+	github.com/dop251/goja v0.0.0-20261105002551-2413f2132ac8
 	github.com/egoist/mygo v0.6.4-0.20261024094029-23ac61d856d7
 	github.com/yuin/goldmark v1.8.6
 	golang.org/x/image v0.46.0
 )
 
 require (
-	github.com/dlclark/regexp2/v2 v2.8.1 // indirect
+	github.com/dlclark/regexp2/v2 v2.11.0 // indirect
 	github.com/ebitengine/purego v0.11.1 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
 	github.com/go-text/typesetting v0.3.5 // indirect

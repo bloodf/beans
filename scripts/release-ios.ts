@@ -1,20 +1,43 @@
 // Build the signed iPhone IPA for a GitHub release; never submit to a store.
 //   Rust core → copied production project → pods → archive → local IPA export.
 //
-//   bun run release-ios                      export an ad-hoc IPA
-//   bun run release-ios --local              archive only
-//   bun run release-ios --export-method debugging  development-signed IPA
+//   pnpm run release-ios                      export an ad-hoc IPA
+//   pnpm run release-ios --local              archive only
+//   pnpm run release-ios --export-method debugging  development-signed IPA
 // Provisioning profiles and certificates must already be installed. Creating/updating
 // Apple provisioning requires the explicit --allow-provisioning flag.
-import { $ } from "bun"
+import { findExecutable } from "./executable.ts";
+import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
-import { mkdir, readdir, rename, rm, symlink } from "node:fs/promises"
+import { mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises"
 import { dirname, join, relative } from "node:path"
 import { color, log, readVersion, ROOT } from "./app.ts"
 
 function die(message: string): never {
   log(color.red(message))
   process.exit(1)
+}
+
+type RunOptions = { cwd?: string; env?: NodeJS.ProcessEnv; capture?: boolean }
+
+/** Run a command without a shell: inherited output, a drained pipe when the caller reads it,
+ * and a failure on a nonzero exit or a signalled child. */
+async function run(command: string[], options: RunOptions = {}): Promise<string> {
+  const child = spawn(command[0]!, command.slice(1), {
+    cwd: options.cwd,
+    env: options.env,
+    shell: false,
+    stdio: options.capture ? ["ignore", "pipe", "inherit"] : "inherit",
+  })
+  const chunks: Buffer[] = []
+  child.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk))
+  const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((settle, reject) => {
+    child.once("error", reject)
+    child.once("close", (exitCode, exitSignal) => settle([exitCode, exitSignal]))
+  })
+  if (code === null) throw new Error(`${command[0]} was terminated by signal ${signal ?? "unknown"}`)
+  if (code !== 0) throw new Error(`${command[0]} failed with exit code ${code}`)
+  return Buffer.concat(chunks).toString("utf8")
 }
 
 const args = process.argv.slice(2)
@@ -30,8 +53,8 @@ for (let index = 0; index < args.length; index++) {
   if (args[index] !== "--local" && args[index] !== "--allow-provisioning") die(`unknown argument: ${args[index]}`)
 }
 
-for (const tool of ["cargo", "xcodebuild", "pod", "bunx", "plutil", "rsync"]) {
-  if (!Bun.which(tool)) die(`missing required tool: ${tool}`)
+for (const tool of ["cargo", "xcodebuild", "pod", "pnpm", "plutil", "rsync"]) {
+  if (!findExecutable(tool)) die(`missing required tool: ${tool}`)
 }
 
 const TEAM_ID = process.env.BEANS_APPLE_TEAM_ID ?? "GJE9R5VE87"
@@ -72,7 +95,7 @@ delete env.EAS_BUILD_PROFILE
 // ---- 1. Rust core
 // The xcframework is gitignored and the dev loop may hold an older one, so a release builds its own.
 log(`${color.bold("core")} ${color.dim("release build for iOS")}`)
-await $`bun run core ios`.cwd(MOBILE).env(env)
+await run(["pnpm", "run", "core", "ios"], { cwd: MOBILE, env })
 
 // ---- 2. production project
 log(`${color.bold("prebuild")} ${color.dim(`Beans, ${BUNDLE_ID}, build ${buildNumber}`)}`)
@@ -81,23 +104,23 @@ if (existsSync(join(PROJECT, "package.json"))) {
   // rsync copies only what changed, and leaves alone the xcframework that expo-modules-jsi's build
   // phase makes in its package and keys to this copy's Pods path.
   const jsi = "/node_modules/expo-modules-jsi/apple"
-  await $`rsync -a --delete --exclude /ios --exclude /android --exclude /.expo --exclude ${`${jsi}/.*`} --exclude ${`${jsi}/Products`} ${`${MOBILE}/`} ${`${PROJECT}/`}`
+  await run(["rsync", "-a", "--delete", "--exclude", "/ios", "--exclude", "/android", "--exclude", "/.expo", "--exclude", `${jsi}/.*`, "--exclude", `${jsi}/Products`, `${MOBILE}/`, `${PROJECT}/`])
   await mkdir(dirname(COPIED_BLOBATAR), { recursive: true })
-  await $`rsync -a --delete ${`${BLOBATAR}/`} ${`${COPIED_BLOBATAR}/`}`
+  await run(["rsync", "-a", "--delete", `${BLOBATAR}/`, `${COPIED_BLOBATAR}/`])
 } else {
   // -c clones on APFS, so node_modules costs next to nothing to copy.
   await rm(PROJECT, { recursive: true, force: true })
   await mkdir(PROJECT, { recursive: true })
   for (const name of await readdir(MOBILE)) {
-    if (!["ios", "android", ".expo"].includes(name)) await $`cp -cR ${join(MOBILE, name)} ${PROJECT}`
+    if (!["ios", "android", ".expo"].includes(name)) await run(["cp", "-cR", join(MOBILE, name), PROJECT])
   }
   await mkdir(dirname(COPIED_BLOBATAR), { recursive: true })
-  await $`cp -cR ${BLOBATAR} ${dirname(COPIED_BLOBATAR)}`
+  await run(["cp", "-cR", BLOBATAR, dirname(COPIED_BLOBATAR)])
 }
 // app.config.ts reads its parent's release version. Keep the copied layout independent
-// of the repository's Bun workspaces while preserving the exact production version.
-await Bun.write(join(BUILD_DIR, "package.json"), JSON.stringify({ private: true, version: readVersion() }) + "\n")
-// Bun's file: install puts absolute per-file links in node_modules. Point the copied dependency at
+// of the repository's workspaces while preserving the exact production version.
+await writeFile(join(BUILD_DIR, "package.json"), JSON.stringify({ private: true, version: readVersion() }) + "\n")
+// The installed dependency points into the working tree. Point the copied dependency at
 // the copied source instead, so Metro sees one Blobatar outside its project root and its React
 // imports resolve against this mobile project's node_modules.
 await rm(LINKED_BLOBATAR, { recursive: true, force: true })
@@ -112,13 +135,13 @@ for (const name of KEEP) {
   await rename(join(IOS, name), join(KEPT, name))
 }
 await rm(IOS, { recursive: true, force: true })
-await $`bunx expo prebuild --platform ios --no-install`.cwd(PROJECT).env(env)
+await run(["pnpm", "exec", "expo", "prebuild", "--platform", "ios", "--no-install"], { cwd: PROJECT, env })
 for (const name of KEEP) {
   if (existsSync(join(KEPT, name))) await rename(join(KEPT, name), join(IOS, name))
 }
-await $`pod install`.cwd(IOS).env(env)
+await run(["pod", "install"], { cwd: IOS, env })
 
-const pbxproj = await Bun.file(join(IOS, "Beans.xcodeproj", "project.pbxproj")).text()
+const pbxproj = await readFile(join(IOS, "Beans.xcodeproj", "project.pbxproj"), "utf8")
 const bundleIds = new Set([...pbxproj.matchAll(/PRODUCT_BUNDLE_IDENTIFIER = "?([^";]+)"?;/g)].map((m) => m[1]))
 if (!bundleIds.has(BUNDLE_ID)) die(`the project builds ${[...bundleIds].join(", ")}, not ${BUNDLE_ID}`)
 
@@ -135,12 +158,12 @@ log(`${color.bold("archiving")} ${color.dim(ARCHIVE)}`)
 await rm(ARCHIVE, { recursive: true, force: true })
 await rm(EXPORT, { recursive: true, force: true })
 const provisioningArgs = allowProvisioning ? ["-allowProvisioningUpdates"] : []
-await $`xcodebuild -workspace ${join(IOS, "Beans.xcworkspace")} -scheme Beans -configuration Release -destination generic/platform=iOS -archivePath ${ARCHIVE} ${provisioningArgs} CURRENT_PROJECT_VERSION=${buildNumber} COMPILATION_CACHE_ENABLE_CACHING=YES archive -quiet`.env(env)
+await run(["xcodebuild", "-workspace", join(IOS, "Beans.xcworkspace"), "-scheme", "Beans", "-configuration", "Release", "-destination", "generic/platform=iOS", "-archivePath", ARCHIVE, ...provisioningArgs, `CURRENT_PROJECT_VERSION=${buildNumber}`, "COMPILATION_CACHE_ENABLE_CACHING=YES", "archive", "-quiet"], { env })
 if (!existsSync(ARCHIVE)) die("xcodebuild produced no archive")
 
 const plist = join(ARCHIVE, "Products", "Applications", "Beans.app", "Info.plist")
-const version = (await $`plutil -extract CFBundleShortVersionString raw ${plist}`.text()).trim()
-const built = (await $`plutil -extract CFBundleVersion raw ${plist}`.text()).trim()
+const version = (await run(["plutil", "-extract", "CFBundleShortVersionString", "raw", plist], { capture: true })).trim()
+const built = (await run(["plutil", "-extract", "CFBundleVersion", "raw", plist], { capture: true })).trim()
 if (built !== buildNumber) die(`the app carries build ${built}, expected ${buildNumber}`)
 
 if (local) {
@@ -154,12 +177,12 @@ const configuredOptions = process.env.BEANS_IOS_EXPORT_OPTIONS
 const exportOptions = configuredOptions ?? join(BUILD_DIR, "ExportOptions.plist")
 if (configuredOptions) {
   if (!existsSync(configuredOptions)) die("BEANS_IOS_EXPORT_OPTIONS does not exist")
-  const options = JSON.parse(await $`plutil -convert json -o - ${configuredOptions}`.text())
+  const options = JSON.parse(await run(["plutil", "-convert", "json", "-o", "-", configuredOptions], { capture: true }))
   if (!["release-testing", "debugging", "ad-hoc", "development"].includes(options.method) || options.destination !== "export") {
     die("Export options must export an ad-hoc/development IPA locally; store upload is not allowed")
   }
 } else {
-  await Bun.write(exportOptions, `<?xml version="1.0" encoding="UTF-8"?>
+  await writeFile(exportOptions, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>method</key><string>${exportMethod}</string>
@@ -170,7 +193,7 @@ if (configuredOptions) {
 </dict></plist>`)
 }
 log(`${color.bold("exporting")} ${color.dim("signed IPA for GitHub")}`)
-await $`xcodebuild -exportArchive -archivePath ${ARCHIVE} -exportOptionsPlist ${exportOptions} -exportPath ${EXPORT} ${provisioningArgs}`.env(env)
+await run(["xcodebuild", "-exportArchive", "-archivePath", ARCHIVE, "-exportOptionsPlist", exportOptions, "-exportPath", EXPORT, ...provisioningArgs], { env })
 const ipas = (await readdir(EXPORT)).filter((file) => file.endsWith(".ipa"))
 if (ipas.length !== 1) die("xcodebuild must produce exactly one signed IPA")
 const output = join(BUILD_DIR, `Beans-${version}.ipa`)

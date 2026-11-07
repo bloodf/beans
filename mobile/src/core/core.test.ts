@@ -1,7 +1,9 @@
-// The parts of the phone's core that run outside React Native, run with `bun test`: the
+// The parts of the phone's core that run outside React Native, run under Vitest: the
 // pairing-string check, the model helpers, and the formatting the transcript and list share.
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, vi } from "vitest";
+
+vi.mock("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {} }));
 
 test("new setup selects the full catalog while edits preserve an empty selection", () => {
   const listed = Array.from({ length: 12 }, (_, i) => ({ id: `combo-${i}` }));

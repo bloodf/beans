@@ -6,6 +6,7 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Local mobile provenance rejects untracked source changes and duplicate cloud/local platform build numbers; native metadata tools inspect the retained snapshot without inherited credentials, with generated APK/IPA regressions in hosted checks.
 - Android signed updates use the current progress dialog with consent-bound events, native commit-aware cancellation and conservative installer-source gating.
 
 - Android update installation guards share the current composer draft state, including replies, pending sends and dictation; explicit draft deletion updates recovery previews immediately.

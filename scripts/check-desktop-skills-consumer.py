@@ -6,7 +6,7 @@ Chromium and fails when any check errors. The checks themselves live in the ship
 next to the sheets they exercise, so this script starts no framework, copies no oracle and runs no
 part of the suite beyond the three skills consumer checks: discovery, library copy and KeepBoth.
 
-Requires `bun install` in desktop/, the generated desktop/src/mygo.ts (gitignored; `bun run generate`),
+Requires `pnpm install --frozen-lockfile` in desktop/, the generated desktop/src/mygo.ts (gitignored; `pnpm run generate`),
 and the playwright Python package with its chromium browser.
 """
 
@@ -66,10 +66,10 @@ def source_binding() -> dict:
 def main() -> int:
     generated = os.path.join(DESKTOP, "src", "mygo.ts")
     if not os.path.exists(generated):
-        raise SystemExit("desktop/src/mygo.ts is missing; run `bun run generate` in desktop/ first")
+        raise SystemExit("desktop/src/mygo.ts is missing; run `pnpm run generate` in desktop/ first")
     port = free_port()
     vite = subprocess.Popen(
-        ["bun", "node_modules/vite/bin/vite.js", "--port", str(port), "--strictPort"],
+        ["pnpm", "exec", "vite", "--port", str(port), "--strictPort"],
         cwd=DESKTOP, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         base = f"http://localhost:{port}"

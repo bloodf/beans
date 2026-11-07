@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { appearanceFor, editAppearance, resetAppearance, shuffleAppearance, lookProblem, previewAppearance, type BotLook } from "./botLook";
 import { avatarActivity, aggregateAvatarActivity } from "./avatarActivity";
 import { toMessage, type WireBody } from "./wire";

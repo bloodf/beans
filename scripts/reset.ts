@@ -1,8 +1,10 @@
 // Reset Beans on this Mac: stop the app and CLI, wipe identity, keys, credentials, chats,
 // app preferences, and logs. Use --dev for Beans Dev, --build to drop build output too,
 // --relay for the local relay database, and -y to skip the confirmation.
+import { spawn } from "node:child_process"
 import { rm } from "node:fs/promises"
 import { existsSync } from "node:fs"
+import { createInterface } from "node:readline/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { APP_NAME, BUNDLE_ID, DEBUG_APP_NAME, DEBUG_BUNDLE_ID, PACKAGE_DIR, ROOT, color, log } from "./app.ts"
@@ -19,6 +21,8 @@ const port = development ? 4875 : 4874
 const home = join(homedir(), development ? ".beans-dev-v2" : ".beans-v2")
 const logs = join(homedir(), "Library", "Logs", appName)
 
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
 const targets: { path: string; what: string; on: boolean }[] = [
   { path: home, what: "identity, keys, credentials, chats", on: true },
   { path: logs, what: "CLI logs", on: true },
@@ -31,9 +35,13 @@ const targets: { path: string; what: string; on: boolean }[] = [
 ]
 
 async function pids(pattern: string): Promise<number[]> {
-  const proc = Bun.spawn(["pgrep", "-f", pattern], { stdout: "pipe", stderr: "pipe" })
-  const text = await new Response(proc.stdout).text()
-  await proc.exited
+  const proc = spawn("pgrep", ["-f", pattern], { stdio: ["ignore", "pipe", "pipe"] })
+  let text = ""
+  proc.stdout?.setEncoding("utf8")
+  if (proc.stdout) for await (const chunk of proc.stdout) text += chunk
+  // Drain stderr so a noisy child never blocks on a full pipe.
+  if (proc.stderr) for await (const _ of proc.stderr) { /* discard */ }
+  await new Promise<void>((resolveClose) => proc.once("close", () => resolveClose()))
   return text
     .split("\n")
     .map((line) => Number(line.trim()))
@@ -52,7 +60,7 @@ async function stopProcesses() {
   for (const pid of found) {
     try { process.kill(pid, "SIGTERM") } catch {}
   }
-  await Bun.sleep(600)
+  await delay(600)
   for (const pid of found) {
     try { process.kill(pid, 0); process.kill(pid, "SIGKILL") } catch {}
   }
@@ -61,12 +69,15 @@ async function stopProcesses() {
 
 async function confirm(): Promise<boolean> {
   if (yes || !process.stdin.isTTY) return yes
-  process.stdout.write(`${color.yellow(`Reset ${appName}?`)} This deletes the identity on this Mac; without the backup phrase it is gone. [y/N] `)
-  for await (const chunk of Bun.stdin.stream()) {
-    const answer = new TextDecoder().decode(chunk).trim().toLowerCase()
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  try {
+    const answer = (await rl.question(
+      `${color.yellow(`Reset ${appName}?`)} This deletes the identity on this Mac; without the backup phrase it is gone. [y/N] `,
+    )).trim().toLowerCase()
     return answer === "y" || answer === "yes"
+  } finally {
+    rl.close()
   }
-  return false
 }
 
 console.log()
@@ -90,8 +101,8 @@ for (const target of targets.filter((t) => t.on)) {
   log(`removed ${target.path}`)
 }
 
-const defaults = Bun.spawn(["defaults", "delete", bundleID], { stdout: "ignore", stderr: "ignore" })
-await defaults.exited
+const defaults = spawn("defaults", ["delete", bundleID], { stdio: "ignore" })
+await new Promise<void>((resolveClose) => defaults.once("close", () => resolveClose()))
 log(`cleared preferences ${color.dim(bundleID)}`)
 
 log(color.green("done") + color.dim(" — next launch starts at onboarding"))

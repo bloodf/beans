@@ -822,7 +822,7 @@ impl App {
                 slot: Some(Slot::latest("roster")), group: None,
             };
             remember_applied(&mut snapshot, &item.id);
-            self.store.queue_outbox_with_state(&item, &snapshot)?;
+            self.store.queue_outbox_with_state(&item, &snapshot, Some(id))?;
             *state = snapshot;
         }
         drop(_edit);
@@ -951,7 +951,7 @@ impl App {
             remember_applied(&mut state, &item.id);
             state.clone()
         };
-        if let Err(error) = self.store.queue_outbox_with_state(&item, &snapshot) {
+        if let Err(error) = self.store.queue_outbox_with_state(&item, &snapshot, None) {
             self.state.lock().unwrap().applied_blob_ids.retain(|id| id != &item.id);
             tracing::error!(%error, kind = %item.kind, "queueing relay blob");
             return;
@@ -1970,7 +1970,7 @@ impl App {
         let mut snapshot = state.clone();
         snapshot.chats[index].unread_count = 0;
         remember_applied(&mut snapshot, &item.id);
-        self.store.queue_outbox_with_state(&item, &snapshot)?;
+        self.store.queue_outbox_with_state(&item, &snapshot, None)?;
         *state = snapshot;
         drop(state);
         self.outbox_notify.notify_waiters();

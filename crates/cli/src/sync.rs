@@ -1358,23 +1358,6 @@ fn validate_roster_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile,
     validate_pending_chat_identities(app, &remote)?;
     if let Some((_, base)) = baseline {
         let queued: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &item.ciphertext).map_err(local)?;
-        // A lost PUT reply leaves acceptance ambiguous when a newer edit returns
-        // to its ancestor value. Keep that intent queued instead of erasing it.
-        if !app.state.lock().unwrap().applied_blob_ids.contains(&remote_blob.id) {
-            if let Some((submitted_seq, sent)) = app.store.roster_baseline("submitted").map_err(local)? {
-                if remote_blob.seq > submitted_seq {
-                    for id in base.device_names.keys().chain(sent.device_names.keys()) {
-                        let desired = queued.device_names.get(id);
-                        if desired == base.device_names.get(id) && desired != sent.device_names.get(id)
-                            && remote.device_names.get(id) != sent.device_names.get(id)
-                            && remote.device_names.get(id) != desired {
-                            return Err(RelayError { status: None, message: format!(
-                                "Roster conflict: Device {id} alias changed after an unacknowledged upload. Local changes remain queued; choose its alias again before retrying") });
-                        }
-                    }
-                }
-            }
-        }
         validate_merged_groups(&merge_rosters(remote, &base, &queued))?;
     }
     Ok(())
@@ -3756,7 +3739,7 @@ mod tests {
     }
 
     #[test]
-    fn lost_alias_reply_then_reset_and_remote_overwrite_retains_conflict() {
+    fn lost_alias_reply_then_reset_and_remote_overwrite_preserves_reset() {
         let scratch = scratch_app();
         let app = &scratch.0;
         crate::identity::create(app, Some("Runner".into())).unwrap();
@@ -3770,19 +3753,19 @@ mod tests {
         app.store.record_submitted_roster(0, &remote).unwrap();
         app.set_device_name("peer", "").unwrap();
         let reopened = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
-        let queued = reopened.store.queued_roster().unwrap().unwrap();
         remote.device_names.insert("peer".into(), "Remote".into());
         let blob = BlobIn { id: "remote-overwrite".into(), kind: "roster".into(), recipient_machine_pubkey: None,
             ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&reopened.dek().unwrap(), "roster", &remote).unwrap()),
             seq: 2, created_at: 2 };
-        let error = apply_incoming_blob(&reopened, &reopened.machine_file().unwrap(), &blob, true).unwrap_err();
-        assert!(error.message.contains("alias changed after an unacknowledged upload"));
+        // Reaffirming the same reset remains valid after a restart.
+        reopened.set_device_name("peer", "").unwrap();
+        apply_incoming_blob(&reopened, &reopened.machine_file().unwrap(), &blob, true).unwrap();
         assert!(!reopened.state.lock().unwrap().device_names.contains_key("peer"));
         let retained = reopened.store.queued_roster().unwrap().unwrap();
-        assert_eq!(retained.id, queued.id);
-        assert_eq!(retained.ciphertext, queued.ciphertext);
-        assert_eq!(reopened.store.roster_baseline("observed").unwrap().unwrap().0, 0);
-        assert!(!reopened.state.lock().unwrap().applied_blob_ids.contains(&blob.id));
+        let desired: RosterBlob = crate::crypto::decrypt_json(&reopened.dek().unwrap(), "roster", &retained.ciphertext).unwrap();
+        assert!(!desired.device_names.contains_key("peer"));
+        assert_eq!(reopened.store.roster_baseline("observed").unwrap().unwrap().0, 2);
+        assert!(reopened.state.lock().unwrap().applied_blob_ids.contains(&blob.id));
     }
 
     #[test]

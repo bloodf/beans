@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { chatContextMenuEntries as getChatContextMenuEntries, openChatContextMenu as getOpenChatContextMenu } from "./sidebar";
 import type { select as getSelect, selection as getSelection } from "./root";
 import type { store as getStore } from "../model/store";
+import type { Bot, Chat } from "../model/models";
 
 let chatContextMenuEntries: typeof getChatContextMenuEntries;
 let openChatContextMenu: typeof getOpenChatContextMenu;
@@ -31,36 +32,46 @@ afterAll(() => {
   else Reflect.deleteProperty(globalThis, "location");
 });
 
+const bot: Bot = {
+  id: "b2", name: "Bot 2", description: "", symbolName: "sparkles", accent: "blue",
+  runnerID: "runner", provider: "deepseek", createdAt: 1,
+  capabilities: { shell: false, write: false, plugins: [] },
+};
+function chat(id: string, kind: Chat["kind"] = "dm"): Chat {
+  return { id, kind, isPinned: false, botIDs: [bot.id], messages: [], unreadCount: 0,
+    createdAt: 1, hasMore: false, groupDescription: "" };
+}
+
 describe("sidebar chat context menu", () => {
-  it("leaves the current selection alone and operates on the clicked chat", async () => {
+  it.each([false, true])("operates on the clicked chat when selection changes during popup: %s", async (changesSelection) => {
     // Seed test selection to chat 1
     const originalSelection = { kind: "chat" as const, id: "c1" };
     select(originalSelection);
 
     // Mock store.chat
-    const c1 = { id: "c1", kind: "dm", isPinned: false, botIDs: ["b1"], messages: [] };
-    const c2 = { id: "c2", kind: "dm", isPinned: false, botIDs: ["b2"], messages: [] };
+    const c1 = chat("c1");
+    const c2 = chat("c2");
     const originalChat = store.chat.bind(store);
     const originalBotsIn = store.botsIn.bind(store);
     const originalTogglePin = store.togglePin.bind(store);
 
     let pinnedChatID: string | null = null;
-    store.chat = ((id: string) => (id === "c1" ? c1 : id === "c2" ? c2 : undefined)) as typeof store.chat;
-    store.botsIn = ((chat: unknown) => [{ id: "b2", name: "Bot 2" }]) as typeof store.botsIn;
-    store.togglePin = ((id: string) => {
-      pinnedChatID = id;
-    }) as typeof store.togglePin;
+    store.chat = (id) => id === "c1" ? c1 : id === "c2" ? c2 : undefined;
+    store.botsIn = () => [bot];
+    store.togglePin = (id) => { pinnedChatID = id; };
 
     try {
       // Right-clicking c2 while c1 is selected
       let menuEntries: ReturnType<typeof chatContextMenuEntries> = [];
       await openChatContextMenu("c2", { x: 10, y: 10 }, async (entries) => {
         menuEntries = entries;
+        expect(selection.get()).toEqual(originalSelection);
+        if (changesSelection) select({ kind: "chat", id: "c3" });
         return "pin";
       });
 
       // The selection should remain c1
-      expect(selection.get()).toEqual(originalSelection);
+      expect(selection.get()).toEqual(changesSelection ? { kind: "chat", id: "c3" } : originalSelection);
       // But the action (pin) should have been performed on c2
       expect(pinnedChatID).toBe("c2");
       // Menu entries for bot DM should include Pin, Change Look…, separator, Delete Bot
@@ -76,11 +87,11 @@ describe("sidebar chat context menu", () => {
   });
 
   it("offers Change Look… for bot chats but not for groups", () => {
-    const dmChat = { id: "dm", kind: "dm", isPinned: false, botIDs: ["b1"], messages: [] } as any;
-    const groupChat = { id: "grp", kind: "group", isPinned: false, botIDs: ["b1", "b2"], messages: [] } as any;
+    const dmChat = chat("dm");
+    const groupChat = chat("grp", "group");
 
     const originalBotsIn = store.botsIn.bind(store);
-    store.botsIn = ((chat: any) => (chat.id === "dm" ? [{ id: "b1", name: "Bot 1" }] : [])) as typeof store.botsIn;
+    store.botsIn = (chat) => chat.id === "dm" ? [bot] : [];
 
     try {
       const dmEntries = chatContextMenuEntries(dmChat);

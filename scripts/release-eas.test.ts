@@ -1,3 +1,6 @@
+import * as trust from "./release-build-inputs.ts";
+import { readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 import { describe, expect, test, vi } from "vitest";
@@ -7,23 +10,22 @@ import { join } from "node:path";
 import { readVersion } from "./app.ts";
 import { downloadArtifact, runEasRelease, runLocalEasRelease, stageEasBuild, stageLocalBuild, stagePair, validateEasBuild } from "./release-eas.ts";
 import { androidNdk, hostLibrary } from "./release-build-inputs.ts";
+import { archiveFixture } from "./release-archive-fixture.ts";
 
 const revision = "a".repeat(40);
 const project = "11111111-1111-4111-8111-111111111111";
 const build = { id: "22222222-2222-4222-8222-222222222222", status: "FINISHED", platform: "ANDROID", appIdentifier: "ai.amoena.beans", distribution: "STORE", buildProfile: "github", gitCommitHash: revision, appVersion: "1.0.11", appBuildVersion: "42", app: { id: project }, artifacts: { buildUrl: "https://artifacts.eascdn.net/build.apk" } };
-test("downloads and stages exact finished APK/AAB/store IPA with hashes, never URLs", async () => {
+test("missing public policy rejects staging and cloud calls before transport or credentials", async () => {
   const directory = await mkdtemp(join(tmpdir(), "beans-eas-test-"));
   const previous = process.env.BEANS_EXPO_PROJECT_ID;
   process.env.BEANS_EXPO_PROJECT_ID = project;
-  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(new Uint8Array([0x50, 0x4b, 3, 4, 1])) as any);
+  const payload = archiveFixture();
+  const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(payload) as any);
   try {
     for (const [profile, platform, suffix] of [["github", "ANDROID", ".apk"], ["production", "ANDROID", ".aab"], ["testflight", "IOS", "-store.ipa"]] as const) {
-      await stageEasBuild({ ...build, appVersion: readVersion(), platform, buildProfile: profile }, profile, revision, directory);
-      const proof = JSON.parse(await readFile(join(directory, `eas-${profile}.json`), "utf8"));
-      expect(proof.artifact).toBe(`Beans-${readVersion()}${suffix}`);
-      expect(proof.sha256).toHaveLength(64);
-      expect(proof.revision).toBe(revision);
-      expect(JSON.stringify(proof)).not.toContain("https");
+      await expect(stageEasBuild({ ...build, appVersion: readVersion(), platform, buildProfile: profile }, profile, revision, directory)).rejects.toThrow("policy unavailable");
+      expect(existsSync(join(directory, `eas-${profile}.json`))).toBe(false);
+      expect(existsSync(join(directory, `Beans-${readVersion()}${suffix}`))).toBe(false);
     }
     const oldToken = process.env.EXPO_TOKEN;
     const oldOwner = process.env.BEANS_EXPO_OWNER;
@@ -31,13 +33,13 @@ test("downloads and stages exact finished APK/AAB/store IPA with hashes, never U
     process.env.BEANS_EXPO_OWNER = "test-owner";
     try {
       const git = (args: string[]) => ({ exitCode: 0, stdout: Buffer.from(args.includes("rev-parse") ? revision : "") }) as any;
-      await runEasRelease(["build", "github", revision, join(directory, "fresh")], async (args) => { expect(args).toContain("--wait"); return [{ ...build, appVersion: readVersion() }]; }, git);
-      await runEasRelease(["build", "github", revision, join(directory, "retry"), build.id], async (args) => { expect(args[0]).toBe("build:view"); return { ...build, appVersion: readVersion() }; }, git);
-      await expect(runEasRelease(["build", "github", revision, join(directory, "empty")], async () => [], git)).rejects.toThrow("exactly one");
-      await expect(runEasRelease(["build", "github", revision, directory], async () => [], () => ({ exitCode: 0, stdout: Buffer.from("dirty") }) as any)).rejects.toThrow("clean");
+      let queried = false;
+      const query = async () => { queried = true; return []; };
+      await expect(runEasRelease(["build", "github", revision, directory], query, git)).rejects.toThrow("policy unavailable");
+      expect(queried).toBe(false);
       await expect(runEasRelease(["bad"], async () => [], git)).rejects.toThrow("usage");
       delete process.env.EXPO_TOKEN;
-      await expect(runEasRelease(["build", "github", revision, join(directory, "empty")], async () => [], git)).rejects.toThrow("required");
+      await expect(runEasRelease(["build", "github", revision, directory], async () => [], git)).rejects.toThrow("policy unavailable");
     } finally {
       if (oldToken === undefined) delete process.env.EXPO_TOKEN; else process.env.EXPO_TOKEN = oldToken;
       if (oldOwner === undefined) delete process.env.BEANS_EXPO_OWNER; else process.env.BEANS_EXPO_OWNER = oldOwner;
@@ -46,8 +48,8 @@ test("downloads and stages exact finished APK/AAB/store IPA with hashes, never U
     const redirects = ["https://api.expo.dev/builds/artifact", "https://wf-artifacts.eascdn.net/build.ipa"];
     fetcher.mockImplementation(async () => redirects.length
       ? new Response(null, { status: 307, headers: { location: redirects.shift()! } }) as any
-      : new Response(new Uint8Array([0x50, 0x4b, 3, 4, 1])) as any);
-    expect((await downloadArtifact("https://expo.dev/artifacts/build.ipa")).length).toBe(5);
+      : new Response(payload) as any);
+    expect(await downloadArtifact("https://expo.dev/artifacts/build.ipa")).toEqual(new Uint8Array(payload));
     fetcher.mockImplementation(async () => new Response(null, { status: 307, headers: { location: "https://evil.eascdn.net/build.ipa" } }) as any);
     await expect(downloadArtifact(build.artifacts.buildUrl)).rejects.toThrow("trusted HTTPS");
     fetcher.mockImplementation(async () => new Response("denied", { status: 403 }) as any);
@@ -97,6 +99,8 @@ describe("local exact-source provenance", () => {
     try { await body(); } finally { for (const [name, value] of Object.entries(old)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } }
   }
   test("runs eas --local, takes the number from the binary and refuses every mismatch", async () => {
+    // Isolate build/provenance behavior below admission; this mock supplies no signing evidence.
+    const admission = vi.spyOn(trust, "preflightMobileTrust").mockImplementation(() => undefined as never);
     const directory = await mkdtemp(join(tmpdir(), "beans-local-eas-"));
     try {
       await withEnv(env, async () => {
@@ -135,7 +139,7 @@ describe("local exact-source provenance", () => {
           await expect(runLocalEasRelease(["github", revision, bad], identity(), builder, git())).rejects.toThrow("required");
         });
       });
-    } finally { await rm(directory, { recursive: true, force: true }); }
+    } finally { admission.mockRestore(); await rm(directory, { recursive: true, force: true }); }
   });
 });
 describe("local staging binds the inspector and the staged hash to one admitted snapshot", () => {
@@ -229,6 +233,7 @@ test("stale proof and completed pair refuse before cloud payment or local build"
   const git = (args: string[]) => ({ exitCode: 0, stdout: Buffer.from(args.includes("rev-parse") ? revision : "") });
   const query = vi.fn(async () => []);
   const builder = vi.fn(() => ({ exitCode: 0 }));
+  const admission = vi.spyOn(trust, "preflightMobileTrust").mockImplementation(() => undefined as never);
   try {
     require("node:fs").writeFileSync(join(dir, "eas-github.json"), "stale");
     for (const complete of [false, true]) {
@@ -238,7 +243,7 @@ test("stale proof and completed pair refuse before cloud payment or local build"
     }
     expect(query).not.toHaveBeenCalled(); expect(builder).not.toHaveBeenCalled();
     expect(await readFile(join(dir, "eas-github.json"), "utf8")).toBe("stale");
-  } finally { process.env = old; await rm(dir, { recursive: true, force: true }); }
+  } finally { admission.mockRestore(); process.env = old; await rm(dir, { recursive: true, force: true }); }
 });
 
 test("a concurrent proof creation rolls back only the artifact", async () => {

@@ -1,5 +1,7 @@
+import * as trust from "./release-build-inputs.ts";
+import * as eas from "./release-eas.ts";
 import { readFile } from "node:fs/promises";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
@@ -11,11 +13,11 @@ import { buildReleaseManifest } from "./release-github.ts";
 import { readVersion, ROOT } from "./app.ts";
 const paths: string[] = [];
 afterEach(async () => { await Promise.all(paths.map((path) => rm(path, { recursive: true, force: true }))); });
-test("all-platform CLI preflight rejects missing notes before loading private credentials", async () => {
+test("all-platform CLI refuses absent or invalid public trust before changelog and key access", async () => {
   const path = await mkdtemp(join(tmpdir(), "beans-release-preflight-")); paths.push(path);
   await mkdir(join(path, "scripts"));
   await mkdir(join(path, "updates"));
-  for (const name of ["app.ts", "changelog.ts", "release-signing.ts", "release-github.ts"]) {
+  for (const name of ["app.ts", "changelog.ts", "release-signing.ts", "release-github.ts", "release-eas.ts", "release-build-inputs.ts", "release-ipa-claims.ts", "release-native-identity.ts", "executable.ts"]) {
     await copyFile(join(ROOT, "scripts", name), join(path, "scripts", name));
   }
   await copyFile(join(ROOT, "updates", "public-key.txt"), join(path, "updates", "public-key.txt"));
@@ -45,7 +47,7 @@ test("all-platform CLI preflight rejects missing notes before loading private cr
   expect(result.signal, `process terminated by signal ${result.signal}`).toBeNull();
   expect(result.status, "expected nonzero exit status").not.toBe(0);
   expect(result.status, "expected exit status to be numeric").not.toBeNull();
-  expect(result.stderr, "expected semantic changelog error in stderr").toContain("CHANGELOG.md requires notes for 1.0.13");
+  expect(result.stderr, "expected public-policy error in stderr").toContain("trust policy unavailable for github");
 });
 async function server() {
   const path = await mkdtemp(join(tmpdir(), "beans-release-fixture-")); paths.push(path);
@@ -68,7 +70,15 @@ async function inventory() {
   }
   return path;
 }
+test("all-platform finalization cannot inspect or sign inventory without public authority", async () => {
+  const path = await server();
+  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("trust policy unavailable for github");
+});
 test("complete all inventory requires hash-bound EAS store provenance", async () => {
+  // Inventory-only fixture; admission and native trust have separate refusal tests.
+  const admission = vi.spyOn(trust, "preflightReleaseTrust").mockImplementation(() => {});
+  const binary = vi.spyOn(eas, "verifyEasBinary").mockResolvedValue(undefined);
+  try {
   const path = await inventory();
   const v = readVersion();
   const sha = createHash("sha256").update("fixture").digest("hex");
@@ -83,6 +93,7 @@ test("complete all inventory requires hash-bound EAS store provenance", async ()
   expect(result).toEqual(await buildReleaseManifest(tag, revision, path, "all"));
   await writeFile(join(path, `Beans-${v}.aab`), "changed");
   await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("provenance");
+  } finally { binary.mockRestore(); admission.mockRestore(); }
 });
 test("local exact-source pipeline: stage with production code, finalize only through a binary verifier", async () => {
   const path = await inventory();
@@ -111,13 +122,18 @@ test("local exact-source pipeline: stage with production code, finalize only thr
   const originals = Object.fromEntries(await Promise.all(["github", "production", "testflight"].map(async (profile) => [profile, JSON.parse(await readFile(proofFile(profile), "utf8"))])));
   expect(originals.github.buildId).toBeUndefined();
   // The trusted-binary gate (#275) is a required seam: no verifier, no local acceptance.
-  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("#275");
+  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("trust policy unavailable for github");
   const calls: string[] = [];
   const verify = async (_: Uint8Array, profile: string, version: string, number: string) => { calls.push(`${profile}:${version}:${number}`); };
-  const manifest = await buildReleaseManifest(tag, revision, path, "all", verify);
+  // Exercise inventory independently below admission. Neither mock proves binary trust.
+  const admission = vi.spyOn(trust, "preflightReleaseTrust").mockImplementation(() => {});
+  const binary = vi.spyOn(eas, "verifyEasBinary").mockImplementation(verify);
+  try {
+  const manifest = await buildReleaseManifest(tag, revision, path, "all");
   expect(calls).toEqual([`github:${v}:50`, `production:${v}:51`, `testflight:${v}:52`]);
   expect(manifest.artifacts.filter((a) => a.component === "provenance")).toHaveLength(3);
-  await expect(buildReleaseManifest(tag, revision, path, "all", async () => { throw new Error("signer differs"); })).rejects.toThrow("signer differs");
+  binary.mockRejectedValueOnce(new Error("signer differs"));
+  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("signer differs");
   const refusals: [string, (proof: any) => any][] = [
     ["unknown kind", (p) => ({ ...p, kind: "cloud" })],
     ["fabricated build id", (p) => ({ ...p, buildId: "22222222-2222-4222-8222-222222222222" })],
@@ -130,23 +146,24 @@ test("local exact-source pipeline: stage with production code, finalize only thr
   ];
   for (const [name, mutate] of refusals) {
     await writeFile(proofFile("github"), JSON.stringify(mutate(originals.github)));
-    await expect(buildReleaseManifest(tag, revision, path, "all", verify), name).rejects.toThrow("Invalid EAS artifact provenance");
+    await expect(buildReleaseManifest(tag, revision, path, "all"), name).rejects.toThrow("Invalid EAS artifact provenance");
     await writeFile(proofFile("github"), JSON.stringify(originals.github));
   }
   // Mixed cloud/local proofs must share the same platform number namespace in either order.
   for (const cloudProfile of ["github", "production"] as const) {
     const other = cloudProfile === "github" ? "production" : "github";
     await writeFile(proofFile(cloudProfile), JSON.stringify({ ...originals[cloudProfile], kind: undefined, buildId: "22222222-2222-4222-8222-222222222222", buildNumber: originals[other].buildNumber }));
-    await expect(buildReleaseManifest(tag, revision, path, "all", verify)).rejects.toThrow("Invalid EAS artifact provenance");
+    await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("Invalid EAS artifact provenance");
     await writeFile(proofFile(cloudProfile), JSON.stringify(originals[cloudProfile]));
   }
   await writeFile(join(path, `Beans-${v}.apk`), "changed");
-  await expect(buildReleaseManifest(tag, revision, path, "all", verify)).rejects.toThrow("provenance");
+  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("provenance");
+  } finally { binary.mockRestore(); admission.mockRestore(); }
 });
 test("server inventory is deterministic and cannot finalize all", async () => {
   const path = await server();
   expect(await buildReleaseManifest(tag, revision, path)).toEqual(await buildReleaseManifest(tag, revision, path));
-  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("incomplete");
+  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("policy unavailable");
 });
 test("tag, revision, scope and unknown assets fail closed", async () => {
   const path = await server();

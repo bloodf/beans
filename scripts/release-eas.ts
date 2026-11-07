@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, open, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { lstat, open, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readVersion, ROOT } from "./app.ts";
+import { inspectMobileBinary, preflightMobileTrust, publicTrustArguments, type MobileReleaseProfile, type PublicTrustPolicy } from "./release-build-inputs.ts";
 import { readNativeSnapshot, snapshotArtifact } from "./release-native-identity.ts";
 
 const profiles = { github: { platform: "ANDROID", extension: "apk", component: "android" }, production: { platform: "ANDROID", extension: "aab", component: "android-store" }, testflight: { platform: "IOS", extension: "ipa", component: "ios-store" } } as const;
@@ -104,11 +105,23 @@ async function eas(args: string[]): Promise<any> {
   if (code !== 0) throw new Error("EAS command failed; no release readiness is published");
   return JSON.parse(text);
 }
-export async function stageEasBuild(build: any, profile: Profile, revision: string, directory: string) {
+export async function verifyEasBinary(bytes: Uint8Array, profile: MobileReleaseProfile, version: string, number: string, policy?: PublicTrustPolicy) {
+  if (!Object.hasOwn(profiles, profile)) throw new Error("Invalid binary inspection profile");
+  const approved = preflightMobileTrust(profile, policy);
+  const temporary = await mkdtemp(join(tmpdir(), "beans-binary-inspect-"));
+  try {
+    const path = join(temporary, `candidate.${profiles[profile].extension}`);
+    await writeFile(path, bytes, { flag: "wx" });
+    inspectMobileBinary(path, profile, version, number, approved);
+  } finally { await rm(temporary, { recursive: true, force: true }); }
+}
+export async function stageEasBuild(build: any, profile: Profile, revision: string, directory: string, policy?: PublicTrustPolicy) {
   const project = process.env.BEANS_EXPO_PROJECT_ID ?? "";
   validateEasBuild(build, profile, revision, readVersion(), project);
+  const approved = preflightMobileTrust(profile, policy);
   await assertStageFree(directory, stagingNames(profile));
   const bytes = await downloadArtifact(build.artifacts.buildUrl);
+  await verifyEasBinary(bytes, profile, readVersion(), build.appBuildVersion, approved);
   const name = `Beans-${readVersion()}${profile === "testflight" ? "-store" : ""}.${profiles[profile].extension}`;
   // URLs can carry download tokens; provenance records identifiers and hashes, never URLs.
   const provenance = { schema: 1, revision, version: readVersion(), project, buildId: build.id, buildNumber: build.appBuildVersion, profile, platform: build.platform, artifact: name, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
@@ -139,8 +152,10 @@ export async function stageLocalBuild(input: string, profile: Profile, revision:
   } finally { snapshot.dispose(); }
 }
 export async function runLocalEasRelease(args: string[], inspect: InspectNative | undefined = undefined, run = (args: string[], cwd: string) => ({ exitCode: spawnSync(args[0]!, args.slice(1), { cwd, stdio: "inherit" }).status }), git = gitState) {
-  const [profile, revision, directory, ...extra] = args;
+  const parsed = await publicTrustArguments(args);
+  const [profile, revision, directory, ...extra] = parsed.args;
   if (!Object.hasOwn(profiles, profile) || !revision || !directory || extra.length) throw new Error("usage: <github|production|testflight> <revision> <directory>");
+  preflightMobileTrust(profile as Profile, parsed.policies[profile as Profile]);
   if (!process.env.EXPO_TOKEN || !process.env.BEANS_EXPO_OWNER || !uuid.test(process.env.BEANS_EXPO_PROJECT_ID ?? "")) throw new Error("EXPO_TOKEN, BEANS_EXPO_OWNER and linked BEANS_EXPO_PROJECT_ID are required");
   if (profile === "testflight" && !/^[A-Z0-9]{10}$/.test(process.env.BEANS_APPLE_TEAM_ID ?? "")) throw new Error("BEANS_APPLE_TEAM_ID is required for a local store IPA");
   const head = git(["git", "rev-parse", "HEAD"]);
@@ -165,8 +180,10 @@ function gitState(args: string[]): { exitCode: number; stdout: Buffer } {
   return { exitCode: result.status, stdout: result.stdout };
 }
 export async function runEasRelease(args: string[], query = eas, git = gitState) {
-  const [command, profile, revision, directory, buildId, ...extra] = args;
+  const parsed = await publicTrustArguments(args);
+  const [command, profile, revision, directory, buildId, ...extra] = parsed.args;
   if (command !== "build" || !Object.hasOwn(profiles, profile) || !revision || !directory || extra.length) throw new Error("usage: release-eas.ts build <github|production|testflight> <revision> <directory> [retry-build-id]");
+  const policy = preflightMobileTrust(profile as Profile, parsed.policies[profile as Profile]);
   if (!process.env.EXPO_TOKEN || !process.env.BEANS_EXPO_OWNER || !uuid.test(process.env.BEANS_EXPO_PROJECT_ID ?? "")) throw new Error("EXPO_TOKEN, BEANS_EXPO_OWNER and linked BEANS_EXPO_PROJECT_ID are required");
   const head = git(["git", "rev-parse", "HEAD"]);
   const dirty = git(["git", "status", "--porcelain", "--untracked-files=all"]);
@@ -175,7 +192,7 @@ export async function runEasRelease(args: string[], query = eas, git = gitState)
   await assertStageFree(resolve(directory), stagingNames(typedProfile));
   const builds = buildId ? [await query(["build:view", buildId, "--json"])] : await query(["build", "--platform", profiles[typedProfile].platform.toLowerCase(), "--profile", profile, "--non-interactive", "--wait", "--json"]);
   if (!Array.isArray(builds) || builds.length !== 1) throw new Error("Expected exactly one completed EAS build");
-  await stageEasBuild(builds[0], typedProfile, revision, resolve(directory));
+  await stageEasBuild(builds[0], typedProfile, revision, resolve(directory), policy);
 }
 /** Dispatch only when this file is the process entry; importing it must stay inert. */
 const isMain = (() => {

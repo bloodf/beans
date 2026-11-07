@@ -6,6 +6,7 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- IPA inspection checks bounded signed app/extension identity claims after signature integrity; Apple profile and entitlement authorization still fails closed. Hosted checks exercise portable claims and generated native refusal fixtures.
 - Skills mounted checks follow the shared browser-consumer module names while retaining all assertions and driver source binding.
 
 - Desktop skill comparisons use the Runner's UTF-8 path order and separate 256-file source and managed-copy limits, so valid disjoint inventories remain inspectable.

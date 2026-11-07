@@ -1,10 +1,12 @@
 /** Blobatar 2's frozen seed→markup contract. A failure is not a fixture update. */
 
-import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, test } from "vitest";
 import { HISTOGRAM_SEEDS, cases, histogram, markup } from "./golden/corpus";
 import { hash, parse } from "./golden/format";
 
-const fixture = parse(await Bun.file(`${import.meta.dir}/golden/gen2.txt`).text());
+const fixture = parse(readFileSync(join(import.meta.dirname, "golden", "gen2.txt"), "utf8"));
 
 const report = (moved: string[], total: number) =>
   `${moved.length} of ${total} moved — e.g. ${moved.slice(0, 5).join(", ")}` +

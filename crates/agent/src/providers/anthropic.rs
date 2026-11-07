@@ -661,11 +661,9 @@ impl Provider for AnthropicProvider {
             return channel_stream(rx);
         }
         let mut body = self.body(&request);
-        let output_cap = body["max_tokens"].as_u64().expect("Messages payload has an output cap");
         let options = request.options.clone();
-        options.before_payload(&mut body);
-        if !body["max_tokens"].as_u64().is_some_and(|tokens| tokens <= output_cap) {
-            let _ = tx.send(AssistantEvent::Error { message: "Request payload exceeds or removes the effective output cap.".into(), aborted: false }).await;
+        if let Err(message) = options.before_payload_with_output_cap(&mut body, "max_tokens") {
+            let _ = tx.send(AssistantEvent::Error { message, aborted: false }).await;
             return channel_stream(rx);
         }
         if body["thinking"]["type"] == "enabled" {

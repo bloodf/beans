@@ -2,7 +2,7 @@
 # and the marketplace index (crates/cli/marketplace/index.json) each move their "updated" time
 # forward whenever anything else in them changes, as Devices keep whichever copy is later. The
 # rules each must read by are checked by the beans-models and beans tests in the Tests workflow.
-# scripts/check-catalog.ts is the check; `bun run check:catalog` runs it locally.
+# scripts/check-catalog.ts is the check; `pnpm run check:catalog` runs it locally.
 name: Catalog
 
 on:
@@ -21,8 +21,14 @@ jobs:
       CATALOG_BASE_REF: ${{ github.base_ref || 'main' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+      - run: pnpm install --frozen-lockfile
       - run: git fetch --depth=1 origin "+refs/heads/$CATALOG_BASE_REF:refs/remotes/origin/$CATALOG_BASE_REF"
-      - run: bun run check:catalog
+      - run: pnpm run check:catalog
         env:
           CATALOG_BASE: origin/${{ env.CATALOG_BASE_REF }}

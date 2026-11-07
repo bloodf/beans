@@ -398,7 +398,10 @@ impl Provider for OpenAiCompatProvider {
         }
         let mut body = self.body(&request);
         let options = request.options.clone();
-        options.before_payload(&mut body);
+        if let Err(message) = options.before_payload_with_output_cap(&mut body, "max_tokens") {
+            let _ = tx.send(AssistantEvent::Error { message, aborted: false }).await;
+            return channel_stream(rx);
+        }
         let api_key = options.api_key(&self.api_key).await;
         let url = format!("{}/chat/completions", self.base_url);
         let client = self.client.clone();

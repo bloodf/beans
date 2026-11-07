@@ -636,6 +636,11 @@
 "Rename Chat" = "重命名聊天";
 "Rename Chat…" = "重命名聊天…";
 "Rename…" = "重命名…";
+"Rename Device" = "重命名设备";
+"Device name" = "设备名称";
+"Couldn’t rename Device" = "无法重命名设备";
+"Keep the name to 64 characters" = "名称不能超过 64 个字符";
+"This name appears on every paired Device. Leave it blank to use the machine’s name." = "此名称会显示在每台已配对设备上。留空以使用机器名称。";
 "Reply" = "回复";
 "Reply failed: %@" = "回复失败：%@";
 "Reply…" = "回复…";

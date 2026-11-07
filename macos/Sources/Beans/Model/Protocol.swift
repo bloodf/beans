@@ -251,6 +251,7 @@ enum Wire {
     struct Device: Decodable {
         var id: String
         var name: String
+        var machineName: String?
         var model: String
         var os: String
         var osVersion: String
@@ -752,7 +753,8 @@ extension Wire.Device {
             machineKey: machineKey,
             plugins: (plugins ?? []).map { $0.toModel() },
             version: version ?? "",
-            update: update.map { Device.CLIUpdate(auto: $0.auto, latest: $0.latest, state: $0.state, error: $0.error) }
+            update: update.map { Device.CLIUpdate(auto: $0.auto, latest: $0.latest, state: $0.state, error: $0.error) },
+            machineName: machineName ?? name
         )
     }
 }

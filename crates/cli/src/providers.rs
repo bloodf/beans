@@ -481,6 +481,7 @@ mod tests {
 
     fn scratch_app() -> ScratchApp {
         let home = std::env::temp_dir().join(format!("beans-providers-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         ScratchApp(App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap(), home)
     }
 

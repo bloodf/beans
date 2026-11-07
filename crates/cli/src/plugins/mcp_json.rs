@@ -1142,6 +1142,7 @@ mod runner {
     /// Adds the server `name`, or saves the one `previous` names under `name`. `config` is its
     /// entry, in any app's spelling; the CLI checks it and writes it back canonical.
     pub fn save(app: &Arc<App>, name: &str, previous: Option<&str>, config: &Value) -> Result<String, String> {
+        let _edit = app.roster_edit.lock().unwrap();
         let _admission = app.plugin_admission(None)?;
         let name = name.trim();
         if name.is_empty() {
@@ -1187,6 +1188,7 @@ mod runner {
 
     /// Removes a server from the file, with its sign-in, its folder, and its always-allowed tools.
     pub fn remove(app: &Arc<App>, name: &str) -> Result<(), String> {
+        let _edit = app.roster_edit.lock().unwrap();
         let _admission = app.plugin_admission(None)?;
         let file = current(app)?;
         let server = file.server(name).ok_or_else(|| format!("No server named {name} in mcp.json."))?.clone();
@@ -1326,7 +1328,7 @@ mod runner {
                     *tool = format!("{new}{}", &tool[old.len()..]);
                 }
             }
-            app.set_auto_review(auto_review);
+            app.set_auto_review_locked(auto_review);
         }
     }
 
@@ -1349,7 +1351,7 @@ mod runner {
         let mut auto_review = app.auto_review();
         if auto_review.rules.iter().any(|rule| rule.tool.as_deref().is_some_and(|tool| tool.starts_with(&prefix))) {
             auto_review.rules.retain(|rule| !rule.tool.as_deref().is_some_and(|tool| tool.starts_with(&prefix)));
-            app.set_auto_review(auto_review);
+            app.set_auto_review_locked(auto_review);
         }
     }
 
@@ -1661,6 +1663,7 @@ mod tests {
     #[test]
     fn a_tool_is_hidden_and_shown_in_the_entrys_tool_exposure() {
         let home = std::env::temp_dir().join(format!("beans-mcp-hide-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
         let config = crate::config::Config { home: home.clone(), port: 0 };
         config.ensure_home().unwrap();
         std::fs::write(home.join("mcp.json"), r#"{"mcpServers": {"docs": {"command": "x", "toolExposure": {"delete_*": "hidden"}}}}"#).unwrap();

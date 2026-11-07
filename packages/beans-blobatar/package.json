@@ -28,8 +28,8 @@
     "./jsc": "./dist/blobatar.jsc.js"
   },
   "scripts": {
-    "build": "bun build.ts",
-    "test": "bun test"
+    "build": "pnpm --dir ../.. run build:blobatar",
+    "test": "pnpm --dir ../.. run test:blobatar"
   },
   "peerDependencies": {
     "react": ">=18",
@@ -38,9 +38,21 @@
     "react-native-worklets": ">=0.5"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true },
-    "react-native-reanimated": { "optional": true },
-    "react-native-svg": { "optional": true },
-    "react-native-worklets": { "optional": true }
+    "react": {
+      "optional": true
+    },
+    "react-native-reanimated": {
+      "optional": true
+    },
+    "react-native-svg": {
+      "optional": true
+    },
+    "react-native-worklets": {
+      "optional": true
+    }
+  },
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": ">=24.22.2 <25"
   }
 }

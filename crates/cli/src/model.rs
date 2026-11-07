@@ -661,6 +661,9 @@ pub struct Chat {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ChatUsage {
     pub context_tokens: u64,
+    /// Estimated after compaction until the next provider response counts the context.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub context_estimated: bool,
     pub context_window: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,

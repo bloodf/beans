@@ -1,3 +1,4 @@
+import * as Application from "expo-application";
 import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo } from "react";
@@ -6,7 +7,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { engine } from "../src/core/engine";
 import { useStore } from "../src/core/store";
-import { startUpdateChecks } from "../src/core/updates";
+import { initializeUpdates } from "../src/core/updates";
 import { useStackScreenOptions } from "../src/ui/navigation";
 import { UpdateProgress } from "../src/ui/UpdateProgress";
 import { usePalette } from "../src/ui/theme";
@@ -20,7 +21,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     void engine.start();
-    startUpdateChecks();
+    return initializeUpdates(Platform.OS, Application.applicationId);
   }, []);
 
   const navigationTheme = useMemo(() => {

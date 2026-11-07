@@ -777,7 +777,15 @@ async fn compact_chat(app: &Arc<App>, chat: &Chat, bot: &Bot, provider: &Arc<dyn
     // The whole chat since the last summary, not the window a turn rebuilds: what a turn would
     // leave out is exactly what the summary must carry.
     let messages = transcript_bounded(app, chat, bot, &workdir, None);
-    Ok(compact_messages(app, &chat.meta.id, bot, provider, &messages, settings, None, cancel).await?.map(|(_, tokens_before)| tokens_before))
+    let before = estimate_context_tokens(&transcript_for(app, chat, bot, &workdir)).tokens;
+    let result = compact_messages(app, &chat.meta.id, bot, provider, &messages, settings, None, cancel).await?;
+    if result.is_some() {
+        if let Some(latest) = app.chat(&chat.meta.id) {
+            let after = estimate_context_tokens(&transcript_for(app, &latest, bot, &workdir)).tokens;
+            app.record_compacted_context(&chat.meta.id, &bot.id, provider.model_id(), before, after);
+        }
+    }
+    Ok(result.map(|(_, tokens_before)| tokens_before))
 }
 
 /// `chats.compact`: summarizes the chat for one bot now (the DM's bot, the group's owner, or

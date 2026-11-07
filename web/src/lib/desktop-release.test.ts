@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test'
+import { expect, test } from 'vitest'
 import { parseDesktopReleases } from './desktop-release'
 
 test('Windows downloads resolve the filename returned by GitHub uploads', () => {

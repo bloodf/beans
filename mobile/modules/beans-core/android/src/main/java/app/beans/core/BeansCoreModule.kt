@@ -22,7 +22,7 @@ class BeansCoreModule : Module() {
     Events("event", "updateProgress")
     Function("updateCapability") { updater.capability() }
     Function("updateResult") { updater.result() }
-    AsyncFunction("checkUpdate").Coroutine { withContext(Dispatchers.IO) { updater.check() } }
+    AsyncFunction("checkUpdate").Coroutine { -> withContext(Dispatchers.IO) { updater.check() } }
     AsyncFunction("installUpdate").Coroutine { id: String ->
       val activity = requireNotNull(appContext.currentActivity)
       withContext(Dispatchers.IO) { updater.install(id, activity) }

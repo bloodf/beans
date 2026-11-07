@@ -1,8 +1,8 @@
 # Beans Architecture
 
-Before coding, read this and the relevant [Subjects](#subjects).
+Before coding, read this and [Subjects](#subjects).
 
-Beans is a Grok Bot alternative: persistent named bots, 1:1 chats, group chats, handoff, and orchestration. Work runs on **Devices you own**. The Rust CLI runs on macOS, Linux, and Windows. Each desktop app bundles, launches and provides a UI for the local CLI.
+Beans is a Grok Bot alternative with persistent named bots, 1:1 and group chats, handoff and orchestration on **Devices you own**. Its Rust CLI runs on macOS, Linux and Windows; each desktop UI bundles and launches it.
 
 Identity is a **key pair**. Devices pair. The relay stores public keys and ciphertext, after [Happy’s security model](https://happy.engineering/docs/security/).
 
@@ -55,7 +55,7 @@ The Linux server updater verifies readiness, upgrades and checks the relay first
 
 ## Subjects
 
-Subject docs live in `docs/architecture/`. `pnpm run check:docs` enforces 16 KiB here and 24 KiB per subject, complete subject listings, and valid links and anchors.
+Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces the 16 KiB overview and 24 KiB subject limits, complete subject listings and valid links/anchors.
 
 | Doc | Read it for |
 | --- | --- |
@@ -71,6 +71,7 @@ Subject docs live in `docs/architecture/`. `pnpm run check:docs` enforces 16 KiB
 | [Local API](docs/architecture/local-api.md) | The `/ws` socket: trust boundary, field errors, every method with params and results, events, secret-bearing methods, memory and setup bodies |
 | [CLI (runtime)](docs/architecture/runtime.md) | Commands, local websocket access, proxy/certificate trust, diagnostics, agent loop and notifications |
 | [Local storage and startup admission](docs/architecture/storage-admission.md) | Data directory, format admission, staged scratch preload, creation guards and final startup persistence |
+| [Local task authority](docs/architecture/tasks.md) | Exclusive execution ownership, durable Job.id admission, invocation receipts, recovery and replay fences |
 | [CLI service and updates](docs/architecture/service-updates.md) | CLI installation, standalone services, Runner admission drain and update availability |
 | [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review |
 | [Attention](docs/architecture/attention.md) | Coordinator attention projection, briefs, dismiss, and local API |
@@ -127,7 +128,7 @@ beans/
   .github/workflows/   # release.yml: manual signed Beans releases; test.yml: full PR/manual test matrix; docs.yml: PR/manual doc check; catalog.yml: PR/manual catalog/index check
 ```
 
-`pnpm run android` rebuilds the Rust core for Android, then builds and runs the Expo dev client on the Android emulator. `cd mobile && pnpm run core` rebuilds the Rust core for both phone platforms; `pnpm run mobile:dev` is the iOS development loop described below.
+See [Phone development](docs/architecture/phone-app.md#development-loop) for phone rebuild commands.
 
 `pnpm run dev` runs the macOS Beans Dev loop; `pnpm run build` produces the Beans release bundle. See [macOS development and builds](docs/architecture/macos-app.md#development-and-builds) for rebuild, launch and SDK-stamping mechanisms. `pnpm run relay` runs a local relay. The [phone development loop](docs/architecture/phone-app.md#development-loop) fingerprints native inputs, rebuilds stale pieces and leaves production Beans processes alone.
 

@@ -6,6 +6,8 @@ Public model and marketplace feeds are operator-managed plaintext, not account c
 
 Storage sits behind one trait (`Store` in `db.rs`) with two backends, picked by `--db` / `BEANS_RELAY_DB`: a path opens SQLite, a `postgres://` URL opens Postgres. All SQL lives in a backend; `routes.rs` only decides what to ask for. One suite (`db/tests.rs`) runs against both; Postgres joins when `BEANS_RELAY_TEST_POSTGRES` names a database.
 
+The CLI caches a bearer only for the exact relay URL and machine signing public key used to authenticate. Forget and namespace changes advance a local cache generation; authentication captures that generation before network I/O and rejects a delayed response if it no longer matches. Deferred envelope cleanup captures that context at admission and refuses a stale context before starting authentication. No cache lock spans HTTP awaits. This prevents stale authentication from repopulating or returning a replacement account's cache; subsequent effects retain their own lifecycle admission.
+
 ## Fresh relay storage
 
 Relay storage uses format `beans-v2` and rejects incompatible state before DDL, migrations or account recovery. An existing SQLite file is inspected before opening SQLite and must carry `application_id` `0x424E5232` (`BNR2`); unmarked, malformed or differently marked databases are rejected without changing bytes. A fresh file receives that application id before WAL/schema setup. This relay marker is distinct from the Device LocalStore marker described in [Identity](identity.md#fresh-beans-format).

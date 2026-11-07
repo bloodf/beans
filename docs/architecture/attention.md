@@ -70,7 +70,9 @@ marker is set. A live pull with a missing account key or a storage failure stops
 `last_seq` or recording the failed blob's receipt; the next pull retries it when the key or store
 is available. `receive` loads only the incoming id, upserts ciphertext, and commits the relay
 receipt in the same transaction as the row. Undecryptable neighbors are skipped. Rows stay
-ciphertext at rest.
+ciphertext at rest. Attention application and replay completion hold the sync account lifecycle
+guard through storage mutation. A response from an old account cannot write records, receipts
+or completion markers into a replacement account; no lifecycle guard spans a network await.
 
 ## In the apps
 

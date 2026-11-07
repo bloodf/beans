@@ -115,10 +115,10 @@ function install() {
       useStore.setState({ devices: [] }); useStore.setState({ devices: [device] });
       removed(); await Promise.resolve(); expect(calls.length).toBe(admitted);
       open();
-      const replaced = os === "ios" ? () => buttons[1]!.onPress!("replaced") : find(find(root, "Confirm"), "Button")!.props.onClick!;
-      useStore.setState({ devices: [{ ...device, machine_key: "replacement" }] });
+      const changedOs = os === "ios" ? () => buttons[1]!.onPress!("changed OS") : find(find(root, "Confirm"), "Button")!.props.onClick!;
+      useStore.setState({ devices: [{ ...device, os: "ios" }] });
       useStore.setState({ devices: [device] });
-      replaced(); await Promise.resolve(); expect(calls.length).toBe(admitted);
+      changedOs(); await Promise.resolve(); expect(calls.length).toBe(admitted);
     } finally { for (const cleanup of cleanups) cleanup(); }
   });
 }

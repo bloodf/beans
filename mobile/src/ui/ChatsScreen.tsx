@@ -399,7 +399,7 @@ function SearchResultRow({ item, bots, query, onPress }: { item: SearchRow; bots
   const members = item.chat.bot_ids.map((id) => bots.get(id)).filter((bot): bot is Bot => !!bot);
   const at = item.createdAt ?? lastActivity(item.chat);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={`${t(item.kind === "file" ? "Files" : item.kind === "message" ? "Messages" : "Chats")}, ${chatTitle(item.chat)}, ${item.snippet}`} onPress={onPress} style={({ pressed }) => [styles.searchRow, { backgroundColor: pressed ? p.fill : "transparent" }]}>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${(item.kind === "file" ? t("Files") : item.kind === "message" ? t("Messages") : t("Chats"))}, ${chatTitle(item.chat)}, ${item.snippet}`} onPress={onPress} style={({ pressed }) => [styles.searchRow, { backgroundColor: pressed ? p.fill : "transparent" }]}>
       <AvatarCluster bots={members} chatId={item.chat.id} size={44} />
       <View style={styles.searchText}>
         <View style={styles.searchTitleLine}>
@@ -408,7 +408,7 @@ function SearchResultRow({ item, bots, query, onPress }: { item: SearchRow; bots
         </View>
         <HighlightedText text={item.snippet} query={query} style={[styles.searchSnippet, { color: p.secondaryLabel }]} numberOfLines={2} />
       </View>
-      {item.kind !== "chat" ? <Text style={{ color: p.tertiaryLabel }}>{t(item.kind === "file" ? "Files" : "Messages")}</Text> : null}
+      {item.kind !== "chat" ? <Text style={{ color: p.tertiaryLabel }}>{(item.kind === "file" ? t("Files") : t("Messages"))}</Text> : null}
     </Pressable>
   );
 }

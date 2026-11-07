@@ -4,6 +4,8 @@
 // `--merge <fragment.json>…` adds `{ "English": "中文" }` files to the tables first.
 
 import { Glob } from "bun"
+import { memorySwiftKeys } from "./l10n-swift"
+import { memoryLookupKeys } from "./l10n-lookups"
 import { join } from "node:path"
 
 const ROOT = join(import.meta.dir, "..")
@@ -130,8 +132,15 @@ function report(name: string, used: Map<string, string>, table: Table) {
 }
 
 const macKeys = await keysIn(join(ROOT, "macos/Sources/Beans"), "**/*.swift", /\bL\(\s*"((?:[^"\\]|\\.)*)"(?:,\s*context:\s*"((?:[^"\\]|\\.)*)")?/g, () => false)
+for await (const path of scan(join(ROOT, "macos/Sources/Beans"), "**/*.swift")) {
+  for (const key of memorySwiftKeys(await Bun.file(join(ROOT, "macos/Sources/Beans", path)).text(), path)) macKeys.set(key, path)
+}
 const phoneKeys = await keysIn(join(ROOT, "mobile"), "{app,src}/**/*.{ts,tsx}", /\bt\(\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/g, (path) => path.includes("i18n/") || path.endsWith(".test.ts"))
 const desktopKeys = await desktopKeysIn(join(ROOT, "desktop"))
+for (const key of memoryLookupKeys(
+  await Bun.file(join(ROOT, "desktop/src/model/memoryService.ts")).text(),
+  await Bun.file(join(ROOT, "desktop/src/ui/sheets/memoryService.tsx")).text(),
+)) desktopKeys.set(key, "src/ui/sheets/memoryService.tsx")
 
 const mac = await readMacTable()
 const phone = await readPhoneTable()

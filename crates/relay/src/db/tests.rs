@@ -651,3 +651,31 @@ async fn a_group_pages_backwards_by_where_each_message_began() {
         assert!(none.is_empty() && !more);
     }
 }
+
+/// Latest-slot replacement can remove an unread pre-fence row. Its replacement remains
+/// strictly beyond the fence and is visible to the ordinary forward cursor.
+#[tokio::test]
+async fn attention_replay_cursor_survives_slot_replacement_between_pages() {
+    for (store, _) in backends().await {
+        let who = name("attention-fence");
+        let machine = name("machine");
+        ok!(store.register_identity(&who, "content", &machine, "box", "attestation"));
+        let attention = |id: &str, key: &str| NewBlob {
+            kind: "attention".into(), slot: slot(key, false), ..blob(&who, id, b"opaque")
+        };
+        ok!(store.insert_blob(attention("first", "attention-a"), 0));
+        ok!(store.insert_blob(attention("unread", "attention-b"), 0));
+        let kinds = vec!["attention".into()];
+        let (first, fence) = ok!(store.blobs_since(&who, &machine, 0, &kinds, 1, 1024));
+        assert_eq!(first.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), vec!["first"]);
+        assert_eq!(fence, 2);
+        // The writer commits while the replay is suspended between requests.
+        ok!(store.insert_blob(attention("replacement", "attention-b"), 0));
+        let (next, _) = ok!(store.blobs_since(&who, &machine, first[0].seq, &kinds, 1, 1024));
+        assert_eq!(next.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), vec!["replacement"]);
+        assert!(next[0].seq > fence);
+        let (forward, _) = ok!(store.blobs_since(&who, &machine, fence, &kinds, 500, 1024));
+        assert_eq!(forward.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), vec!["replacement"]);
+        assert!(ok!(store.blob(&who, &machine, "unread")).is_none());
+    }
+}

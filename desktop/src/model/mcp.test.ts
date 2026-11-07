@@ -1,7 +1,7 @@
 // A Runner's MCP servers in the model: the command line the server sheet reads and writes, the form
 // it edits an entry through, and how a server's state reads.
 
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { entryJSON, entryOf, formOf, formProblem, joinCommandLine, looksSecret, mcpAddress, mcpState, parseLocally, sameEntry, splitCommandLine, type McpServer } from "./mcp";
 
 test("a command line splits the way Windows and a shell both read it", () => {

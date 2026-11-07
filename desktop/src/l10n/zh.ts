@@ -243,6 +243,8 @@ export const zh: Record<string, string> = {
   "Command Palette…": "命令面板…",
   "Communication": "通信",
   "Compact": "压缩",
+  "Compacting…": "正在压缩…",
+  "Compacted": "已压缩",
   "Complete valid fields to update the preview.": "请填写有效值以更新预览。",
   "Confirmation needed: %@": "需要确认：%@",
   "Connect": "接入",

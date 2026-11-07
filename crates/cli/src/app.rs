@@ -55,6 +55,8 @@ impl Slot {
 #[derive(Debug, Clone, Default)]
 pub struct State {
     pub devices: Vec<Device>,
+    pub device_names: std::collections::BTreeMap<String, String>,
+    pub device_name_edits: std::collections::BTreeMap<String, String>,
     pub bots: Vec<Bot>,
     pub chats: Vec<Chat>,
     pub routines: Vec<Routine>,
@@ -155,6 +157,9 @@ pub struct SentJob {
 }
 
 pub struct App {
+    /// Exclusive OS lock retained until every callback drops this App.
+    execution_owner: Option<std::fs::File>,
+    execution_epoch: String,
     pub config: Config,
     pub settings: Mutex<Settings>,
     pub identity: Mutex<Option<IdentityFile>>,
@@ -174,7 +179,7 @@ pub struct App {
     pub sync_wakes: AtomicU64,
     /// Held from a message's local write to its outbox enqueue, so a chat's `position` order
     /// and the order its messages reach the relay log are the same on every Device.
-    message_order: Mutex<()>,
+    pub(crate) message_order: Mutex<()>,
     pub relay_connected: AtomicBool,
     /// The relay answered `426`: it no longer serves the protocol this build speaks.
     pub relay_update_required: AtomicBool,
@@ -231,6 +236,8 @@ pub struct App {
     pub plugins: Mutex<crate::plugins::Store>,
     /// Serializes local plugin admission/publication with account reset, including callbacks.
     pub(crate) plugin_lifecycle: parking_lot::ReentrantMutex<std::cell::Cell<(u64, bool)>>,
+    /// Selected-relay ownership, including settings changes away and back.
+    pub(crate) relay_generation: AtomicU64,
     /// Public marketplace index from the selected relay, with bundled offline fallback.
     pub marketplace: crate::marketplace::Updates,
     /// Public built-in model catalog checks from the selected relay.
@@ -251,11 +258,190 @@ pub struct App {
 }
 
 impl App {
+    /// Loads a non-executing Device view. Recovery belongs exclusively to load_owner.
     pub fn load(config: Config) -> anyhow::Result<Arc<App>> {
+        Self::load_inner(config, false)
+    }
+
+    pub fn load_owner(config: Config) -> anyhow::Result<Arc<App>> {
+        Self::load_inner(config, true)
+    }
+
+    pub fn is_execution_owner(&self) -> bool { self.execution_owner.is_some() }
+    pub fn legacy_execution_closed(&self) -> anyhow::Result<bool> { self.store.legacy_execution_closed() }
+
+    /// Called only after explicit fresh identity creation clears its account store.
+    /// The caller retains plugin_admission; a Device reader never creates authority.
+    pub(crate) fn initialize_created_task_account(&self) -> anyhow::Result<()> {
+        if self.is_execution_owner() { self.store.task_account_epoch(&self.execution_epoch)?; }
+        Ok(())
+    }
+
+    pub fn task_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(), "Only the execution owner reads an active lease");
+        self.store.active_task_lease(&self.execution_epoch,task_id,lifecycle.get().0)
+    }
+
+    pub fn freeze_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(!self.is_paused(), "Account paused");
+        self.store.insert_invocation(lease,binding)
+    }
+
+    pub fn decide_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, decision: crate::local_store::AuthorizationDecision, kind: crate::local_store::AuthorizationKind, card: Option<&str>, device: Option<&str>, at: i64) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        self.store.decide_invocation(lease,binding,decision,kind,card,device,at)
+    }
+
+    /// The protected recheck MUST validate effective capabilities, installation, target,
+    /// workspace and binding without awaiting. #111 supplies it after preparation.
+    pub fn admit_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, recheck: impl FnOnce(&Self) -> anyhow::Result<()>) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Execution unavailable");
+        recheck(self)?;
+        self.store.admit_invocation(lease,binding)
+    }
+
+    pub fn finish_task_receipt(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, outcome: crate::local_store::ReceiptOutcome) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        self.store.finish_receipt(lease,binding,outcome)
+    }
+    pub fn task_history_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let lifecycle=self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(),"History resolution requires execution ownership");
+        self.store.history_task_lease(&self.execution_epoch,task_id,lifecycle.get().0)
+    }
+    pub fn resolve_task_history(&self, lease: &crate::local_store::TaskLease, at: i64) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(),"History resolution requires execution ownership");
+        self.store.resolve_task(lease,at)
+    }
+    /// Captures the existing account incarnation under the same reset boundary as plugins.
+    pub(crate) fn task_lease(&self, job: &Job) -> anyhow::Result<crate::local_store::TaskLease> {
+        anyhow::ensure!(self.is_execution_owner(), "Only the execution owner admits local tasks");
+        let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        let epoch = self.store.task_account_epoch(&self.execution_epoch)?;
+        Ok(crate::local_store::TaskLease {
+            account_epoch: epoch, owner_epoch: self.execution_epoch.clone(), task_id: job.id.clone(),
+            execution_id: uuid::Uuid::new_v4().to_string(), incarnation: lifecycle.get().0,
+        })
+    }
+
+    /// Caller holds roster_edit; shared ordinary/scheduled admission eligibility.
+    pub(crate) fn check_local_job(&self, job: &Job) -> anyhow::Result<()> {
+        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Execution unavailable");
+        let chat=self.chat(&job.chat_id).ok_or_else(||anyhow::anyhow!("Task chat is unavailable"))?;
+        let bot=self.bot(&job.bot_id).ok_or_else(||anyhow::anyhow!("Task bot is unavailable"))?;
+        anyhow::ensure!(self.this_device_id().as_deref()==Some(bot.runner_id.as_str()) && chat.meta.bot_ids.contains(&job.bot_id), "Task Runner or chat membership changed");
+        if let Some(id)=&job.routine_id {
+            anyhow::ensure!(self.routine(id).is_some_and(|r|r.bot_id==job.bot_id), "Routine bot binding changed");
+        }
+        Ok(())
+    }
+    /// Received Jobs retain the session's account and Device binding across decryption.
+    pub(crate) fn receive_task_envelope(&self, job: &Job, expected: &crate::keys::MachineFile, remember: Option<&str>) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        self.check_sync_account(expected)?;
+        let lease = if self.is_execution_owner() {
+            self.queue_local_task_locked(job)?
+        } else {
+            self.store.quarantine_task_envelope(&expected.identity_pubkey, &job.id)?;
+            None
+        };
+        if let Some(id) = remember { remember_applied(&mut self.state.lock().unwrap(), id); }
+        Ok(lease)
+    }
+
+    /// Caller holds the lifecycle boundary through the associated mutation/publication.
+    pub(crate) fn check_sync_account(&self, expected: &crate::keys::MachineFile) -> anyhow::Result<()> {
+        let current = self.machine_file().ok_or_else(|| anyhow::anyhow!("Sync account changed"))?;
+        anyhow::ensure!(current.identity_pubkey == expected.identity_pubkey && current.machine_secret == expected.machine_secret, "Sync account changed");
+        Ok(())
+    }
+
+    pub(crate) fn queue_local_task(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        self.queue_local_task_at(job, None)
+    }
+
+    pub(crate) fn queue_local_task_at(&self, job: &Job, incarnation: Option<u64>) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
+        self.queue_local_task_locked(job)
+    }
+
+    fn queue_local_task_locked(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        self.check_local_job(job)?;
+        let lease = self.task_lease(job)?;
+        if let Some(id) = &job.routine_id {
+            anyhow::ensure!(!self.store.routine_needs_review(&lease.account_epoch,id)?, "Routine has unresolved work requiring review");
+        }
+        let identity = self.machine_file().ok_or_else(|| anyhow::anyhow!("Device has no account"))?.identity_pubkey;
+        Ok(self.store.queue_task_for_identity(&lease, job, &identity)?.then_some(lease))
+    }
+
+    /// A local user submission creates a new identity, never authorizes a supplied Job id.
+    pub(crate) fn mint_local_intent(&self, mut job: Job, incarnation: Option<u64>) -> anyhow::Result<(Job, crate::local_store::TaskLease)> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
+        self.check_local_job(&job)?;
+        anyhow::ensure!(job.routine_id.is_none(), "Local user intent cannot reopen a routine");
+        job.id = format!("job-{}", uuid::Uuid::new_v4());
+        let lease = self.task_lease(&job)?;
+        anyhow::ensure!(self.store.queue_local_intent(&lease, &job)?, "New local intent identity already fenced");
+        Ok((job, lease))
+    }
+
+    pub(crate) fn start_local_task(&self, lease: &crate::local_store::TaskLease) -> anyhow::Result<bool> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Task execution is unavailable");
+        self.store.start_task(lease)
+    }
+
+    pub(crate) fn abandon_queued_task(&self, lease: &crate::local_store::TaskLease) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(self.is_execution_owner(), "Task cleanup requires execution ownership");
+        self.store.abandon_queued_task(lease)
+    }
+
+    pub(crate) fn finish_local_task(&self, lease: &crate::local_store::TaskLease, interrupted: bool) -> anyhow::Result<bool> {
+        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        self.store.finish_task(lease, interrupted)
+    }
+
+    fn persist_task_cancel(&self, task: Option<&str>, chat: Option<&str>, bot: Option<&str>) -> anyhow::Result<()> {
+        let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        if let Some(epoch) = self.store.current_task_account_epoch()? {
+            self.store.cancel_tasks(&epoch,task,chat,bot)?;
+        }
+        Ok(())
+    }
+    fn load_inner(config: Config, owner: bool) -> anyhow::Result<Arc<App>> {
         if config.home.join("forget-in-progress.json").try_exists()? {
             anyhow::bail!("Account forget is incomplete; finish local cleanup before reopening this home");
         }
         let admission = config.ensure_home_admission()?;
+        // Retain the same storage guard through lock acquisition, recovery and final save.
+        let execution_owner = if owner {
+            let path = config.home.join("execution.lock");
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true).create(true).truncate(false);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            }
+            let file = options.open(&path)?;
+            anyhow::ensure!(file.metadata()?.is_file(), "Execution lock must be a regular file");
+            file.try_lock().map_err(|_| anyhow::anyhow!("Execution ownership is busy or unsupported"))?;
+            config::set_private(&path)?;
+            Some(file)
+        } else { None };
         let settings = Settings::load(&config);
         let identity: Option<IdentityFile> = config::read_json_strict(&config.identity_path())?;
         let machine: Option<MachineFile> = config::read_json_strict(&config.machine_path())?;
@@ -264,7 +450,11 @@ impl App {
         let marketplace = crate::marketplace::Updates::load(&config);
         let store = LocalStore::open_with_admission(&config.database_path(), admission.as_ref(), false)?;
         let memory_config = crate::memory_service::load(&store, machine.as_ref().and_then(|m| m.dek().ok()))?;
-        store.recover_memory_queue()?;
+        let execution_epoch = uuid::Uuid::new_v4().to_string();
+        if execution_owner.is_some() {
+            store.recover_task_owner(&execution_epoch)?;
+            store.recover_memory_queue()?;
+        }
         let mut state = store.load_state()?;
         for bot in &mut state.bots {
             bot.normalize_description();
@@ -278,6 +468,8 @@ impl App {
         let http = beans_tls::client_builder().timeout(std::time::Duration::from_secs(60)).build()?;
 
         let app = Arc::new(App {
+            execution_owner,
+            execution_epoch,
             config,
             settings: Mutex::new(settings),
             identity: Mutex::new(identity),
@@ -306,6 +498,7 @@ impl App {
             provider_auth: Mutex::new(CancellationToken::new()),
             plugin_sign_in: Mutex::new(None),
             plugin_lifecycle: parking_lot::ReentrantMutex::new(std::cell::Cell::new((0, false))),
+            relay_generation: AtomicU64::new(0),
             running_jobs: Mutex::new(HashMap::new()),
             announced_turns: Mutex::new(std::collections::BTreeMap::new()),
             #[cfg(feature = "runner")]
@@ -344,6 +537,7 @@ impl App {
     /// Reconcile again after each pull: a newer remote card can replace startup's dismissal.
     #[cfg(feature = "runner")]
     pub fn close_orphan_proposals(&self) -> anyhow::Result<()> {
+        if !self.is_execution_owner() { return Ok(()); }
         let Some(runner_id) = self.this_device_id() else { return Ok(()); };
         let own_bots: std::collections::HashSet<String> = self.state.lock().unwrap().bots.iter()
             .filter(|bot| bot.runner_id == runner_id).map(|bot| bot.id.clone()).collect();
@@ -506,7 +700,7 @@ impl App {
     pub(crate) fn plugin_admission(&self, expected: Option<u64>) -> Result<parking_lot::ReentrantMutexGuard<'_, std::cell::Cell<(u64, bool)>>, String> {
         let guard = self.plugin_lifecycle.lock();
         let (incarnation, closed) = guard.get();
-        if closed || expected.is_some_and(|expected| expected != incarnation) {
+        if closed || expected.is_some_and(|expected| expected != incarnation) || !crate::requests::admission_matches(self, incarnation) {
             return Err("The plugin account changed; start again.".into());
         }
         Ok(guard)
@@ -558,14 +752,23 @@ impl App {
     }
 
     pub fn set_relay_url(&self, url: Option<String>) -> anyhow::Result<()> {
+        let authority = self.plugin_lifecycle.lock();
+        let generation = self.relay_generation.load(Ordering::Relaxed).checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Relay setting generation exhausted"))?;
         let mut settings = self.settings.lock().unwrap();
+        let previous = settings.relay_url.clone();
         settings.relay_url = url.map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
-        settings.save(&self.config)?;
+        if let Err(error) = settings.save(&self.config) {
+            settings.relay_url = previous;
+            return Err(error);
+        }
+        self.relay_generation.store(generation, Ordering::Relaxed);
+        self.relay.forget_token();
         drop(settings);
+        drop(authority);
         crate::catalog::enable(self);
         crate::marketplace::enable(self);
         self.emit(self.roster_summary());
-        self.relay.forget_token();
         // Another relay may serve this build and know this Device; the sync loop wakes and
         // finds out.
         let had_problem = self.relay_problem.lock().unwrap().take().is_some();
@@ -597,20 +800,58 @@ impl App {
         Ok(())
     }
 
+    /// Gives a known Device an account alias; blank restores its machine name.
+    pub fn set_device_name(&self, id: &str, name: &str) -> anyhow::Result<()> {
+        let name = name.trim();
+        anyhow::ensure!(name.chars().count() <= 64, "Device names must be at most 64 characters");
+        let _edit = self.roster_edit.lock().unwrap();
+        let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        let dek = self.machine_file().ok_or_else(|| anyhow::anyhow!("No identity on this Device"))?.dek()?;
+        {
+            let mut state = self.state.lock().unwrap();
+            let device = state.devices.iter().find(|device| device.id == id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown Device"))?;
+            let alias = (!name.is_empty() && name != device.name).then(|| name.to_owned());
+            let mut snapshot = state.clone();
+            match alias {
+                Some(name) => { snapshot.device_names.insert(id.to_owned(), name); }
+                None => { snapshot.device_names.remove(id); }
+            }
+            snapshot.device_name_edits.insert(id.to_owned(), uuid::Uuid::new_v4().to_string());
+            let item = OutboxItem {
+                id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
+                ciphertext: crate::crypto::encrypt_json(&dek, "roster", &Self::roster_from_state(&snapshot))?,
+                slot: Some(Slot::latest("roster")), group: None,
+            };
+            remember_applied(&mut snapshot, &item.id);
+            self.store.queue_outbox_with_state(&item, &snapshot)?;
+            *state = snapshot;
+        }
+        drop(_edit);
+        drop(lifecycle);
+        self.outbox_notify.notify_waiters();
+        self.emit(self.roster_summary());
+        Ok(())
+    }
+
     /// Forgets the identity on this Device: keys, credentials, and everything synced. The
     /// relay keeps the account; another Device or the backup phrase brings it back.
     pub fn forget_identity(&self) -> anyhow::Result<()> {
         let lifecycle = self.plugin_lifecycle.lock();
         let (incarnation, _) = lifecycle.get();
         lifecycle.set((incarnation.checked_add(1).expect("plugin incarnation exhausted"), true));
+        let close_result = self.store.close_task_account();
+        for job in self.running_jobs.lock().unwrap().values() {
+            job.cancel.cancel();
+        }
+        #[cfg(feature = "runner")]
+        self.memory_runtime.cancel_all();
+        close_result?;
         let marker = self.config.home.join("forget-in-progress.json");
         config::write_json_private(&marker, &serde_json::json!({ "forget_in_progress": true }))?;
         #[cfg(feature = "runner")]
         self.mcp.reset();
         self.plugins.lock().unwrap().reset_account(&self.config)?;
-        for job in self.running_jobs.lock().unwrap().values() {
-            job.cancel.cancel();
-        }
         #[cfg(feature = "provider-auth")]
         self.cancel_provider_auth();
         self.cancel_plugin_sign_in(None);
@@ -618,8 +859,6 @@ impl App {
         self.steering_queues.lock().unwrap().clear();
         #[cfg(feature = "runner")]
         self.step_interrupts.lock().unwrap().clear();
-        #[cfg(feature = "runner")]
-        self.memory_runtime.cancel_all();
         *self.memory_config.lock() = crate::memory_service::config::MemoryConfig::default();
         *self.identity.lock().unwrap() = None;
         *self.machine.lock().unwrap() = None;
@@ -738,11 +977,21 @@ impl App {
 
     pub fn push_roster(&self) {
         let Some(dek) = self.dek() else { return };
-        let roster = {
-            let state = self.state.lock().unwrap();
-            RosterBlob {
+        let roster = Self::roster_from_state(&self.state.lock().unwrap());
+        match crate::crypto::encrypt_json(&dek, "roster", &roster) {
+            Ok(ciphertext) => {
+                self.push_slot_blob("roster", Slot::latest("roster"), None, ciphertext);
+            }
+            Err(error) => tracing::error!(%error, "encrypting roster"),
+        }
+    }
+
+    pub(crate) fn roster_from_state(state: &State) -> RosterBlob {
+        RosterBlob {
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
+                device_names: state.device_names.clone(),
+                device_name_edits: state.device_name_edits.clone(),
                 routines: state.routines.clone(),
                 workflows: state.workflows.clone(),
                 auto_review: state.auto_review.clone(),
@@ -753,13 +1002,6 @@ impl App {
                 policy_capabilities: state.policy_capabilities.clone(),
                 deleted_bot_versions: state.deleted_bot_versions.clone(),
                 updated_at: config::now_secs(),
-            }
-        };
-        match crate::crypto::encrypt_json(&dek, "roster", &roster) {
-            Ok(ciphertext) => {
-                self.push_slot_blob("roster", Slot::latest("roster"), None, ciphertext);
-            }
-            Err(error) => tracing::error!(%error, "encrypting roster"),
         }
     }
 
@@ -881,7 +1123,10 @@ impl App {
     }
 
     pub fn device(&self, id: &str) -> Option<Device> {
-        self.state.lock().unwrap().devices.iter().find(|d| d.id == id).cloned()
+        let state = self.state.lock().unwrap();
+        let mut device = state.devices.iter().find(|d| d.id == id).cloned()?;
+        if let Some(name) = state.device_names.get(id) { device.name = name.clone(); }
+        Some(device)
     }
 
     /// A chat's name as the apps show it: a group's title, else its members' names; a direct
@@ -1142,6 +1387,11 @@ impl App {
     }
 
     pub fn stop_for_pause(&self) {
+        if let Err(error) = self.persist_task_cancel(None,None,None) {
+            let lifecycle = self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0, true));
+            tracing::error!(%error, "Task cancellation persistence failed; account admission closed");
+        }
         #[cfg(feature = "runner")]
         self.memory_runtime.cancel_all();
         for job in self.running_jobs.lock().unwrap().values() { job.cancel.cancel(); }
@@ -1156,6 +1406,11 @@ impl App {
     /// Replaces the Auto-review setting and publishes the roster.
     pub fn set_auto_review(&self, auto_review: AutoReview) {
         let _edit = self.roster_edit.lock().unwrap();
+        self.set_auto_review_locked(auto_review);
+    }
+
+    /// Caller retains roster_edit; plugin callers take roster before lifecycle.
+    pub(crate) fn set_auto_review_locked(&self, auto_review: AutoReview) {
         self.state.lock().unwrap().auto_review = auto_review;
         self.roster_changed(true);
     }
@@ -1204,6 +1459,12 @@ impl App {
     }
 
     pub fn roster_changed(&self, upload: bool) {
+        let reconciled=self.store.reconcile_schedules(&self.state.lock().unwrap());
+        if let Err(error)=reconciled {
+            let lifecycle=self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0,true));
+            tracing::error!(%error,"Schedule revocation failed; account admission closed");
+        }
         self.save_state();
         if upload {
             self.push_roster();
@@ -1318,6 +1579,7 @@ impl App {
     pub fn delete_bot(&self, id: &str) -> anyhow::Result<()> {
         let _edit = self.roster_edit.lock().unwrap();
         if self.bot(id).is_none() { anyhow::bail!("Unknown bot"); }
+        self.persist_task_cancel(None,None,Some(id))?;
         self.invalidate_bot_memory(id)?;
         let (removed_chat_ids, policy) = {
             let mut state = self.state.lock().unwrap();
@@ -1568,11 +1830,25 @@ impl App {
     /// Changes a routine and publishes the roster.
     pub fn update_routine(&self, id: &str, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
         let _edit = self.roster_edit.lock().unwrap();
+        self.update_routine_locked(id, None, update)
+    }
+
+    pub(crate) fn update_routine_for_incarnation(&self, id: &str, incarnation: u64, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+        let _edit = self.roster_edit.lock().unwrap();
+        self.update_routine_locked(id, Some(incarnation), update)
+    }
+
+    fn update_routine_locked(&self, id: &str, incarnation: Option<u64>, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+        let _guard = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
         let routine = {
             let mut state = self.state.lock().unwrap();
-            let routine = state.routines.iter_mut().find(|r| r.id == id).ok_or_else(|| anyhow::anyhow!("Unknown routine"))?;
-            update(routine);
-            routine.clone()
+            let index=state.routines.iter().position(|r|r.id==id).ok_or_else(||anyhow::anyhow!("Unknown routine"))?;
+            let before=crate::local_store::schedule_binding(&state,&state.routines[index])?;
+            let mut routine=state.routines[index].clone();
+            update(&mut routine);
+            if before!=crate::local_store::schedule_binding(&state,&routine)? { self.store.revoke_schedule(id)?; }
+            state.routines[index]=routine.clone();
+            routine
         };
         self.roster_changed(true);
         Ok(routine)
@@ -1730,6 +2006,10 @@ impl App {
                 return;
             }
         };
+        self.publish_committed_message(message, stored_upsert, upload);
+    }
+
+    pub(crate) fn publish_committed_message(&self, message: Message, stored_upsert: crate::local_store::Upsert, upload: bool) {
         if !stored_upsert.changed {
             return;
         }
@@ -1911,6 +2191,11 @@ impl App {
     /// Device runs, with that Device, so the caller can forward the cancellation there too:
     /// jobs this Device sent to another Runner, and turns the other Devices list for the chat.
     pub fn cancel_chat(&self, chat_id: &str) -> Vec<(String, String)> {
+        if let Err(error) = self.persist_task_cancel(None,Some(chat_id),None) {
+            let lifecycle = self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0, true));
+            tracing::error!(%error, "Task cancellation persistence failed; admission closed");
+        }
         let mut remote = Vec::new();
         for (id, job) in self.running_jobs.lock().unwrap().iter() {
             if job.chat_id == chat_id {
@@ -1934,6 +2219,11 @@ impl App {
     /// Cancels one job on this Runner. A cancellation envelope can arrive while the job is
     /// waiting for the chat lock because jobs register before they begin.
     pub fn cancel_job(&self, job_id: &str) {
+        if let Err(error) = self.persist_task_cancel(Some(job_id),None,None) {
+            let lifecycle = self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0, true));
+            tracing::error!(%error, "Task cancellation persistence failed; admission closed");
+        }
         if let Some(job) = self.running_jobs.lock().unwrap().get(job_id) {
             job.cancel.cancel();
         }
@@ -2022,7 +2312,8 @@ impl App {
     fn devices_out(&self, state: &State) -> Vec<Value> {
         let this_id = self.this_device_id();
         let mut devices: Vec<&Device> = state.devices.iter().collect();
-        devices.sort_by_key(|d| (Some(d.id.clone()) != this_id, d.name.to_lowercase()));
+        let name = |device: &Device| state.device_names.get(&device.id).unwrap_or(&device.name).clone();
+        devices.sort_by_key(|d| (Some(d.id.clone()) != this_id, name(d).to_lowercase()));
         let mut out: Vec<Value> = devices
             .into_iter()
             .map(|device| {
@@ -2031,7 +2322,8 @@ impl App {
                 let status = if is_this || state.device_online.contains(&device.id) { "online" } else { "offline" };
                 json!({
                     "id": device.id,
-                    "name": device.name,
+                    "name": name(device),
+                    "machine_name": device.name,
                     "model": device.model,
                     "os": device.os,
                     "os_version": device.os_version,
@@ -2225,6 +2517,183 @@ mod tests {
         std::fs::create_dir(&home).unwrap();
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    #[test]
+    fn task_owner_process_probe() {
+        let Some(home) = std::env::var_os("BEANS_TEST_OWNER_HOME") else { return; };
+        assert!(App::load_owner(Config { home: home.into(), port: 0 }).is_err(), "a competing process must not acquire ownership");
+    }
+
+    #[test]
+    fn task_owner_excludes_process_and_recovers_only_after_release() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config { home: home.path().into(), port: 0 };
+        let owner = App::load_owner(config.clone()).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact","app::tests::task_owner_process_probe","--nocapture"])
+            .env("BEANS_TEST_OWNER_HOME",home.path()).status().unwrap();
+        assert!(status.success());
+        let reader = App::load(config.clone()).unwrap();
+        assert!(!reader.is_execution_owner());
+        assert!(App::load_owner(config.clone()).is_err());
+        drop(owner);
+        let replacement = App::load_owner(config).unwrap();
+        assert!(replacement.is_execution_owner());
+    }
+
+    #[test]
+    fn nonowner_load_preserves_submitted_delivery() {
+        use crate::memory_service::queue::{freeze_document, Delivery};
+        use crate::memory_service::types::{MemoryScope, OperationState, Revision};
+
+        let scratch = scratch_app();
+        let delivery = Delivery {
+            id: "delivery-owner-boundary".into(),
+            bot_id: "bot-owner-boundary".into(),
+            scope: MemoryScope {
+                namespace: "scratch-owner-boundary".into(),
+                connection_id: "scratch-connection".into(),
+                connection_revision: Revision { counter: 1, device_id: "scratch-device".into() },
+                deletion_epoch: 0,
+            },
+            consent_revision: None,
+            document: freeze_document("scratch-owner-boundary", "synthetic content", vec![]).unwrap(),
+            state: OperationState::Submitted,
+            operation_id: None,
+            error_code: None,
+        };
+        scratch.0.store.connection.lock().unwrap().execute(
+            "INSERT INTO memory_deliveries(id,bot_id,state,json) VALUES(?1,?2,'submitted',?3)",
+            rusqlite::params![delivery.id, delivery.bot_id, serde_json::to_string(&delivery).unwrap()],
+        ).unwrap();
+
+        let reader = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let stored: String = reader.store.connection.lock().unwrap().query_row(
+            "SELECT json FROM memory_deliveries WHERE id=?1", [&delivery.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(serde_json::from_str::<Delivery>(&stored).unwrap(), delivery,
+            "loading a non-owner must not recover another process's submitted delivery");
+        drop(reader);
+        let owner = App::load_owner(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let recovered: String = owner.store.connection.lock().unwrap().query_row(
+            "SELECT json FROM memory_deliveries WHERE id=?1", [&delivery.id], |row| row.get(0),
+        ).unwrap();
+        let recovered: Delivery = serde_json::from_str(&recovered).unwrap();
+        assert_eq!(recovered.state,OperationState::DeliveryUnknown);
+        assert_eq!(recovered.error_code.as_deref(),Some("response_lost"));
+    }
+
+    #[test]
+    fn device_alias_preserves_machine_name_and_survives_restart() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+        app.set_device_name("peer", "  Office  ").unwrap();
+        assert_eq!(app.device("peer").unwrap().name, "Office");
+        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let snapshot = restarted.snapshot();
+        let row = snapshot["devices"].as_array().unwrap().iter().find(|d| d["id"] == "peer").unwrap();
+        assert_eq!(row["name"], "Office");
+        assert_eq!(row["machine_name"], "Machine");
+        assert!(restarted.set_device_name("missing", "Name").is_err());
+        assert!(restarted.set_device_name("peer", &"界".repeat(65)).is_err());
+        restarted.set_device_name("peer", &"界".repeat(64)).unwrap();
+        restarted.state.lock().unwrap().devices.iter_mut().find(|d| d.id == "peer").unwrap().name = "New machine name".into();
+        restarted.set_device_name("peer", " \n ").unwrap();
+        let reset = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert!(!reset.state.lock().unwrap().device_names.contains_key("peer"));
+        assert_eq!(reset.device("peer").unwrap().name, "New machine name");
+    }
+
+    #[tokio::test]
+    async fn device_alias_api_keeps_machine_rename_and_forget_boundaries() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Machine".into())).unwrap();
+        let id = app.this_device_id().unwrap();
+        crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":"Office"})).await.unwrap();
+        crate::api::dispatch(app, "device.rename", json!({"name":"New machine"})).await.unwrap();
+        assert_eq!(app.device(&id).unwrap().name, "Office");
+        assert_eq!(app.machine_file().unwrap().name, "New machine");
+        for value in [Value::Null, json!(17), json!(false)] {
+            assert!(crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":value})).await.is_err());
+        }
+        crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":""})).await.unwrap();
+        assert_eq!(app.device(&id).unwrap().name, "New machine");
+        app.set_device_name(&id, "Old account").unwrap();
+        app.forget_identity().unwrap();
+        assert!(app.set_device_name(&id, "Late alias").is_err());
+        crate::identity::create(app, Some("Replacement".into())).unwrap();
+        assert!(app.state.lock().unwrap().device_names.is_empty());
+        assert!(app.store.load_state().unwrap().device_names.is_empty());
+        assert!(app.set_device_name(&id, "Late alias").is_err());
+    }
+
+    fn assert_device_alias_transaction_failure(table: &str, operation: &str) {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Workbench".into())).unwrap();
+        app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+        app.set_device_name("peer", "Old alias").unwrap();
+        let before = app.store.load_state().unwrap();
+        let queued = app.store.queued_roster().unwrap().unwrap();
+        let ancestor = serde_json::to_value(app.store.roster_baseline("queued").unwrap()).unwrap();
+        let db = rusqlite::Connection::open(app.config.database_path()).unwrap();
+        db.execute_batch(&format!("CREATE TRIGGER fail_alias BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, 'synthetic alias failure'); END;")).unwrap();
+        let mut events = app.events.subscribe();
+        let error = app.set_device_name("peer", "New alias").unwrap_err();
+        assert!(error.to_string().contains("synthetic alias failure"));
+        let persisted = app.store.load_state().unwrap();
+        assert_eq!(app.state.lock().unwrap().device_names, before.device_names);
+        assert_eq!(persisted.device_names, before.device_names);
+        assert_eq!(persisted.device_name_edits, before.device_name_edits);
+        assert_eq!(app.state.lock().unwrap().device_name_edits, before.device_name_edits);
+        assert_eq!(app.state.lock().unwrap().applied_blob_ids, before.applied_blob_ids);
+        assert_eq!(persisted.applied_blob_ids, before.applied_blob_ids);
+        let retained = app.store.queued_roster().unwrap().unwrap();
+        assert_eq!(retained.id, queued.id);
+        assert_eq!(retained.ciphertext, queued.ciphertext);
+        assert_eq!(serde_json::to_value(app.store.roster_baseline("queued").unwrap()).unwrap(), ancestor);
+        assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn device_alias_state_failure_rejects_without_publication() {
+        assert_device_alias_transaction_failure("device_names", "UPDATE");
+    }
+
+    #[test]
+    fn device_alias_outbox_failure_rolls_back_state_and_receipt() {
+        assert_device_alias_transaction_failure("outbox", "UPDATE");
+    }
+
+    #[test]
+    fn device_alias_committed_intent_survives_dropped_app() {
+        let home = tempfile::tempdir().unwrap();
+        let config = Config { home: home.path().into(), port: 0 };
+        let (queued_id, dek, ancestor) = {
+            let app = App::load(config.clone()).unwrap();
+            crate::identity::create(&app, Some("Workbench".into())).unwrap();
+            app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+            app.set_device_name("peer", "Office").unwrap();
+            let ancestor = serde_json::to_value(app.store.roster_baseline("queued").unwrap().unwrap()).unwrap();
+            let queued = app.store.queued_roster().unwrap().unwrap();
+            (queued.id, app.dek().unwrap(), ancestor)
+        };
+        // The original App and its SQLite connection are dropped before admission.
+        let reopened = App::load(config).unwrap();
+        assert_eq!(reopened.device("peer").unwrap().name, "Office");
+        let persisted = reopened.store.load_state().unwrap();
+        assert_eq!(persisted.device_names.get("peer").unwrap(), "Office");
+        let queued = reopened.store.queued_roster().unwrap().unwrap();
+        assert_eq!(queued.id, queued_id);
+        assert!(persisted.applied_blob_ids.contains(&queued_id));
+        assert_eq!(queued.slot, Some(Slot::latest("roster")));
+        let roster: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &queued.ciphertext).unwrap();
+        assert_eq!(roster.device_names, persisted.device_names);
+        assert_eq!(serde_json::to_value(reopened.store.roster_baseline("queued").unwrap().unwrap()).unwrap(), ancestor);
     }
 
     #[test]
@@ -3039,7 +3508,11 @@ mod tests {
         app.upsert_message(foreign_card, true);
         app.save_state_now();
 
-        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let reader = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        reader.close_orphan_proposals().unwrap();
+        assert!(matches!(reader.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"), "a non-owner must not recover a Runner's proposal");
+        drop(reader);
+        let reloaded = App::load_owner(Config { home: scratch.1.clone(), port: 0 }).unwrap();
         reloaded.close_orphan_proposals().unwrap();
         assert!(matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "dismissed"));
         assert!(matches!(reloaded.message("chat", "other-permission").unwrap().body, Body::Permission { decision, .. } if decision == "pending"));

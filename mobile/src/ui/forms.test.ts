@@ -31,7 +31,7 @@ vi.doMock("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
 vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
 vi.doMock("./theme", () => ({ Font: { body: 17, small: 15 }, usePalette: () => ({ cell: "cell", separator: "separator", secondaryLabel: "secondaryLabel" }) }));
 
-const { Section } = await import("./forms");
+const { Section, ToggleRow, FieldRow } = await import("./forms");
 
 const row = (title: string) => createElement("row", { key: title, title });
 
@@ -81,4 +81,36 @@ test("each row keeps its cell when the rows around it come and go", () => {
   expect(new Set([defaultKey, flash, plus, pro]).size).toBe(4);
   expect(keys(["Flash", "Pro"])).toEqual([defaultKey, flash, pro]);
   expect(keys(["Pro"])).toEqual([defaultKey, pro]);
+});
+
+function control(node: ReactNode, type: string): ReactElement<{ accessibilityLabel?: string; value?: unknown; secureTextEntry?: boolean }> {
+  if (!isValidElement<{ children?: ReactNode }>(node)) throw new Error("Expected an element");
+  const found = Children.toArray(node.props.children).find(child => isValidElement(child) && child.type === type);
+  if (!isValidElement<{ accessibilityLabel?: string; value?: unknown; secureTextEntry?: boolean }>(found)) throw new Error(`Missing ${type}`);
+  return found;
+}
+
+test("ToggleRow names the native switch with its title", () => {
+  for (const value of [false, true]) {
+    const native = control(ToggleRow({ title: "Pause all bots", value, onValueChange: () => {} }), "Switch");
+    expect(native.props.accessibilityLabel).toBe("Pause all bots");
+    expect(native.props.value).toBe(value);
+  }
+});
+
+test("FieldRow names the native input by explicit override, label, then placeholder", () => {
+  for (const [props, expected] of [
+    [{ label: "API key", placeholder: "Enter key" }, "API key"],
+    [{ label: "API key", accessibilityLabel: "Provider credential", placeholder: "Enter key" }, "Provider credential"],
+    [{ label: "API key", accessibilityLabel: "", placeholder: "Enter key" }, ""],
+    [{ label: "API key", accessibilityLabel: undefined, placeholder: "Enter key" }, "API key"],
+    [{ placeholder: "Bot memory" }, "Bot memory"],
+    [{}, undefined],
+  ] as const) {
+    const native = control(FieldRow({ ...props, value: "secret-value", secureTextEntry: true }), "TextInput");
+    expect(native.props.accessibilityLabel).toBe(expected);
+    expect(native.props.accessibilityLabel).not.toBe("secret-value");
+    expect(native.props.value).toBe("secret-value");
+    expect(native.props.secureTextEntry).toBe(true);
+  }
 });

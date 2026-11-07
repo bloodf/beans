@@ -1,10 +1,82 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // A fresh process exercises the native MyGo branch without leaking its import-time
 // platform selection into the browser-host store/visibility tests in the full suite.
+const here = fileURLToPath(new URL(".", import.meta.url));
+
+interface FixtureOutcome {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+}
+
+/** The tsx loader, resolved from the installed package and passed as an absolute file URL: a
+ * bare `tsx` would depend on the child's cwd and on whatever is on PATH. */
+let loader: string | undefined;
+function tsxLoader(): string {
+  if (!loader) {
+    let resolved: string;
+    try {
+      resolved = createRequire(import.meta.url).resolve("tsx");
+    } catch (error) {
+      throw new Error(`tsx is not installed for the desktop tests: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    loader = pathToFileURL(resolved).href;
+  }
+  return loader;
+}
+
+/** Runs the fixture in its own Node process, drains both pipes, and reports how it ended. The
+ * child is the one this test owns: on a timeout it is terminated and reaped before failing. */
+async function runFixture(script: string, env: NodeJS.ProcessEnv, timeoutMs = 30_000): Promise<FixtureOutcome> {
+  const child = spawn(process.execPath, ["--import", tsxLoader(), "--input-type=module", "--eval", script], {
+    cwd: here,
+    env,
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const out = child.stdout;
+  const err = child.stderr;
+  if (!out || !err) throw new Error("the fixture process has no output pipes");
+  out.setEncoding("utf8");
+  err.setEncoding("utf8");
+  out.on("data", (chunk: string) => { stdout.push(chunk); });
+  err.on("data", (chunk: string) => { stderr.push(chunk); });
+  let timedOut = false;
+  let escalation: NodeJS.Timeout | undefined;
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGTERM");
+    escalation = setTimeout(() => child.kill("SIGKILL"), 2_000);
+  }, timeoutMs);
+  let outcome: FixtureOutcome;
+  try {
+    const { code, signal } = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (closeCode, closeSignal) => resolve({ code: closeCode, signal: closeSignal }));
+    });
+    outcome = { code, signal, stdout: stdout.join(""), stderr: stderr.join("") };
+  } catch (error) {
+    throw new Error(`the fixture process could not run: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  } finally {
+    clearTimeout(deadline);
+    if (escalation) clearTimeout(escalation);
+  }
+  if (timedOut) throw new Error(`the fixture process timed out after ${timeoutMs}ms: ${JSON.stringify(outcome)}`);
+  return outcome;
+}
+
 test("a disposed native snapshot cannot hide a remounted avatar visibility registry", async () => {
   const script = `
     import assert from "node:assert/strict";
+    import { pathToFileURL } from "node:url";
+    const base = pathToFileURL(process.cwd() + "/");
     const pending = [], nativeListeners = new Set(), intersections = [];
     globalThis.location = { search: "" };
     const media = Object.assign(new EventTarget(), { matches: false });
@@ -27,7 +99,7 @@ test("a disposed native snapshot cannot hide a remounted avatar visibility regis
       },
     };
     // Static import cannot select the native branch before the runtime is installed.
-    const { watchAvatarVisibility } = await import("../ui/avatarVisibility.ts");
+    const { watchAvatarVisibility } = await import(new URL("../ui/avatarVisibility.ts", base).href);
     const shown = { focused: true, visible: true, minimized: false, fullScreen: false };
     const hidden = { ...shown, focused: false, visible: false, minimized: true };
     const oldElement = {}, freshElement = {}, fresh = [];
@@ -49,15 +121,20 @@ test("a disposed native snapshot cannot hide a remounted avatar visibility regis
     stopFresh();
     assert.equal(nativeListeners.size, 0, "teardown releases the native subscription");
   `;
-  const child = Bun.spawn([process.execPath, "--eval", script], { cwd: import.meta.dir, stdout: "pipe", stderr: "pipe" });
-  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
-  expect(stderr).toBe("");
-  expect(code).toBe(0);
-});
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  // The fixture must not depend on an inherited loader or on Bun on PATH.
+  delete env.NODE_OPTIONS;
+  const { code, signal, stdout, stderr } = await runFixture(script, env);
+  expect(stderr, `the fixture wrote to stderr:\n${stderr}`).toBe("");
+  expect(code, `the fixture exited with ${signal ?? "no signal"}:\n${stdout}`).toBe(0);
+  expect(signal).toBeNull();
+}, 30_000);
 
 test("native snapshot rejections are reported without notifying live or disposed listeners", async () => {
   const script = `
     import assert from "node:assert/strict";
+    import { pathToFileURL } from "node:url";
+    const base = pathToFileURL(process.cwd() + "/");
     const pending = [], nativeListeners = new Set(), unhandled = [], reported = [];
     globalThis.location = { search: "" };
     globalThis.mygo = {
@@ -74,7 +151,7 @@ test("native snapshot rejections are reported without notifying live or disposed
     };
     process.on("unhandledRejection", error => unhandled.push(error));
     console.error = (...args) => reported.push(args);
-    const { watchWindowState } = await import("./index.ts");
+    const { watchWindowState } = await import(new URL("./index.ts", base).href);
     let oldCalls = 0, liveCalls = 0;
     const stopOld = watchWindowState(() => oldCalls++);
     stopOld();
@@ -102,8 +179,11 @@ test("native snapshot rejections are reported without notifying live or disposed
     stopLive();
     assert.equal(nativeListeners.size, 0);
   `;
-  const child = Bun.spawn([process.execPath, "--eval", script], { cwd: import.meta.dir, stdout: "pipe", stderr: "pipe" });
-  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
-  expect(stderr).toBe("");
-  expect(code).toBe(0);
-});
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  // The fixture must not depend on an inherited loader or on Bun on PATH.
+  delete env.NODE_OPTIONS;
+  const { code, signal, stdout, stderr } = await runFixture(script, env);
+  expect(stderr, `the fixture wrote to stderr:\n${stderr}`).toBe("");
+  expect(code, `the fixture exited with ${signal ?? "no signal"}:\n${stdout}`).toBe(0);
+  expect(signal).toBeNull();
+}, 30_000);

@@ -8,6 +8,8 @@
  * and usually says everything, so it goes where a reader looks first.
  */
 
+import { createHash } from "node:crypto";
+
 export type Section = "histogram" | "markup" | "hashes";
 
 /**
@@ -20,7 +22,7 @@ export type Section = "histogram" | "markup" | "hashes";
  * with the thousand entries here.
  */
 export function hash(markup: string): string {
-  return new Bun.CryptoHasher("sha256").update(markup).digest("hex").slice(0, 16);
+  return createHash("sha256").update(markup, "utf8").digest("hex").slice(0, 16);
 }
 
 const HEADER = (gen: string) => `# blobatar — ${gen} golden fixture

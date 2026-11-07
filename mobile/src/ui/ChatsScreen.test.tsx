@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 
 // Mount the production search consumer with real store subscriptions and controlled native replies.
 // Hook slots/native tags follow Composer.test.tsx; native layout and navigation need device proof.
@@ -32,32 +32,32 @@ const react = {
     }
   },
 };
-mock.module("react", () => ({ ...react, default: react }));
+vi.doMock("react", () => ({ ...react, default: react }));
 const jsx = (type: any, props: any) => ({ type, props });
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
-mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
-mock.module("react-native", () => ({ Platform: { OS: "ios" }, View: "View", Text: "Text", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator", Alert: {}, AppState: {}, StyleSheet: { create: (x: any) => x, hairlineWidth: 1 }, useWindowDimensions: () => ({ width: 400 }) }));
-mock.module("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
-mock.module("expo-haptics", () => ({}));
-mock.module("expo-router", () => ({ Link: "Link", Stack: { SearchBar: "SearchBar", Toolbar: Object.assign("Toolbar", { Button: "Button", Menu: "Menu", MenuAction: "MenuAction" }), Title: "Title" }, useRouter: () => ({}) }));
-mock.module("./AvatarFlashList", () => ({ AvatarFlashList: "List" }));
-mock.module("./Avatar", () => ({ AvatarCluster: "Avatar" }));
-mock.module("./ChatPeek", () => ({ ChatPeek: "Peek" }));
-mock.module("./ChatRow", () => ({ ChatRow: "Row" }));
-mock.module("./layout", () => ({ PaneWidth: "PaneWidth", useSidebarWidth: () => 320 }));
-mock.module("./relay", () => ({ problemTitle: () => "", showRelayProblem: () => {} }));
-mock.module("./format", () => ({ lastActivity: () => 0, preview: () => "", stamp: () => "" }));
-mock.module("./SidebarSearch", () => ({ SidebarSearch: "Search", useSidebarSearchInset: () => 0 }));
-mock.module("./Symbol", () => ({ Symbol: "Symbol" }));
-mock.module("./theme", () => ({ Font: {}, usePalette: () => ({}) }));
-mock.module("./navigation", () => ({ AndroidIcons: {} }));
-mock.module("../i18n", () => ({ t: (x: string) => x, useLanguage: () => ({ language: "en" }) }));
-mock.module("../core/prefs", () => ({ savePrefs: () => {}, loadPrefs: () => ({}), coreHome: () => "unused", pathOf: (x: string) => x, wipePrefs: () => {} }));
-mock.module("../core/host", () => ({ hostFacts: () => ({}) }));
-mock.module("../core/push", () => ({ clearPushes: () => {}, installPushHandlers: () => {}, registerForPushes: () => {} }));
-mock.module("expo-web-browser", () => ({}));
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
+vi.doMock("react-native", () => ({ Platform: { OS: "ios" }, View: "View", Text: "Text", Pressable: "Pressable", ActivityIndicator: "ActivityIndicator", Alert: {}, AppState: {}, StyleSheet: { create: (x: any) => x, hairlineWidth: 1 }, useWindowDimensions: () => ({ width: 400 }) }));
+vi.doMock("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
+vi.doMock("expo-haptics", () => ({}));
+vi.doMock("expo-router", () => ({ Link: "Link", Stack: { SearchBar: "SearchBar", Toolbar: Object.assign("Toolbar", { Button: "Button", Menu: "Menu", MenuAction: "MenuAction" }), Title: "Title" }, useRouter: () => ({}) }));
+vi.doMock("./AvatarFlashList", () => ({ AvatarFlashList: "List" }));
+vi.doMock("./Avatar", () => ({ AvatarCluster: "Avatar" }));
+vi.doMock("./ChatPeek", () => ({ ChatPeek: "Peek" }));
+vi.doMock("./ChatRow", () => ({ ChatRow: "Row" }));
+vi.doMock("./layout", () => ({ PaneWidth: "PaneWidth", useSidebarWidth: () => 320 }));
+vi.doMock("./relay", () => ({ problemTitle: () => "", showRelayProblem: () => {} }));
+vi.doMock("./format", () => ({ lastActivity: () => 0, preview: () => "", stamp: () => "" }));
+vi.doMock("./SidebarSearch", () => ({ SidebarSearch: "Search", useSidebarSearchInset: () => 0 }));
+vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
+vi.doMock("./theme", () => ({ Font: {}, usePalette: () => ({}) }));
+vi.doMock("./navigation", () => ({ AndroidIcons: {} }));
+vi.doMock("../i18n", () => ({ t: (x: string) => x, useLanguage: () => ({ language: "en" }) }));
+vi.doMock("../core/prefs", () => ({ savePrefs: () => {}, loadPrefs: () => ({}), coreHome: () => "unused", pathOf: (x: string) => x, wipePrefs: () => {} }));
+vi.doMock("../core/host", () => ({ hostFacts: () => ({}) }));
+vi.doMock("../core/push", () => ({ clearPushes: () => {}, installPushHandlers: () => {}, registerForPushes: () => {} }));
+vi.doMock("expo-web-browser", () => ({}));
 const replies: Array<(value: any) => void> = [];
-mock.module("../../modules/beans-core", () => ({ request: () => new Promise(resolve => replies.push(resolve)) }));
+vi.doMock("../../modules/beans-core", () => ({ request: () => new Promise(resolve => replies.push(resolve)) }));
 const { useStore, resetStore } = await import("../core/store");
 const { ChatsScreen } = await import("./ChatsScreen");
 const timers = new Map<number, () => void>();

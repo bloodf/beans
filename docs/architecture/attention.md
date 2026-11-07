@@ -53,6 +53,15 @@ Bootstrap includes `attention { items, briefs, preferences }`. `attention.change
 projection. Devices take attention blobs in live pulls and during first sync. A Device upgrading
 from a build that skipped this kind replays attention slots once and records a persisted
 `attention_upgrade` marker when the replay finishes (or after first sync when `last_seq` was 0).
+Replay captures the normal `last_seq` before its first request and scans strictly ordered pages
+from zero through that fixed fence. It stops on an empty page or after reaching/passing the
+fence; it applies only attention rows at or below the fence and never advances the normal
+cursor. Concurrent pulls cannot move this finish line. A latest-slot replacement beyond the
+fence remains available to normal pulling, even when replacement removes an unread old row.
+Required page fields, nonnegative head, strict sequence progress and head bounds are validated;
+replay also requires unaddressed attention rows and a head at least as high as its fence.
+Malformed pages leave the marker unset. These checks rely on the authenticated relay's ordered
+latest-slot storage contract, rather than treating a changing response head as a snapshot.
 A missing account key or a relay error leaves the marker unset so the next start retries, but
 does not abort the rest of sync. A blob that fails to decrypt under a present key is logged by
 id, skipped, and the replay may still complete and set the marker. On a live pull the same skip

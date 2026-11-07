@@ -449,7 +449,7 @@ fn apply_attention_blob(
 /// this build recognized the kind. Idempotent under `attention::receive_blob`.
 ///
 /// Marker rules: set when the replay finishes (corrupt blobs may have been skipped). Left
-/// unset only when the account key is unavailable or the relay/network errors — so a later
+/// unset when the account key, storage, or validated relay page is unavailable — so a later
 /// start retries. Callers must not abort the normal pull on `Err`.
 async fn attention_upgrade_replay(
     app: &Arc<App>,
@@ -457,15 +457,18 @@ async fn attention_upgrade_replay(
     token: &str,
     machine_file: &crate::keys::MachineFile,
 ) -> Result<(), RelayError> {
+    // Capture before awaiting: concurrent pulls must not move this replay's finish line.
+    let through = app.state.lock().unwrap().last_seq;
     let mut since = 0;
-    loop {
-        let (blobs, _) = app.relay.list_blobs(url, token, since, "attention").await?;
+    while since < through {
+        let (blobs, head) = app.relay.list_blobs(url, token, since, "attention").await?;
+        if head < through || blobs.iter().any(|blob|
+            blob.kind != "attention" || blob.recipient_machine_pubkey.is_some())
+        {
+            return Err(RelayError { status: None, message: "Invalid attention replay page".into() });
+        }
         let Some(last) = blobs.last().map(|blob| blob.seq) else { break };
-        for blob in &blobs {
-            // Relays filter by kinds; still ignore other kinds if a fixture returns them.
-            if blob.kind != "attention" {
-                continue;
-            }
+        for blob in blobs.iter().take_while(|blob| blob.seq <= through) {
             match apply_attention_blob(app, machine_file, blob) {
                 Ok(AttentionApply::Applied | AttentionApply::SkippedCorrupt) => {}
                 Err(error) => {
@@ -4193,7 +4196,7 @@ mod tests {
                 .chain(gate.follow_on.iter())
                 .map(|blob| blob["seq"].as_i64().unwrap())
                 .max()
-                .unwrap_or(0);
+                .unwrap_or(0).max(9);
             if kinds == ["attention"] {
                 let page = gate.attention_calls.fetch_add(1, Ordering::SeqCst);
                 if gate.fail_on_page == Some(page) {
@@ -4321,6 +4324,93 @@ mod tests {
             account_blob(app, 12, "policy", "follow-on-policy", &policy),
         ];
         (blobs, message, renamed)
+    }
+
+    #[tokio::test]
+    async fn attention_replay_rejects_malformed_or_nonprogressing_pages_without_marker() {
+        use axum::{routing::get, Json, Router};
+        use serde_json::json;
+        let (publisher, blobs, _) = publish_attention_blobs("INVALID-PAGE", 1);
+        let row = blob_json(&blobs[0]);
+        let mut duplicate = row.clone();
+        duplicate["seq"] = json!(0);
+        let mut wrong_kind = row.clone();
+        wrong_kind["kind"] = json!("policy");
+        for body in [json!({"seq":9}), json!({"seq":9,"blobs":null}),
+            json!({"seq":"9","blobs":[]}), json!({"seq":8,"blobs":[]}),
+            json!({"seq":9,"blobs":[row.clone(),row.clone()]}),
+            json!({"seq":9,"blobs":[duplicate]}), json!({"seq":9,"blobs":[wrong_kind]})] {
+            let upgrading = upgrading_device(&publisher);
+            let router = Router::new().route("/v1/blobs", get(move || {
+                let body = body.clone();
+                async move { Json(body) }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            assert!(attention_upgrade_replay(&upgrading.0, &url, "token",
+                &upgrading.0.machine_file().unwrap()).await.is_err());
+            assert!(!upgrading.0.store.attention_upgrade_done().unwrap());
+            assert_eq!(upgrading.0.state.lock().unwrap().last_seq, 9);
+            assert!(upgrading.0.store.attention_rows().unwrap().is_empty());
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn attention_replay_pins_fence_while_another_pull_advances() {
+        use axum::{extract::{Query, State as HttpState}, routing::get, Json, Router};
+        use serde_json::{json, Value};
+        struct Gate {
+            entered: tokio::sync::Notify,
+            resume: tokio::sync::Notify,
+            calls: std::sync::atomic::AtomicUsize,
+            old: Value,
+            moved: Value,
+        }
+        async fn list(HttpState(gate): HttpState<Arc<Gate>>,
+            Query(query): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
+            let since: i64 = query["since"].parse().unwrap();
+            if query["kinds"] == "attention" {
+                let call = gate.calls.fetch_add(1, Ordering::SeqCst);
+                assert!(call < 2, "replay must stop at its original fence");
+                if call == 0 {
+                    gate.entered.notify_one();
+                    gate.resume.notified().await;
+                    return Json(json!({"seq":11,"blobs":[gate.old]}));
+                }
+                return Json(json!({"seq":11,"blobs":[gate.moved]}));
+            }
+            Json(json!({"seq":11,"blobs":if since < 11 {vec![gate.moved.clone()]} else {vec![]}}))
+        }
+        let (publisher, blobs, _) = publish_attention_blobs("MOVING-SLOT", 1);
+        let upgrading = upgrading_device(&publisher);
+        let mut moved = blobs[0].clone();
+        moved.seq = 11;
+        moved.id = "moved-slot".into();
+        let gate = Arc::new(Gate { entered: tokio::sync::Notify::new(), resume: tokio::sync::Notify::new(),
+            calls: std::sync::atomic::AtomicUsize::new(0), old: blob_json(&blobs[0]), moved: blob_json(&moved) });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let router = Router::new().route("/v1/blobs", get(list)).with_state(gate.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let machine = upgrading.0.machine_file().unwrap();
+        let replay = attention_upgrade_replay(&upgrading.0, &url, "token", &machine);
+        let concurrent = async {
+            gate.entered.notified().await;
+            // A real concurrent normal pull applies the replacement and advances last_seq.
+            upgrading.0.attention_backfilled.store(true, Ordering::Relaxed);
+            pull_blobs(&upgrading.0, &url, "token", &machine).await.unwrap();
+            gate.resume.notify_one();
+        };
+        let (result, ()) = tokio::join!(replay, concurrent);
+        result.unwrap();
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 2);
+        assert!(upgrading.0.store.attention_upgrade_done().unwrap());
+        assert_eq!(upgrading.0.state.lock().unwrap().last_seq, 11);
+        assert_eq!(upgrading.0.store.load_state().unwrap().last_seq, 11);
+        assert!(upgrading.0.state.lock().unwrap().applied_blob_ids.contains(&"moved-slot".to_string()));
+        server.abort();
     }
 
     #[tokio::test]

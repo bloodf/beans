@@ -34,14 +34,19 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
       - uses: expo/expo-github-action@v8
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
-      - run: bun install --frozen-lockfile && bun install --cwd mobile --frozen-lockfile
+      - run: pnpm install --frozen-lockfile && pnpm --dir mobile install --frozen-lockfile
       - name: Verify signed release and submit exact recorded build to testing only
         env:
           TAG: ${{ inputs.tag }}
           PLATFORM: ${{ inputs.platform }}
-        run: bun run scripts/submit-eas.ts "$TAG" "$PLATFORM"
+        run: pnpm exec tsx scripts/submit-eas.ts "$TAG" "$PLATFORM"

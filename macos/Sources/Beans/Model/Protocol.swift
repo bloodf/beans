@@ -500,6 +500,7 @@ enum Wire {
 
     struct ChatUsage: Decodable {
         var contextTokens: Int
+        var contextEstimated: Bool?
         var contextWindow: Int
         var inputTokens: Int
         var outputTokens: Int
@@ -871,7 +872,7 @@ extension Wire.Chat {
 extension Wire.ChatUsage {
     func toModel() -> ChatUsage {
         ChatUsage(
-            contextTokens: contextTokens, contextWindow: contextWindow, inputTokens: inputTokens, outputTokens: outputTokens,
+            contextTokens: contextTokens, contextEstimated: contextEstimated == true, contextWindow: contextWindow, inputTokens: inputTokens, outputTokens: outputTokens,
             cacheReadTokens: cacheReadTokens, costUSD: costUsd, costKnown: costKnown, turns: turns, model: model)
     }
 }

@@ -187,22 +187,33 @@ test.each(["sidebar", "ios", "android"] as const)("%s search retains authority a
   } finally { dispose(); globalThis.setTimeout = originalTimeout; globalThis.clearTimeout = originalClear; }
 });
 
-test("content changes do not starve search and schedule a follow-up", async () => {
+test.each([true, false])("content changes do not starve search and schedule a follow-up with relayConnected=%s", async (relayConnected) => {
   searchSurface = "sidebar"; platform.OS = "ios";
   const originalTimeout = globalThis.setTimeout, originalClear = globalThis.clearTimeout;
-  globalThis.setTimeout = ((run: () => void) => { const id = ++timerID; timers.set(id, run); return id; }) as unknown as typeof setTimeout;
-  globalThis.clearTimeout = ((id: number) => { timers.delete(id); }) as unknown as typeof clearTimeout;
+  const connectionTimers = new Map<number, () => void>();
+  // useConnecting owns a separate >=1000 ms timer while the relay is disconnected.
+  globalThis.setTimeout = ((run: () => void, delay: number) => {
+    const id = ++timerID;
+    if (delay === 140) timers.set(id, run);
+    else {
+      expect(delay).toBeGreaterThanOrEqual(1000);
+      connectionTimers.set(id, run);
+    }
+    return id;
+  }) as unknown as typeof setTimeout;
+  globalThis.clearTimeout = ((id: number) => { timers.delete(id); connectionTimers.delete(id); }) as unknown as typeof clearTimeout;
   const runTimers = () => { for (const [id, run] of [...timers]) { timers.delete(id); run(); } };
   const rows = () => find(render(), "List")!.props.data.map(row => row.snippet);
   try {
     resetStore();
-    useStore.setState({ paired: true, identityId: "A", relayUrl: "relay-A", deviceId: "phone-A", chats: [{ id: "same", title: "Before", kind: "group", bot_ids: [], messages: [], unread_count: 0, is_pinned: false, created_at: 0 }], bots: [] });
+    useStore.setState({ relayConnected, paired: true, identityId: "A", relayUrl: "relay-A", deviceId: "phone-A", chats: [{ id: "same", title: "Before", kind: "group", bot_ids: [], messages: [], unread_count: 0, is_pinned: false, created_at: 0 }], bots: [] });
     const root = render();
     find(root, "Search")!.props.onChangeText("needle"); render();
     for (let i = 0; i < 5; i++) {
       useStore.setState(state => ({ chats: state.chats.map(chat => ({ ...chat, title: `Changed ${i}` })) }));
       render();
     }
+    expect(connectionTimers.size).toBe(relayConnected ? 0 : 1);
     expect(timers.size).toBe(1);
     runTimers();
     expect(replies.length).toBe(1);
@@ -223,6 +234,8 @@ test("content changes do not starve search and schedule a follow-up", async () =
     expect(rows()).toEqual([]);
   } finally {
     for (const item of slots) if (item && typeof item === "object" && "cleanup" in item && typeof item.cleanup === "function") item.cleanup();
+    expect(timers.size).toBe(0);
+    expect(connectionTimers.size).toBe(0);
     slots = []; timers.clear(); replies.length = 0;
     globalThis.setTimeout = originalTimeout; globalThis.clearTimeout = originalClear;
   }

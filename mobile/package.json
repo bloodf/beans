@@ -47,18 +47,26 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.2",
     "@types/react": "~19.2.2",
-    "typescript": "~6.0.3"
+    "typescript": "~6.0.3",
+    "@types/node": "^24",
+    "tsx": "4.23.15",
+    "vitest": "5.1.0",
+    "vite": "^8.0.0"
   },
   "scripts": {
     "start": "expo start",
     "ios": "expo run:ios",
     "android": "expo run:android",
-    "typecheck": "tsc --noEmit",
-    "test": "bun test --isolate src",
-    "core": "bun run modules/beans-core/build.ts",
-    "postinstall": "bun run ../scripts/release-eas-native.ts"
+    "typecheck": "tsc --noEmit && tsc --noEmit --project tsconfig.tests.json",
+    "test": "vitest run --config vitest.config.ts",
+    "core": "tsx modules/beans-core/build.ts",
+    "postinstall": "tsx ../scripts/release-eas-native.ts"
   },
-  "private": true
+  "private": true,
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": ">=24.22.2 <25"
+  },
+  "type": "commonjs"
 }

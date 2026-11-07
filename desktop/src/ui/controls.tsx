@@ -334,8 +334,8 @@ export function SearchField(props: {
   );
 }
 
-export function Spinner(props: { size?: number; class?: string }) {
-  return <span class={["spinner", props.class]} style={{ width: `${props.size ?? 16}px`, height: `${props.size ?? 16}px` }} role="progressbar" />;
+export function Spinner(props: { size?: number; class?: string; label?: string }) {
+  return <span class={["spinner", props.class]} style={{ width: `${props.size ?? 16}px`, height: `${props.size ?? 16}px` }} role="progressbar" aria-label={props.label} />;
 }
 
 /** A button that copies `text` and says so for a moment: its symbol turns into a green check, its

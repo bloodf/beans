@@ -1,6 +1,9 @@
 {
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
+    "types": [
+      "node"
+    ],
     "strict": true,
     "preserveSymlinks": true
   },
@@ -12,6 +15,7 @@
   ],
   "exclude": [
     "**/*.test.ts",
+    "**/*.test.tsx",
     "modules/beans-core/build.ts"
   ]
 }

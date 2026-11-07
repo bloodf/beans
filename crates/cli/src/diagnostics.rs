@@ -190,6 +190,21 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_or_denied_kvm_never_admits_guests() {
+        for observed in [
+            HostObservations { kvm_device_present: Some(false), kvm_device_accessible: None, ..measured() },
+            HostObservations { kvm_device_accessible: Some(false), budget: None, ..measured() },
+            HostObservations { kvm_device_present: None, ..measured() },
+        ] {
+            let report = computer_host_report(&observed);
+            assert!(report["capacity"]["guests"].is_null());
+            let expected = if observed.kvm_device_present == Some(false)
+                || observed.kvm_device_accessible == Some(false) { "not_ready" } else { "unknown" };
+            assert_eq!(report["overall"], expected);
+        }
+    }
+
+    #[test]
     fn computer_host_contract() {
         let ready = computer_host_report(&measured());
         assert_eq!(ready["overall"], "ready");

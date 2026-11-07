@@ -206,7 +206,7 @@ test.skipIf(process.platform === "win32")("a FIFO without a writer is refused fa
     await mkdir(bin);
     const q = (p: string) => `'${p.replaceAll("'", "'\\''")}'`;
     for (const tool of ["unzip", "aapt2", "bundletool", "plutil"]) { await writeFile(join(bin, tool), `#!/bin/sh\nprintf x > ${q(marker)}\nexit 0\n`); await chmod(join(bin, tool), 0o755); }
-    const script = join(dir, "probe.ts");
+    const script = join(dir, "probe.mts");
     await writeFile(script, `
       import { snapshotArtifact, readNativeIdentity } from ${JSON.stringify(join(ROOT, "scripts/release-native-identity.ts"))};
       import { stageLocalBuild } from ${JSON.stringify(join(ROOT, "scripts/release-eas.ts"))};

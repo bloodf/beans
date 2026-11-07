@@ -1,22 +1,7 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 import type { Chat, Message } from "../core/model";
-import { fileURLToPath } from "node:url";
 
-// Module mocks live only in a dedicated Bun host, never in the full-suite process.
-if (process.env.BEANS_TRANSCRIPT_SCROLL_HOST === "1") {
-  installTranscriptScenario();
-} else {
-  test("transcript scroll consumer in an isolated Bun host", () => {
-    const child = Bun.spawnSync([process.execPath, "test", "--isolate", fileURLToPath(import.meta.url)], {
-      env: { ...process.env, BEANS_TRANSCRIPT_SCROLL_HOST: "1" },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    expect(child.exitCode, child.stdout.toString() + child.stderr.toString()).toBe(0);
-  });
-}
-
-function installTranscriptScenario() {
+// Vitest isolates native module mocks in this file's fork.
 // No renderer is installed in mobile; retain its existing hook-slot/native-tag boundary.
 // These scenarios exercise production callbacks, not native layout or React scheduling.
 
@@ -79,7 +64,7 @@ const react = {
   useSyncExternalStore: (_subscribe: unknown, snapshot: () => unknown) => snapshot(),
   useDebugValue: () => {},
 };
-mock.module("react", () => ({ ...react, default: react }));
+vi.doMock("react", () => ({ ...react, default: react }));
 const scrolls: Array<{ kind: string; offset?: number }> = [];
 let offset = 0, tail = 300;
 let renderedRows: Array<{ key: string }> = [];
@@ -99,45 +84,45 @@ const jsx = (type: unknown, props: Props): Node => {
   }
   return { type, props };
 };
-mock.module("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
-mock.module("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
+vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx, Fragment: "Fragment" }));
+vi.doMock("react/jsx-dev-runtime", () => ({ jsxDEV: jsx, Fragment: "Fragment" }));
 const platform = { OS: "android" };
 let routeId = "chat";
-mock.module("react-native", () => ({ Platform: platform, View: "View", Text: "Text", Pressable: "Pressable", Alert: { alert: () => {} }, PixelRatio: { get: () => 1 }, StyleSheet: { create: (value: unknown) => value, hairlineWidth: 1 } }));
-mock.module("expo-router", () => ({ Stack: Object.assign("Stack", { Screen: "Screen", Title: "Title", Toolbar: Object.assign("Toolbar", { Button: "Button" }) }), useLocalSearchParams: () => ({ id: routeId }), useRouter: () => ({}), useFocusEffect: () => {} }));
-mock.module("expo-router/react-navigation", () => ({ useHeaderHeight: () => 64 }));
-mock.module("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 24, bottom: 0 }) }));
-mock.module("react-native-keyboard-controller", () => ({ KeyboardChatScrollView: "Scroll", KeyboardController: { dismiss: () => {} }, useKeyboardHandler: () => {} }));
-mock.module("react-native-reanimated", () => ({ default: { View: "AnimatedView" }, useSharedValue: (value: number) => slot(() => ({ value })).value, useAnimatedStyle: () => ({}), useAnimatedReaction: () => {}, runOnJS: (callback: unknown) => callback, ZoomIn: { duration: () => ({}) }, ZoomOut: { duration: () => ({}) } }));
-mock.module("expo-linear-gradient", () => ({ LinearGradient: "Gradient" }));
-mock.module("../../modules/beans-core/SoftScrollEdgeView", () => ({ SoftScrollEdgeView: "Edge" }));
-mock.module("./AvatarFlashList", () => ({ AvatarFlashList: "List" }));
-mock.module("./Avatar", () => ({ AvatarCluster: "Avatar" }));
-mock.module("./Composer", () => ({ Composer: "Composer", Surface: "Surface" }));
-mock.module("./KeyboardFoot", () => ({ KeyboardFoot: "Foot" }));
-mock.module("./layout", () => ({ useWide: () => false }));
-mock.module("./Symbol", () => ({ Symbol: "Symbol" }));
-mock.module("./theme", () => ({ usePalette: () => ({}) }));
-mock.module("./format", () => ({ quoteText: (text: string) => text }));
-mock.module("./AnswerSheet", () => ({ AnswerSheet: "Answer" }));
-mock.module("../i18n", () => ({ t: (text: string) => text, useLanguage: () => ({ language: "en" }) }));
+vi.doMock("react-native", () => ({ Platform: platform, View: "View", Text: "Text", Pressable: "Pressable", Alert: { alert: () => {} }, PixelRatio: { get: () => 1 }, StyleSheet: { create: (value: unknown) => value, hairlineWidth: 1 } }));
+vi.doMock("expo-router", () => ({ Stack: Object.assign("Stack", { Screen: "Screen", Title: "Title", Toolbar: Object.assign("Toolbar", { Button: "Button" }) }), useLocalSearchParams: () => ({ id: routeId }), useRouter: () => ({}), useFocusEffect: () => {} }));
+vi.doMock("expo-router/react-navigation", () => ({ useHeaderHeight: () => 64 }));
+vi.doMock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ top: 24, bottom: 0 }) }));
+vi.doMock("react-native-keyboard-controller", () => ({ KeyboardChatScrollView: "Scroll", KeyboardController: { dismiss: () => {} }, useKeyboardHandler: () => {} }));
+vi.doMock("react-native-reanimated", () => ({ default: { View: "AnimatedView" }, useSharedValue: (value: number) => slot(() => ({ value })).value, useAnimatedStyle: () => ({}), useAnimatedReaction: () => {}, runOnJS: (callback: unknown) => callback, ZoomIn: { duration: () => ({}) }, ZoomOut: { duration: () => ({}) } }));
+vi.doMock("expo-linear-gradient", () => ({ LinearGradient: "Gradient" }));
+vi.doMock("../../modules/beans-core/SoftScrollEdgeView", () => ({ SoftScrollEdgeView: "Edge" }));
+vi.doMock("./AvatarFlashList", () => ({ AvatarFlashList: "List" }));
+vi.doMock("./Avatar", () => ({ AvatarCluster: "Avatar" }));
+vi.doMock("./Composer", () => ({ Composer: "Composer", Surface: "Surface" }));
+vi.doMock("./KeyboardFoot", () => ({ KeyboardFoot: "Foot" }));
+vi.doMock("./layout", () => ({ useWide: () => false }));
+vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
+vi.doMock("./theme", () => ({ usePalette: () => ({}) }));
+vi.doMock("./format", () => ({ quoteText: (text: string) => text }));
+vi.doMock("./AnswerSheet", () => ({ AnswerSheet: "Answer" }));
+vi.doMock("../i18n", () => ({ t: (text: string) => text, useLanguage: () => ({ language: "en" }) }));
 const message: Message = { id: "sent", chat_id: "chat", author: { kind: "you" }, body: { kind: "text", text: "sent" }, state: { kind: "complete" }, created_at: 0 };
 let chat: Chat = { id: "chat", kind: "dm", bot_ids: [], messages: [message], unread_count: 0, is_pinned: false, created_at: 0 };
-mock.module("../core/prefs", () => ({ savePrefs: () => {}, loadPrefs: () => ({}), coreHome: () => "unused", pathOf: (value: string) => value, wipePrefs: () => {} }));
-const { useStore }: typeof import("../core/store") = require("../core/store");
-const { composerDraft, editComposerDraft, submitComposerDraft }: typeof import("../core/composerDraft") = require("../core/composerDraft");
+vi.doMock("../core/prefs", () => ({ savePrefs: () => {}, loadPrefs: () => ({}), coreHome: () => "unused", pathOf: (value: string) => value, wipePrefs: () => {} }));
+const { useStore }: typeof import("../core/store") = await import("../core/store");
+const { composerDraft, editComposerDraft, submitComposerDraft }: typeof import("../core/composerDraft") = await import("../core/composerDraft");
 let sendReply: (() => Promise<Message>) | undefined;
 let sendCalls = 0;
-mock.module("../core/engine", () => ({ chatTitle: () => "Chat", engine: { sendMessage: async () => {
+vi.doMock("../core/engine", () => ({ chatTitle: () => "Chat", engine: { sendMessage: async () => {
   sendCalls += 1;
   if (sendReply) return sendReply();
   chat = { ...chat, messages: [...chat.messages, message] };
   useStore.setState({ chats: [chat] });
   return message;
 }, loadOlder: async () => {} } }));
-mock.module("./transcript", () => ({ buildRows: (current: Chat) => current.messages.map(row => ({ key: row.id, type: "message", message: row })), quoteAuthorName: () => "You", DayRow: "Day", MarkerRow: "Marker", MessageRow: "Message", NoticeRow: "Notice", PermissionRow: "Permission", CommandRow: "Command", StatusRow: "Status", WorkingRow: "Working" }));
+vi.doMock("./transcript", () => ({ buildRows: (current: Chat) => current.messages.map(row => ({ key: row.id, type: "message", message: row })), quoteAuthorName: () => "You", DayRow: "Day", MarkerRow: "Marker", MessageRow: "Message", NoticeRow: "Notice", PermissionRow: "Permission", CommandRow: "Command", StatusRow: "Status", WorkingRow: "Working" }));
 // Native mocks must be installed before this production consumer loads.
-const { default: ChatScreen }: typeof import("../../app/(main)/chat/[id]") = require("../../app/(main)/chat/[id]");
+const { default: ChatScreen }: typeof import("../../app/(main)/chat/[id]") = await import("../../app/(main)/chat/[id]");
 function find(node: unknown, type: unknown): Node | undefined {
   if (Array.isArray(node)) return node.map(child => find(child, type)).find(Boolean);
   if (!node || typeof node !== "object" || !("type" in node) || !("props" in node)) return;
@@ -286,4 +271,3 @@ test.each(["ios", "android"])("%s transcript yields streaming scroll to reader a
     globalThis.setTimeout = originalTimeout; globalThis.clearTimeout = originalClear; globalThis.requestAnimationFrame = originalFrame;
   }
 });
-}

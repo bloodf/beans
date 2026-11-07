@@ -79,7 +79,6 @@ Give each worker exact scope and file ownership. State that concurrent work must
 
 Keep the existing Beans gates. `pnpm run check:docs`, `pnpm run check:catalog` and the same-repository PR test matrix remain applicable. Inspect the current workflow definitions before execution; a local tooling smoke does not replace hosted checks. Product homes, accounts, relays, signing inputs and deployments are not tooling fixtures.
 
-
 Create one tooling PR against current Beans `main` and link it immediately to T3. Merge only after independent exact-head review and the real required checks pass. When waiting for hosted checks, use T3's PR watch and end the run; do not poll CI.
 
 Before propagation, prepare a per-ref plan with original head, target payload, old-head ancestry proof and recovery instructions. Append only tooling to every existing local and origin branch, including historical branches and open PR heads. Preserve each branch's existing instruction and ignore bytes. Do not merge unrelated product history, silently resolve divergence or recreate a branch absent from the server. Push fast-forward with explicit refspecs. Stop on the first remote write failure, re-read remote state and report to central before retry or a strategy change.

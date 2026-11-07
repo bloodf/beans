@@ -30,6 +30,7 @@ import { onStoreEvent, track } from "../model/reactive";
 import { errorText, store } from "../model/store";
 import { addBotToChat, presentMarketplace } from "./actions";
 import { box } from "./box";
+import { browserScheduler, Compacts, type CompactPhase } from "./compact";
 import { Button, Switch } from "./controls";
 import { popupMenu, separator } from "./menu";
 import { chatActions, openDevice } from "./root";
@@ -47,6 +48,23 @@ import { presentRoutine } from "./sheets/routine";
 const memoryByBot = box<Record<string, BotMemory>>({});
 const memoryErrors = box<Record<string, string>>({});
 const memoryFetches = box<Record<string, true>>({});
+
+// The Compact of each chat the inspector has asked for: under way, then done, or why it did not
+// compact. The pane keeps them while it is closed, as the Mac inspector keeps its memory.
+const compactVersion = box(0);
+const compacts = new Compacts(browserScheduler, () => compactVersion.update((n) => n + 1));
+
+/** The chat's Compact, redrawn when it moves. */
+function compactPhase(chatID: string): CompactPhase {
+  compactVersion.read();
+  return compacts.phase(chatID);
+}
+
+/** Why a Compact did not compact, at the foot of the pane. */
+function compactToast(): string {
+  compactVersion.read();
+  return compacts.toast();
+}
 
 /** Asks the CLI for the bot's memory; the section redraws when it answers. */
 function refreshMemory(botID: string): void {
@@ -120,38 +138,48 @@ export function Inspector(props: { chatID: string }) {
   );
 
   return (
-    <div class="inspector">
-      <div class="inspector-column">
-        <Show when={chat()}>
-          {(current) => (
-            <>
-              <Participants chat={current()} members={members()} />
-              <Show when={!isDM(current())}>
-                <div class="inspector-add">
-                  <Button disabled={!(canAddBot(current()) && members().length < store.bots.length)} onClick={() => addBotToChat(current().id)}>
-                    {L("Add Bot…")}
-                  </Button>
-                </div>
-                <Group chat={current()} members={members()} />
-              </Show>
-              <Show when={single()}>
-                {(bot) => (
-                  <>
-                    <Profile bot={bot()} />
-                    <Runtime bot={bot()} chat={current()} />
-                    <Abilities bot={bot()} />
-                    <Memory bot={bot()} />
-                    <Routines bot={bot()} />
-                    <Plugins bot={bot()} />
-                  </>
-                )}
-              </Show>
-              <Routing members={members()} />
-            </>
-          )}
-        </Show>
+    <>
+      <div class="inspector">
+        <div class="inspector-column">
+          <Show when={chat()}>
+            {(current) => (
+              <>
+                <Participants chat={current()} members={members()} />
+                <Show when={!isDM(current())}>
+                  <div class="inspector-add">
+                    <Button disabled={!(canAddBot(current()) && members().length < store.bots.length)} onClick={() => addBotToChat(current().id)}>
+                      {L("Add Bot…")}
+                    </Button>
+                  </div>
+                  <Group chat={current()} members={members()} />
+                </Show>
+                <Show when={single()}>
+                  {(bot) => (
+                    <>
+                      <Profile bot={bot()} />
+                      <Runtime bot={bot()} chat={current()} />
+                      <Abilities bot={bot()} />
+                      <Memory bot={bot()} />
+                      <Routines bot={bot()} />
+                      <Plugins bot={bot()} />
+                    </>
+                  )}
+                </Show>
+                <Routing members={members()} />
+              </>
+            )}
+          </Show>
+        </div>
       </div>
-    </div>
+      {/* Why a Compact did not compact, at the foot of the pane. */}
+      <Show when={compactToast()}>
+        {(text) => (
+          <div class="inspector-toast" role="alert">
+            {text()}
+          </div>
+        )}
+      </Show>
+    </>
   );
 }
 
@@ -235,6 +263,19 @@ function Profile(props: { bot: Bot }) {
 
 function Runtime(props: { bot: Bot; chat: Chat }) {
   const bot = () => props.bot;
+  const chatID = () => props.chat.id;
+  /** What the chat's last Compact is doing: idle, running, or done. */
+  const phase = createMemo(() => compactPhase(chatID()));
+  /** Compacts the chat on its Runner, and shows what came of it: the row says it is under way,
+   * then checks it off, or a toast says why it did not compact. */
+  const compact = () => {
+    const id = chatID();
+    if (!compacts.start(id)) return;
+    void store.compactChat(id).then(
+      () => compacts.succeed(id),
+      (error) => compacts.fail(id, errorText(error)),
+    );
+  };
   const providers = () => {
     track.roster();
     return store.providers;
@@ -304,7 +345,15 @@ function Runtime(props: { bot: Bot; chat: Chat }) {
       <Show when={props.chat.usage}>
         {(usage) => (
           <>
-            <ActionRow label={L("Context")} value={contextSummary(usage())} tint="var(--label)" actionTitle={L("Compact")} onAction={() => store.compactChat(props.chat.id)} />
+            <ActionRow
+              label={L("Context")}
+              value={phase() === "running" ? L("Compacting…") : contextSummary(usage())}
+              tint={phase() === "running" ? "var(--label-2)" : "var(--label)"}
+              actionTitle={phase() === "running" ? L("Compacting…") : phase() === "done" ? L("Compacted") : L("Compact")}
+              actionCopied={phase() === "done"}
+              busy={phase() === "running"}
+              onAction={compact}
+            />
             <KeyValueRow label={L("Spent")} value={spendSummary(usage())} />
           </>
         )}

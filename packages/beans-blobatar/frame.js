@@ -8,13 +8,11 @@ function solve(x, x1, y1, x2, y2) {
   const by = 3 * (y2 - y1) - cy;
   const ay = 1 - cy - by;
   let t = x;
-  for (let i = 0;i < 8; i++) {
+  for (let i = 0; i < 8; i++) {
     const err = ((ax * t + bx) * t + cx) * t - x;
-    if (Math.abs(err) < 0.00001)
-      break;
+    if (Math.abs(err) < 1e-5) break;
     const d = (3 * ax * t + 2 * bx) * t + cx;
-    if (Math.abs(d) < 0.000001)
-      break;
+    if (Math.abs(d) < 1e-6) break;
     t -= err / d;
   }
   return ((ay * t + by) * t + cy) * t;
@@ -49,16 +47,16 @@ var SACCADE = [
 var WRAP = [
   [0, 0, 0, 0, 0],
   [0.15, 0, 0, 0, 0],
-  [0.165, -0.0176, 0.008, -0.027, 0.648],
-  [0.31, -0.0176, 0.008, -0.027, 0.648],
-  [0.325, -0.022, -0.01, -0.003, 0.09],
-  [0.47, -0.022, -0.01, -0.003, 0.09],
-  [0.485, -0.0033, 0.0015, -0.0255, -0.115],
-  [0.63, -0.0033, 0.0015, -0.0255, -0.115],
-  [0.645, -0.0165, -0.0075, -0.024, -0.54],
-  [0.79, -0.0165, -0.0075, -0.024, -0.54],
-  [0.805, -0.022, 0.01, -0.0045, 0.135],
-  [0.985, -0.022, 0.01, -0.0045, 0.135],
+  [0.165, -0.0176, 8e-3, -0.027, 0.648],
+  [0.31, -0.0176, 8e-3, -0.027, 0.648],
+  [0.325, -0.022, -0.01, -3e-3, 0.09],
+  [0.47, -0.022, -0.01, -3e-3, 0.09],
+  [0.485, -33e-4, 15e-4, -0.0255, -0.115],
+  [0.63, -33e-4, 15e-4, -0.0255, -0.115],
+  [0.645, -0.0165, -75e-4, -0.024, -0.54],
+  [0.79, -0.0165, -75e-4, -0.024, -0.54],
+  [0.805, -0.022, 0.01, -45e-4, 0.135],
+  [0.985, -0.022, 0.01, -45e-4, 0.135],
   [1, 0, 0, 0, 0]
 ];
 var SHAKE = [
@@ -70,13 +68,11 @@ var SHAKE = [
 ];
 function stops(u, table, col) {
   "worklet";
-  for (let i = table.length - 1;i >= 0; i--) {
+  for (let i = table.length - 1; i >= 0; i--) {
     const row = table[i];
-    if (u < row[0])
-      continue;
+    if (u < row[0]) continue;
     const next = table[i + 1];
-    if (!next)
-      return row[col];
+    if (!next) return row[col];
     const span = next[0] - row[0];
     return span <= 0 ? row[col] : row[col] + (next[col] - row[col]) * ((u - row[0]) / span);
   }
@@ -122,7 +118,7 @@ function idleFrame(s, t, amp, shake) {
 }
 function n3(v) {
   "worklet";
-  return Math.round(v * 1000) / 1000;
+  return Math.round(v * 1e3) / 1e3;
 }
 function rootT(f) {
   "worklet";
@@ -176,10 +172,9 @@ function glanceT(f, cx, cy, lean, side) {
 // frame.ts
 function lerpPath(a, b, t) {
   "worklet";
-  if (a.segments.length !== b.segments.length)
-    throw new Error("avatar paths have different segment counts");
+  if (a.segments.length !== b.segments.length) throw new Error("avatar paths have different segment counts");
   const segments = [];
-  for (let i = 0;i < b.segments.length; i++) {
+  for (let i = 0; i < b.segments.length; i++) {
     const s = a.segments[i];
     const e = b.segments[i];
     segments.push([
@@ -195,12 +190,10 @@ function lerpPath(a, b, t) {
 }
 function lerpColor(a, b, t) {
   "worklet";
-  if (t <= 0)
-    return a;
-  if (t >= 1)
-    return b;
+  if (t <= 0) return a;
+  if (t >= 1) return b;
   let out = "#";
-  for (let i = 1;i < 7; i += 2) {
+  for (let i = 1; i < 7; i += 2) {
     const v = Math.round(parseInt(a.slice(i, i + 2), 16) * (1 - t) + parseInt(b.slice(i, i + 2), 16) * t);
     out += (v < 16 ? "0" : "") + v.toString(16).toUpperCase();
   }
@@ -210,8 +203,7 @@ function interpolateAvatarGeometry(from, to, t) {
   "worklet";
   const u = t <= 0 ? 0 : t >= 1 ? 1 : t;
   const m = (a, b) => a * (1 - u) + b * u;
-  if (from.petals.length !== to.petals.length)
-    throw new Error("avatar geometries have different petal counts");
+  if (from.petals.length !== to.petals.length) throw new Error("avatar geometries have different petal counts");
   const pose = {};
   for (const k in to.pose) {
     const c = k;
@@ -255,13 +247,11 @@ function cubicBezier(x, x1, y1, x2, y2) {
   const by = 3 * (y2 - y1) - cy;
   const ay = 1 - cy - by;
   let t = x;
-  for (let i = 0;i < 8; i++) {
+  for (let i = 0; i < 8; i++) {
     const err = ((ax * t + bx) * t + cx) * t - x;
-    if (Math.abs(err) < 0.00001)
-      break;
+    if (Math.abs(err) < 1e-5) break;
     const d = (3 * ax * t + 2 * bx) * t + cx;
-    if (Math.abs(d) < 0.000001)
-      break;
+    if (Math.abs(d) < 1e-6) break;
     t -= err / d;
   }
   return ((ay * t + by) * t + cy) * t;
@@ -271,10 +261,8 @@ function avatarMorphProgress(elapsedMs, toward) {
   const p = toward.pose;
   const expressive = p.esx !== 1 || p.esy !== 1 || p.tilt !== 0 || p.edy !== 0 || p.edx !== 0 || p.esx2 !== 0 || p.esy2 !== 0 || p.tilt2 !== 0 || p.edy2 !== 0 || p.lock !== 0 || p.heat !== 0 || p.shake !== 0 || p.rock !== 0 || p.bdy !== 0;
   const x = elapsedMs / (expressive ? 300 : 400);
-  if (!(x < 1))
-    return { t: 1, done: true };
-  if (x <= 0)
-    return { t: 0, done: false };
+  if (!(x < 1)) return { t: 1, done: true };
+  if (x <= 0) return { t: 0, done: false };
   return { t: expressive ? cubicBezier(x, 0.45, 0.05, 0.5, 1) : cubicBezier(x, 0.42, 0, 0.58, 1), done: false };
 }
 function mul(a, b) {
@@ -296,7 +284,10 @@ function poseMatrix(e, p, i) {
   const q = -e.rot * Math.PI / 180;
   const sx = p.esx + sel * p.esx2;
   const sy = p.esy + sel * p.esy2;
-  const lin = mul(mul([Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0], [sx, 0, 0, sy, 0, 0]), [Math.cos(q), Math.sin(q), -Math.sin(q), Math.cos(q), 0, 0]);
+  const lin = mul(
+    mul([Math.cos(r), Math.sin(r), -Math.sin(r), Math.cos(r), 0, 0], [sx, 0, 0, sy, 0, 0]),
+    [Math.cos(q), Math.sin(q), -Math.sin(q), Math.cos(q), 0, 0]
+  );
   const tx = e.cx + p.edx * wrap;
   const ty = e.cy + p.edy + sel * p.edy2;
   return [lin[0], lin[1], lin[2], lin[3], tx - lin[0] * e.cx - lin[2] * e.cy, ty - lin[1] * e.cx - lin[3] * e.cy];
@@ -340,12 +331,12 @@ function eyePath(e) {
   const cos = Math.cos(t);
   const sin = Math.sin(t);
   const xy = [];
-  for (let i = 0;i < pts.length; i += 2) {
+  for (let i = 0; i < pts.length; i += 2) {
     xy.push(Math.round((e.cx + pts[i] * cos - pts[i + 1] * sin) * 100) / 100);
     xy.push(Math.round((e.cy + pts[i] * sin + pts[i + 1] * cos) * 100) / 100);
   }
   const segments = [];
-  for (let s = 0;s < 4; s++) {
+  for (let s = 0; s < 4; s++) {
     const o = 2 + s * 6;
     segments.push([xy[o], xy[o + 1], xy[o + 2], xy[o + 3], xy[o + 4], xy[o + 5]]);
   }
@@ -383,8 +374,7 @@ function avatarPath(p, digits = 2) {
     return r === 0 ? "0" : String(r);
   };
   let d = `M${n(p.start[0])} ${n(p.start[1])}`;
-  for (const s of p.segments)
-    d += `C${n(s[0])} ${n(s[1])} ${n(s[2])} ${n(s[3])} ${n(s[4])} ${n(s[5])}`;
+  for (const s of p.segments) d += `C${n(s[0])} ${n(s[1])} ${n(s[2])} ${n(s[3])} ${n(s[4])} ${n(s[5])}`;
   return d + "Z";
 }
 export {

@@ -274,6 +274,10 @@ body.resizing * {
   border-radius: 8px;
 }
 
+.chat-row:hover:not(.selected) {
+  background: var(--hover);
+}
+
 .chat-row.selected {
   background: var(--selection-inactive);
 }
@@ -379,6 +383,11 @@ body.resizing * {
   width: 38px;
   margin-right: 10px;
   color: var(--label-2);
+}
+
+.pane-row:hover:not(.selected),
+.setting-row:hover:not(.selected) {
+  background: var(--hover);
 }
 
 .pane-row.selected,

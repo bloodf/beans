@@ -6,17 +6,19 @@
 name: Catalog
 
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: catalog-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   catalog:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       CATALOG_BASE_REF: ${{ github.base_ref || 'main' }}
     steps:

@@ -77,7 +77,17 @@ Give each worker exact scope and file ownership. State that concurrent work must
 
 ## Verify and propagate tooling
 
-Keep the existing Beans gates. `pnpm run check:docs`, `pnpm run check:catalog` and the same-repository PR test matrix remain applicable. Inspect the current workflow definitions before execution; a local tooling smoke does not replace hosted checks. Product homes, accounts, relays, signing inputs and deployments are not tooling fixtures.
+Validation workflows `test.yml`, `docs.yml` and `catalog.yml` run only on explicit `workflow_dispatch`. PRs and feature pushes do not start dependency installs, compilation, browser suites or platform matrices. The existing test commands, catalog validation, docs validation, signing checks and release environments remain intact. The other three workflows, Models sync, signed release and mobile submission, already require manual dispatch. There is no dedicated security workflow in this checkout; do not remove security checks, external GitHub App checks or review requirements.
+
+Use existing local dependencies for `pnpm run check:docs`, `pnpm run check:catalog`, applicable lint and affected unit tests. For CI/deployment policy changes, run `python3 -I -B scripts/test_vercel_ignore.py -v`, `shellcheck web/vercel-ignore.sh`, and the focused `scripts/release-pr-gates.test.ts` and `scripts/protoc-workflows.test.ts` suites when dependencies are present. Do not install dependencies or run full builds, E2E suites or hosted workflows without explicit authorization. A missing prerequisite is a verification gap, not a passing check. Manual hosted validation retains the full test matrix when an operator explicitly chooses it. Validation jobs have bounded timeouts and cancel older runs on the same ref.
+
+Local lint, affected units and independent objective review of the exact publication head remain required. Retain real branch protections and required status checks. Manual workflow job checks do not satisfy a PR ruleset's required status checks, even on the same head, according to GitHub's current documentation. Do not emit synthetic success statuses, replace a real check with an empty job, remove requirements or use an admin bypass. Central must resolve any mismatch between existing required events and manual-only validation before publication; an unresolved check blocks integration.
+
+At this patch's read-only inspection, the legacy protection endpoint for `bloodf/beans` main returned HTTP 404 `Branch not protected`, and the effective branch-rules endpoint returned `[]`. Central must review this live protection gap before allowing main deployments; this patch does not change settings. New live projects, effective rules, external checks and queued builds need central inspection. Local source does not prove containment.
+
+Publish only after central confirms live containment for old PR/branch configurations. The implementation agent returns a working diff without pushing, creating a PR, switching branches or deploying. Product work remains paused. Product homes, accounts, relays, signing inputs and deployments are not tooling fixtures.
+
+Official references: [manual workflows](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow) and [required check events and skipped workflows](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/collaborating-on-repositories-with-code-quality-features/troubleshooting-required-status-checks).
 
 Create one tooling PR against current Beans `main` and link it immediately to T3. Merge only after independent exact-head review and the real required checks pass. When waiting for hosted checks, use T3's PR watch and end the run; do not poll CI.
 

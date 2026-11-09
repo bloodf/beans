@@ -16,32 +16,16 @@ function evaluate(expression: string, github: object, env: object = {}) {
 }
 
 for (const { file, workflow } of workflows) {
-  test(`${file}: PRs targeting main and manual dispatch trigger validation`, () => {
-    expect(workflow.on).toEqual({ pull_request: { branches: ["main"] }, workflow_dispatch: null });
-  });
-
-  test(`${file}: any same-repository PR and manual dispatch allocate runners, forks do not`, () => {
-    for (const [name, job] of Object.entries(workflow.jobs) as [string, { if: string }][]) {
-      for (const [head, repo, expected] of [
-        ["release/1.0.15", "bloodf/beans", true],
-        ["release/integration/1.0.15", "bloodf/beans", true],
-        ["feature/chat", "bloodf/beans", true],
-        ["fleet/r20261014a-ci", "bloodf/beans", true],
-        ["main", "bloodf/beans", true],
-        ["release-fix", "bloodf/beans", true],
-        ["release/1.0.15", "contributor/beans", false],
-        ["feature/chat", "contributor/beans", false],
-      ] as const) {
-        const github = {
-          repository: "bloodf/beans",
-          event_name: "pull_request",
-          head_ref: head,
-          event: { pull_request: { head: { repo: { full_name: repo } } } },
-        };
-        expect(evaluate(job.if, github), `${file} ${name}: ${repo}:${head}`).toBe(expected);
-      }
-      // Dispatch has no pull_request payload; short-circuit admission must not dereference it.
-      expect(evaluate(job.if, { repository: "bloodf/beans", event_name: "workflow_dispatch", event: {} }), `${file} ${name}: dispatch`).toBe(true);
+  test(`${file}: only explicit manual dispatch allocates validation runners`, () => {
+    expect(workflow.on).toEqual({ workflow_dispatch: null });
+    expect(workflow.concurrency).toEqual({
+      group: `${file === "test.yml" ? "tests" : file.slice(0, -4)}-` + "${{ github.ref }}",
+      "cancel-in-progress": true,
+    });
+    for (const name of Object.keys(workflow.jobs)) {
+      const job = workflow.jobs[name];
+      expect(job["timeout-minutes"]).toBeGreaterThan(0);
+      expect(job["continue-on-error"]).toBeUndefined();
     }
   });
 }

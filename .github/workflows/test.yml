@@ -1,4 +1,4 @@
-# Runs the full test matrix on same-repository pull requests targeting main and manual dispatch: the Rust workspace on Linux,
+# Runs the full test matrix only on explicit manual dispatch: the Rust workspace on Linux,
 # where the relay's store suite runs on SQLite and on a Postgres service, and on macOS; the crates
 # a Windows Runner runs, on Windows; the macOS app's XCTest suite over the markdown crate it links;
 # the Windows and Linux app's page and Go side on Ubuntu, plus Go-only desktop builds and tests on
@@ -7,15 +7,13 @@
 name: Tests
 
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
 
-# A newer push to a pull request replaces the run still going for it.
+# A newer manual run on the same ref replaces the previous run.
 concurrency:
-  group: tests-${{ github.event.pull_request.number || github.sha }}
+  group: tests-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -23,9 +21,9 @@ env:
 
 jobs:
   release-source:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Release source fixtures
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
@@ -38,7 +36,6 @@ jobs:
       - run: pnpm exec vitest run --config vitest.config.ts scripts/release-eas.test.ts scripts/release-github.test.ts scripts/submit-eas.test.ts scripts/protoc-workflows.test.ts scripts/release-pr-gates.test.ts scripts/release-archive.test.ts
 
   rust-linux:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -103,7 +100,6 @@ jobs:
           done
 
   rust-macos:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (macOS)
     runs-on: macos-latest
     timeout-minutes: 45
@@ -140,7 +136,6 @@ jobs:
           done
 
   rust-windows:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Rust (Windows)
     # The crates a Windows Runner runs: the CLI, the agent, the model catalog, and provider
     # sign-in. There paths have drive letters, PATH splits on `;`, and commands run on pipes in
@@ -177,10 +172,10 @@ jobs:
       - run: cargo test --locked --no-fail-fast -p beans -p beans-agent -p beans-models -p beans-provider-auth -p beans-tls
 
   macos-app:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: macOS app
     # The app builds against the macOS 26 SDK.
     runs-on: macos-26
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -221,10 +216,10 @@ jobs:
       - run: sh macos/Tests/run-settings-layout.sh
 
   desktop:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Windows and Linux app
     # Playwright 1.59.1 has no Chromium build for ubuntu26.04; pin until the pin is raised.
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: desktop
@@ -251,9 +246,9 @@ jobs:
 
   # Go module of desktop/ on macOS (MyGo host compiles without the Solid page or mygo-cli).
   desktop-go-macos:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Desktop Go (macOS)
     runs-on: macos-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: desktop
@@ -268,9 +263,9 @@ jobs:
 
   # Go module of desktop/ on Windows (same compile/test surface as desktop-go-macos).
   desktop-go-windows:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Desktop Go (Windows)
     runs-on: windows-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: desktop
@@ -285,9 +280,9 @@ jobs:
       - run: go test -count=1 -v ./...
 
   mobile:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     name: Phone app
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: mobile

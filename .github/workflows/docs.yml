@@ -1,20 +1,22 @@
-# Checks the docs on same-repository pull requests targeting main and manual dispatch: each architecture doc within its budget,
+# Checks the docs only on explicit manual dispatch: each architecture doc within its budget,
 # every subject listed in ARCHITECTURE.md, and every relative link and #heading resolving.
 # scripts/check-docs.ts is the check; `pnpm run check:docs` runs it locally.
 name: Docs
 
 on:
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   docs:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v4

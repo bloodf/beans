@@ -94,7 +94,7 @@ pub struct Server {
 
 impl Server {
     pub fn tools(&self) -> Vec<rmcp::model::Tool> { self.tools.read().clone() }
-    fn is_closed(&self) -> bool { self.service.is_closed() || self.service.peer().is_transport_closed() }
+    pub fn is_closed(&self) -> bool { self.service.is_closed() || self.service.peer().is_transport_closed() }
 }
 
 pub struct Client {
@@ -120,6 +120,88 @@ impl rmcp::ClientHandler for Client {
             }
         });
     }
+
+}
+
+impl Server {
+    /// Ends the connection, and with a stdio server its process.
+    pub fn stop(&self) { self.service.cancellation_token().cancel(); }
+
+    /// Whether this is still the installed plugin's server: not one from before an update or a removal.
+    pub fn is_current(&self, app: &App) -> bool {
+        app.plugins.lock().unwrap().get(&self.plugin_id).is_some()
+            && self.admission.enter(app, &self.plugin_id).is_ok()
+    }
+
+    /// Waits up to ten seconds for a stopped server's transport to close.
+    pub async fn wait_stopped(&self) -> Result<(), String> {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !self.service.peer().is_transport_closed() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.map_err(|_| "The browser didn't close.".to_string())
+    }
+
+    /// A call Lorca makes itself (opening, closing, a screenshot), its error result as an error.
+    pub async fn browser_call(&self, name: &str, args: Value) -> Result<rmcp::model::CallToolResult, String> {
+        let mut params = CallToolRequestParams::default();
+        params.name = name.to_string().into();
+        params.arguments = args.as_object().cloned();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(120), self.service.peer().call_tool(params)).await
+            .map_err(|_| { self.stop(); "The browser didn't answer in time and was closed.".to_string() })?
+            .map_err(|e| e.to_string())?;
+        if result.is_error == Some(true) {
+            return Err(result.content.iter().filter_map(|block| match block { ContentBlock::Text(text) => Some(text.text.as_str()), _ => None }).collect::<Vec<_>>().join("\n"));
+        }
+        Ok(result)
+    }
+
+    /// Starts the browser if it isn't running yet and brings its current tab forward.
+    pub async fn open_visible(&self) -> Result<(), String> {
+        let tabs = self.browser_call("browser_tabs", json!({ "action": "list" })).await?;
+        // Playwright lists tabs as `- 0: (current) [title] (url)`; selecting one fronts it.
+        let current = tabs.content.iter().filter_map(|block| match block { ContentBlock::Text(text) => Some(text.text.as_str()), _ => None })
+            .flat_map(str::lines).find_map(|line| line.trim().strip_prefix("- ")?.split_once(": (current)")?.0.parse::<usize>().ok());
+        if let Some(current) = current {
+            self.browser_call("browser_tabs", json!({ "action": "select", "index": current })).await?;
+        }
+        Ok(())
+    }
+}
+
+/// A headed Browser server for one of a bot's profiles, a process of its own with the profile's
+/// folder. The plugin's shared headless server still answers what the catalog lists.
+pub async fn visible_browser(app: &Arc<App>, session_id: &str) -> Result<Arc<Server>, String> {
+    let (plugin, values) = {
+        let store = app.plugins.lock().unwrap();
+        (store.get(crate::browser::PLUGIN_ID).cloned().ok_or("Install the Browser plugin on this Runner first.")?, store.values(crate::browser::PLUGIN_ID))
+    };
+    let Some(ServerSpec::Stdio { command, args, env, cwd, timeout }) = plugin.manifest.servers.get("browser") else {
+        return Err("This Browser plugin doesn't run Playwright on the Runner, so its profiles can't open.".into());
+    };
+    // The profile's folder is the one Lorca gives it: a config, CDP, or extension override could
+    // attach it to another browser.
+    if args.iter().any(|arg| ["--config", "--cdp-endpoint", "--endpoint", "--extension", "--isolated", "--storage-state", "--user-data-dir", "--port"].iter().any(|flag| arg == flag || arg.starts_with(&format!("{flag}=")))) {
+        return Err("This Browser plugin sets its own profile or connection, so its profiles can't open.".into());
+    }
+    if env.keys().any(|key| matches!(key.as_str(), "PLAYWRIGHT_MCP_CONFIG" | "PLAYWRIGHT_MCP_CDP_ENDPOINT" | "PLAYWRIGHT_MCP_ENDPOINT" | "PLAYWRIGHT_MCP_CDP_HEADERS" | "PLAYWRIGHT_MCP_EXTENSION" | "PLAYWRIGHT_MCP_ISOLATED" | "PLAYWRIGHT_MCP_STORAGE_STATE" | "PLAYWRIGHT_MCP_PORT")) {
+        return Err("This Browser plugin sets its own profile or connection, so its profiles can't open.".into());
+    }
+    let dir = app.config.home.join("browser/profiles").join(session_id);
+    let output = app.config.home.join("browser/output").join(session_id);
+    std::fs::create_dir_all(&output).map_err(|e| e.to_string())?;
+    crate::config::set_private(output.parent().unwrap()).map_err(|e| e.to_string())?;
+    crate::config::set_private(&output).map_err(|e| e.to_string())?;
+    let mut args: Vec<String> = args.iter().filter(|arg| *arg != "--headless" && !arg.starts_with("--headless=")).cloned().collect();
+    args.extend(["--user-data-dir".into(), dir.display().to_string(), "--output-dir".into(), output.display().to_string(), "--image-responses".into(), "allow".into()]);
+    let mut env = env.clone();
+    env.insert("PLAYWRIGHT_MCP_HEADLESS".into(), "false".into());
+    let spec = ServerSpec::Stdio { command: command.clone(), args, env, cwd: cwd.clone(), timeout: *timeout };
+    let values = template_values(&plugin, values).await;
+    let admission = Admission::capture(app, crate::browser::PLUGIN_ID)?;
+    let server = tokio::time::timeout(CONNECT_TIMEOUT, connect(app, &plugin, "browser", &spec, &values, None, admission)).await.map_err(|_| "The Browser server did not start in time.".to_string())??;
+    save_catalog(app, &plugin.manifest.id, "browser", SavedServer { instructions: server.instructions.clone(), tools: server.tools(), resources: server.resources });
+    Ok(Arc::new(server))
 }
 
 /// Maximum pages read from a server's changing tool list.
@@ -186,7 +268,7 @@ impl Pool {
         self.servers.lock().unwrap().retain(|key, _| !key.starts_with(&format!("{plugin_id}/")));
     }
 
-    fn generation(&self, plugin_id: &str) -> u64 {
+    pub(super) fn generation(&self, plugin_id: &str) -> u64 {
         self.generations.lock().unwrap().get(plugin_id).copied().unwrap_or_default()
     }
 
@@ -291,6 +373,9 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
             // Windows as files the way a terminal finds them (`npx` is npm's `npx.cmd`).
             let command = expand_home(&fill(command, values));
             let mut cmd = beans_agent::login_shell::command(&command).await;
+            if plugin.manifest.id == crate::browser::PLUGIN_ID && args.iter().any(|arg| arg == "--user-data-dir") {
+                for key in ["PLAYWRIGHT_MCP_CONFIG", "PLAYWRIGHT_MCP_CDP_ENDPOINT", "PLAYWRIGHT_MCP_ENDPOINT", "PLAYWRIGHT_MCP_CDP_HEADERS", "PLAYWRIGHT_MCP_EXTENSION", "PLAYWRIGHT_MCP_ISOLATED", "PLAYWRIGHT_MCP_STORAGE_STATE", "PLAYWRIGHT_MCP_PORT"] { cmd.env_remove(key); }
+            }
             let (transport, stderr) = {
             let _guard = admission.enter(app, &plugin.manifest.id)?;
             cmd.args(args.iter().map(|a| expand_home(&fill(a, values))));
@@ -325,6 +410,19 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                 }
             }
         }
+        ServerSpec::Builtin { service: service_name, auth: builtin_auth, .. } => {
+            // Telegram's server runs only for Telegram's accounts, and Slack's for Slack's.
+            let service = super::builtin::service(service_name)
+                .filter(|service| service.name() == plugin.service_id())
+                .ok_or_else(|| format!("{} needs a newer Lorca on this Runner.", plugin.manifest.name))?;
+            // One that calls the service with the account's sign-in waits for it, as an HTTP
+            // server does. Its calls refresh the token themselves (`service_token`).
+            if matches!(builtin_auth, Some(AuthSpec::Oauth { .. })) && app.plugins.lock().unwrap().sign_in_secret(&plugin.manifest.id, "oauth", name).is_none() {
+                return Err(format!("Sign in to {} first.", plugin.manifest.name));
+            }
+            let pipe = super::builtin::start(app, &plugin.manifest.id, service);
+            client().serve(pipe).await.map_err(|e| format!("{} did not start: {e}", plugin.manifest.name))?
+        }
         ServerSpec::Http { url, headers, auth: auth_spec, .. } => {
             // `${VAR}` in an mcp.json server's URL is the environment's.
             let url = &fill(url, values);
@@ -350,7 +448,18 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                     serve_retrying(&client, || StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.clone())).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
                 }
                 (None, Some(oauth @ AuthSpec::Oauth { .. }), Some(stored)) => {
-                    if stored["device_flow"].as_bool() == Some(true) {
+                    if stored["native_flow"].as_bool() == Some(true) {
+                        let token_endpoint = match oauth { AuthSpec::Oauth { token_endpoint: Some(endpoint), .. } => endpoint, _ => return Err("The saved sign-in cannot be refreshed. Sign in again.".into()) };
+                        let refreshed = super::oauth::refresh(&app.http, token_endpoint, &stored).await?;
+                        let _guard = admission.enter(app, &plugin.manifest.id)?;
+                        if let Some(refreshed) = &refreshed { super::set_oauth_at_generation(app, &plugin.manifest.id, name, refreshed.clone(), admission.generation)?; }
+                        drop(_guard);
+                        let saved = refreshed.as_ref().unwrap_or(&stored);
+                        let token = saved["tokens"]["access_token"].as_str().ok_or("The saved sign-in has no access token")?.to_string();
+                        bearer_expires_at = token_expires_at(saved);
+                        let config = config.auth_header(token);
+                        serve_retrying(&client, || StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.clone())).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
+                    } else if stored["device_flow"].as_bool() == Some(true) {
                         // GitHub's refresh endpoint has its own contract: no `scope` or MCP
                         // `resource`. Refresh it here, then give the transport a plain bearer.
                         let token_endpoint = match oauth {
@@ -369,7 +478,7 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                         let restored = if refreshable { restore_manager(app, url, &stored, metadata_url).await } else { Err("no refresh token".into()) };
                         match restored {
                             Ok(manager) => {
-                                let signed_in = AuthClient::new(app.mcp.http.clone(), manager);
+                                let signed_in = AuthClient::new(crate::connector_limits::LimitedHttpClient::new(app, app.mcp.http.clone(), &plugin.manifest.id), manager);
                                 auth = Some(signed_in.auth_manager.clone());
                                 let transport = || StreamableHttpClientTransport::with_client(signed_in.clone(), config.clone());
                                 serve_retrying(&client, transport).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
@@ -509,6 +618,45 @@ fn transient(error: &rmcp::service::ClientInitializeError) -> bool {
     }
     text.split("HTTP ").skip(1).filter_map(|rest| rest.get(..3)?.parse::<u16>().ok()).any(passing) || text.contains("error sending request")
 }
+
+/// Why a remote server did not connect, naming it by its origin alone: the state goes into the
+/// machine blob, and a URL's path or query can hold a key (Zapier's does).
+fn describe_connect_error(error: &str, url: &str) -> String {
+    let shown = shown_url(url);
+    let error = match reqwest::Url::parse(url) {
+        Ok(parsed) => error.replace(parsed.as_str(), &shown).replace(url, &shown),
+        Err(_) => error.replace(url, &shown),
+    };
+    let lower = error.to_lowercase();
+    if error.contains("401") || lower.contains("unauthorized") || lower.contains("auth required") {
+        format!("{shown} refused the credentials. Sign in again.")
+    } else if reqwest::Url::parse(url).is_ok_and(|parsed| parsed.path().trim_end_matches('/').ends_with("/sse")) {
+        // The older HTTP+SSE transport, which rmcp's client does not speak.
+        format!("Could not connect to {shown}: {error}. Lorca speaks MCP's streamable HTTP; a server that offers it too usually has it at /mcp rather than /sse.")
+    } else {
+        format!("Could not connect to {shown}: {error}")
+    }
+}
+
+fn authorization_expired(error: &str) -> bool {
+    let error = error.to_lowercase();
+    ["invalid_token", "invalid_grant", "token_expired", "token_revoked", "invalid_auth", "not_authed", "bad_refresh_token", "401 unauthorized", "authentication_required", "sign-in expired", "refused the credentials", "another authorization server"].iter().any(|marker| error.contains(marker))
+}
+
+/// `https://mcp.example.com` for any URL there.
+fn shown_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => match (parsed.host_str(), parsed.port()) {
+            (Some(host), Some(port)) => format!("{}://{host}:{port}", parsed.scheme()),
+            (Some(host), None) => format!("{}://{host}", parsed.scheme()),
+            _ => "the server".into(),
+        },
+        Err(_) => "the server".into(),
+    }
+}
+
+/// The `WWW-Authenticate` challenge of a server that answered the handshake with a 401, or an
+/// empty one when it gave none: the server wants a sign-in.
 fn auth_challenge(error: &rmcp::service::ClientInitializeError) -> Option<String> {
     use rmcp::transport::streamable_http_client::StreamableHttpError;
     if let rmcp::service::ClientInitializeError::TransportError { error, .. } = error {
@@ -564,7 +712,14 @@ fn expand_home(path: &str) -> String {
     }
 }
 
-fn tidy_tokens(tokens: &Value) -> Value {
+/// The authorization server's metadata from the document a server's sign-in names, taken as it
+/// is: for a server that advertises the wrong authorization server, or none.
+
+
+/// A token response without the optional fields a server sent empty or null, as some send
+/// `"scope": ""` for a token with no scope. Kept, an empty scope is asked for again at every
+/// refresh.
+pub(super) fn tidy_tokens(tokens: &Value) -> Value {
     let mut tokens = tokens.clone();
     if let Some(fields) = tokens.as_object_mut() {
         fields.retain(|key, value| !matches!(key.as_str(), "scope" | "refresh_token" | "id_token" | "expires_in" | "refresh_token_expires_in") || !(value.is_null() || value.as_str().is_some_and(|s| s.trim().is_empty())));
@@ -590,6 +745,31 @@ async fn restore_manager(app: &Arc<App>, url: &str, stored: &Value, metadata_url
     let mut state = OAuthState::new(url, Some(app.mcp.http.clone())).await.map_err(|e| e.to_string())?;
     state.set_credentials(client_id, tokens).await.map_err(|e| format!("Restoring the sign-in: {e}"))?;
     state.into_authorization_manager().ok_or_else(|| "Restoring the sign-in".to_string())
+}
+
+/// A native sign-in's access token for the service's own API, refreshed and saved first when it
+/// is about to expire, as a connection refreshes it: what a Gmail draft card's Send sends with.
+pub async fn service_token(app: &Arc<App>, plugin_id: &str, server: &str) -> Result<String, String> {
+    let admission = Admission::capture(app, plugin_id)?;
+    let generation = admission.generation;
+    let (stored, token_endpoint) = {
+        let store = app.plugins.lock().unwrap();
+        let plugin = store.get(plugin_id).ok_or("The account was removed.")?;
+        let Some(AuthSpec::Oauth { token_endpoint: Some(endpoint), .. }) = plugin.manifest.servers.get(server).and_then(ServerSpec::oauth) else {
+            return Err("The account has no sign-in to send with.".into());
+        };
+        (store.sign_in_secret(plugin_id, "oauth", server).ok_or("Sign in to the account again.")?, endpoint.clone())
+    };
+    if stored["native_flow"].as_bool() != Some(true) {
+        return Err("Sign in to the account again.".into());
+    }
+    let refreshed = super::oauth::refresh(&app.http, &token_endpoint, &stored).await?;
+    if let Some(refreshed) = &refreshed {
+        super::set_oauth_at_generation(app, plugin_id, server, refreshed.clone(), generation)?;
+    }
+    let _guard = admission.enter(app, plugin_id)?;
+    let saved = refreshed.as_ref().unwrap_or(&stored);
+    saved["tokens"]["access_token"].as_str().map(String::from).ok_or_else(|| "The saved sign-in has no access token".into())
 }
 
 #[derive(Debug)]
@@ -694,7 +874,7 @@ async fn device_bearer(app: &Arc<App>, plugin_id: &str, server: &str, name: &str
     let (bearer, refreshed) = refresh_device_bearer(&app.http, token_endpoint, name, stored).await?;
     let _admission = admission.enter(app, plugin_id)?;
     if let Some(refreshed) = refreshed {
-        super::set_oauth(app, plugin_id, server, Some(refreshed))?;
+        super::set_oauth_at_generation(app, plugin_id, server, refreshed, admission.generation)?;
     }
     Ok(bearer)
 }
@@ -748,13 +928,15 @@ impl OAuthActor {
 /// A browser sign-in another Device finishes: the authorization this Runner holds until that
 /// Device sends back where the browser landed, and what to update when it ends.
 struct Pending {
-    state: OAuthState,
+    state: BrowserState,
     server: String,
     name: String,
     card: Option<(String, String)>,
     admission: Admission,
     actor: OAuthActor,
 }
+
+enum BrowserState { Mcp(OAuthState), Native(super::oauth::Pending) }
 
 /// The OAuth server of a plugin, when it has one.
 pub fn oauth_server(app: &App, plugin_id: &str) -> Option<String> {
@@ -764,7 +946,7 @@ pub fn oauth_server(app: &App, plugin_id: &str) -> Option<String> {
         .manifest
         .servers
         .iter()
-        .find(|(_, spec)| matches!(spec, ServerSpec::Http { auth: Some(AuthSpec::Oauth { .. }), .. }))
+        .find(|(_, spec)| spec.oauth().is_some())
         .map(|(name, _)| name.clone())
 }
 
@@ -824,6 +1006,7 @@ pub fn post_sign_in_card(app: &Arc<App>, chat_id: &str, bot_id: &str, plugin_id:
             path: None,
             link: None,
             code: None,
+            secret: None,
         },
     );
     app.upsert_message(message.clone(), true);
@@ -863,8 +1046,9 @@ async fn connect_oauth_authorized(app: &Arc<App>, plugin_id: &str, server: &str,
     };
     let own = app.plugins.lock().unwrap().values(plugin_id);
     let values = template_values(&plugin, own).await;
-    let (url, scopes, client, device) = match &spec {
-        ServerSpec::Http { url, auth: Some(AuthSpec::Oauth { scopes, token_variable, client_id_variable, client_secret_variable, client_id, client_secret, device_authorization_endpoint, token_endpoint, client_name, callback_port, callback_url, auth_server_metadata_url, .. }), .. } => {
+    let (url, scopes, client, device) = match spec.oauth() {
+        Some(AuthSpec::Oauth { scopes, token_variable, client_id_variable, client_secret_variable, client_id, client_secret, device_authorization_endpoint, token_endpoint, client_name, callback_port, callback_url, auth_server_metadata_url, authorization_endpoint, authorization_params, .. }) => {
+            let url = match &spec { ServerSpec::Http { url, .. } => url.as_str(), _ => "" };
             let values = &values;
             let set = |fixed: &Option<String>, variable: &Option<String>| {
                 fixed.as_deref().map(|v| fill(v, &values)).filter(|v| !v.trim().is_empty()).or_else(|| variable.as_ref().and_then(|v| values.get(v).cloned())).filter(|v| !v.trim().is_empty())
@@ -879,6 +1063,9 @@ async fn connect_oauth_authorized(app: &Arc<App>, plugin_id: &str, server: &str,
                 callback_port: *callback_port,
                 callback_url: callback_url.clone(),
                 metadata_url: auth_server_metadata_url.clone(),
+                authorization_endpoint: authorization_endpoint.clone(),
+                token_endpoint: token_endpoint.clone(),
+                authorization_params: authorization_params.clone(),
             };
             let device = match (device_authorization_endpoint, token_endpoint, &hint.id) {
                 (Some(device_endpoint), Some(token_endpoint), Some(_)) => Some((device_endpoint.clone(), token_endpoint.clone())),
@@ -987,7 +1174,7 @@ pub(super) async fn finish_sign_in_as(app: &Arc<App>, plugin_id: &str, id: &str,
     let finisher = OAuthActor::capture(app, requested_by)?;
     let pending = take_sign_in(app, plugin_id, id).ok_or("That sign-in is over. Start it again.")?;
     pending.actor.check(app)?;
-    let flow = complete_sign_in(pending.state, callback, &pending.name).await;
+    let flow = complete_sign_in(app, pending.state, callback, &pending.name).await;
     // Both the initiating and finishing Device must retain authority at commit.
     finish_oauth(app, plugin_id, &pending.server, &pending.name, pending.card, flow, pending.admission, &pending.actor, &finisher)?;
     Ok(json!({ "signed_in": true }))
@@ -1044,6 +1231,7 @@ fn finish_oauth(app: &Arc<App>, plugin_id: &str, server: &str, name: &str, card:
             actor.check(app)?;
             finisher.check(app)?;
             settle_sign_in_cards(app, plugin_id, name);
+            Ok(())
         }
         Err(error) => {
             if !is_ready(app, plugin_id) {
@@ -1056,6 +1244,7 @@ fn finish_oauth(app: &Arc<App>, plugin_id: &str, server: &str, name: &str, card:
                 finisher.check(app)?;
                 set_card_while(app, &chat_id, &message_id, "allowed", "failed", format!("Sign-in failed: {error}"));
             }
+            Err(error)
         }
     }
     result
@@ -1227,12 +1416,25 @@ struct ClientHint {
     callback_url: Option<String>,
     /// The authorization server's metadata document, in place of discovery.
     metadata_url: Option<String>,
+    authorization_endpoint: Option<String>,
+    token_endpoint: Option<String>,
+    authorization_params: BTreeMap<String, String>,
 }
 
 impl ClientHint {
     /// A redirect the client was registered with, which only this Runner's own loopback can take.
     fn has_fixed_redirect(&self) -> bool {
         self.callback_port.is_some() || self.callback_url.is_some()
+    }
+
+    fn matches_redirect(&self, redirect: &str) -> bool {
+        let Ok(url) = reqwest::Url::parse(redirect) else { return false };
+        if let Some(fixed) = &self.callback_url {
+            let Ok(expected) = reqwest::Url::parse(fixed) else { return false };
+            return url.scheme() == expected.scheme() && url.host_str() == expected.host_str() && url.path() == expected.path()
+                && expected.port().or(self.callback_port).is_none_or(|port| url.port() == Some(port));
+        }
+        self.callback_port.is_none_or(|port| url.port() == Some(port))
     }
 }
 
@@ -1270,7 +1472,13 @@ async fn challenge_of(app: &Arc<App>, url: &str) -> Option<String> {
 /// (registered on the fly as a native app, or the preregistered one), PKCE. Answers with what
 /// finishes it and the page to open, for the browser to come back to `redirect`. The server
 /// has `sign_in::SETUP_TIMEOUT` for all of it, so a Device waiting on the start hears how it went.
-async fn begin_sign_in(app: &Arc<App>, url: &str, scopes: &[String], name: &str, client: &ClientHint, redirect: String) -> Result<(OAuthState, String), String> {
+async fn begin_sign_in(app: &Arc<App>, url: &str, scopes: &[String], name: &str, client: &ClientHint, redirect: String) -> Result<(BrowserState, String), String> {
+    if let Some(endpoint) = &client.authorization_endpoint {
+        let id = client.id.as_deref().ok_or_else(|| client.no_registration_advice(name))?;
+        let token = client.token_endpoint.as_deref().ok_or("The integration has no token endpoint.")?;
+        let (pending, page) = super::oauth::Pending::begin(endpoint, token, id, client.secret.as_deref(), &redirect, scopes, &client.authorization_params)?;
+        return Ok((BrowserState::Native(pending), page));
+    }
     let setup = async {
         let mut state = OAuthState::new(url, Some(app.mcp.http.clone())).await.map_err(|e| format!("{name}: {e}"))?;
         let mut request = AuthorizationRequest::new(redirect).with_scopes(scopes.iter().cloned()).with_client_name(client.name.as_deref().unwrap_or("Beans")).with_application_type("native");
@@ -1296,13 +1504,17 @@ async fn begin_sign_in(app: &Arc<App>, url: &str, scopes: &[String], name: &str,
             state.start_authorization(request).await.map_err(refused)?;
         }
         let page = state.get_authorization_url().await.map_err(|e| e.to_string())?;
-        Ok((state, page))
+        Ok((BrowserState::Mcp(state), page))
     };
     tokio::time::timeout(super::sign_in::SETUP_TIMEOUT, setup).await.map_err(|_| format!("{name} did not answer the sign-in in time."))?
 }
 
 /// Finishes an authorization with where the browser landed: its code for the tokens.
-async fn complete_sign_in(mut state: OAuthState, callback: &str, name: &str) -> Result<Value, String> {
+async fn complete_sign_in(app: &Arc<App>, state: BrowserState, callback: &str, name: &str) -> Result<Value, String> {
+    let mut state = match state {
+        BrowserState::Native(pending) => return pending.finish(&app.http, callback).await,
+        BrowserState::Mcp(state) => state,
+    };
     if super::sign_in::denied(callback) {
         return Err("The sign-in was denied.".into());
     }
@@ -1322,7 +1534,7 @@ async fn sign_in(app: &Arc<App>, plugin_id: &str, admission: Admission, url: &st
     let (state, page) = begin_sign_in(app, url, scopes, name, client, callback.redirect_uri()).await?;
     { let _guard = admission.enter(app, plugin_id)?; open_browser(app, &page)?; }
     let landed = callback.wait(name, super::sign_in::TIMEOUT).await?;
-    complete_sign_in(state, &landed, name).await
+    complete_sign_in(app, state, &landed, name).await
 }
 
 /// Opens a sign-in page in this computer's browser. `BEANS_OAUTH_NO_BROWSER=1` fetches it
@@ -1459,6 +1671,25 @@ pub struct PluginTool {
     incarnation: u64,
 }
 
+/// Resolves the exact original tool on its original server from the live connection for a
+/// durable review. A cached tool name never supplies authority or execution preconditions, and
+/// the call checks the bot's Access in the originating chat again right before it goes out, as
+/// a turn's calls do.
+pub async fn reviewed_tool(app: &Arc<App>, bot: &Bot, chat_id: &str, plugin_id: &str, server_name: &str, name: &str, cancel: &CancellationToken) -> Result<Arc<dyn Tool>, String> {
+    let plugin = app.plugins.lock().unwrap().get(plugin_id).cloned().ok_or("The reviewed connection was removed.")?;
+    if plugin.manifest.tools.hides(name) { return Err("The reviewed tool is hidden.".into()); }
+    let server = tokio::select! {
+        result = app.mcp.server(app, plugin_id, server_name) => result?,
+        _ = cancel.cancelled() => return Err("Stopped".into()),
+    };
+    let tool = server.tools().into_iter().find(|tool| tool.name.as_ref() == name).ok_or("The server no longer offers the reviewed tool.")?;
+    let description = tool.description.as_deref().unwrap_or("").to_string();
+    Ok(Arc::new(PluginTool { app: app.clone(), budget: crate::budgets::current(), plugin_id: plugin_id.into(), plugin_name: plugin.display_name(),
+        server_name: server_name.into(), tool, name: tool_name(plugin_id, name), description, read_only: false, kind: ToolKind::Call,
+        timeout: plugin.manifest.servers.get(server_name).map(ServerSpec::call_timeout).unwrap_or(super::CALL_TIMEOUT),
+        policy_context: Some((bot.clone(), chat_id.into())) }))
+}
+
 /// What calling a plugin tool asks its server: one of its own tools, or its resources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolKind {
@@ -1556,7 +1787,7 @@ impl PluginCatalog {
     }
     /// Discovery, connection, and listing use the current bot policy, not its turn-start copy.
     fn permits_plugin(&self, plugin_id: &str) -> bool {
-        self.bot_id.as_deref().is_none_or(|id| self.app.bot(id).is_some_and(|bot| bot.capabilities.permits("", Some(plugin_id))))
+        self.allows(plugin_id) && self.bot_id.as_deref().is_none_or(|id| self.app.bot(id).is_some_and(|bot| bot.capabilities.permits("", Some(plugin_id))))
     }
 
 
@@ -1588,10 +1819,11 @@ impl PluginCatalog {
             let read_only = kind != ToolKind::Call || tool.annotations.as_ref().and_then(|annotations| annotations.read_only_hint).unwrap_or(false)
                 || plugin.manifest.tools.readonly.iter().any(|pattern| pattern_matches(pattern, &original_name));
             let executable = Arc::new(PluginTool {
+                budget: self.budget.clone(),
                 app: self.app.clone(),
                 bot_id: self.bot_id.clone(),
                 plugin_id: plugin.manifest.id.clone(),
-                plugin_name: plugin.manifest.name.clone(),
+                plugin_name: plugin.display_name(),
                 server_name: server_name.to_string(),
                 tool: tool.clone(),
                 name: name.clone(),
@@ -1608,7 +1840,7 @@ impl PluginCatalog {
                     name,
                     original_name,
                     plugin_id: plugin.manifest.id.clone(),
-                    plugin_name: plugin.manifest.name.clone(),
+                    plugin_name: plugin.display_name(),
                     server_name: server_name.to_string(),
                     description: utf8_prefix(&description, MAX_SEARCH_INDEX_DESCRIPTION_BYTES).to_string(),
                     search_schema: utf8_prefix(&raw_search_schema, MAX_SEARCH_SCHEMA_BYTES).to_string(),
@@ -1628,7 +1860,7 @@ impl PluginCatalog {
             return Vec::new();
         }
         let status = self.app.plugins.lock().unwrap().status(&plugin.manifest.id);
-        if let Some(status) = status.filter(|status| status.state == "needs_setup" || status.state == "needs_auth") {
+        if let Some(status) = status.filter(|status| matches!(status.state.as_str(), "needs_setup" | "needs_auth" | "insufficient_access")) {
             return vec![status.detail];
         }
         let mut problems = Vec::new();
@@ -1652,9 +1884,23 @@ impl PluginCatalog {
         problems
     }
 
+    /// Whether the bot whose turn this is may use the plugin now. A catalog with no bot, for
+    /// a look at what is installed, takes them all.
+    fn allows(&self, plugin_id: &str) -> bool {
+        let Some((bot, _)) = &self.policy_context else { return true };
+        self.app.bot(&bot.id).is_some_and(|bot| bot.permissions.as_ref().is_none_or(|policy| policy.allows_connection(plugin_id)))
+    }
+
+    /// The installed plugins this catalog offers: those the bot may use.
+    fn installed(&self) -> Vec<Installed> {
+        self.app.plugins.lock().unwrap().installed().iter().filter(|plugin| self.allows(&plugin.manifest.id)).cloned().collect()
+    }
+
     fn plugin_tool(&self, name: &str) -> Option<Arc<PluginTool>> {
         self.state.lock().unwrap().tools.get(name).map(|tool| tool.tool.clone())
     }
+
+    pub fn is_plugin_tool(&self, name: &str) -> bool { self.plugin_tool(name).is_some() }
 
     /// The plugin a tool belongs to, by name, for the working row's "Using GitHub…".
     pub fn plugin_name(&self, tool_name: &str) -> Option<String> {
@@ -1684,13 +1930,16 @@ impl PluginCatalog {
 /// turn to turn.
 fn plugin_group(app: &App, plugin: &Installed, saved: &[Offered]) -> PluginGroup {
     let manifest = &plugin.manifest;
-    let mut description = manifest.name.clone();
+    let mut description = plugin.display_name();
+    if let Some(service) = &plugin.service_id {
+        description.push_str(&format!(" (service {service}, account id {}). Use this namespace to explicitly select this account; ask the user when the intended account is unclear.", manifest.id));
+    }
     if let Some(about) = manifest.description.lines().map(str::trim).find(|line| !line.is_empty()) {
         description.push_str(&format!(": {about}"));
     }
     let status = app.plugins.lock().unwrap().status(&manifest.id);
     match status.as_ref().map(|status| status.state.as_str()) {
-        Some("needs_auth") => description.push_str("\nNeeds a sign-in before its tools work: call connect_plugin."),
+        Some("needs_auth" | "insufficient_access") => description.push_str("\nNeeds a sign-in before its tools work: call connect_plugin with this account id."),
         Some("needs_setup") => description.push_str(&format!("\nNot set up yet ({}): the user sets it up in the plugin's settings.", status.map(|status| status.detail).unwrap_or_default())),
         _ => {}
     }
@@ -1803,6 +2052,11 @@ pub fn turn_catalog_for_bot(app: &Arc<App>, local: Vec<Arc<dyn Tool>>, bot_id: &
     Arc::new(PluginCatalog::new(app.clone(), local, Some(bot_id.to_string())))
 }
 
+/// Execution catalogs bind every MCP call to the bot and chat for a final policy check.
+pub fn bot_catalog(app: &Arc<App>, bot: &Bot, chat_id: &str, local: Vec<Arc<dyn Tool>>) -> Arc<PluginCatalog> {
+    Arc::new(PluginCatalog::for_context(app.clone(), local, Some((bot.clone(), chat_id.into()))))
+}
+
 /// The installed plugins as the system prompt names them.
 pub fn plugin_briefs(app: &App, bot_id: Option<&str>) -> Vec<PluginBrief> {
     let policy = bot_id.map(|id| app.bot(id).map(|bot| bot.capabilities));
@@ -1813,7 +2067,7 @@ pub fn plugin_briefs(app: &App, bot_id: Option<&str>) -> Vec<PluginBrief> {
             let status = store.status(&plugin.manifest.id);
             PluginBrief {
                 id: plugin.manifest.id.clone(),
-                name: plugin.manifest.name.clone(),
+                name: plugin.display_name(),
                 state: status.as_ref().map(|status| status.state.clone()).unwrap_or_else(|| "ready".into()),
                 detail: status.map(|status| status.detail).unwrap_or_default(),
                 skills: plugin
@@ -1848,7 +2102,7 @@ pub struct PluginBrief {
 enum Access {
     ReadOnly,
     /// It may change things. `description` is its live server's, for the review.
-    Changes { description: String },
+    Changes { description: String, capability: crate::permissions::Capability },
     Stopped,
 }
 
@@ -1875,7 +2129,12 @@ async fn access(app: &Arc<App>, tool: &PluginTool, cancel: &CancellationToken) -
     if live_tool.as_ref().and_then(|live| live.annotations.as_ref()).and_then(|annotations| annotations.read_only_hint) == Some(true) {
         return Access::ReadOnly;
     }
-    Access::Changes { description: live_tool.and_then(|live| live.description.map(|description| description.to_string())).unwrap_or_default() }
+    let draft = app.plugins.lock().unwrap().get(&tool.plugin_id)
+        .is_some_and(|plugin| plugin.manifest.tools.draft.iter().any(|pattern| pattern_matches(pattern, &name)));
+    Access::Changes {
+        description: live_tool.and_then(|live| live.description.map(|description| description.to_string())).unwrap_or_default(),
+        capability: if draft { crate::permissions::Capability::Draft } else { crate::permissions::Capability::Write },
+    }
 }
 
 /// Whether a script's call to `name` reaches a plugin tool that only reads (see `access`).
@@ -1884,6 +2143,29 @@ pub async fn is_read_only(app: &Arc<App>, catalog: &PluginCatalog, name: &str, c
         Some(tool) => matches!(access(app, &tool, cancel).await, Access::ReadOnly),
         None => false,
     }
+}
+
+async fn authorize_plugin(app: &Arc<App>, bot: &Bot, tool: &PluginTool, cancel: &CancellationToken) -> Result<(), crate::permissions::AccessDenied> {
+    use crate::permissions::{self, Capability};
+    let name = tool.tool.name.as_ref();
+    permissions::check_connection(app, bot, &tool.plugin_id, name, None)?;
+    let capability = match access(app, tool, cancel).await {
+        Access::ReadOnly => Capability::Read,
+        Access::Changes { capability, .. } => capability,
+        Access::Stopped => {
+            return Err(permissions::AccessDenied { tool: name.into(), connection_id: Some(tool.plugin_id.clone()), capability: None, reason: "the call was stopped".into(), grantable: false })
+        }
+    };
+    permissions::check_connection(app, bot, &tool.plugin_id, name, Some(capability))
+}
+
+/// The bot's Access for a script's call by name, with the live or trusted classification of
+/// what the tool does: a routine check's.
+pub async fn authorize_catalog_tool(app: &Arc<App>, catalog: &PluginCatalog, bot: &Bot, name: &str, cancel: &CancellationToken) -> Result<(), crate::permissions::AccessDenied> {
+    let tool = catalog.plugin_tool(name).ok_or_else(|| crate::permissions::AccessDenied {
+        tool: name.into(), connection_id: None, capability: None, reason: "the tool is no longer available".into(), grantable: false,
+    })?;
+    authorize_plugin(app, bot, &tool, cancel).await
 }
 
 /// Auto-review, and the user's answer on a card when it asks, for a plugin call a script makes:
@@ -1904,18 +2186,47 @@ pub async fn review_call(
         return Some(crate::local_review::blocked(format!("{} is not permitted for this bot.", ctx.tool_call.name)));
     }
     let name = tool.tool.name.to_string();
-    let review_description = match access(app, &tool, ctx.cancel).await {
-        Access::ReadOnly => return None,
+    if let Err(denied) = crate::permissions::check_connection(app, bot, &tool.plugin_id, &name, None) {
+        return Some(crate::permissions::refuse(app, chat_id, bot, denied));
+    }
+    let (capability, review_description) = match access(app, &tool, ctx.cancel).await {
+        Access::ReadOnly => (crate::permissions::Capability::Read, String::new()),
         Access::Stopped => return Some(crate::local_review::blocked("Stopped".into())),
-        Access::Changes { description } => description,
+        Access::Changes { description, capability } => (capability, description),
     };
+    if let Err(denied) = crate::permissions::check_connection(app, bot, &tool.plugin_id, &name, Some(capability)) {
+        return Some(crate::permissions::refuse(app, chat_id, bot, denied));
+    }
+    if capability == crate::permissions::Capability::Read { return None; }
+    // An email or Slack message the bot writes in a chat waits as a draft for the user to send,
+    // who reviews it on its card, so Auto-review does not judge it.
+    if !unattended && crate::permissions::drafts_messages(bot) {
+        let message = app.plugins.lock().unwrap().get(&tool.plugin_id).and_then(|plugin| plugin.manifest.tools.message(&name).cloned());
+        if let Some(message) = message {
+            let names = (tool.plugin_id.as_str(), tool.server_name.as_str(), tool.plugin_name.as_str());
+            return Some(crate::drafts::stage(app, bot, chat_id, trigger, &ctx.tool_call.id, names, &name, &message, ctx.args, ctx.cancel).await);
+        }
+    }
     // The script the call comes from says what the whole batch is for.
     let script = ctx.parent.filter(|parent| parent.name == codemode::CODEMODE_TOOL_NAME).and_then(|parent| parent.arguments["code"].as_str());
     let outcome = super::review::decide(app, bot, chat_id, trigger, &tool.plugin_id, &tool.plugin_name, &name, &review_description, ctx.args, script, ctx.cancel).await;
-    let super::review::Outcome::Ask { reason, .. } = outcome else { return None };
+    let reason = match outcome {
+        super::review::Outcome::Allow => return None,
+        // The bot reads why and finds another way, or asks the user in the chat.
+        super::review::Outcome::Held { note, .. } if !unattended => return Some(crate::local_review::blocked(note)),
+        super::review::Outcome::Held { reason, .. } => Some(reason),
+        super::review::Outcome::Ask { reason, .. } => reason,
+    };
     if unattended {
+        let staged = crate::review_execution::stage_call(app, bot, chat_id, trigger, &ctx.tool_call.id,
+            crate::review_queue::ReviewPayload::Plugin { plugin_id: tool.plugin_id.clone(), server_name: tool.server_name.clone(), tool: name.clone(), arguments: ctx.args.clone() },
+            crate::review_queue::ReviewTarget { account: tool.plugin_name.clone(), resource: call_summary(&name, ctx.args) }, reason.as_deref(), ctx.cancel).await;
+        let status = match staged {
+            Ok(item) => format!("Staged review {} (version {}). The user can edit and approve it later; the exact call resumes on this Runner. Do not retry it now.", item.id, item.version),
+            Err(error) => format!("Could not stage the action for review: {error}. Report the proposed action."),
+        };
         return Some(crate::local_review::blocked(format!(
-            "{name} needs the user's permission ({}), and nobody is here to give it. Report what you would do; the user can add an Auto-review rule allowing it.",
+            "{name} needs the user's permission ({}). {status}",
             reason.as_deref().unwrap_or("Auto-review is off, so every change asks")
         )));
     }
@@ -2125,9 +2436,25 @@ impl Tool for PluginTool {
             return Err(ToolError("Account paused or plugin access removed.".into()));
         }
         let tool = self.tool.name.to_string();
-        let server = tokio::select! {
-            server = self.app.mcp.server(&self.app, &self.plugin_id, &self.server_name) => server.map_err(ToolError)?,
-            _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
+        // A bot's Browser calls go to its open profile, and wait while the user has it.
+        let mut browser_input = None;
+        if self.plugin_id == crate::browser::PLUGIN_ID {
+            if let Some((bot, chat_id)) = &self.policy_context {
+                browser_input = self.app.browser_sessions.input(&self.app, &bot.id, chat_id, &cancel).await.map_err(ToolError)?;
+            }
+        }
+        if browser_input.is_some() && tool == "browser_take_screenshot" {
+            args["type"] = json!("png");
+            if let Some(args) = args.as_object_mut() {
+                args.remove("filename");
+            }
+        }
+        let server = match &browser_input {
+            Some(input) => input.server.clone(),
+            None => tokio::select! {
+                server = self.app.mcp.server(&self.app, &self.plugin_id, &self.server_name) => server.map_err(ToolError)?,
+                _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
+            },
         };
         { let _guard = admitted.enter(&self.app, &self.plugin_id).map_err(ToolError)?; }
         if self.app.is_paused() || self.bot_id.as_deref().is_some_and(|id| !self.app.bot(id).is_some_and(|bot| bot.capabilities.permits(&self.name, Some(&self.plugin_id))))
@@ -2136,8 +2463,27 @@ impl Tool for PluginTool {
         }
         if self.kind != ToolKind::Call { return self.resources(args, cancel, &server).await; }
         let mut params = CallToolRequestParams::default();
+        // A sign-in, connection or review may have awaited while the user revoked access.
+        self.check_policy(&cancel).await?;
+        let _permit = self.admit(&cancel).await?;
+        // A saved secret the call names goes in only now, past every review, and only into what
+        // Browser types on the secret's own site.
+        let page = async {
+            let tabs = server.browser_call("browser_tabs", json!({ "action": "list" })).await?;
+            let text = tabs.content.iter().filter_map(|block| match block { ContentBlock::Text(text) => Some(text.text.as_str()), _ => None }).collect::<Vec<_>>().join("\n");
+            crate::secrets::current_page(&text).ok_or_else(|| "Lorca could not tell which page the browser shows, so it typed nothing.".to_string())
+        };
+        let args = crate::secrets::fill_call(&self.app, self.policy_context.as_ref().map(|(bot, _)| bot), &self.plugin_id, &tool, args, page).await.map_err(ToolError)?;
         params.name = tool.clone().into();
         params.arguments = args.as_object().cloned();
+        // A server of Lorca's own learns whose turn called, to keep what it sent in that chat.
+        let builtin = self.app.plugins.lock().unwrap().get(&self.plugin_id).is_some_and(|plugin| matches!(plugin.manifest.servers.get(&self.server_name), Some(ServerSpec::Builtin { .. })));
+        if let (true, Some((bot, chat_id))) = (builtin, &self.policy_context) {
+            let mut meta = serde_json::Map::new();
+            meta.insert("lorca/bot_id".into(), json!(bot.id));
+            meta.insert("lorca/chat_id".into(), json!(chat_id));
+            params.meta = Some(rmcp::model::RequestMetaObject(rmcp::model::MetaObject(meta)));
+        }
         // A call the user stops, or one that runs out of time, is called off at the server too
         // (`notifications/cancelled`), so it stops the work rather than finishing it unseen.
         let request = rmcp::model::ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(params));
@@ -2148,9 +2494,23 @@ impl Tool for PluginTool {
             _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
         };
         let (peer, id) = (handle.peer.clone(), handle.id.clone());
+        let mut answer = Box::pin(handle.await_response());
         let response = tokio::select! {
-            response = handle.await_response() => response,
+            response = &mut answer => response,
             _ = cancel.cancelled() => {
+                // A profile's browser stays the bot's until the server has answered, so a takeover
+                // never meets a click still on its way. Called off, the call would be forgotten here
+                // while the server went on, so it finishes; one that takes over ten seconds closes
+                // its browser instead.
+                if let Some(input) = browser_input {
+                    let app = self.app.clone();
+                    tokio::spawn(async move {
+                        if tokio::time::timeout(std::time::Duration::from_secs(10), answer).await.is_err() {
+                            input.interrupted(&app);
+                        }
+                    });
+                    return Err(ToolError("Stopped".into()));
+                }
                 let cancelled = rmcp::model::CancelledNotification::new(rmcp::model::CancelledNotificationParam::new(Some(id), Some("Stopped".into())));
                 let _ = peer.send_notification(cancelled.into()).await;
                 return Err(ToolError("Stopped".into()));
@@ -2162,8 +2522,14 @@ impl Tool for PluginTool {
         match response {
             Ok(rmcp::model::ServerResult::CallToolResult(result)) => result,
             Ok(_) => return Err(ToolError(format!("{tool} answered with something other than a result"))),
-            Err(rmcp::ServiceError::Timeout { .. }) => return Err(ToolError(format!("{tool} took too long"))),
+            Err(rmcp::ServiceError::Timeout { .. }) => {
+                if let Some(input) = &browser_input { input.interrupted(&self.app); }
+                return Err(ToolError(format!("{tool} took too long")));
+            }
             Err(error) => {
+                if let rmcp::ServiceError::McpError(error) = &error {
+                    self.app.connector_limits.observe_result(&self.app, &self.plugin_id, &serde_json::to_value(error).unwrap_or_default());
+                }
                 if let Some((scope, challenge)) = insufficient_scope(&error) {
                     needs_more_access(&self.app, &self.plugin_id, &self.server_name, &scope, &challenge);
                     return Err(ToolError(format!("{} needs more access for {tool}. Sign in again to grant it.", self.plugin_name)));
@@ -2414,7 +2780,7 @@ async fn persist_refreshed(app: &Arc<App>, plugin_id: &str, server: &str, auth: 
         let saved = app.plugins.lock().unwrap().sign_in_secret(plugin_id, "oauth", server);
         let fresh = json!({ "client_id": client_id, "tokens": tokens, "signed_in_at": now_secs() });
         if saved.as_ref().map(|s| s["tokens"] != fresh["tokens"]).unwrap_or(true) {
-            let _ = super::set_oauth(app, plugin_id, server, Some(fresh));
+            let _ = super::set_oauth_at_generation(app, plugin_id, server, fresh, generation);
         }
     }
 }
@@ -2503,6 +2869,44 @@ pub async fn ask_with_rule(
     always_rule: Option<AutoReviewRule>,
     cancel: &CancellationToken,
 ) -> Decision {
+    post_and_wait(app, chat_id, bot_id, plugin_id, plugin_name, tool, summary, arguments, reason, always_rule, Asker::Turn, cancel).await
+}
+
+/// A permission card no turn waits on, such as a coding agent's question: the user's messages
+/// in the chat go to the bot and leave it up, and it waits for its answer, `PERMISSION_TIMEOUT`,
+/// or `cancel`, which reads as dismissed.
+#[allow(clippy::too_many_arguments)]
+pub async fn ask_aside(
+    app: &Arc<App>,
+    chat_id: &str,
+    bot_id: &str,
+    plugin_id: &str,
+    plugin_name: &str,
+    tool: &str,
+    summary: &str,
+    arguments: Value,
+    reason: Option<String>,
+    always_rule: Option<AutoReviewRule>,
+    cancel: &CancellationToken,
+) -> Decision {
+    post_and_wait(app, chat_id, bot_id, plugin_id, plugin_name, tool, summary, arguments, reason, always_rule, Asker::Aside, cancel).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn post_and_wait(
+    app: &Arc<App>,
+    chat_id: &str,
+    bot_id: &str,
+    plugin_id: &str,
+    plugin_name: &str,
+    tool: &str,
+    summary: &str,
+    arguments: Value,
+    reason: Option<String>,
+    always_rule: Option<AutoReviewRule>,
+    asker: Asker,
+    cancel: &CancellationToken,
+) -> Decision {
     let message = Message::new(
         chat_id,
         Author::Bot { bot_id: bot_id.to_string() },
@@ -2521,9 +2925,10 @@ pub async fn ask_with_rule(
             path: None,
             link: None,
             code: None,
+            secret: None,
         },
     );
-    let decision = await_answer(app, chat_id, &message.id, always_rule, cancel, || {
+    let decision = wait_for_answer(app, chat_id, &message.id, always_rule, asker, cancel, || {
         app.upsert_message(message.clone(), true);
         crate::push::permission(app, &message);
     })
@@ -2679,14 +3084,18 @@ fn save_proposal(workdir: &std::path::Path, path: &str, content: &str) -> Result
 /// theirs still to read is dismissed without asking, and a message that arrives while it waits
 /// dismisses it (`dismiss_questions`). An Always allow adds `always_rule` before this returns.
 pub async fn await_answer(app: &Arc<App>, chat_id: &str, message_id: &str, always_rule: Option<AutoReviewRule>, cancel: &CancellationToken, ask: impl FnOnce()) -> Decision {
+    wait_for_answer(app, chat_id, message_id, always_rule, Asker::Turn, cancel, ask).await
+}
+
+async fn wait_for_answer(app: &Arc<App>, chat_id: &str, message_id: &str, always_rule: Option<AutoReviewRule>, asker: Asker, cancel: &CancellationToken, ask: impl FnOnce()) -> Decision {
     // A call stopped before its question went up puts nothing in the chat.
     if cancel.is_cancelled() {
         return Decision::Denied;
     }
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.pending_permissions.lock().unwrap().insert(message_id.to_string(), (chat_id.to_string(), tx));
+    app.pending_permissions.lock().unwrap().insert(message_id.to_string(), (chat_id.to_string(), asker, tx));
     // Checked once the question is registered, so a message landing in between still reaches it.
-    if app.steering_queue(chat_id).is_some_and(|queue| !queue.is_empty()) {
+    if asker == Asker::Turn && app.steering_queue(chat_id).is_some_and(|queue| !queue.is_empty()) {
         app.pending_permissions.lock().unwrap().remove(message_id);
         return Decision::Dismissed;
     }
@@ -2711,16 +3120,17 @@ pub fn answer(app: &Arc<App>, message_id: &str, decision: Decision) -> bool {
     let Ok(_guard) = app.plugin_admission(None) else { return false };
     if decision == Decision::Always && message_id.starts_with("msg-propose-") { return false; }
     match app.pending_permissions.lock().unwrap().remove(message_id) {
-        Some((_, tx)) => tx.send(decision).is_ok(),
+        Some((_, _, tx)) => tx.send(decision).is_ok(),
         None => false,
     }
 }
 
-/// The user wrote in `chat_id` while questions there waited for their answer: each is
-/// dismissed, so its action does not run and the turn goes on to read what they wrote.
+/// The user wrote in `chat_id` while questions there waited for their answer: each the turn
+/// waits on is dismissed, so its action does not run and the turn goes on to read what they
+/// wrote. A question asked aside stays up.
 pub fn dismiss_questions(app: &App, chat_id: &str) {
-    let dismissed: Vec<_> = app.pending_permissions.lock().unwrap().extract_if(|_, (chat, _)| chat == chat_id).collect();
-    for (_, (_, tx)) in dismissed {
+    let dismissed: Vec<_> = app.pending_permissions.lock().unwrap().extract_if(|_, (chat, asker, _)| chat == chat_id && *asker == Asker::Turn).collect();
+    for (_, (_, _, tx)) in dismissed {
         let _ = tx.send(Decision::Dismissed);
     }
 }
@@ -2734,7 +3144,10 @@ pub fn dismissed_call(reason: String) -> ToolResult {
 }
 
 #[cfg(test)]
-mod tests {
+mod review_tests;
+
+#[cfg(test)]
+pub(crate) mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -2913,6 +3326,90 @@ mod tests {
         serde_json::from_value(json!({ "name": name, "description": description, "inputSchema": serde_json::from_str::<Value>(schema).unwrap() })).unwrap()
     }
 
+    /// A real MCP child records every tools/call. Policy errors cannot reach it, even when
+    /// the account saved Always allow or a codemode script directly executes the bound tool.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bot_permissions_gate_real_mcp_calls_and_ignore_forged_cached_readonly() {
+        use crate::permissions::{BotPermissions, Capability};
+        use beans_agent::{AgentContext, DirectRunner};
+        use beans_agent::types::{AssistantMessage, ToolCall};
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let bot = app.state.lock().unwrap().bots[0].clone();
+        let chat_id = app.dm_with(&bot.id, None).unwrap().meta.id;
+        let calls_path = scratch.1.join("mcp-calls");
+        let script = r#"import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    method = req['method']
+    if method == 'initialize':
+        result = {'protocolVersion':'2025-06-18','capabilities':{'tools':{}},'serverInfo':{'name':'mail','version':'1'}}
+    elif method == 'tools/list':
+        result = {'tools':[{'name':name,'inputSchema':{'type':'object','properties':{}},'annotations':{'readOnlyHint':name=='list_messages'}} for name in ['list_messages','create_draft','send_message','cached_readonly']]}
+    elif method == 'tools/call':
+        name = req['params']['name']
+        with open(sys.argv[1],'a') as file: file.write(name+'\n')
+        result = {'content':[{'type':'text','text':name+' ran'}]}
+    else: result = {}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}), flush=True)
+"#;
+        let mut cached: Vec<_> = ["list_messages", "create_draft", "send_message", "cached_readonly"].iter().map(|name| mcp_tool(name, name, r#"{"type":"object","properties":{}}"#)).collect();
+        for tool in &mut cached {
+            // The disk claims all calls only read; only the live child's mark is authority.
+            tool.annotations = Some(serde_json::from_value(json!({"readOnlyHint": true})).unwrap());
+        }
+        crate::config::write_json_private(&catalog_path(app, "mail-work"), &SavedCatalog { servers: BTreeMap::from([("api".into(), SavedServer { instructions: None, tools: cached, resources: true })]) }).unwrap();
+        let manifest = super::super::Manifest::parse(&json!({
+            "id": "mail-work", "name": "Mail Work", "servers": {"api": {"type":"stdio","command":"python3","args":["-u","-c",script,calls_path]}},
+            "tools": {"draft": ["create_draft"]}
+        })).unwrap();
+        super::super::install(app, manifest, "inline").unwrap();
+        let policy: BotPermissions = serde_json::from_value(json!({"connections":{"mail-work":{"capabilities":["read","draft"]}},"shell":false,"filesystem":"none"})).unwrap();
+        app.update_bot(&bot.id, |bot| bot.permissions = Some(policy.clone())).unwrap();
+        // The Access sheet lists the instance by its name with the tools it last offered.
+        let listed = crate::api::dispatch(app, "bots.permissions", json!({"id": bot.id})).await.unwrap();
+        let connection = listed["connections"].as_array().unwrap().iter().find(|entry| entry["id"] == "mail-work").unwrap();
+        assert_eq!(connection["name"], "Mail Work");
+        assert_eq!(connection["tools"].as_array().unwrap().len(), 4);
+        app.add_auto_review_rule(AutoReviewRule { id: "always".into(), text: "Always send".into(), behavior: "allow".into(), tool: Some("mail-work/send_message".into()) });
+        let catalog = bot_catalog(app, &bot, &chat_id, Vec::new());
+        let cancel = CancellationToken::new();
+        let assistant = AssistantMessage::empty("test", "test");
+        let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+        let args = json!({});
+        for name in ["send_message", "cached_readonly"] {
+            let name = tool_name("mail-work", name);
+            let call = ToolCall { id: name.clone(), name: name.clone(), arguments: args.clone() };
+            let parent = ToolCall { id: "script".into(), name: "codemode".into(), arguments: json!({"code":"await tools.mail_work__send_message({})"}) };
+            let ctx = BeforeToolCallContext { assistant_message: &assistant, tool_call: &call, args: &args, context: &context, cancel: &cancel, parent: Some(&parent) };
+            let refused = review_call(app, &catalog, &chat_id, &super::super::review::Trigger::default(), &bot, false, &ctx).await.unwrap();
+            assert!(refused.block && refused.reason.unwrap().contains("write access"));
+            assert!(catalog.plugin_tool(&name).unwrap().execute("direct", args.clone(), cancel.clone(), Arc::new(|_| {})).await.is_err());
+        }
+        assert!(!calls_path.exists(), "no denied MCP call ran");
+        assert!(authorize_catalog_tool(app, &catalog, &bot, "mail_work__create_draft", &cancel).await.is_ok());
+        assert!(matches!(access(app, &catalog.plugin_tool("mail_work__create_draft").unwrap(), &cancel).await, Access::Changes { capability: Capability::Draft, .. }));
+        let script = "const result = await tools.mail_work__list_messages({}); text(result);";
+        let codemode = beans_agent::codemode::CodemodeTool::new(catalog.clone(), Default::default());
+        let run = codemode.run_script("read", script, cancel.clone(), &DirectRunner).await.unwrap();
+        assert!(!run.result.is_error, "{}", run.result.text_content());
+        assert_eq!(std::fs::read_to_string(&calls_path).unwrap(), "list_messages\n");
+        // A resource tool shares its connection's grants too. Revoking during the turn wins.
+        app.update_bot(&bot.id, |bot| bot.permissions = Some(BotPermissions { connections: Some(BTreeMap::new()), ..policy })).unwrap();
+        for name in ["list_messages", "create_draft", "read_mcp_resource"] {
+            let tool = catalog.plugin_tool(&tool_name("mail-work", name)).unwrap();
+            assert!(tool.execute("revoked", args.clone(), cancel.clone(), Arc::new(|_| {})).await.is_err());
+        }
+        assert_eq!(std::fs::read_to_string(&calls_path).unwrap(), "list_messages\n", "revoked calls reach no service");
+        // The next turn's catalog leaves the plugin out, so a search starts nothing.
+        let next = bot_catalog(app, &bot, &chat_id, Vec::new());
+        assert!(next.plugin_tool(&tool_name("mail-work", "list_messages")).is_none());
+        assert!(codemode::Catalog::search(&*next, "messages", None, 10, &cancel).await.unwrap().is_empty());
+    }
+
     fn catalog_tool(app: &Arc<App>, plugin_id: &str, plugin_name: &str, original_name: &str, description: &str, schema: &str) -> Arc<CatalogTool> {
         let name = tool_name(plugin_id, original_name);
         let tool = mcp_tool(original_name, description, schema);
@@ -2926,6 +3423,7 @@ mod tests {
             search_schema: schema.into(),
             server_instructions: String::new(),
             tool: Arc::new(PluginTool {
+                budget: None,
                 app: app.clone(),
                 bot_id: None,
                 plugin_id: plugin_id.into(),
@@ -2993,6 +3491,142 @@ mod tests {
     /// A 1×1 PNG, and text labeled an image, which no system reads as one, in base64.
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
     const NOT_AN_IMAGE: &str = "bm90IGFuIGltYWdl";
+
+    /// A Browser server over an in-memory MCP transport: every call answers at once with text, a
+    /// screenshot with a PNG, and `browser_wait_for` only after 300 ms. It records the calls.
+    pub(crate) async fn fake_browser(app: &Arc<App>) -> (Arc<Server>, Arc<Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (client_io, server_io) = tokio::io::duplex(16384);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let (read, mut write) = tokio::io::split(server_io);
+        let (answers, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::spawn(async move {
+            while let Some(line) = outgoing.recv().await {
+                if write.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let Some(id) = request.get("id").cloned() else { continue };
+                let name = request["params"]["name"].as_str().unwrap_or_default().to_string();
+                let result = match request["method"].as_str() {
+                    Some("initialize") => json!({ "protocolVersion": request["params"]["protocolVersion"], "capabilities": { "tools": {} }, "serverInfo": { "name": "fake-browser", "version": "1" } }),
+                    Some("tools/list") => json!({ "tools": [] }),
+                    Some("tools/call") => {
+                        recorded.lock().unwrap().push(name.clone());
+                        if name == "browser_take_screenshot" {
+                            json!({ "content": [{ "type": "image", "data": PNG, "mimeType": "image/png" }] })
+                        } else {
+                            json!({ "content": [{ "type": "text", "text": "ok" }] })
+                        }
+                    }
+                    _ => json!({}),
+                };
+                let line = format!("{}\n", json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+                let answers = answers.clone();
+                tokio::spawn(async move {
+                    if name == "browser_wait_for" {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    }
+                    let _ = answers.send(line);
+                });
+            }
+        });
+        let service = Client { info: ClientConfig::default(), app: Arc::downgrade(app), plugin_id: crate::browser::PLUGIN_ID.into(), server: "browser".into(), admission: Admission::capture(app, crate::browser::PLUGIN_ID).unwrap() }.serve(client_io).await.unwrap();
+        (Arc::new(Server {
+            plugin_id: crate::browser::PLUGIN_ID.into(), name: "browser".into(), service,
+            tools: std::sync::RwLock::new(Vec::new()), instructions: None, resources: false, auth: None, bearer_expires_at: None,
+            admission: Admission::capture(app, crate::browser::PLUGIN_ID).unwrap(),
+        }), calls)
+    }
+
+    /// What a scripted Browser server answers a call with: a result's `content`, or an error's text.
+    pub(crate) type BrowserAnswer = Arc<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
+
+    /// A Browser server over an in-memory MCP transport that lists `tools` and answers each call
+    /// as `answer` says, recording the calls with their arguments.
+    pub(crate) async fn scripted_browser(app: &Arc<App>, tools: &[&str], answer: BrowserAnswer) -> (Arc<Server>, Arc<Mutex<Vec<(String, Value)>>>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (client_io, server_io) = tokio::io::duplex(1 << 20);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let (read, mut write) = tokio::io::split(server_io);
+        let listed: Vec<Value> = tools.iter().map(|name| json!({ "name": name, "inputSchema": { "type": "object" } })).collect();
+        tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let Some(id) = request.get("id").cloned() else { continue };
+                let result = match request["method"].as_str() {
+                    Some("initialize") => json!({ "protocolVersion": request["params"]["protocolVersion"], "capabilities": { "tools": {} }, "serverInfo": { "name": "scripted-browser", "version": "1" } }),
+                    Some("tools/list") => json!({ "tools": listed }),
+                    Some("tools/call") => {
+                        let name = request["params"]["name"].as_str().unwrap_or_default().to_string();
+                        let arguments = request["params"]["arguments"].clone();
+                        recorded.lock().unwrap().push((name.clone(), arguments.clone()));
+                        match answer(&name, &arguments) {
+                            Ok(content) => json!({ "content": content }),
+                            Err(error) => json!({ "content": [{ "type": "text", "text": format!("### Error\nError: {error}") }], "isError": true }),
+                        }
+                    }
+                    _ => json!({}),
+                };
+                let line = format!("{}\n", json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+                if write.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let service = Client { info: ClientConfig::default(), app: Arc::downgrade(app), plugin_id: crate::browser::PLUGIN_ID.into(), server: "browser".into(), admission: Admission::capture(app, crate::browser::PLUGIN_ID).unwrap() }.serve(client_io).await.unwrap();
+        let tools = service.peer().list_all_tools().await.unwrap();
+        (Arc::new(Server {
+            plugin_id: crate::browser::PLUGIN_ID.into(), name: "browser".into(), service,
+            tools: std::sync::RwLock::new(tools), instructions: None, resources: false, auth: None, bearer_expires_at: None,
+            admission: Admission::capture(app, crate::browser::PLUGIN_ID).unwrap(),
+        }), calls)
+    }
+
+    /// A headless Browser server from this computer's Playwright MCP (`npx`), as a profile's but
+    /// without a window, on `BEANS_TEST_CHROMIUM` or else Playwright's Chrome for Testing.
+    pub(crate) async fn headless_browser(app: &Arc<App>, cwd: &std::path::Path) -> Arc<Server> {
+        let plugin = app.plugins.lock().unwrap().get(crate::browser::PLUGIN_ID).cloned().unwrap();
+        let chromium = std::env::var("BEANS_TEST_CHROMIUM").unwrap_or_else(|_| {
+            let cache = dirs::home_dir().unwrap().join("Library/Caches/ms-playwright");
+            let build = std::fs::read_dir(&cache).unwrap().flatten().map(|entry| entry.path()).filter(|path| path.file_name().unwrap().to_string_lossy().starts_with("chromium-")).max().unwrap();
+            build.join("chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing").display().to_string()
+        });
+        let args = ["-y", "@playwright/mcp@latest", "--headless", "--isolated", "--image-responses", "allow", "--executable-path", &chromium].map(String::from).to_vec();
+        let spec = ServerSpec::Stdio { command: "npx".into(), args, env: BTreeMap::new(), cwd: Some(cwd.display().to_string()), timeout: None };
+        Arc::new(connect(app, &plugin, "browser", &spec, &BTreeMap::new(), None, Admission::capture(app, crate::browser::PLUGIN_ID).unwrap()).await.unwrap())
+    }
+
+    /// A screenshot's content, a 1×1 PNG.
+    pub(crate) fn png_content() -> Value {
+        json!([{ "type": "image", "data": PNG, "mimeType": "image/png" }])
+    }
+
+    /// One of the Browser plugin's tools as a bot's turn has it.
+    pub(crate) fn browser_tool(app: &Arc<App>, bot: &Bot, chat_id: &str, name: &str) -> PluginTool {
+        PluginTool {
+            app: app.clone(),
+            budget: crate::budgets::current(),
+            plugin_id: crate::browser::PLUGIN_ID.into(),
+            plugin_name: "Browser".into(),
+            server_name: "browser".into(),
+            tool: mcp_tool(name, "", r#"{"type":"object"}"#),
+            name: tool_name(crate::browser::PLUGIN_ID, name),
+            description: String::new(),
+            read_only: false,
+            kind: ToolKind::Call,
+            timeout: super::super::CALL_TIMEOUT,
+            policy_context: Some((bot.clone(), chat_id.into())),
+        }
+    }
 
     /// A small JPEG, in base64.
     fn jpeg() -> String {
@@ -3316,7 +3950,7 @@ mod tests {
         let store = app.plugins.lock().unwrap();
         assert_eq!(store.secret("hub", "scope:api").unwrap()["scope"], json!("repo read:org admin:org"), "what it had and what it needs, once each");
         assert!(store.sign_in_secret("hub", "oauth", "api").is_none());
-        assert_eq!(store.status("hub").unwrap().state, "needs_auth");
+        assert_eq!(store.status("hub").unwrap().state, "insufficient_access");
     }
 
     #[test]
@@ -3413,7 +4047,7 @@ mod tests {
             let (url, posts) = answering(status).await;
             let manifest = super::super::Manifest::parse(&json!({ "id": id, "name": id, "servers": { "api": { "type": "http", "url": url } } })).unwrap();
             // Not `install`, whose background connection would try too.
-            app.plugins.lock().unwrap().installed.push(super::super::Installed { manifest, source: "inline".into(), installed_at: 0.0, variables: BTreeMap::new() });
+            app.plugins.lock().unwrap().installed.push(super::super::Installed { manifest, source: "inline".into(), installed_at: 0.0, variables: BTreeMap::new(), service_id: None, account_name: None });
             assert!(app.mcp.server(app, id, "api").await.is_err());
             assert_eq!(posts.load(std::sync::atomic::Ordering::SeqCst), tries, "{status}");
         }

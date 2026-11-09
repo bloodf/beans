@@ -1,6 +1,7 @@
 // Colors and type. Each platform uses its own semantic system colors: UIKit colors on iOS and
 // Material 3 dynamic colors on Android, including the user's wallpaper palette on Android 12+.
 
+import { getMaterialColors, type MaterialColors } from "@expo/ui/jetpack-compose";
 import { Color } from "expo-router";
 import { useSyncExternalStore } from "react";
 import { AppState, Platform, PlatformColor, useColorScheme, type ColorValue } from "react-native";
@@ -39,12 +40,14 @@ const ios = (name: string) => (Platform.OS === "ios" ? PlatformColor(name) : und
 // dynamic values are read again after foreground, including a period with no consumers.
 let lightPalette: Palette | undefined;
 let darkPalette: Palette | undefined;
+const materials: { light?: MaterialColors; dark?: MaterialColors } = {};
 let revision = 0;
 let stopListening: (() => void) | undefined;
 const subscribers = new Set<() => void>();
 
 function invalidateAndroidPalette() {
   lightPalette = darkPalette = undefined;
+  materials.light = materials.dark = undefined;
   ++revision;
 }
 
@@ -84,6 +87,14 @@ export function usePalette(): Palette {
   if (dark) darkPalette = palette;
   else lightPalette = palette;
   return palette;
+}
+
+export function useMaterialPalette(): MaterialColors | null {
+  const dark = useColorScheme() === "dark";
+  useSyncExternalStore(subscribe, getRevision, getRevision);
+  if (Platform.OS !== "android") return null;
+  const scheme = dark ? "dark" : "light";
+  return (materials[scheme] ??= getMaterialColors({ scheme }));
 }
 
 function buildPalette(dark: boolean): Palette {
@@ -138,7 +149,13 @@ function buildPalette(dark: boolean): Palette {
   };
 }
 
-/// The eight bot accents, as the Mac app's system colors, with a lifted twin for gradients.
+/// A `#rrggbb` color (what Android's Material colors are) at an opacity.
+export function withAlpha(hex: string, alpha: number): string {
+  const value = parseInt(hex.slice(1, 7), 16);
+  return `rgba(${(value >> 16) & 255},${(value >> 8) & 255},${value & 255},${alpha})`;
+}
+
+/// The eight bot accents, as Apple's system colors, with a lifted twin for gradients.
 export const ACCENTS: Record<Accent, { light: [string, string]; dark: [string, string] }> = {
   indigo: { light: ["#8583F5", "#5856D6"], dark: ["#8B89F7", "#5E5CE6"] },
   blue: { light: ["#4DA3FF", "#007AFF"], dark: ["#4FA8FF", "#0A84FF"] },

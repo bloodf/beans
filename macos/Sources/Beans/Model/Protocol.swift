@@ -153,9 +153,11 @@ enum Wire {
     struct AutoReview: Decodable {
         var isEnabled: Bool
         var rules: [AutoReviewRule]?
+        var provider: String?
+        var models: [String: String]?
 
         func toModel() -> Beans.AutoReview {
-            Beans.AutoReview(isEnabled: isEnabled, rules: (rules ?? []).map { $0.toModel() })
+            Beans.AutoReview(isEnabled: isEnabled, rules: (rules ?? []).map { $0.toModel() }, provider: provider, models: models ?? [:])
         }
     }
 
@@ -443,6 +445,9 @@ enum Wire {
         var model: String?
         var thinking: String?
         var avatar: Attachment?
+        var shape: String?
+        var workdir: String?
+        var permissions: BotAccess?
         var look: BotLook.Lenient?
         var capabilities: BotCapabilities?
         var createdAt: Double
@@ -590,6 +595,17 @@ enum Wire {
         var description: String?
         var scriptCommand: String?
         var targetBotId: String?
+        var targetAgentId: String?
+        var agentId: String?
+        var agentKind: String?
+        var failed: Bool?
+        var reviewId: String?
+        var version: UInt64?
+        var state: String?
+        var account: String?
+        var note: String?
+        var draft: MessageDraft?
+        var secret: SecretRequest?
         var from: String?
         var to: String?
         var reason: String?
@@ -606,6 +622,15 @@ enum Wire {
         var path: String?
         var run: Run?
         var replyTo: ReplyTo?
+    }
+
+    struct MessageDraft: Decodable {
+        var kind: String?
+        var to: [String]?
+        var cc: [String]?
+        var bcc: [String]?
+        var subject: String?
+        var body: String?
     }
 
     struct ReplyTo: Decodable {
@@ -773,6 +798,7 @@ extension Wire.Bot {
             thinking: thinking,
             avatar: avatar.map { Attachment(id: $0.id, name: $0.name, mime: $0.mime, size: $0.size, width: $0.width, height: $0.height) },
             look: look?.value,
+            shape: shape, workdir: workdir, permissions: permissions,
             capabilities: capabilities?.toModel() ?? BotCapabilities(),
             createdAt: Date(timeIntervalSince1970: createdAt)
         )
@@ -802,8 +828,18 @@ extension Wire.Message {
                             prompt: $0.prompt, output: $0.output,
                             device: $0.device, reason: $0.reason, rule: $0.rule,
                             handedOver: $0.handedOver ?? false, background: $0.background ?? false)
-                    }
+                    },
+                    targetAgentID: self.body.targetAgentId
                 ))
+        case "agent_message":
+            let heading = [self.body.agentKind, self.body.title].compactMap { $0 }.joined(separator: " · ")
+            body = .text("Message from " + heading + (self.body.failed == true ? " (failed)" : "") + "\n\n" + (self.body.text ?? ""))
+        case "draft":
+            let draft = self.body.draft
+            // Read-only until the version-bound review editor is integrated.
+            body = .notice(["Draft · " + (self.body.account ?? ""), self.body.state,
+                            draft?.to?.joined(separator: ", "), draft?.subject,
+                            draft?.body, self.body.note].compactMap { $0 }.joined(separator: "\n"))
         case "handoff":
             body = .handoff(from: self.body.from ?? "", to: self.body.to ?? "", reason: self.body.reason ?? "")
         case "notice":
@@ -811,6 +847,7 @@ extension Wire.Message {
         case "permission":
             body = .permission(
                 PermissionRequest(
+                    secret: self.body.secret,
                     pluginID: self.body.pluginId ?? "", pluginName: self.body.pluginName ?? "", tool: self.body.tool ?? "",
                     summary: self.body.summary ?? "", decision: PermissionRequest.Decision(rawValue: self.body.decision ?? "") ?? .pending,
                     link: self.body.link, code: self.body.code, reason: self.body.reason, rule: self.body.rule,
@@ -834,6 +871,9 @@ extension Wire.Message {
                 Attachment(id: $0.id, name: $0.name, mime: $0.mime, size: $0.size, width: $0.width, height: $0.height)
             },
             replyTo: self.body.replyTo.map { ReplyQuote(messageID: $0.messageId, author: $0.author.toModel(), text: $0.text) })
+        message.reviewID = self.body.reviewId
+        message.reviewVersion = self.body.version
+        message.reviewState = self.body.state
         message.queued = queued ?? false
         return message
     }

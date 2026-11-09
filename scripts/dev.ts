@@ -255,7 +255,7 @@ function watchSources() {
   const generated = `${relative(SOURCES_DIR, MARKDOWN_SWIFT_DIR)}/`
   const onChange = (_event: string, filename: string | null) => {
     if (!filename) return
-    if (![".swift", ".rs", "Cargo.toml", ".strings"].some((suffix) => filename.endsWith(suffix))) return
+    if (![".swift", ".rs", "Cargo.toml", ".strings", ".json"].some((suffix) => filename.endsWith(suffix))) return
     if (filename.startsWith(generated)) return
     // The relay crate stands alone: its changes rebuild the relay, not the app.
     if (filename.startsWith("relay/")) relayChanged = true

@@ -1,3 +1,4 @@
+import * as Haptics from "expo-haptics";
 // The message field, laid out like the desktop composer: one glass pill floating over the
 // transcript. Inside its left edge a "+" disc drops down a native menu of attachment sources;
 // inside its right edge a disc is Dictate while the field is empty and Send once there is
@@ -6,6 +7,8 @@
 // above the text. @-mention chips in a group. There is no hard Stop on the phone; sending a
 // message while a turn runs steers it. Where liquid glass is not available (older iOS, Android)
 // the pill is a plain filled field. An image pasted into the field attaches like a picked photo.
+// A coding agent's page uses it too, with no "+" disc: it waits on each send, keeps a draft that
+// did not go, and takes no text while the agent cannot be reached.
 
 import { Button as MenuButton, Host as SwiftHost, Image as MenuImage, Menu, type ButtonProps } from "@expo/ui/swift-ui";
 import { background, frame, shapes } from "@expo/ui/swift-ui/modifiers";
@@ -14,11 +17,11 @@ import { Column as ComposeColumn, Host as ComposeHost, Icon as ComposeIcon, List
 import { clickable, fillMaxWidth, padding } from "@expo/ui/jetpack-compose/modifiers";
 import * as DocumentPicker from "expo-document-picker";
 import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
-import * as Haptics from "expo-haptics";
+import { haptic } from "./haptics";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ColorValue, type ImageSourcePropType, type StyleProp, type ViewStyle } from "react-native";
 import { ImagePasteView, type PastedImage } from "../../modules/beans-core/ImagePasteView";
 import type { PickedFile } from "../core/engine";
@@ -34,6 +37,7 @@ import { joinDictation } from "./format";
 import { Symbol } from "./Symbol";
 import { Font, usePalette } from "./theme";
 import { AndroidIcons } from "./navigation";
+import { alert } from "./alert";
 
 const MAX_LINES = 5;
 const CHIP = 56;
@@ -48,14 +52,14 @@ export function Surface({ style, children, tint, edge, onPress }: { style: Style
   if (GLASS) {
     // The glass is a layer under the content; the edge is drawn by the wrapping view.
     return (
-      <Pressable onPress={onPress} disabled={!onPress} accessible={false} style={[style, outline]}>
+      <Pressable onPress={onPress} disabled={!onPress} accessible={false} ripple="none" style={[style, outline]}>
         <GlassView glassEffectStyle="regular" isInteractive style={[StyleSheet.absoluteFill, { borderRadius: StyleSheet.flatten(style)?.borderRadius }]} />
         {children}
       </Pressable>
     );
   }
   return (
-    <Pressable onPress={onPress} disabled={!onPress} accessible={false} style={[style, outline, { backgroundColor: tint }]}>
+    <Pressable onPress={onPress} disabled={!onPress} accessible={false} ripple="none" style={[style, outline, { backgroundColor: tint }]}>
       {children}
     </Pressable>
   );
@@ -75,6 +79,8 @@ interface AttachSource {
 /// label that is only the glyph would leave an empty disc behind.
 function AttachMenu({ sources, tint, label }: { sources: AttachSource[]; tint: ColorValue; label: ColorValue }) {
   return (
+    // The tap is SwiftUI's; claiming it here keeps it from the pill around the composer, whose
+    // press focuses the field: that expands the pill and moves this disc, which closes the menu.
     <View style={styles.disc} onStartShouldSetResponder={() => true}>
       {/* The hosted view would otherwise avoid the keyboard by itself: SwiftUI treats the keys as
           a safe-area inset and pushes the disc up out of its frame while the sticky composer
@@ -108,6 +114,9 @@ export function Composer({
   reply: incomingReply,
   onCancelReply,
   onSend,
+  attach = true,
+  disabled = false,
+  sending = false,
 }: {
   chatId: string;
   members: Bot[];
@@ -118,8 +127,11 @@ export function Composer({
   onCancelReply?: () => void;
   /** The text, its files, and the bots its `@Name`s picked from the chips, by id. */
   onSend: (text: string, attachments: PickedFile[], mentions: string[], replyTo?: string) => Promise<boolean>;
+  attach?: boolean;
+  disabled?: boolean;
+  sending?: boolean;
 }) {
-  useLanguage();
+  const { language: appLanguage } = useLanguage();
   const p = usePalette();
   const identity = useStore(s => s.identityId);
   const relay = useStore(s => s.relayUrl);
@@ -185,7 +197,7 @@ export function Composer({
   const dictationMenuRef = useRef<MenuComponentRef>(null);
   const { language, setting: dictationSetting } = useDictationLanguage();
   const dictationLanguages = useSupportedLanguages();
-  const canSend = text.trim().length > 0 || attachments.length > 0;
+  const canSend = !disabled && !sending && (text.trim().length > 0 || attachments.length > 0);
   // A swipe on a bubble starts a reply; the keyboard comes up for it.
   useEffect(() => {
     if (incomingReply) {
@@ -210,7 +222,7 @@ export function Composer({
   }
 
   async function submit() {
-    if (currentDraft.current !== draft || draft.invalidated || draft.pending) return;
+    if (disabled || sending || currentDraft.current !== draft || draft.invalidated || draft.pending) return;
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     await submitComposerDraft(draft, onSend);
   }
@@ -247,7 +259,7 @@ export function Composer({
       }
       return next;
     });
-    if (problems.length) Alert.alert(t("Some files were not attached"), problems.join("\n"));
+    if (problems.length) alert(t("Some files were not attached"), problems.join("\n"));
   }
 
   function pasteImages(images: PastedImage[]) {
@@ -336,7 +348,7 @@ export function Composer({
     if (words) setText(next);
     if (problem) {
       pendingSend.current = false;
-      Alert.alert(t("Dictation stopped"), problem);
+      alert(t("Dictation stopped"), problem);
       return;
     }
     if (pendingSend.current) {
@@ -402,23 +414,26 @@ export function Composer({
     }
   }
 
-  const primary = listening || canSend ? "send" : "dictate";
+  // A draft waiting on a send keeps Send, dimmed.
+  const primary = listening || canSend || (sending && text.trim().length > 0) ? "send" : "dictate";
+  const primaryOff = disabled || (primary === "send" && !listening && !canSend);
   const edge = p.dark ? "rgba(255,255,255,0.14)" : "rgba(0,0,0,0.1)";
   const expanded = focused || text.length > 0 || attachments.length > 0 || !!reply;
 
   // The pieces below carry keys and always share one parent view, so switching between the
   // compact row and the expanded stack reorders them instead of remounting them: a remounted
   // input drops focus and takes the keyboard down with it.
-  const plus =
-    Platform.OS === "ios" ? (
+  const plus = !attach ? null : Platform.OS === "ios" ? (
       <AttachMenu key="plus" sources={sources} tint={p.fill} label={p.label} />
     ) : (
       <Pressable
         key="plus"
         onPress={() => {
-          void Haptics.selectionAsync();
+          haptic.open();
           setAttachOpen(true);
         }}
+        // A 33 dp disc, touchable across Material's 48 dp.
+        hitSlop={8}
         style={({ pressed }) => [styles.disc, styles.androidDisc, { backgroundColor: p.fill, opacity: pressed ? 0.7 : 1 }]}
         accessibilityRole="button"
         accessibilityLabel={t("Attach")}
@@ -459,7 +474,7 @@ export function Composer({
   const input = (
     <ImagePasteView
       key="input"
-      onPasteImages={({ nativeEvent }) => pasteImages(nativeEvent.files)}
+      onPasteImages={attach ? ({ nativeEvent }) => pasteImages(nativeEvent.files) : undefined}
       style={[styles.inputBox, expanded && styles.inputBoxExpanded]}
     >
       <TextInput
@@ -467,6 +482,7 @@ export function Composer({
         value={text}
         onChangeText={setText}
         placeholder={reply ? t("Reply…") : placeholder}
+        editable={!disabled}
         placeholderTextColor={p.tertiaryLabel}
         multiline
         onFocus={() => setFocused(true)}
@@ -481,6 +497,7 @@ export function Composer({
   const primaryButton = (
     <Pressable
       key="primary"
+      disabled={primaryOff}
       onPress={primary === "send" ? send : () => void dictate()}
       onLongPress={
         primary !== "dictate"
@@ -489,21 +506,27 @@ export function Composer({
             ? () => void pickDictationLanguage()
             : () => dictationMenuRef.current?.show()
       }
-      style={({ pressed }) => [styles.disc, Platform.OS === "android" && styles.androidDisc, { backgroundColor: primary === "send" ? p.tint : p.fill, opacity: pressed ? 0.7 : 1 }]}
+      hitSlop={8}
+      style={({ pressed }) => [styles.disc, Platform.OS === "android" && styles.androidDisc, { backgroundColor: primary === "send" ? p.tint : p.fill, opacity: primaryOff ? 0.4 : pressed ? 0.7 : 1 }]}
       accessibilityLabel={primary === "send" ? t("Send") : t("Dictate")}
+      accessibilityState={{ disabled: primaryOff }}
       accessibilityHint={primary === "dictate" ? t("Long press to choose the language") : undefined}
     >
       <Symbol name={primary === "send" ? "arrow.up" : "mic.fill"} size={16} color={primary === "send" ? p.userBubbleText : p.label} weight="bold" />
     </Pressable>
   );
-  const dictationActions: MenuAction[] = [
-    {
-      id: "automatic",
-      title: t("Automatic ({language})", { language: languageName(automaticLanguage(dictationLanguages)) }),
-      state: dictationSetting ? "off" : "on",
-    },
-    ...dictationLanguages.map((tag) => ({ id: tag, title: languageName(tag), state: dictationSetting === tag ? ("on" as const) : ("off" as const) })),
-  ];
+  const dictationActions = useMemo<MenuAction[]>(
+    () => [
+      {
+        id: "automatic",
+        title: t("Automatic ({language})", { language: languageName(automaticLanguage(dictationLanguages)) }),
+        state: dictationSetting ? "off" : "on",
+      },
+      ...dictationLanguages.map((tag) => ({ id: tag, title: languageName(tag), state: dictationSetting === tag ? ("on" as const) : ("off" as const) })),
+    ],
+    // `appLanguage` names the languages.
+    [dictationLanguages, dictationSetting, appLanguage],
+  );
   const primaryDisc =
     Platform.OS === "android" && primary === "dictate" ? (
       <MenuView
@@ -569,7 +592,9 @@ export function Composer({
                 )}
                 <Pressable
                   onPress={() => setAttachments((current) => current.filter((_, i) => i !== index))}
-                  hitSlop={8}
+                  hitSlop={15}
+                  ripple="borderless"
+                  rippleRadius={16}
                   style={styles.remove}
                   accessibilityLabel={t("Remove {name}", { name: file.name })}
                 >
@@ -583,7 +608,7 @@ export function Composer({
           {expanded
             ? [
                 !listening && input,
-                <View key="controls" style={styles.controls}>
+                <View key="controls" style={[styles.controls, !attach && styles.controlsEnd]}>
                   {plus}
                   {listening && recording}
                   {primaryDisc}
@@ -639,6 +664,10 @@ function imageAsset(asset: ImagePicker.ImagePickerAsset): PickedFile {
   };
 }
 
+function timestamp(): string {
+  return new Date().toISOString().slice(0, 19).replace("T", " ").replace(/:/g, ".");
+}
+
 function deviceLanguage(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().locale || "en-US";
@@ -660,6 +689,7 @@ const styles = StyleSheet.create({
   reply: { flexDirection: "row", alignItems: "center", gap: 6, paddingTop: 10, paddingHorizontal: 10 },
   replyText: { flex: 1, fontSize: 13 },
   controls: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 6, paddingTop: 4 },
+  controlsEnd: { justifyContent: "flex-end" },
   inputBox: { flex: 1, marginVertical: 6, marginHorizontal: 6 },
   // In the stack the input is a row of its own: no growing into the column, wider margins.
   inputBoxExpanded: { flex: 0, marginHorizontal: 12, marginTop: 10, marginBottom: 6 },

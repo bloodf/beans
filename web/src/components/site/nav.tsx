@@ -27,8 +27,8 @@ export function docsPath(lng: string, page?: string) {
   return page ? `${docs}/${page}` : docs
 }
 
-/// The download page in the page's language: `/download` and `/zh/download`. It links the Mac
-/// app's disk image, the Windows installer, the Linux install script and Debian packages, the
+/// The download page in the page's language: `/download` and `/zh/download`. It links the macOS
+/// disk image, the Windows installer, the Linux install script and Debian packages, the
 /// iPhone beta, and the CLI installer.
 export function downloadPath(lng: string) {
   return localizedPath(lng, '/download')

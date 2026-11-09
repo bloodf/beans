@@ -21,7 +21,6 @@ func main() {
 	}
 	prefs.load()
 	applyAppearance(prefs.get().Appearance)
-
 	useUpdater()
 	mygo.Bind(CLI{}, Host{}, Files{}, Menus{}, &Notices{}, Prefs{})
 	if err := mygo.Protocol.HandleFunc(fileScheme, serveFile); err != nil {
@@ -29,11 +28,16 @@ func main() {
 	}
 
 	mygo.App.OnSecondInstance(func(args []string, workingDir string) { app.reopen() })
+	// Open in Beans on a shared bot's page: beans://t/<id>#<key> (beans-dev:// for Beans Dev),
+	// with the launch or from a second instance.
+	mygo.App.OnOpenURL(func(link string) { post(func() { app.openTemplateLink(link) }) })
 	mygo.App.OnActivate(func(hasVisibleWindows bool) {
 		if !hasVisibleWindows {
 			app.reopen()
 		}
 	})
+	mygo.App.OnDidBecomeActive(func() { app.activeChanged(true) })
+	mygo.App.OnDidResignActive(func() { app.activeChanged(false) })
 	mygo.App.OnWindowAllClosed(func() {
 		if !app.keepsRunning() {
 			mygo.App.Quit()

@@ -116,6 +116,10 @@ async fn models_catalog(State(state): State<AppState>, headers: HeaderMap) -> Re
 async fn marketplace_catalog(State(state): State<AppState>, headers: HeaderMap) -> Response {
     state.catalogs.marketplace.serve(&headers)
 }
+/// A shared link's ciphertext: a 1 MiB template, its 24-byte nonce, and its 16-byte tag.
+const MAX_SHARE_BYTES: usize = 1024 * 1024 + 40;
+/// How many shared links one identity keeps here.
+const MAX_SHARES: i64 = 100;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -219,7 +223,9 @@ fn upgrade_required(min_protocol: u32) -> Response {
 /// Public catalogs, `/`, the healthcheck, and `/metrics` need no client protocol.
 async fn require_protocol(State(state): State<AppState>, request: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let speaks = client_protocol(request.headers());
-    if request.uri().path().starts_with("/v1/") && request.uri().path() != "/v1/health"
+    // A shared link is read by a web page, which speaks no protocol.
+    let shared_link = request.method() == axum::http::Method::GET && request.uri().path().starts_with("/v1/shares/");
+    if !shared_link && request.uri().path().starts_with("/v1/") && request.uri().path() != "/v1/health"
         && (speaks < account_min_protocol(&state) || !client_format(request.headers())) {
         return upgrade_required(account_min_protocol(&state));
     }
@@ -250,6 +256,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/files/{id}", get(get_file).put(
             put_file.layer(axum::middleware::from_fn_with_state(state.clone(), crate::limit::large_uploads))
         ).layer(DefaultBodyLimit::disable()))
+        .route("/v1/shares/{id}", get(get_share.layer(axum::middleware::from_fn_with_state(state.clone(), crate::limit::per_ip)))
+            .put(put_share)
+            .delete(delete_share))
         .route("/v1/groups/{group}", axum::routing::delete(delete_group))
         .route("/v1/groups/{group}/blobs", get(group_blobs))
         .route("/v1/push", post(send_push))
@@ -258,6 +267,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/pair/{nonce}", axum::routing::delete(delete_pairing))
         .route("/v1/pair/{nonce}/request", get(get_pair_request))
         .route("/v1/pair/{nonce}/reply", post(post_pair_reply))
+        .merge(crate::receivers::router(state.clone()))
         .merge(public)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::from_fn_with_state(state.clone(), require_protocol))
@@ -474,6 +484,9 @@ async fn put_blob(State(state): State<AppState>, auth: Auth, headers: HeaderMap,
     if body.kind == "policy" && (body.slot.is_some() || body.group.is_some() || body.recipient_machine_pubkey.is_some()) {
         return Err(ApiError::bad_request("Policy requires unaddressed unslotted ungrouped envelope"));
     }
+    if body.kind == "event" && (body.recipient_machine_pubkey.is_none() || body.slot.is_some() || body.group.is_some()) {
+        return Err(ApiError::bad_request("Event envelopes require a recipient and have no slot or group"));
+    }
     let id = body.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     if !valid_id(&id) {
         return Err(ApiError::bad_request("Blob id must be 1–64 characters of [A-Za-z0-9._-]"));
@@ -517,7 +530,7 @@ async fn put_blob(State(state): State<AppState>, auth: Auth, headers: HeaderMap,
     if inserted.existing {
         return Ok(Json(json!({ "id": id, "seq": inserted.seq, "existing": true })).into_response());
     }
-    state.db.publish(db::Event::Blobs { identity: auth.identity_pubkey.clone(), recipient: body.recipient_machine_pubkey.clone() }).await;
+    state.db.publish(db::Event::Blobs { identity: auth.identity_pubkey.clone(), recipient: body.recipient_machine_pubkey.clone(), sender: None }).await;
     Ok(Json(json!({ "id": id, "seq": inserted.seq })).into_response())
 }
 
@@ -589,7 +602,7 @@ async fn put_file(State(state): State<AppState>, auth: Auth, Path(id): Path<Stri
         }
     };
     if !inserted.existing {
-        state.db.publish(db::Event::Blobs { identity: auth.identity_pubkey, recipient: None }).await;
+        state.db.publish(db::Event::Blobs { identity: auth.identity_pubkey, recipient: None, sender: Some(auth.machine_pubkey) }).await;
     }
     Ok(Json(json!({ "id": id, "seq": inserted.seq, "existing": inserted.existing })))
 }
@@ -606,6 +619,43 @@ async fn get_file(State(state): State<AppState>, auth: Auth, Path(id): Path<Stri
         return Err(ApiError::not_found("The file is no longer stored"));
     };
     Ok(([(header::CONTENT_TYPE, "application/octet-stream")], ciphertext).into_response())
+}
+
+// MARK: - Shared links
+
+/// A shared link's ciphertext, put by the identity that shares it. The relay holds bytes it
+/// cannot read: the key is in the link, after the `#` no browser sends.
+async fn put_share(State(state): State<AppState>, auth: Auth, Path(id): Path<String>, headers: HeaderMap, ciphertext: Bytes) -> ApiResult<Json<Value>> {
+    if !valid_id(&id) {
+        return Err(ApiError::bad_request("Link id must be 1–64 characters of [A-Za-z0-9._-]"));
+    }
+    if headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()) != Some("application/octet-stream") {
+        return Err(ApiError::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Shared links require application/octet-stream"));
+    }
+    if ciphertext.is_empty() || ciphertext.len() > MAX_SHARE_BYTES {
+        return Err(ApiError::too_large("A shared link holds 1 MiB at most"));
+    }
+    state.db.put_share(&auth.identity_pubkey, &id, &ciphertext, MAX_SHARES).await?;
+    Ok(Json(json!({ "id": id })))
+}
+
+/// Anyone with the id reads the ciphertext, a lorca.app page in a browser included.
+async fn get_share(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let mut response = match state.db.share(&id).await {
+        Ok(Some(ciphertext)) => ([(header::CONTENT_TYPE, "application/octet-stream"), (header::CACHE_CONTROL, "no-store")], ciphertext).into_response(),
+        Ok(None) => ApiError::not_found("No such link").into_response(),
+        Err(error) => error.into_response(),
+    };
+    response.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, header::HeaderValue::from_static("*"));
+    response
+}
+
+async fn delete_share(State(state): State<AppState>, auth: Auth, Path(id): Path<String>) -> ApiResult<StatusCode> {
+    if state.db.delete_share(&auth.identity_pubkey, &id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found("No such link"))
+    }
 }
 
 #[derive(Debug, Deserialize)]

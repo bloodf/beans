@@ -10,13 +10,16 @@ use tokio::sync::{broadcast, watch, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{self, Config, Settings};
+use crate::credentials::Credentials;
 use crate::events::{ChatSummary, Event, RelayProblem};
 use crate::keys::{self, IdentityFile, MachineFile};
-use crate::model::*;
 use crate::local_store::LocalStore;
-use crate::credentials::Credentials;
+use crate::model::*;
 use crate::relay::RelayClient;
 
+/// How long the app's chat on screen stays put before the other Devices hear of it, so a run
+/// through the sidebar goes up once.
+const WATCH_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub struct OutboxItem {
@@ -43,13 +46,35 @@ pub struct Slot {
 
 impl Slot {
     pub fn latest(name: impl Into<String>) -> Slot {
-        Slot { name: name.into(), keep_first: false }
+        Slot {
+            name: name.into(),
+            keep_first: false,
+        }
     }
 
     pub fn first_and_latest(name: impl Into<String>) -> Slot {
-        Slot { name: name.into(), keep_first: true }
+        Slot {
+            name: name.into(),
+            keep_first: true,
+        }
     }
 }
+
+/// How long a Device remembers what it uploaded, and how many blobs at most: the time a newer
+/// account key takes to reach it after another Device made it.
+pub const RECENT_UPLOADS: i64 = 2 * 60;
+const MAX_RECENT_UPLOADS: usize = 500;
+
+/// A blob this Device uploaded: when, and where the relay put it in the log.
+#[derive(Debug, Clone)]
+pub struct RecentUpload {
+    pub at: i64,
+    pub seq: i64,
+    pub item: OutboxItem,
+}
+
+/// The longest name the account can give a Device.
+pub const MAX_DEVICE_NAME_CHARS: usize = 64;
 
 /// The process's in-memory projection of the local SQLite tables.
 #[derive(Debug, Clone, Default)]
@@ -59,6 +84,8 @@ pub struct State {
     pub device_name_edits: std::collections::BTreeMap<String, String>,
     pub bots: Vec<Bot>,
     pub chats: Vec<Chat>,
+    /// The sidebar's sections, in order.
+    pub sections: Vec<Section>,
     pub routines: Vec<Routine>,
     pub workflows: Vec<WorkflowRecord>,
     pub auto_review: AutoReview,
@@ -68,6 +95,15 @@ pub struct State {
     pub capability_versions: HashMap<String, PolicyVersion>,
     pub policy_capabilities: HashMap<String, Capabilities>,
     pub deleted_bot_versions: HashMap<String, PolicyVersion>,
+    pub shared_links: Vec<crate::templates::links::SharedLink>,
+    /// The names the account gives its Devices, by machine pubkey, from the roster.
+    /// The machine pubkeys of Devices unpaired from this account, from the roster and kept for
+    /// good: no `machine` blob makes one a Device again and no envelope from one is opened.
+    pub unpaired: std::collections::BTreeSet<String>,
+    /// The ids of the bots, chats, and routines deleted on any Device, from the roster and kept
+    /// for good: a roster that still lists one does not bring it back.
+    pub deleted: std::collections::BTreeSet<String>,
+    pub workflow_setups: Vec<crate::workflows::Setup>,
     pub last_seq: i64,
     /// Seq of the latest roster slot observed or accepted, independent of the log cursor.
     pub roster_slot_seq: i64,
@@ -89,6 +125,9 @@ pub struct State {
     pub turns_online: std::collections::HashSet<String>,
     /// The turns each other Device's latest machine blob lists, by machine pubkey.
     pub device_turns: HashMap<String, Vec<LiveTurn>>,
+    /// The chat each other computer's latest machine blob says its app shows in front of the
+    /// user, by machine pubkey.
+    pub device_watching: HashMap<String, String>,
     /// The relay's machine list as last read: machine pubkey → when the relay attested it, on
     /// this Device's clock. Not kept across runs.
     pub listed_machines: HashMap<String, i64>,
@@ -160,6 +199,8 @@ pub struct App {
     /// Exclusive OS lock retained until every callback drops this App.
     execution_owner: Option<std::fs::File>,
     execution_epoch: String,
+    /// Serializes scoped context revisions, optimistic checks, and remote replay locally.
+    pub(crate) project_context_lock: Mutex<()>,
     pub config: Config,
     pub settings: Mutex<Settings>,
     pub identity: Mutex<Option<IdentityFile>>,
@@ -168,10 +209,20 @@ pub struct App {
     pub memory_config: parking_lot::Mutex<crate::memory_service::config::MemoryConfig>,
     #[cfg(feature = "runner")]
     pub memory_runtime: crate::memory_service::dispatch::MemoryRuntime,
+    pub playbooks: Mutex<crate::playbooks::Library>,
     pub state: Mutex<State>,
     /// Serializes local roster edits through their queue write with sync's rebase and apply.
     pub(crate) roster_edit: Mutex<()>,
     pub store: LocalStore,
+    /// Serializes encrypted handoff record merges and admission on this Device.
+    pub handoff_lock: Mutex<()>,
+    pub budgets: crate::budgets::BudgetStore,
+    #[cfg(feature = "runner")]
+    pub connector_limits: crate::connector_limits::ConnectorLimits,
+    /// Serializes review decisions, encrypted persistence, and their relay publication.
+    pub review_lock: Mutex<()>,
+    /// An approval wakes the Runner's review executor.
+    pub review_wake: Notify,
     pub events: broadcast::Sender<Event>,
     pub relay: RelayClient,
     pub outbox_notify: Notify,
@@ -180,6 +231,10 @@ pub struct App {
     /// Held from a message's local write to its outbox enqueue, so a chat's `position` order
     /// and the order its messages reach the relay log are the same on every Device.
     pub(crate) message_order: Mutex<()>,
+    /// Serializes task validation with its atomic SQLite CAS and request receipt.
+    pub(crate) task_order: Mutex<()>,
+    /// Serializes output version checks and publication on the producing Runner.
+    pub(crate) output_publication: Mutex<()>,
     pub relay_connected: AtomicBool,
     /// The relay answered `426`: it no longer serves the protocol this build speaks.
     pub relay_update_required: AtomicBool,
@@ -194,6 +249,19 @@ pub struct App {
     /// history). Message and roster events are held back and state is not written per
     /// message; the cycle saves once and emits one snapshot when the page is applied.
     pub bulk_sync: AtomicBool,
+    /// This process has checked the encrypted attention and project context records after an
+    /// upgrade from a build that advanced last_seq without recognizing those blob kinds.
+    pub attention_backfilled: AtomicBool,
+    /// A Device was unpaired: an identity device makes a new generation of the account key once
+    /// its pull has caught up (`identity::rotate_if_due`).
+    pub rotation_due: AtomicBool,
+    /// A Device this one had no record of landed, or a newer account key did: the blobs held
+    /// for them are tried again after the page being applied (`sync::release_held`).
+    pub held_due: AtomicBool,
+    /// What this Device uploaded for the account in the last `RECENT_UPLOADS`, with when: a blob
+    /// that went up under an older key just before a newer one reached it goes up again under
+    /// that one (`sync::account_key_changed`).
+    pub recent_uploads: Mutex<std::collections::VecDeque<RecentUpload>>,
     /// The machine key of the account the sync loop has pulled from the relay since this
     /// process started: its roster, Devices, and credentials. `sync.account` waits on it.
     pub account_pulled: watch::Sender<Option<String>>,
@@ -224,14 +292,28 @@ pub struct App {
     /// Jobs sent to other Runners, waiting for their `job_result`.
     pub pending_results: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
     /// Requests sent to other Runners, waiting for their `response`.
-    pub pending_responses: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Response>>>,
-    /// Questions waiting for the user's answer, by the id of the row that asks: its chat, and
-    /// where the answer goes.
+    /// The questions this Device asked, by request id: the Runner asked, which alone answers, and
+    /// where its answer goes.
+    pub pending_responses: Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<Response>)>>,
+    /// Questions waiting for the user's answer, by the id of the row that asks: its chat, who
+    /// waits on it, and where the answer goes.
     #[cfg(feature = "runner")]
-    pub pending_permissions: Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<crate::plugins::mcp::Decision>)>>,
+    pub pending_permissions: Mutex<
+        HashMap<
+            String,
+            (
+                String,
+                crate::plugins::mcp::Asker,
+                tokio::sync::oneshot::Sender<crate::plugins::mcp::Decision>,
+            ),
+        >,
+    >,
     /// Commands `bash` left running in their terminals, waiting for input.
     #[cfg(feature = "runner")]
     pub shell_sessions: crate::shell::Sessions,
+    /// The coding agents the bots run on this Runner.
+    #[cfg(feature = "runner")]
+    pub coding_agents: crate::coding::Agents,
     /// What this Runner has installed, with the secrets kept apart.
     pub plugins: Mutex<crate::plugins::Store>,
     /// Serializes local plugin admission/publication with account reset, including callbacks.
@@ -241,19 +323,38 @@ pub struct App {
     /// Public marketplace index from the selected relay, with bundled offline fallback.
     pub marketplace: crate::marketplace::Updates,
     /// Public built-in model catalog checks from the selected relay.
+    /// This Runner's channels as its machine blob advertises them, and its accounts' readers.
+    pub channels: crate::channels::Channels,
+    /// Serializes guided setup resource creation and installation on this Device.
+    pub workflow_editing: tokio::sync::Mutex<()>,
+    /// Checks for a newer model catalog.
     pub catalog: crate::catalog::Updates,
     /// Retained CLI updater state; Beans leaves the unadapted self-update path disabled.
     #[cfg(feature = "cli")]
     pub updates: crate::update::Updater,
+    /// What the desktop app that runs this CLI says of its own updates.
+    #[cfg(feature = "cli")]
+    pub app_updates: crate::app_update::AppUpdates,
     /// Connected MCP servers.
     #[cfg(feature = "runner")]
     pub mcp: crate::plugins::mcp::Pool,
+    /// The bots' browser profiles on this Runner and their open browsers.
+    #[cfg(feature = "runner")]
+    pub browser_sessions: crate::browser::Sessions,
+    /// The secrets the user saved for this Runner's bots.
+    #[cfg(feature = "runner")]
+    pub secrets: crate::secrets::Store,
     /// The checks of this Runner's routines.
     #[cfg(feature = "runner")]
     pub routine_checks: crate::routines::Checks,
     /// The local update lease, and the admission count every new turn, room, routine, check,
     /// and relay envelope passes through (`update_control`).
     pub update: crate::update_control::Control,
+    /// Serializes encrypted feedback records and guarded revision decisions on this Runner.
+    pub feedback_lock: tokio::sync::Mutex<()>,
+    #[cfg(feature = "runner")]
+    /// At most one bounded coordinator review per bot; exclusions cancel its token.
+    pub feedback_reviews: Mutex<HashMap<String, CancellationToken>>,
     pub http: reqwest::Client,
 }
 
@@ -267,163 +368,368 @@ impl App {
         Self::load_inner(config, true)
     }
 
-    pub fn is_execution_owner(&self) -> bool { self.execution_owner.is_some() }
-    pub fn legacy_execution_closed(&self) -> anyhow::Result<bool> { self.store.legacy_execution_closed() }
+    pub fn is_execution_owner(&self) -> bool {
+        self.execution_owner.is_some()
+    }
+    pub fn legacy_execution_closed(&self) -> anyhow::Result<bool> {
+        self.store.legacy_execution_closed()
+    }
 
     /// Called only after explicit fresh identity creation clears its account store.
     /// The caller retains plugin_admission; a Device reader never creates authority.
     pub(crate) fn initialize_created_task_account(&self) -> anyhow::Result<()> {
-        if self.is_execution_owner() { self.store.task_account_epoch(&self.execution_epoch)?; }
+        if self.is_execution_owner() {
+            self.store.task_account_epoch(&self.execution_epoch)?;
+        }
         Ok(())
     }
 
-    pub fn task_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+    pub fn task_execution(
+        &self,
+        task_id: &str,
+    ) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(self.is_execution_owner(), "Only the execution owner reads an active lease");
-        self.store.active_task_lease(&self.execution_epoch,task_id,lifecycle.get().0)
+        anyhow::ensure!(
+            self.is_execution_owner(),
+            "Only the execution owner reads an active lease"
+        );
+        self.store
+            .active_task_lease(&self.execution_epoch, task_id, lifecycle.get().0)
     }
 
-    pub fn freeze_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding) -> anyhow::Result<bool> {
+    pub fn freeze_task_invocation(
+        &self,
+        lease: &crate::local_store::TaskLease,
+        binding: &crate::local_store::InvocationBinding,
+    ) -> anyhow::Result<bool> {
         let _policy = self.roster_edit.lock().unwrap();
-        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+        let _lifecycle = self
+            .plugin_admission(Some(lease.incarnation))
+            .map_err(anyhow::Error::msg)?;
         anyhow::ensure!(!self.is_paused(), "Account paused");
-        self.store.insert_invocation(lease,binding)
+        self.store.insert_invocation(lease, binding)
     }
 
-    pub fn decide_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, decision: crate::local_store::AuthorizationDecision, kind: crate::local_store::AuthorizationKind, card: Option<&str>, device: Option<&str>, at: i64) -> anyhow::Result<bool> {
+    pub fn decide_task_invocation(
+        &self,
+        lease: &crate::local_store::TaskLease,
+        binding: &crate::local_store::InvocationBinding,
+        decision: crate::local_store::AuthorizationDecision,
+        kind: crate::local_store::AuthorizationKind,
+        card: Option<&str>,
+        device: Option<&str>,
+        at: i64,
+    ) -> anyhow::Result<bool> {
         let _policy = self.roster_edit.lock().unwrap();
-        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
-        self.store.decide_invocation(lease,binding,decision,kind,card,device,at)
+        let _lifecycle = self
+            .plugin_admission(Some(lease.incarnation))
+            .map_err(anyhow::Error::msg)?;
+        self.store
+            .decide_invocation(lease, binding, decision, kind, card, device, at)
     }
 
     /// The protected recheck MUST validate effective capabilities, installation, target,
     /// workspace and binding without awaiting. #111 supplies it after preparation.
-    pub fn admit_task_invocation(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, recheck: impl FnOnce(&Self) -> anyhow::Result<()>) -> anyhow::Result<bool> {
+    pub fn admit_task_invocation(
+        &self,
+        lease: &crate::local_store::TaskLease,
+        binding: &crate::local_store::InvocationBinding,
+        recheck: impl FnOnce(&Self) -> anyhow::Result<()>,
+    ) -> anyhow::Result<bool> {
         let _policy = self.roster_edit.lock().unwrap();
-        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Execution unavailable");
+        let _lifecycle = self
+            .plugin_admission(Some(lease.incarnation))
+            .map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            self.is_execution_owner() && !self.is_paused(),
+            "Execution unavailable"
+        );
         recheck(self)?;
-        self.store.admit_invocation(lease,binding)
+        self.store.admit_invocation(lease, binding)
     }
 
-    pub fn finish_task_receipt(&self, lease: &crate::local_store::TaskLease, binding: &crate::local_store::InvocationBinding, outcome: crate::local_store::ReceiptOutcome) -> anyhow::Result<bool> {
-        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
-        self.store.finish_receipt(lease,binding,outcome)
+    pub fn finish_task_receipt(
+        &self,
+        lease: &crate::local_store::TaskLease,
+        binding: &crate::local_store::InvocationBinding,
+        outcome: crate::local_store::ReceiptOutcome,
+    ) -> anyhow::Result<bool> {
+        let _lifecycle = self
+            .plugin_admission(Some(lease.incarnation))
+            .map_err(anyhow::Error::msg)?;
+        self.store.finish_receipt(lease, binding, outcome)
     }
-    pub fn task_history_execution(&self, task_id: &str) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
-        let lifecycle=self.plugin_admission(None).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(self.is_execution_owner(),"History resolution requires execution ownership");
-        self.store.history_task_lease(&self.execution_epoch,task_id,lifecycle.get().0)
+    pub fn task_history_execution(
+        &self,
+        task_id: &str,
+    ) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            self.is_execution_owner(),
+            "History resolution requires execution ownership"
+        );
+        self.store
+            .history_task_lease(&self.execution_epoch, task_id, lifecycle.get().0)
     }
-    pub fn resolve_task_history(&self, lease: &crate::local_store::TaskLease, at: i64) -> anyhow::Result<bool> {
-        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(self.is_execution_owner(),"History resolution requires execution ownership");
-        self.store.resolve_task(lease,at)
+    pub fn resolve_task_history(
+        &self,
+        lease: &crate::local_store::TaskLease,
+        at: i64,
+    ) -> anyhow::Result<bool> {
+        let _lifecycle = self
+            .plugin_admission(Some(lease.incarnation))
+            .map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            self.is_execution_owner(),
+            "History resolution requires execution ownership"
+        );
+        self.store.resolve_task(lease, at)
     }
     /// Captures the existing account incarnation under the same reset boundary as plugins.
     pub(crate) fn task_lease(&self, job: &Job) -> anyhow::Result<crate::local_store::TaskLease> {
-        anyhow::ensure!(self.is_execution_owner(), "Only the execution owner admits local tasks");
+        anyhow::ensure!(
+            self.is_execution_owner(),
+            "Only the execution owner admits local tasks"
+        );
         let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
         let epoch = self.store.task_account_epoch(&self.execution_epoch)?;
         Ok(crate::local_store::TaskLease {
-            account_epoch: epoch, owner_epoch: self.execution_epoch.clone(), task_id: job.id.clone(),
-            execution_id: uuid::Uuid::new_v4().to_string(), incarnation: lifecycle.get().0,
+            account_epoch: epoch,
+            owner_epoch: self.execution_epoch.clone(),
+            task_id: job.id.clone(),
+            execution_id: uuid::Uuid::new_v4().to_string(),
+            incarnation: lifecycle.get().0,
         })
     }
 
     /// Caller holds roster_edit; shared ordinary/scheduled admission eligibility.
     pub(crate) fn check_local_job(&self, job: &Job) -> anyhow::Result<()> {
-        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Execution unavailable");
-        let chat=self.chat(&job.chat_id).ok_or_else(||anyhow::anyhow!("Task chat is unavailable"))?;
-        let bot=self.bot(&job.bot_id).ok_or_else(||anyhow::anyhow!("Task bot is unavailable"))?;
-        anyhow::ensure!(self.this_device_id().as_deref()==Some(bot.runner_id.as_str()) && chat.meta.bot_ids.contains(&job.bot_id), "Task Runner or chat membership changed");
-        if let Some(id)=&job.routine_id {
-            anyhow::ensure!(self.routine(id).is_some_and(|r|r.bot_id==job.bot_id), "Routine bot binding changed");
+        anyhow::ensure!(
+            self.is_execution_owner() && !self.is_paused(),
+            "Execution unavailable"
+        );
+        let chat = self
+            .chat(&job.chat_id)
+            .ok_or_else(|| anyhow::anyhow!("Task chat is unavailable"))?;
+        let bot = self
+            .bot(&job.bot_id)
+            .ok_or_else(|| anyhow::anyhow!("Task bot is unavailable"))?;
+        anyhow::ensure!(
+            self.this_device_id().as_deref() == Some(bot.runner_id.as_str())
+                && chat.meta.bot_ids.contains(&job.bot_id),
+            "Task Runner or chat membership changed"
+        );
+        if let Some(id) = &job.routine_id {
+            anyhow::ensure!(
+                self.routine(id).is_some_and(|r| r.bot_id == job.bot_id),
+                "Routine bot binding changed"
+            );
         }
         Ok(())
     }
     /// Received Jobs retain the session's account and Device binding across decryption.
-    pub(crate) fn receive_task_envelope(&self, job: &Job, expected: &crate::keys::MachineFile, remember: Option<&str>) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+    pub(crate) fn receive_task_envelope(
+        &self,
+        job: &Job,
+        expected: &crate::keys::MachineFile,
+        remember: Option<&str>,
+    ) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         let _policy = self.roster_edit.lock().unwrap();
         let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
         self.check_sync_account(expected)?;
         let lease = if self.is_execution_owner() {
             self.queue_local_task_locked(job)?
         } else {
-            self.store.quarantine_task_envelope(&expected.identity_pubkey, &job.id)?;
+            self.store
+                .quarantine_task_envelope(&expected.identity_pubkey, &job.id)?;
             None
         };
-        if let Some(id) = remember { remember_applied(&mut self.state.lock().unwrap(), id); }
+        if let Some(id) = remember {
+            remember_applied(&mut self.state.lock().unwrap(), id);
+        }
         Ok(lease)
     }
 
+    pub(crate) fn receive_authenticated_task_envelope(
+        &self,
+        authenticated: &crate::envelope::Authenticated<Job>,
+        expected: &crate::keys::MachineFile,
+        blob_id: &str,
+    ) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+        let _policy = self.roster_edit.lock().unwrap();
+        let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
+        self.check_sync_account(expected)?;
+        let job = &authenticated.opened.body;
+        let sender = &authenticated.opened.from;
+        {
+            let state = self.state.lock().unwrap();
+            anyhow::ensure!(
+                !state.unpaired.contains(sender) && state.devices.iter().any(|d| &d.id == sender),
+                "Job sender is no longer paired"
+            );
+        }
+        anyhow::ensure!(&job.requested_by == sender, "signed job requester mismatch");
+        let lease = if self.is_execution_owner() {
+            self.check_local_job(job)?;
+            let lease = self.task_lease(job)?;
+            if let Some(id) = &job.routine_id {
+                anyhow::ensure!(
+                    !self.store.routine_needs_review(&lease.account_epoch, id)?,
+                    "Routine has unresolved work requiring review"
+                );
+            }
+            Some(lease)
+        } else {
+            None
+        };
+        let queued = self.store.receive_authenticated_task(
+            lease.as_ref(),
+            job,
+            &expected.identity_pubkey,
+            &authenticated.receipt,
+        )?;
+        remember_applied(&mut self.state.lock().unwrap(), blob_id);
+        Ok(lease.filter(|_| queued))
+    }
+
     /// Caller holds the lifecycle boundary through the associated mutation/publication.
-    pub(crate) fn check_sync_account(&self, expected: &crate::keys::MachineFile) -> anyhow::Result<()> {
-        let current = self.machine_file().ok_or_else(|| anyhow::anyhow!("Sync account changed"))?;
-        anyhow::ensure!(current.identity_pubkey == expected.identity_pubkey && current.machine_secret == expected.machine_secret, "Sync account changed");
+    pub(crate) fn check_sync_account(
+        &self,
+        expected: &crate::keys::MachineFile,
+    ) -> anyhow::Result<()> {
+        let current = self
+            .machine_file()
+            .ok_or_else(|| anyhow::anyhow!("Sync account changed"))?;
+        anyhow::ensure!(
+            current.identity_pubkey == expected.identity_pubkey
+                && current.machine_secret == expected.machine_secret,
+            "Sync account changed"
+        );
         Ok(())
     }
 
-    pub(crate) fn queue_local_task(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+    pub(crate) fn queue_local_task(
+        &self,
+        job: &Job,
+    ) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         self.queue_local_task_at(job, None)
     }
 
-    pub(crate) fn queue_local_task_at(&self, job: &Job, incarnation: Option<u64>) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+    pub(crate) fn queue_local_task_at(
+        &self,
+        job: &Job,
+        incarnation: Option<u64>,
+    ) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         let _policy = self.roster_edit.lock().unwrap();
-        let _lifecycle = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
+        let _lifecycle = self
+            .plugin_admission(incarnation)
+            .map_err(anyhow::Error::msg)?;
         self.queue_local_task_locked(job)
     }
 
-    fn queue_local_task_locked(&self, job: &Job) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
+    fn queue_local_task_locked(
+        &self,
+        job: &Job,
+    ) -> anyhow::Result<Option<crate::local_store::TaskLease>> {
         self.check_local_job(job)?;
         let lease = self.task_lease(job)?;
         if let Some(id) = &job.routine_id {
-            anyhow::ensure!(!self.store.routine_needs_review(&lease.account_epoch,id)?, "Routine has unresolved work requiring review");
+            anyhow::ensure!(
+                !self.store.routine_needs_review(&lease.account_epoch, id)?,
+                "Routine has unresolved work requiring review"
+            );
         }
-        let identity = self.machine_file().ok_or_else(|| anyhow::anyhow!("Device has no account"))?.identity_pubkey;
-        Ok(self.store.queue_task_for_identity(&lease, job, &identity)?.then_some(lease))
+        let identity = self
+            .machine_file()
+            .ok_or_else(|| anyhow::anyhow!("Device has no account"))?
+            .identity_pubkey;
+        Ok(self
+            .store
+            .queue_task_for_identity(&lease, job, &identity)?
+            .then_some(lease))
     }
 
     /// A local user submission creates a new identity, never authorizes a supplied Job id.
-    pub(crate) fn mint_local_intent(&self, mut job: Job, incarnation: Option<u64>) -> anyhow::Result<(Job, crate::local_store::TaskLease)> {
+    pub(crate) fn mint_local_intent(
+        &self,
+        mut job: Job,
+        incarnation: Option<u64>,
+    ) -> anyhow::Result<(Job, crate::local_store::TaskLease)> {
         let _policy = self.roster_edit.lock().unwrap();
-        let _lifecycle = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
+        let _lifecycle = self
+            .plugin_admission(incarnation)
+            .map_err(anyhow::Error::msg)?;
         self.check_local_job(&job)?;
-        anyhow::ensure!(job.routine_id.is_none(), "Local user intent cannot reopen a routine");
+        anyhow::ensure!(
+            job.routine_id.is_none(),
+            "Local user intent cannot reopen a routine"
+        );
         job.id = format!("job-{}", uuid::Uuid::new_v4());
         let lease = self.task_lease(&job)?;
-        anyhow::ensure!(self.store.queue_local_intent(&lease, &job)?, "New local intent identity already fenced");
+        anyhow::ensure!(
+            self.store.queue_local_intent(&lease, &job)?,
+            "New local intent identity already fenced"
+        );
         Ok((job, lease))
     }
 
-    pub(crate) fn start_local_task(&self, lease: &crate::local_store::TaskLease) -> anyhow::Result<bool> {
+    pub(crate) fn start_local_task(
+        &self,
+        lease: &crate::local_store::TaskLease,
+    ) -> anyhow::Result<bool> {
         let _policy = self.roster_edit.lock().unwrap();
-        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(self.is_execution_owner() && !self.is_paused(), "Task execution is unavailable");
+        let _lifecycle = self
+            .plugin_admission(Some(lease.incarnation))
+            .map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            self.is_execution_owner() && !self.is_paused(),
+            "Task execution is unavailable"
+        );
         self.store.start_task(lease)
     }
 
-    pub(crate) fn abandon_queued_task(&self, lease: &crate::local_store::TaskLease) -> anyhow::Result<bool> {
-        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(self.is_execution_owner(), "Task cleanup requires execution ownership");
+    pub(crate) fn abandon_queued_task(
+        &self,
+        lease: &crate::local_store::TaskLease,
+    ) -> anyhow::Result<bool> {
+        let _lifecycle = self
+            .plugin_admission(Some(lease.incarnation))
+            .map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            self.is_execution_owner(),
+            "Task cleanup requires execution ownership"
+        );
         self.store.abandon_queued_task(lease)
     }
 
-    pub(crate) fn finish_local_task(&self, lease: &crate::local_store::TaskLease, interrupted: bool) -> anyhow::Result<bool> {
-        let _lifecycle = self.plugin_admission(Some(lease.incarnation)).map_err(anyhow::Error::msg)?;
+    pub(crate) fn finish_local_task(
+        &self,
+        lease: &crate::local_store::TaskLease,
+        interrupted: bool,
+    ) -> anyhow::Result<bool> {
+        let _lifecycle = self
+            .plugin_admission(Some(lease.incarnation))
+            .map_err(anyhow::Error::msg)?;
         self.store.finish_task(lease, interrupted)
     }
 
-    fn persist_task_cancel(&self, task: Option<&str>, chat: Option<&str>, bot: Option<&str>) -> anyhow::Result<()> {
+    fn persist_task_cancel(
+        &self,
+        task: Option<&str>,
+        chat: Option<&str>,
+        bot: Option<&str>,
+    ) -> anyhow::Result<()> {
         let _lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
         if let Some(epoch) = self.store.current_task_account_epoch()? {
-            self.store.cancel_tasks(&epoch,task,chat,bot)?;
+            self.store.cancel_tasks(&epoch, task, chat, bot)?;
         }
         Ok(())
     }
     fn load_inner(config: Config, owner: bool) -> anyhow::Result<Arc<App>> {
         if config.home.join("forget-in-progress.json").try_exists()? {
-            anyhow::bail!("Account forget is incomplete; finish local cleanup before reopening this home");
+            anyhow::bail!(
+                "Account forget is incomplete; finish local cleanup before reopening this home"
+            );
         }
         let admission = config.ensure_home_admission()?;
         // Retain the same storage guard through lock acquisition, recovery and final save.
@@ -437,19 +743,38 @@ impl App {
                 options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
             }
             let file = options.open(&path)?;
-            anyhow::ensure!(file.metadata()?.is_file(), "Execution lock must be a regular file");
-            file.try_lock().map_err(|_| anyhow::anyhow!("Execution ownership is busy or unsupported"))?;
+            anyhow::ensure!(
+                file.metadata()?.is_file(),
+                "Execution lock must be a regular file"
+            );
+            file.try_lock()
+                .map_err(|_| anyhow::anyhow!("Execution ownership is busy or unsupported"))?;
             config::set_private(&path)?;
             Some(file)
-        } else { None };
+        } else {
+            None
+        };
         let settings = Settings::load(&config);
+        crate::catalog::load_cached(&config);
         let identity: Option<IdentityFile> = config::read_json_strict(&config.identity_path())?;
         let machine: Option<MachineFile> = config::read_json_strict(&config.machine_path())?;
+        // The library also travels in the roster, so one that cannot be read comes back from
+        // the other Devices.
+        let playbooks = crate::playbooks::Library::load(
+            &config.home,
+            machine.as_ref().and_then(|m| m.dek().ok()),
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "reading playbooks.enc");
+            crate::playbooks::Library::default()
+        });
         let credentials = Credentials::load(&config);
         let plugins = crate::plugins::Store::load(&config)?;
         let marketplace = crate::marketplace::Updates::load(&config);
-        let store = LocalStore::open_with_admission(&config.database_path(), admission.as_ref(), false)?;
-        let memory_config = crate::memory_service::load(&store, machine.as_ref().and_then(|m| m.dek().ok()))?;
+        let store =
+            LocalStore::open_with_admission(&config.database_path(), admission.as_ref(), false)?;
+        let memory_config =
+            crate::memory_service::load(&store, machine.as_ref().and_then(|m| m.dek().ok()))?;
         let execution_epoch = uuid::Uuid::new_v4().to_string();
         if execution_owner.is_some() {
             store.recover_task_owner(&execution_epoch)?;
@@ -459,17 +784,24 @@ impl App {
         for bot in &mut state.bots {
             bot.normalize_description();
         }
-        let chat_ids: Vec<String> = state.chats.iter().map(|chat| chat.meta.id.clone()).collect();
+        let chat_ids: Vec<String> = state
+            .chats
+            .iter()
+            .map(|chat| chat.meta.id.clone())
+            .collect();
         store.retain_chats(&chat_ids)?;
         // Upload this Device's metadata once per launch: a relay that changed or was reset
         // since the last upload has no copy, and every newly paired Device needs one.
         state.machine_blob_hash = None;
         let (events, _) = broadcast::channel(512);
-        let http = beans_tls::client_builder().timeout(std::time::Duration::from_secs(60)).build()?;
+        let http = beans_tls::client_builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
 
         let app = Arc::new(App {
             execution_owner,
             execution_epoch,
+            project_context_lock: Mutex::new(()),
             config,
             settings: Mutex::new(settings),
             identity: Mutex::new(identity),
@@ -478,19 +810,33 @@ impl App {
             memory_config: parking_lot::Mutex::new(memory_config),
             #[cfg(feature = "runner")]
             memory_runtime: crate::memory_service::dispatch::MemoryRuntime::default(),
+            playbooks: Mutex::new(playbooks),
             state: Mutex::new(state),
             roster_edit: Mutex::new(()),
             store,
+            handoff_lock: Mutex::new(()),
+            budgets: crate::budgets::BudgetStore::default(),
+            #[cfg(feature = "runner")]
+            connector_limits: crate::connector_limits::ConnectorLimits::default(),
+            review_lock: Mutex::new(()),
+            review_wake: Notify::new(),
             events,
             relay: RelayClient::new()?,
             outbox_notify: Notify::new(),
             sync_wakes: AtomicU64::new(0),
             message_order: Mutex::new(()),
+            task_order: Mutex::new(()),
+            output_publication: Mutex::new(()),
             relay_connected: AtomicBool::new(false),
             relay_update_required: AtomicBool::new(false),
             relay_problem: Mutex::new(None),
             presence_stale: AtomicBool::new(false),
             bulk_sync: AtomicBool::new(false),
+            attention_backfilled: AtomicBool::new(false),
+            rotation_due: AtomicBool::new(false),
+            // Blobs held when the last run ended are tried once this one has its keys.
+            held_due: AtomicBool::new(true),
+            recent_uploads: Mutex::new(std::collections::VecDeque::new()),
             account_pulled: watch::Sender::new(None),
             pairings: Mutex::new(HashMap::new()),
             accepting: Mutex::new(None),
@@ -513,22 +859,40 @@ impl App {
             pending_permissions: Mutex::new(HashMap::new()),
             #[cfg(feature = "runner")]
             shell_sessions: crate::shell::Sessions::default(),
+            #[cfg(feature = "runner")]
+            coding_agents: crate::coding::Agents::default(),
             plugins: Mutex::new(plugins),
+            channels: crate::channels::Channels::default(),
             marketplace,
+            workflow_editing: tokio::sync::Mutex::new(()),
             catalog: crate::catalog::Updates::default(),
             #[cfg(feature = "cli")]
             updates: crate::update::Updater::default(),
+            #[cfg(feature = "cli")]
+            app_updates: crate::app_update::AppUpdates::default(),
             #[cfg(feature = "runner")]
             mcp: crate::plugins::mcp::Pool::new(),
             #[cfg(feature = "runner")]
+            browser_sessions: crate::browser::Sessions::default(),
+            #[cfg(feature = "runner")]
+            secrets: crate::secrets::Store::default(),
+            #[cfg(feature = "runner")]
             routine_checks: crate::routines::Checks::default(),
             update: crate::update_control::Control::default(),
+            feedback_lock: tokio::sync::Mutex::new(()),
+            #[cfg(feature = "runner")]
+            feedback_reviews: Mutex::new(HashMap::new()),
             http,
         });
         crate::marketplace::enable(&app);
         crate::catalog::enable(&app);
         // Normalize and persist the in-memory view before background work begins.
-        let snapshot = { app.state.lock().map_err(|_| anyhow::anyhow!("Startup state mutex is poisoned"))?.clone() };
+        let snapshot = {
+            app.state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Startup state mutex is poisoned"))?
+                .clone()
+        };
         app.store.save_state(&snapshot)?;
         Ok(app)
     }
@@ -537,14 +901,30 @@ impl App {
     /// Reconcile again after each pull: a newer remote card can replace startup's dismissal.
     #[cfg(feature = "runner")]
     pub fn close_orphan_proposals(&self) -> anyhow::Result<()> {
-        if !self.is_execution_owner() { return Ok(()); }
-        let Some(runner_id) = self.this_device_id() else { return Ok(()); };
-        let own_bots: std::collections::HashSet<String> = self.state.lock().unwrap().bots.iter()
-            .filter(|bot| bot.runner_id == runner_id).map(|bot| bot.id.clone()).collect();
+        if !self.is_execution_owner() {
+            return Ok(());
+        }
+        let Some(runner_id) = self.this_device_id() else {
+            return Ok(());
+        };
+        let own_bots: std::collections::HashSet<String> = self
+            .state
+            .lock()
+            .unwrap()
+            .bots
+            .iter()
+            .filter(|bot| bot.runner_id == runner_id)
+            .map(|bot| bot.id.clone())
+            .collect();
         for mut card in self.store.proposal_cards()? {
             if !matches!(&card.author, Author::Bot { bot_id } if own_bots.contains(bot_id))
                 || !matches!(&card.body, Body::Permission { decision, .. } if decision == "pending")
-                || self.pending_permissions.lock().unwrap().contains_key(&card.id) {
+                || self
+                    .pending_permissions
+                    .lock()
+                    .unwrap()
+                    .contains_key(&card.id)
+            {
                 continue;
             }
             if let Body::Permission { decision, .. } = &mut card.body {
@@ -610,7 +990,12 @@ impl App {
     /// Starts waiting on plugin sign-in `id` for another Runner, cancelling a previous wait.
     pub fn begin_plugin_sign_in(&self, id: &str) -> CancellationToken {
         let next = CancellationToken::new();
-        if let Some((_, previous)) = self.plugin_sign_in.lock().unwrap().replace((id.to_string(), next.clone())) {
+        if let Some((_, previous)) = self
+            .plugin_sign_in
+            .lock()
+            .unwrap()
+            .replace((id.to_string(), next.clone()))
+        {
             previous.cancel();
         }
         next
@@ -627,7 +1012,11 @@ impl App {
 
     /// Changes the account's credential of `kind`: saved here, sent to the other Devices, and
     /// shown by the apps.
-    pub fn update_credentials(&self, kind: &str, update: impl FnOnce(&mut Credentials)) -> anyhow::Result<()> {
+    pub fn update_credentials(
+        &self,
+        kind: &str,
+        update: impl FnOnce(&mut Credentials),
+    ) -> anyhow::Result<()> {
         {
             let mut credentials = self.credentials.lock().unwrap();
             update(&mut credentials);
@@ -656,7 +1045,8 @@ impl App {
     /// connected here before the account carried them, or a relay that was reset. Called once
     /// a pull has merged what the relay holds, so an older set never replaces a newer one.
     pub fn push_credentials_if_owed(&self) {
-        let is_owed = !self.state.lock().unwrap().credentials_uploaded && !self.credentials.lock().unwrap().is_empty();
+        let is_owed = !self.state.lock().unwrap().credentials_uploaded
+            && !self.credentials.lock().unwrap().is_empty();
         if is_owed {
             self.push_credentials();
         }
@@ -675,8 +1065,12 @@ impl App {
             }
             merge
         };
-        if !merge.taken.is_empty() { self.emit(self.roster_summary()); }
-        if merge.is_ahead { self.push_credentials(); }
+        if !merge.taken.is_empty() {
+            self.emit(self.roster_summary());
+        }
+        if merge.is_ahead {
+            self.push_credentials();
+        }
     }
 
     pub fn emit(&self, event: Event) {
@@ -684,11 +1078,13 @@ impl App {
             && matches!(
                 event,
                 Event::MessageAdded { .. }
+                    | Event::AttentionChanged(_)
                     | Event::MessageUpdated { .. }
                     | Event::MessageRemoved { .. }
                     | Event::ChatRemoved { .. }
                     | Event::RosterChanged { .. }
                     | Event::ChatUsageChanged { .. }
+                    | Event::TaskChanged { .. }
             )
         {
             // The snapshot at the end of the page carries all of this at once.
@@ -697,20 +1093,35 @@ impl App {
         let _ = self.events.send(event);
     }
 
-    pub(crate) fn plugin_admission(&self, expected: Option<u64>) -> Result<parking_lot::ReentrantMutexGuard<'_, std::cell::Cell<(u64, bool)>>, String> {
+    pub(crate) fn plugin_admission(
+        &self,
+        expected: Option<u64>,
+    ) -> Result<parking_lot::ReentrantMutexGuard<'_, std::cell::Cell<(u64, bool)>>, String> {
         let guard = self.plugin_lifecycle.lock();
         let (incarnation, closed) = guard.get();
-        if closed || expected.is_some_and(|expected| expected != incarnation) || !crate::requests::admission_matches(self, incarnation) {
+        if closed
+            || expected.is_some_and(|expected| expected != incarnation)
+            || !crate::requests::admission_matches(self, incarnation)
+        {
             return Err("The plugin account changed; start again.".into());
         }
         Ok(guard)
     }
 
     /// The closure must not acquire `state`: membership remains locked through publication.
-    pub(crate) fn with_plugin_actor<T>(&self, expected: Option<u64>, actors: &[Option<&str>], publish: impl FnOnce(u64) -> Result<T, String>) -> Result<T, String> {
+    pub(crate) fn with_plugin_actor<T>(
+        &self,
+        expected: Option<u64>,
+        actors: &[Option<&str>],
+        publish: impl FnOnce(u64) -> Result<T, String>,
+    ) -> Result<T, String> {
         let lifecycle = self.plugin_admission(expected)?;
         let state = self.state.lock().unwrap();
-        if actors.iter().flatten().any(|id| !state.listed_machines.contains_key(*id)) {
+        if actors
+            .iter()
+            .flatten()
+            .any(|id| !state.listed_machines.contains_key(*id))
+        {
             return Err("Request requires a paired Device".into());
         }
         publish(lifecycle.get().0)
@@ -719,7 +1130,9 @@ impl App {
     // MARK: - Keys
 
     pub fn has_identity(&self) -> bool {
-        if self.plugin_lifecycle.lock().get().1 { return true; }
+        if self.plugin_lifecycle.lock().get().1 {
+            return true;
+        }
         self.machine.lock().unwrap().is_some()
     }
 
@@ -732,10 +1145,13 @@ impl App {
     }
 
     pub fn this_device_id(&self) -> Option<String> {
-        self.machine_file().and_then(|m| m.machine().ok()).map(|m| m.pubkey())
+        self.machine_file()
+            .and_then(|m| m.machine().ok())
+            .map(|m| m.pubkey())
     }
 
-    pub fn dek(&self) -> Option<[u8; 32]> {
+    /// The account keys: the newest encrypts, any opens (`keys::AccountKeys`).
+    pub fn dek(&self) -> Option<crate::keys::AccountKeys> {
         self.machine_file().and_then(|m| m.dek().ok())
     }
 
@@ -745,7 +1161,11 @@ impl App {
     pub fn relay_url(&self) -> Option<String> {
         let from_settings = self.settings.lock().unwrap().effective_relay_url();
         from_settings
-            .or_else(|| std::env::var("BEANS_RELAY_URL").ok().filter(|s| !s.is_empty()))
+            .or_else(|| {
+                std::env::var("BEANS_RELAY_URL")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
             .or_else(|| self.machine_file().and_then(|m| m.relay_url))
             .or_else(config::dev_relay_url)
             .or_else(config::default_relay_url)
@@ -753,11 +1173,16 @@ impl App {
 
     pub fn set_relay_url(&self, url: Option<String>) -> anyhow::Result<()> {
         let authority = self.plugin_lifecycle.lock();
-        let generation = self.relay_generation.load(Ordering::Relaxed).checked_add(1)
+        let generation = self
+            .relay_generation
+            .load(Ordering::Relaxed)
+            .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("Relay setting generation exhausted"))?;
         let mut settings = self.settings.lock().unwrap();
         let previous = settings.relay_url.clone();
-        settings.relay_url = url.map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
+        settings.relay_url = url
+            .map(|u| u.trim().trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty());
         if let Err(error) = settings.save(&self.config) {
             settings.relay_url = previous;
             return Err(error);
@@ -779,49 +1204,79 @@ impl App {
         Ok(())
     }
 
-    /// Renames this Device; the roster hears through the machine blob.
-    pub fn rename_device(&self, name: &str) -> anyhow::Result<()> {
+    /// Gives a Device, this one or another, the name every paired Device shows it as. Blank, or
+    /// the name its own machine goes by, takes that name back.
+    pub fn set_device_name(&self, id: &str, name: &str) -> anyhow::Result<()> {
         let name = name.trim();
-        if name.is_empty() {
-            anyhow::bail!("Give the Device a name");
+        if name.chars().count() > MAX_DEVICE_NAME_CHARS {
+            anyhow::bail!("Keep the name to {MAX_DEVICE_NAME_CHARS} characters");
         }
         {
-            let mut machine = self.machine.lock().unwrap();
-            let Some(file) = machine.as_mut() else { anyhow::bail!("No identity on this Device") };
-            file.name = name.to_string();
+            let mut state = self.state.lock().unwrap();
+            let Some(device) = state.devices.iter().find(|d| d.id == id) else {
+                anyhow::bail!("Unknown Device")
+            };
+            if name.is_empty() || name == device.name {
+                if state.device_names.remove(id).is_none() {
+                    return Ok(());
+                }
+            } else if state
+                .device_names
+                .insert(id.to_string(), name.to_string())
+                .as_deref()
+                == Some(name)
+            {
+                return Ok(());
+            }
         }
-        self.save_machine()?;
-        if let Some(device) = self.local_device() {
-            upsert_device(&mut self.state.lock().unwrap().devices, device);
-        }
-        self.save_state();
-        self.push_machine_blob_if_changed();
-        self.emit(self.roster_summary());
+        self.roster_changed(true);
         Ok(())
     }
 
     /// Gives a known Device an account alias; blank restores its machine name.
     pub fn set_device_name(&self, id: &str, name: &str) -> anyhow::Result<()> {
         let name = name.trim();
-        anyhow::ensure!(name.chars().count() <= 64, "Device names must be at most 64 characters");
+        anyhow::ensure!(
+            name.chars().count() <= 64,
+            "Device names must be at most 64 characters"
+        );
         let _edit = self.roster_edit.lock().unwrap();
         let lifecycle = self.plugin_admission(None).map_err(anyhow::Error::msg)?;
-        let dek = self.machine_file().ok_or_else(|| anyhow::anyhow!("No identity on this Device"))?.dek()?;
+        let dek = self
+            .machine_file()
+            .ok_or_else(|| anyhow::anyhow!("No identity on this Device"))?
+            .dek()?;
         {
             let mut state = self.state.lock().unwrap();
-            let device = state.devices.iter().find(|device| device.id == id)
+            let device = state
+                .devices
+                .iter()
+                .find(|device| device.id == id)
                 .ok_or_else(|| anyhow::anyhow!("Unknown Device"))?;
             let alias = (!name.is_empty() && name != device.name).then(|| name.to_owned());
             let mut snapshot = state.clone();
             match alias {
-                Some(name) => { snapshot.device_names.insert(id.to_owned(), name); }
-                None => { snapshot.device_names.remove(id); }
+                Some(name) => {
+                    snapshot.device_names.insert(id.to_owned(), name);
+                }
+                None => {
+                    snapshot.device_names.remove(id);
+                }
             }
-            snapshot.device_name_edits.insert(id.to_owned(), uuid::Uuid::new_v4().to_string());
+            snapshot
+                .device_name_edits
+                .insert(id.to_owned(), uuid::Uuid::new_v4().to_string());
             let item = OutboxItem {
-                id: uuid::Uuid::new_v4().to_string(), kind: "roster".into(), recipient: None,
-                ciphertext: crate::crypto::encrypt_json(&dek, "roster", &Self::roster_from_state(&snapshot))?,
-                slot: Some(Slot::latest("roster")), group: None,
+                id: uuid::Uuid::new_v4().to_string(),
+                kind: "roster".into(),
+                recipient: None,
+                ciphertext: crate::crypto::encrypt_json(
+                    &dek,
+                    "roster",
+                    &Self::roster_from_state(&snapshot),
+                )?,
+                slot: Some(Slot::latest("roster")),
+                group: None,
             };
             remember_applied(&mut snapshot, &item.id);
             self.store.queue_outbox_with_state(&item, &snapshot)?;
@@ -839,7 +1294,12 @@ impl App {
     pub fn forget_identity(&self) -> anyhow::Result<()> {
         let lifecycle = self.plugin_lifecycle.lock();
         let (incarnation, _) = lifecycle.get();
-        lifecycle.set((incarnation.checked_add(1).expect("plugin incarnation exhausted"), true));
+        lifecycle.set((
+            incarnation
+                .checked_add(1)
+                .expect("plugin incarnation exhausted"),
+            true,
+        ));
         let close_result = self.store.close_task_account();
         for job in self.running_jobs.lock().unwrap().values() {
             job.cancel.cancel();
@@ -856,21 +1316,40 @@ impl App {
         self.cancel_provider_auth();
         self.cancel_plugin_sign_in(None);
         #[cfg(feature = "runner")]
+        for review in self.feedback_reviews.lock().unwrap().values() {
+            review.cancel();
+        }
+        #[cfg(feature = "runner")]
         self.steering_queues.lock().unwrap().clear();
         #[cfg(feature = "runner")]
         self.step_interrupts.lock().unwrap().clear();
         *self.memory_config.lock() = crate::memory_service::config::MemoryConfig::default();
+        #[cfg(feature = "runner")]
+        self.browser_sessions.reset();
+        #[cfg(feature = "runner")]
+        self.secrets.reset();
         *self.identity.lock().unwrap() = None;
         *self.machine.lock().unwrap() = None;
         *self.credentials.lock().unwrap() = Credentials::default();
+        *self.playbooks.lock().unwrap() = crate::playbooks::Library::default();
         *self.state.lock().unwrap() = State::default();
         self.store.clear()?;
+        self.budgets.clear();
+        #[cfg(feature = "runner")]
+        self.connector_limits.clear();
         self.settings.lock().unwrap().relay_url = None;
         self.relay.forget_token();
         *self.relay_problem.lock().unwrap() = None;
         // The sync session ends on this instead of waiting for its socket to say something.
         self.outbox_notify.notify_waiters();
-        for path in [self.config.identity_path(), self.config.machine_path(), self.config.credentials_path(), self.config.settings_path()] {
+        for path in [
+            self.config.identity_path(),
+            self.config.machine_path(),
+            self.config.credentials_path(),
+            self.config.settings_path(),
+            self.config.home.join("playbooks.enc"),
+            self.config.home.join("secrets.enc"),
+        ] {
             if path.exists() {
                 std::fs::remove_file(&path)?;
             }
@@ -879,11 +1358,17 @@ impl App {
         if files.is_dir() {
             std::fs::remove_dir_all(&files)?;
         }
+        let browser = self.config.home.join("browser");
+        if browser.is_dir() {
+            std::fs::remove_dir_all(browser)?;
+        }
         std::fs::remove_file(&marker)?;
         lifecycle.set((lifecycle.get().0, false));
         // The other Devices' turns went with the account.
         self.turns_changed();
-        self.emit(Event::IdentityChanged { has_identity: false });
+        self.emit(Event::IdentityChanged {
+            has_identity: false,
+        });
         self.emit(Event::Snapshot(self.snapshot()));
         Ok(())
     }
@@ -903,8 +1388,10 @@ impl App {
             os_version,
             box_pubkey: keys.box_pubkey(),
             plugins: self.plugins.lock().unwrap().statuses(),
+            channels: self.channels.statuses(),
             version: config::VERSION.into(),
             update: self.update_status(),
+            app: self.app_status(),
             updated_at: config::now_unix(),
         })
     }
@@ -921,16 +1408,46 @@ impl App {
         }
     }
 
+    /// The desktop app that runs this CLI, while it is connected and updates itself.
+    pub fn app_status(&self) -> Option<crate::model::AppStatus> {
+        #[cfg(feature = "cli")]
+        {
+            self.app_updates.status()
+        }
+        #[cfg(not(feature = "cli"))]
+        {
+            None
+        }
+    }
+
     // MARK: - Outbox
 
     pub fn push_blob(&self, kind: &str, recipient: Option<String>, ciphertext: Vec<u8>) -> String {
-        self.push_blob_as(uuid::Uuid::new_v4().to_string(), kind, recipient, ciphertext)
+        self.push_blob_as(
+            uuid::Uuid::new_v4().to_string(),
+            kind,
+            recipient,
+            ciphertext,
+        )
     }
 
     /// Queues a blob under a chosen id: a `file` blob carries its attachment's id so any
     /// Device can fetch it by that id later.
-    pub fn push_blob_as(&self, id: String, kind: &str, recipient: Option<String>, ciphertext: Vec<u8>) -> String {
-        self.queue_blob(OutboxItem { id: id.clone(), kind: kind.to_string(), recipient, ciphertext, slot: None, group: None });
+    pub fn push_blob_as(
+        &self,
+        id: String,
+        kind: &str,
+        recipient: Option<String>,
+        ciphertext: Vec<u8>,
+    ) -> String {
+        self.queue_blob(OutboxItem {
+            id: id.clone(),
+            kind: kind.to_string(),
+            recipient,
+            ciphertext,
+            slot: None,
+            group: None,
+        });
         id
     }
 
@@ -938,24 +1455,48 @@ impl App {
     /// chat; a bot's avatar belongs to none.
     pub fn push_file_blob(&self, id: String, chat_id: Option<&str>, ciphertext: Vec<u8>) {
         let group = chat_id.map(crate::model::relay_name);
-        self.queue_blob(OutboxItem { id, kind: "file".into(), recipient: None, ciphertext, slot: None, group });
+        self.queue_blob(OutboxItem {
+            id,
+            kind: "file".into(),
+            recipient: None,
+            ciphertext,
+            slot: None,
+            group,
+        });
     }
 
     /// Queues a version of `slot`. A version still waiting in the outbox gives way to this
     /// one, in its place in the queue, so a Device that was offline uploads each message once.
-    pub fn push_slot_blob(&self, kind: &str, slot: Slot, group: Option<String>, ciphertext: Vec<u8>) {
+    pub fn push_slot_blob(
+        &self,
+        kind: &str,
+        slot: Slot,
+        group: Option<String>,
+        ciphertext: Vec<u8>,
+    ) {
         let id = uuid::Uuid::new_v4().to_string();
-        self.queue_blob(OutboxItem { id, kind: kind.to_string(), recipient: None, ciphertext, slot: Some(slot), group });
+        self.queue_blob(OutboxItem {
+            id,
+            kind: kind.to_string(),
+            recipient: None,
+            ciphertext,
+            slot: Some(slot),
+            group,
+        });
     }
 
-    fn queue_blob(&self, item: OutboxItem) {
+    pub fn queue_blob(&self, item: OutboxItem) {
         let snapshot = {
             let mut state = self.state.lock().unwrap();
             remember_applied(&mut state, &item.id);
             state.clone()
         };
         if let Err(error) = self.store.queue_outbox_with_state(&item, &snapshot) {
-            self.state.lock().unwrap().applied_blob_ids.retain(|id| id != &item.id);
+            self.state
+                .lock()
+                .unwrap()
+                .applied_blob_ids
+                .retain(|id| id != &item.id);
             tracing::error!(%error, kind = %item.kind, "queueing relay blob");
             return;
         }
@@ -964,13 +1505,18 @@ impl App {
 
     fn next_policy_version(&self, state: &mut State) -> PolicyVersion {
         state.policy_clock = state.policy_clock.saturating_add(1);
-        PolicyVersion { counter: state.policy_clock, device_id: self.this_device_id().unwrap_or_default() }
+        PolicyVersion {
+            counter: state.policy_clock,
+            device_id: self.this_device_id().unwrap_or_default(),
+        }
     }
 
     fn publish_policy(&self, policy: PolicyBlob) {
         let Some(dek) = self.dek() else { return };
         match crate::crypto::encrypt_json(&dek, "policy", &policy) {
-            Ok(ciphertext) => { self.push_blob("policy", None, ciphertext); }
+            Ok(ciphertext) => {
+                self.push_blob("policy", None, ciphertext);
+            }
             Err(error) => tracing::error!(%error, "encrypting policy"),
         }
     }
@@ -988,20 +1534,25 @@ impl App {
 
     pub(crate) fn roster_from_state(state: &State) -> RosterBlob {
         RosterBlob {
-                bots: state.bots.clone(),
-                chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
-                device_names: state.device_names.clone(),
-                device_name_edits: state.device_name_edits.clone(),
-                routines: state.routines.clone(),
-                workflows: state.workflows.clone(),
-                auto_review: state.auto_review.clone(),
-                paused: state.paused,
-                policy_clock: state.policy_clock,
-                pause_version: state.pause_version.clone(),
-                capability_versions: state.capability_versions.clone(),
-                policy_capabilities: state.policy_capabilities.clone(),
-                deleted_bot_versions: state.deleted_bot_versions.clone(),
-                updated_at: config::now_secs(),
+            bots: state.bots.clone(),
+            chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
+            device_names: state.device_names.clone(),
+            device_name_edits: state.device_name_edits.clone(),
+            routines: state.routines.clone(),
+            workflows: state.workflows.clone(),
+            workflow_setups: Some(state.workflow_setups.clone()),
+            sections: state.sections.clone(),
+            shared_links: state.shared_links.clone(),
+            unpaired: state.unpaired.clone(),
+            deleted: state.deleted.clone(),
+            auto_review: state.auto_review.clone(),
+            paused: state.paused,
+            policy_clock: state.policy_clock,
+            pause_version: state.pause_version.clone(),
+            capability_versions: state.capability_versions.clone(),
+            policy_capabilities: state.policy_capabilities.clone(),
+            deleted_bot_versions: state.deleted_bot_versions.clone(),
+            updated_at: config::now_secs(),
         }
     }
 
@@ -1013,11 +1564,25 @@ impl App {
     /// its place ahead of older messages. A chat goes up under the message order lock, so no new
     /// message lands between its old ones.
     pub fn push_history(&self) {
+        if let Err(error) = crate::attention::push_history(self) {
+            tracing::warn!(%error, "queueing attention history");
+        }
+        if let Err(error) = crate::tasks::push_all(self) {
+            tracing::warn!(%error, "requeueing durable tasks");
+        }
         let (avatars, chats): (Vec<Attachment>, Vec<(String, u32)>) = {
             let state = self.state.lock().unwrap();
             (
-                state.bots.iter().filter_map(|bot| bot.avatar.clone()).collect(),
-                state.chats.iter().map(|chat| (chat.meta.id.clone(), chat.unread_count)).collect(),
+                state
+                    .bots
+                    .iter()
+                    .filter_map(|bot| bot.avatar.clone())
+                    .collect(),
+                state
+                    .chats
+                    .iter()
+                    .map(|chat| (chat.meta.id.clone(), chat.unread_count))
+                    .collect(),
             )
         };
         let push_file = |chat_id: Option<&str>, attachment: &Attachment| {
@@ -1036,6 +1601,9 @@ impl App {
                 tracing::error!(%error, %chat_id, "dropping a chat's queued blobs to upload it again");
                 continue;
             }
+            if let Err(error) = crate::project_context::push_history(self, &chat_id, true) {
+                tracing::warn!(%error, %chat_id, "queueing shared project context again");
+            }
             let messages = match self.store.all(&chat_id) {
                 Ok(messages) => messages,
                 Err(error) => {
@@ -1047,7 +1615,9 @@ impl App {
             let count = messages.len();
             for (index, message) in messages.into_iter().enumerate() {
                 if index == read_mark {
-                    self.push_chat_op(&ChatBlob::ClearUnread { chat_id: chat_id.clone() });
+                    self.push_chat_op(&ChatBlob::ClearUnread {
+                        chat_id: chat_id.clone(),
+                    });
                 }
                 if let Body::Text { attachments, .. } = &message.body {
                     for attachment in attachments {
@@ -1059,6 +1629,20 @@ impl App {
             if read_mark == count {
                 self.push_chat_op(&ChatBlob::ClearUnread { chat_id });
             }
+        }
+    }
+
+    /// Notes a blob that went up, and its place in the relay's log, for `recent_uploads`.
+    pub fn remember_upload(&self, item: OutboxItem, seq: i64) {
+        let at = config::now_unix();
+        let mut recent = self.recent_uploads.lock().unwrap();
+        recent.push_back(RecentUpload { at, seq, item });
+        while recent
+            .front()
+            .is_some_and(|upload| upload.at < at - RECENT_UPLOADS)
+            || recent.len() > MAX_RECENT_UPLOADS
+        {
+            recent.pop_front();
         }
     }
 
@@ -1075,21 +1659,31 @@ impl App {
     /// Uploads this Device's metadata, with the turns in flight on it, when either changed
     /// since the last upload.
     pub fn push_machine_blob_if_changed(&self) {
-        let (Some(dek), Some(device)) = (self.dek(), self.local_device()) else { return };
+        let (Some(dek), Some(device)) = (self.dek(), self.local_device()) else {
+            return;
+        };
         let turns = self.turns_here();
+        let budgets = self.budgets.local_snapshots(self);
+        let watching = self.watched_chat.lock().unwrap().clone();
         let fingerprint = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             device.id,
             device.name,
             device.model,
             device.os,
             device.os_version,
             serde_json::to_string(&device.plugins).unwrap_or_default(),
+            serde_json::to_string(&device.channels).unwrap_or_default(),
             device.version,
             serde_json::to_string(&device.update).unwrap_or_default(),
-            serde_json::to_string(&turns).unwrap_or_default()
+            serde_json::to_string(&device.app).unwrap_or_default(),
+            serde_json::to_string(&turns).unwrap_or_default(),
+            serde_json::to_string(&budgets).unwrap_or_default(),
+            watching.as_deref().unwrap_or_default()
         );
-        let hash = keys::b64(&<sha2::Sha256 as sha2::Digest>::digest(fingerprint.as_bytes()));
+        let hash = keys::b64(&<sha2::Sha256 as sha2::Digest>::digest(
+            fingerprint.as_bytes(),
+        ));
         let changed = {
             let mut state = self.state.lock().unwrap();
             upsert_device(&mut state.devices, device.clone());
@@ -1104,9 +1698,23 @@ impl App {
             return;
         }
         let device_id = device.id.clone();
-        match crate::crypto::encrypt_json(&dek, "machine", &MachineBlob { device, turns }) {
+        match crate::crypto::encrypt_json(
+            &dek,
+            "machine",
+            &MachineBlob {
+                device,
+                turns,
+                budgets,
+                watching,
+            },
+        ) {
             Ok(ciphertext) => {
-                self.push_slot_blob("machine", Slot::latest(format!("machine-{}", device_id)), None, ciphertext);
+                self.push_slot_blob(
+                    "machine",
+                    Slot::latest(format!("machine-{}", device_id)),
+                    None,
+                    ciphertext,
+                );
             }
             Err(error) => tracing::error!(%error, "encrypting machine blob"),
         }
@@ -1115,48 +1723,88 @@ impl App {
     // MARK: - Lookup
 
     pub fn bot(&self, id: &str) -> Option<Bot> {
-        self.state.lock().unwrap().bots.iter().find(|b| b.id == id).cloned()
+        self.state
+            .lock()
+            .unwrap()
+            .bots
+            .iter()
+            .find(|b| b.id == id)
+            .cloned()
     }
 
     pub fn chat(&self, id: &str) -> Option<Chat> {
-        self.state.lock().unwrap().chats.iter().find(|c| c.meta.id == id).cloned()
+        self.state
+            .lock()
+            .unwrap()
+            .chats
+            .iter()
+            .find(|c| c.meta.id == id)
+            .cloned()
     }
 
+    /// A Device as the account knows it, under the name the account gave it, if any.
     pub fn device(&self, id: &str) -> Option<Device> {
         let state = self.state.lock().unwrap();
         let mut device = state.devices.iter().find(|d| d.id == id).cloned()?;
-        if let Some(name) = state.device_names.get(id) { device.name = name.clone(); }
+        if let Some(name) = state.device_names.get(id) {
+            device.name = name.clone();
+        }
         Some(device)
     }
 
     /// A chat's name as the apps show it: a group's title, else its members' names; a direct
     /// chat's bot.
     pub fn chat_title(&self, chat: &ChatMeta) -> String {
-        if let Some(title) = chat.title.as_deref().map(str::trim).filter(|title| chat.is_group() && !title.is_empty()) {
+        if let Some(title) = chat
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| chat.is_group() && !title.is_empty())
+        {
             return title.to_string();
         }
-        chat.bot_ids.iter().map(|id| crate::runtime::name_of(self, id)).collect::<Vec<_>>().join(", ")
+        chat.bot_ids
+            .iter()
+            .map(|id| crate::runtime::name_of(self, id))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// The group a person names: its id, or its title as the apps show it, in any case.
     pub fn find_group(&self, query: &str) -> Result<Chat, String> {
         let query = query.trim();
-        let chats: Vec<ChatMeta> = self.state.lock().unwrap().chats.iter().map(|chat| chat.meta.clone()).collect();
+        let chats: Vec<ChatMeta> = self
+            .state
+            .lock()
+            .unwrap()
+            .chats
+            .iter()
+            .map(|chat| chat.meta.clone())
+            .collect();
         if let Some(chat) = chats.iter().find(|chat| chat.id == query) {
             if !chat.is_group() {
-                return Err(format!("{query} is the direct chat with {}; only a group has an owner.", self.chat_title(chat)));
+                return Err(format!(
+                    "{query} is the direct chat with {}; only a group has an owner.",
+                    self.chat_title(chat)
+                ));
             }
             return self.chat(&chat.id).ok_or_else(|| "Unknown chat".into());
         }
         let folded = query.to_lowercase();
-        let named: Vec<&ChatMeta> = chats.iter().filter(|chat| chat.is_group() && self.chat_title(chat).to_lowercase() == folded).collect();
+        let named: Vec<&ChatMeta> = chats
+            .iter()
+            .filter(|chat| chat.is_group() && self.chat_title(chat).to_lowercase() == folded)
+            .collect();
         match named.as_slice() {
             [chat] => self.chat(&chat.id).ok_or_else(|| "Unknown chat".into()),
             [] => Err(format!("No group is called \"{query}\".")),
             many => Err(format!(
                 "{} groups are called \"{query}\"; name one by its id: {}.",
                 many.len(),
-                many.iter().map(|chat| chat.id.as_str()).collect::<Vec<_>>().join(", ")
+                many.iter()
+                    .map(|chat| chat.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         }
     }
@@ -1167,42 +1815,78 @@ impl App {
         let query = query.trim();
         let members: Vec<Bot> = {
             let state = self.state.lock().unwrap();
-            chat.meta.bot_ids.iter().filter_map(|id| state.bots.iter().find(|bot| &bot.id == id).cloned()).collect()
+            chat.meta
+                .bot_ids
+                .iter()
+                .filter_map(|id| state.bots.iter().find(|bot| &bot.id == id).cloned())
+                .collect()
         };
         if let Some(bot) = members.iter().find(|bot| bot.id == query) {
             return Ok(bot.clone());
         }
         let name = query.strip_prefix('@').unwrap_or(query).to_lowercase();
-        let named: Vec<&Bot> = members.iter().filter(|bot| bot.name.to_lowercase() == name).collect();
+        let named: Vec<&Bot> = members
+            .iter()
+            .filter(|bot| bot.name.to_lowercase() == name)
+            .collect();
         let title = self.chat_title(&chat.meta);
         match named.as_slice() {
             [bot] => Ok((*bot).clone()),
             [] => Err(format!(
                 "{query} is not in {title}. Its bots: {}.",
-                members.iter().map(|bot| bot.name.as_str()).collect::<Vec<_>>().join(", ")
+                members
+                    .iter()
+                    .map(|bot| bot.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
             many => Err(format!(
                 "{} bots in {title} are called {query}; name one by its id: {}.",
                 many.len(),
-                many.iter().map(|bot| bot.id.as_str()).collect::<Vec<_>>().join(", ")
+                many.iter()
+                    .map(|bot| bot.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         }
     }
 
     pub fn routine(&self, id: &str) -> Option<Routine> {
-        self.state.lock().unwrap().routines.iter().find(|r| r.id == id).cloned()
+        self.state
+            .lock()
+            .unwrap()
+            .routines
+            .iter()
+            .find(|r| r.id == id)
+            .cloned()
     }
 
     /// A bot's routines, oldest first.
     pub fn routines_of(&self, bot_id: &str) -> Vec<Routine> {
-        let mut routines: Vec<Routine> = self.state.lock().unwrap().routines.iter().filter(|r| r.bot_id == bot_id).cloned().collect();
-        routines.sort_by(|a, b| a.created_at.partial_cmp(&b.created_at).unwrap_or(std::cmp::Ordering::Equal));
+        let mut routines: Vec<Routine> = self
+            .state
+            .lock()
+            .unwrap()
+            .routines
+            .iter()
+            .filter(|r| r.bot_id == bot_id)
+            .cloned()
+            .collect();
+        routines.sort_by(|a, b| {
+            a.created_at
+                .partial_cmp(&b.created_at)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         routines
     }
 
     /// The routine a running job belongs to, if any.
     pub fn is_routine_running(&self, routine_id: &str) -> bool {
-        self.running_jobs.lock().unwrap().values().any(|job| job.routine_id.as_deref() == Some(routine_id))
+        self.running_jobs
+            .lock()
+            .unwrap()
+            .values()
+            .any(|job| job.routine_id.as_deref() == Some(routine_id))
     }
 
     pub fn device_is_online(&self, id: &str) -> bool {
@@ -1214,7 +1898,12 @@ impl App {
     }
 
     pub fn chat_lock(&self, chat_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.chat_locks.lock().unwrap().entry(chat_id.to_string()).or_default().clone()
+        self.chat_locks
+            .lock()
+            .unwrap()
+            .entry(chat_id.to_string())
+            .or_default()
+            .clone()
     }
 
     /// Every turn in flight this Device knows of, for the apps' working indicators; a group
@@ -1227,7 +1916,11 @@ impl App {
     }
 
     pub fn running_chat_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.known_turns().into_values().map(|turn| turn.chat_id).collect();
+        let mut ids: Vec<String> = self
+            .known_turns()
+            .into_values()
+            .map(|turn| turn.chat_id)
+            .collect();
         ids.sort();
         ids.dedup();
         ids
@@ -1237,18 +1930,50 @@ impl App {
     /// and the group exchanges it holds. A job it sent to another Runner is that Runner's to
     /// list.
     pub fn turns_here(&self) -> Vec<LiveTurn> {
-        let mut turns: Vec<LiveTurn> =
-            self.running_jobs.lock().unwrap().iter().filter(|(_, job)| job.runner_id.is_none()).map(|(id, job)| job.turn(id)).collect();
+        let mut turns: Vec<LiveTurn> = self
+            .running_jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, job)| job.runner_id.is_none())
+            .map(|(id, job)| job.turn(id))
+            .collect();
         turns.sort_by(|a, b| a.job_id.cmp(&b.job_id));
         turns
     }
 
+    /// The turns another online Device lists as running there. A bot's turns run on its own
+    /// Runner, so one listed elsewhere is a turn its old Runner finishes after a move.
+    fn turns_elsewhere(&self, matches: impl Fn(&LiveTurn) -> bool) -> bool {
+        let this = self.this_device_id();
+        let state = self.state.lock().unwrap();
+        state
+            .device_turns
+            .iter()
+            .filter(|(id, _)| {
+                Some(id.as_str()) != this.as_deref() && state.turns_online.contains(*id)
+            })
+            .any(|(_, turns)| turns.iter().any(&matches))
+    }
+
+    /// Whether `bot_id` has a turn in `chat_id` on another Device, its old Runner after a move.
+    pub fn bot_turn_elsewhere(&self, chat_id: &str, bot_id: &str) -> bool {
+        self.turns_elsewhere(|turn| turn.chat_id == chat_id && turn.bot_id == bot_id)
+    }
+
+    /// Whether a run of the routine goes on on another Device, its bot's old Runner after a move.
+    pub fn routine_running_elsewhere(&self, routine_id: &str) -> bool {
+        self.turns_elsewhere(|turn| turn.routine_id.as_deref() == Some(routine_id))
+    }
+
     /// Every turn in flight this Device knows of, by job id: what the other Devices list while
     /// the relay last saw them online, then this Device's own jobs, including one it sent to a
-    /// Runner that has not listed it yet.
+    /// Runner that has not listed it yet. A job sent to a Runner the relay's last machine list
+    /// shows offline is left out, as that Runner's own list is: its wait goes on, so a result
+    /// that comes later still counts.
     fn known_turns(&self) -> std::collections::BTreeMap<String, LiveTurn> {
         let mut turns = std::collections::BTreeMap::new();
-        {
+        let offline_runners: std::collections::HashSet<String> = {
             let state = self.state.lock().unwrap();
             for (device_id, listed) in &state.device_turns {
                 if state.turns_online.contains(device_id) {
@@ -1257,8 +1982,21 @@ impl App {
                     }
                 }
             }
-        }
+            state
+                .listed_machines
+                .keys()
+                .filter(|id| !state.turns_online.contains(*id))
+                .cloned()
+                .collect()
+        };
         for (id, job) in self.running_jobs.lock().unwrap().iter() {
+            if job
+                .runner_id
+                .as_ref()
+                .is_some_and(|runner| offline_runners.contains(runner))
+            {
+                continue;
+            }
             turns.entry(id.clone()).or_insert_with(|| job.turn(id));
         }
         turns
@@ -1273,15 +2011,16 @@ impl App {
         }
         let mut announced = self.announced_turns.lock().unwrap();
         let known = self.known_turns();
-        for (id, turn) in announced.iter() {
-            if !known.contains_key(id) {
-                self.emit(Event::JobFinished { chat_id: turn.chat_id.clone(), bot_id: turn.bot_id.clone(), job_id: id.clone(), routine_id: turn.routine_id.clone() });
-            }
-        }
+        self.announce_ended(&announced, &known);
         for (id, turn) in &known {
             let before = announced.get(id);
             if before.is_none() {
-                self.emit(Event::JobStarted { chat_id: turn.chat_id.clone(), bot_id: turn.bot_id.clone(), job_id: id.clone(), routine_id: turn.routine_id.clone() });
+                self.emit(Event::JobStarted {
+                    chat_id: turn.chat_id.clone(),
+                    bot_id: turn.bot_id.clone(),
+                    job_id: id.clone(),
+                    routine_id: turn.routine_id.clone(),
+                });
             }
             if let Some(activity) = &turn.activity {
                 if before.and_then(|seen| seen.activity.as_ref()) != Some(activity) {
@@ -1290,6 +2029,37 @@ impl App {
             }
         }
         *announced = known;
+    }
+
+    /// Tells the local app at once which of the turns it was told of this Device no longer
+    /// knows, and announces none: a Device the relay now shows offline lists nothing, and its
+    /// turns end here without waiting for the rest of the sync round, which a relay that drops
+    /// the session may never finish. What starts waits for `turns_changed` after the pull.
+    pub fn turns_ended(&self) {
+        if self.bulk_sync.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut announced = self.announced_turns.lock().unwrap();
+        let known = self.known_turns();
+        self.announce_ended(&announced, &known);
+        announced.retain(|id, _| known.contains_key(id));
+    }
+
+    fn announce_ended(
+        &self,
+        announced: &std::collections::BTreeMap<String, LiveTurn>,
+        known: &std::collections::BTreeMap<String, LiveTurn>,
+    ) {
+        for (id, turn) in announced.iter() {
+            if !known.contains_key(id) {
+                self.emit(Event::JobFinished {
+                    chat_id: turn.chat_id.clone(),
+                    bot_id: turn.bot_id.clone(),
+                    job_id: id.clone(),
+                    routine_id: turn.routine_id.clone(),
+                });
+            }
+        }
     }
 
     /// A turn here started, ended, or changed what it is doing: the other Devices hear it
@@ -1316,13 +2086,21 @@ impl App {
     /// A bot's new message says what its turn was doing, so whatever the turn reported before
     /// it is over, as it is in the apps.
     fn end_turn_activity(&self, chat_id: &str, bot_id: &str) {
-        let changed = self.running_jobs.lock().unwrap().values_mut().fold(false, |changed, job| {
-            let ends = job.runner_id.is_none() && job.chat_id == chat_id && job.bot_id == bot_id && job.activity.is_some();
-            if ends {
-                job.activity = None;
-            }
-            changed || ends
-        });
+        let changed = self
+            .running_jobs
+            .lock()
+            .unwrap()
+            .values_mut()
+            .fold(false, |changed, job| {
+                let ends = job.runner_id.is_none()
+                    && job.chat_id == chat_id
+                    && job.bot_id == bot_id
+                    && job.activity.is_some();
+                if ends {
+                    job.activity = None;
+                }
+                changed || ends
+            });
         if changed {
             self.local_turns_changed();
         }
@@ -1332,13 +2110,21 @@ impl App {
     pub fn set_device_turns(&self, device_id: &str, turns: Vec<LiveTurn>) {
         {
             let mut state = self.state.lock().unwrap();
-            if state.device_turns.get(device_id).map(Vec::as_slice).unwrap_or_default() == turns.as_slice() {
+            if state
+                .device_turns
+                .get(device_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                == turns.as_slice()
+            {
                 return;
             }
             if turns.is_empty() {
                 state.device_turns.remove(device_id);
             } else {
-                state.device_turns.insert(device_id.to_string(), turns.clone());
+                state
+                    .device_turns
+                    .insert(device_id.to_string(), turns.clone());
             }
         }
         if let Err(error) = self.store.set_device_turns(device_id, &turns) {
@@ -1351,17 +2137,33 @@ impl App {
 
     pub fn roster_summary(&self) -> Event {
         let memory = self.memory_summary();
+        let this_device = self.this_device_id();
         let state = self.state.lock().unwrap();
         Event::RosterChanged {
             devices: self.devices_out(&state),
             bots: state.bots.clone(),
-            chats: state.chats.iter().map(|c| ChatSummary { meta: c.meta.clone(), unread_count: c.unread_count, usage: c.usage.clone() }).collect(),
+            chats: state
+                .chats
+                .iter()
+                .map(|c| ChatSummary {
+                    meta: c.meta.clone(),
+                    unread_count: c.unread_count,
+                    usage: shown_usage(&state, c, this_device.as_deref()),
+                })
+                .collect(),
+            sections: state.sections.clone(),
             routines: self.routines_out(&state),
             auto_review: state.auto_review.clone(),
             paused: state.paused,
             providers: self.credentials.lock().unwrap().statuses(),
             models: models_out(),
             memory,
+            shared_links: state
+                .shared_links
+                .iter()
+                .map(crate::templates::links::SharedLink::out)
+                .collect(),
+            playbooks: crate::playbooks::summaries(self),
         }
     }
 
@@ -1369,37 +2171,60 @@ impl App {
         self.state.lock().unwrap().auto_review.clone()
     }
 
-    pub fn is_paused(&self) -> bool { self.state.lock().unwrap().paused }
+    pub fn is_paused(&self) -> bool {
+        self.state.lock().unwrap().paused
+    }
 
     pub fn set_paused(&self, paused: bool) {
         let _edit = self.roster_edit.lock().unwrap();
         let policy = {
             let mut state = self.state.lock().unwrap();
-            if state.paused == paused { return; }
+            if state.paused == paused {
+                return;
+            }
             state.paused = paused;
             let version = self.next_policy_version(&mut state);
             state.pause_version = version.clone();
-            PolicyBlob { paused: Some(paused), bot_id: None, capabilities: None, removed: false, version }
+            PolicyBlob {
+                paused: Some(paused),
+                bot_id: None,
+                capabilities: None,
+                removed: false,
+                version,
+            }
         };
-        if paused { self.stop_for_pause(); }
+        if paused {
+            self.stop_for_pause();
+        }
         self.publish_policy(policy);
         self.roster_changed(true);
     }
 
     pub fn stop_for_pause(&self) {
-        if let Err(error) = self.persist_task_cancel(None,None,None) {
+        if let Err(error) = self.persist_task_cancel(None, None, None) {
             let lifecycle = self.plugin_lifecycle.lock();
             lifecycle.set((lifecycle.get().0, true));
             tracing::error!(%error, "Task cancellation persistence failed; account admission closed");
         }
         #[cfg(feature = "runner")]
         self.memory_runtime.cancel_all();
-        for job in self.running_jobs.lock().unwrap().values() { job.cancel.cancel(); }
+        for job in self.running_jobs.lock().unwrap().values() {
+            job.cancel.cancel();
+        }
         #[cfg(feature = "runner")]
         {
             self.routine_checks.cancel_all();
-            let chats: Vec<String> = self.state.lock().unwrap().chats.iter().map(|chat| chat.meta.id.clone()).collect();
-            for chat in chats { self.shell_sessions.stop_chat(&chat); }
+            let chats: Vec<String> = self
+                .state
+                .lock()
+                .unwrap()
+                .chats
+                .iter()
+                .map(|chat| chat.meta.id.clone())
+                .collect();
+            for chat in chats {
+                self.shell_sessions.stop_chat(&chat);
+            }
         }
     }
 
@@ -1459,10 +2284,10 @@ impl App {
     }
 
     pub fn roster_changed(&self, upload: bool) {
-        let reconciled=self.store.reconcile_schedules(&self.state.lock().unwrap());
-        if let Err(error)=reconciled {
-            let lifecycle=self.plugin_lifecycle.lock();
-            lifecycle.set((lifecycle.get().0,true));
+        let reconciled = self.store.reconcile_schedules(&self.state.lock().unwrap());
+        if let Err(error) = reconciled {
+            let lifecycle = self.plugin_lifecycle.lock();
+            lifecycle.set((lifecycle.get().0, true));
             tracing::error!(%error,"Schedule revocation failed; account admission closed");
         }
         self.save_state();
@@ -1470,22 +2295,35 @@ impl App {
             self.push_roster();
         }
         self.emit(self.roster_summary());
+        crate::attention::changed(self);
     }
 
     /// Creates the bot and its direct chat in one roster change, so other Devices (and the
     /// app's optimistic rows) never see a bot without its DM.
-    pub fn create_bot_with_dm(&self, bot: Bot, chat_id: Option<String>) -> anyhow::Result<(Bot, Chat)> {
+    pub fn create_bot_with_dm(
+        &self,
+        bot: Bot,
+        chat_id: Option<String>,
+    ) -> anyhow::Result<(Bot, Chat)> {
         self.create_bot_with_dm_prepared(bot, chat_id, |_| Ok(()))
     }
 
     /// Validates the Runner and reserved ids before preparation admits template work or
     /// stores its avatar. The roster edit lock keeps those reservations valid through commit.
-    pub(crate) fn create_bot_with_dm_prepared(&self, mut bot: Bot, chat_id: Option<String>,
-        prepare: impl FnOnce(&mut Bot) -> anyhow::Result<()>) -> anyhow::Result<(Bot, Chat)> {
+    pub(crate) fn create_bot_with_dm_prepared(
+        &self,
+        mut bot: Bot,
+        chat_id: Option<String>,
+        prepare: impl FnOnce(&mut Bot) -> anyhow::Result<()>,
+    ) -> anyhow::Result<(Bot, Chat)> {
         let _edit = self.roster_edit.lock().unwrap();
-        if let Some(look) = &bot.look { look.validate().map_err(anyhow::Error::msg)?; }
+        if let Some(look) = &bot.look {
+            look.validate().map_err(anyhow::Error::msg)?;
+        }
         bot.normalize_description();
-        let runner = self.device(&bot.runner_id).ok_or_else(|| anyhow::anyhow!("Unknown Runner"))?;
+        let runner = self
+            .device(&bot.runner_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown Runner"))?;
         if !runner.is_runner() {
             anyhow::bail!("{} runs {} and cannot run bots", runner.name, runner.os);
         }
@@ -1493,16 +2331,24 @@ impl App {
         if bot.id.is_empty() {
             loop {
                 bot.id = format!("bot-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                if !state.bots.iter().any(|b| b.id == bot.id) && !state.deleted_bot_versions.contains_key(&bot.id) { break; }
+                if !state.bots.iter().any(|b| b.id == bot.id)
+                    && !state.deleted_bot_versions.contains_key(&bot.id)
+                {
+                    break;
+                }
             }
-        } else if state.bots.iter().any(|b| b.id == bot.id) || state.deleted_bot_versions.contains_key(&bot.id) {
+        } else if state.bots.iter().any(|b| b.id == bot.id)
+            || state.deleted_bot_versions.contains_key(&bot.id)
+        {
             anyhow::bail!("Bot id already exists or was deleted");
         }
         let mut id = chat_id.filter(|id| !id.is_empty()).unwrap_or_default();
         if id.is_empty() {
             loop {
                 id = format!("chat-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-                if !state.chats.iter().any(|c| c.meta.id == id) { break; }
+                if !state.chats.iter().any(|c| c.meta.id == id) {
+                    break;
+                }
             }
         } else if state.chats.iter().any(|c| c.meta.id == id) {
             anyhow::bail!("Chat id already exists");
@@ -1512,22 +2358,52 @@ impl App {
         prepare(&mut bot)?;
         let mut state = self.state.lock().unwrap();
         let mut next = state.clone();
-        if bot.created_at == 0.0 { bot.created_at = config::now_secs(); }
+        if bot.created_at == 0.0 {
+            bot.created_at = config::now_secs();
+        }
         let chat = Chat {
-            meta: ChatMeta { id, kind: "dm".into(), title: None, bot_ids: vec![bot.id.clone()], owner_bot_id: Some(bot.id.clone()), description: None, is_pinned: false, created_at: config::now_secs() },
-            unread_count: 0, usage: None, compactions: Vec::new(),
+            meta: ChatMeta {
+                id,
+                kind: "dm".into(),
+                title: None,
+                bot_ids: vec![bot.id.clone()],
+                owner_bot_id: Some(bot.id.clone()),
+                description: None,
+                is_pinned: false,
+                created_at: config::now_secs(),
+            },
+            unread_count: 0,
+            usage: None,
+            compactions: Vec::new(),
         };
         let policy = if bot.capabilities != Capabilities::default() {
             let version = self.next_policy_version(&mut next);
-            next.capability_versions.insert(bot.id.clone(), version.clone());
-            next.policy_capabilities.insert(bot.id.clone(), bot.capabilities.clone());
-            Some(PolicyBlob { paused: None, bot_id: Some(bot.id.clone()), capabilities: Some(bot.capabilities.clone()), removed: false, version })
-        } else { None };
+            next.capability_versions
+                .insert(bot.id.clone(), version.clone());
+            next.policy_capabilities
+                .insert(bot.id.clone(), bot.capabilities.clone());
+            Some(PolicyBlob {
+                paused: None,
+                bot_id: Some(bot.id.clone()),
+                capabilities: Some(bot.capabilities.clone()),
+                removed: false,
+                version,
+            })
+        } else {
+            None
+        };
         next.bots.push(bot.clone());
         next.chats.insert(0, chat.clone());
         if let Err(error) = self.store.save_state_creating_chat(&next, &chat.meta) {
-            if let Some(avatar) = bot.avatar.as_ref().filter(|avatar| old_avatar.as_ref() != Some(&avatar.id)
-                && !state.bots.iter().any(|existing| existing.avatar.as_ref().is_some_and(|held| held.id == avatar.id))) {
+            if let Some(avatar) = bot.avatar.as_ref().filter(|avatar| {
+                old_avatar.as_ref() != Some(&avatar.id)
+                    && !state.bots.iter().any(|existing| {
+                        existing
+                            .avatar
+                            .as_ref()
+                            .is_some_and(|held| held.id == avatar.id)
+                    })
+            }) {
                 self.drop_avatar(&mut state, &avatar.id);
                 self.store.remove_outbox_with_state(&avatar.id, &state)?;
                 self.outbox_notify.notify_waiters();
@@ -1536,7 +2412,9 @@ impl App {
         }
         *state = next;
         drop(state);
-        if let Some(policy) = policy { self.publish_policy(policy); }
+        if let Some(policy) = policy {
+            self.publish_policy(policy);
+        }
         self.roster_changed(true);
         Ok((bot, chat))
     }
@@ -1547,29 +2425,51 @@ impl App {
         let _edit = self.roster_edit.lock().unwrap();
         let (bot, policy) = {
             let mut state = self.state.lock().unwrap();
-            let bot = state.bots.iter_mut().find(|b| b.id == id).ok_or_else(|| anyhow::anyhow!("Unknown bot"))?;
+            let bot = state
+                .bots
+                .iter_mut()
+                .find(|b| b.id == id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown bot"))?;
             let old_avatar = bot.avatar.as_ref().map(|avatar| avatar.id.clone());
             let old_capabilities = bot.capabilities.clone();
             let mut draft = bot.clone();
             update(&mut draft);
             if draft.look != bot.look {
-                if let Some(look) = &draft.look { look.validate().map_err(anyhow::Error::msg)?; }
+                if let Some(look) = &draft.look {
+                    look.validate().map_err(anyhow::Error::msg)?;
+                }
             }
             draft.normalize_description();
             *bot = draft.clone();
             let bot = draft;
-            if let Some(old) = old_avatar.filter(|old| bot.avatar.as_ref().map(|avatar| &avatar.id) != Some(old)) {
+            if let Some(old) =
+                old_avatar.filter(|old| bot.avatar.as_ref().map(|avatar| &avatar.id) != Some(old))
+            {
                 self.drop_avatar(&mut state, &old);
             }
             let policy = if old_capabilities != bot.capabilities {
                 let version = self.next_policy_version(&mut state);
-                state.capability_versions.insert(id.to_string(), version.clone());
-                state.policy_capabilities.insert(id.to_string(), bot.capabilities.clone());
-                Some(PolicyBlob { paused: None, bot_id: Some(id.to_string()), capabilities: Some(bot.capabilities.clone()), removed: false, version })
-            } else { None };
+                state
+                    .capability_versions
+                    .insert(id.to_string(), version.clone());
+                state
+                    .policy_capabilities
+                    .insert(id.to_string(), bot.capabilities.clone());
+                Some(PolicyBlob {
+                    paused: None,
+                    bot_id: Some(id.to_string()),
+                    capabilities: Some(bot.capabilities.clone()),
+                    removed: false,
+                    version,
+                })
+            } else {
+                None
+            };
             (bot, policy)
         };
-        if let Some(policy) = policy { self.publish_policy(policy); }
+        if let Some(policy) = policy {
+            self.publish_policy(policy);
+        }
         self.roster_changed(true);
         Ok(bot)
     }
@@ -1577,22 +2477,46 @@ impl App {
     /// Deletes a bot, its direct chat and routines, and its memberships in group chats. A
     /// group whose last bot was deleted goes with it; the other groups keep their transcript.
     pub fn delete_bot(&self, id: &str) -> anyhow::Result<()> {
+        let _project_context = self.project_context_lock.lock().unwrap();
         let _edit = self.roster_edit.lock().unwrap();
-        if self.bot(id).is_none() { anyhow::bail!("Unknown bot"); }
-        self.persist_task_cancel(None,None,Some(id))?;
+        if self.bot(id).is_none() {
+            anyhow::bail!("Unknown bot");
+        }
+        self.persist_task_cancel(None, None, Some(id))?;
         self.invalidate_bot_memory(id)?;
         let (removed_chat_ids, policy) = {
             let mut state = self.state.lock().unwrap();
-            let deleted_bot = state.bots.iter().find(|bot| bot.id == id).cloned().ok_or_else(|| anyhow::anyhow!("Unknown bot"))?;
+            let deleted_bot = state
+                .bots
+                .iter()
+                .find(|bot| bot.id == id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Unknown bot"))?;
 
             state.bots.retain(|bot| bot.id != id);
+            let routines: Vec<String> = state
+                .routines
+                .iter()
+                .filter(|routine| routine.bot_id == id)
+                .map(|routine| routine.id.clone())
+                .collect();
             state.routines.retain(|routine| routine.bot_id != id);
             state.workflows.retain(|workflow| workflow.bot_id != id);
             let version = self.next_policy_version(&mut state);
-            state.deleted_bot_versions.insert(id.to_string(), version.clone());
+            state
+                .deleted_bot_versions
+                .insert(id.to_string(), version.clone());
             state.capability_versions.remove(id);
             state.policy_capabilities.remove(id);
-            let policy = PolicyBlob { paused: None, bot_id: Some(id.to_string()), capabilities: None, removed: true, version };
+            let policy = PolicyBlob {
+                paused: None,
+                bot_id: Some(id.to_string()),
+                capabilities: None,
+                removed: true,
+                version,
+            };
+            state.deleted.insert(id.to_string());
+            state.deleted.extend(routines);
             if let Some(avatar) = &deleted_bot.avatar {
                 self.drop_avatar(&mut state, &avatar.id);
             }
@@ -1609,7 +2533,8 @@ impl App {
                     continue;
                 }
                 chat.meta.bot_ids.retain(|bot_id| bot_id != id);
-                chat.compactions.retain(|compaction| compaction.bot_id != id);
+                chat.compactions
+                    .retain(|compaction| compaction.bot_id != id);
                 if chat.meta.owner_bot_id.as_deref() == Some(id) {
                     chat.meta.owner_bot_id = chat.meta.bot_ids.first().cloned();
                 }
@@ -1619,12 +2544,14 @@ impl App {
             }
 
             state.chats.retain(|chat| !removed.contains(&chat.meta.id));
+            state.deleted.extend(removed.iter().cloned());
             queue_chat_deletes(&mut state, &removed);
             (removed, policy)
         };
         self.publish_policy(policy);
         let snapshot = self.state.lock().unwrap().clone();
-        self.store.save_state_deleting_chats(&snapshot, &removed_chat_ids)?;
+        self.store
+            .save_state_deleting_chats(&snapshot, &removed_chat_ids)?;
 
         // Stop this bot after the roster mutation is committed. A room job has no bot id and
         // keeps going when its group survives; it reads the changed membership before offering
@@ -1635,14 +2562,22 @@ impl App {
             }
         }
         for chat_id in &removed_chat_ids {
-            self.emit(Event::ChatRemoved { chat_id: chat_id.clone() });
+            self.emit(Event::ChatRemoved {
+                chat_id: chat_id.clone(),
+            });
         }
         // After its jobs stop, so a script ending now finds the bot gone and writes nothing.
         if let Err(error) = self.store.forget_codemode_values_of(id) {
             tracing::warn!(%error, "forgetting a deleted bot's script values");
         }
+        crate::feedback::forget_bot(self, id);
+        crate::playbooks::forget_scopes(self, &[id.to_string()], &removed_chat_ids);
+        #[cfg(feature = "runner")]
+        crate::secrets::forget_bots(self, &[id.to_string()]);
         #[cfg(feature = "runner")]
         self.shell_sessions.close_orphans(self);
+        #[cfg(feature = "runner")]
+        self.coding_agents.close_orphans(self);
         self.roster_changed(true);
         Ok(())
     }
@@ -1655,7 +2590,6 @@ impl App {
             state.blob_deletes.push(attachment_id.to_string());
         }
     }
-
 
     pub fn create_chat(&self, meta: ChatMeta) -> anyhow::Result<Chat> {
         let _edit = self.roster_edit.lock().unwrap();
@@ -1670,7 +2604,10 @@ impl App {
             meta.created_at = config::now_secs();
         }
         let ids: Vec<String> = if meta.kind == "dm" {
-            meta.title = None;
+            // A channel's conversation is named after where it happens.
+            if meta.channel.is_none() {
+                meta.title = None;
+            }
             meta.description = None;
             meta.bot_ids.iter().take(1).cloned().collect()
         } else {
@@ -1681,7 +2618,12 @@ impl App {
         if meta.bot_ids.is_empty() {
             anyhow::bail!("A chat needs at least one bot");
         }
-        if meta.owner_bot_id.as_ref().map(|id| !meta.bot_ids.contains(id)).unwrap_or(true) {
+        if meta
+            .owner_bot_id
+            .as_ref()
+            .map(|id| !meta.bot_ids.contains(id))
+            .unwrap_or(true)
+        {
             meta.owner_bot_id = meta.bot_ids.first().cloned();
         }
         {
@@ -1692,7 +2634,13 @@ impl App {
                 }
             }
         }
-        let chat = Chat { meta, unread_count: 0, usage: None, compactions: Vec::new() };
+        let chat = Chat {
+            meta,
+            unread_count: 0,
+            usage: None,
+            compactions: Vec::new(),
+            runner_usage: Default::default(),
+        };
         {
             let mut state = self.state.lock().unwrap();
             if let Some(existing) = state.chats.iter().find(|c| c.meta.id == chat.meta.id) {
@@ -1718,7 +2666,11 @@ impl App {
             .unwrap()
             .chats
             .iter()
-            .find(|c| c.meta.kind == "dm" && c.meta.bot_ids == vec![bot_id.to_string()])
+            .find(|c| {
+                c.meta.kind == "dm"
+                    && c.meta.channel.is_none()
+                    && c.meta.bot_ids == vec![bot_id.to_string()]
+            })
             .cloned()
         {
             return Ok(existing);
@@ -1731,36 +2683,58 @@ impl App {
             owner_bot_id: Some(bot_id.to_string()),
             description: None,
             is_pinned: false,
+            section_id: None,
+            is_hidden: false,
+            mute: None,
             created_at: 0.0,
+            channel: None,
         })
     }
 
     pub fn delete_chat(&self, chat_id: &str) {
         let _edit = self.roster_edit.lock().unwrap();
+        let _project_context = self.project_context_lock.lock().unwrap();
         self.cancel_chat(chat_id);
         {
             let mut state = self.state.lock().unwrap();
             state.chats.retain(|c| c.meta.id != chat_id);
+            state.deleted.insert(chat_id.to_string());
             // The relay drops the chat's messages, read marks, and attachments in one call,
             // made by the sync cycle and retried until it lands. What was still waiting to go
             // up goes nowhere.
             queue_chat_deletes(&mut state, &[chat_id.to_string()]);
         }
         let snapshot = self.state.lock().unwrap().clone();
-        if let Err(error) = self.store.save_state_deleting_chats(&snapshot, &[chat_id.to_string()]) {
+        if let Err(error) = self
+            .store
+            .save_state_deleting_chats(&snapshot, &[chat_id.to_string()])
+        {
             tracing::error!(%error, %chat_id, "deleting chat state");
         }
-        self.emit(Event::ChatRemoved { chat_id: chat_id.to_string() });
+        self.emit(Event::ChatRemoved {
+            chat_id: chat_id.to_string(),
+        });
+        crate::playbooks::forget_scopes(self, &[], &[chat_id.to_string()]);
         #[cfg(feature = "runner")]
         self.shell_sessions.close_orphans(self);
+        #[cfg(feature = "runner")]
+        self.coding_agents.close_orphans(self);
         self.roster_changed(true);
     }
 
-    pub fn update_chat_meta(&self, chat_id: &str, update: impl FnOnce(&mut ChatMeta)) -> anyhow::Result<()> {
+    pub fn update_chat_meta(
+        &self,
+        chat_id: &str,
+        update: impl FnOnce(&mut ChatMeta),
+    ) -> anyhow::Result<()> {
         let _edit = self.roster_edit.lock().unwrap();
         {
             let mut state = self.state.lock().unwrap();
-            let chat = state.chats.iter_mut().find(|c| c.meta.id == chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
+            let chat = state
+                .chats
+                .iter_mut()
+                .find(|c| c.meta.id == chat_id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
             update(&mut chat.meta);
         }
         self.roster_changed(true);
@@ -1772,7 +2746,11 @@ impl App {
         let _edit = self.roster_edit.lock().unwrap();
         {
             let mut state = self.state.lock().unwrap();
-            let chat = state.chats.iter_mut().find(|c| c.meta.id == chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
+            let chat = state
+                .chats
+                .iter_mut()
+                .find(|c| c.meta.id == chat_id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
             if !chat.meta.is_group() {
                 anyhow::bail!("Only group chats can be renamed");
             }
@@ -1788,7 +2766,11 @@ impl App {
         let _edit = self.roster_edit.lock().unwrap();
         {
             let mut state = self.state.lock().unwrap();
-            let chat = state.chats.iter_mut().find(|c| c.meta.id == chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
+            let chat = state
+                .chats
+                .iter_mut()
+                .find(|c| c.meta.id == chat_id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
             if !chat.meta.is_group() {
                 anyhow::bail!("Only a group has a description");
             }
@@ -1796,6 +2778,153 @@ impl App {
         }
         self.roster_changed(true);
         Ok(())
+    }
+
+    // MARK: - Sidebar
+
+    /// Adds a section after the others, with `chat_id` moved into it in the same roster change.
+    pub fn create_section(
+        &self,
+        id: Option<String>,
+        name: &str,
+        chat_id: Option<&str>,
+    ) -> anyhow::Result<Section> {
+        let name = section_name(name)?;
+        let section = {
+            let mut state = self.state.lock().unwrap();
+            let id = id
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or_else(|| format!("section-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+            if state.sections.iter().any(|section| section.id == id) {
+                anyhow::bail!("That section already exists");
+            }
+            if let Some(chat_id) = chat_id {
+                let chat = state
+                    .chats
+                    .iter_mut()
+                    .find(|chat| chat.meta.id == chat_id)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
+                chat.meta.section_id = Some(id.clone());
+            }
+            let section = Section {
+                id,
+                name,
+                collapsed: false,
+            };
+            state.sections.push(section.clone());
+            section
+        };
+        self.roster_changed(true);
+        Ok(section)
+    }
+
+    pub fn update_section(
+        &self,
+        id: &str,
+        update: impl FnOnce(&mut Section),
+    ) -> anyhow::Result<()> {
+        {
+            let mut state = self.state.lock().unwrap();
+            let section = state
+                .sections
+                .iter_mut()
+                .find(|section| section.id == id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown section"))?;
+            update(section);
+        }
+        self.roster_changed(true);
+        Ok(())
+    }
+
+    pub fn rename_section(&self, id: &str, name: &str) -> anyhow::Result<()> {
+        let name = section_name(name)?;
+        self.update_section(id, |section| section.name = name)
+    }
+
+    /// Deletes a section. Its chats go back to the chats in no section.
+    pub fn delete_section(&self, id: &str) -> anyhow::Result<()> {
+        {
+            let mut state = self.state.lock().unwrap();
+            let before = state.sections.len();
+            state.sections.retain(|section| section.id != id);
+            if state.sections.len() == before {
+                anyhow::bail!("Unknown section");
+            }
+            for chat in state
+                .chats
+                .iter_mut()
+                .filter(|chat| chat.meta.section_id.as_deref() == Some(id))
+            {
+                chat.meta.section_id = None;
+            }
+        }
+        self.roster_changed(true);
+        Ok(())
+    }
+
+    /// Puts the sections in the order of `ids`. Sections it leaves out follow, in their order.
+    pub fn reorder_sections(&self, ids: &[String]) {
+        {
+            let mut state = self.state.lock().unwrap();
+            let place = |section: &Section| {
+                ids.iter()
+                    .position(|id| *id == section.id)
+                    .unwrap_or(usize::MAX)
+            };
+            state.sections.sort_by_key(place);
+        }
+        self.roster_changed(true);
+    }
+
+    /// Lists a chat under a section, or with the chats in no section, where the sidebar shows
+    /// it: off the pinned rows and out of Hidden.
+    pub fn set_chat_section(
+        &self,
+        chat_id: &str,
+        section_id: Option<String>,
+    ) -> anyhow::Result<()> {
+        if let Some(id) = &section_id {
+            if !self
+                .state
+                .lock()
+                .unwrap()
+                .sections
+                .iter()
+                .any(|section| &section.id == id)
+            {
+                anyhow::bail!("Unknown section");
+            }
+        }
+        self.update_chat_meta(chat_id, |meta| {
+            meta.section_id = section_id;
+            meta.is_pinned = false;
+            meta.is_hidden = false;
+        })
+    }
+
+    /// Takes a chat out of the sidebar, or puts it back. A hidden chat is not pinned.
+    pub fn hide_chat(&self, chat_id: &str, hidden: bool) -> anyhow::Result<()> {
+        self.update_chat_meta(chat_id, |meta| {
+            meta.is_hidden = hidden;
+            if hidden {
+                meta.is_pinned = false;
+            }
+        })
+    }
+
+    /// Pins or unpins a chat. A pinned chat is back in the sidebar.
+    pub fn pin_chat(&self, chat_id: &str, pinned: Option<bool>) -> anyhow::Result<()> {
+        self.update_chat_meta(chat_id, |meta| {
+            meta.is_pinned = pinned.unwrap_or(!meta.is_pinned);
+            if meta.is_pinned {
+                meta.is_hidden = false;
+            }
+        })
+    }
+
+    /// Turns a chat's alerts off on every Device, until `until` or until unmuted, or back on.
+    pub fn mute_chat(&self, chat_id: &str, mute: Option<Mute>) -> anyhow::Result<()> {
+        self.update_chat_meta(chat_id, |meta| meta.mute = mute)
     }
 
     // MARK: - Routines
@@ -1827,30 +2956,70 @@ impl App {
         Ok(routine)
     }
 
-    /// Changes a routine and publishes the roster.
-    pub fn update_routine(&self, id: &str, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+    /// Changes a routine, saves it, and publishes the roster.
+    pub fn record_routine(
+        &self,
+        id: &str,
+        update: impl FnOnce(&mut Routine),
+    ) -> anyhow::Result<Routine> {
         let _edit = self.roster_edit.lock().unwrap();
-        self.update_routine_locked(id, None, update)
+        self.update_routine_locked(id, None, false, update)
     }
 
-    pub(crate) fn update_routine_for_incarnation(&self, id: &str, incarnation: u64, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+    pub fn update_routine(
+        &self,
+        id: &str,
+        update: impl FnOnce(&mut Routine),
+    ) -> anyhow::Result<Routine> {
         let _edit = self.roster_edit.lock().unwrap();
-        self.update_routine_locked(id, Some(incarnation), update)
+        self.update_routine_locked(id, None, true, update)
     }
 
-    fn update_routine_locked(&self, id: &str, incarnation: Option<u64>, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
-        let _guard = self.plugin_admission(incarnation).map_err(anyhow::Error::msg)?;
+    pub(crate) fn update_routine_for_incarnation(
+        &self,
+        id: &str,
+        incarnation: u64,
+        update: impl FnOnce(&mut Routine),
+    ) -> anyhow::Result<Routine> {
+        let _edit = self.roster_edit.lock().unwrap();
+        self.update_routine_locked(id, Some(incarnation), true, update)
+    }
+
+    fn update_routine_locked(
+        &self,
+        id: &str,
+        incarnation: Option<u64>,
+        upload: bool,
+        update: impl FnOnce(&mut Routine),
+    ) -> anyhow::Result<Routine> {
+        let _guard = self
+            .plugin_admission(incarnation)
+            .map_err(anyhow::Error::msg)?;
         let routine = {
             let mut state = self.state.lock().unwrap();
-            let index=state.routines.iter().position(|r|r.id==id).ok_or_else(||anyhow::anyhow!("Unknown routine"))?;
-            let before=crate::local_store::schedule_binding(&state,&state.routines[index])?;
-            let mut routine=state.routines[index].clone();
+            let index = state
+                .routines
+                .iter()
+                .position(|r| r.id == id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown routine"))?;
+            let before = crate::local_store::schedule_binding(&state, &state.routines[index])?;
+            let mut routine = state.routines[index].clone();
             update(&mut routine);
-            if before!=crate::local_store::schedule_binding(&state,&routine)? { self.store.revoke_schedule(id)?; }
-            state.routines[index]=routine.clone();
+            if before != crate::local_store::schedule_binding(&state, &routine)? {
+                self.store.revoke_schedule(id)?;
+            }
+            let previous = state.routines[index].clone();
+            state.routines[index] = routine.clone();
+            if let Err(error) = self.store.save_state(&state) {
+                state.routines[index] = previous;
+                return Err(error);
+            }
             routine
         };
-        self.roster_changed(true);
+        if upload {
+            self.push_roster();
+        }
+        self.emit(self.roster_summary());
         Ok(routine)
     }
 
@@ -1863,6 +3032,7 @@ impl App {
             if state.routines.len() == before {
                 anyhow::bail!("Unknown routine");
             }
+            state.deleted.insert(id.to_string());
         }
         self.roster_changed(true);
         Ok(())
@@ -1872,8 +3042,20 @@ impl App {
 
     /// A bot's saved workflows, oldest first.
     pub fn workflows_of(&self, bot_id: &str) -> Vec<WorkflowRecord> {
-        let mut workflows: Vec<WorkflowRecord> = self.state.lock().unwrap().workflows.iter().filter(|w| w.bot_id == bot_id).cloned().collect();
-        workflows.sort_by(|a, b| a.created_at.partial_cmp(&b.created_at).unwrap_or(std::cmp::Ordering::Equal));
+        let mut workflows: Vec<WorkflowRecord> = self
+            .state
+            .lock()
+            .unwrap()
+            .workflows
+            .iter()
+            .filter(|w| w.bot_id == bot_id)
+            .cloned()
+            .collect();
+        workflows.sort_by(|a, b| {
+            a.created_at
+                .partial_cmp(&b.created_at)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         workflows
     }
 
@@ -1892,12 +3074,22 @@ impl App {
             // before it is pushed: a create checked only against its own snapshot would let
             // two creates take the last slot together, and let a full roster grow past what
             // `workflow::admit` will accept back from the relay.
-            let held = state.workflows.iter().filter(|w| w.bot_id == workflow.bot_id).count();
+            let held = state
+                .workflows
+                .iter()
+                .filter(|w| w.bot_id == workflow.bot_id)
+                .count();
             if held >= crate::workflow::MAX_PER_BOT {
-                anyhow::bail!("A bot keeps at most {} workflows. Delete one first.", crate::workflow::MAX_PER_BOT);
+                anyhow::bail!(
+                    "A bot keeps at most {} workflows. Delete one first.",
+                    crate::workflow::MAX_PER_BOT
+                );
             }
             if state.workflows.len() >= crate::workflow::MAX_TOTAL {
-                anyhow::bail!("This account keeps at most {} workflows. Delete one first.", crate::workflow::MAX_TOTAL);
+                anyhow::bail!(
+                    "This account keeps at most {} workflows. Delete one first.",
+                    crate::workflow::MAX_TOTAL
+                );
             }
             state.workflows.push(workflow.clone());
         }
@@ -1923,15 +3115,83 @@ impl App {
     /// next run is due (or the next check, for a routine with one), and whether a run is going
     /// on right now.
     fn routines_out(&self, state: &State) -> Vec<Value> {
-        state.routines.iter().map(|routine| self.routine_out(routine)).collect()
+        state
+            .routines
+            .iter()
+            .map(|routine| self.routine_out_with_state(routine, state))
+            .collect()
     }
 
     pub fn routine_out(&self, routine: &Routine) -> Value {
+        self.routine_out_with_state(routine, &self.state.lock().unwrap())
+    }
+
+    fn routine_out_with_state(&self, routine: &Routine, state: &State) -> Value {
         let mut out = serde_json::to_value(routine).unwrap_or_default();
-        out["schedule_text"] = json!(crate::schedule::parse(&routine.schedule).map(|s| s.describe()).unwrap_or_else(|_| routine.schedule.clone()));
-        out["next_run_at"] = json!(crate::routines::next_run_shown(self, routine).map(|t| t as f64));
-        out["is_running"] = json!(self.is_routine_running(&routine.id));
+        out["schedule_text"] = json!(crate::routine_triggers::describe(routine));
+        out["next_run_at"] =
+            json!(crate::routines::next_run_shown(self, routine).map(|t| t as f64));
+        // What the apps word themselves: a one-time routine's instant, what a routine on events
+        // listens to, and the event a routine around events runs for next. What the Runner keeps
+        // to compare reads stays out.
+        if let Ok(schedule @ crate::schedule::Schedule::Once(_)) =
+            crate::schedule::parse(&routine.schedule)
+        {
+            out["once_at"] = json!(schedule.once_instant(&routine.timezone).map(|t| t as f64));
+        }
+        if let Some(calendar) = &routine.calendar {
+            let offset = match crate::schedule::parse(&routine.schedule) {
+                Ok(crate::schedule::Schedule::Events(offset)) => Some(offset),
+                _ => None,
+            };
+            let next = offset.and_then(|offset| crate::routine_triggers::next_event_run(routine, offset)).map(|(_, event)| json!({ "title": event.title, "start": event.start, "end": event.end }));
+            out["calendar"] = json!({
+                "account": calendar.account,
+                "matching": calendar.matching,
+                "minutes": offset.map(|offset| offset.minutes),
+                "after": offset.map(|offset| offset.after),
+                "next_event": next,
+            });
+        }
+        let running = self.is_routine_running(&routine.id);
+        out["is_running"] = json!(running);
+        out["state"] = json!(self.routine_state(routine, state, running));
         out
+    }
+
+    /// How a routine stands, for the apps: `running`; `blocked`, paused until a sign-in (with
+    /// `paused_reason: authentication`) or with a check that tried to change something;
+    /// `paused`; `waiting_for_runner`, while its Runner is offline, since no other Runner takes
+    /// it over; `failed`, while its checks or runs fail and it tries again; else `on`.
+    fn routine_state(&self, routine: &Routine, state: &State, running: bool) -> &'static str {
+        use crate::routine_health::CheckStatus;
+        let runner = state
+            .bots
+            .iter()
+            .find(|bot| bot.id == routine.bot_id)
+            .map(|bot| bot.runner_id.as_str());
+        let online = runner.is_some_and(|id| {
+            self.this_device_id().as_deref() == Some(id) || state.device_online.contains(id)
+        });
+        if running {
+            "running"
+        } else if routine.paused_reason.as_deref() == Some("authentication") {
+            "blocked"
+        } else if !routine.is_enabled {
+            "paused"
+        } else if !online {
+            "waiting_for_runner"
+        } else {
+            match routine
+                .health
+                .as_ref()
+                .and_then(|health| health.model.status.or(health.status))
+            {
+                Some(CheckStatus::Failed) => "failed",
+                Some(CheckStatus::Blocked) => "blocked",
+                _ => "on",
+            }
+        }
     }
 
     /// The local app says which chat the user is looking at (`None` when it is not frontmost).
@@ -1939,15 +3199,65 @@ impl App {
         *self.watched_chat.lock().unwrap() = chat_id;
     }
 
+    /// The same, told to the other Devices in this Device's machine blob once the user settles
+    /// on a chat, so a Runner elsewhere does not push it to a phone either.
+    pub fn watch_chat(self: &Arc<Self>, chat_id: Option<String>) {
+        self.set_watched_chat(chat_id);
+        let app = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(WATCH_SETTLE).await;
+            app.push_machine_blob_if_changed();
+        });
+    }
+
+    /// Whether the user looks at the chat on this Device.
     pub fn is_watching(&self, chat_id: &str) -> bool {
         self.watched_chat.lock().unwrap().as_deref() == Some(chat_id)
+    }
+
+    /// Whether the user looks at the chat on this Device or on another computer the relay lists
+    /// online.
+    pub fn is_watched_anywhere(&self, chat_id: &str) -> bool {
+        if self.is_watching(chat_id) {
+            return true;
+        }
+        let state = self.state.lock().unwrap();
+        state.device_watching.iter().any(|(device_id, watched)| {
+            watched == chat_id && state.device_online.contains(device_id)
+        })
+    }
+
+    /// The chat another computer's latest machine blob says it shows.
+    pub fn set_device_watching(&self, device_id: &str, chat_id: Option<String>) {
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.device_watching.get(device_id) == chat_id.as_ref() {
+                return;
+            }
+            match &chat_id {
+                Some(chat_id) => state
+                    .device_watching
+                    .insert(device_id.to_string(), chat_id.clone()),
+                None => state.device_watching.remove(device_id),
+            };
+        }
+        if let Err(error) = self
+            .store
+            .set_device_watching(device_id, chat_id.as_deref())
+        {
+            tracing::error!(%error, "keeping the chat another Device shows");
+        }
     }
 
     /// Clears a chat's unread count. Read on this Device (`upload`), it clears on every other
     /// one through a `ClearUnread` blob.
     pub fn mark_read(&self, chat_id: &str, upload: bool) -> anyhow::Result<()> {
         let mut state = self.state.lock().unwrap();
-        let Some(index) = state.chats.iter().position(|chat| chat.meta.id == chat_id && chat.unread_count > 0) else {
+        let Some(index) = state
+            .chats
+            .iter()
+            .position(|chat| chat.meta.id == chat_id && chat.unread_count > 0)
+        else {
             return Ok(());
         };
         if !upload {
@@ -1964,12 +3274,19 @@ impl App {
             self.emit(self.roster_summary());
             return saved;
         }
-        let dek = self.dek().ok_or_else(|| anyhow::anyhow!("Account key unavailable"))?;
-        let op = ChatBlob::ClearUnread { chat_id: chat_id.to_string() };
+        let dek = self
+            .dek()
+            .ok_or_else(|| anyhow::anyhow!("Account key unavailable"))?;
+        let op = ChatBlob::ClearUnread {
+            chat_id: chat_id.to_string(),
+        };
         let item = OutboxItem {
-            id: uuid::Uuid::new_v4().to_string(), kind: "chat".into(), recipient: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: "chat".into(),
+            recipient: None,
             ciphertext: crate::crypto::encrypt_json(&dek, "chat", &op)?,
-            slot: Some(op.slot()), group: Some(op.group()),
+            slot: Some(op.slot()),
+            group: Some(op.group()),
         };
         let mut snapshot = state.clone();
         snapshot.chats[index].unread_count = 0;
@@ -1989,7 +3306,14 @@ impl App {
     /// One that finishes while the user looks at its chat is read here, and so everywhere.
     /// A message the user sends, from any Device, says they have read what came before it.
     pub fn upsert_message(&self, message: Message, upload: bool) {
-        if !self.state.lock().unwrap().chats.iter().any(|chat| chat.meta.id == message.chat_id) {
+        if !self
+            .state
+            .lock()
+            .unwrap()
+            .chats
+            .iter()
+            .any(|chat| chat.meta.id == message.chat_id)
+        {
             return;
         }
         let _order = self.message_order.lock().unwrap();
@@ -2009,18 +3333,30 @@ impl App {
         self.publish_committed_message(message, stored_upsert, upload);
     }
 
-    pub(crate) fn publish_committed_message(&self, message: Message, stored_upsert: crate::local_store::Upsert, upload: bool) {
+    pub(crate) fn publish_committed_message(
+        &self,
+        message: Message,
+        stored_upsert: crate::local_store::Upsert,
+        upload: bool,
+    ) {
         if !stored_upsert.changed {
             return;
         }
         let watching = self.is_watching(&message.chat_id);
         let outcome = {
             let mut state = self.state.lock().unwrap();
-            match state.chats.iter_mut().find(|c| c.meta.id == message.chat_id) {
+            match state
+                .chats
+                .iter_mut()
+                .find(|c| c.meta.id == message.chat_id)
+            {
                 Some(chat) => {
                     let added = stored_upsert.previous.is_none();
                     let changed = stored_upsert.changed;
-                    let counted = stored_upsert.previous.as_ref().is_some_and(Message::counts_unread);
+                    let counted = stored_upsert
+                        .previous
+                        .as_ref()
+                        .is_some_and(Message::counts_unread);
                     let finished = !counted && message.counts_unread();
                     if finished && !watching {
                         chat.unread_count += 1;
@@ -2041,21 +3377,31 @@ impl App {
             return;
         };
         if added {
-            self.emit(Event::MessageAdded { chat_id: message.chat_id.clone(), message: message.for_app() });
+            self.emit(Event::MessageAdded {
+                chat_id: message.chat_id.clone(),
+                message: message.for_app(),
+            });
         } else if changed {
-            self.emit(Event::MessageUpdated { chat_id: message.chat_id.clone(), message: message.for_app() });
+            self.emit(Event::MessageUpdated {
+                chat_id: message.chat_id.clone(),
+                message: message.for_app(),
+            });
         }
         if (finished && !watching) || read {
             self.emit(self.roster_summary());
         }
         if upload {
-            self.push_chat_op(&ChatBlob::Upsert { message: message.clone() });
+            self.push_chat_op(&ChatBlob::Upsert {
+                message: message.clone(),
+            });
         }
         if let (true, Author::Bot { bot_id }) = (added, &message.author) {
             self.end_turn_activity(&message.chat_id, bot_id);
         }
         if finished && watching {
-            self.push_chat_op(&ChatBlob::ClearUnread { chat_id: message.chat_id });
+            self.push_chat_op(&ChatBlob::ClearUnread {
+                chat_id: message.chat_id,
+            });
         }
     }
 
@@ -2069,9 +3415,15 @@ impl App {
             }
         };
         if removed {
-            self.emit(Event::MessageRemoved { chat_id: chat_id.to_string(), message_id: message_id.to_string() });
+            self.emit(Event::MessageRemoved {
+                chat_id: chat_id.to_string(),
+                message_id: message_id.to_string(),
+            });
             if upload {
-                self.push_chat_op(&ChatBlob::Remove { chat_id: chat_id.to_string(), message_id: message_id.to_string() });
+                self.push_chat_op(&ChatBlob::Remove {
+                    chat_id: chat_id.to_string(),
+                    message_id: message_id.to_string(),
+                });
             }
         }
     }
@@ -2082,7 +3434,10 @@ impl App {
 
     #[cfg(test)]
     pub fn messages(&self, chat_id: &str) -> Vec<Message> {
-        self.store.all(chat_id).map_err(|error| tracing::error!(%error, %chat_id, "reading transcript")).unwrap_or_default()
+        self.store
+            .all(chat_id)
+            .map_err(|error| tracing::error!(%error, %chat_id, "reading transcript"))
+            .unwrap_or_default()
     }
 
     /// True when the relay holds older messages of this chat than this Device has.
@@ -2090,10 +3445,21 @@ impl App {
         self.store.history_before(chat_id).ok().flatten().is_some()
     }
 
-    pub fn message_page(&self, chat_id: &str, before: Option<&str>, limit: usize) -> (Vec<Message>, bool) {
+    pub fn message_page(
+        &self,
+        chat_id: &str,
+        before: Option<&str>,
+        limit: usize,
+    ) -> (Vec<Message>, bool) {
         match self.store.page(chat_id, before, limit) {
             // More may be on the relay than here: `chats.messages` fetches it when asked.
-            Ok((messages, more)) => (messages.into_iter().map(|message| message.for_app()).collect(), more || self.history_is_partial(chat_id)),
+            Ok((messages, more)) => (
+                messages
+                    .into_iter()
+                    .map(|message| message.for_app())
+                    .collect(),
+                more || self.history_is_partial(chat_id),
+            ),
             Err(error) => {
                 tracing::error!(%error, %chat_id, "paging transcript");
                 (Vec::new(), false)
@@ -2102,16 +3468,55 @@ impl App {
     }
 
     pub fn notice(&self, chat_id: &str, text: impl Into<String>) {
-        let message = Message::new(chat_id, Author::System, Body::Notice { text: text.into(), routine_id: None });
+        let message = Message::new(
+            chat_id,
+            Author::System,
+            Body::Notice {
+                text: text.into(),
+                routine_id: None,
+            },
+        );
         self.upsert_message(message, true);
+    }
+
+    #[cfg(feature = "runner")]
+    pub fn record_pricing(&self, chat_id: &str, pricing: crate::budgets::Pricing, usd: f64) {
+        let updated = {
+            let mut state = self.state.lock().unwrap();
+            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else {
+                return;
+            };
+            let entry = chat.usage.get_or_insert_with(ChatUsage::default);
+            if !entry.pricing_kinds.contains(&pricing) {
+                entry.pricing_kinds.push(pricing);
+            }
+            match pricing {
+                crate::budgets::Pricing::Api => entry.api_cost_usd += usd,
+                crate::budgets::Pricing::SubscriptionEstimate => {
+                    entry.subscription_estimate_usd += usd
+                }
+                crate::budgets::Pricing::Unknown => entry.unknown_price_calls += 1,
+            }
+            entry.clone()
+        };
+        self.save_state();
+        self.report_usage(chat_id, updated);
     }
 
     /// Adds a finished turn's usage to the chat's and tells the app.
     #[cfg(feature = "runner")]
-    pub fn record_usage(&self, chat_id: &str, model: &str, usage: &beans_agent::Usage, context_window: u64) {
+    pub fn record_usage(
+        &self,
+        chat_id: &str,
+        model: &str,
+        usage: &beans_agent::Usage,
+        context_window: u64,
+    ) {
         let updated = {
             let mut state = self.state.lock().unwrap();
-            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
+            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else {
+                return;
+            };
             let first = chat.usage.is_none();
             let entry = chat.usage.get_or_insert_with(ChatUsage::default);
             entry.context_tokens = beans_agent::estimate::context_tokens(usage);
@@ -2121,33 +3526,87 @@ impl App {
             entry.output_tokens += usage.output;
             entry.cache_read_tokens += usage.cache_read;
             entry.cost_usd += usage.cost.total;
-            entry.cost_known = Some((first || entry.cost_known == Some(true)) && usage.cost.known == Some(true));
+            entry.cost_known =
+                Some((first || entry.cost_known == Some(true)) && usage.cost.known == Some(true));
             entry.turns += 1;
             entry.model = model.to_string();
             entry.updated_at = crate::config::now_secs();
             entry.clone()
         };
         self.save_state();
-        self.emit(Event::ChatUsageChanged { chat_id: chat_id.to_string(), usage: updated });
+        self.report_usage(chat_id, updated);
     }
 
-    /// Retains the provider's prompt overhead while estimating the context left after compaction.
+    /// After a Compact, the context the next turn sends until that turn counts it: the last
+    /// turn's count less what the summary took out, `before` and `after` being the transcript's
+    /// estimated size on either side of it.
     #[cfg(feature = "runner")]
-    pub fn record_compacted_context(&self, chat_id: &str, bot_id: &str, model: &str, before: u64, after: u64) {
-        if after >= before { return; }
+    pub fn record_compacted_context(&self, chat_id: &str, before: u64, after: u64) {
         let updated = {
             let mut state = self.state.lock().unwrap();
-            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
-            // Group usage has no responder identity, so its transcript delta cannot be attributed.
-            if chat.meta.kind != "dm" || chat.meta.bot_ids.len() != 1 || chat.meta.bot_ids[0] != bot_id { return; }
-            let Some(entry) = chat.usage.as_mut().filter(|usage| usage.context_tokens > 0 && usage.model == model) else { return };
-            entry.context_tokens = entry.context_tokens.saturating_sub(before.saturating_sub(after)).max(after);
+            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else {
+                return;
+            };
+            let Some(entry) = chat.usage.as_mut().filter(|usage| usage.context_tokens > 0) else {
+                return;
+            };
+            entry.context_tokens = entry
+                .context_tokens
+                .saturating_sub(before.saturating_sub(after))
+                .max(after);
             entry.context_estimated = true;
             entry.updated_at = crate::config::now_secs();
             entry.clone()
         };
         self.save_state();
-        self.emit(Event::ChatUsageChanged { chat_id: chat_id.to_string(), usage: updated });
+        self.report_usage(chat_id, updated);
+    }
+
+    /// Retains the provider's prompt overhead while estimating the context left after compaction.
+    #[cfg(feature = "runner")]
+    pub fn record_compacted_context(
+        &self,
+        chat_id: &str,
+        bot_id: &str,
+        model: &str,
+        before: u64,
+        after: u64,
+    ) {
+        if after >= before {
+            return;
+        }
+        let updated = {
+            let mut state = self.state.lock().unwrap();
+            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else {
+                return;
+            };
+            // Group usage has no responder identity, so its transcript delta cannot be attributed.
+            if chat.meta.kind != "dm"
+                || chat.meta.bot_ids.len() != 1
+                || chat.meta.bot_ids[0] != bot_id
+            {
+                return;
+            }
+            let Some(entry) = chat
+                .usage
+                .as_mut()
+                .filter(|usage| usage.context_tokens > 0 && usage.model == model)
+            else {
+                return;
+            };
+            entry.context_tokens = entry
+                .context_tokens
+                .saturating_sub(before.saturating_sub(after))
+                .max(after);
+            entry.context_estimated = true;
+            entry.updated_at = crate::config::now_secs();
+            entry.clone()
+        };
+        self.save_state();
+        self.emit(Event::ChatUsageChanged {
+            chat_id: chat_id.to_string(),
+            usage: updated,
+        });
     }
 
     /// Adds a side call's tokens and cost to the chat's, such as a script's `models.ask()`: they
@@ -2157,26 +3616,82 @@ impl App {
     pub fn add_side_usage(&self, chat_id: &str, usage: &beans_agent::Usage) {
         let updated = {
             let mut state = self.state.lock().unwrap();
-            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
+            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else {
+                return;
+            };
             let first = chat.usage.is_none();
             let entry = chat.usage.get_or_insert_with(ChatUsage::default);
             entry.input_tokens += usage.input + usage.cache_read + usage.cache_write;
             entry.output_tokens += usage.output;
             entry.cache_read_tokens += usage.cache_read;
             entry.cost_usd += usage.cost.total;
-            entry.cost_known = Some((first || entry.cost_known == Some(true)) && usage.cost.known == Some(true));
+            entry.cost_known =
+                Some((first || entry.cost_known == Some(true)) && usage.cost.known == Some(true));
             entry.updated_at = crate::config::now_secs();
             entry.clone()
         };
         self.save_state();
-        self.emit(Event::ChatUsageChanged { chat_id: chat_id.to_string(), usage: updated });
+        self.report_usage(chat_id, updated);
+    }
+
+    /// Uploads what the turns here used in the chat, for the other Devices, and tells the app.
+    #[cfg(feature = "runner")]
+    fn report_usage(&self, chat_id: &str, usage: ChatUsage) {
+        if let Some(runner_id) = self.this_device_id() {
+            self.push_chat_op(&ChatBlob::Usage {
+                chat_id: chat_id.to_string(),
+                runner_id,
+                usage,
+            });
+        }
+        self.emit_usage(chat_id);
+    }
+
+    /// Another Runner's report of what its turns used in the chat. The cycle saves state once
+    /// after the page.
+    pub fn set_runner_usage(&self, chat_id: &str, runner_id: &str, usage: ChatUsage) {
+        if self.this_device_id().as_deref() == Some(runner_id) {
+            return;
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else {
+                return;
+            };
+            if chat.runner_usage.get(runner_id) == Some(&usage) {
+                return;
+            }
+            chat.runner_usage.insert(runner_id.to_string(), usage);
+        }
+        self.emit_usage(chat_id);
+    }
+
+    /// Tells the app the chat's usage as it shows it.
+    fn emit_usage(&self, chat_id: &str) {
+        let this_device = self.this_device_id();
+        let usage = {
+            let state = self.state.lock().unwrap();
+            state
+                .chats
+                .iter()
+                .find(|c| c.meta.id == chat_id)
+                .and_then(|chat| shown_usage(&state, chat, this_device.as_deref()))
+        };
+        if let Some(usage) = usage {
+            self.emit(Event::ChatUsageChanged {
+                chat_id: chat_id.to_string(),
+                usage,
+            });
+        }
     }
 
     /// Replaces the bot's summary of the chat so far, or clears it.
     pub fn set_compaction(&self, chat_id: &str, bot_id: &str, compaction: Option<Compaction>) {
         {
             let mut state = self.state.lock().unwrap();
-            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
+            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else {
+                return;
+            };
             chat.compactions.retain(|c| c.bot_id != bot_id);
             if let Some(compaction) = compaction {
                 chat.compactions.push(compaction);
@@ -2191,7 +3706,7 @@ impl App {
     /// Device runs, with that Device, so the caller can forward the cancellation there too:
     /// jobs this Device sent to another Runner, and turns the other Devices list for the chat.
     pub fn cancel_chat(&self, chat_id: &str) -> Vec<(String, String)> {
-        if let Err(error) = self.persist_task_cancel(None,Some(chat_id),None) {
+        if let Err(error) = self.persist_task_cancel(None, Some(chat_id), None) {
             let lifecycle = self.plugin_lifecycle.lock();
             lifecycle.set((lifecycle.get().0, true));
             tracing::error!(%error, "Task cancellation persistence failed; admission closed");
@@ -2206,7 +3721,11 @@ impl App {
             }
         }
         let state = self.state.lock().unwrap();
-        for (device_id, turns) in state.device_turns.iter().filter(|(id, _)| state.turns_online.contains(*id)) {
+        for (device_id, turns) in state
+            .device_turns
+            .iter()
+            .filter(|(id, _)| state.turns_online.contains(*id))
+        {
             for turn in turns.iter().filter(|turn| turn.chat_id == chat_id) {
                 if !remote.iter().any(|(id, _)| id == &turn.job_id) {
                     remote.push((turn.job_id.clone(), device_id.clone()));
@@ -2219,7 +3738,7 @@ impl App {
     /// Cancels one job on this Runner. A cancellation envelope can arrive while the job is
     /// waiting for the chat lock because jobs register before they begin.
     pub fn cancel_job(&self, job_id: &str) {
-        if let Err(error) = self.persist_task_cancel(Some(job_id),None,None) {
+        if let Err(error) = self.persist_task_cancel(Some(job_id), None, None) {
             let lifecycle = self.plugin_lifecycle.lock();
             lifecycle.set((lifecycle.get().0, true));
             tracing::error!(%error, "Task cancellation persistence failed; admission closed");
@@ -2240,7 +3759,9 @@ impl App {
             message.queued = false;
             Some(message)
         });
-        let Some(message) = promoted else { return false };
+        let Some(message) = promoted else {
+            return false;
+        };
         // The apps here hear it too: the message no longer waits, and its Send now goes.
         self.upsert_message(message, true);
         true
@@ -2249,7 +3770,12 @@ impl App {
     /// Marks a user message as held for the next step of the turn at work, or as no longer
     /// held, here and on every Device. Unchanged when it already is.
     pub fn set_queued(&self, chat_id: &str, message_id: &str, queued: bool) {
-        let Some(mut message) = self.message(chat_id, message_id).filter(|m| m.queued != queued) else { return };
+        let Some(mut message) = self
+            .message(chat_id, message_id)
+            .filter(|m| m.queued != queued)
+        else {
+            return;
+        };
         message.queued = queued;
         self.upsert_message(message, true);
     }
@@ -2257,69 +3783,129 @@ impl App {
     /// Stop: nothing in the chat waits for a step any more.
     pub fn unqueue_chat(&self, chat_id: &str) {
         // A held message is among the newest: the turn it waits on is the chat's latest.
-        let recent = self.store.page(chat_id, None, 40).map(|(messages, _)| messages).unwrap_or_default();
-        let held: Vec<String> = recent.into_iter().filter(|m| m.queued).map(|m| m.id).collect();
+        let recent = self
+            .store
+            .page(chat_id, None, 40)
+            .map(|(messages, _)| messages)
+            .unwrap_or_default();
+        let held: Vec<String> = recent
+            .into_iter()
+            .filter(|m| m.queued)
+            .map(|m| m.id)
+            .collect();
         for id in held {
             self.set_queued(chat_id, &id, false);
         }
     }
 
     #[cfg(feature = "runner")]
-    pub fn register_step_interrupt(&self, chat_id: &str, job_id: &str, interrupt: beans_agent::StepInterrupt) {
-        self.step_interrupts.lock().unwrap().insert(chat_id.to_string(), (job_id.to_string(), interrupt));
+    pub fn register_step_interrupt(
+        &self,
+        chat_id: &str,
+        job_id: &str,
+        interrupt: beans_agent::StepInterrupt,
+    ) {
+        self.step_interrupts
+            .lock()
+            .unwrap()
+            .insert(chat_id.to_string(), (job_id.to_string(), interrupt));
     }
 
     #[cfg(feature = "runner")]
     pub fn unregister_step_interrupt(&self, chat_id: &str, job_id: &str) {
         let mut interrupts = self.step_interrupts.lock().unwrap();
-        if interrupts.get(chat_id).is_some_and(|(active, _)| active == job_id) {
+        if interrupts
+            .get(chat_id)
+            .is_some_and(|(active, _)| active == job_id)
+        {
             interrupts.remove(chat_id);
         }
     }
 
     #[cfg(feature = "runner")]
     pub fn step_interrupt(&self, chat_id: &str) -> Option<beans_agent::StepInterrupt> {
-        self.step_interrupts.lock().unwrap().get(chat_id).map(|(_, interrupt)| interrupt.clone())
+        self.step_interrupts
+            .lock()
+            .unwrap()
+            .get(chat_id)
+            .map(|(_, interrupt)| interrupt.clone())
     }
 
     /// A replacement user job calls this after it reaches the chat lock. True means an older
     /// turn already handled the message, so this job is only the durable wake-up and may exit.
     /// `promoted_at` preserves that decision across a process restart.
     pub fn take_steering_message(&self, chat_id: &str, message_id: &str) -> bool {
-        self.message(chat_id, message_id).is_some_and(|message| message.promoted_at.is_some())
+        self.message(chat_id, message_id)
+            .is_some_and(|message| message.promoted_at.is_some())
     }
 
     #[cfg(feature = "runner")]
-    pub fn register_steering_queue(&self, chat_id: &str, job_id: &str, queue: beans_agent::AgentMessageQueue) {
-        self.steering_queues.lock().unwrap().insert(chat_id.to_string(), (job_id.to_string(), queue));
+    pub fn register_steering_queue(
+        &self,
+        chat_id: &str,
+        job_id: &str,
+        queue: beans_agent::AgentMessageQueue,
+    ) {
+        self.steering_queues
+            .lock()
+            .unwrap()
+            .insert(chat_id.to_string(), (job_id.to_string(), queue));
     }
 
     #[cfg(feature = "runner")]
     pub fn unregister_steering_queue(&self, chat_id: &str, job_id: &str) {
         let mut queues = self.steering_queues.lock().unwrap();
-        if queues.get(chat_id).is_some_and(|(active, _)| active == job_id) {
+        if queues
+            .get(chat_id)
+            .is_some_and(|(active, _)| active == job_id)
+        {
             queues.remove(chat_id);
         }
     }
 
     #[cfg(feature = "runner")]
     pub fn steering_queue(&self, chat_id: &str) -> Option<beans_agent::AgentMessageQueue> {
-        self.steering_queues.lock().unwrap().get(chat_id).map(|(_, queue)| queue.clone())
+        self.steering_queues
+            .lock()
+            .unwrap()
+            .get(chat_id)
+            .map(|(_, queue)| queue.clone())
     }
 
     // MARK: - Snapshot
 
     fn devices_out(&self, state: &State) -> Vec<Value> {
         let this_id = self.this_device_id();
+        let name = |device: &Device| {
+            state
+                .device_names
+                .get(&device.id)
+                .unwrap_or(&device.name)
+                .clone()
+        };
         let mut devices: Vec<&Device> = state.devices.iter().collect();
-        let name = |device: &Device| state.device_names.get(&device.id).unwrap_or(&device.name).clone();
+        let name = |device: &Device| {
+            state
+                .device_names
+                .get(&device.id)
+                .unwrap_or(&device.name)
+                .clone()
+        };
         devices.sort_by_key(|d| (Some(d.id.clone()) != this_id, name(d).to_lowercase()));
         let mut out: Vec<Value> = devices
             .into_iter()
             .map(|device| {
                 let is_this = Some(device.id.clone()) == this_id;
-                let seen = state.device_seen.get(&device.id).copied().unwrap_or(device.updated_at);
-                let status = if is_this || state.device_online.contains(&device.id) { "online" } else { "offline" };
+                let seen = state
+                    .device_seen
+                    .get(&device.id)
+                    .copied()
+                    .unwrap_or(device.updated_at);
+                let status = if is_this || state.device_online.contains(&device.id) {
+                    "online"
+                } else {
+                    "offline"
+                };
                 json!({
                     "id": device.id,
                     "name": name(device),
@@ -2332,14 +3918,18 @@ impl App {
                     "status": status,
                     "last_seen": seen as f64,
                     "plugins": device.plugins,
+                    "channels": device.channels,
                     "version": device.version,
                     "update": device.update,
+                    "app": device.app,
                 })
             })
             .collect();
         // Machines the relay lists that never said what they are come last: a key, presence,
         // and Unpair, with no name or `os`. One whose `machine` blob landed since is above.
-        let unknown = state.unknown_machines.iter().filter(|id| state.listed_machines.contains_key(*id) && !state.devices.iter().any(|d| &d.id == *id));
+        let unknown = state.unknown_machines.iter().filter(|id| {
+            state.listed_machines.contains_key(*id) && !state.devices.iter().any(|d| &d.id == *id)
+        });
         out.extend(unknown.map(|id| {
             json!({
                 "id": id,
@@ -2360,12 +3950,12 @@ impl App {
 
     /// A chat as a snapshot carries it: its newest messages in the apps' form, and `has_more`
     /// when older ones remain in SQLite for `chats.messages` to page.
-    fn chat_for_app(&self, chat: &Chat) -> Value {
+    fn chat_for_app(&self, state: &State, chat: &Chat, this_device: Option<&str>) -> Value {
         let (messages, has_more) = self.message_page(&chat.meta.id, None, SNAPSHOT_MESSAGES);
         let mut out = serde_json::to_value(ChatSummary {
             meta: chat.meta.clone(),
             unread_count: chat.unread_count,
-            usage: chat.usage.clone(),
+            usage: shown_usage(state, chat, this_device),
         })
         .unwrap_or_default();
         out["messages"] = json!(messages);
@@ -2377,28 +3967,38 @@ impl App {
         // Do not hold the metadata lock while paging SQLite: message writes take the locks in
         // the opposite order when they update unread state.
         let state = self.state.lock().unwrap().clone();
-        let identity_id = self.machine_file().map(|m| keys::identity_id(&m.identity_pubkey));
+        let identity_id = self
+            .machine_file()
+            .map(|m| keys::identity_id(&m.identity_pubkey));
+        let this_device = self.this_device_id();
         json!({
             "version": config::VERSION,
             "has_identity": self.has_identity(),
             "is_identity_device": self.is_identity_device(),
             "identity_id": identity_id,
-            "this_device_id": self.this_device_id(),
+            "this_device_id": this_device.clone(),
             "relay_url": self.relay_url(),
             "relay_connected": self.relay_connected.load(Ordering::Relaxed),
             "relay_update_required": self.relay_update_required.load(Ordering::Relaxed),
             "relay_error": self.relay_problem.lock().unwrap().clone(),
             "devices": self.devices_out(&state),
             "bots": state.bots,
-            "chats": state.chats.iter().map(|chat| self.chat_for_app(chat)).collect::<Vec<_>>(),
+            "chats": state.chats.iter().map(|chat| self.chat_for_app(&state, chat, this_device.as_deref())).collect::<Vec<_>>(),
+            "sections": state.sections,
             "routines": self.routines_out(&state),
+            "reviews": crate::review_queue::list(self).unwrap_or_default(),
+            "tasks": crate::tasks::list(self).unwrap_or_default(),
             "auto_review": state.auto_review,
             "paused": state.paused,
             "providers": self.credentials.lock().unwrap().statuses(),
             "models": models_out(),
             "memory": self.memory_summary(),
+            "shared_links": state.shared_links.iter().map(crate::templates::links::SharedLink::out).collect::<Vec<_>>(),
+            "playbooks": crate::playbooks::summaries(self),
             "running_chat_ids": self.running_chat_ids(),
             "running_turns": self.running_turns(),
+            "attention": crate::attention::view(self).unwrap_or_default(),
+            "budgets": self.budgets.snapshots(self),
         })
     }
 }
@@ -2412,13 +4012,22 @@ pub async fn refresh_models_periodically(app: Arc<App>) {
     );
     loop {
         ticks.tick().await;
-        let Some(this) = app.this_device_id() else { continue };
-        if !app.relay_connected.load(Ordering::Relaxed) { continue; }
+        let Some(this) = app.this_device_id() else {
+            continue;
+        };
+        if !app.relay_connected.load(Ordering::Relaxed) {
+            continue;
+        }
         let elected = {
             let state = app.state.lock().unwrap();
-            state.caught_up && state.devices.iter()
-                .filter(|device| device.is_runner() && state.device_online.contains(&device.id))
-                .map(|device| device.id.as_str()).min() == Some(this.as_str())
+            state.caught_up
+                && state
+                    .devices
+                    .iter()
+                    .filter(|device| device.is_runner() && state.device_online.contains(&device.id))
+                    .map(|device| device.id.as_str())
+                    .min()
+                    == Some(this.as_str())
         };
         if elected {
             if let Err(error) = crate::provider_auth::refresh_custom_models(&app).await {
@@ -2430,10 +4039,19 @@ pub async fn refresh_models_periodically(app: Arc<App>) {
 
 /// The models the apps offer in their pickers, in the catalog's order, so each provider's first
 /// is its default: the provider, id, and name, and the thinking levels each one takes.
+/// A section's name as the sidebar shows it: one line, at most 60 characters.
+fn section_name(name: &str) -> anyhow::Result<String> {
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        anyhow::bail!("A section needs a name");
+    }
+    Ok(name.chars().take(60).collect())
+}
+
 fn models_out() -> Vec<Value> {
     beans_models::models()
         .iter()
-        .map(|model| json!({ "provider": model.provider, "id": model.id, "name": model.name, "levels": model.levels }))
+        .map(|model| json!({ "provider": model.provider, "id": model.id, "name": model.name, "levels": model.levels, "decides": model.decides() }))
         .collect()
 }
 
@@ -2457,6 +4075,20 @@ fn read_mark_at(messages: &[Message], unread: u32) -> usize {
 
 /// Drops everything still waiting to upload for these chats and queues their relay groups for
 /// deletion. The sync cycle retries each group until the relay accepts it.
+/// A chat's usage as the apps show it: `Chat::shown_usage` with the context of the Runner its
+/// bot, or a group's owner, runs on.
+fn shown_usage(state: &State, chat: &Chat, this_device: Option<&str>) -> Option<ChatUsage> {
+    let bot_id = chat
+        .meta
+        .owner_bot_id
+        .as_ref()
+        .or(chat.meta.bot_ids.first());
+    let runner_id = bot_id
+        .and_then(|id| state.bots.iter().find(|bot| &bot.id == id))
+        .map(|bot| bot.runner_id.as_str());
+    chat.shown_usage(runner_id, this_device)
+}
+
 fn queue_chat_deletes(state: &mut State, chat_ids: &[String]) {
     for chat_id in chat_ids {
         let group = crate::model::relay_name(chat_id);
@@ -2515,24 +4147,46 @@ mod tests {
     fn scratch_app() -> ScratchApp {
         let home = std::env::temp_dir().join(format!("beans-app-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&home).unwrap();
-        let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
+        let app = App::load(Config {
+            home: home.clone(),
+            port: 0,
+        })
+        .unwrap();
         ScratchApp(app, home)
     }
 
     #[test]
     fn task_owner_process_probe() {
-        let Some(home) = std::env::var_os("BEANS_TEST_OWNER_HOME") else { return; };
-        assert!(App::load_owner(Config { home: home.into(), port: 0 }).is_err(), "a competing process must not acquire ownership");
+        let Some(home) = std::env::var_os("BEANS_TEST_OWNER_HOME") else {
+            return;
+        };
+        assert!(
+            App::load_owner(Config {
+                home: home.into(),
+                port: 0
+            })
+            .is_err(),
+            "a competing process must not acquire ownership"
+        );
     }
 
     #[test]
     fn task_owner_excludes_process_and_recovers_only_after_release() {
         let home = tempfile::tempdir().unwrap();
-        let config = Config { home: home.path().into(), port: 0 };
+        let config = Config {
+            home: home.path().into(),
+            port: 0,
+        };
         let owner = App::load_owner(config.clone()).unwrap();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact","app::tests::task_owner_process_probe","--nocapture"])
-            .env("BEANS_TEST_OWNER_HOME",home.path()).status().unwrap();
+            .args([
+                "--exact",
+                "app::tests::task_owner_process_probe",
+                "--nocapture",
+            ])
+            .env("BEANS_TEST_OWNER_HOME", home.path())
+            .status()
+            .unwrap();
         assert!(status.success());
         let reader = App::load(config.clone()).unwrap();
         assert!(!reader.is_execution_owner());
@@ -2554,34 +4208,76 @@ mod tests {
             scope: MemoryScope {
                 namespace: "scratch-owner-boundary".into(),
                 connection_id: "scratch-connection".into(),
-                connection_revision: Revision { counter: 1, device_id: "scratch-device".into() },
+                connection_revision: Revision {
+                    counter: 1,
+                    device_id: "scratch-device".into(),
+                },
                 deletion_epoch: 0,
             },
             consent_revision: None,
-            document: freeze_document("scratch-owner-boundary", "synthetic content", vec![]).unwrap(),
+            document: freeze_document("scratch-owner-boundary", "synthetic content", vec![])
+                .unwrap(),
             state: OperationState::Submitted,
             operation_id: None,
             error_code: None,
         };
-        scratch.0.store.connection.lock().unwrap().execute(
-            "INSERT INTO memory_deliveries(id,bot_id,state,json) VALUES(?1,?2,'submitted',?3)",
-            rusqlite::params![delivery.id, delivery.bot_id, serde_json::to_string(&delivery).unwrap()],
-        ).unwrap();
+        scratch
+            .0
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO memory_deliveries(id,bot_id,state,json) VALUES(?1,?2,'submitted',?3)",
+                rusqlite::params![
+                    delivery.id,
+                    delivery.bot_id,
+                    serde_json::to_string(&delivery).unwrap()
+                ],
+            )
+            .unwrap();
 
-        let reader = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
-        let stored: String = reader.store.connection.lock().unwrap().query_row(
-            "SELECT json FROM memory_deliveries WHERE id=?1", [&delivery.id], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(serde_json::from_str::<Delivery>(&stored).unwrap(), delivery,
-            "loading a non-owner must not recover another process's submitted delivery");
+        let reader = App::load(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
+        let stored: String = reader
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT json FROM memory_deliveries WHERE id=?1",
+                [&delivery.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Delivery>(&stored).unwrap(),
+            delivery,
+            "loading a non-owner must not recover another process's submitted delivery"
+        );
         drop(reader);
-        let owner = App::load_owner(Config { home: scratch.1.clone(), port: 0 }).unwrap();
-        let recovered: String = owner.store.connection.lock().unwrap().query_row(
-            "SELECT json FROM memory_deliveries WHERE id=?1", [&delivery.id], |row| row.get(0),
-        ).unwrap();
+        let owner = App::load_owner(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
+        let recovered: String = owner
+            .store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT json FROM memory_deliveries WHERE id=?1",
+                [&delivery.id],
+                |row| row.get(0),
+            )
+            .unwrap();
         let recovered: Delivery = serde_json::from_str(&recovered).unwrap();
-        assert_eq!(recovered.state,OperationState::DeliveryUnknown);
-        assert_eq!(recovered.error_code.as_deref(),Some("response_lost"));
+        assert_eq!(recovered.state, OperationState::DeliveryUnknown);
+        assert_eq!(recovered.error_code.as_deref(), Some("response_lost"));
     }
 
     #[test]
@@ -2589,21 +4285,51 @@ mod tests {
         let scratch = scratch_app();
         let app = &scratch.0;
         crate::identity::create(app, Some("Workbench".into())).unwrap();
-        app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+        app.state.lock().unwrap().devices.push(Device {
+            id: "peer".into(),
+            name: "Machine".into(),
+            ..Default::default()
+        });
         app.set_device_name("peer", "  Office  ").unwrap();
         assert_eq!(app.device("peer").unwrap().name, "Office");
-        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let restarted = App::load(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
         let snapshot = restarted.snapshot();
-        let row = snapshot["devices"].as_array().unwrap().iter().find(|d| d["id"] == "peer").unwrap();
+        let row = snapshot["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "peer")
+            .unwrap();
         assert_eq!(row["name"], "Office");
         assert_eq!(row["machine_name"], "Machine");
         assert!(restarted.set_device_name("missing", "Name").is_err());
         assert!(restarted.set_device_name("peer", &"界".repeat(65)).is_err());
         restarted.set_device_name("peer", &"界".repeat(64)).unwrap();
-        restarted.state.lock().unwrap().devices.iter_mut().find(|d| d.id == "peer").unwrap().name = "New machine name".into();
+        restarted
+            .state
+            .lock()
+            .unwrap()
+            .devices
+            .iter_mut()
+            .find(|d| d.id == "peer")
+            .unwrap()
+            .name = "New machine name".into();
         restarted.set_device_name("peer", " \n ").unwrap();
-        let reset = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
-        assert!(!reset.state.lock().unwrap().device_names.contains_key("peer"));
+        let reset = App::load(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
+        assert!(!reset
+            .state
+            .lock()
+            .unwrap()
+            .device_names
+            .contains_key("peer"));
         assert_eq!(reset.device("peer").unwrap().name, "New machine name");
     }
 
@@ -2613,14 +4339,24 @@ mod tests {
         let app = &scratch.0;
         crate::identity::create(app, Some("Machine".into())).unwrap();
         let id = app.this_device_id().unwrap();
-        crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":"Office"})).await.unwrap();
-        crate::api::dispatch(app, "device.rename", json!({"name":"New machine"})).await.unwrap();
+        crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":"Office"}))
+            .await
+            .unwrap();
+        crate::api::dispatch(app, "device.rename", json!({"name":"New machine"}))
+            .await
+            .unwrap();
         assert_eq!(app.device(&id).unwrap().name, "Office");
         assert_eq!(app.machine_file().unwrap().name, "New machine");
         for value in [Value::Null, json!(17), json!(false)] {
-            assert!(crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":value})).await.is_err());
+            assert!(
+                crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":value}))
+                    .await
+                    .is_err()
+            );
         }
-        crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":""})).await.unwrap();
+        crate::api::dispatch(app, "device.set_name", json!({"id":id,"name":""}))
+            .await
+            .unwrap();
         assert_eq!(app.device(&id).unwrap().name, "New machine");
         app.set_device_name(&id, "Old account").unwrap();
         app.forget_identity().unwrap();
@@ -2635,7 +4371,11 @@ mod tests {
         let scratch = scratch_app();
         let app = &scratch.0;
         crate::identity::create(app, Some("Workbench".into())).unwrap();
-        app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+        app.state.lock().unwrap().devices.push(Device {
+            id: "peer".into(),
+            name: "Machine".into(),
+            ..Default::default()
+        });
         app.set_device_name("peer", "Old alias").unwrap();
         let before = app.store.load_state().unwrap();
         let queued = app.store.queued_roster().unwrap().unwrap();
@@ -2649,14 +4389,26 @@ mod tests {
         assert_eq!(app.state.lock().unwrap().device_names, before.device_names);
         assert_eq!(persisted.device_names, before.device_names);
         assert_eq!(persisted.device_name_edits, before.device_name_edits);
-        assert_eq!(app.state.lock().unwrap().device_name_edits, before.device_name_edits);
-        assert_eq!(app.state.lock().unwrap().applied_blob_ids, before.applied_blob_ids);
+        assert_eq!(
+            app.state.lock().unwrap().device_name_edits,
+            before.device_name_edits
+        );
+        assert_eq!(
+            app.state.lock().unwrap().applied_blob_ids,
+            before.applied_blob_ids
+        );
         assert_eq!(persisted.applied_blob_ids, before.applied_blob_ids);
         let retained = app.store.queued_roster().unwrap().unwrap();
         assert_eq!(retained.id, queued.id);
         assert_eq!(retained.ciphertext, queued.ciphertext);
-        assert_eq!(serde_json::to_value(app.store.roster_baseline("queued").unwrap()).unwrap(), ancestor);
-        assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert_eq!(
+            serde_json::to_value(app.store.roster_baseline("queued").unwrap()).unwrap(),
+            ancestor
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -2672,13 +4424,22 @@ mod tests {
     #[test]
     fn device_alias_committed_intent_survives_dropped_app() {
         let home = tempfile::tempdir().unwrap();
-        let config = Config { home: home.path().into(), port: 0 };
+        let config = Config {
+            home: home.path().into(),
+            port: 0,
+        };
         let (queued_id, dek, ancestor) = {
             let app = App::load(config.clone()).unwrap();
             crate::identity::create(&app, Some("Workbench".into())).unwrap();
-            app.state.lock().unwrap().devices.push(Device { id: "peer".into(), name: "Machine".into(), ..Default::default() });
+            app.state.lock().unwrap().devices.push(Device {
+                id: "peer".into(),
+                name: "Machine".into(),
+                ..Default::default()
+            });
             app.set_device_name("peer", "Office").unwrap();
-            let ancestor = serde_json::to_value(app.store.roster_baseline("queued").unwrap().unwrap()).unwrap();
+            let ancestor =
+                serde_json::to_value(app.store.roster_baseline("queued").unwrap().unwrap())
+                    .unwrap();
             let queued = app.store.queued_roster().unwrap().unwrap();
             (queued.id, app.dek().unwrap(), ancestor)
         };
@@ -2691,15 +4452,23 @@ mod tests {
         assert_eq!(queued.id, queued_id);
         assert!(persisted.applied_blob_ids.contains(&queued_id));
         assert_eq!(queued.slot, Some(Slot::latest("roster")));
-        let roster: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &queued.ciphertext).unwrap();
+        let roster: RosterBlob =
+            crate::crypto::decrypt_json(&dek, "roster", &queued.ciphertext).unwrap();
         assert_eq!(roster.device_names, persisted.device_names);
-        assert_eq!(serde_json::to_value(reopened.store.roster_baseline("queued").unwrap().unwrap()).unwrap(), ancestor);
+        assert_eq!(
+            serde_json::to_value(reopened.store.roster_baseline("queued").unwrap().unwrap())
+                .unwrap(),
+            ancestor
+        );
     }
 
     #[test]
     fn load_propagates_final_normalization_save_failure() {
         let home = tempfile::tempdir().unwrap();
-        let config = Config { home: home.path().into(), port: 0 };
+        let config = Config {
+            home: home.path().into(),
+            port: 0,
+        };
         let initial = App::load(config.clone()).unwrap();
         let mut seeded = initial.store.load_state().unwrap();
         seeded.machine_blob_hash = Some("retained-startup-hash".into());
@@ -2720,21 +4489,33 @@ mod tests {
         db.execute_batch(
             "CREATE TRIGGER fail_final_normalization BEFORE UPDATE ON metadata
              WHEN OLD.machine_blob_hash = 'retained-startup-hash' AND NEW.machine_blob_hash IS NULL
-             BEGIN SELECT RAISE(ABORT, 'final startup normalization failure'); END;"
-        ).unwrap();
+             BEGIN SELECT RAISE(ABORT, 'final startup normalization failure'); END;",
+        )
+        .unwrap();
         // Only the final save writes the hash reset performed after recovery and retention.
-        let error = App::load(config.clone()).err().expect("final startup save must reject load");
+        let error = App::load(config.clone())
+            .err()
+            .expect("final startup save must reject load");
         assert!(format!("{error:#}").contains("final startup normalization failure"));
-        assert_eq!(metadata(&db), before, "failed final save must preserve every durable metadata field and JSON byte");
+        assert_eq!(
+            metadata(&db),
+            before,
+            "failed final save must preserve every durable metadata field and JSON byte"
+        );
 
-        db.execute_batch("DROP TRIGGER fail_final_normalization;").unwrap();
+        db.execute_batch("DROP TRIGGER fail_final_normalization;")
+            .unwrap();
         let loaded = App::load(config).unwrap();
         let persisted = loaded.store.load_state().unwrap();
         assert_eq!(persisted.machine_blob_hash, None);
         assert_eq!(persisted.last_seq, 73);
         let mut expected = before;
         expected.3 = None;
-        assert_eq!(metadata(&db), expected, "successful final save changes only the startup hash");
+        assert_eq!(
+            metadata(&db),
+            expected,
+            "successful final save changes only the startup hash"
+        );
     }
 
     fn bot(id: &str) -> Bot {
@@ -2743,6 +4524,7 @@ mod tests {
             name: id.into(),
             description: String::new(),
             symbol_name: "sparkles".into(),
+            shape: String::new(),
             accent: "indigo".into(),
             avatar: None,
             look: None,
@@ -2753,6 +4535,7 @@ mod tests {
             legacy_instructions: String::new(),
             workdir: None,
             capabilities: Default::default(),
+            permissions: None,
             created_at: 1.0,
         }
     }
@@ -2785,12 +4568,25 @@ mod tests {
         };
         let outbox_before = app.store.outbox().unwrap().len();
 
-        let error = app.insert_workflow(workflow_record("b1", crate::workflow::MAX_TOTAL)).unwrap_err();
-        assert!(format!("{error:#}").contains("at most"), "a full roster must say why: {error:#}");
+        let error = app
+            .insert_workflow(workflow_record("b1", crate::workflow::MAX_TOTAL))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("at most"),
+            "a full roster must say why: {error:#}"
+        );
 
         assert_eq!(app.state.lock().unwrap().workflows.len(), held);
-        assert_eq!(app.store.load_state().unwrap().workflows.len(), held, "a refused create wrote to the store");
-        assert_eq!(app.store.outbox().unwrap().len(), outbox_before, "a refused create queued an outbox item");
+        assert_eq!(
+            app.store.load_state().unwrap().workflows.len(),
+            held,
+            "a refused create wrote to the store"
+        );
+        assert_eq!(
+            app.store.outbox().unwrap().len(),
+            outbox_before,
+            "a refused create queued an outbox item"
+        );
         assert_eq!(app.workflows_of("b1").len(), crate::workflow::MAX_TOTAL);
     }
 
@@ -2810,12 +4606,29 @@ mod tests {
         };
         let outbox_before = app.store.outbox().unwrap().len();
 
-        let error = app.insert_workflow(workflow_record("b1", crate::workflow::MAX_PER_BOT)).unwrap_err();
-        assert!(format!("{error:#}").contains("at most"), "a full bot must say why: {error:#}");
+        let error = app
+            .insert_workflow(workflow_record("b1", crate::workflow::MAX_PER_BOT))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("at most"),
+            "a full bot must say why: {error:#}"
+        );
 
-        assert_eq!(app.state.lock().unwrap().workflows.len(), held, "a refused create changed the held records");
-        assert_eq!(app.store.load_state().unwrap().workflows.len(), 0, "a refused create wrote to the store");
-        assert_eq!(app.store.outbox().unwrap().len(), outbox_before, "a refused create queued an outbox item");
+        assert_eq!(
+            app.state.lock().unwrap().workflows.len(),
+            held,
+            "a refused create changed the held records"
+        );
+        assert_eq!(
+            app.store.load_state().unwrap().workflows.len(),
+            0,
+            "a refused create wrote to the store"
+        );
+        assert_eq!(
+            app.store.outbox().unwrap().len(),
+            outbox_before,
+            "a refused create queued an outbox item"
+        );
     }
 
     /// Two creates taking the last slot together: exactly one wins. The bound is read under the
@@ -2837,25 +4650,51 @@ mod tests {
         // The two threads race for the single remaining slot; either may take it.
         let admitted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let refused = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let workers: Vec<_> = (0..2).map(|attempt| {
-            let app = Arc::clone(app);
-            let admitted = Arc::clone(&admitted);
-            let refused = Arc::clone(&refused);
-            std::thread::spawn(move || {
-                if app.insert_workflow(workflow_record("b1", crate::workflow::MAX_PER_BOT - 1 + attempt)).is_ok() {
-                    admitted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                } else {
-                    refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }
+        let workers: Vec<_> = (0..2)
+            .map(|attempt| {
+                let app = Arc::clone(app);
+                let admitted = Arc::clone(&admitted);
+                let refused = Arc::clone(&refused);
+                std::thread::spawn(move || {
+                    if app
+                        .insert_workflow(workflow_record(
+                            "b1",
+                            crate::workflow::MAX_PER_BOT - 1 + attempt,
+                        ))
+                        .is_ok()
+                    {
+                        admitted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    } else {
+                        refused.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                })
             })
-        }).collect();
-        for worker in workers { worker.join().unwrap(); }
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
 
-        assert_eq!(admitted.load(std::sync::atomic::Ordering::SeqCst), 1, "both creates took the last slot");
-        assert_eq!(refused.load(std::sync::atomic::Ordering::SeqCst), 1, "the losing create was not refused");
+        assert_eq!(
+            admitted.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "both creates took the last slot"
+        );
+        assert_eq!(
+            refused.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the losing create was not refused"
+        );
         let held = app.workflows_of("b1").len();
-        assert_eq!(held, crate::workflow::MAX_PER_BOT, "a bot kept more than its bound");
-        assert_eq!(app.state.lock().unwrap().workflows.len(), crate::workflow::MAX_PER_BOT, "one record survived for one slot");
+        assert_eq!(
+            held,
+            crate::workflow::MAX_PER_BOT,
+            "a bot kept more than its bound"
+        );
+        assert_eq!(
+            app.state.lock().unwrap().workflows.len(),
+            crate::workflow::MAX_PER_BOT,
+            "one record survived for one slot"
+        );
     }
 
     fn chat(id: &str, kind: &str, bot_ids: &[&str], owner: Option<&str>) -> Chat {
@@ -2868,11 +4707,16 @@ mod tests {
                 owner_bot_id: owner.map(str::to_string),
                 description: None,
                 is_pinned: false,
+                section_id: None,
+                is_hidden: false,
+                mute: None,
                 created_at: 1.0,
+                channel: None,
             },
             unread_count: 0,
             usage: None,
             compactions: Vec::new(),
+            runner_usage: Default::default(),
         }
     }
 
@@ -2882,13 +4726,20 @@ mod tests {
             bot_id: bot_id.into(),
             name: id.into(),
             prompt: String::new(),
+            feedback_authorization_prompt: None,
             schedule: "every 1h".into(),
+            timezone: "UTC".into(),
+            missed_run_policy: Default::default(),
+            last_scheduled_at: None,
+            health: None,
             is_enabled: true,
             enabled_at: 1.0,
             last_run_at: None,
             last_outcome: None,
             paused_reason: None,
             check: None,
+            events: None,
+            calendar: None,
             created_at: 1.0,
         }
     }
@@ -2912,26 +4763,49 @@ mod tests {
         *app.machine.lock().unwrap() = Some(MachineFile {
             format: config::Format::BeansV2,
             machine_secret: keys::b64(&[17; 32]),
-            identity_pubkey: String::new(), content_pubkey: String::new(),
-            account_dek: keys::b64(&dek), name: "synthetic".into(), os: "ios".into(),
-            os_version: String::new(), model: String::new(), registered: false,
-            relay_url: None, created_at: 1,
+            identity_pubkey: String::new(),
+            content_pubkey: String::new(),
+            account_dek: keys::b64(&dek),
+            name: "synthetic".into(),
+            os: "ios".into(),
+            os_version: String::new(),
+            model: String::new(),
+            registered: false,
+            relay_url: None,
+            created_at: 1,
         });
         let mut unread = chat("read", "dm", &[], None);
         unread.unread_count = 3;
         app.state.lock().unwrap().chats.push(unread);
         app.store.save_state(&app.state.lock().unwrap()).unwrap();
         let params = json!({"chat_id": "read"});
-        assert_eq!(crate::api::dispatch(app, "chats.mark_read", params.clone()).await.unwrap(), Value::Null);
+        assert_eq!(
+            crate::api::dispatch(app, "chats.mark_read", params.clone())
+                .await
+                .unwrap(),
+            Value::Null
+        );
         assert_eq!(app.store.load_state().unwrap().chats[0].unread_count, 0);
         let queued = app.store.outbox().unwrap();
         assert_eq!(queued.len(), 1);
-        assert!(matches!(crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &queued[0].ciphertext).unwrap(),
-            ChatBlob::ClearUnread { chat_id } if chat_id == "read"));
-        assert_eq!(queued[0].slot, Some(ChatBlob::ClearUnread { chat_id: "read".into() }.slot()));
+        assert!(
+            matches!(crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &queued[0].ciphertext).unwrap(),
+            ChatBlob::ClearUnread { chat_id } if chat_id == "read")
+        );
+        assert_eq!(
+            queued[0].slot,
+            Some(
+                ChatBlob::ClearUnread {
+                    chat_id: "read".into()
+                }
+                .slot()
+            )
+        );
         let receipt = app.store.load_state().unwrap().applied_blob_ids;
         assert!(receipt.contains(&queued[0].id));
-        crate::api::dispatch(app, "chats.mark_read", params.clone()).await.unwrap();
+        crate::api::dispatch(app, "chats.mark_read", params.clone())
+            .await
+            .unwrap();
         assert_eq!(app.store.outbox().unwrap()[0].id, queued[0].id);
         assert_eq!(app.store.load_state().unwrap().applied_blob_ids, receipt);
 
@@ -2941,21 +4815,37 @@ mod tests {
             app.store.save_state(&app.state.lock().unwrap()).unwrap();
             db.execute_batch(&format!("CREATE TRIGGER fail_read BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT, 'synthetic read failure'); END;")).unwrap();
             let mut events = app.events.subscribe();
-            assert!(crate::api::dispatch(app, "chats.mark_read", params.clone()).await.is_err(), "{table} failure must reject API success");
+            assert!(
+                crate::api::dispatch(app, "chats.mark_read", params.clone())
+                    .await
+                    .is_err(),
+                "{table} failure must reject API success"
+            );
             assert_eq!(app.chat("read").unwrap().unread_count, 3);
             assert_eq!(app.store.load_state().unwrap().chats[0].unread_count, 3);
             assert_eq!(app.store.load_state().unwrap().applied_blob_ids, receipt);
             assert_eq!(app.store.outbox().unwrap()[0].id, queued[0].id);
-            assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
             db.execute_batch("DROP TRIGGER fail_read;").unwrap();
         }
-        crate::api::dispatch(app, "chats.mark_read", params.clone()).await.unwrap();
+        crate::api::dispatch(app, "chats.mark_read", params.clone())
+            .await
+            .unwrap();
         let committed = app.store.outbox().unwrap();
         assert_eq!(committed.len(), 1);
         assert_ne!(committed[0].id, queued[0].id);
-        crate::api::dispatch(app, "chats.mark_read", params).await.unwrap();
+        crate::api::dispatch(app, "chats.mark_read", params)
+            .await
+            .unwrap();
         assert_eq!(app.store.outbox().unwrap()[0].id, committed[0].id);
-        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let reloaded = App::load(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
         assert_eq!(reloaded.chat("read").unwrap().unread_count, 0);
         assert_eq!(reloaded.store.outbox().unwrap()[0].id, committed[0].id);
     }
@@ -2968,7 +4858,10 @@ mod tests {
         let second = app.begin_plugin_sign_in("second");
         assert!(first.is_cancelled(), "a newer sign-in replaces the wait");
         app.cancel_plugin_sign_in(Some("first"));
-        assert!(!second.is_cancelled(), "a late close of the first page leaves the second alone");
+        assert!(
+            !second.is_cancelled(),
+            "a late close of the first page leaves the second alone"
+        );
         app.cancel_plugin_sign_in(Some("second"));
         assert!(second.is_cancelled());
         let third = app.begin_plugin_sign_in("third");
@@ -2979,13 +4872,29 @@ mod tests {
     #[test]
     fn old_local_stores_are_rejected_untouched() {
         let home = tempfile::tempdir().unwrap();
-        for name in ["state.json", "transcript.sqlite3", "transcript.sqlite3-wal", "transcript.sqlite3-shm"] {
+        for name in [
+            "state.json",
+            "transcript.sqlite3",
+            "transcript.sqlite3-wal",
+            "transcript.sqlite3-shm",
+        ] {
             std::fs::write(home.path().join(name), b"retained-account").unwrap();
         }
-        let config = Config { home: home.path().into(), port: 0 };
+        let config = Config {
+            home: home.path().into(),
+            port: 0,
+        };
         assert!(App::load(config.clone()).is_err());
-        for name in ["state.json", "transcript.sqlite3", "transcript.sqlite3-wal", "transcript.sqlite3-shm"] {
-            assert_eq!(std::fs::read(home.path().join(name)).unwrap(), b"retained-account");
+        for name in [
+            "state.json",
+            "transcript.sqlite3",
+            "transcript.sqlite3-wal",
+            "transcript.sqlite3-shm",
+        ] {
+            assert_eq!(
+                std::fs::read(home.path().join(name)).unwrap(),
+                b"retained-account"
+            );
         }
         assert!(!config.database_path().exists());
         assert!(!home.path().join("format.json").exists());
@@ -2996,10 +4905,19 @@ mod tests {
     fn compacted_context_preserves_spending_and_next_turn_replaces_estimate() {
         let scratch = scratch_app();
         let app = &scratch.0;
-        app.state.lock().unwrap().chats.push(chat("compact", "dm", &["bot"], None));
+        app.state
+            .lock()
+            .unwrap()
+            .chats
+            .push(chat("compact", "dm", &["bot"], None));
         app.record_compacted_context("compact", "bot", "fixture", 100_000, 20_000);
         assert!(app.chat("compact").unwrap().usage.is_none());
-        let mut usage = beans_agent::Usage { input: 140_000, output: 1_000, total_tokens: 141_000, ..Default::default() };
+        let mut usage = beans_agent::Usage {
+            input: 140_000,
+            output: 1_000,
+            total_tokens: 141_000,
+            ..Default::default()
+        };
         usage.cost.total = 0.42;
         usage.cost.known = Some(true);
         app.record_usage("compact", "fixture", &usage, 1_000_000);
@@ -3007,20 +4925,64 @@ mod tests {
         let mut events = app.events.subscribe();
         app.record_compacted_context("compact", "bot", "fixture", 120_000, 25_000);
         let shown = app.chat("compact").unwrap().usage.unwrap();
-        assert_eq!((shown.context_tokens, shown.context_estimated), (46_000, true));
-        assert_eq!((shown.input_tokens, shown.output_tokens, shown.cost_usd, shown.cost_known, shown.turns),
-            (before.input_tokens, before.output_tokens, before.cost_usd, before.cost_known, before.turns));
-        assert!(matches!(events.try_recv(), Ok(Event::ChatUsageChanged { usage, .. }) if usage.context_estimated && usage.context_tokens == 46_000));
+        assert_eq!(
+            (shown.context_tokens, shown.context_estimated),
+            (46_000, true)
+        );
+        assert_eq!(
+            (
+                shown.input_tokens,
+                shown.output_tokens,
+                shown.cost_usd,
+                shown.cost_known,
+                shown.turns
+            ),
+            (
+                before.input_tokens,
+                before.output_tokens,
+                before.cost_usd,
+                before.cost_known,
+                before.turns
+            )
+        );
+        assert!(
+            matches!(events.try_recv(), Ok(Event::ChatUsageChanged { usage, .. }) if usage.context_estimated && usage.context_tokens == 46_000)
+        );
         app.save_state_now();
-        assert_eq!(app.store.load_state().unwrap().chats[0].usage.as_ref().unwrap().context_tokens, 46_000);
+        assert_eq!(
+            app.store.load_state().unwrap().chats[0]
+                .usage
+                .as_ref()
+                .unwrap()
+                .context_tokens,
+            46_000
+        );
         app.add_side_usage("compact", &beans_agent::Usage::default());
-        assert!(app.chat("compact").unwrap().usage.unwrap().context_estimated);
+        assert!(
+            app.chat("compact")
+                .unwrap()
+                .usage
+                .unwrap()
+                .context_estimated
+        );
         app.record_compacted_context("compact", "bot", "fixture", 200_000, 30_000);
-        assert_eq!(app.chat("compact").unwrap().usage.unwrap().context_tokens, 30_000);
+        assert_eq!(
+            app.chat("compact").unwrap().usage.unwrap().context_tokens,
+            30_000
+        );
         app.record_compacted_context("compact", "bot", "fixture", 10_000, 40_000);
-        assert_eq!(app.chat("compact").unwrap().usage.unwrap().context_tokens, 30_000);
+        assert_eq!(
+            app.chat("compact").unwrap().usage.unwrap().context_tokens,
+            30_000
+        );
         app.record_usage("compact", "fixture", &usage, 1_000_000);
-        assert!(!app.chat("compact").unwrap().usage.unwrap().context_estimated);
+        assert!(
+            !app.chat("compact")
+                .unwrap()
+                .usage
+                .unwrap()
+                .context_estimated
+        );
         app.record_compacted_context("missing", "bot", "fixture", 100_000, 20_000);
     }
 
@@ -3038,14 +5000,25 @@ mod tests {
             ("dm", vec!["a"], "a", "fixture", 10_000, 40_000),
         ] {
             app.state.lock().unwrap().chats = vec![chat("skip", kind, &bots, None)];
-            app.record_usage("skip", "fixture", &beans_agent::Usage {
-                input: 140_000, output: 1_000, total_tokens: 141_000, ..Default::default()
-            }, 1_000_000);
+            app.record_usage(
+                "skip",
+                "fixture",
+                &beans_agent::Usage {
+                    input: 140_000,
+                    output: 1_000,
+                    total_tokens: 141_000,
+                    ..Default::default()
+                },
+                1_000_000,
+            );
             let original = app.chat("skip").unwrap().usage.unwrap();
             let mut events = app.events.subscribe();
             app.record_compacted_context("skip", bot, model, before, after);
             assert_eq!(app.chat("skip").unwrap().usage.unwrap(), original);
-            assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
         }
     }
 
@@ -3056,20 +5029,43 @@ mod tests {
         use beans_agent::Usage;
 
         let mut info = ModelInfo {
-            id: "fixture".into(), name: "Fixture".into(), provider: "fixture".into(),
-            context_window: 4096, max_output: 1024, reasoning: false, images: false,
-            rates: None, tiers: Vec::new(), thinking: ThinkingMode::Effort,
-            levels: Vec::new(), wire: None,
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            provider: "fixture".into(),
+            context_window: 4096,
+            max_output: 1024,
+            reasoning: false,
+            images: false,
+            rates: None,
+            tiers: Vec::new(),
+            thinking: ThinkingMode::Effort,
+            levels: Vec::new(),
+            wire: None,
         };
-        let mut absent = Usage { input: 1_000_000, output: 500_000, total_tokens: 1_500_000, ..Usage::default() };
+        let mut absent = Usage {
+            input: 1_000_000,
+            output: 500_000,
+            total_tokens: 1_500_000,
+            ..Usage::default()
+        };
         absent.cost = info.cost_of(&absent);
         let mut zero_call = Usage::default();
         zero_call.cost = info.cost_of(&zero_call);
         let mut free = absent.clone();
-        info.rates = Some(Rates { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 });
+        info.rates = Some(Rates {
+            input: 0.0,
+            output: 0.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+        });
         free.cost = info.cost_of(&free);
         let mut priced = absent.clone();
-        info.rates = Some(Rates { input: 2.0, output: 4.0, cache_read: 0.0, cache_write: 0.0 });
+        info.rates = Some(Rates {
+            input: 2.0,
+            output: 4.0,
+            cache_read: 0.0,
+            cache_write: 0.0,
+        });
         priced.cost = info.cost_of(&priced);
         assert_eq!((absent.cost.total, absent.cost.known), (0.0, Some(false)));
         assert_eq!((free.cost.total, free.cost.known), (0.0, Some(true)));
@@ -3078,7 +5074,10 @@ mod tests {
             let mut aggregate = Usage::default();
             aggregate.add(unknown);
             aggregate.add(&priced);
-            assert_eq!((aggregate.cost.total, aggregate.cost.known), (4.0, Some(false)));
+            assert_eq!(
+                (aggregate.cost.total, aggregate.cost.known),
+                (4.0, Some(false))
+            );
             let mut reverse = Usage::default();
             reverse.add(&priced);
             reverse.add(unknown);
@@ -3099,41 +5098,255 @@ mod tests {
             ("reverse", &absent, Some(&priced), 4.0, false),
             ("zero-call", &zero_call, Some(&priced), 4.0, false),
         ] {
-            app.state.lock().expect("test state lock").chats.push(chat(id, "dm", &[], None));
+            app.state
+                .lock()
+                .expect("test state lock")
+                .chats
+                .push(chat(id, "dm", &[], None));
             app.record_usage(id, "fixture", first, 4096);
             let before = app.chat(id).unwrap().usage.unwrap();
-            if let Some(side) = side { app.add_side_usage(id, side); }
+            if let Some(side) = side {
+                app.add_side_usage(id, side);
+            }
             let usage = app.chat(id).unwrap().usage.unwrap();
-            assert_eq!((usage.cost_usd, usage.cost_known), (subtotal, Some(complete)));
-            assert_eq!((usage.context_tokens, usage.context_window, usage.turns, &usage.model),
-                (before.context_tokens, before.context_window, 1, &before.model));
+            assert_eq!(
+                (usage.cost_usd, usage.cost_known),
+                (subtotal, Some(complete))
+            );
+            assert_eq!(
+                (
+                    usage.context_tokens,
+                    usage.context_window,
+                    usage.turns,
+                    &usage.model
+                ),
+                (
+                    before.context_tokens,
+                    before.context_window,
+                    1,
+                    &before.model
+                )
+            );
             let snapshot = app.snapshot();
-            let wire = snapshot["chats"].as_array().unwrap().iter().find(|row| row["id"] == id).unwrap();
+            let wire = snapshot["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == id)
+                .unwrap();
             assert_eq!(wire["usage"]["cost_usd"], json!(subtotal));
             assert_eq!(wire["usage"]["cost_known"], json!(complete));
         }
-        app.state.lock().expect("test state lock").chats.push(chat("side-first", "dm", &[], None));
+        app.state
+            .lock()
+            .expect("test state lock")
+            .chats
+            .push(chat("side-first", "dm", &[], None));
         app.add_side_usage("side-first", &free);
-        assert_eq!(app.chat("side-first").unwrap().usage.unwrap().cost_known, Some(true));
+        assert_eq!(
+            app.chat("side-first").unwrap().usage.unwrap().cost_known,
+            Some(true)
+        );
         app.record_usage("side-first", "fixture", &absent, 4096);
-        assert_eq!(app.chat("side-first").unwrap().usage.unwrap().cost_known, Some(false));
+        assert_eq!(
+            app.chat("side-first").unwrap().usage.unwrap().cost_known,
+            Some(false)
+        );
         let old: ChatUsage = serde_json::from_value(json!({
             "context_tokens": 0, "context_window": 0, "input_tokens": 0,
             "output_tokens": 0, "cache_read_tokens": 0, "cost_usd": 3.0,
             "turns": 0, "model": "fixture", "updated_at": 0.0
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!old.context_estimated);
         let mut old_chat = chat("historical", "dm", &[], None);
         old_chat.usage = Some(old);
-        app.state.lock().expect("test state lock").chats.push(old_chat);
+        app.state
+            .lock()
+            .expect("test state lock")
+            .chats
+            .push(old_chat);
         app.add_side_usage("historical", &priced);
         let historical = app.chat("historical").unwrap().usage.unwrap();
-        assert_eq!((historical.cost_usd, historical.cost_known), (7.0, Some(false)));
+        assert_eq!(
+            (historical.cost_usd, historical.cost_known),
+            (7.0, Some(false))
+        );
         app.save_state_now();
-        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
-        for id in ["absent", "free", "priced", "mixed", "reverse", "zero-call", "side-first", "historical"] {
-            assert_eq!(reloaded.chat(id).unwrap().usage, app.chat(id).unwrap().usage);
+        let reloaded = App::load(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
+        for id in [
+            "absent",
+            "free",
+            "priced",
+            "mixed",
+            "reverse",
+            "zero-call",
+            "side-first",
+            "historical",
+        ] {
+            assert_eq!(
+                reloaded.chat(id).unwrap().usage,
+                app.chat(id).unwrap().usage
+            );
         }
+    }
+
+    #[test]
+    fn sections_hidden_chats_and_mutes_are_kept_in_the_roster() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        {
+            let mut state = app.state.lock().unwrap();
+            state.bots.push(bot("b1"));
+            state.chats.push(chat("a", "dm", &["b1"], Some("b1")));
+            state.chats.push(chat("b", "group", &["b1"], Some("b1")));
+        }
+        let pipeline = app
+            .create_section(None, "  Big   deals ", Some("a"))
+            .unwrap();
+        assert_eq!(pipeline.name, "Big deals");
+        assert!(
+            app.create_section(None, "   ", None).is_err(),
+            "a section needs a name"
+        );
+        assert!(app
+            .create_section(Some(pipeline.id.clone()), "Twice", None)
+            .is_err());
+        let customers = app
+            .create_section(Some("customers".into()), "Customers", None)
+            .unwrap();
+        assert_eq!(
+            app.chat("a").unwrap().meta.section_id.as_deref(),
+            Some(pipeline.id.as_str())
+        );
+        app.reorder_sections(&["customers".into()]);
+        app.rename_section(&pipeline.id, "Pipeline").unwrap();
+        app.update_section(&pipeline.id, |section| section.collapsed = true)
+            .unwrap();
+        assert!(
+            app.set_chat_section("b", Some("gone".into())).is_err(),
+            "a chat moves only into a section that exists"
+        );
+        app.set_chat_section("b", Some(customers.id.clone()))
+            .unwrap();
+        let names = |app: &App| {
+            app.state
+                .lock()
+                .unwrap()
+                .sections
+                .iter()
+                .map(|s| (s.name.clone(), s.collapsed))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(app),
+            [
+                ("Customers".to_string(), false),
+                ("Pipeline".to_string(), true)
+            ]
+        );
+
+        app.pin_chat("a", Some(true)).unwrap();
+        app.hide_chat("a", true).unwrap();
+        assert!(
+            app.chat("a").unwrap().meta.is_hidden && !app.chat("a").unwrap().meta.is_pinned,
+            "a hidden chat is not pinned"
+        );
+        app.mute_chat("b", Some(Mute { until: Some(100.0) }))
+            .unwrap();
+        assert!(
+            app.chat("b").unwrap().meta.is_muted(99.0)
+                && !app.chat("b").unwrap().meta.is_muted(100.0)
+        );
+
+        // Everything is still there after a restart.
+        let reloaded = App::load(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
+        assert_eq!(names(&reloaded), names(app));
+        assert_eq!(
+            reloaded.chat("a").unwrap().meta,
+            app.chat("a").unwrap().meta
+        );
+        assert_eq!(
+            reloaded.chat("b").unwrap().meta.mute,
+            Some(Mute { until: Some(100.0) })
+        );
+        drop(reloaded);
+
+        // Pinning brings a hidden chat back, and moving a chat to a section shows it there, off
+        // the pinned rows; deleting a section leaves its chats in none.
+        app.pin_chat("a", None).unwrap();
+        assert!(!app.chat("a").unwrap().meta.is_hidden);
+        app.set_chat_section("a", Some(customers.id.clone()))
+            .unwrap();
+        assert!(!app.chat("a").unwrap().meta.is_pinned);
+        app.hide_chat("a", true).unwrap();
+        app.set_chat_section("a", None).unwrap();
+        assert!(!app.chat("a").unwrap().meta.is_hidden);
+        app.delete_section(&customers.id).unwrap();
+        assert_eq!(app.chat("b").unwrap().meta.section_id, None);
+        assert!(app.delete_section(&customers.id).is_err());
+        app.mute_chat("b", None).unwrap();
+        assert!(!app.chat("b").unwrap().meta.is_muted(0.0));
+    }
+
+    #[test]
+    fn a_device_name_shows_everywhere_and_survives_a_restart() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        app.state.lock().unwrap().devices.push(Device {
+            id: "runner".into(),
+            name: "MacBook Air".into(),
+            os: "macos".into(),
+            ..Default::default()
+        });
+        let row = |app: &App| {
+            let state = app.state.lock().unwrap();
+            app.devices_out(&state)
+                .into_iter()
+                .find(|d| d["id"] == "runner")
+                .unwrap()
+        };
+
+        app.set_device_name("runner", "  Build box ").unwrap();
+        assert_eq!(
+            (row(app)["name"].as_str(), row(app)["machine_name"].as_str()),
+            (Some("Build box"), Some("MacBook Air"))
+        );
+        assert_eq!(app.device("runner").unwrap().name, "Build box");
+        assert!(app
+            .set_device_name("runner", &"x".repeat(MAX_DEVICE_NAME_CHARS + 1))
+            .is_err());
+        assert!(app.set_device_name("nobody", "Box").is_err());
+
+        app.save_state_now();
+        let reloaded = App::load(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
+        assert_eq!(reloaded.device("runner").unwrap().name, "Build box");
+
+        // The machine's own name, like a blank one, takes the name the account gave back.
+        app.set_device_name("runner", "MacBook Air").unwrap();
+        assert!(app.state.lock().unwrap().device_names.is_empty());
+        app.set_device_name("runner", "Build box").unwrap();
+        app.set_device_name("runner", " ").unwrap();
+        assert_eq!(row(app)["name"], "MacBook Air");
+        app.save_state_now();
+        let reloaded = App::load(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
+        assert!(reloaded.state.lock().unwrap().device_names.is_empty());
     }
 
     #[test]
@@ -3162,11 +5375,29 @@ mod tests {
         assert!(!scratch.1.join("state.json").exists());
         assert!(app.config.database_path().is_file());
 
-        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let reloaded = App::load(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
         assert!(reloaded.chat("chat").is_some());
         let state = reloaded.state.lock().unwrap();
-        assert_eq!(state.bots.iter().map(|bot| bot.id.as_str()).collect::<Vec<_>>(), vec!["b1"]);
-        assert_eq!(state.routines.iter().map(|routine| routine.id.as_str()).collect::<Vec<_>>(), vec!["routine"]);
+        assert_eq!(
+            state
+                .bots
+                .iter()
+                .map(|bot| bot.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b1"]
+        );
+        assert_eq!(
+            state
+                .routines
+                .iter()
+                .map(|routine| routine.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["routine"]
+        );
         assert_eq!(state.last_seq, 42);
         assert_eq!(state.roster_slot_seq, 37);
         assert_eq!(state.group_deletes, vec!["deleted-chat"]);
@@ -3175,10 +5406,16 @@ mod tests {
         assert_eq!(state.device_seen.get("device"), Some(&99));
         assert_eq!(state.applied_blob_ids, vec!["blob-1", "blob-2"]);
         drop(state);
-        assert_eq!(reloaded.message("chat", &id).and_then(|message| match message.body {
-            Body::Text { text, .. } => Some(text),
-            _ => None,
-        }).as_deref(), Some("kept in SQLite"));
+        assert_eq!(
+            reloaded
+                .message("chat", &id)
+                .and_then(|message| match message.body {
+                    Body::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .as_deref(),
+            Some("kept in SQLite")
+        );
     }
 
     #[test]
@@ -3189,14 +5426,26 @@ mod tests {
         let runner_id = app.this_device_id().unwrap();
         let existing = app.state.lock().unwrap().bots[0].id.clone();
         for kind in ["group", "dm"] {
-            app.create_chat(ChatMeta { id: format!("taken-{kind}"), kind: kind.into(), title: None, bot_ids: vec![existing.clone()], owner_bot_id: Some(existing.clone()), description: None, is_pinned: false, created_at: 1.0 }).unwrap();
+            app.create_chat(ChatMeta {
+                id: format!("taken-{kind}"),
+                kind: kind.into(),
+                title: None,
+                bot_ids: vec![existing.clone()],
+                owner_bot_id: Some(existing.clone()),
+                description: None,
+                is_pinned: false,
+                created_at: 1.0,
+            })
+            .unwrap();
             let count = app.state.lock().unwrap().bots.len();
             let pending = app.store.pending_chat_creates().unwrap();
             let outbox = app.store.outbox().unwrap().len();
             let mut candidate = bot(&format!("new-{kind}"));
             candidate.runner_id = runner_id.clone();
             candidate.capabilities.shell = false;
-            assert!(app.create_bot_with_dm(candidate, Some(format!("taken-{kind}"))).is_err());
+            assert!(app
+                .create_bot_with_dm(candidate, Some(format!("taken-{kind}")))
+                .is_err());
             assert_eq!(app.state.lock().unwrap().bots.len(), count);
             assert_eq!(app.store.pending_chat_creates().unwrap(), pending);
             assert_eq!(app.store.outbox().unwrap().len(), outbox);
@@ -3204,15 +5453,40 @@ mod tests {
         let mut candidate = bot("new-bot");
         candidate.runner_id = runner_id.clone();
         candidate.capabilities.shell = false;
-        let (created, dm) = app.create_bot_with_dm(candidate, Some("optimistic-dm".into())).unwrap();
+        let (created, dm) = app
+            .create_bot_with_dm(candidate, Some("optimistic-dm".into()))
+            .unwrap();
         assert_eq!(dm.meta.id, "optimistic-dm");
         assert_eq!(dm.meta.bot_ids, vec![created.id.clone()]);
-        assert_eq!(app.store.pending_chat_creates().unwrap().iter().filter(|id| *id == "optimistic-dm").count(), 1);
+        assert_eq!(
+            app.store
+                .pending_chat_creates()
+                .unwrap()
+                .iter()
+                .filter(|id| *id == "optimistic-dm")
+                .count(),
+            1
+        );
         let queued = app.store.outbox().unwrap();
-        assert_eq!(queued.iter().filter(|item| item.kind == "roster").count(), 1);
-        let roster: RosterBlob = crate::crypto::decrypt_json(&app.dek().unwrap(), "roster", &queued.iter().find(|item| item.kind == "roster").unwrap().ciphertext).unwrap();
+        assert_eq!(
+            queued.iter().filter(|item| item.kind == "roster").count(),
+            1
+        );
+        let roster: RosterBlob = crate::crypto::decrypt_json(
+            &app.dek().unwrap(),
+            "roster",
+            &queued
+                .iter()
+                .find(|item| item.kind == "roster")
+                .unwrap()
+                .ciphertext,
+        )
+        .unwrap();
         assert!(roster.bots.iter().any(|b| b.id == created.id));
-        assert!(roster.chats.iter().any(|c| c.id == dm.meta.id && c.bot_ids == vec![created.id.clone()]));
+        assert!(roster
+            .chats
+            .iter()
+            .any(|c| c.id == dm.meta.id && c.bot_ids == vec![created.id.clone()]));
         let connection = rusqlite::Connection::open(app.config.database_path()).unwrap();
         connection.execute_batch("CREATE TRIGGER fail_new_chat BEFORE INSERT ON pending_chat_creates WHEN NEW.id = 'blocked' BEGIN SELECT RAISE(ABORT, 'blocked'); END;").unwrap();
         let before = app.store.outbox().unwrap().len();
@@ -3220,15 +5494,28 @@ mod tests {
         let mut failed = bot("blocked-bot");
         failed.runner_id = runner_id;
         failed.capabilities.shell = false;
-        assert!(app.create_bot_with_dm(failed, Some("blocked".into())).is_err());
+        assert!(app
+            .create_bot_with_dm(failed, Some("blocked".into()))
+            .is_err());
         assert!(app.bot("blocked-bot").is_none());
         assert!(app.chat("blocked").is_none());
         assert_eq!(app.store.outbox().unwrap().len(), before);
         assert_eq!(app.state.lock().unwrap().policy_clock, policy_clock);
-        assert!(!app.store.pending_chat_creates().unwrap().contains(&"blocked".into()));
-        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert!(!app
+            .store
+            .pending_chat_creates()
+            .unwrap()
+            .contains(&"blocked".into()));
+        let reloaded = App::load(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
         assert!(reloaded.bot("new-bot").is_some());
-        assert_eq!(reloaded.chat("optimistic-dm").unwrap().meta.bot_ids, vec!["new-bot"]);
+        assert_eq!(
+            reloaded.chat("optimistic-dm").unwrap().meta.bot_ids,
+            vec!["new-bot"]
+        );
         assert!(reloaded.bot("blocked-bot").is_none());
         assert_eq!(reloaded.state.lock().unwrap().policy_clock, policy_clock);
     }
@@ -3255,17 +5542,47 @@ mod tests {
         app.delete_bot("b1").unwrap();
 
         let state = app.state.lock().unwrap();
-        assert_eq!(state.bots.iter().map(|bot| bot.id.as_str()).collect::<Vec<_>>(), vec!["b2"]);
-        assert_eq!(state.routines.iter().map(|routine| routine.id.as_str()).collect::<Vec<_>>(), vec!["r2"]);
-        assert_eq!(state.chats.iter().map(|chat| chat.meta.id.as_str()).collect::<Vec<_>>(), vec!["dm-b2", "shared"]);
-        let shared = state.chats.iter().find(|chat| chat.meta.id == "shared").unwrap();
+        assert_eq!(
+            state
+                .bots
+                .iter()
+                .map(|bot| bot.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b2"]
+        );
+        assert_eq!(
+            state
+                .routines
+                .iter()
+                .map(|routine| routine.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["r2"]
+        );
+        assert_eq!(
+            state
+                .chats
+                .iter()
+                .map(|chat| chat.meta.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dm-b2", "shared"]
+        );
+        let shared = state
+            .chats
+            .iter()
+            .find(|chat| chat.meta.id == "shared")
+            .unwrap();
         assert_eq!(shared.meta.bot_ids, vec!["b2"]);
         assert_eq!(shared.meta.owner_bot_id.as_deref(), Some("b2"));
         assert!(state.group_deletes.contains(&"dm-b1".into()));
         assert!(state.group_deletes.contains(&"solo".into()));
         drop(state);
         assert_eq!(
-            app.store.outbox().unwrap().iter().filter_map(|item| item.group.as_deref()).collect::<Vec<_>>(),
+            app.store
+                .outbox()
+                .unwrap()
+                .iter()
+                .filter_map(|item| item.group.as_deref())
+                .collect::<Vec<_>>(),
             vec!["dm-b2", "shared"]
         );
     }
@@ -3287,26 +5604,56 @@ mod tests {
             other.meta.title = Some("Standup".into());
             let mut again = chat("again", "group", &["b1"], None);
             again.meta.title = Some("standup".into());
-            state.chats = vec![chat("dm-b1", "dm", &["b1"], Some("b1")), launch, other, again, chat("untitled", "group", &["b2", "b1"], Some("b1"))];
+            state.chats = vec![
+                chat("dm-b1", "dm", &["b1"], Some("b1")),
+                launch,
+                other,
+                again,
+                chat("untitled", "group", &["b2", "b1"], Some("b1")),
+            ];
         }
 
         assert_eq!(app.find_group("launch").unwrap().meta.id, "launch");
         assert_eq!(app.find_group("LAUNCH ROOM").unwrap().meta.id, "launch");
-        assert_eq!(app.find_group("Critic, Scout").unwrap().meta.id, "untitled", "an untitled group goes by its members' names");
-        assert!(app.find_group("Standup").unwrap_err().contains("other, again"));
-        assert!(app.find_group("dm-b1").unwrap_err().contains("only a group has an owner"));
-        assert!(app.find_group("Scout").is_err(), "a direct chat's bot names no group");
+        assert_eq!(
+            app.find_group("Critic, Scout").unwrap().meta.id,
+            "untitled",
+            "an untitled group goes by its members' names"
+        );
+        assert!(app
+            .find_group("Standup")
+            .unwrap_err()
+            .contains("other, again"));
+        assert!(app
+            .find_group("dm-b1")
+            .unwrap_err()
+            .contains("only a group has an owner"));
+        assert!(
+            app.find_group("Scout").is_err(),
+            "a direct chat's bot names no group"
+        );
 
         let launch = app.find_group("launch").unwrap();
         assert_eq!(app.find_member(&launch, "critic").unwrap().id, "b2");
         assert_eq!(app.find_member(&launch, "@Scout").unwrap().id, "b1");
         assert_eq!(app.find_member(&launch, "b2").unwrap().id, "b2");
         let standup = app.find_group("other").unwrap();
-        assert_eq!(app.find_member(&standup, "Scout").unwrap_err(), "Scout is not in Standup. Its bots: Critic.");
+        assert_eq!(
+            app.find_member(&standup, "Scout").unwrap_err(),
+            "Scout is not in Standup. Its bots: Critic."
+        );
 
-        assert_eq!(launch.meta.owner(), Some("b1"), "no owner set means the first member");
+        assert_eq!(
+            launch.meta.owner(),
+            Some("b1"),
+            "no owner set means the first member"
+        );
         assert_eq!(app.find_group("untitled").unwrap().meta.owner(), Some("b1"));
-        assert_eq!(chat("gone", "group", &["b2"], Some("b1")).meta.owner(), Some("b2"), "an owner who left is not the owner");
+        assert_eq!(
+            chat("gone", "group", &["b2"], Some("b1")).meta.owner(),
+            Some("b2"),
+            "an owner who left is not the owner"
+        );
         assert_eq!(chat("dm", "dm", &["b1"], Some("b1")).meta.owner(), None);
     }
 
@@ -3314,7 +5661,15 @@ mod tests {
     fn a_dropped_avatar_is_queued_for_deletion_on_the_relay() {
         let scratch = scratch_app();
         let app = &scratch.0;
-        let avatar = |id: &str| crate::model::Attachment { id: id.into(), name: "a.png".into(), mime: "image/png".into(), size: 1, width: None, height: None };
+        let avatar = |id: &str| crate::model::Attachment {
+            id: id.into(),
+            name: "a.png".into(),
+            mime: "image/png".into(),
+            size: 1,
+            width: None,
+            height: None,
+            sha256: None,
+        };
         let mut b1 = bot("b1");
         b1.avatar = Some(avatar("first"));
         app.state.lock().unwrap().bots.push(b1);
@@ -3323,16 +5678,21 @@ mod tests {
             std::fs::write(app.config.files_dir().join(id), b"png").unwrap();
         }
 
-        app.update_bot("b1", |bot| bot.name = "Renamed".into()).unwrap();
+        app.update_bot("b1", |bot| bot.name = "Renamed".into())
+            .unwrap();
         assert!(app.state.lock().unwrap().blob_deletes.is_empty());
 
-        app.update_bot("b1", |bot| bot.avatar = Some(avatar("second"))).unwrap();
+        app.update_bot("b1", |bot| bot.avatar = Some(avatar("second")))
+            .unwrap();
         assert_eq!(app.state.lock().unwrap().blob_deletes, vec!["first"]);
         assert!(!app.config.files_dir().join("first").exists());
         assert!(app.config.files_dir().join("second").exists());
 
         app.delete_bot("b1").unwrap();
-        assert_eq!(app.state.lock().unwrap().blob_deletes, vec!["first", "second"]);
+        assert_eq!(
+            app.state.lock().unwrap().blob_deletes,
+            vec!["first", "second"]
+        );
         assert!(!app.config.files_dir().join("second").exists());
     }
 
@@ -3358,7 +5718,14 @@ mod tests {
         let state = app.state.lock().unwrap();
         assert_eq!(state.bots.len(), 2);
         assert_eq!(state.routines.len(), 1);
-        assert_eq!(state.chats.iter().map(|chat| chat.meta.id.as_str()).collect::<Vec<_>>(), vec!["dm-b1"]);
+        assert_eq!(
+            state
+                .chats
+                .iter()
+                .map(|chat| chat.meta.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dm-b1"]
+        );
         assert!(state.group_deletes.contains(&"group".into()));
         drop(state);
         assert!(app.message("group", &message_id).is_none());
@@ -3376,7 +5743,12 @@ mod tests {
             ];
         }
 
-        assert_eq!(app.rename_chat("dm", Some("Alias".into())).unwrap_err().to_string(), "Only group chats can be renamed");
+        assert_eq!(
+            app.rename_chat("dm", Some("Alias".into()))
+                .unwrap_err()
+                .to_string(),
+            "Only group chats can be renamed"
+        );
         app.rename_chat("group", Some("Standup".into())).unwrap();
 
         let state = app.state.lock().unwrap();
@@ -3389,14 +5761,23 @@ mod tests {
         let scratch = scratch_app();
         let app = &scratch.0;
         crate::identity::create(app, Some("Workbench".into())).unwrap();
-        app.state.lock().unwrap().chats.push(chat("chat", "dm", &["b1"], Some("b1")));
+        app.state
+            .lock()
+            .unwrap()
+            .chats
+            .push(chat("chat", "dm", &["b1"], Some("b1")));
 
         std::thread::scope(|scope| {
             for thread in 0..8 {
                 scope.spawn(move || {
                     for index in 0..40 {
-                        let author = if thread % 2 == 0 { Author::You } else { Author::System };
-                        let mut message = Message::new("chat", author, Body::text(format!("{thread}-{index}")));
+                        let author = if thread % 2 == 0 {
+                            Author::You
+                        } else {
+                            Author::System
+                        };
+                        let mut message =
+                            Message::new("chat", author, Body::text(format!("{thread}-{index}")));
                         app.upsert_message(message.clone(), true);
                         // A streaming update takes the queued version's place.
                         message.body = Body::text(format!("{thread}-{index} done"));
@@ -3406,13 +5787,19 @@ mod tests {
             }
         });
 
-        let stored: Vec<String> = app.messages("chat").into_iter().map(|message| message.id).collect();
+        let stored: Vec<String> = app
+            .messages("chat")
+            .into_iter()
+            .map(|message| message.id)
+            .collect();
         let queued: Vec<String> = app
             .store
             .outbox()
             .unwrap()
             .into_iter()
-            .filter(|item| item.kind == "chat" && item.slot.as_ref().is_some_and(|slot| slot.keep_first))
+            .filter(|item| {
+                item.kind == "chat" && item.slot.as_ref().is_some_and(|slot| slot.keep_first)
+            })
             .map(|item| item.slot.unwrap().name)
             .collect();
         assert_eq!(stored.len(), 320);
@@ -3424,17 +5811,45 @@ mod tests {
         let scratch = scratch_app();
         let app = &scratch.0;
         crate::identity::create(app, Some("Workbench".into())).unwrap();
-        app.state.lock().unwrap().chats.push(chat("chat", "dm", &["b1"], Some("b1")));
+        app.state
+            .lock()
+            .unwrap()
+            .chats
+            .push(chat("chat", "dm", &["b1"], Some("b1")));
         let you = |text: &str| Message::new("chat", Author::You, Body::text(text));
-        let reply = |text: &str| Message::new("chat", Author::Bot { bot_id: "b1".into() }, Body::text(text));
-        let messages = [you("hi"), reply("one"), you("more"), reply("two"), reply("three")];
+        let reply = |text: &str| {
+            Message::new(
+                "chat",
+                Author::Bot {
+                    bot_id: "b1".into(),
+                },
+                Body::text(text),
+            )
+        };
+        let messages = [
+            you("hi"),
+            reply("one"),
+            you("more"),
+            reply("two"),
+            reply("three"),
+        ];
         // The last two replies still wait in the outbox, as they would for a relay that went
         // away before they went up.
         for (index, message) in messages.iter().enumerate() {
             app.upsert_message(message.clone(), index >= 3);
         }
         // This Device has not read the last two replies.
-        assert_eq!(app.state.lock().unwrap().chats.iter().find(|chat| chat.meta.id == "chat").unwrap().unread_count, 2);
+        assert_eq!(
+            app.state
+                .lock()
+                .unwrap()
+                .chats
+                .iter()
+                .find(|chat| chat.meta.id == "chat")
+                .unwrap()
+                .unread_count,
+            2
+        );
 
         app.push_history();
 
@@ -3459,19 +5874,41 @@ mod tests {
         let app = &scratch.0;
         crate::identity::create(app, Some("Workbench".into())).unwrap();
         let token = CancellationToken::new();
-        app.running_jobs.lock().unwrap().insert("running".into(), RunningJob {
-            chat_id: "chat".into(), bot_id: "bot".into(), routine_id: None,
-            runner_id: None, cancel: token.clone(), activity: None,
-        });
+        app.running_jobs.lock().unwrap().insert(
+            "running".into(),
+            RunningJob {
+                chat_id: "chat".into(),
+                bot_id: "bot".into(),
+                routine_id: None,
+                runner_id: None,
+                cancel: token.clone(),
+                activity: None,
+            },
+        );
         app.set_paused(true);
         assert!(token.is_cancelled());
         assert_eq!(app.snapshot()["paused"], true);
-        assert!(matches!(app.roster_summary(), Event::RosterChanged { paused: true, .. }));
+        assert!(matches!(
+            app.roster_summary(),
+            Event::RosterChanged { paused: true, .. }
+        ));
         let dek = app.dek().unwrap();
-        let ciphertext = app.store.outbox().unwrap().into_iter().rfind(|item| item.kind == "roster").unwrap().ciphertext;
+        let ciphertext = app
+            .store
+            .outbox()
+            .unwrap()
+            .into_iter()
+            .rfind(|item| item.kind == "roster")
+            .unwrap()
+            .ciphertext;
         let roster: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &ciphertext).unwrap();
         assert!(roster.paused);
-        assert!(App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap().is_paused());
+        assert!(App::load(Config {
+            home: scratch.1.clone(),
+            port: 0
+        })
+        .unwrap()
+        .is_paused());
         app.set_paused(false);
         assert!(!app.is_paused());
     }
@@ -3488,14 +5925,35 @@ mod tests {
         let mut foreign = bot("b2");
         foreign.runner_id = crate::keys::Machine::generate().pubkey();
         app.state.lock().unwrap().bots.push(foreign);
-        app.state.lock().unwrap().chats.push(chat("chat", "dm", &["b1"], Some("b1")));
+        app.state
+            .lock()
+            .unwrap()
+            .chats
+            .push(chat("chat", "dm", &["b1"], Some("b1")));
         let card = |id: &str, tool: &str| {
-            let mut message = Message::new("chat", Author::Bot { bot_id: "b1".into() }, Body::Permission {
-                plugin_id: "computer".into(), plugin_name: "Runner".into(), tool: tool.into(),
-                summary: "Review draft".into(), arguments: Value::Null, decision: "pending".into(),
-                reason: None, rule: None, command: None, title: Some("Draft".into()),
-                content: Some("Original".into()), path: Some("draft.md".into()), link: None, code: None,
-            });
+            let mut message = Message::new(
+                "chat",
+                Author::Bot {
+                    bot_id: "b1".into(),
+                },
+                Body::Permission {
+                    plugin_id: "computer".into(),
+                    plugin_name: "Runner".into(),
+                    tool: tool.into(),
+                    summary: "Review draft".into(),
+                    arguments: Value::Null,
+                    decision: "pending".into(),
+                    reason: None,
+                    rule: None,
+                    command: None,
+                    title: Some("Draft".into()),
+                    content: Some("Original".into()),
+                    path: Some("draft.md".into()),
+                    link: None,
+                    code: None,
+                    secret: None,
+                },
+            );
             message.id = id.into();
             message
         };
@@ -3504,21 +5962,55 @@ mod tests {
         app.upsert_message(card(&old_id, "propose"), true);
         app.upsert_message(card("other-permission", "install"), true);
         let mut foreign_card = card("foreign-proposal", "propose");
-        foreign_card.author = Author::Bot { bot_id: "b2".into() };
+        foreign_card.author = Author::Bot {
+            bot_id: "b2".into(),
+        };
         app.upsert_message(foreign_card, true);
         app.save_state_now();
 
-        let reader = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let reader = App::load(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
         reader.close_orphan_proposals().unwrap();
-        assert!(matches!(reader.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"), "a non-owner must not recover a Runner's proposal");
+        assert!(
+            matches!(reader.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"),
+            "a non-owner must not recover a Runner's proposal"
+        );
         drop(reader);
-        let reloaded = App::load_owner(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        let reloaded = App::load_owner(Config {
+            home: scratch.1.clone(),
+            port: 0,
+        })
+        .unwrap();
         reloaded.close_orphan_proposals().unwrap();
-        assert!(matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "dismissed"));
-        assert!(matches!(reloaded.message("chat", "other-permission").unwrap().body, Body::Permission { decision, .. } if decision == "pending"));
-        assert!(matches!(reloaded.message("chat", "foreign-proposal").unwrap().body, Body::Permission { decision, .. } if decision == "pending"));
-        assert!(!crate::plugins::mcp::answer(&reloaded, &old_id, crate::plugins::mcp::Decision::Allowed));
-        assert!(!crate::plugins::mcp::propose(&reloaded, "chat", "b1", "old-call", Some("Draft".into()), Some("Original".into()), Some("draft.md".into()), &CancellationToken::new()).await.unwrap());
+        assert!(
+            matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "dismissed")
+        );
+        assert!(
+            matches!(reloaded.message("chat", "other-permission").unwrap().body, Body::Permission { decision, .. } if decision == "pending")
+        );
+        assert!(
+            matches!(reloaded.message("chat", "foreign-proposal").unwrap().body, Body::Permission { decision, .. } if decision == "pending")
+        );
+        assert!(!crate::plugins::mcp::answer(
+            &reloaded,
+            &old_id,
+            crate::plugins::mcp::Decision::Allowed
+        ));
+        assert!(!crate::plugins::mcp::propose(
+            &reloaded,
+            "chat",
+            "b1",
+            "old-call",
+            Some("Draft".into()),
+            Some("Original".into()),
+            Some("draft.md".into()),
+            &CancellationToken::new()
+        )
+        .await
+        .unwrap());
         let dek = reloaded.dek().unwrap();
         let settled = reloaded.store.outbox().unwrap().into_iter().filter(|item| item.kind == "chat")
             .filter_map(|item| crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &item.ciphertext).ok())
@@ -3526,35 +6018,72 @@ mod tests {
         assert!(settled, "settled card must sync to paired Devices");
         // A newer remote pending row can replace the startup dismissal before outbox drain.
         let mut remote = card(&old_id, "propose");
-        if let Body::Permission { summary, .. } = &mut remote.body { *summary = "Newer remote draft".into(); }
+        if let Body::Permission { summary, .. } = &mut remote.body {
+            *summary = "Newer remote draft".into();
+        }
         reloaded.upsert_message(remote, false);
-        assert!(matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"));
+        assert!(
+            matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending")
+        );
         reloaded.close_orphan_proposals().unwrap();
-        assert!(matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, summary, .. } if decision == "dismissed" && summary == "Newer remote draft"));
+        assert!(
+            matches!(reloaded.message("chat", &old_id).unwrap().body, Body::Permission { decision, summary, .. } if decision == "dismissed" && summary == "Newer remote draft")
+        );
         let queued = reloaded.store.outbox().unwrap().len();
         reloaded.close_orphan_proposals().unwrap();
-        assert_eq!(reloaded.store.outbox().unwrap().len(), queued, "settled cards must not republish on each poll");
-        assert!(!crate::plugins::mcp::answer(&reloaded, &old_id, crate::plugins::mcp::Decision::Allowed));
+        assert_eq!(
+            reloaded.store.outbox().unwrap().len(),
+            queued,
+            "settled cards must not republish on each poll"
+        );
+        assert!(!crate::plugins::mcp::answer(
+            &reloaded,
+            &old_id,
+            crate::plugins::mcp::Decision::Allowed
+        ));
         assert!(reloaded.store.outbox().unwrap().into_iter().filter(|item| item.kind == "chat")
             .filter_map(|item| crate::crypto::decrypt_json::<ChatBlob>(&dek, "chat", &item.ciphertext).ok())
             .any(|op| matches!(op, ChatBlob::Upsert { message } if message.id == old_id && matches!(&message.body, Body::Permission { decision, summary, .. } if decision == "dismissed" && summary == "Newer remote draft"))));
 
         let pending = reloaded.clone();
         let review = tokio::spawn(async move {
-            crate::plugins::mcp::propose(&pending, "chat", "b1", "new-call", Some("New".into()), Some("New bytes".into()), Some("new.md".into()), &CancellationToken::new()).await
+            crate::plugins::mcp::propose(
+                &pending,
+                "chat",
+                "b1",
+                "new-call",
+                Some("New".into()),
+                Some("New bytes".into()),
+                Some("new.md".into()),
+                &CancellationToken::new(),
+            )
+            .await
         });
         let new_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                if let Some(card) = reloaded.store.proposal_cards().unwrap().into_iter().find(|card| card.id.starts_with("msg-propose-") && card.id != old_id) {
+                if let Some(card) = reloaded
+                    .store
+                    .proposal_cards()
+                    .unwrap()
+                    .into_iter()
+                    .find(|card| card.id.starts_with("msg-propose-") && card.id != old_id)
+                {
                     break card.id;
                 }
                 tokio::task::yield_now().await;
             }
-        }).await.expect("new proposal must become reviewable");
+        })
+        .await
+        .expect("new proposal must become reviewable");
         reloaded.close_orphan_proposals().unwrap();
-        assert!(matches!(reloaded.message("chat", &new_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending"));
-        assert!(crate::plugins::mcp::answer(&reloaded, &new_id, crate::plugins::mcp::Decision::Denied));
+        assert!(
+            matches!(reloaded.message("chat", &new_id).unwrap().body, Body::Permission { decision, .. } if decision == "pending")
+        );
+        assert!(crate::plugins::mcp::answer(
+            &reloaded,
+            &new_id,
+            crate::plugins::mcp::Decision::Denied
+        ));
         assert!(!review.await.unwrap().unwrap());
     }
-
 }

@@ -66,7 +66,7 @@ func (Host) Info() HostInfo {
 		DefaultCLIPort:     defaultCLIPort(),
 		ProductionRelayURL: productionRelayURL,
 		Locale:             mygo.App.Locale(),
-		UpdatesEnabled:     mygo.Updater.Enabled(),
+		UpdatesEnabled:     updatesEnabled(),
 		CLILogPath:         cliLogPath(),
 		KeepsRunning:       app.keepsRunning(),
 	}
@@ -141,14 +141,6 @@ func widenable(ctx context.Context, pageWidth float64) (*mygo.Window, float64) {
 
 func workArea(r mygo.Rectangle) mygo.Rectangle {
 	return mygo.Screen.DisplayMatching(r).WorkArea
-}
-
-// widened is r made `by` wider within area: to the right where the area has room, then to the
-// left, and past both by less. It never shrinks r or moves it back into the area.
-func widened(r, area mygo.Rectangle, by int) mygo.Rectangle {
-	right := min(by, max(0, area.X+area.Width-(r.X+r.Width)))
-	left := min(by-right, max(0, r.X-area.X))
-	return mygo.Rectangle{X: r.X - left, Y: r.Y, Width: r.Width + left + right, Height: r.Height}
 }
 
 // SetBadge shows the chats' unread count where the system has a place for it: the launcher
@@ -271,25 +263,4 @@ func (n *Notices) ClearChat(chatID string) {
 	for _, notification := range gone {
 		notification.Close()
 	}
-}
-
-// fitUTF16 cuts s to at most n UTF-16 units, the last of them an ellipsis when it cuts.
-func fitUTF16(s string, n int) string {
-	if len(utf16.Encode([]rune(s))) <= n {
-		return s
-	}
-	if n <= 0 {
-		return ""
-	}
-	var kept []rune
-	used := 0
-	for _, r := range s {
-		size := utf16.RuneLen(r)
-		if used+size > n-1 {
-			break
-		}
-		kept = append(kept, r)
-		used += size
-	}
-	return strings.TrimRight(string(kept), " ") + "…"
 }

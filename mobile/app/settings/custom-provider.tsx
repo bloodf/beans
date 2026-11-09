@@ -1,9 +1,10 @@
 // A custom provider, slid in from Settings inside the same sheet: any server that speaks
-// OpenAI's or Anthropic's API, such as a gateway or a model server on the user's network. With a
-// `preset` the form starts from a server people often add; with a provider's `kind` it edits that
-// one; with neither it starts empty. The core lists the server's models as the URL and the key
-// change, and reaches the server again before it saves; the provider joins the account's
-// encrypted credentials, which every paired Device shares.
+// OpenAI's or Anthropic's API, such as a gateway or a model server on the user's network, or a
+// decision API whose models Auto-review runs. With a `preset` the form starts from a server
+// people often add; with a provider's `kind` it edits that one; with neither it starts empty. The
+// core lists the server's models as the URL and the key change, and reaches the server again
+// before it saves; the provider joins the account's encrypted credentials, which every paired
+// Device shares.
 
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -34,6 +35,7 @@ import { t, useLanguage } from "../../src/i18n";
 import { FieldRow, Row, Section } from "../../src/ui/forms";
 import { chooseDefaultModel, setModelListing, startModelDraft, takeModelListing, useModelDraft } from "../../src/ui/modelDraft";
 import { usePalette } from "../../src/ui/theme";
+import { alert } from "../../src/ui/alert";
 
 // Model checks run only after an explicit user action.
 
@@ -151,7 +153,7 @@ export default function CustomProviderScreen() {
   const host = urlHost(baseURL);
   // The preset being added, else the one whose server the URL names or whose name the provider
   // has: for the key's hint.
-  const preset = adding ?? presetForURL(baseURL) ?? customPreset(saved?.name);
+  const preset = adding ?? presetForURL(baseURL, api) ?? customPreset(saved?.name);
   const requestURL = customRequestURL(api, baseURL);
   // Loopback resolves on the selected Runner, never the phone.
   const local = !!adding?.local || isLoopbackHost(host);
@@ -165,8 +167,8 @@ export default function CustomProviderScreen() {
   const picked = rows.filter((row) => row.selected);
   const defaultId = defaultModelId(rows, chosenDefault);
   const defaultRow = picked.find((row) => row.id === defaultId);
-  // Left empty, the name is the preset's whose server the URL names, else the host.
-  const fallbackName = defaultProviderName(baseURL);
+  // Left empty, the name is the preset's whose server and API the URL and menu name, else the host.
+  const fallbackName = defaultProviderName(baseURL, api);
   const providerName = name.trim() || fallbackName;
   const canSave = !working && keyLoaded && runnerReady && validWindow && checked && !!providerName && isHTTPURL(baseURL) && picked.length > 0;
 
@@ -208,7 +210,7 @@ export default function CustomProviderScreen() {
 
   function confirmDelete() {
     if (!kind) return;
-    Alert.alert(t("Delete {name}?", { name: saved?.name || providerName }), t("This removes the provider from every paired Device."), [
+    alert(t("Delete {name}?", { name: saved?.name || providerName }), t("This removes the provider from every paired Device."), [
       { text: t("Cancel"), style: "cancel" },
       {
         text: t("Delete"),

@@ -21,9 +21,9 @@ cli = ["runner", "server", "dep:usage", "dep:tracing-subscriber"]
 # Connecting and disconnecting account providers. Devices use this without the agent loop.
 provider-auth = ["dep:beans-provider-auth"]
 # Running bots: the agent loop, providers, tools. Off for a Device that only takes part.
-runner = ["provider-auth", "dep:beans-agent", "dep:open", "dep:rmcp", "dep:mcp_http", "dep:process-wrap", "memory-pgvector", "memory-lance"]
+runner = ["provider-auth", "dep:beans-agent", "dep:open", "dep:rmcp", "dep:mcp_http", "dep:process-wrap", "dep:sse-stream", "dep:httpdate", "memory-pgvector", "memory-lance"]
 # The local websocket the desktop app connects to.
-server = ["dep:axum"]
+server = ["dep:axum", "dep:subtle"]
 # Vector/native SDKs are linked only by Runners, never the phone core.
 memory-pgvector = ["dep:pgvector", "dep:tokio-postgres", "dep:memory-postgres-rustls", "dep:percent-encoding"]
 memory-lance = ["dep:lancedb", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:axum"]
@@ -39,6 +39,9 @@ async-trait.workspace = true
 axum = { workspace = true, optional = true }
 base64.workspace = true
 chacha20poly1305.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 usage = { package = "usage-rs", version = "6", optional = true }
 crypto_box.workspace = true
 data-encoding.workspace = true
@@ -46,6 +49,7 @@ dirs.workspace = true
 ed25519-dalek.workspace = true
 futures.workspace = true
 hkdf.workspace = true
+hmac.workspace = true
 libc.workspace = true
 open = { workspace = true, optional = true }
 parking_lot.workspace = true
@@ -59,6 +63,8 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile = "=3.27.0"
+# The local websocket compares its token in constant time.
+subtle = { version = "2.6", optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -85,10 +91,15 @@ arrow-ipc = { version = "=58.4.1", optional = true }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-27"], optional = true }
 # Latest compatible stable API; 1.0 RC removes Tokenizer and padding/truncation.
 tokenizers = { version = "=0.22.2", default-features = false, features = ["onig"], optional = true }
+sse-stream = { version = "0.2.4", optional = true }
+httpdate = { version = "1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Native draft paths, parent watches, and the Windows service console need these APIs.
 windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Wdk_System_Threading", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading", "Win32_System_Console", "Win32_System_JobObjects", "Win32_UI_Shell"] }
 
 [dev-dependencies]
+# Paused time for the tests of waits that last seconds or a day.
+tokio = { workspace = true, features = ["test-util"] }
+# Real images for the attachment tests; the agent crate builds the same crate already.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

@@ -14,7 +14,7 @@ use crate::model::{AutoReviewRule, Bot, CommandRun};
 use crate::plugins::mcp::{self, Decision};
 use crate::plugins::review::{self, Action, Outcome, Trigger};
 
-const LOCAL_TARGET_ID: &str = "computer";
+pub(crate) const LOCAL_TARGET_ID: &str = "computer";
 
 /// Reviews direct and nested bash calls before their command starts. A returned result blocks
 /// the call; None executes it with the Runner user's normal authority. Only statically
@@ -37,15 +37,22 @@ pub async fn before_tool_call(
     }
     let command = ctx.args.get("command").and_then(Value::as_str).unwrap_or("");
     let workdir = std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
-    if app.auto_review().is_enabled && read_only(command) {
+    let secrets = crate::secrets::named_in(ctx.args);
+    if app.auto_review().is_enabled && secrets.is_empty() && read_only(command) {
         return None;
     }
     let runner_id = app.this_device_id().unwrap_or_else(|| bot.runner_id.clone());
     let runner_name = app.device(&runner_id).map(|device| device.name).unwrap_or_else(|| "this Runner".into());
-    let description = format!(
+    let mut description = format!(
         "Run this shell command as the user on {runner_name}, with full filesystem, process, credential, and network access. Working directory: {}.",
         home_relative(&workdir)
     );
+    if !secrets.is_empty() {
+        description.push_str(&format!(
+            " It runs with the user's saved secrets {} in its environment, which the user gave this bot for its commands; sending one anywhere but the service it is for leaks it.",
+            secrets.iter().map(|name| format!("${name}")).collect::<Vec<_>>().join(", ")
+        ));
+    }
     // The reviewer judges the command, not the bot's own account of what it does.
     let mut args = ctx.args.clone();
     if let Some(fields) = args.as_object_mut() {
@@ -64,21 +71,43 @@ pub async fn before_tool_call(
     });
     // A command from a codemode script comes with the script, which says what the batch is for.
     let script = ctx.parent.filter(|parent| parent.name == CODEMODE_TOOL_NAME).and_then(|parent| parent.arguments["code"].as_str());
-    let action = Action { target_name: &runner_name, tool: "bash", description: &description, args: &args, script, propose_rule: true };
-    let Outcome::Ask { reason, rule } = review::review(app, bot, chat_id, trigger, action, ctx.cancel).await else {
-        update(&|run| run.state = "running".into());
-        return None;
+    let facts = facts(command, &workdir).await;
+    let action = Action { target_name: &runner_name, tool: "bash", description: &description, args: &args, script, facts: &facts, propose_rule: true };
+    let (reason, rule) = match review::review(app, bot, chat_id, trigger, action, ctx.cancel).await {
+        Outcome::Allow => {
+            update(&|run| run.state = "running".into());
+            return None;
+        }
+        // The bot reads why and finds another way, or asks the user in the chat.
+        Outcome::Held { reason, note, .. } if !unattended => {
+            update(&|run| {
+                run.state = "denied".into();
+                run.held = true;
+                run.reason = Some(reason.clone());
+                run.outcome = Some("Held by Auto-review".into());
+            });
+            return Some(blocked(note));
+        }
+        Outcome::Held { reason, rule, .. } => (Some(reason), rule),
+        Outcome::Ask { reason, rule } => (reason, rule),
     };
     if unattended {
+        let staged = crate::review_execution::stage_call(app, bot, chat_id, trigger, &ctx.tool_call.id,
+            crate::review_queue::ReviewPayload::Shell { arguments: ctx.args.clone() },
+            crate::review_queue::ReviewTarget { account: runner_name.clone(), resource: home_relative(&workdir) },
+            reason.as_deref(), ctx.cancel).await;
+        let status = match staged {
+            Ok(item) => format!("Staged review {} (version {}). The user can edit and approve it later; the exact call resumes on this Runner. Do not retry it now.", item.id, item.version),
+            Err(error) => format!("Could not stage the action for review: {error}. Report the proposed action."),
+        };
         update(&|run| {
             run.state = "denied".into();
             run.reason = reason.clone();
-            run.outcome = Some("Needs your permission, and nobody was here to give it".into());
+            run.outcome = Some(status.clone());
         });
         return Some(blocked(format!(
-            "bash needs the user's permission ({}), and nobody is here to give it. Report what you would do; the user can add an Auto-review rule allowing it{}.",
+            "bash needs the user's permission ({}). {status}",
             reason.as_deref().unwrap_or("Auto-review is off, so every command asks"),
-            rule.map(|rule| format!(", such as “{rule}”")).unwrap_or_default()
         )));
     }
 
@@ -159,8 +188,13 @@ async fn review_input(app: &Arc<App>, chat_id: &str, trigger: &Trigger, bot: &Bo
          network access. The command reads the input exactly as typed, followed by Enter unless enter is false."
     );
     let args = serde_json::json!({ "command": command, "input": text, "enter": ctx.args.get("enter").and_then(Value::as_bool).unwrap_or(true) });
-    let action = Action { target_name: &runner_name, tool: "bash_input", description: &description, args: &args, script: None, propose_rule: false };
-    let Outcome::Ask { reason, .. } = review::review(app, bot, chat_id, trigger, action, ctx.cancel).await else { return None };
+    let action = Action { target_name: &runner_name, tool: "bash_input", description: &description, args: &args, script: None, facts: &[], propose_rule: false };
+    let reason = match review::review(app, bot, chat_id, trigger, action, ctx.cancel).await {
+        Outcome::Allow => return None,
+        Outcome::Held { note, .. } if !unattended => return Some(blocked(note)),
+        Outcome::Held { reason, .. } => Some(reason),
+        Outcome::Ask { reason, .. } => reason,
+    };
     if unattended {
         return Some(blocked(format!(
             "bash_input needs the user's permission ({}), and nobody is here to give it. Stop the command with bash_input and \
@@ -175,6 +209,171 @@ async fn review_input(app: &Arc<App>, chat_id: &str, trigger: &Trigger, bot: &Bo
         Decision::Denied => Some(blocked("The user did not allow that input. Do not retry it; ask what they want instead.".into())),
         Decision::Expired => Some(blocked("Nobody answered the permission request for bash_input in time. Say what you needed and stop.".into())),
         Decision::Dismissed => Some(dismissed("The user sent a new message instead of answering, so that input was not typed. Follow that message.")),
+    }
+}
+
+/// Whether a command runs without a review while Auto-review is on: the parser proves it only
+/// reads, it stays in Lorca's own folders, or it only makes, copies, moves, and edits files in
+/// `workdir`, where the bot's file tools write without a review too. A coding agent's commands
+/// (`crate::coding`) take the same fast path as the bot's own, in the folder it works in.
+pub(crate) fn needs_no_review(_app: &App, command: &str, _workdir: &Path) -> bool {
+    read_only(command)
+}
+
+/// What Lorca checks before a command that could discard work, for the review to take as ground
+/// truth: whether each folder it would delete, reset, or clean is a git working tree with
+/// changes, untracked files, or commits found on no remote, and what work only a branch it would
+/// delete holds. Nothing for other commands.
+pub(crate) async fn facts(command: &str, workdir: &Path) -> Vec<String> {
+    if !command.contains("rm ") && !command.contains("git ") {
+        return Vec::new();
+    }
+    let (command, workdir) = (command.to_string(), workdir.to_path_buf());
+    tokio::task::spawn_blocking(move || git_facts(&command, &workdir, dirs::home_dir().as_deref())).await.unwrap_or_default()
+}
+
+fn git_facts(command: &str, workdir: &Path, home: Option<&Path>) -> Vec<String> {
+    let (stages, _) = parsed_shell(command);
+    let mut dir = workdir.to_path_buf();
+    let mut folders: Vec<PathBuf> = Vec::new();
+    let mut branches: Vec<(PathBuf, String)> = Vec::new();
+    let path_of = |word: &str, dir: &Path| -> Option<PathBuf> {
+        let path = if word == "~" || word.starts_with("~/") {
+            home?.join(word.trim_start_matches('~').trim_start_matches('/'))
+        } else if word.contains('$') || word.contains('*') || word.contains("__substitution_value__") {
+            return None;
+        } else {
+            dir.join(word)
+        };
+        Some(normalized(&path))
+    };
+    for stage in &stages {
+        let Some((name, args)) = command_and_args(stage) else { continue };
+        let operands: Vec<&String> = args.iter().filter(|arg| !arg.starts_with('-')).collect();
+        match name.as_str() {
+            "cd" | "pushd" => {
+                if let [target] = operands.as_slice() {
+                    if let Some(path) = path_of(target, &dir) {
+                        dir = path;
+                    }
+                }
+            }
+            "rm" if args.iter().any(|arg| arg == "--recursive" || arg.starts_with('-') && !arg.starts_with("--") && arg.contains(['r', 'R'])) => {
+                folders.extend(operands.iter().filter_map(|word| path_of(word, &dir)));
+            }
+            "git" => {
+                let mut at = dir.clone();
+                let mut i = 0;
+                while let Some(arg) = args.get(i) {
+                    match arg.as_str() {
+                        "-C" => {
+                            if let Some(path) = args.get(i + 1).and_then(|word| path_of(word, &at)) {
+                                at = path;
+                            }
+                            i += 2;
+                        }
+                        option if option.starts_with('-') => i += 1,
+                        _ => break,
+                    }
+                }
+                let Some(subcommand) = args.get(i) else { continue };
+                let rest: Vec<&String> = args[i + 1..].iter().collect();
+                let rest_operands: Vec<&String> = rest.iter().copied().filter(|arg| !arg.starts_with('-')).collect();
+                let has = |flags: &[&str]| rest.iter().any(|arg| flags.contains(&arg.as_str()));
+                match subcommand.as_str() {
+                    "reset" if has(&["--hard", "--merge", "--keep"]) => folders.push(at.clone()),
+                    "checkout" | "restore" if has(&["--", ".", "-f", "--force", "--worktree"]) || rest_operands.iter().any(|arg| *arg == ".") => folders.push(at.clone()),
+                    "clean" | "stash" if subcommand != "stash" || rest_operands.first().is_some_and(|op| matches!(op.as_str(), "drop" | "clear")) => folders.push(at.clone()),
+                    "worktree" if rest_operands.first().is_some_and(|op| *op == "remove") => {
+                        folders.extend(rest_operands[1..].iter().filter_map(|word| path_of(word, &at)));
+                    }
+                    "branch" if has(&["-d", "-D", "--delete"]) => branches.extend(rest_operands.iter().map(|name| (at.clone(), name.to_string()))),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut facts = Vec::new();
+    for folder in folders.iter().take(4) {
+        facts.extend(folder_fact(folder));
+    }
+    for (at, branch) in branches.iter().take(4) {
+        facts.extend(branch_fact(at, branch));
+    }
+    facts
+}
+
+/// One folder's git state, as a sentence: whether it holds changes or commits nothing else has.
+fn folder_fact(folder: &Path) -> Option<String> {
+    let shown = home_relative(folder);
+    if !folder.exists() {
+        return Some(format!("{shown} does not exist."));
+    }
+    let status = git(folder, &["status", "--porcelain=v1", "--branch"])?;
+    let mut lines = status.lines();
+    let head = lines.next().unwrap_or_default().trim_start_matches("## ").to_string();
+    let (mut changed, mut untracked) = (0, 0);
+    for line in lines {
+        if line.starts_with("??") {
+            untracked += 1;
+        } else if !line.trim().is_empty() {
+            changed += 1;
+        }
+    }
+    let branch = head.split("...").next().unwrap_or(&head).to_string();
+    let unpushed = git(folder, &["rev-list", "--count", "HEAD", "--not", "--remotes"]).and_then(|count| count.trim().parse::<u32>().ok()).unwrap_or(0);
+    let tree = if changed + untracked == 0 { "no uncommitted changes".to_string() } else { format!("{changed} changed and {untracked} untracked files not committed") };
+    let commits = match unpushed {
+        0 => "every commit is on a remote".to_string(),
+        1 => "1 commit found on no remote".to_string(),
+        count => format!("{count} commits found on no remote"),
+    };
+    Some(format!("{shown} is a git working tree on {branch}: {tree}, {commits}."))
+}
+
+/// What only one branch holds: its commits that no other branch, tag, or remote has.
+fn branch_fact(at: &Path, branch: &str) -> Option<String> {
+    // `--exclude` names a branch as `--branches` lists it, without `refs/heads/`.
+    let exclude = format!("--exclude={branch}");
+    let only = git(at, &["rev-list", "--count", &format!("refs/heads/{branch}"), "--not", &exclude, "--branches", "--tags", "--remotes"])?.trim().parse::<u32>().ok()?;
+    Some(match only {
+        0 => format!("Branch {branch} has no commits that another branch, a tag, or a remote does not also have."),
+        1 => format!("Branch {branch} has 1 commit found nowhere else."),
+        count => format!("Branch {branch} has {count} commits found nowhere else."),
+    })
+}
+
+/// A git command's output in `folder`, or nothing when it fails or takes over three seconds.
+fn git(folder: &Path, args: &[&str]) -> Option<String> {
+    let mut child = std::process::Command::new("git")
+        .arg("-C")
+        .arg(folder)
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    // Read while it runs, so a long listing never fills the pipe and stalls it.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut output = String::new();
+        std::io::Read::read_to_string(&mut stdout, &mut output).map(|_| output).ok()
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return reader.join().ok().flatten(),
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) if std::time::Instant::now() > deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
     }
 }
 
@@ -199,7 +398,7 @@ fn home_relative(path: &Path) -> String {
     }
 }
 
-fn command_summary(command: &str) -> String {
+pub(crate) fn command_summary(command: &str) -> String {
     let one_line = command.split_whitespace().collect::<Vec<_>>().join(" ");
     let shown: String = one_line.chars().take(180).collect();
     format!("$ {shown}{}", if one_line.chars().count() > 180 { "…" } else { "" })
@@ -675,15 +874,42 @@ fn safe_git(args: &[String]) -> bool {
         || matches!(arg.as_str(), "--ext-diff" | "--textconv")) {
         return false;
     }
-    let Some(subcommand) = args.iter().find(|arg| !arg.starts_with('-')) else { return false };
-    if matches!(subcommand.as_str(), "status" | "diff" | "log" | "show" | "rev-parse" | "describe" | "blame" | "ls-files" | "ls-tree" | "cat-file") {
-        return true;
+    // Options before the subcommand: `-C <folder>` says where it runs.
+    let mut i = 0;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "-C" | "--git-dir" | "--work-tree" | "--namespace" => i += 2,
+            "--no-pager" | "-P" | "--no-optional-locks" | "--literal-pathspecs" | "--no-replace-objects" => i += 1,
+            option if option.starts_with("--git-dir=") || option.starts_with("--work-tree=") || option.starts_with("--namespace=") => i += 1,
+            _ => break,
+        }
     }
-    subcommand == "branch"
-        && args
-            .iter()
-            .filter(|arg| *arg != "branch")
-            .all(|arg| matches!(arg.as_str(), "-a" | "--all" | "-r" | "--remotes" | "-v" | "-vv" | "--verbose" | "--list" | "--show-current"))
+    let Some(subcommand) = args.get(i).filter(|arg| !arg.starts_with('-')) else { return false };
+    let rest = &args[i + 1..];
+    let only = |allowed: &[&str]| rest.iter().all(|arg| allowed.contains(&arg.as_str()));
+    match subcommand.as_str() {
+        "status" | "diff" | "log" | "show" | "rev-parse" | "describe" | "blame" | "ls-files" | "ls-tree" | "cat-file" | "shortlog" | "rev-list"
+        | "merge-base" | "name-rev" | "for-each-ref" | "show-ref" | "count-objects" | "check-ignore" | "ls-remote" | "whatchanged" => true,
+        // `--open-files-in-pager` runs a program.
+        "grep" => !rest.iter().any(|arg| arg == "-O" || arg.starts_with("--open-files-in-pager")),
+        // Listing; a name with no listing option creates a branch.
+        "branch" => {
+            let lists = rest.iter().any(|arg| {
+                matches!(arg.as_str(), "--list" | "-l" | "-a" | "--all" | "-r" | "--remotes" | "--show-current" | "--merged" | "--no-merged" | "--contains" | "--no-contains" | "--points-at")
+            });
+            let changes = rest.iter().any(|arg| {
+                matches!(arg.as_str(), "-d" | "-D" | "--delete" | "-m" | "-M" | "--move" | "-c" | "-C" | "--copy" | "-f" | "--force" | "-u" | "--unset-upstream" | "--edit-description" | "-t" | "--track")
+                    || arg.starts_with("--set-upstream-to") || arg.starts_with("--track=")
+            });
+            !changes && (lists || rest.iter().all(|arg| arg.starts_with('-')))
+        }
+        "tag" => rest.is_empty() || rest.iter().any(|arg| matches!(arg.as_str(), "-l" | "--list")) && !rest.iter().any(|arg| matches!(arg.as_str(), "-d" | "--delete" | "-f" | "--force" | "-a" | "-s" | "-m")),
+        "remote" => only(&["-v", "--verbose"]) || matches!(rest.first().map(String::as_str), Some("get-url" | "show")),
+        "worktree" => matches!(rest.first().map(String::as_str), Some("list")),
+        "stash" => matches!(rest.first().map(String::as_str), Some("list" | "show")),
+        "reflog" => matches!(rest.first().map(String::as_str), None | Some("show")),
+        _ => false,
+    }
 }
 
 /// Whether a stage writes a file through redirection: `>`, `>>`, `&>`, or `>&` to anything but

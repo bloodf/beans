@@ -1,4 +1,4 @@
-# Releasing the Windows and Linux app
+# Releasing the desktop app
 
 The desktop keeps the runtime identity Beans (`app.beans`) and uses the root `package.json` version. Distribution belongs to the [unified Beans release](releasing-cli.md) in `bloodf/beans`, tagged `beans-v<version>`, not a separate desktop release.
 
@@ -35,3 +35,7 @@ Failed preparation, port/reconnect/relay changes, preference cancellation and ve
 The combined quit callback stops the local app connection and waits for the approved idle child to exit before installation, while the single-instance lock is still held. Ordinary Windows quit retains parent-exit shutdown; approved update quit stops the idle CLI explicitly so resource locks do not wait for an app exit that installation would delay. MyGo renames the running Windows app executable aside and cleans it up on the next user launch. Readiness and selected-relay health are revalidated before installing; installation failures are logged and MyGo attempts its existing file-swap rollback. The app does not claim database rollback or restart itself. Real platform shutdown, ACL, resource-lock and rollback behavior requires parent verification; compilation alone is insufficient.
 
 On Windows, the per-user installer location can update itself. On Linux, the install script's `~/.local/beans.app` can update itself; a package-managed `/opt` installation is updated through the package manager. The public download page links only to releases carrying readiness assets. No update request carries account credentials.
+
+## Cutting a release
+
+See [Build and staging](#build-and-staging). The root Beans version and signed readiness inventory authorize release scope.

@@ -1,29 +1,37 @@
-// Transcript rows, after the Mac app: bubbles (a group shows the bot's name above and its
-// avatar beside the bubble's bottom edge; a DM shows neither), "Today 4:13 AM" separators after
-// fifteen minutes of silence, the "is working" row, "Chef stopped without replying", and the
-// centered "Message from ◉ Name" / "Messaged ◉ Name" markers. Tool calls never render, except a
-// command, which shows as its card while it needs the user.
+import { Modal } from "react-native";
+// Transcript rows: bubbles (a group shows the bot's name above and its avatar beside the bubble's
+// bottom edge; a DM shows neither), "Today 4:13 AM" separators after fifteen minutes of silence,
+// the "is working" row, "Chef stopped without replying", and the centered "Message from ◉ Name" /
+// "Messaged ◉ Name" markers, with a coding agent's mark in place of the avatar for the agents a bot
+// runs. Tool calls never render, except a command, which shows as its card while it needs the user,
+// and a coding agent's start and the messages sent to it.
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Linking, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { Linking, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable } from "./Pressable";
 import * as Clipboard from "expo-clipboard";
-import * as Haptics from "expo-haptics";
+import { haptic } from "./haptics";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
-import Animated, { useAnimatedStyle, useSharedValue, withSequence, withSpring, withTiming } from "react-native-reanimated";
+import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withSequence, withSpring, withTiming } from "react-native-reanimated";
 import { LinearGradient } from "expo-linear-gradient";
+import { useRouter } from "expo-router";
 import { ShimmerView } from "../../modules/beans-core/ShimmerView";
-import { isLive, isSentMessage, showsCard, type Author, type Body, type Bot, type Chat, type CommandRun, type Message } from "../core/model";
+import { agentMessageFromUser, agentStartRow, agentTitle, agentWrote, canBeQuoted, isAgentRow, isLive, isSentMessage, showsCard, showsSpeakers, type Author, type Body, type Bot, type Chat, type CommandRun, type Message } from "../core/model";
 import { engine } from "../core/engine";
 import { useStore } from "../core/store";
 import { language, t, useLanguage } from "../i18n";
 import { AttachmentBlock } from "./attachments";
-import { BotAvatar } from "./Avatar";
-import { daySeparator, firstLine, workingActivity } from "./format";
-import { Markdown } from "./Markdown";
 import { OutputCard } from "./outputs";
+import { BotAvatar, ContactAvatar } from "./Avatar";
+import { AgentLogo } from "./AgentLogo";
+import { daySeparator, firstLine, workingActivity, workingPhrase, workingStep } from "./format";
+import { Markdown } from "./Markdown";
 import { Symbol } from "./Symbol";
 import { usePaneWidth } from "./layout";
-import { Font, usePalette } from "./theme";
+import { accentColor, Font, usePalette } from "./theme";
+import { alert } from "./alert";
+import { draftStateWord, draftTitle, fileSize, sendable, type DraftBody } from "./drafts";
+import { secretCaption, secretTitle } from "./secrets";
 
 export const SEPARATOR_GAP_SECS = 15 * 60;
 const AVATAR = 28;
@@ -31,7 +39,7 @@ const GUTTER = 8;
 /// A bubble stops growing here in a wide pane.
 const BUBBLE_COLUMN_MAX = 620;
 const INSET = 12;
-/// A notice's line, and its icon, which centers on the first line as on the Mac.
+/// A notice's line, and its icon, which centers on the first line.
 const NOTICE_LINE = 17;
 const NOTICE_ICON = 14;
 
@@ -42,15 +50,20 @@ export type Row =
   | { key: string; type: "notice"; text: string; groupStart: boolean }
   | { key: string; type: "permission"; message: Message; body: Extract<Body, { kind: "permission" }>; bot: Bot | undefined; groupStart: boolean }
   | { key: string; type: "command"; message: Message; run: CommandRun; bot: Bot | undefined; groupStart: boolean }
+  /// A coding agent's marker: the start or a message the bot sent it ("Messaged ⬢ Title"), what
+  /// the user wrote it from its page (`byYou`, "You messaged ⬢ Title"), or what it said ("Message
+  /// from ⬢ Title"). `start` is the row that started it, whose page a tap opens, when it is loaded.
+  | { key: string; type: "agent"; message: Message; incoming: boolean; byYou: boolean; title: string; kind: string; text: string; failed: boolean; start: string | undefined; groupStart: boolean }
+  | { key: string; type: "draft"; message: Message; body: DraftBody; bot: Bot | undefined; groupStart: boolean }
   | { key: string; type: "working"; bots: Bot[] }
   | { key: string; type: "status"; text: string };
 
-/// Builds the rows for a chat, the way the Mac app's ChatViewController does.
+/// Builds the rows for a chat, the way the desktop app does.
 export function buildRows(chat: Chat, bots: Map<string, Bot>, workingBotIds: string[], isWorking: boolean, status: string | null): Row[] {
   const rows: Row[] = [];
   let previous: Message | null = null;
   let previousAuthorKey: string | null = null;
-  const shown = chat.messages.filter((m) => m.body.kind !== "tool" || showsCard(m.body) || isSentMessage(m.body));
+  const shown = chat.messages.filter((m) => m.body.kind !== "tool" || isAgentRow(m.body) || showsCard(m.body) || isSentMessage(m.body));
   for (let i = 0; i < shown.length; i++) {
     const message = shown[i];
     const separated = !previous || message.created_at - previous.created_at >= SEPARATOR_GAP_SECS;
@@ -58,12 +71,12 @@ export function buildRows(chat: Chat, bots: Map<string, Bot>, workingBotIds: str
       rows.push({ key: `day-${message.id}`, type: "day", at: message.created_at });
       previousAuthorKey = null;
     }
-    const authorKey = message.author.kind === "bot" ? `bot:${message.author.bot_id}` : message.author.kind;
+    const authorKey = keyOf(message.author);
     const groupStart = separated || authorKey !== previousAuthorKey;
     switch (message.body.kind) {
       case "text": {
         const next = shown[i + 1];
-        const nextKey = next ? (next.author.kind === "bot" ? `bot:${next.author.bot_id}` : next.author.kind) : null;
+        const nextKey = next ? keyOf(next.author) : null;
         const nextSeparated = next ? next.created_at - message.created_at >= SEPARATOR_GAP_SECS : true;
         const groupEnd = nextSeparated || nextKey !== authorKey || next?.body.kind !== "text";
         // A run of one bot's outputs joins into one list.
@@ -74,7 +87,7 @@ export function buildRows(chat: Chat, bots: Map<string, Bot>, workingBotIds: str
           message,
           groupStart,
           groupEnd,
-          showsName: chat.kind === "group" && message.author.kind === "bot" && groupStart,
+          showsName: showsSpeakers(chat) && (message.author.kind === "bot" || message.author.kind === "contact") && groupStart,
           stackAbove: output && !groupStart && isOutputCard(shown[i - 1]),
           stackBelow: output && !groupEnd && isOutputCard(next),
         });
@@ -82,7 +95,24 @@ export function buildRows(chat: Chat, bots: Map<string, Bot>, workingBotIds: str
         break;
       }
       case "tool":
-        if (message.body.run) {
+        if (isAgentRow(message.body)) {
+          const body = message.body;
+          const start = body.agent ? message : agentStartRow(chat.messages, body.target_agent_id ?? "");
+          const agent = start?.body.kind === "tool" ? start.body.agent : undefined;
+          rows.push({
+            key: message.id,
+            type: "agent",
+            message,
+            incoming: false,
+            byYou: false,
+            title: agent ? agentTitle(agent) : t("a coding agent"),
+            kind: agent?.kind ?? "",
+            text: agentWrote(body),
+            failed: false,
+            start: start?.id,
+            groupStart,
+          });
+        } else if (message.body.run) {
           const bot = message.author.kind === "bot" ? bots.get(message.author.bot_id) : undefined;
           rows.push({ key: message.id, type: "command", message, run: message.body.run, bot, groupStart });
         } else {
@@ -91,13 +121,33 @@ export function buildRows(chat: Chat, bots: Map<string, Bot>, workingBotIds: str
         previousAuthorKey = null;
         break;
       case "handoff": {
-        const incoming = chat.kind !== "group" && chat.bot_ids.includes(message.body.to);
+        // From a bot outside the chat, as a DM's request or a handoff's report: a message.
+        const incoming = chat.bot_ids.includes(message.body.to) && !chat.bot_ids.includes(message.body.from);
         rows.push({
           key: message.id,
           type: "marker",
           text: incoming ? t("Message from") : t("Handed off to"),
           bot: bots.get(incoming ? message.body.from : message.body.to),
           tooltip: message.body.reason,
+          groupStart,
+        });
+        previousAuthorKey = null;
+        break;
+      }
+      case "agent_message": {
+        const start = agentStartRow(chat.messages, message.body.agent_id);
+        const byYou = agentMessageFromUser(message);
+        rows.push({
+          key: message.id,
+          type: "agent",
+          message,
+          incoming: !byYou,
+          byYou,
+          title: message.body.title || t("a coding agent"),
+          kind: message.body.agent_kind,
+          text: message.body.text,
+          failed: !!message.body.failed,
+          start: start?.id,
           groupStart,
         });
         previousAuthorKey = null;
@@ -111,6 +161,10 @@ export function buildRows(chat: Chat, bots: Map<string, Bot>, workingBotIds: str
         rows.push({ key: message.id, type: "permission", message, body: message.body, bot: message.author.kind === "bot" ? bots.get(message.author.bot_id) : undefined, groupStart });
         previousAuthorKey = null;
         break;
+      case "draft":
+        rows.push({ key: message.id, type: "draft", message, body: message.body, bot: message.author.kind === "bot" ? bots.get(message.author.bot_id) : undefined, groupStart });
+        previousAuthorKey = null;
+        break;
     }
     previous = message;
   }
@@ -119,7 +173,37 @@ export function buildRows(chat: Chat, bots: Map<string, Bot>, workingBotIds: str
   return rows;
 }
 
-export function DayRow({ at }: { at: number }) {
+/// `next` with every row that says what its predecessor of the same key said replaced by that
+/// predecessor, and `previous` itself when nothing changed. Rows are rebuilt on every event in
+/// the chat, most of which change one row or none (a tool call the transcript does not show).
+export function shareRows(previous: Row[], next: Row[]): Row[] {
+  if (previous.length === 0) return next;
+  const byKey = new Map(previous.map((row) => [row.key, row]));
+  let changed = next.length !== previous.length;
+  const shared = next.map((row, index) => {
+    const old = byKey.get(row.key);
+    const kept = old && sameRow(old, row) ? old : row;
+    if (kept !== previous[index]) changed = true;
+    return kept;
+  });
+  return changed ? shared : previous;
+}
+
+function sameRow(a: Row, b: Row): boolean {
+  const x = a as Record<string, unknown>;
+  const y = b as Record<string, unknown>;
+  for (const key in y) {
+    if (x[key] === y[key]) continue;
+    const left = x[key];
+    const right = y[key];
+    // The working row's bots: the same bots in a new list.
+    if (Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, i) => item === right[i])) continue;
+    return false;
+  }
+  return Object.keys(x).length === Object.keys(y).length;
+}
+
+export const DayRow = memo(function DayRow({ at }: { at: number }) {
   useLanguage();
   const p = usePalette();
   return (
@@ -127,7 +211,7 @@ export function DayRow({ at }: { at: number }) {
       <Text style={[styles.caption, { color: p.secondaryLabel }]}>{daySeparator(new Date(at * 1000))}</Text>
     </View>
   );
-}
+});
 
 /// Swiping a bubble this far to the right makes the draft a reply to it.
 const REPLY_SWIPE = 56;
@@ -137,6 +221,7 @@ const BACK_EDGE = 28;
 export function quoteAuthorName(author: Author, bots: Map<string, Bot>): string {
   if (author.kind === "you") return t("You");
   if (author.kind === "bot") return bots.get(author.bot_id)?.name ?? t("Bot");
+  if (author.kind === "contact") return author.name;
   return "Beans";
 }
 
@@ -145,39 +230,51 @@ export function isOutputCard(message: Message | undefined): boolean {
   return !!message && message.output !== undefined && message.author.kind !== "you";
 }
 
-/// Only the bubble owns the detector; the whole row follows its rightward drag.
-/// Edge and leftward drags remain navigation's, vertical drags the transcript's.
+/// Who a run of bubbles belongs to: the user, one bot, or one person outside Lorca.
+function keyOf(author: Author): string {
+  if (author.kind === "bot") return `bot:${author.bot_id}`;
+  if (author.kind === "contact") return `contact:${author.name}`;
+  return author.kind;
+}
+
+/// How far from the screen's left edge a drag stays the system's back gesture.
+
+/// Swipe to reply, as in Messages and Google Messages: the bubble, dragged to the right, takes its
+/// row along with a reply arrow fading in behind it; let go past `REPLY_SWIPE` and the draft
+/// answers it. Only a drag that starts on the bubble, away from the left edge, is a reply: one
+/// anywhere else stays the system's back gesture (iOS 26 takes it from the whole content), as does
+/// a leftward one, and vertical ones stay with the transcript. The drag runs on the UI thread, so
+/// the bubble follows the finger while JS is busy with a streaming reply.
 function useSwipeToReply(onReply?: () => void) {
   const offset = useSharedValue(0);
-  const armed = useRef(false);
-  const pan = useMemo(
-    () =>
-      Gesture.Pan()
-        .runOnJS(true)
-        .enabled(!!onReply)
-        .activeOffsetX(14)
-        .failOffsetX(-10)
-        .failOffsetY([-10, 10])
-        .onTouchesDown((event, manager) => {
-          if ((event.allTouches[0]?.absoluteX ?? 0) < BACK_EDGE) manager.fail();
-        })
-        .onUpdate((event) => {
-          offset.value = Math.max(0, Math.min(REPLY_SWIPE * 1.4, event.translationX));
-          const past = offset.value >= REPLY_SWIPE;
-          if (past !== armed.current) {
-            armed.current = past;
-            if (past) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-          }
-        })
-        .onEnd((_event, success) => {
-          if (success && armed.current) onReply?.();
-        })
-        .onFinalize(() => {
-          armed.current = false;
-          offset.value = withSpring(0, { damping: 22, stiffness: 260 });
-        }),
-    [onReply, offset],
-  );
+  const armed = useSharedValue(false);
+  const pan = useMemo(() => {
+    const reply = () => onReply?.();
+    const tick = haptic.threshold;
+    return Gesture.Pan()
+      .enabled(!!onReply)
+      .activeOffsetX(14)
+      .failOffsetX(-10)
+      .failOffsetY([-10, 10])
+      .onTouchesDown((event, manager) => {
+        if ((event.allTouches[0]?.absoluteX ?? 0) < BACK_EDGE) manager.fail();
+      })
+      .onUpdate((event) => {
+        offset.value = Math.max(0, Math.min(REPLY_SWIPE * 1.4, event.translationX));
+        const past = offset.value >= REPLY_SWIPE;
+        if (past !== armed.value) {
+          armed.value = past;
+          if (past) runOnJS(tick)();
+        }
+      })
+      .onEnd((_event, success) => {
+        if (success && armed.value) runOnJS(reply)();
+      })
+      .onFinalize(() => {
+        armed.value = false;
+        offset.value = withSpring(0, { damping: 22, stiffness: 260 });
+      });
+  }, [onReply, offset, armed]);
   const follow = useAnimatedStyle(() => ({ transform: [{ translateX: offset.value }] }));
   const arrow = useAnimatedStyle(() => {
     const progress = Math.min(1, offset.value / REPLY_SWIPE);
@@ -186,9 +283,12 @@ function useSwipeToReply(onReply?: () => void) {
   return { pan, follow, arrow };
 }
 
-/// `onReply` makes the draft a reply to this message (a swipe to the right); `onQuotePress` brings
-/// the message a reply answers into view; `flashing` pulses the bubble once it is there.
-export function MessageRow({
+/// `onReply` makes the draft a reply to this message (a swipe to the right), when it can be quoted;
+/// `onQuotePress` brings the message a reply answers into view; `flashing` pulses the bubble once
+/// it is there. Rows are built anew on every change to the chat, but their messages keep their
+/// identity until they change, so a bubble renders again only when its own message or place
+/// in the run does: a streaming reply re-renders its own bubble, not the screenful above it.
+export const MessageRow = memo(function MessageRow({
   row,
   bots,
   isGroup,
@@ -199,11 +299,12 @@ export function MessageRow({
   row: Extract<Row, { type: "message" }>;
   bots: Map<string, Bot>;
   isGroup: boolean;
-  onReply?: () => void;
+  onReply?: (message: Message) => void;
   onQuotePress?: (messageID: string) => void;
   flashing?: boolean;
 }) {
   const held = row.message.queued === true;
+  const reply = useMemo(() => (onReply && canBeQuoted(row.message) ? () => onReply(row.message) : undefined), [onReply, row.message]);
   useLanguage();
   const p = usePalette();
   const paneWidth = usePaneWidth();
@@ -217,6 +318,7 @@ export function MessageRow({
   const pulsing = useAnimatedStyle(() => ({ opacity: pulse.value }));
   const isYou = message.author.kind === "you";
   const bot = message.author.kind === "bot" ? bots.get(message.author.bot_id) : undefined;
+  const contact = message.author.kind === "contact" ? message.author.name : undefined;
   const text = message.body.kind === "text" ? message.body.text : "";
   const attachments = message.body.kind === "text" ? (message.body.attachments ?? []) : [];
   const failed = message.state.kind === "failed";
@@ -228,7 +330,7 @@ export function MessageRow({
   const columnWidth = Math.min(Math.floor(paneWidth * 0.8), BUBBLE_COLUMN_MAX);
   const attachmentWidth = columnWidth - 26 - (showsAvatar ? AVATAR + GUTTER : 0);
   const quoteName = quote ? quoteAuthorName(quote.author, bots) : "";
-  const swipe = useSwipeToReply(onReply);
+  const swipe = useSwipeToReply(reply);
   return (
     <View>
     <Animated.View style={[styles.replyArrow, swipe.arrow]} pointerEvents="none">
@@ -236,11 +338,15 @@ export function MessageRow({
     </Animated.View>
     <Animated.View style={swipe.follow}>
     <View style={[styles.messageRow, { paddingTop: stackAbove ? 0 : groupStart ? 14 : 3 }, isYou ? styles.messageRowYou : styles.messageRowBot]}>
-      {showsAvatar && <View style={{ width: AVATAR + GUTTER, alignSelf: "flex-end" }}>{groupEnd && <BotAvatar bot={bot} chatId={message.chat_id} size={AVATAR} />}</View>}
+      {showsAvatar && (
+        <View style={{ width: AVATAR + GUTTER, alignSelf: "flex-end" }}>
+          {groupEnd && (contact !== undefined ? <ContactAvatar name={contact} size={AVATAR} /> : <BotAvatar bot={bot} chatId={message.chat_id} size={AVATAR} />)}
+        </View>
+      )}
       <View style={[styles.bubbleColumn, { maxWidth: columnWidth }, isYou && styles.bubbleColumnYou]}>
         {showsName && (
           <Text style={[styles.author, { color: p.secondaryLabel }]} numberOfLines={1}>
-            {bot?.name ?? t("Bot")}
+            {contact ?? bot?.name ?? t("Bot")}
           </Text>
         )}
         {quote && (
@@ -283,7 +389,7 @@ export function MessageRow({
         </GestureDetector>
         {held && (
           <Pressable
-            onPress={() => engine.sendNow(message.chat_id, message.id).catch((error) => Alert.alert(t("Could not send now"), error instanceof Error ? error.message : String(error)))}
+            onPress={() => engine.sendNow(message.chat_id, message.id).catch((error) => alert(t("Could not send now"), error instanceof Error ? error.message : String(error)))}
             hitSlop={8}
             style={styles.sendNow}
             accessibilityRole="button"
@@ -297,14 +403,25 @@ export function MessageRow({
     </Animated.View>
     </View>
   );
-}
+}, (a, b) =>
+  a.row.message === b.row.message &&
+  a.row.groupStart === b.row.groupStart &&
+  a.row.groupEnd === b.row.groupEnd &&
+  a.row.showsName === b.row.showsName &&
+  a.bots === b.bots &&
+  a.isGroup === b.isGroup &&
+  a.onReply === b.onReply &&
+  a.onQuotePress === b.onQuotePress &&
+  a.flashing === b.flashing,
+);
 
 /// "Messaged ◉ Name" with the message's first line under it; a tap opens the whole message
 /// in a sheet.
-export function MarkerRow({ row, onPress }: { row: Extract<Row, { type: "marker" }>; onPress?: (row: Extract<Row, { type: "marker" }>) => void }) {
+export const MarkerRow = memo(function MarkerRow({ row, onPress }: { row: Extract<Row, { type: "marker" }>; onPress?: (row: Extract<Row, { type: "marker" }>) => void }) {
   useLanguage();
   const p = usePalette();
-  const preview = row.tooltip ? firstLine(row.tooltip) : "";
+  // Bold and code marks go, as the chat list's preview drops them.
+  const preview = row.tooltip ? firstLine(row.tooltip).replace(/\*\*|`/g, "") : "";
   return (
     <Pressable
       style={({ pressed }) => [styles.centered, { paddingTop: row.groupStart ? 14 : 6, opacity: pressed ? 0.5 : 1 }]}
@@ -325,9 +442,9 @@ export function MarkerRow({ row, onPress }: { row: Extract<Row, { type: "marker"
       ) : null}
     </Pressable>
   );
-}
+});
 
-export function NoticeRow({ row }: { row: Extract<Row, { type: "notice" }> }) {
+export const NoticeRow = memo(function NoticeRow({ row }: { row: Extract<Row, { type: "notice" }> }) {
   const p = usePalette();
   return (
     <View style={[styles.centered, { paddingTop: row.groupStart ? 14 : 6 }]}>
@@ -337,34 +454,103 @@ export function NoticeRow({ row }: { row: Extract<Row, { type: "notice" }> }) {
       </View>
     </View>
   );
+});
+
+/// A bot asking before a plugin tool runs, a shell command runs, or a plugin is installed. While
+/// it waits: the question, the call (a shell command in a code block that opens the whole
+/// command on tap), why Auto-review paused it, the answers, and under them the rule Always allow
+/// adds. A shell command offers Always allow only with a rule. Once answered, the answer and the
+/// call; an Always allow keeps its rule. A bot's Access refusing a call asks for more access: Edit
+/// Access… opens the bot's Access, and Dismiss puts the request away; neither runs the call. In a
+/// group the card sits in the bubbles' column, the bot's avatar beside its bottom edge.
+export const PermissionRow = memo(function PermissionRow({ row, isGroup, onDecide, onFill }: { row: Extract<Row, { type: "permission" }>; isGroup: boolean; onDecide: (message: Message, decision: "allow" | "always" | "deny") => void; onFill: (message: Message) => void }) {
+  if (row.body.tool === "secret" && row.body.secret) return <SecretRow row={row} isGroup={isGroup} onDecide={onDecide} onFill={onFill} />;
+  return <AskRow row={row} isGroup={isGroup} onDecide={onDecide} />;
+});
+
+/// A bot asking for a secret, as the desktop app's card: who asks and where it goes, why, Fill In,
+/// which opens `SecretSheet` with a field for each value, and Not now, then that the value stays on
+/// the Runner and the bot never sees it. Once answered, the answer and what was asked for: "Saved ·
+/// npm token". In a group the card sits in the bubbles' column, the bot's avatar beside its bottom
+/// edge.
+function SecretRow({ row, isGroup, onDecide, onFill }: { row: Extract<Row, { type: "permission" }>; isGroup: boolean; onDecide: (message: Message, decision: "allow" | "always" | "deny") => void; onFill: (message: Message) => void }) {
+  useLanguage();
+  const p = usePalette();
+  const runner = useStore((s) => s.devices.find((d) => d.id === row.bot?.runner_id)?.name) ?? t("its Runner");
+  const showsAvatar = isGroup && row.message.author.kind === "bot";
+  const body = row.body;
+  const pending = body.decision === "pending";
+  const who = row.bot?.name ?? t("The bot");
+  const title = secretTitle(body, who);
+  const caption = secretCaption(body);
+  return (
+    <View style={[styles.messageRow, { paddingTop: row.groupStart ? 14 : 6 }]}>
+      {showsAvatar && (
+        <View style={{ width: AVATAR + GUTTER, alignSelf: "flex-end" }}>
+          <BotAvatar bot={row.bot} size={AVATAR} />
+        </View>
+      )}
+      <View style={[styles.permission, { backgroundColor: p.cell, borderColor: p.separator }]}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Symbol name="key" size={16} color={pending ? p.tint : p.secondaryLabel} />
+          <Text style={[styles.permissionTitle, { color: p.label }]} numberOfLines={2}>
+            {title}
+          </Text>
+        </View>
+        {caption ? (
+          <Text style={[pending ? styles.reasonText : styles.caption, { color: p.secondaryLabel }]} numberOfLines={4}>
+            {caption}
+          </Text>
+        ) : null}
+        {pending ? (
+          <>
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
+              <Pressable onPress={() => onFill(row.message)} style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]} accessibilityRole="button">
+                <Text style={{ color: p.tint, fontSize: 13, fontWeight: "600" }}>{t("Fill In")}</Text>
+              </Pressable>
+              <Pressable onPress={() => onDecide(row.message, "deny")} style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]} accessibilityRole="button">
+                <Text style={{ color: p.label, fontSize: 13, fontWeight: "600" }}>{t("Not now")}</Text>
+              </Pressable>
+            </View>
+            <Text style={[styles.ruleNote, { color: p.secondaryLabel }]}>{t("Saved on {runner}. {who} never sees it.", { runner, who })}</Text>
+          </>
+        ) : null}
+      </View>
+    </View>
+  );
 }
 
-/// Permission cards for plugin calls, commands, installs, sign-ins, and draft proposals.
-/// Drafts show a bounded Markdown preview and open the full document before approval.
-export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { type: "permission" }>; isGroup: boolean; onDecide: (decision: "allow" | "always" | "deny") => void }) {
+const AskRow = memo(function AskRow({ row, isGroup, onDecide }: { row: Extract<Row, { type: "permission" }>; isGroup: boolean; onDecide: (message: Message, decision: "allow" | "always" | "deny") => void }) {
   useLanguage();
   const p = usePalette();
   const [copied, setCopied] = useState(false);
-  const [showCommand, setShowCommand] = useState(false);
-  const [showDraft, setShowDraft] = useState(false);
-  const paneWidth = usePaneWidth();
+  const router = useRouter();
   const showsAvatar = isGroup && row.message.author.kind === "bot";
   const pending = row.body.decision === "pending";
   const connect = row.body.tool === "connect";
+  const access = row.body.tool === "access";
   const proposal = row.body.tool === "propose";
-  const shell = row.body.plugin_id === "computer";
+  const paneWidth = usePaneWidth();
+  const [showCommand, setShowCommand] = useState(false);
+  const [showDraft, setShowDraft] = useState(false);
+  const shell = row.body.plugin_id === "computer" && !access;
   const who = row.bot?.name ?? t("The bot");
   const plugin = row.body.plugin_name;
-  const title = proposal
-    ? t("{who} wants to save a draft", { who })
+  const title = access
+    ? t("{who} needs more access", { who })
     : connect
-      ? t("{who} needs a sign-in to {plugin}", { who, plugin })
-      : row.body.tool === "install"
-        ? t("{who} wants to install {plugin}", { who, plugin })
-        : shell
-          ? t("{who} wants to run a command on {plugin}", { who, plugin })
-          : t("{who} wants to use {plugin}", { who, plugin });
+    ? t("{who} needs a sign-in to {plugin}", { who, plugin })
+    : row.body.tool === "install"
+      ? t("{who} wants to install {plugin}", { who, plugin })
+      : shell
+        ? t("{who} wants to run a command on {plugin}", { who, plugin })
+        : t("{who} wants to use {plugin}", { who, plugin });
   const command = row.body.command ?? row.body.summary.replace(/^\$ /, "");
+  // What an access request names: a plugin's tool as it is, or what the bot wanted to do on its
+  // Runner in the CLI's English.
+  const local: Record<string, string> = { "Shell commands": t("Shell commands"), "Changing files": t("Changing files"), "Reading files": t("Reading files") };
+  const summary = access ? (local[row.body.summary] ?? row.body.summary) : row.body.summary;
+  const reason = access ? t("Not allowed in this bot's Access settings.") : row.body.reason;
   const ruleNote = proposal || !row.body.rule
     ? undefined
     : pending
@@ -377,7 +563,9 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
     : connect
       ? { allowed: t("Signing in"), denied: t("Not now"), dismissed: t("Dismissed"), connected: t("Signed in"), failed: t("Sign-in failed") }
       : { allowed: t("Allowed once"), always: t("Always allowed"), denied: t("Denied"), expired: t("No answer in time"), dismissed: t("Dismissed") };
-  const choices: [string, "allow" | "always" | "deny"][] = proposal
+  const choices: [string, "allow" | "always" | "deny" | "access"][] = access
+    ? [[t("Edit Access…"), "access"], [t("Dismiss"), "deny"]]
+    : proposal
     ? [[t("Approve & save"), "allow"], [t("Decline"), "deny"]]
     : connect
       ? [[t("Sign in"), "allow"], [t("Not now"), "deny"]]
@@ -435,7 +623,7 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
           </View>
         ) : pending && shell ? (
           <Pressable
-            onPress={() => setShowCommand(true)}
+            onPress={() => router.push({ pathname: "/command/[id]", params: { id: row.message.id, chat: row.message.chat_id, title } })}
             style={({ pressed }) => [styles.command, { backgroundColor: p.code, opacity: pressed ? 0.6 : 1 }]}
             accessibilityRole="button"
             accessibilityLabel={t("Show the full command")}
@@ -446,11 +634,11 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
           </Pressable>
         ) : (
           <Text style={[styles.caption, { color: p.secondaryLabel }]} numberOfLines={3}>
-            {pending ? row.body.summary : `${decided[row.body.decision] ?? row.body.decision} · ${row.body.summary}`}
+            {pending ? summary : `${decided[row.body.decision] ?? row.body.decision} · ${summary}`}
           </Text>
         )}
-        {pending && row.body.reason ? (
-          <Text style={[styles.reasonText, { color: p.secondaryLabel }]}>{row.body.reason}</Text>
+        {pending && reason ? (
+          <Text style={[styles.reasonText, { color: p.secondaryLabel }]}>{reason}</Text>
         ) : null}
         {!proposal && row.body.decision === "allowed" && row.body.code ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginTop: 4 }}>
@@ -479,7 +667,15 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
         {pending ? (
           <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
             {choices.map(([label, decision]) => (
-              <Pressable key={decision} onPress={() => onDecide(decision)} accessibilityRole="button" style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]}>
+              <Pressable
+                key={decision}
+                onPress={() =>
+                  decision === "access"
+                    ? row.message.author.kind === "bot" && router.push({ pathname: "/chat-info/access/[id]", params: { id: row.message.author.bot_id, close: "1" } })
+                    : onDecide(row.message, decision)
+                }
+                style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]}
+              >
                 <Text style={{ color: decision === "deny" ? p.label : p.tint, fontSize: 13, fontWeight: "600" }}>
                   {label}
                 </Text>
@@ -493,7 +689,116 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
       {proposal && draft ? <DraftSheet visible={showDraft} title={row.body.title ?? title} path={row.body.path} content={draft} onClose={() => setShowDraft(false)} /> : null}
     </View>
   );
-}
+});
+
+/// An email or Slack message a bot wrote, as a card: who drafted it and the account it goes out
+/// from, To and Cc, the subject, the start of the text, and the attachments; while it waits, Send,
+/// Always Send on a Slack card (which also has the bot send its next messages directly), and
+/// Discard. A tap on the card opens the draft to edit, as Mail's compose sheet. Once sent or
+/// discarded, how it ended on the title's line. In a group the card sits in the bubbles' column,
+/// the bot's avatar beside its bottom edge.
+export const DraftRow = memo(function DraftRow({ row, isGroup }: { row: Extract<Row, { type: "draft" }>; isGroup: boolean }) {
+  useLanguage();
+  const p = usePalette();
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const showsAvatar = isGroup && row.message.author.kind === "bot";
+  const card = row.body;
+  const draft = card.draft;
+  const pending = card.state === "pending";
+  const state = draftStateWord(card.state);
+  const title = draftTitle(draft, row.bot?.name ?? t("The bot"));
+  const open = () => router.push({ pathname: "/draft/[id]", params: { id: row.message.id, chat: row.message.chat_id } });
+  const act = async (failure: string, request: () => Promise<unknown>) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await request();
+    } catch (error) {
+      alert(failure, error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const send = (always: boolean) => act(t("Couldn't send this draft"), () => engine.sendDraft(row.message.chat_id, row.message.id, draft, always));
+  const header = (label: string, values?: string[]) =>
+    values && values.length > 0 ? (
+      <Text style={[styles.draftHeader, { color: p.secondaryLabel }]} numberOfLines={1}>
+        {label} <Text style={{ color: p.label }}>{values.join(", ")}</Text>
+      </Text>
+    ) : null;
+  const buttons: [string, () => void, boolean][] = [
+    [t("Send"), () => void send(false), true],
+    ...(card.direct ? [[t("Always Send"), () => void send(true), true] as [string, () => void, boolean]] : []),
+    [t("Discard"), () => void act(t("Couldn't discard this draft"), () => engine.discardDraft(row.message.chat_id, row.message.id)), false],
+  ];
+  return (
+    <View style={[styles.messageRow, { paddingTop: row.groupStart ? 14 : 6 }]}>
+      {showsAvatar && (
+        <View style={{ width: AVATAR + GUTTER, alignSelf: "flex-end" }}>
+          <BotAvatar bot={row.bot} size={AVATAR} />
+        </View>
+      )}
+      <Pressable
+        onPress={open}
+        accessibilityRole="button"
+        accessibilityHint={pending ? t("Opens the draft to edit") : undefined}
+        style={({ pressed }) => [styles.permission, { backgroundColor: pressed ? p.fill : p.cell, borderColor: p.separator }]}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Symbol name={draft.kind === "email" ? "envelope" : "bubble.left"} size={16} color={p.tint} />
+          <Text style={[styles.permissionTitle, { color: p.label, flex: 1 }]} numberOfLines={2}>
+            {title}
+          </Text>
+          {state ? (
+            <Text style={[styles.caption, { color: card.state === "failed" ? p.red : card.state === "uncertain" ? accentColor("orange", p.dark) : p.secondaryLabel }]}>{state}</Text>
+          ) : null}
+        </View>
+        <Text style={[styles.caption, { color: p.secondaryLabel, marginTop: -4 }]} numberOfLines={1}>
+          {card.account}
+        </Text>
+        <View style={{ gap: 2 }}>
+          {header(t("To"), draft.to)}
+          {header(t("Cc"), draft.cc)}
+          {header(t("Bcc"), draft.bcc)}
+        </View>
+        {draft.subject ? (
+          <Text style={[styles.draftSubject, { color: p.label }]} numberOfLines={2}>
+            {draft.subject}
+          </Text>
+        ) : null}
+        <Text style={[styles.reasonText, { color: p.label }]} numberOfLines={8}>
+          {draft.body}
+        </Text>
+        {(draft.attachments ?? []).map((file, index) => (
+          <View key={`${file.name}-${index}`} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <Symbol name="paperclip" size={13} color={p.secondaryLabel} />
+            <Text style={[styles.reasonText, { color: p.label, flexShrink: 1 }]} numberOfLines={1}>
+              {file.name}
+            </Text>
+            {file.size > 0 ? <Text style={[styles.caption, { color: p.secondaryLabel }]}>{fileSize(file.size)}</Text> : null}
+          </View>
+        ))}
+        {card.note ? <Text style={[styles.ruleNote, { color: card.state === "failed" ? p.red : accentColor("orange", p.dark) }]}>{card.note}</Text> : null}
+        {pending ? (
+          <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
+            {buttons.map(([label, onPress, tinted]) => (
+              <Pressable
+                key={label}
+                onPress={onPress}
+                disabled={busy || (tinted && !sendable(draft))}
+                style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill, opacity: busy ? 0.5 : 1 }]}
+              >
+                <Text style={{ color: tinted ? p.tint : p.label, fontSize: 13, fontWeight: "600" }}>{label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+        {pending && card.direct ? <Text style={[styles.ruleNote, { color: p.secondaryLabel }]}>{t("Always Send also sends this bot's next Slack messages directly.")}</Text> : null}
+      </Pressable>
+    </View>
+  );
+});
 
 /// A command's card, while the command needs the user (`showsCard`). While Auto-review asks to run
 /// it: who wants to, the command on one line in a code block that opens the whole command on tap,
@@ -501,7 +806,7 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
 /// Stop on the title's line, the command, and its last lines in a code block of their own that
 /// scrolls; at a question, Answer, which opens `AnswerSheet`. In a group the card sits in the
 /// bubbles' column, the bot's avatar beside its bottom edge.
-export function CommandRow({
+export const CommandRow = memo(function CommandRow({
   row,
   isGroup,
   onDecide,
@@ -510,15 +815,15 @@ export function CommandRow({
 }: {
   row: Extract<Row, { type: "command" }>;
   isGroup: boolean;
-  onDecide: (decision: "allow" | "always" | "deny") => void;
-  onAnswer: () => void;
-  onStop: () => Promise<void>;
+  onDecide: (message: Message, decision: "allow" | "always" | "deny") => void;
+  onAnswer: (message: Message) => void;
+  onStop: (message: Message) => Promise<void>;
 }) {
   useLanguage();
   const p = usePalette();
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showCommand, setShowCommand] = useState(false);
+  const router = useRouter();
   const { run } = row;
   const showsAvatar = isGroup && row.message.author.kind === "bot";
   const who = row.bot?.name ?? t("The bot");
@@ -543,7 +848,7 @@ export function CommandRow({
     setStopping(true);
     setError(null);
     try {
-      await onStop();
+      await onStop(row.message);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -576,7 +881,7 @@ export function CommandRow({
           ) : null}
         </View>
         <Pressable
-          onPress={() => setShowCommand(true)}
+          onPress={() => router.push({ pathname: "/command/[id]", params: { id: row.message.id, chat: row.message.chat_id, title: t("{who}'s command", { who }) } })}
           style={({ pressed }) => [styles.command, { backgroundColor: p.code, opacity: pressed ? 0.6 : 1 }]}
           accessibilityRole="button"
           accessibilityLabel={t("Show the full command")}
@@ -591,7 +896,7 @@ export function CommandRow({
         {run.state === "asking" ? (
           <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
             {choices.map(([label, decision]) => (
-              <Pressable key={decision} onPress={() => onDecide(decision)} style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]}>
+              <Pressable key={decision} onPress={() => onDecide(row.message, decision)} style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]}>
                 <Text style={{ color: decision === "deny" ? p.label : p.tint, fontSize: 13, fontWeight: "600" }}>{label}</Text>
               </Pressable>
             ))}
@@ -600,16 +905,54 @@ export function CommandRow({
         {run.state === "asking" && run.rule ? <Text style={[styles.ruleNote, { color: p.secondaryLabel }]}>{t("Always allow adds the rule “{rule}”.", { rule: run.rule })}</Text> : null}
         {run.state === "waiting" && takesInput ? (
           <View style={{ flexDirection: "row", marginTop: 4 }}>
-            <Pressable onPress={onAnswer} style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]} accessibilityRole="button">
+            <Pressable onPress={() => onAnswer(row.message)} style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]} accessibilityRole="button">
               <Text style={{ color: p.tint, fontSize: 13, fontWeight: "600" }}>{t("Answer")}</Text>
             </Pressable>
           </View>
         ) : null}
       </View>
-      <CommandSheet visible={showCommand} title={t("{who}'s command", { who })} command={run.command} onClose={() => setShowCommand(false)} />
     </View>
   );
+});
+
+/// "Message from", "You messaged", or "Messaged": the words before an agent marker's title.
+export function agentRowLabel(row: Extract<Row, { type: "agent" }>): string {
+  return row.incoming ? t("Message from") : row.byYou ? t("You messaged") : t("Messaged");
 }
+
+/// A coding agent's marker, after the bot-to-bot one: "Messaged ⬢ Title" for the start and for a
+/// message the bot sent it, "You messaged ⬢ Title" for what the user wrote it from its page,
+/// "Message from ⬢ Title" for what it said, the agent's mark where a bot's
+/// avatar would be, and the message's first line under it (red when the agent ended on its own). A
+/// tap opens the agent's page.
+export const AgentRow = memo(function AgentRow({ row, onOpen }: { row: Extract<Row, { type: "agent" }>; onOpen: (row: Extract<Row, { type: "agent" }>) => void }) {
+  useLanguage();
+  const p = usePalette();
+  const label = agentRowLabel(row);
+  const preview = firstLine(row.text).replace(/\*\*|`/g, "");
+  return (
+    <Pressable
+      style={({ pressed }) => [styles.centered, { paddingTop: row.groupStart ? 14 : 6, opacity: pressed ? 0.5 : 1 }]}
+      onPress={() => onOpen(row)}
+      accessibilityRole="button"
+      accessibilityLabel={`${label} ${row.title}${preview ? `: ${preview}` : ""}`}
+    >
+      <View style={[styles.markerLine, { maxWidth: 320 }]}>
+        <Text style={[styles.caption, { color: p.secondaryLabel }]}>{label} </Text>
+        <AgentLogo kind={row.kind} size={13} color={p.secondaryLabel} />
+        <Text style={[styles.caption, { color: p.secondaryLabel, fontWeight: "600", flexShrink: 1 }]} numberOfLines={1}>
+          {" "}
+          {row.title}
+        </Text>
+      </View>
+      {preview ? (
+        <Text style={[styles.caption, { color: row.failed ? p.red : p.tertiaryLabel, marginTop: 3, maxWidth: 300, textAlign: "center" }]} numberOfLines={1}>
+          {preview}
+        </Text>
+      ) : null}
+    </Pressable>
+  );
+});
 
 /// A running command's last lines: a code block like the command's that grows to six lines and
 /// then scrolls, the newest line in view. An edge with more lines past it fades out: Android
@@ -681,6 +1024,87 @@ function DraftSheet({ visible, title, path, content, onClose }: { visible: boole
 }
 
 /// The whole command a permission card asks about or a command's card runs, to read or copy.
+export const StatusRow = memo(function StatusRow({ text }: { text: string }) {
+  const p = usePalette();
+  return (
+    <View style={[styles.centered, { paddingTop: 10, paddingBottom: 4 }]}>
+      <Text style={[styles.caption, { color: p.tertiaryLabel }]}>{text}</Text>
+    </View>
+  );
+});
+
+/// One of Grok Bot's phrases in a DM ("Chipping away…") and "Chef is working…" in a group, or what
+/// the one bot at work is doing, the words shimmering while a turn runs.
+export const WorkingRow = memo(function WorkingRow({ chatId, bots, isGroup }: { chatId: string; bots: Bot[]; isGroup: boolean }) {
+  useLanguage();
+  const p = usePalette();
+  const activity = useStore((s) => workingActivity(s, chatId));
+  const step = useStore((s) => workingStep(chatId, s.chats.find((c) => c.id === chatId)?.messages));
+  const names = bots.map((b) => b.name);
+  const label =
+    names.length > 1
+      ? t("{names} and {last} are working…", { names: names.slice(0, -1).join(language === "zh" ? "、" : ", "), last: names[names.length - 1] })
+      : (activity ?? (isGroup && names.length === 1 ? t("{name} is working…", { name: names[0] }) : workingPhrase(step)));
+  return (
+    <View style={[styles.messageRow, styles.messageRowBot, { paddingTop: 14, alignItems: "center" }]}>
+      <View style={{ width: AVATAR + GUTTER }}>{bots[0] && <BotAvatar bot={bots[0]} chatId={chatId} size={AVATAR} />}</View>
+      <ShimmerView style={styles.working}>
+        <Text style={[styles.caption, { color: p.label }]} numberOfLines={1}>
+          {label}
+        </Text>
+      </ShimmerView>
+    </View>
+  );
+});
+
+const styles = StyleSheet.create({
+  sheet: { flex: 1, paddingHorizontal: 20, paddingTop: 20, gap: 14 },
+  sheetTitle: { fontSize: 17, fontWeight: "600" },
+  sheetCommand: { borderRadius: 10, padding: 12 },
+  sheetButtons: { flexDirection: "row", justifyContent: "space-between", paddingBottom: 12 },
+  dayRow: { alignItems: "center", paddingTop: 18, paddingBottom: 2 },
+  caption: { fontSize: Font.caption, fontWeight: "500" },
+  messageRow: { flexDirection: "row", paddingHorizontal: INSET },
+  messageRowYou: { justifyContent: "flex-end" },
+  messageRowBot: { justifyContent: "flex-start" },
+  bubbleColumn: { maxWidth: "80%", alignItems: "flex-start" },
+  bubbleColumnYou: { alignItems: "flex-end" },
+  author: { fontSize: Font.author, fontWeight: "600", marginLeft: 12, marginBottom: 2 },
+  quote: { flexDirection: "row", alignItems: "center", gap: 4, maxWidth: "100%", marginHorizontal: 6, marginBottom: 3 },
+  quoteYou: { alignSelf: "flex-end" },
+  quoteText: { flexShrink: 1, fontSize: 12 },
+  quoteName: { fontWeight: "600" },
+  replyArrow: { position: "absolute", left: 18, top: 0, bottom: 0, justifyContent: "center" },
+  // Held for the bot's next step: the bubble waits, dimmed, over Send now.
+  held: { opacity: 0.55 },
+  sendNow: { alignSelf: "flex-end", marginTop: 4, marginRight: 6 },
+  sendNowText: { fontSize: 13, fontWeight: "600" },
+  bubble: { borderRadius: 18, paddingHorizontal: 13, paddingVertical: 9, gap: 2 },
+  bubbleFooter: { flexDirection: "row", justifyContent: "flex-end", alignItems: "center" },
+  centered: { alignItems: "center", paddingHorizontal: INSET },
+  markerLine: { flexDirection: "row", alignItems: "center" },
+  notice: { flexDirection: "row", alignItems: "flex-start", gap: 8, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8, maxWidth: 360 },
+  // The card takes what the row leaves beside the avatar column, up to `maxWidth`.
+  permission: { flex: 1, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12, paddingVertical: 10, gap: 6, maxWidth: 420 },
+  permissionTitle: { fontSize: 14, fontWeight: "600", flexShrink: 1 },
+  permissionButton: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8 },
+  draftHeader: { fontSize: 13, lineHeight: 18 },
+  draftSubject: { fontSize: 14, fontWeight: "600", lineHeight: 19 },
+  headerButton: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 7 },
+  command: { borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7, marginTop: 2 },
+  commandText: { fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 12.5, lineHeight: 17 },
+  output: { borderRadius: 8, marginTop: 2, overflow: "hidden" },
+  // Six lines of `commandText`, then the block scrolls.
+  outputScroll: { maxHeight: 6 * 17 + 14 },
+  outputContent: { paddingHorizontal: 10, paddingVertical: 7 },
+  outputFade: { position: "absolute", left: 0, right: 0, height: 16 },
+  reasonText: { fontSize: 13, lineHeight: 18 },
+  ruleNote: { fontSize: 12, lineHeight: 16 },
+  noticeIcon: { marginTop: (NOTICE_LINE - NOTICE_ICON) / 2 },
+  noticeText: { fontSize: 12.5, lineHeight: NOTICE_LINE, flexShrink: 1 },
+  working: { flexShrink: 1 },
+});
+
 function CommandSheet({ visible, title, command, onClose }: { visible: boolean; title: string; command: string; onClose: () => void }) {
   useLanguage();
   const p = usePalette();
@@ -715,81 +1139,3 @@ function CommandSheet({ visible, title, command, onClose }: { visible: boolean; 
     </Modal>
   );
 }
-
-export function StatusRow({ text }: { text: string }) {
-  const p = usePalette();
-  return (
-    <View style={[styles.centered, { paddingTop: 10, paddingBottom: 4 }]}>
-      <Text style={[styles.caption, { color: p.tertiaryLabel }]}>{text}</Text>
-    </View>
-  );
-}
-
-/// "Working…" in a DM and "Chef is working…" in a group, or what the one bot at work is doing,
-/// the words shimmering while a turn runs.
-export function WorkingRow({ chatId, bots, isGroup }: { chatId: string; bots: Bot[]; isGroup: boolean }) {
-  useLanguage();
-  const p = usePalette();
-  const activity = useStore((s) => workingActivity(s, chatId));
-  const names = bots.map((b) => b.name);
-  const label =
-    names.length > 1
-      ? t("{names} and {last} are working…", { names: names.slice(0, -1).join(language === "zh" ? "、" : ", "), last: names[names.length - 1] })
-      : (activity ?? (isGroup && names.length === 1 ? t("{name} is working…", { name: names[0] }) : t("Working…")));
-  return (
-    <View style={[styles.messageRow, styles.messageRowBot, { paddingTop: 14, alignItems: "center" }]}>
-      <View style={{ width: AVATAR + GUTTER }}>{bots[0] && <BotAvatar bot={bots[0]} chatId={chatId} size={AVATAR} />}</View>
-      <ShimmerView style={styles.working}>
-        <Text style={[styles.caption, { color: p.label }]} numberOfLines={1}>
-          {label}
-        </Text>
-      </ShimmerView>
-    </View>
-  );
-}
-
-const styles = StyleSheet.create({
-  dayRow: { alignItems: "center", paddingTop: 18, paddingBottom: 2 },
-  caption: { fontSize: Font.caption, fontWeight: "500" },
-  messageRow: { flexDirection: "row", paddingHorizontal: INSET },
-  messageRowYou: { justifyContent: "flex-end" },
-  messageRowBot: { justifyContent: "flex-start" },
-  bubbleColumn: { maxWidth: "80%", alignItems: "flex-start" },
-  bubbleColumnYou: { alignItems: "flex-end" },
-  author: { fontSize: Font.author, fontWeight: "600", marginLeft: 12, marginBottom: 2 },
-  quote: { flexDirection: "row", alignItems: "center", gap: 4, maxWidth: "100%", marginHorizontal: 6, marginBottom: 3 },
-  quoteYou: { alignSelf: "flex-end" },
-  quoteText: { flexShrink: 1, fontSize: 12 },
-  quoteName: { fontWeight: "600" },
-  replyArrow: { position: "absolute", left: 18, top: 0, bottom: 0, justifyContent: "center" },
-  // Held for the bot's next step: the bubble waits, dimmed, over Send now.
-  held: { opacity: 0.55 },
-  sendNow: { alignSelf: "flex-end", marginTop: 4, marginRight: 6 },
-  sendNowText: { fontSize: 13, fontWeight: "600" },
-  bubble: { borderRadius: 18, paddingHorizontal: 13, paddingVertical: 9, gap: 2 },
-  bubbleFooter: { flexDirection: "row", justifyContent: "flex-end", alignItems: "center" },
-  centered: { alignItems: "center", paddingHorizontal: INSET },
-  markerLine: { flexDirection: "row", alignItems: "center" },
-  notice: { flexDirection: "row", alignItems: "flex-start", gap: 8, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8, maxWidth: 360 },
-  // The card takes what the row leaves beside the avatar column, up to `maxWidth`.
-  permission: { flex: 1, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12, paddingVertical: 10, gap: 6, maxWidth: 420 },
-  permissionTitle: { fontSize: 14, fontWeight: "600", flexShrink: 1 },
-  permissionButton: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8 },
-  headerButton: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 7 },
-  command: { borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7, marginTop: 2 },
-  commandText: { fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 12.5, lineHeight: 17 },
-  output: { borderRadius: 8, marginTop: 2, overflow: "hidden" },
-  // Six lines of `commandText`, then the block scrolls.
-  outputScroll: { maxHeight: 6 * 17 + 14 },
-  outputContent: { paddingHorizontal: 10, paddingVertical: 7 },
-  outputFade: { position: "absolute", left: 0, right: 0, height: 16 },
-  reasonText: { fontSize: 13, lineHeight: 18 },
-  ruleNote: { fontSize: 12, lineHeight: 16 },
-  sheet: { flex: 1, paddingHorizontal: 20, paddingTop: 20, gap: 14 },
-  sheetTitle: { fontSize: 17, fontWeight: "600" },
-  sheetCommand: { borderRadius: 10, padding: 12 },
-  sheetButtons: { flexDirection: "row", justifyContent: "space-between", paddingBottom: 12 },
-  noticeIcon: { marginTop: (NOTICE_LINE - NOTICE_ICON) / 2 },
-  noticeText: { fontSize: 12.5, lineHeight: NOTICE_LINE, flexShrink: 1 },
-  working: { flexShrink: 1 },
-});

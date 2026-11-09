@@ -1,5 +1,5 @@
-// What the Running tasks sheet reads, after the Mac's popover: the time moving on while it shows,
-// and where a command stands in words.
+// What the Running tasks sheet reads, after the desktop app's flyout: the time moving on while it
+// shows, and where a command stands in words.
 
 import { useEffect, useState } from "react";
 import type { CommandRun } from "../core/model";

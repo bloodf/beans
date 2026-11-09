@@ -68,9 +68,11 @@ impl Hub {
         went_offline
     }
 
-    /// A blob landed. One sealed to a machine concerns that machine alone.
-    pub fn blobs(&self, identity_pubkey: &str, recipient_machine_pubkey: Option<&str>) {
-        self.signal(identity_pubkey, Signal::Blobs, |c| recipient_machine_pubkey.is_none_or(|m| m == c.machine_pubkey));
+    /// A blob landed. Notify every eligible socket, including the writer and its other sockets.
+    pub fn blobs(&self, identity_pubkey: &str, recipient_machine_pubkey: Option<&str>, _sender_machine_pubkey: Option<&str>) {
+        self.signal(identity_pubkey, Signal::Blobs, |c| {
+            recipient_machine_pubkey.is_none_or(|m| m == c.machine_pubkey)
+        });
     }
 
     pub fn machines(&self, identity_pubkey: &str) {
@@ -140,10 +142,10 @@ mod tests {
         let mut mac = hub.join("identity", "mac");
         let mut phone = hub.join("identity", "phone");
         let mut stranger = hub.join("other", "mac");
-        hub.blobs("identity", Some("mac"));
+        hub.blobs("identity", Some("mac"), Some("phone"));
         assert_eq!(mac.signals.try_recv().ok(), Some(Signal::Blobs));
         assert!(phone.signals.try_recv().is_err());
-        hub.blobs("identity", None);
+        hub.blobs("identity", None, None);
         assert_eq!(phone.signals.try_recv().ok(), Some(Signal::Blobs));
         assert_eq!(mac.signals.try_recv().ok(), Some(Signal::Blobs));
         assert!(stranger.signals.try_recv().is_err());
@@ -155,7 +157,7 @@ mod tests {
         let mut mac = hub.join("identity", "mac");
         let mut second = hub.join("identity", "mac");
         let mut phone = hub.join("identity", "phone");
-        hub.blobs("identity", None);
+        hub.blobs("identity", None, Some("mac"));
         assert_eq!(mac.signals.try_recv().ok(), Some(Signal::Blobs));
         assert_eq!(second.signals.try_recv().ok(), Some(Signal::Blobs));
         assert_eq!(phone.signals.try_recv().ok(), Some(Signal::Blobs));

@@ -8,9 +8,8 @@ import (
 	"time"
 )
 
-// Wire shapes the CLI sends over 127.0.0.1, and their mapping into the app's model, after the
-// macOS app's Protocol.swift. Keys are snake_case on the wire; a field the CLI may leave out or
-// send as null is a pointer.
+// Wire shapes the CLI sends over 127.0.0.1, and their mapping into the app's model. Keys are
+// snake_case on the wire; a field the CLI may leave out or send as null is a pointer.
 
 // WireRelayProblem is why the last try to connect to the relay failed.
 type WireRelayProblem struct {
@@ -28,6 +27,8 @@ type WirePluginStatus struct {
 	State       string  `json:"state"`
 	Detail      string  `json:"detail"`
 	Source      *string `json:"source"`
+	ServiceID   *string `json:"service_id"`
+	AccountName *string `json:"account_name"`
 }
 
 type WireMcpTool struct {
@@ -74,9 +75,16 @@ type WireDeviceUpdate struct {
 	Error  *string `json:"error"`
 }
 
+// WireDeviceApp is the desktop app on a Runner: its version beside its updates.
+type WireDeviceApp struct {
+	Version string `json:"version"`
+	WireDeviceUpdate
+}
+
 type WireDevice struct {
 	ID           string             `json:"id"`
 	Name         string             `json:"name"`
+	MachineName  *string            `json:"machine_name"`
 	Model        string             `json:"model"`
 	OS           string             `json:"os"`
 	OSVersion    string             `json:"os_version"`
@@ -85,10 +93,12 @@ type WireDevice struct {
 	Status       string             `json:"status"`
 	LastSeen     float64            `json:"last_seen"`
 	Plugins      []WirePluginStatus `json:"plugins"`
+	Channels     []WireChannel      `json:"channels"`
 	// Unknown is a machine the relay lists that never sent its `machine` blob: no name, no OS.
 	Unknown bool              `json:"unknown"`
 	Version *string           `json:"version"`
 	Update  *WireDeviceUpdate `json:"update"`
+	App     *WireDeviceApp    `json:"app"`
 }
 
 type WireAttachment struct {
@@ -104,20 +114,22 @@ type WireBot struct {
 	ID           string          `json:"id"`
 	Name         string          `json:"name"`
 	Description  string          `json:"description"`
-	SymbolName   string          `json:"symbol_name"`
+	Shape        string          `json:"shape"`
 	Accent       string          `json:"accent"`
 	RunnerID     string          `json:"runner_id"`
 	Provider     string          `json:"provider"`
 	Model        *string         `json:"model"`
 	Thinking     *string         `json:"thinking"`
+	Avatar       *WireAttachment `json:"avatar"`
+	Permissions  *BotPermissions `json:"permissions"`
+	CreatedAt    float64         `json:"created_at"`
+	SymbolName   string          `json:"symbol_name"`
+	Look         json.RawMessage `json:"look"`
 	Capabilities *struct {
 		Shell   *bool     `json:"shell"`
 		Write   *bool     `json:"write"`
 		Plugins *[]string `json:"plugins"`
 	} `json:"capabilities"`
-	Avatar    *WireAttachment `json:"avatar"`
-	Look      json.RawMessage `json:"look"`
-	CreatedAt float64         `json:"created_at"`
 }
 
 type WireRun struct {
@@ -133,9 +145,89 @@ type WireRun struct {
 	Background *bool   `json:"background"`
 }
 
+type WireAgent struct {
+	ID          string        `json:"id"`
+	Kind        string        `json:"kind"`
+	Title       *string       `json:"title"`
+	Task        *string       `json:"task"`
+	Folder      *string       `json:"folder"`
+	Branch      *string       `json:"branch"`
+	State       string        `json:"state"`
+	Outcome     *string       `json:"outcome"`
+	PullRequest *string       `json:"pull_request"`
+	PullState   *string       `json:"pull_state"`
+	Changes     *AgentChanges `json:"changes"`
+	Device      *string       `json:"device"`
+	DeviceID    *string       `json:"device_id"`
+	Repository  *string       `json:"repository"`
+	StartedAt   *float64      `json:"started_at"`
+	UpdatedAt   *float64      `json:"updated_at"`
+}
+
+// ToAgentRun reads a coding agent as a start row, or `coding.transcript`'s card, carries it.
+func ToAgentRun(wire *WireAgent) *AgentRun {
+	state := AgentState(wire.State)
+	switch state {
+	case AgentStarting, AgentWorking, AgentAsking, AgentIdle, AgentFailed, AgentStopped:
+	default:
+		state = AgentStopped
+	}
+	agent := &AgentRun{
+		ID: wire.ID, Kind: wire.Kind, Title: str(wire.Title), Task: str(wire.Task), Folder: str(wire.Folder), Branch: str(wire.Branch),
+		State: state, Outcome: str(wire.Outcome), PullRequest: str(wire.PullRequest), Device: str(wire.Device),
+		PullState: PullState(str(wire.PullState)),
+		DeviceID:  str(wire.DeviceID), Repository: str(wire.Repository),
+	}
+	if wire.Changes != nil {
+		changes := *wire.Changes
+		agent.Changes = &changes
+	}
+	if wire.StartedAt != nil {
+		agent.StartedAt = seconds(*wire.StartedAt)
+	}
+	if wire.UpdatedAt != nil {
+		agent.UpdatedAt = seconds(*wire.UpdatedAt)
+	}
+	return agent
+}
+
 type WireAuthor struct {
 	Kind  string  `json:"kind"`
 	BotID *string `json:"bot_id"`
+	Name  *string `json:"name"`
+}
+
+// WireChannel is a channel in its Runner's record.
+type WireChannel struct {
+	ID        string `json:"id"`
+	BotID     string `json:"bot_id"`
+	Name      string `json:"name"`
+	Service   string `json:"service"`
+	AccountID string `json:"account_id"`
+	Chats     []struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	} `json:"chats"`
+	Listen       ChannelListen `json:"listen"`
+	Task         string        `json:"task"`
+	State        string        `json:"state"`
+	Detail       string        `json:"detail"`
+	HeldDelivery string        `json:"held_delivery"`
+	Requests     []struct {
+		ID      string `json:"id"`
+		Title   string `json:"title"`
+		Private bool   `json:"private"`
+		From    string `json:"from"`
+	} `json:"requests"`
+}
+
+// WireChatChannel is where a channel's conversation happens.
+type WireChatChannel struct {
+	ChannelID string  `json:"channel_id"`
+	Service   string  `json:"service"`
+	AccountID string  `json:"account_id"`
+	ChatID    string  `json:"chat_id"`
+	ThreadID  *string `json:"thread_id"`
 }
 
 type WireBody struct {
@@ -148,6 +240,11 @@ type WireBody struct {
 	IsRunning     *bool            `json:"is_running"`
 	Description   *string          `json:"description"`
 	TargetBotID   *string          `json:"target_bot_id"`
+	TargetAgentID *string          `json:"target_agent_id"`
+	AgentID       *string          `json:"agent_id"`
+	AgentKind     *string          `json:"agent_kind"`
+	Title         *string          `json:"title"`
+	Failed        *bool            `json:"failed"`
 	ScriptCommand *string          `json:"script_command"`
 	From          *string          `json:"from"`
 	To            *string          `json:"to"`
@@ -161,11 +258,45 @@ type WireBody struct {
 	Rule          *string          `json:"rule"`
 	Command       *string          `json:"command"`
 	Run           *WireRun         `json:"run"`
+	Agent         *WireAgent       `json:"agent"`
+	ReviewID      *string          `json:"review_id"`
+	Version       *uint64          `json:"version"`
+	State         *string          `json:"state"`
+	Account       *string          `json:"account"`
+	Draft         *DraftFields     `json:"draft"`
+	Note          *string          `json:"note"`
+	Direct        *bool            `json:"direct"`
+	Secret        *WireSecretAsk   `json:"secret"`
 	ReplyTo       *struct {
 		MessageID string     `json:"message_id"`
 		Author    WireAuthor `json:"author"`
 		Text      string     `json:"text"`
 	} `json:"reply_to"`
+}
+
+// WireSecretAsk is a secret request's ask, in the CLI's shape.
+type WireSecretAsk struct {
+	Use    string `json:"use"`
+	Site   string `json:"site"`
+	Fields []struct {
+		Name  string `json:"name"`
+		Label string `json:"label"`
+	} `json:"fields"`
+}
+
+// WireSecret is one of a Runner's secrets, as `secrets.list` answers it.
+type WireSecret struct {
+	ID        string  `json:"id"`
+	BotID     string  `json:"bot_id"`
+	Name      string  `json:"name"`
+	Label     string  `json:"label"`
+	Use       string  `json:"use"`
+	Site      string  `json:"site"`
+	UpdatedAt float64 `json:"updated_at"`
+}
+
+func (w WireSecret) model() SavedSecret {
+	return SavedSecret{ID: w.ID, BotID: w.BotID, Name: w.Name, Label: w.Label, Use: SecretUse(w.Use), Site: w.Site, UpdatedAt: w.UpdatedAt}
 }
 
 type WireMessage struct {
@@ -177,35 +308,64 @@ type WireMessage struct {
 		Kind  string  `json:"kind"`
 		Error *string `json:"error"`
 	} `json:"state"`
-	CreatedAt float64 `json:"created_at"`
-	Queued    *bool   `json:"queued"`
+	CreatedAt    float64         `json:"created_at"`
+	Queued       *bool           `json:"queued"`
+	Output       *Output         `json:"output"`
+	Notification NotificationTag `json:"notification"`
 }
 
 type WireChatUsage struct {
-	ContextTokens    int     `json:"context_tokens"`
-	ContextEstimated bool    `json:"context_estimated"`
-	ContextWindow    int     `json:"context_window"`
-	InputTokens      int     `json:"input_tokens"`
-	OutputTokens     int     `json:"output_tokens"`
-	CacheReadTokens  int     `json:"cache_read_tokens"`
-	CostUSD          float64 `json:"cost_usd"`
-	Turns            int     `json:"turns"`
-	Model            string  `json:"model"`
+	ContextTokens           int      `json:"context_tokens"`
+	ContextEstimated        bool     `json:"context_estimated"`
+	ContextWindow           int      `json:"context_window"`
+	InputTokens             int      `json:"input_tokens"`
+	OutputTokens            int      `json:"output_tokens"`
+	CacheReadTokens         int      `json:"cache_read_tokens"`
+	CostUSD                 float64  `json:"cost_usd"`
+	Turns                   int      `json:"turns"`
+	Model                   string   `json:"model"`
+	APICostUSD              float64  `json:"api_cost_usd"`
+	SubscriptionEstimateUSD float64  `json:"subscription_estimate_usd"`
+	UnknownPriceCalls       uint64   `json:"unknown_price_calls"`
+	PricingKinds            []string `json:"pricing_kinds"`
 }
 
 type WireChat struct {
-	ID          string         `json:"id"`
-	Kind        string         `json:"kind"`
-	Title       *string        `json:"title"`
-	BotIDs      []string       `json:"bot_ids"`
-	OwnerBotID  *string        `json:"owner_bot_id"`
-	Description *string        `json:"description"`
-	IsPinned    bool           `json:"is_pinned"`
-	CreatedAt   float64        `json:"created_at"`
-	Messages    []WireMessage  `json:"messages"`
-	UnreadCount *int           `json:"unread_count"`
-	Usage       *WireChatUsage `json:"usage"`
-	HasMore     *bool          `json:"has_more"`
+	ID          string           `json:"id"`
+	Kind        string           `json:"kind"`
+	Title       *string          `json:"title"`
+	BotIDs      []string         `json:"bot_ids"`
+	OwnerBotID  *string          `json:"owner_bot_id"`
+	Description *string          `json:"description"`
+	IsPinned    bool             `json:"is_pinned"`
+	SectionID   *string          `json:"section_id"`
+	IsHidden    bool             `json:"is_hidden"`
+	Mute        *WireMute        `json:"mute"`
+	CreatedAt   float64          `json:"created_at"`
+	Messages    []WireMessage    `json:"messages"`
+	UnreadCount *int             `json:"unread_count"`
+	Usage       *WireChatUsage   `json:"usage"`
+	HasMore     *bool            `json:"has_more"`
+	Channel     *WireChatChannel `json:"channel"`
+}
+
+type WireMute struct {
+	Until *float64 `json:"until"`
+}
+
+type WireSection struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Collapsed bool   `json:"collapsed"`
+}
+
+// ToSections are the sidebar's sections as the roster lists them.
+func ToSections(wire []WireSection) []*Section {
+	sections := make([]*Section, 0, len(wire))
+	for _, section := range wire {
+		sections = append(sections, &Section{ID: section.ID, Name: section.Name, Collapsed: section.Collapsed})
+	}
+	return sections
 }
 
 type WireRoutine struct {
@@ -223,6 +383,36 @@ type WireRoutine struct {
 	IsRunning    *bool    `json:"is_running"`
 	Check        *string  `json:"check"`
 	CreatedAt    float64  `json:"created_at"`
+
+	Timezone        *string            `json:"timezone"`
+	MissedRunPolicy *string            `json:"missed_run_policy"`
+	State           *string            `json:"state"`
+	Health          *WireRoutineHealth `json:"health"`
+
+	OnceAt *float64 `json:"once_at"`
+	Events *struct {
+		Receiver   string  `json:"receiver"`
+		Subject    *string `json:"subject"`
+		Status     *string `json:"status"`
+		SourceName *string `json:"source_name"`
+		Title      *string `json:"title"`
+		URL        *string `json:"url"`
+		Endpoint   *string `json:"endpoint"`
+		Key        *string `json:"key"`
+		LastEvent  *struct {
+			Summary string  `json:"summary"`
+			At      float64 `json:"at"`
+		} `json:"last_event"`
+	} `json:"events"`
+	Calendar *struct {
+		Account   *string `json:"account"`
+		Matching  *string `json:"matching"`
+		Minutes   *int    `json:"minutes"`
+		After     *bool   `json:"after"`
+		NextEvent *struct {
+			Title *string `json:"title"`
+		} `json:"next_event"`
+	} `json:"calendar"`
 }
 
 type WireAutoReview struct {
@@ -233,12 +423,17 @@ type WireAutoReview struct {
 		Behavior string  `json:"behavior"`
 		Tool     *string `json:"tool"`
 	} `json:"rules"`
+	// Provider is the provider that reviews, absent for the bot's own; Models the review models
+	// picked by provider.
+	Provider *string           `json:"provider"`
+	Models   map[string]string `json:"models"`
 }
 
 type WireProvider struct {
 	Kind        string            `json:"kind"`
 	IsConnected bool              `json:"is_connected"`
 	Detail      string            `json:"detail"`
+	ReviewModel *string           `json:"review_model"`
 	BaseURL     *string           `json:"base_url"`
 	Name        *string           `json:"name"`
 	API         *string           `json:"api"`
@@ -256,8 +451,8 @@ type WireCustomModel struct {
 	Levels        []string `json:"levels"`
 }
 
-// WireModelList is `providers.list_models`: the chat models a server lists, in its order. Listed
-// is false when the server publishes no list.
+// WireModelList is `providers.list_models`: the models a server lists that its protocol can run,
+// in its order. Listed is false when the server publishes no list.
 type WireModelList struct {
 	Listed bool              `json:"listed"`
 	Models []WireCustomModel `json:"models"`
@@ -270,16 +465,19 @@ type WireRunningTurn struct {
 	RoutineID *string `json:"routine_id"`
 }
 
-// WireModel is a model the CLI's catalog offers, in the catalog's order: each provider's first is
-// its default.
+// WireModel is a model the CLI's catalog offers, in the catalog's order: each provider's first
+// that does not decide is its default.
 type WireModel struct {
 	Provider string   `json:"provider"`
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`
 	Levels   []string `json:"levels"`
+	Decides  bool     `json:"decides"`
 }
 
 type WireSnapshot struct {
+	Attention           *AttentionView    `json:"attention"`
+	Budgets             []BudgetState     `json:"budgets"`
 	Version             string            `json:"version"`
 	HasIdentity         bool              `json:"has_identity"`
 	IsIdentityDevice    bool              `json:"is_identity_device"`
@@ -292,23 +490,31 @@ type WireSnapshot struct {
 	Devices             []WireDevice      `json:"devices"`
 	Bots                []WireBot         `json:"bots"`
 	Chats               []WireChat        `json:"chats"`
+	Sections            []WireSection     `json:"sections"`
 	Routines            []WireRoutine     `json:"routines"`
+	Reviews             []ReviewItem      `json:"reviews"`
+	Tasks               []DurableTask     `json:"tasks"`
 	AutoReview          *WireAutoReview   `json:"auto_review"`
+	SharedLinks         []SharedLink      `json:"shared_links"`
 	Providers           []WireProvider    `json:"providers"`
 	Models              []WireModel       `json:"models"`
+	Playbooks           []PlaybookSummary `json:"playbooks"`
 	RunningChatIDs      []string          `json:"running_chat_ids"`
 	RunningTurns        []WireRunningTurn `json:"running_turns"`
 }
 
 type WireRosterChanged struct {
-	Devices    []WireDevice    `json:"devices"`
-	Bots       []WireBot       `json:"bots"`
-	Chats      []WireChat      `json:"chats"`
-	Routines   []WireRoutine   `json:"routines"`
-	AutoReview *WireAutoReview `json:"auto_review"`
-	Providers  []WireProvider  `json:"providers"`
+	Devices     []WireDevice    `json:"devices"`
+	Bots        []WireBot       `json:"bots"`
+	Chats       []WireChat      `json:"chats"`
+	Sections    []WireSection   `json:"sections"`
+	Routines    []WireRoutine   `json:"routines"`
+	AutoReview  *WireAutoReview `json:"auto_review"`
+	SharedLinks []SharedLink    `json:"shared_links"`
+	Providers   []WireProvider  `json:"providers"`
 	// Models are the catalog's models again, so a newer catalog the CLI installs reaches the pickers.
-	Models []WireModel `json:"models"`
+	Models    []WireModel        `json:"models"`
+	Playbooks *[]PlaybookSummary `json:"playbooks"`
 }
 
 type WireMessagePage struct {
@@ -370,7 +576,8 @@ type WireMarketplacePlugin struct {
 		Name        string  `json:"name"`
 		Description *string `json:"description"`
 	} `json:"skills"`
-	InstalledOn []string `json:"installed_on"`
+	InstalledOn   []string `json:"installed_on"`
+	NamedAccounts *bool    `json:"named_accounts"`
 }
 
 type WireTemplateRoutine struct {
@@ -386,6 +593,7 @@ type WireBotTemplate struct {
 	Summary     *string               `json:"summary"`
 	Description string                `json:"description"`
 	SymbolName  *string               `json:"symbol_name"`
+	Shape       *string               `json:"shape"`
 	Accent      *string               `json:"accent"`
 	Category    *string               `json:"category"`
 	Featured    *bool                 `json:"featured"`
@@ -396,6 +604,7 @@ type WireBotTemplate struct {
 }
 
 type WireMarketplace struct {
+	Packs   []WorkflowPack          `json:"packs"`
 	Plugins []WireMarketplacePlugin `json:"plugins"`
 	Bots    []WireBotTemplate       `json:"bots"`
 }
@@ -520,7 +729,7 @@ func number(value *int) int {
 func ToPlugin(wire WirePluginStatus) InstalledPlugin {
 	state := PluginState(wire.State)
 	switch state {
-	case PluginReady, PluginNeedsSetup, PluginNeedsAuth, PluginConnecting, PluginError:
+	case PluginReady, PluginNeedsSetup, PluginNeedsAuth, PluginInsufficientAccess, PluginConnecting, PluginError:
 	default:
 		state = PluginUnknown
 	}
@@ -533,6 +742,8 @@ func ToPlugin(wire WirePluginStatus) InstalledPlugin {
 		State:       state,
 		Detail:      wire.Detail,
 		Source:      str(wire.Source),
+		ServiceID:   str(wire.ServiceID),
+		AccountName: str(wire.AccountName),
 	}
 }
 
@@ -592,12 +803,10 @@ func ToDevice(wire WireDevice) *Device {
 		LastSeen:     seconds(wire.LastSeen),
 		MachineKey:   wire.MachineKey,
 		Version:      str(wire.Version),
+		MachineName:  str(wire.MachineName),
 	}
-	switch device.OS {
-	case OSMacOS, OSLinux, OSWindows, OSIOS, OSIPadOS, OSAndroid:
-	default:
-		device.OS = OSLinux
-	}
+	// An `os` the app has no name for stays as the CLI reported it: no Runner, as the CLI judges
+	// it (`Device::is_runner`).
 	if wire.Unknown {
 		device.Name, device.OS = L("Unknown Device"), OSUnknown
 	}
@@ -610,15 +819,26 @@ func ToDevice(wire WireDevice) *Device {
 	for _, plugin := range wire.Plugins {
 		device.Plugins = append(device.Plugins, ToPlugin(plugin))
 	}
+	for _, channel := range wire.Channels {
+		device.Channels = append(device.Channels, ToChannel(channel))
+	}
 	if wire.Update != nil {
-		update := &DeviceUpdate{Auto: wire.Update.Auto, Latest: str(wire.Update.Latest), Error: str(wire.Update.Error)}
-		switch state := str(wire.Update.State); state {
-		case "installing", "restarting", "installed":
-			update.State = state
-		}
-		device.Update = update
+		update := toDeviceUpdate(*wire.Update)
+		device.Update = &update
+	}
+	if wire.App != nil && wire.App.Version != "" {
+		device.App = &DeviceApp{Version: wire.App.Version, Update: toDeviceUpdate(wire.App.WireDeviceUpdate)}
 	}
 	return device
+}
+
+func toDeviceUpdate(wire WireDeviceUpdate) DeviceUpdate {
+	update := DeviceUpdate{Auto: wire.Auto, Latest: str(wire.Latest), Error: str(wire.Error)}
+	switch state := str(wire.State); state {
+	case "installing", "restarting", "installed":
+		update.State = state
+	}
+	return update
 }
 
 func ToAttachment(wire WireAttachment) Attachment {
@@ -627,20 +847,19 @@ func ToAttachment(wire WireAttachment) Attachment {
 
 func ToBot(wire WireBot) *Bot {
 	bot := &Bot{
-		ID:          wire.ID,
-		Name:        wire.Name,
-		Description: wire.Description,
-		SymbolName:  wire.SymbolName,
-		Accent:      "indigo",
-		RunnerID:    wire.RunnerID,
-		Provider:    "deepseek",
-		Model:       str(wire.Model),
-		Thinking:    str(wire.Thinking),
-		Capabilities: BotCapabilities{
-			Shell: true,
-			Write: true,
-		},
-		CreatedAt: seconds(wire.CreatedAt),
+		ID:           wire.ID,
+		Name:         wire.Name,
+		Description:  wire.Description,
+		SymbolName:   wire.SymbolName,
+		Shape:        wire.Shape,
+		Accent:       "indigo",
+		RunnerID:     wire.RunnerID,
+		Provider:     "deepseek",
+		Model:        str(wire.Model),
+		Thinking:     str(wire.Thinking),
+		Capabilities: BotCapabilities{Shell: true, Write: true},
+		Permissions:  wire.Permissions.Clone(),
+		CreatedAt:    seconds(wire.CreatedAt),
 	}
 	if IsAccent(wire.Accent) {
 		bot.Accent = Accent(wire.Accent)
@@ -673,16 +892,40 @@ func toAuthor(wire WireAuthor) Author {
 		return You
 	case "bot":
 		return BotAuthor(str(wire.BotID))
+	case "contact":
+		return Author{Kind: AuthorContact, Name: str(wire.Name)}
 	}
 	return System
 }
 
+// ToChannel reads a channel from its Runner's record.
+func ToChannel(wire WireChannel) Channel {
+	channel := Channel{
+		ID: wire.ID, BotID: wire.BotID, Name: wire.Name, Service: wire.Service, AccountID: wire.AccountID,
+		Listen: wire.Listen, Task: wire.Task, State: ChannelState(wire.State), Detail: wire.Detail, HeldDelivery: wire.HeldDelivery,
+	}
+	switch channel.State {
+	case ChannelListening, ChannelPaused, ChannelHeld, ChannelOffline:
+	default:
+		channel.State = ChannelListening
+	}
+	for _, chat := range wire.Chats {
+		channel.Chats = append(channel.Chats, ChannelChat{ID: chat.ID, Title: chat.Title})
+	}
+	for _, request := range wire.Requests {
+		channel.Requests = append(channel.Requests, ChatRequest{ID: request.ID, Title: request.Title, Private: request.Private, From: request.From})
+	}
+	return channel
+}
+
 func ToMessage(wire WireMessage) *Message {
 	message := &Message{
-		ID:        wire.ID,
-		Author:    toAuthor(wire.Author),
-		CreatedAt: seconds(wire.CreatedAt),
-		Queued:    flag(wire.Queued),
+		ID:           wire.ID,
+		Author:       toAuthor(wire.Author),
+		CreatedAt:    seconds(wire.CreatedAt),
+		Queued:       flag(wire.Queued),
+		Output:       wire.Output,
+		Notification: wire.Notification,
 	}
 	body := wire.Body
 	switch body.Kind {
@@ -694,6 +937,7 @@ func ToMessage(wire WireMessage) *Message {
 			IsRunning:     flag(body.IsRunning),
 			Description:   str(body.Description),
 			TargetBotID:   str(body.TargetBotID),
+			TargetAgentID: str(body.TargetAgentID),
 			ScriptCommand: str(body.ScriptCommand),
 		}
 		if tool.Name == "" {
@@ -720,7 +964,14 @@ func ToMessage(wire WireMessage) *Message {
 				Background: flag(run.Background),
 			}
 		}
+		if agent := body.Agent; agent != nil {
+			tool.Agent = ToAgentRun(agent)
+		}
 		message.Body = Body{Kind: BodyTool, Tool: tool}
+	case "agent_message":
+		message.Body = Body{Kind: BodyAgentMessage, AgentMessage: &AgentMessage{
+			AgentID: str(body.AgentID), AgentKind: str(body.AgentKind), Title: str(body.Title), Text: str(body.Text), Failed: flag(body.Failed),
+		}}
 	case "handoff":
 		message.Body = Body{Kind: BodyHandoff, Handoff: Handoff{From: str(body.From), To: str(body.To), Reason: str(body.Reason)}}
 	case "notice":
@@ -744,7 +995,21 @@ func ToMessage(wire WireMessage) *Message {
 			Rule:       str(body.Rule),
 			HasRule:    body.Rule != nil,
 			Command:    str(body.Command),
+			Secret:     secretAsk(body.Secret),
 		}}
+	case "draft":
+		card := &DraftCard{ReviewID: str(body.ReviewID), State: str(body.State), PluginID: str(body.PluginID),
+			Account: str(body.Account), Note: str(body.Note), Direct: flag(body.Direct)}
+		if card.State == "" {
+			card.State = "pending"
+		}
+		if body.Version != nil {
+			card.Version = *body.Version
+		}
+		if body.Draft != nil {
+			card.Fields = body.Draft.Clone()
+		}
+		message.Body = Body{Kind: BodyDraft, Draft: card}
 	default:
 		message.Body = Body{Kind: BodyText, Text: str(body.Text)}
 	}
@@ -770,15 +1035,19 @@ func ToMessage(wire WireMessage) *Message {
 
 func ToUsage(wire WireChatUsage) *ChatUsage {
 	return &ChatUsage{
-		ContextTokens:    wire.ContextTokens,
-		ContextEstimated: wire.ContextEstimated,
-		ContextWindow:    wire.ContextWindow,
-		InputTokens:      wire.InputTokens,
-		OutputTokens:     wire.OutputTokens,
-		CacheReadTokens:  wire.CacheReadTokens,
-		CostUSD:          wire.CostUSD,
-		Turns:            wire.Turns,
-		Model:            wire.Model,
+		ContextTokens:           wire.ContextTokens,
+		ContextEstimated:        wire.ContextEstimated,
+		ContextWindow:           wire.ContextWindow,
+		InputTokens:             wire.InputTokens,
+		OutputTokens:            wire.OutputTokens,
+		CacheReadTokens:         wire.CacheReadTokens,
+		CostUSD:                 wire.CostUSD,
+		Turns:                   wire.Turns,
+		Model:                   wire.Model,
+		APICostUSD:              wire.APICostUSD,
+		SubscriptionEstimateUSD: wire.SubscriptionEstimateUSD,
+		UnknownPriceCalls:       wire.UnknownPriceCalls,
+		PricingKinds:            slices.Clone(wire.PricingKinds),
 	}
 }
 
@@ -798,7 +1067,23 @@ func ToChat(wire WireChat, existing *Chat) *Chat {
 		chat.CustomTitle = str(wire.Title)
 		chat.GroupDescription = str(wire.Description)
 	}
+	if wire.Channel != nil {
+		// A channel's conversation is named after where it happens.
+		chat.CustomTitle = str(wire.Title)
+		chat.Channel = &ChatChannel{
+			ChannelID: wire.Channel.ChannelID, Service: wire.Channel.Service, AccountID: wire.Channel.AccountID,
+			ChatID: wire.Channel.ChatID, ThreadID: str(wire.Channel.ThreadID),
+		}
+	}
 	chat.OwnerBotID = str(wire.OwnerBotID)
+	chat.SectionID = str(wire.SectionID)
+	chat.IsHidden = wire.IsHidden
+	if wire.Mute != nil {
+		chat.Mute = &ChatMute{}
+		if wire.Mute.Until != nil {
+			chat.Mute.Until = seconds(*wire.Mute.Until)
+		}
+	}
 	if wire.Messages != nil {
 		for _, message := range wire.Messages {
 			chat.Messages = append(chat.Messages, ToMessage(message))
@@ -841,12 +1126,52 @@ func ToRoutine(wire WireRoutine) *Routine {
 		Check:        str(wire.Check),
 		HasCheck:     wire.Check != nil,
 		CreatedAt:    seconds(wire.CreatedAt),
+		// The CLI names the zone; "Local" reads as this computer's.
+		Timezone:        cmp.Or(str(wire.Timezone), "Local"),
+		MissedRunPolicy: cmp.Or(str(wire.MissedRunPolicy), "coalesce"),
+		State:           str(wire.State),
+		Health:          toRoutineHealth(wire.Health),
+	}
+	if routine.State == "" {
+		routine.State = "paused"
+		if wire.IsEnabled {
+			routine.State = "on"
+		}
 	}
 	if wire.LastRunAt != nil {
 		routine.LastRunAt = seconds(*wire.LastRunAt)
 	}
 	if wire.NextRunAt != nil {
 		routine.NextRunAt = seconds(*wire.NextRunAt)
+	}
+	// A one-time routine, a watch, and a routine around events are worded here, in the app's
+	// language, from what the CLI says of them.
+	switch {
+	case wire.Events != nil:
+		events := &RoutineEvents{
+			Receiver: wire.Events.Receiver, Subject: str(wire.Events.Subject), Status: cmp.Or(str(wire.Events.Status), "pending"),
+			SourceName: str(wire.Events.SourceName), Title: str(wire.Events.Title), URL: str(wire.Events.URL),
+			Endpoint: str(wire.Events.Endpoint), Key: str(wire.Events.Key),
+		}
+		if last := wire.Events.LastEvent; last != nil {
+			events.LastEvent = &LastEvent{Summary: last.Summary, At: seconds(last.At)}
+		}
+		routine.Events = events
+		routine.ScheduleText = events.Words()
+	case wire.Calendar != nil:
+		events := &RoutineCalendar{Account: str(wire.Calendar.Account), Matching: str(wire.Calendar.Matching)}
+		if wire.Calendar.Minutes != nil {
+			events.Minutes = *wire.Calendar.Minutes
+		}
+		events.After = flag(wire.Calendar.After)
+		if wire.Calendar.NextEvent != nil {
+			events.NextEventTitle = str(wire.Calendar.NextEvent.Title)
+		}
+		routine.Calendar = events
+		routine.ScheduleText = AroundEvents(events.Minutes, events.After, events.Matching)
+	case wire.OnceAt != nil:
+		routine.OnceAt = seconds(*wire.OnceAt)
+		routine.ScheduleText = Once(routine.OnceAt, routine.Timezone)
 	}
 	return routine
 }
@@ -856,6 +1181,17 @@ func ToAutoReview(wire *WireAutoReview) AutoReview {
 		return AutoReview{IsEnabled: true}
 	}
 	review := AutoReview{IsEnabled: wire.IsEnabled}
+	if provider := str(wire.Provider); IsProviderKind(provider) {
+		review.Provider = provider
+	}
+	for kind, model := range wire.Models {
+		if IsProviderKind(kind) && model != "" {
+			if review.Models == nil {
+				review.Models = map[ProviderKind]string{}
+			}
+			review.Models[kind] = model
+		}
+	}
 	for _, rule := range wire.Rules {
 		behavior := "allow"
 		if rule.Behavior == "ask" {
@@ -874,7 +1210,7 @@ func ToProviders(wire []WireProvider) []ProviderCredential {
 		if !IsProviderKind(provider.Kind) {
 			continue
 		}
-		credential := ProviderCredential{Kind: provider.Kind, IsConnected: provider.IsConnected, Detail: provider.Detail, BaseURL: str(provider.BaseURL)}
+		credential := ProviderCredential{Kind: provider.Kind, IsConnected: provider.IsConnected, Detail: provider.Detail, BaseURL: str(provider.BaseURL), ReviewModel: str(provider.ReviewModel)}
 		if IsCustomKind(provider.Kind) {
 			credential.Name = str(provider.Name)
 			if api := str(provider.API); IsCustomAPI(api) {
@@ -904,23 +1240,24 @@ func ToCustomModel(wire WireCustomModel) CustomModel {
 func ToModels(wire []WireModel) []ProviderModel {
 	out := make([]ProviderModel, 0, len(wire))
 	for _, model := range wire {
-		out = append(out, ProviderModel{Provider: model.Provider, ID: model.ID, Label: model.Name, Levels: model.Levels})
+		out = append(out, ProviderModel{Provider: model.Provider, ID: model.ID, Label: model.Name, Levels: model.Levels, Decides: model.Decides})
 	}
 	return out
 }
 
 func ToMarketplacePlugin(wire WireMarketplacePlugin) MarketplacePlugin {
 	plugin := MarketplacePlugin{
-		ID:          wire.ID,
-		Name:        wire.Name,
-		Description: str(wire.Description),
-		Icon:        str(wire.Icon),
-		Homepage:    str(wire.Homepage),
-		Author:      str(wire.Author),
-		Category:    str(wire.Category),
-		IsFeatured:  flag(wire.Featured),
-		Tags:        wire.Tags,
-		InstalledOn: wire.InstalledOn,
+		ID:            wire.ID,
+		Name:          wire.Name,
+		Description:   str(wire.Description),
+		Icon:          str(wire.Icon),
+		Homepage:      str(wire.Homepage),
+		Author:        str(wire.Author),
+		Category:      str(wire.Category),
+		IsFeatured:    flag(wire.Featured),
+		Tags:          wire.Tags,
+		InstalledOn:   wire.InstalledOn,
+		NamedAccounts: flag(wire.NamedAccounts),
 	}
 	names := make([]string, 0, len(wire.Servers))
 	for name := range wire.Servers {
@@ -929,6 +1266,10 @@ func ToMarketplacePlugin(wire WireMarketplacePlugin) MarketplacePlugin {
 	slices.Sort(names)
 	for _, name := range names {
 		server := wire.Servers[name]
+		// A server Beans answers itself (Telegram's, Slack's bot) is Beans, not one to list.
+		if server.Type == "builtin" {
+			continue
+		}
 		address := str(server.URL)
 		if address == "" {
 			address = strings.Join(append([]string{str(server.Command)}, server.Args...), " ")
@@ -956,6 +1297,7 @@ func ToBotTemplate(wire WireBotTemplate) BotTemplate {
 		Summary:     str(wire.Summary),
 		Description: wire.Description,
 		SymbolName:  cmp.Or(str(wire.SymbolName), "sparkles"),
+		Shape:       str(wire.Shape),
 		Accent:      "indigo",
 		Category:    str(wire.Category),
 		IsFeatured:  flag(wire.Featured),
@@ -973,7 +1315,7 @@ func ToBotTemplate(wire WireBotTemplate) BotTemplate {
 }
 
 func ToMarketplace(wire WireMarketplace) Marketplace {
-	var out Marketplace
+	out := Marketplace{Packs: wire.Packs}
 	for _, plugin := range wire.Plugins {
 		out.Plugins = append(out.Plugins, ToMarketplacePlugin(plugin))
 	}
@@ -1008,4 +1350,15 @@ func ToBotMemory(wire WireBotMemory) BotMemory {
 		memory.MaxLines, memory.MaxBytes = index.MaxLines, index.MaxBytes
 	}
 	return memory
+}
+
+func secretAsk(wire *WireSecretAsk) *SecretAsk {
+	if wire == nil {
+		return nil
+	}
+	ask := &SecretAsk{Use: SecretUse(wire.Use), Site: wire.Site}
+	for _, field := range wire.Fields {
+		ask.Fields = append(ask.Fields, SecretField{Name: field.Name, Label: field.Label})
+	}
+	return ask
 }

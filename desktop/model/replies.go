@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// Stands in for the CLI's agent loop in the demo, after the macOS app's ReplyEngine: bots work for
-// a moment, run fake tools, hand off between each other, and post whole replies. Each step waits
-// on a timer and runs on the main thread, as the rest of the store does.
+// Stands in for the CLI's agent loop in the demo: bots work for a moment, run fake tools, hand off
+// between each other, and post whole replies. Each step waits on a timer and runs on the main
+// thread, as the rest of the store does.
 
 type stepKind int
 
@@ -306,7 +306,7 @@ func mockReply(bot *Bot, prompt string) string {
 	switch bot.ID {
 	case "bot-patch":
 		return pick(
-			"Smallest version that works:\n\n```rust\npub async fn serve(addr: SocketAddr) -> Result<()> {\n    let listener = TcpListener::bind(addr).await?;\n    tracing::info!(%addr, \"beans serve\");\n    while let Ok((stream, _)) = listener.accept().await {\n        tokio::spawn(handle(stream));\n    }\n    Ok(())\n}\n```\n\nOne task per connection, and `handle` owns the decrypt step so the accept loop stays dumb.",
+			"Smallest version that works:\n\n```rust\npub async fn serve(addr: SocketAddr) -> Result<()> {\n    let listener = TcpListener::bind(addr).await?;\n    tracing::info!(%addr, \"lorca serve\");\n    while let Ok((stream, _)) = listener.accept().await {\n        tokio::spawn(handle(stream));\n    }\n    Ok(())\n}\n```\n\nOne task per connection, and `handle` owns the decrypt step so the accept loop stays dumb.",
 			"I'd keep this in the CLI rather than the app. The app should stay a renderer — the moment it knows how to decrypt, the key material has two homes and the threat model gets harder to explain.",
 			"Two options, and they are not close:\n\n- Put it behind `bootstrap` and let the app render whatever comes back.\n- Add a new event kind and teach both sides about it.\n\nThe first one is free. Take the first one.",
 		)

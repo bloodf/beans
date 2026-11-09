@@ -3,6 +3,7 @@
 // Chinese entry, and a format key and its translation should take the same values. `pnpm run l10n` lists what is missing, unused, or mismatched;
 // `--merge <fragment.json>…` adds `{ "English": "中文" }` files to the tables first.
 
+import { spawnSync } from "node:child_process"
 import { memorySwiftKeys } from "./l10n-swift.ts"
 import { globSync, existsSync } from "node:fs"
 import { readFile, writeFile } from "node:fs/promises"
@@ -12,6 +13,8 @@ const ROOT = join(import.meta.dirname, "..")
 const MAC_TABLE = join(ROOT, "macos/Resources/zh-Hans.lproj/Localizable.strings")
 const PHONE_TABLE = join(ROOT, "mobile/src/i18n/zh.ts")
 const DESKTOP_TABLE = join(ROOT, "desktop/src/l10n/zh.ts")
+
+const NATIVE_TABLE = join(ROOT, "desktop/l10n/zh.go")
 
 type Table = Map<string, string>
 
@@ -73,6 +76,20 @@ async function desktopKeysIn(dir: string) {
   return keys
 }
 
+async function nativeKeysIn(dir: string) {
+  const keys = new Map<string, string>()
+  for await (const path of scan(dir, "**/*.go")) {
+    if (path.startsWith("l10n/") || path.endsWith("_test.go")) continue
+    const source = await readFile(join(dir, path), "utf8")
+    for (const match of source.matchAll(/\bL\(\s*"((?:[^"\\]|\\.)*)"/g)) keys.set(unescape(match[1]), path)
+    for (const match of source.matchAll(/\bLc\(\s*"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)"/g)) {
+      keys.set(`${unescape(match[1])}|${unescape(match[2])}`, path)
+    }
+  }
+  return keys
+}
+
+
 async function readPhoneTable(path = PHONE_TABLE): Promise<Table> {
   const table: Table = new Map()
   if (!existsSync(path)) return table
@@ -100,6 +117,13 @@ async function writePhoneTable(table: Table) {
 async function writeDesktopTable(table: Table) {
   const lines = sorted(table).map(([key, value]) => `  "${escapeFor(key)}": "${escapeFor(value)}",`)
   await writeFile(DESKTOP_TABLE, `// Simplified Chinese. The key is the English text passed to L(); \`pnpm run l10n\` checks this table.\n\nexport const zh: Record<string, string> = {\n${lines.join("\n")}\n};\n`, "utf8")
+}
+
+async function writeNativeTable(table: Table) {
+  const lines = sorted(table).map(([key, value]) => `\t"${escapeFor(key)}": "${escapeFor(value)}",`)
+  await writeFile(NATIVE_TABLE, `// Simplified Chinese. Checked by pnpm run l10n.\n\npackage l10n\n\nvar zh = map[string]string{\n${lines.join("\n")}\n}\n`, "utf8")
+  const formatted = spawnSync("gofmt", ["-w", NATIVE_TABLE], { stdio: "inherit" })
+  if (formatted.error || formatted.status !== 0) throw new Error("gofmt failed on the native desktop table")
 }
 
 /// The values a sentence takes: `%@`/`%d` (positions ignored) or `{name}`.
@@ -136,6 +160,9 @@ for await (const path of scan(join(ROOT, "macos/Sources/Beans"), "**/*.swift")) 
   for (const key of memorySwiftKeys(await readFile(join(ROOT, "macos/Sources/Beans", path), "utf8"), path)) macKeys.set(key, path)
 }
 const phoneKeys = await keysIn(join(ROOT, "mobile"), "{app,src}/**/*.{ts,tsx}", /\bt\(\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/g, (path) => path.includes("i18n/") || path.endsWith(".test.ts"))
+for (const [key, path] of await keysIn(join(ROOT, "mobile"), "{app,src}/**/*.{ts,tsx}", /\btc\(\s*"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)"/g, (path) => path.includes("i18n/") || path.endsWith(".test.ts"))) phoneKeys.set(key, path)
+const nativeKeys = await nativeKeysIn(join(ROOT, "desktop"))
+const native = await readPhoneTable(NATIVE_TABLE)
 const desktopKeys = await desktopKeysIn(join(ROOT, "desktop"))
 
 const mac = await readMacTable()
@@ -147,7 +174,7 @@ if (mergeAt !== -1) {
   for (const path of process.argv.slice(mergeAt + 1)) {
     const fragment = JSON.parse(await readFile(path, "utf8")) as Record<string, string>
     for (const [key, value] of Object.entries(fragment)) {
-      for (const [used, table, name] of [[macKeys, mac, "mac"], [phoneKeys, phone, "phone"], [desktopKeys, desktop, "desktop"]] as const) {
+      for (const [used, table, name] of [[macKeys, mac, "mac"], [phoneKeys, phone, "phone"], [desktopKeys, desktop, "desktop"], [nativeKeys, native, "native"]] as const) {
         if (!used.has(key)) continue
         const existing = table.get(key)
         if (existing !== undefined && existing !== value) console.log(`${name}: kept ${JSON.stringify(existing)} over ${JSON.stringify(value)} for ${JSON.stringify(key)}`)
@@ -158,7 +185,8 @@ if (mergeAt !== -1) {
   await writeMacTable(mac)
   await writePhoneTable(phone)
   await writeDesktopTable(desktop)
+  await writeNativeTable(native)
 }
 
-const problems = report("mac", macKeys, mac) + report("phone", phoneKeys, phone) + report("desktop", desktopKeys, desktop)
+const problems = report("mac", macKeys, mac) + report("phone", phoneKeys, phone) + report("desktop", desktopKeys, desktop) + report("native", nativeKeys, native)
 process.exit(problems === 0 ? 0 : 1)

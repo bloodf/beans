@@ -11,7 +11,7 @@ import uniffi.beans_mobile.EventListener
 /// The Rust core behind the phone: started once with the app's folder and the phone's facts,
 /// then one request at a time and a stream of events.
 class BeansCoreModule : Module() {
-  private var core: Core? = null
+  @Volatile private var core: Core? = null
   private val updater by lazy { Updater(requireNotNull(appContext.reactContext), { PushService.inFront }) { id, phase, downloaded, total ->
     sendEvent("updateProgress", mapOf("id" to id, "phase" to phase, "downloaded" to downloaded, "total" to total))
   } }
@@ -29,13 +29,19 @@ class BeansCoreModule : Module() {
     }
     Function("cancelUpdate") { updater.cancel() }
 
-    Function("start") { home: String, name: String, os: String, osVersion: String, model: String ->
-      if (core == null) {
-        core = Core.start(home, name, os, osVersion, model, object : EventListener {
-          override fun onEvent(json: String) {
-            sendEvent("event", mapOf("json" to json))
+
+    // Off the JS thread, so the first frame does not wait for the account to load.
+    AsyncFunction("start").Coroutine { home: String, name: String, os: String, osVersion: String, model: String ->
+      withContext(Dispatchers.IO) {
+        synchronized(this@BeansCoreModule) {
+          if (core == null) {
+            core = Core.start(home, name, os, osVersion, model, object : EventListener {
+              override fun onEvent(json: String) {
+                sendEvent("event", mapOf("json" to json))
+              }
+            })
           }
-        })
+        }
       }
     }
 

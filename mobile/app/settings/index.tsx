@@ -3,19 +3,21 @@ import { AlertDialog, Column, Host, OutlinedTextField, RadioButton, Row as Compo
 import { clickable, fillMaxWidth, padding } from "@expo/ui/jetpack-compose/modifiers";
 import { Stack, useRouter } from "expo-router";
 import { useState } from "react";
-import { Alert, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
 import { engine } from "../../src/core/engine";
-import { CUSTOM_PRESETS, customProviderNamed, deviceName, isCustomProvider, isRunner, providerLabel } from "../../src/core/model";
+import { CUSTOM_PRESETS, customProviderNamed, deviceName, isCustomProvider, isRunner, presetGroup, reviewModelRows, reviewPicker, withCustomModels, type ReviewModelRow, providerLabel } from "../../src/core/model";
 import { deviceIsOnline, useStore } from "../../src/core/store";
 import { checkUpdates, dismissUpdate, installUpdate, setUpdateChecks, useUpdates } from "../../src/core/updates";
 import { deviceLanguage, languageNames, languages, setAppLanguage, t, useLanguage } from "../../src/i18n";
-import { MenuRow, Row, Section, ToggleRow, type MenuChoice } from "../../src/ui/forms";
+import { FieldRow, MenuRow, Row, Section, ToggleRow, type MenuChoice } from "../../src/ui/forms";
 import { lastSeen } from "../../src/ui/format";
 import { Symbol } from "../../src/ui/Symbol";
 import { usePalette } from "../../src/ui/theme";
-import { deviceSymbol } from "../../src/ui/devices";
+import { useDeviceRows } from "../../src/ui/devices";
+import { useWide } from "../../src/ui/layout";
 import { CloseToolbar } from "../../src/ui/navigation";
 import { DeviceRename } from "../../src/ui/DeviceRename";
+import { alert } from "../../src/ui/alert";
 import {
   automaticLanguage,
   languageName,
@@ -27,8 +29,9 @@ import {
 export default function SettingsScreen() {
   const router = useRouter();
   const p = usePalette();
+  const wide = useWide();
+  const deviceRows = useDeviceRows();
   const devices = useStore((s) => s.devices);
-  const seen = useStore((s) => s.device_seen);
   const relayConnected = useStore((s) => s.relayConnected);
   const relayUpdateRequired = useStore((s) => s.relayUpdateRequired);
   const relayError = useStore((s) => s.relayError);
@@ -37,6 +40,8 @@ export default function SettingsScreen() {
   const autoReview = useStore((s) => s.auto_review);
   const paused = useStore((s) => s.paused);
   const providers = useStore((s) => s.providers);
+  const sharedLinks = useStore((s) => s.shared_links);
+  const catalog = withCustomModels(useStore((s) => s.models), providers);
   const thisDevice = devices.find((d) => d.is_this_device);
   const [addingRule, setAddingRule] = useState(false);
   const [ruleText, setRuleText] = useState("");
@@ -47,8 +52,8 @@ export default function SettingsScreen() {
   const updates = useUpdates();
   const updateReason = updates.reason;
 
-  // The Mac app's pop-up: Automatic with the language it resolves to, a separator, then every
-  // language the recognizer knows, by name.
+  // A pop-up of Automatic with the language it resolves to, a separator, then every language the
+  // recognizer knows, by name.
   const dictationLanguages = useSupportedLanguages();
   const automaticDictation = t("Automatic ({language})", { language: languageName(automaticLanguage()) });
   const dictationChoices = [
@@ -60,8 +65,54 @@ export default function SettingsScreen() {
     { title: systemLanguage, selected: !appLanguage.chosen, onPress: () => setAppLanguage(undefined) },
     ...languages.map((code) => ({ title: languageNames[code], selected: appLanguage.chosen === code, onPress: () => setAppLanguage(code) })),
   ];
-  // Add Custom Provider's menu: the hosted presets, the ones on the user's own computer, then any
-  // other server. A preset the account has already opens that provider, checked.
+  // Reviews with, after Details' Runs with: the bot's own provider, then every connected one.
+  const reviewer = reviewPicker(autoReview, providers);
+  const botsProvider = t("Bot's provider");
+  const reviewProviderChoices: MenuChoice[] = [
+    {
+      title: botsProvider,
+      selected: !reviewer.provider,
+      onPress: () => {
+        if (autoReview.provider) engine.setReviewProvider(undefined);
+      },
+      dividerAfter: reviewer.providers.length > 0,
+    },
+    ...reviewer.providers.map((kind) => ({
+      title: providerLabel(kind, providers),
+      selected: kind === reviewer.provider,
+      onPress: () => {
+        if (kind !== autoReview.provider) engine.setReviewProvider(kind);
+      },
+    })),
+  ];
+  // Review Models: each connected provider's, Default (the model its status names) first, then
+  // all its models, decision models among them.
+  const reviewModels = reviewModelRows(autoReview, providers, catalog);
+  function reviewModelMenu(row: ReviewModelRow) {
+    const fallback = row.defaultName ? t("Default ({model})", { model: row.defaultName }) : t("Default");
+    const choices: MenuChoice[] = [
+      {
+        title: fallback,
+        selected: !row.picked,
+        onPress: () => {
+          if (row.picked) engine.setReviewModel(row.kind, undefined);
+        },
+        dividerAfter: row.models.length > 0,
+      },
+      ...row.models.map((model) => ({
+        title: model.name,
+        selected: model.id === row.picked,
+        onPress: () => {
+          if (model.id !== row.picked) engine.setReviewModel(row.kind, model.id);
+        },
+      })),
+    ];
+    const value = row.picked ? (row.models.find((model) => model.id === row.picked)?.name ?? row.picked) : fallback;
+    return { title: providerLabel(row.kind, providers), value, choices };
+  }
+  // Add Custom Provider's menu: the hosted presets, the ones on the user's own computer, the
+  // decision APIs Auto-review can use, then any other server. A preset the account has already
+  // opens that provider, checked.
   const customProviderChoices: MenuChoice[] = [
     ...CUSTOM_PRESETS.map((preset, index) => {
       const existing = preset.compatible ? undefined : customProviderNamed(preset.name, providers);
@@ -69,18 +120,13 @@ export default function SettingsScreen() {
       return {
         title: preset.name,
         selected: !!existing,
-        dividerAfter: !next || !!next.local !== !!preset.local,
+        dividerAfter: !next || presetGroup(next) !== presetGroup(preset),
         onPress: () =>
           router.push({ pathname: "/settings/custom-provider", params: existing ? { kind: existing.kind } : { preset: preset.name } }),
       };
     }),
     { title: t("Other Server…"), selected: false, onPress: () => router.push("/settings/custom-provider") },
   ];
-  const thisId = engine.deviceId;
-  // This phone first, and machines that never said what they are last.
-  const sorted = [...devices].sort((a, b) =>
-    a.id === thisId ? -1 : b.id === thisId ? 1 : Number(!!a.unknown) - Number(!!b.unknown) || a.name.localeCompare(b.name),
-  );
 
   function addRule() {
     if (Platform.OS === "android") {
@@ -113,7 +159,7 @@ export default function SettingsScreen() {
     if (!rule) return;
     const flipped: "allow" | "ask" =
       rule.behavior === "allow" ? "ask" : "allow";
-    Alert.alert(
+    alert(
       rule.text,
       rule.behavior === "allow" ? t("Allow automatically") : t("Ask first"),
       [
@@ -142,7 +188,7 @@ export default function SettingsScreen() {
   }
 
   function confirmUnpair() {
-    Alert.alert(
+    alert(
       t("Unpair this phone?"),
       t("Its keys and the synced chats are removed from this phone. Your other paired Devices keep everything, and you can pair again any time."),
       [
@@ -223,125 +269,6 @@ export default function SettingsScreen() {
         </Section>
 
 
-        <Section title={t("Account")}>
-          <ToggleRow title={t("Pause all bots")} value={paused} onValueChange={(value) => void changePause(value)} />
-          <Row title={t("Identity")} detail={identity ?? "—"} />
-          <Row
-            title={t("Relay")}
-            detail={relayUrl?.replace(/^https?:\/\//, "") ?? "—"}
-            // Why the last try to connect failed, as the core has it, until one goes through.
-            subtitle={relayUpdateRequired ? t("Update Beans to sync") : relayConnected ? t("Connected") : relayError ? relayError.message : t("Connecting…")}
-            subtitleLines={3}
-          />
-        </Section>
-
-        <Section
-          title={t("Auto-review")}
-          footer={
-            autoReview.is_enabled
-              ? t('Beans checks effectful plugin actions and every shell command before they run. Safe commands normally run automatically; risky commands ask you first. Add rules to customize what bots can do automatically; "Ask first" wins if rules conflict.')
-              : t("Off: every shell command and effectful plugin action asks you first.")
-          }
-        >
-          <ToggleRow
-            title={t("Check actions before they run")}
-            value={autoReview.is_enabled}
-            onValueChange={(v) =>
-              engine.setAutoReview({ ...autoReview, is_enabled: v })
-            }
-          />
-          {autoReview.rules.map((rule) => (
-            <Row
-              key={rule.id}
-              title={rule.text}
-              detail={
-                rule.behavior === "allow" ? t("Allow automatically") : t("Ask first")
-              }
-              onPress={() => editRule(rule.id)}
-            />
-          ))}
-          <Row title={t("Add rule…")} onPress={addRule} />
-        </Section>
-
-        <Section
-          title={t("Providers")}
-          footer={t("Credentials belong to your account and reach every paired Device encrypted.")}
-        >
-          {/* One list, so every row gets its separator: the built-ins, the custom providers in
-              the order they were added, then the row that adds one. */}
-          {[
-            ...providers.filter((provider) => !isCustomProvider(provider.kind)).map((provider) => (
-              <Row
-                key={provider.kind}
-                title={providerLabel(provider.kind, providers)}
-                subtitle={
-                  provider.is_connected ? provider.detail || undefined : undefined
-                }
-                detail={provider.is_connected ? t("Connected") : t("Not connected")}
-                onPress={() => router.push(`/settings/provider/${provider.kind}`)}
-                chevron
-              />
-            )),
-            ...providers.filter((provider) => isCustomProvider(provider.kind)).map((provider) => (
-              <Row
-                key={provider.kind}
-                title={providerLabel(provider.kind, providers)}
-                subtitle={provider.detail || undefined}
-                detail={t("Configured")}
-                onPress={() => router.push({ pathname: "/settings/custom-provider", params: { kind: provider.kind } })}
-                chevron
-              />
-            )),
-            <MenuRow key="add-custom-provider" title={t("Add Custom Provider")} choices={customProviderChoices} />,
-          ]}
-        </Section>
-
-        <Section
-          title={t("Devices")}
-          footer={t("Desktop Devices are Runners: they run bots with your account's provider credentials. Phones and tablets read and write chats.")}
-        >
-          {sorted.map((device) => {
-            const online = device.id === thisId || deviceIsOnline(device.id);
-            return (
-              <Row
-                key={device.id}
-                title={
-                  device.id === thisId
-                    ? t("{name} (this phone)", { name: device.name })
-                    : deviceName(device)
-                }
-                onPress={() => router.push(`/settings/device/${device.id}`)}
-                chevron
-                subtitle={[
-                  device.model,
-                  isRunner(device) ? t("Runner") : t("Device"),
-                  online ? t("Online") : lastSeen(seen[device.id]),
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-                leading={
-                  <View style={styles.deviceIcon}>
-                    <Symbol
-                      name={deviceSymbol(device.os, device.model)}
-                      size={22}
-                      color={p.label}
-                    />
-                    <View
-                      style={[
-                        styles.deviceDot,
-                        {
-                          backgroundColor: online ? p.green : p.tertiaryLabel,
-                          borderColor: p.cell,
-                        },
-                      ]}
-                    />
-                  </View>
-                }
-              />
-            );
-          })}
-        </Section>
-
         <Section>
           <Row
             title={t("Unpair This Phone")}
@@ -409,16 +336,6 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
-  deviceIcon: { width: 32, alignItems: "center" },
-  deviceDot: {
-    position: "absolute",
-    right: 0,
-    bottom: -2,
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    borderWidth: 2,
-  },
   version: { textAlign: "center", fontSize: 12, marginTop: 28 },
   dialogHost: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0 },
 });

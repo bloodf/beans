@@ -13,9 +13,9 @@ import (
 	"unicode"
 )
 
-// The MCP servers a Runner keeps in its mcp.json, after the macOS app's McpServers.swift: each
-// one's entry as the file holds it, how it stands, and the tools it offered; the command line the
-// server sheet's Command field reads and writes; and the form the sheet edits an entry through.
+// The MCP servers a Runner keeps in its mcp.json: each one's entry as the file holds it, how it
+// stands, and the tools it offered; the command line the server sheet's Command field reads and
+// writes; and the form the sheet edits an entry through.
 
 // McpEntry is one server's entry, canonical: `command`, `args`, `env`, and `cwd` for a command;
 // `type`, `url`, and `headers` for a remote server; and any field Beans does not know, as the
@@ -136,7 +136,7 @@ func McpStateText(server McpServer) (string, Tone) {
 			return L("1 tool"), ToneGreen
 		}
 		return L("%d tools", server.ToolCount), ToneGreen
-	case PluginNeedsAuth:
+	case PluginNeedsAuth, PluginInsufficientAccess:
 		return L("Needs a sign-in"), ToneOrange
 	case PluginConnecting:
 		if status.Detail != "" {

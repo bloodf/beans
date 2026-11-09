@@ -1,7 +1,7 @@
 import type { BotAvatarState, BotLook } from "@beans/blobatar";
 import { Image } from "expo-image";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, View, useWindowDimensions, type ColorValue, type StyleProp, type ViewStyle } from "react-native";
+import { StyleSheet, Text, View, useWindowDimensions, type ColorValue, type StyleProp, type ViewStyle } from "react-native";
 import Animated, { cancelAnimation, Easing, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from "react-native-reanimated";
 import { resolveBotState, resolveChatBotState } from "../core/activity";
 import { engine } from "../core/engine";
@@ -53,7 +53,7 @@ function useSurfaceVisibility() {
 
 // Only generated portraits mount the numeric engine. Photo-circle cropping is independent of
 // saved look; missing photo bytes use that customized generated fallback.
-export function AvatarDisc({ name, uri, size, look, state = "idle", working = false, onVisibilityChange, style }: { name: string; uri?: string; size: number; look?: BotLook; state?: BotAvatarState; working?: boolean; onVisibilityChange?: (visible: boolean) => void; style?: StyleProp<ViewStyle> }) {
+export function AvatarDisc({ name, uri, size, look, state = "idle", working = false, service, onVisibilityChange, style }: { name: string; uri?: string; size: number; look?: BotLook; state?: BotAvatarState; working?: boolean; service?: string; onVisibilityChange?: (visible: boolean) => void; style?: StyleProp<ViewStyle> }) {
   const p = usePalette();
   const surface = useSurfaceVisibility();
   const geometry = useMemo(() => uri ? null : avatarGeometry(name, look, state), [name, uri, look, state]);
@@ -65,7 +65,8 @@ export function AvatarDisc({ name, uri, size, look, state = "idle", working = fa
           <Image source={{ uri }} contentFit="cover" style={{ width: size, height: size }} />
         </View>
       ) : geometry ? <AvatarFigure key={name} geometry={geometry} size={size} visibility={{ ...surface, motion: geometry.motion }} /> : null}
-      {working ? <PresenceDot size={size} ring={p.background} moving={!!geometry?.motion && surface.visible && surface.appActive && surface.focused && !surface.reduceMotion} /> : null}
+      {service ? <ServiceBadge service={service} size={size} ring={p.background} /> : null}
+      {working ? <PresenceDot size={size} ring={p.background} top={!!service} moving={!!geometry?.motion && surface.visible && surface.appActive && surface.focused && !surface.reduceMotion} /> : null}
     </View>
   );
 }
@@ -75,10 +76,10 @@ export function useBotAvatarState(botId: string | undefined, chatId?: string): B
   return useStore((s) => (!botId ? "idle" : chatId ? resolveChatBotState(s, chatId, botId) : resolveBotState(s, botId)));
 }
 
-export function BotAvatar({ bot, chatId, size = 40, working = false, style }: { bot: Bot | undefined; chatId?: string; size?: number; working?: boolean; style?: StyleProp<ViewStyle> }) {
+export function BotAvatar({ bot, chatId, size = 40, working = false, service, style }: { bot: Bot | undefined; chatId?: string; size?: number; working?: boolean; service?: string; style?: StyleProp<ViewStyle> }) {
   const uri = useBotAvatarUri(bot);
   const state = useBotAvatarState(bot?.id, chatId);
-  return <AvatarDisc name={bot?.id ?? ""} uri={uri} size={size} look={bot?.look} state={state} working={working} style={style} />;
+  return <AvatarDisc name={bot?.id ?? ""} uri={uri} size={size} look={bot?.look} state={state} working={working} service={service} style={style} />;
 }
 
 export function YouAvatar({ size = 40 }: { size?: number }) {
@@ -86,7 +87,7 @@ export function YouAvatar({ size = 40 }: { size?: number }) {
   return <View style={[styles.disc, { width: size, height: size, borderRadius: size / 2, backgroundColor: p.fill }]}><Symbol name="person.fill" size={size * 0.5} color={p.secondaryLabel} /></View>;
 }
 
-export function PresenceDot({ size, ring, moving }: { size: number; ring: ColorValue; moving: boolean }) {
+export function PresenceDot({ size, ring, moving, top = false }: { size: number; ring: ColorValue; moving: boolean; top?: boolean }) {
   const p = usePalette();
   const scale = useSharedValue(1);
   useEffect(() => {
@@ -99,16 +100,16 @@ export function PresenceDot({ size, ring, moving }: { size: number; ring: ColorV
   const dot = Math.max(7, Math.round(size * 0.27));
   const ringWidth = Math.max(1.5, dot * 0.22);
   return (
-    <Animated.View style={[styles.presence, animated, { width: dot + ringWidth * 2, height: dot + ringWidth * 2, borderRadius: (dot + ringWidth * 2) / 2, backgroundColor: ring, right: -ringWidth * 0.6, bottom: -ringWidth * 0.6 }]}>
+    <Animated.View style={[styles.presence, animated, { width: dot + ringWidth * 2, height: dot + ringWidth * 2, borderRadius: (dot + ringWidth * 2) / 2, backgroundColor: ring, right: -ringWidth * 0.6, ...(top ? { top: -ringWidth * 0.6 } : { bottom: -ringWidth * 0.6 }) }]}>
       <View style={{ width: dot, height: dot, borderRadius: dot / 2, backgroundColor: p.green }} />
     </Animated.View>
   );
 }
 
-export function AvatarCluster({ bots, chatId, size = 40, working = false }: { bots: Bot[]; chatId?: string; size?: number; working?: boolean }) {
+export function AvatarCluster({ bots, chatId, size = 40, working = false, service }: { bots: Bot[]; chatId?: string; size?: number; working?: boolean; service?: string }) {
   const p = usePalette();
   const surface = useSurfaceVisibility();
-  if (bots.length <= 1) return <BotAvatar bot={bots[0]} chatId={chatId} size={size} working={working} />;
+  if (bots.length <= 1) return <BotAvatar bot={bots[0]} chatId={chatId} size={size} working={working} service={service} />;
   const small = size * 0.66;
   return (
     <View ref={surface.ref} collapsable={false} onLayout={surface.check} style={{ width: size, height: size }}>
@@ -124,4 +125,40 @@ export function AvatarCluster({ bots, chatId, size = 40, working = false }: { bo
 const styles = StyleSheet.create({
   disc: { alignItems: "center", justifyContent: "center" },
   presence: { position: "absolute", alignItems: "center", justifyContent: "center" },
+  badge: { position: "absolute", alignItems: "center", justifyContent: "center" },
+  eye: { position: "absolute", backgroundColor: "#FFFFFF" },
+  shapeGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10, padding: 14 },
+  shapeCell: { width: 48, height: 44, borderRadius: 10, borderWidth: 2, alignItems: "center", justifyContent: "center" },
 });
+
+const SERVICE_MARKS: Record<string, number> = {
+  telegram: require("../../assets/services/telegram.png"),
+  slack: require("../../assets/services/slack.png"),
+};
+
+/// A channel conversation's service mark over the avatar's bottom-right edge, ringed in the
+/// surface color.
+function ServiceBadge({ service, size, ring }: { service: string; size: number; ring: ColorValue }) {
+  const mark = SERVICE_MARKS[service];
+  if (!mark) return null;
+  const badge = Math.round(size * 0.4);
+  const ringWidth = Math.max(1.5, badge * 0.1);
+  const outer = badge + ringWidth * 2;
+  return (
+    <View style={[styles.badge, { width: outer, height: outer, borderRadius: outer / 2, backgroundColor: ring, right: -ringWidth, bottom: -ringWidth }]}>
+      <Image source={mark} style={{ width: badge, height: badge }} />
+    </View>
+  );
+}
+
+
+export function ContactAvatar({ name, size = 40 }: { name: string; size?: number }) {
+  const initial = Array.from(name.trim())[0]?.toUpperCase() ?? "?";
+  return (
+    <View style={[styles.disc, { width: size, height: size, borderRadius: size / 2 }]}>
+      <Text style={{ color: "#FFFFFF", fontSize: Math.round(size * 0.46), fontWeight: "600" }} allowFontScaling={false}>
+        {initial}
+      </Text>
+    </View>
+  );
+}

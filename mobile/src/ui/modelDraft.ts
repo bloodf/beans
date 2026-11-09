@@ -29,7 +29,7 @@ export function takeModelListing(listed: boolean, models: CustomModel[], selectA
   useModelDraft.setState((s) => ({ rows: mergeListedModels(s.rows, listed ? models : [], selectAll), listing: { state: listed && models.length ? "listed" : "unlisted" } }));
 }
 
-/// New rows with the default where it was, as the desktop apps keep it: the model picked when
+/// New rows with the default where it was, as the desktop app keeps it: the model picked when
 /// none was becomes it, and only unpicking it moves it to the first picked one left. Without this
 /// a model picked higher in the list, or an id added at the top, would take it over.
 function keepingDefault(s: ModelDraft, rows: ModelRow[], changed: string): Pick<ModelDraft, "rows" | "chosenDefault"> {

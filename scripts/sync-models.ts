@@ -15,7 +15,7 @@ const OPENCODE_DOCS: Record<string, string> = {
 }
 const CODEX_MODELS = "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json"
 const WIRES: Record<string, string> = {
-  responses: "responses", messages: "messages", "chat/completions": "chat-completions",
+  responses: "responses", messages: "messages", "chat/completions": "chat-completions", systemone: "system-one",
 }
 const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 const RATE_FIELDS = ["input", "output", "cache_read", "cache_write"] as const
@@ -32,7 +32,7 @@ type Rates = Record<typeof RATE_FIELDS[number], number> & Record<string, unknown
 type Tier = { input_tokens_above: number; rates: Rates; [key: string]: unknown }
 type Model = {
   provider: string; id: string; name: string; context_window: number; max_output: number
-  rates: Rates; tiers?: Tier[]; thinking: string; levels?: string[]; wire?: string
+  rates: Rates; tiers?: Tier[]; thinking?: string; levels?: string[]; wire?: string
   [key: string]: unknown
 }
 type Catalog = { version: number; updated: string; models: Model[]; review: Record<string, string>; [key: string]: unknown }
@@ -91,8 +91,8 @@ function validate(text: string, required: string[] = []): Catalog {
     const key = `${m.provider}/${m.id}`
     if (typeof m.provider !== "string" || !m.provider || typeof m.id !== "string" || !m.id
       || typeof m.name !== "string" || !m.name || seen.has(key)
-      || !positive(m.context_window) || !positive(m.max_output) || !completeRates(m.rates)
-      || typeof m.thinking !== "string" || !["adaptive", "adaptive-between-tools", "budget", "effort"].includes(m.thinking)
+      || !positive(m.context_window) || !(positive(m.max_output) || (m.wire === "system-one" && m.max_output === 0)) || !completeRates(m.rates)
+      || (!(m.wire === "system-one" && m.thinking === undefined) && (typeof m.thinking !== "string" || !["adaptive", "adaptive-between-tools", "budget", "effort"].includes(m.thinking)))
       || (m.wire !== undefined && (typeof m.wire !== "string" || !Object.values(WIRES).includes(m.wire)))
       || (m.provider.startsWith("opencode") && !m.wire)
       || (m.levels !== undefined && (!Array.isArray(m.levels) || m.levels.some((l: unknown) => typeof l !== "string" || !LEVELS.includes(l))))
@@ -181,15 +181,15 @@ export function syncCatalog(text: string, sources: Sources, now = Date.now()) {
     }
     if (endpoint) set("wire", WIRES[endpoint])
     const upstream = modelsDev[MODELS_DEV[m.provider]]?.models?.[m.id]
-    if (!upstream) { notes.push(`${name} is not on models.dev.`); continue }
+    if (!upstream) { if (m.wire !== "system-one") notes.push(`${name} is not on models.dev.`); continue }
     if (upstream.status === "deprecated") notes.push(`${name} is deprecated on models.dev.`)
     const levels = levelsFrom(upstream.reasoning_options)
-    if (levels && m.levels && !same(levels, m.levels)) {
+    if (m.wire !== "system-one" && levels && m.levels && !same(levels, m.levels)) {
       if (m.provider in OPENCODE_DOCS) set("levels", levels)
       else if (!kept("levels")) notes.push(`${name}: thinking levels differ; review by hand.`)
     }
     for (const [field, value] of [["context_window", upstream.limit?.context], ["max_output", upstream.limit?.output]] as const) {
-      if (positive(value) && !kept(field)) set(field, value)
+      if ((positive(value) || (field === "max_output" && m.wire === "system-one" && value === 0)) && !kept(field)) set(field, value)
     }
     if (upstream.cost) {
       // Absence is unknown, not free. Preserve extension fields, including pricing completeness.
@@ -225,9 +225,10 @@ export function syncCatalog(text: string, sources: Sources, now = Date.now()) {
   const superseded = (provider: string, id: string) => catalog.models.some((m) => m.provider === provider && family(m.id) === family(id) && notOlder(version(m.id), version(id)))
   for (const [provider, source] of Object.entries(MODELS_DEV)) {
     for (const [id, e] of Object.entries(modelsDev[source]?.models ?? {})) {
-      if (listed.has(`${provider}/${id}`) || e.status === "deprecated" || (e.release_date ?? "") < since || !positive(e.limit?.output) || superseded(provider, id)) continue
+      if (listed.has(`${provider}/${id}`) || e.status === "deprecated" || (e.release_date ?? "") < since || superseded(provider, id)) continue
       const endpoint = tables[provider]?.get(id)
       if (provider in OPENCODE_DOCS && (!endpoint || !Object.hasOwn(WIRES, endpoint))) continue
+      if (!positive(e.limit?.output) && !(endpoint === "systemone" && e.limit?.output === 0)) continue
       const levels = levelsFrom(e.reasoning_options)
       fresh.push(`${provider}/${id} — ${e.name}, released ${e.release_date}, ${e.limit?.context} window, input ${validRate(e.cost?.input) ? `$${e.cost.input}` : "unknown"} / output ${validRate(e.cost?.output) ? `$${e.cost.output}` : "unknown"}${endpoint ? `, ${WIRES[endpoint]}` : ""}${levels ? `, levels ${JSON.stringify(levels)}` : ""}`)
     }
@@ -283,14 +284,33 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     assert.deepEqual(output.models[0].tiers, row.tiers)
     assert.deepEqual(output.review, input.review)
     assert.equal(output.updated, "2026-10-20T01:00:00Z")
-    assert.match(result.report, /decision: unsupported endpoint systemone/)
+    assert.doesNotMatch(result.report, /decision: unsupported endpoint systemone/)
     assert.match(result.report, /opencode-go: wire verification unavailable/)
     assert.deepEqual(output.models.map((m) => m.id), ["chat"])
-    assert.deepEqual(result.fresh, [])
-    const refused = syncCatalog(text, { ...sources, docs: { ...sources.docs, opencode: html.replace("openai/v1/chat/completions", "systemone/v1/systemone") } })
+    assert.equal(result.fresh.length, 1)
+    assert.match(result.fresh[0], /opencode\/decision.*system-one/)
+    const decision = { ...row, id: "decision", name: "Decision", wire: "system-one", max_output: 0, thinking: undefined }
+    const decisionText = JSON.stringify({ ...input, models: [row, decision] })
+    const decisionResult = syncCatalog(decisionText, sources)
+    assert.equal(decisionResult.refused, false)
+    const decisionOutput = validate(decisionResult.text).models[1]
+    assert.equal(decisionOutput.wire, "system-one")
+    assert.equal(decisionOutput.thinking, undefined)
+    modelsDev.opencode.models.decision.limit = { context: 64000, output: 0 }
+    const zeroDiscovery = syncCatalog(text, sources, Date.parse("2026-10-20T01:00:00Z"))
+    assert.equal(zeroDiscovery.fresh.length, 1)
+    assert.match(zeroDiscovery.fresh[0], /opencode\/decision.*system-one/)
+    const zeroOutput = syncCatalog(decisionText, sources)
+    assert.equal(validate(zeroOutput.text).models[1].max_output, 0)
+    assert.equal(validate(zeroOutput.text).models[1].context_window, 64000)
+    assert.throws(() => validate(JSON.stringify({ ...input, models: [{ ...row, max_output: 0 }] })))
+    assert.throws(() => validate(JSON.stringify({ ...input, models: [{ ...row, thinking: undefined }] })))
+    assert.throws(() => validate(JSON.stringify({ ...input, models: [row, { ...decision, max_output: -1 }] })))
+    assert.throws(() => validate(JSON.stringify({ ...input, models: [row, { ...decision, thinking: "unknown" }] })))
+    const refused = syncCatalog(text, { ...sources, docs: { ...sources.docs, opencode: html.replace("openai/v1/chat/completions", "unknown/v1/unsupported") } })
     assert.equal(refused.refused, true)
     assert.equal(refused.text, text)
-    assert.match(refused.report, /chat: unsupported endpoint systemone/)
+    assert.match(refused.report, /chat: unsupported endpoint unsupported/)
     assert.match(refused.report, /no catalog changes are written/)
     assert.equal(syncCatalog(text, { ...sources, docs: { opencode: "", "opencode-go": "" } }).text, text)
     modelsDev.opencode.models.chat.cost = { input: 0.25, output: 0, tiers: [{ tier: { type: "context", size: 50 }, input: 0.5 }] }

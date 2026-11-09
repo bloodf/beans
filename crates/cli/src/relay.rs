@@ -52,7 +52,10 @@ impl From<reqwest::Error> for RelayError {
         while let Some(source) = cause.source() {
             cause = source;
         }
-        RelayError { status: error.status().map(|s| s.as_u16()), message: format!("relay unreachable: {cause}") }
+        RelayError {
+            status: error.status().map(|s| s.as_u16()),
+            message: format!("relay unreachable: {cause}"),
+        }
     }
 }
 
@@ -80,7 +83,10 @@ pub struct BlobIn {
 const POLICY_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
 fn invalid_policy_replay() -> RelayError {
-    RelayError { status: None, message: "Invalid managed policy replay".into() }
+    RelayError {
+        status: None,
+        message: "Invalid managed policy replay".into(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -94,7 +100,6 @@ struct PolicyCut {
     done: bool,
     blobs: Vec<PolicyCutBlob>,
 }
-
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -124,13 +129,24 @@ impl LegacyPolicyPage {
     fn validate(&self) -> RelayResult<()> {
         let mut last = 0;
         let mut ids = std::collections::HashSet::new();
-        if self.seq < 0 || self.blobs.len() > 500 { return Err(invalid_policy_replay()); }
+        if self.seq < 0 || self.blobs.len() > 500 {
+            return Err(invalid_policy_replay());
+        }
         for blob in &self.blobs {
-            let ciphertext = crate::keys::unb64(&blob.ciphertext).map_err(|_| invalid_policy_replay())?;
-            if !policy_blob_id(&blob.id) || !ids.insert(&blob.id) || blob.kind != "policy"
-                || blob.recipient_machine_pubkey.is_some() || blob.seq <= last || blob.seq > self.seq
-                || blob.created_at < 0 || ciphertext.is_empty() || ciphertext.len() > 4 * 1024 * 1024
-            { return Err(invalid_policy_replay()); }
+            let ciphertext =
+                crate::keys::unb64(&blob.ciphertext).map_err(|_| invalid_policy_replay())?;
+            if !policy_blob_id(&blob.id)
+                || !ids.insert(&blob.id)
+                || blob.kind != "policy"
+                || blob.recipient_machine_pubkey.is_some()
+                || blob.seq <= last
+                || blob.seq > self.seq
+                || blob.created_at < 0
+                || ciphertext.is_empty()
+                || ciphertext.len() > 4 * 1024 * 1024
+            {
+                return Err(invalid_policy_replay());
+            }
             last = blob.seq;
         }
         Ok(())
@@ -140,8 +156,16 @@ impl LegacyPolicyPage {
 #[derive(Deserialize)]
 #[serde(tag = "subtype", rename_all = "snake_case", deny_unknown_fields)]
 enum PolicyCutBlob {
-    Ordinary { id: String, seq: i64, ciphertext: Vec<u8> },
-    Managed { receipt: PolicyReceipt, policy_ciphertext: Vec<u8>, roster_ciphertext: Vec<u8> },
+    Ordinary {
+        id: String,
+        seq: i64,
+        ciphertext: Vec<u8>,
+    },
+    Managed {
+        receipt: PolicyReceipt,
+        policy_ciphertext: Vec<u8>,
+        roster_ciphertext: Vec<u8>,
+    },
 }
 
 #[derive(Deserialize, PartialEq, Eq)]
@@ -164,7 +188,9 @@ struct PolicyReceipt {
     checkpoint_transaction_id: Option<String>,
 }
 
-fn required_policy_nullable<'de, D: serde::Deserializer<'de>>(decoder: D) -> Result<Option<String>, D::Error> {
+fn required_policy_nullable<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<Option<String>, D::Error> {
     Option::<String>::deserialize(decoder)
 }
 
@@ -173,33 +199,71 @@ fn policy_identifier(value: &str, max: usize) -> bool {
 }
 
 fn policy_blob_id(value: &str) -> bool {
-    policy_identifier(value, 64) && value != "." && value != ".."
-        && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    policy_identifier(value, 64)
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
 impl PolicyReceipt {
     fn validate(&self, account: &str, policy: &[u8], roster: &[u8]) -> RelayResult<()> {
         use sha2::{Digest, Sha256};
         let commitment = serde_json::to_vec(&json!([
-            "beans-managed-skill-commit", 1, self.account_id, self.transaction_id, self.expected_slot_seq,
-            [self.policy_id, self.policy_ciphertext_len, self.policy_sha256, "managed_skill_policy", null, null, null],
-            [self.roster_id, self.roster_ciphertext_len, self.roster_sha256, "roster", "roster", null, null],
+            "beans-managed-skill-commit",
+            1,
+            self.account_id,
+            self.transaction_id,
+            self.expected_slot_seq,
+            [
+                self.policy_id,
+                self.policy_ciphertext_len,
+                self.policy_sha256,
+                "managed_skill_policy",
+                null,
+                null,
+                null
+            ],
+            [
+                self.roster_id,
+                self.roster_ciphertext_len,
+                self.roster_sha256,
+                "roster",
+                "roster",
+                null,
+                null
+            ],
             self.checkpoint_transaction_id
-        ])).map_err(|_| invalid_policy_replay())?;
-        if self.schema_version != 1 || self.account_id != account
+        ]))
+        .map_err(|_| invalid_policy_replay())?;
+        if self.schema_version != 1
+            || self.account_id != account
             || !policy_identifier(&self.transaction_id, 1024)
-            || self.checkpoint_transaction_id.as_deref().is_some_and(|id| !policy_identifier(id, 1024) || id == self.transaction_id)
-            || !policy_blob_id(&self.policy_id) || !policy_blob_id(&self.roster_id) || self.policy_id == self.roster_id
-            || self.expected_slot_seq < 0 || self.expected_slot_seq >= self.policy_seq
-            || self.policy_seq <= 0 || self.policy_seq.checked_add(1) != Some(self.roster_seq)
-            || policy.is_empty() || roster.is_empty()
+            || self
+                .checkpoint_transaction_id
+                .as_deref()
+                .is_some_and(|id| !policy_identifier(id, 1024) || id == self.transaction_id)
+            || !policy_blob_id(&self.policy_id)
+            || !policy_blob_id(&self.roster_id)
+            || self.policy_id == self.roster_id
+            || self.expected_slot_seq < 0
+            || self.expected_slot_seq >= self.policy_seq
+            || self.policy_seq <= 0
+            || self.policy_seq.checked_add(1) != Some(self.roster_seq)
+            || policy.is_empty()
+            || roster.is_empty()
             || (policy.len().saturating_mul(4).saturating_add(2) / 3)
-                .saturating_add(roster.len().saturating_mul(4).saturating_add(2) / 3) > 32768
-            || self.policy_ciphertext_len != policy.len() as i64 || self.roster_ciphertext_len != roster.len() as i64
+                .saturating_add(roster.len().saturating_mul(4).saturating_add(2) / 3)
+                > 32768
+            || self.policy_ciphertext_len != policy.len() as i64
+            || self.roster_ciphertext_len != roster.len() as i64
             || self.policy_sha256 != format!("{:x}", Sha256::digest(policy))
             || self.roster_sha256 != format!("{:x}", Sha256::digest(roster))
             || self.request_sha256 != format!("{:x}", Sha256::digest(commitment))
-        { return Err(invalid_policy_replay()); }
+        {
+            return Err(invalid_policy_replay());
+        }
         Ok(())
     }
 }
@@ -208,7 +272,6 @@ impl PolicyReceipt {
 #[allow(dead_code)]
 pub struct MachineIn {
     pub machine_pubkey: String,
-    pub box_pubkey: String,
     pub last_seen: i64,
     pub created_at: i64,
     /// The machine has a sync socket open on the relay.
@@ -251,7 +314,8 @@ struct Heard {
     ended: Option<String>,
 }
 
-type SocketStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type SocketStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// The relay pings every 25 s. A socket silent for this long is dead: the computer slept, the
 /// phone changed networks.
@@ -280,7 +344,10 @@ impl SyncSocket {
                     return Ok(signals);
                 }
                 if let Some(message) = &heard.ended {
-                    return Err(RelayError { status: None, message: message.clone() });
+                    return Err(RelayError {
+                        status: None,
+                        message: message.clone(),
+                    });
                 }
             }
             changed.await;
@@ -333,7 +400,9 @@ async fn read_until_end(stream: &mut SocketStream, shared: &SocketShared) -> Str
         };
         due = tokio::time::Instant::now() + SOCKET_SILENCE;
         let signal = match message {
-            Message::Text(text) => serde_json::from_str::<Value>(&text).ok().and_then(|v| v["type"].as_str().map(str::to_string)),
+            Message::Text(text) => serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v["type"].as_str().map(str::to_string)),
             // The pong has to be flushed by hand when nothing else is written. Bound the flush so
             // a stalled write ends the reader instead of hanging it (intentional Beans hardening
             // beyond upstream lorca 9277722).
@@ -363,8 +432,14 @@ fn socket_error(error: tokio_tungstenite::tungstenite::Error) -> RelayError {
     use tokio_tungstenite::tungstenite::Error;
     match error {
         // The upgrade was refused: 401 for a stale token, 410 for an unpaired machine.
-        Error::Http(response) => RelayError { status: Some(response.status().as_u16()), message: format!("sync socket refused ({})", response.status()) },
-        other => RelayError { status: None, message: format!("sync socket: {other}") },
+        Error::Http(response) => RelayError {
+            status: Some(response.status().as_u16()),
+            message: format!("sync socket refused ({})", response.status()),
+        },
+        other => RelayError {
+            status: None,
+            message: format!("sync socket: {other}"),
+        },
     }
 }
 
@@ -388,6 +463,16 @@ struct HealthEvidence<'a> {
     min_protocol: u32,
     min_roster_protocol: u32,
     memory_config_version: u32,
+}
+
+/// What a relay's auth challenge looks like: base64url, as long as a nonce is. Nothing else is
+/// signed in answer, so the challenge cannot get the machine key to sign an envelope or anything
+/// else that begins with a `/` or a NUL.
+pub fn is_challenge_nonce(nonce: &str) -> bool {
+    (16..=128).contains(&nonce.len())
+        && nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 const FILE_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -415,7 +500,10 @@ pub(crate) struct TokenContext {
 
 impl TokenCache {
     fn invalidate(&mut self) {
-        self.generation = self.generation.checked_add(1).expect("relay token generation exhausted");
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("relay token generation exhausted");
         self.namespace = None;
         self.bearer = None;
     }
@@ -431,18 +519,31 @@ impl TokenCache {
 
 impl RelayClient {
     pub fn new() -> anyhow::Result<Self> {
-        Ok(RelayClient { http: Mutex::new(Self::http_client()?), token: Mutex::new(TokenCache::default()) })
+        Ok(RelayClient {
+            http: Mutex::new(Self::http_client()?),
+            token: Mutex::new(TokenCache::default()),
+        })
     }
 
     /// The relay's own client: what it says about this build goes to the relay and never to
     /// a provider.
     fn http_client() -> anyhow::Result<reqwest::Client> {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("beans-protocol", reqwest::header::HeaderValue::from(PROTOCOL));
-        headers.insert("beans-format", reqwest::header::HeaderValue::from_static(crate::config::FORMAT));
+        headers.insert(
+            "beans-protocol",
+            reqwest::header::HeaderValue::from(PROTOCOL),
+        );
+        headers.insert(
+            "beans-format",
+            reqwest::header::HeaderValue::from_static(crate::config::FORMAT),
+        );
         Ok(beans_tls::client_builder()
             .timeout(std::time::Duration::from_secs(60))
-            .user_agent(format!("beans/{} ({})", crate::config::VERSION, std::env::consts::OS))
+            .user_agent(format!(
+                "beans/{} ({})",
+                crate::config::VERSION,
+                std::env::consts::OS
+            ))
             .default_headers(headers)
             .build()?)
     }
@@ -473,16 +574,24 @@ impl RelayClient {
         let text = response.text().await.unwrap_or_default();
         let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if !status.is_success() {
-            let message = value["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("{status}: {text}"));
-            return Err(RelayError { status: Some(status.as_u16()), message });
+            let message = value["error"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{status}: {text}"));
+            return Err(RelayError {
+                status: Some(status.as_u16()),
+                message,
+            });
         }
         Ok(value)
     }
 
     /// Validates fresh format and enforced floors before account traffic.
     pub async fn health(&self, url: &str) -> RelayResult<u32> {
-        let incompatible = || RelayError { status: Some(426), message:
-            "Relay update required: Beans v2 format, protocol 5 and compatible enforced floors are required".into() };
+        let incompatible = || {
+            RelayError { status: Some(426), message:
+            "Relay update required: Beans v2 format, protocol 5 and compatible enforced floors are required".into() }
+        };
         let response = self.http().get(format!("{url}/v1/health")).send().await?;
         if !response.status().is_success() {
             Self::check(response).await?;
@@ -491,9 +600,14 @@ impl RelayClient {
         let text = response.text().await?;
         // Struct deserialization rejects duplicate compatibility fields.
         let health: HealthEvidence<'_> = serde_json::from_str(&text).map_err(|_| incompatible())?;
-        if health.ok && health.service == "beans-relay" && health.format == crate::config::Format::BeansV2
-            && health.protocol >= PROTOCOL && health.min_protocol == PROTOCOL
-            && health.min_roster_protocol == MIN_ROSTER_PROTOCOL && health.memory_config_version == 1 {
+        if health.ok
+            && health.service == "beans-relay"
+            && health.format == crate::config::Format::BeansV2
+            && health.protocol >= PROTOCOL
+            && health.min_protocol == PROTOCOL
+            && health.min_roster_protocol == MIN_ROSTER_PROTOCOL
+            && health.memory_config_version == 1
+        {
             Ok(health.protocol)
         } else {
             Err(incompatible())
@@ -501,7 +615,13 @@ impl RelayClient {
     }
 
     /// Signed by the identity: registers the identity (idempotent) and attests one machine.
-    pub async fn register(&self, url: &str, identity: &Identity, machine_pubkey: &str, box_pubkey: &str) -> RelayResult<()> {
+    pub async fn register(
+        &self,
+        url: &str,
+        identity: &Identity,
+        machine_pubkey: &str,
+        box_pubkey: &str,
+    ) -> RelayResult<()> {
         self.health(url).await?;
         let payload = json!({
             "identity_pubkey": identity.pubkey(),
@@ -511,24 +631,52 @@ impl RelayClient {
         });
         let bytes = serde_json::to_vec(&payload).unwrap();
         let body = json!({ "payload": b64(&bytes), "signature": identity.sign(&bytes) });
-        Self::check(self.http().post(format!("{url}/v1/identities")).json(&body).send().await?).await?;
+        Self::check(
+            self.http()
+                .post(format!("{url}/v1/identities"))
+                .json(&body)
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(())
     }
 
     /// The machine behind the bearer attests another for its identity: how a Device without
     /// the identity key pairs one. Protocol 2.
-    pub async fn attest(&self, url: &str, token: &str, machine_pubkey: &str, box_pubkey: &str) -> RelayResult<()> {
+    pub async fn attest(
+        &self,
+        url: &str,
+        token: &str,
+        machine_pubkey: &str,
+        box_pubkey: &str,
+    ) -> RelayResult<()> {
         let body = json!({ "machine_pubkey": machine_pubkey, "box_pubkey": box_pubkey });
-        Self::check(self.http().post(format!("{url}/v1/machines")).bearer_auth(token).json(&body).send().await?).await?;
+        Self::check(
+            self.http()
+                .post(format!("{url}/v1/machines"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn authenticate(&self, url: &str, machine: &Machine) -> RelayResult<String> {
         let context = self.token_context(url, machine);
-        self.authenticate_for(url, machine, context.namespace, context.generation).await
+        self.authenticate_for(url, machine, context.namespace, context.generation)
+            .await
     }
 
-    async fn authenticate_for(&self, url: &str, machine: &Machine, namespace: (String, String), generation: u64) -> RelayResult<String> {
+    async fn authenticate_for(
+        &self,
+        url: &str,
+        machine: &Machine,
+        namespace: (String, String),
+        generation: u64,
+    ) -> RelayResult<String> {
         // No cache guard spans network I/O. Completion must still belong to its admission.
         self.health(url).await?;
         let challenge = Self::check(
@@ -539,7 +687,17 @@ impl RelayClient {
                 .await?,
         )
         .await?;
-        let nonce = challenge["nonce"].as_str().ok_or_else(|| RelayError { status: None, message: "no nonce".into() })?;
+        let nonce = challenge["nonce"].as_str().ok_or_else(|| RelayError {
+            status: None,
+            message: "no nonce".into(),
+        })?;
+        // The relay picks what the machine key signs here, and that key signs envelopes too.
+        if !is_challenge_nonce(nonce) {
+            return Err(RelayError {
+                status: None,
+                message: "the relay's challenge is not a nonce".into(),
+            });
+        }
         let verified = Self::check(
             self.http()
                 .post(format!("{url}/v1/auth/verify"))
@@ -552,11 +710,20 @@ impl RelayClient {
                 .await?,
         )
         .await?;
-        let token = verified["token"].as_str().ok_or_else(|| RelayError { status: None, message: "no token".into() })?.to_string();
+        let token = verified["token"]
+            .as_str()
+            .ok_or_else(|| RelayError {
+                status: None,
+                message: "no token".into(),
+            })?
+            .to_string();
         let expires_at = verified["expires_at"].as_i64().unwrap_or(now_unix() + 600);
         let mut cache = self.token.lock().unwrap();
         if cache.generation != generation || cache.namespace.as_ref() != Some(&namespace) {
-            return Err(RelayError { status: None, message: "relay authentication context changed".into() });
+            return Err(RelayError {
+                status: None,
+                message: "relay authentication context changed".into(),
+            });
         }
         cache.bearer = Some((token.clone(), expires_at));
         Ok(token)
@@ -566,16 +733,28 @@ impl RelayClient {
     pub(crate) fn token_context(&self, url: &str, machine: &Machine) -> TokenContext {
         let namespace = (url.to_owned(), machine.pubkey());
         let generation = self.token.lock().unwrap().select(&namespace);
-        TokenContext { namespace, generation }
+        TokenContext {
+            namespace,
+            generation,
+        }
     }
 
     /// Uses an existing admission without selecting (or reviving) its namespace.
-    pub(crate) async fn token_for_context(&self, context: &TokenContext, machine: &Machine) -> RelayResult<String> {
+    pub(crate) async fn token_for_context(
+        &self,
+        context: &TokenContext,
+        machine: &Machine,
+    ) -> RelayResult<String> {
         {
             let cache = self.token.lock().unwrap();
-            if cache.generation != context.generation || cache.namespace.as_ref() != Some(&context.namespace)
-                || machine.pubkey() != context.namespace.1 {
-                return Err(RelayError { status: None, message: "relay authentication context changed".into() });
+            if cache.generation != context.generation
+                || cache.namespace.as_ref() != Some(&context.namespace)
+                || machine.pubkey() != context.namespace.1
+            {
+                return Err(RelayError {
+                    status: None,
+                    message: "relay authentication context changed".into(),
+                });
             }
             if let Some((token, expires_at)) = &cache.bearer {
                 if expires_at.saturating_sub(60) > now_unix() {
@@ -583,7 +762,13 @@ impl RelayClient {
                 }
             }
         }
-        self.authenticate_for(&context.namespace.0, machine, context.namespace.clone(), context.generation).await
+        self.authenticate_for(
+            &context.namespace.0,
+            machine,
+            context.namespace.clone(),
+            context.generation,
+        )
+        .await
     }
 
     pub async fn token(&self, url: &str, machine: &Machine) -> RelayResult<String> {
@@ -591,9 +776,17 @@ impl RelayClient {
         self.token_for_context(&context, machine).await
     }
 
-    pub async fn put_blob(&self, url: &str, token: &str, item: crate::app::OutboxItem, expected_slot_seq: i64) -> RelayResult<i64> {
+    pub async fn put_blob(
+        &self,
+        url: &str,
+        token: &str,
+        item: crate::app::OutboxItem,
+        expected_slot_seq: i64,
+    ) -> RelayResult<i64> {
         if item.kind == "file" {
-            let mut request = self.http().put(format!("{url}/v1/files/{}", item.id))
+            let mut request = self
+                .http()
+                .put(format!("{url}/v1/files/{}", item.id))
                 .bearer_auth(token)
                 .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
                 .timeout(FILE_TRANSFER_TIMEOUT);
@@ -635,20 +828,38 @@ impl RelayClient {
             None => format!("ws://{url}/v1/sync"),
         };
         let mut request = address.into_client_request().map_err(socket_error)?;
-        let bearer = format!("Bearer {token}").parse().map_err(|_| RelayError { status: None, message: "token is not a header value".into() })?;
+        let bearer = format!("Bearer {token}").parse().map_err(|_| RelayError {
+            status: None,
+            message: "token is not a header value".into(),
+        })?;
         request.headers_mut().insert("authorization", bearer);
-        request.headers_mut().insert("beans-protocol", PROTOCOL.into());
-        request.headers_mut().insert("beans-format", crate::config::FORMAT.parse().expect("Beans format header"));
+        request
+            .headers_mut()
+            .insert("beans-protocol", PROTOCOL.into());
+        request.headers_mut().insert(
+            "beans-format",
+            crate::config::FORMAT.parse().expect("Beans format header"),
+        );
         let connector = tokio_tungstenite::Connector::Rustls(tls());
-        let connect = tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector));
+        let connect =
+            tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector));
         let (stream, _) = tokio::time::timeout(std::time::Duration::from_secs(20), connect)
             .await
-            .map_err(|_| RelayError { status: None, message: "the sync socket timed out connecting".into() })?
+            .map_err(|_| RelayError {
+                status: None,
+                message: "the sync socket timed out connecting".into(),
+            })?
             .map_err(socket_error)?;
         Ok(SyncSocket::start(stream))
     }
 
-    pub async fn list_blobs(&self, url: &str, token: &str, since: i64, kinds: &str) -> RelayResult<(Vec<BlobIn>, i64)> {
+    pub async fn list_blobs(
+        &self,
+        url: &str,
+        token: &str,
+        since: i64,
+        kinds: &str,
+    ) -> RelayResult<(Vec<BlobIn>, i64)> {
         let value = Self::check(
             self.http()
                 .get(format!("{url}/v1/blobs"))
@@ -664,7 +875,12 @@ impl RelayClient {
     }
 
     /// Inspects opaque commitments only. Completion never supplies activation authority.
-    pub(crate) async fn inspect_policy_replay(&self, url: &str, token: &str, account: &str) -> RelayResult<PolicyInspection> {
+    pub(crate) async fn inspect_policy_replay(
+        &self,
+        url: &str,
+        token: &str,
+        account: &str,
+    ) -> RelayResult<PolicyInspection> {
         let mut cursor = 0;
         let mut cut: Option<(String, String, i64)> = None;
         let mut blob_ids = std::collections::HashSet::new();
@@ -672,81 +888,160 @@ impl RelayClient {
         let mut bytes = 0usize;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
         for _ in 0..65_537 {
-            let mut query = vec![("policy_replay", "1".to_string()), ("since", cursor.to_string()), ("kinds", "policy".to_string())];
+            let mut query = vec![
+                ("policy_replay", "1".to_string()),
+                ("since", cursor.to_string()),
+                ("kinds", "policy".to_string()),
+            ];
             if let Some((context, token, through)) = &cut {
-                query.extend([("context", context.clone()), ("cut_token", token.clone()), ("through", through.to_string())]);
+                query.extend([
+                    ("context", context.clone()),
+                    ("cut_token", token.clone()),
+                    ("through", through.to_string()),
+                ]);
             }
-            let page: Result<PolicyCut, PolicyInspection> = tokio::time::timeout_at(deadline, async {
-                let response = self.http().get(format!("{url}/v1/blobs")).bearer_auth(token).query(&query)
-                    .timeout(std::time::Duration::from_secs(60)).send().await?;
-                let bytes = Self::policy_response_bytes(response).await?;
-                if cut.is_none() {
-                    if let Ok(legacy) = serde_json::from_slice::<LegacyPolicyPage>(&bytes) {
-                        legacy.validate()?;
-                        return Ok(Err(PolicyInspection::LegacyTransport));
+            let page: Result<PolicyCut, PolicyInspection> =
+                tokio::time::timeout_at(deadline, async {
+                    let response = self
+                        .http()
+                        .get(format!("{url}/v1/blobs"))
+                        .bearer_auth(token)
+                        .query(&query)
+                        .timeout(std::time::Duration::from_secs(60))
+                        .send()
+                        .await?;
+                    let bytes = Self::policy_response_bytes(response).await?;
+                    if cut.is_none() {
+                        if let Ok(legacy) = serde_json::from_slice::<LegacyPolicyPage>(&bytes) {
+                            legacy.validate()?;
+                            return Ok(Err(PolicyInspection::LegacyTransport));
+                        }
                     }
-                }
-                serde_json::from_slice::<PolicyCut>(&bytes).map(Ok).map_err(|_| invalid_policy_replay())
-            }).await.map_err(|_| invalid_policy_replay())??;
+                    serde_json::from_slice::<PolicyCut>(&bytes)
+                        .map(Ok)
+                        .map_err(|_| invalid_policy_replay())
+                })
+                .await
+                .map_err(|_| invalid_policy_replay())??;
             let page = match page {
                 Ok(page) => page,
                 Err(outcome) => return Ok(outcome),
             };
-            if page.schema_version != 1 || !policy_identifier(&page.context, 1024)
-                || !policy_identifier(&page.cut_token, 4096) || page.through < cursor
-                || page.blobs.len() > 1 || (!page.done && page.blobs.is_empty())
-                || cut.as_ref().is_some_and(|(context, _, through)| context != &page.context || *through != page.through)
-            { return Err(invalid_policy_replay()); }
+            if page.schema_version != 1
+                || !policy_identifier(&page.context, 1024)
+                || !policy_identifier(&page.cut_token, 4096)
+                || page.through < cursor
+                || page.blobs.len() > 1
+                || (!page.done && page.blobs.is_empty())
+                || cut.as_ref().is_some_and(|(context, _, through)| {
+                    context != &page.context || *through != page.through
+                })
+            {
+                return Err(invalid_policy_replay());
+            }
             let mut last = cursor;
             for blob in page.blobs {
                 let (seq, end, size) = match blob {
-                    PolicyCutBlob::Ordinary { id, seq, ciphertext } => {
-                        if !policy_blob_id(&id) || !blob_ids.insert(id) || ciphertext.is_empty() || ciphertext.len() > 4 * 1024 * 1024 {
+                    PolicyCutBlob::Ordinary {
+                        id,
+                        seq,
+                        ciphertext,
+                    } => {
+                        if !policy_blob_id(&id)
+                            || !blob_ids.insert(id)
+                            || ciphertext.is_empty()
+                            || ciphertext.len() > 4 * 1024 * 1024
+                        {
                             return Err(invalid_policy_replay());
                         }
                         (seq, seq, ciphertext.len())
                     }
-                    PolicyCutBlob::Managed { receipt, policy_ciphertext, roster_ciphertext } => {
+                    PolicyCutBlob::Managed {
+                        receipt,
+                        policy_ciphertext,
+                        roster_ciphertext,
+                    } => {
                         receipt.validate(account, &policy_ciphertext, &roster_ciphertext)?;
-                        if !transactions.insert(receipt.transaction_id.clone()) || !blob_ids.insert(receipt.policy_id.clone())
-                            || !blob_ids.insert(receipt.roster_id.clone()) { return Err(invalid_policy_replay()); }
-                        let response = self.http().get(format!("{url}/v1/blobs")).bearer_auth(token)
-                            .query(&[("policy_replay", "1"), ("receipt_transaction_id", receipt.transaction_id.as_str())])
-                            .timeout(std::time::Duration::from_secs(60)).send();
+                        if !transactions.insert(receipt.transaction_id.clone())
+                            || !blob_ids.insert(receipt.policy_id.clone())
+                            || !blob_ids.insert(receipt.roster_id.clone())
+                        {
+                            return Err(invalid_policy_replay());
+                        }
+                        let response = self
+                            .http()
+                            .get(format!("{url}/v1/blobs"))
+                            .bearer_auth(token)
+                            .query(&[
+                                ("policy_replay", "1"),
+                                ("receipt_transaction_id", receipt.transaction_id.as_str()),
+                            ])
+                            .timeout(std::time::Duration::from_secs(60))
+                            .send();
                         let found: PolicyReceipt = tokio::time::timeout_at(deadline, async {
                             Self::policy_response(response.await?).await
-                        }).await.map_err(|_| invalid_policy_replay())??;
-                        if found != receipt { return Err(invalid_policy_replay()); }
-                        (receipt.policy_seq, receipt.roster_seq, policy_ciphertext.len())
+                        })
+                        .await
+                        .map_err(|_| invalid_policy_replay())??;
+                        if found != receipt {
+                            return Err(invalid_policy_replay());
+                        }
+                        (
+                            receipt.policy_seq,
+                            receipt.roster_seq,
+                            policy_ciphertext.len(),
+                        )
                     }
                 };
-                if seq <= last || end > page.through { return Err(invalid_policy_replay()); }
+                if seq <= last || end > page.through {
+                    return Err(invalid_policy_replay());
+                }
                 last = end;
                 bytes = bytes.checked_add(size).ok_or_else(invalid_policy_replay)?;
-                if bytes > 1024 * 1024 * 1024 || blob_ids.len() > 1_048_576 { return Err(invalid_policy_replay()); }
+                if bytes > 1024 * 1024 * 1024 || blob_ids.len() > 1_048_576 {
+                    return Err(invalid_policy_replay());
+                }
             }
             if page.next_since != if page.done { page.through } else { last }
-                || (!page.done && page.next_since <= cursor) { return Err(invalid_policy_replay()); }
-            if page.done { return Ok(PolicyInspection::CompleteOpaqueCut); }
+                || (!page.done && page.next_since <= cursor)
+            {
+                return Err(invalid_policy_replay());
+            }
+            if page.done {
+                return Ok(PolicyInspection::CompleteOpaqueCut);
+            }
             cursor = page.next_since;
             cut = Some((page.context, page.cut_token, page.through));
         }
         Err(invalid_policy_replay())
     }
 
-    async fn policy_response<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> RelayResult<T> {
-        serde_json::from_slice(&Self::policy_response_bytes(response).await?).map_err(|_| invalid_policy_replay())
+    async fn policy_response<T: serde::de::DeserializeOwned>(
+        response: reqwest::Response,
+    ) -> RelayResult<T> {
+        serde_json::from_slice(&Self::policy_response_bytes(response).await?)
+            .map_err(|_| invalid_policy_replay())
     }
 
     async fn policy_response_bytes(mut response: reqwest::Response) -> RelayResult<Vec<u8>> {
         let status = response.status();
         if !status.is_success() {
-            return Err(RelayError { status: Some(status.as_u16()), message: "Managed policy replay refused".into() });
+            return Err(RelayError {
+                status: Some(status.as_u16()),
+                message: "Managed policy replay refused".into(),
+            });
         }
-        if response.content_length().is_some_and(|size| size > POLICY_PAGE_BYTES as u64) { return Err(invalid_policy_replay()); }
+        if response
+            .content_length()
+            .is_some_and(|size| size > POLICY_PAGE_BYTES as u64)
+        {
+            return Err(invalid_policy_replay());
+        }
         let mut bytes = Vec::new();
         while let Some(chunk) = response.chunk().await? {
-            if chunk.len() > POLICY_PAGE_BYTES - bytes.len() { return Err(invalid_policy_replay()); }
+            if chunk.len() > POLICY_PAGE_BYTES - bytes.len() {
+                return Err(invalid_policy_replay());
+            }
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
@@ -754,22 +1049,44 @@ impl RelayClient {
 
     /// A chat backwards: the `limit` messages placed below `before` (the newest without it),
     /// oldest first, and whether older ones remain.
-    pub async fn group_page(&self, url: &str, token: &str, group: &str, before: Option<i64>, limit: usize) -> RelayResult<(Vec<GroupSlot>, bool)> {
+    pub async fn group_page(
+        &self,
+        url: &str,
+        token: &str,
+        group: &str,
+        before: Option<i64>,
+        limit: usize,
+    ) -> RelayResult<(Vec<GroupSlot>, bool)> {
         let mut query = vec![("limit", limit.to_string())];
         if let Some(before) = before {
             query.push(("before", before.to_string()));
         }
         let value = Self::check(
-            self.http().get(format!("{url}/v1/groups/{group}/blobs")).bearer_auth(token).query(&query).timeout(std::time::Duration::from_secs(60)).send().await?,
+            self.http()
+                .get(format!("{url}/v1/groups/{group}/blobs"))
+                .bearer_auth(token)
+                .query(&query)
+                .timeout(std::time::Duration::from_secs(60))
+                .send()
+                .await?,
         )
         .await?;
-        let slots = serde_json::from_value(value["slots"].clone()).map_err(|e| RelayError { status: None, message: format!("group page: {e}") })?;
+        let slots = serde_json::from_value(value["slots"].clone()).map_err(|e| RelayError {
+            status: None,
+            message: format!("group page: {e}"),
+        })?;
         Ok((slots, value["has_more"].as_bool().unwrap_or(false)))
     }
 
     /// An attachment's encrypted bytes; `None` when it is no longer stored for this identity.
     pub async fn get_file(&self, url: &str, token: &str, id: &str) -> RelayResult<Option<Vec<u8>>> {
-        let mut response = self.http().get(format!("{url}/v1/files/{id}")).bearer_auth(token).timeout(FILE_TRANSFER_TIMEOUT).send().await?;
+        let mut response = self
+            .http()
+            .get(format!("{url}/v1/files/{id}"))
+            .bearer_auth(token)
+            .timeout(FILE_TRANSFER_TIMEOUT)
+            .send()
+            .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -777,12 +1094,26 @@ impl RelayClient {
             Self::check(response).await?;
             unreachable!();
         }
-        if response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()) != Some("application/octet-stream") {
-            return Err(RelayError { status: None, message: "Relay returned an invalid attachment content type".into() });
+        if response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            != Some("application/octet-stream")
+        {
+            return Err(RelayError {
+                status: None,
+                message: "Relay returned an invalid attachment content type".into(),
+            });
         }
         let max = crate::files::MAX_ATTACHMENT_BYTES as usize + crate::crypto::ENVELOPE_OVERHEAD;
-        let too_large = || RelayError { status: None, message: "Relay attachment exceeds the file size limit".into() };
-        if response.content_length().is_some_and(|size| size > max as u64) {
+        let too_large = || RelayError {
+            status: None,
+            message: "Relay attachment exceeds the file size limit".into(),
+        };
+        if response
+            .content_length()
+            .is_some_and(|size| size > max as u64)
+        {
             return Err(too_large());
         }
         let mut bytes = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
@@ -796,26 +1127,213 @@ impl RelayClient {
     }
 
     pub async fn delete_blob(&self, url: &str, token: &str, id: &str) -> RelayResult<()> {
-        Self::check(self.http().delete(format!("{url}/v1/blobs/{id}")).bearer_auth(token).send().await?).await?;
+        Self::check(
+            self.http()
+                .delete(format!("{url}/v1/blobs/{id}"))
+                .bearer_auth(token)
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(())
     }
 
     /// Deletes every blob of a group. Good to repeat.
     pub async fn delete_group(&self, url: &str, token: &str, group: &str) -> RelayResult<()> {
-        Self::check(self.http().delete(format!("{url}/v1/groups/{group}")).bearer_auth(token).send().await?).await?;
+        Self::check(
+            self.http()
+                .delete(format!("{url}/v1/groups/{group}"))
+                .bearer_auth(token)
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(())
     }
 
+    // MARK: - Shared links
+
+    /// Puts a shared link's ciphertext under `id`, replacing what the id held.
+    pub async fn put_share(
+        &self,
+        url: &str,
+        token: &str,
+        id: &str,
+        ciphertext: Vec<u8>,
+    ) -> RelayResult<()> {
+        let request = self
+            .http()
+            .put(format!("{url}/v1/shares/{id}"))
+            .bearer_auth(token);
+        Self::check(
+            request
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(ciphertext)
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// A shared link's ciphertext, which anyone may read; `None` when the relay holds nothing
+    /// under `id`.
+    pub async fn get_share(&self, url: &str, id: &str) -> RelayResult<Option<Vec<u8>>> {
+        let mut response = self
+            .http()
+            .get(format!("{url}/v1/shares/{id}"))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let error = Self::check(response)
+                .await
+                .err()
+                .unwrap_or_else(|| RelayError {
+                    status: None,
+                    message: "Unexpected answer".into(),
+                });
+            // A relay older than shared links has no such route and says so without a word.
+            return if error.status == Some(404) && error.message == "No such link" {
+                Ok(None)
+            } else {
+                Err(error)
+            };
+        }
+        let max = crate::templates::format::MAX_BYTES + crate::crypto::ENVELOPE_OVERHEAD;
+        let too_large = || RelayError {
+            status: None,
+            message: "The shared link is larger than a template".into(),
+        };
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if chunk.len() > max - bytes.len() {
+                return Err(too_large());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(Some(bytes))
+    }
+
+    pub async fn delete_share(&self, url: &str, token: &str, id: &str) -> RelayResult<()> {
+        Self::check(
+            self.http()
+                .delete(format!("{url}/v1/shares/{id}"))
+                .bearer_auth(token)
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The link a user follows to set a receiver up for this account: where the GitHub App
+    /// installs, or where they authorize it when it is installed on `subject`'s repository. A
+    /// relay without the receiver answers 404.
+    pub async fn receiver_setup(
+        &self,
+        url: &str,
+        token: &str,
+        receiver: &str,
+        subject: Option<&str>,
+    ) -> RelayResult<Value> {
+        Self::check(
+            self.http()
+                .post(format!("{url}/v1/receivers/{receiver}/setup"))
+                .bearer_auth(token)
+                .json(&json!({ "subject": subject }))
+                .send()
+                .await?,
+        )
+        .await
+    }
+
+    /// Asks a receiver to seal its events about `subject` to this machine under a subscription's
+    /// secret. Answers `status`: `subscribed`, `needs_setup` (with `setup_url`), or `refused`
+    /// (with `message`). A relay without the receiver answers 404.
+    pub async fn receiver_subscribe(
+        &self,
+        url: &str,
+        token: &str,
+        receiver: &str,
+        body: &Value,
+    ) -> RelayResult<Value> {
+        Self::check(
+            self.http()
+                .post(format!("{url}/v1/receivers/{receiver}/subscriptions"))
+                .bearer_auth(token)
+                .json(body)
+                .send()
+                .await?,
+        )
+        .await
+    }
+
+    /// Replaces the hash of the key a receiver's senders include.
+    pub async fn receiver_key(
+        &self,
+        url: &str,
+        token: &str,
+        receiver: &str,
+        id: &str,
+        key_hash: &str,
+    ) -> RelayResult<()> {
+        Self::check(
+            self.http()
+                .post(format!(
+                    "{url}/v1/receivers/{receiver}/subscriptions/{id}/key"
+                ))
+                .bearer_auth(token)
+                .json(&json!({ "key_hash": key_hash }))
+                .send()
+                .await?,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn receiver_unsubscribe(
+        &self,
+        url: &str,
+        token: &str,
+        receiver: &str,
+        id: &str,
+    ) -> RelayResult<()> {
+        Self::check(
+            self.http()
+                .delete(format!("{url}/v1/receivers/{receiver}/subscriptions/{id}"))
+                .bearer_auth(token)
+                .send()
+                .await?,
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn machines(&self, url: &str, token: &str) -> RelayResult<(Vec<MachineIn>, i64)> {
-        let value = Self::check(self.http().get(format!("{url}/v1/machines")).bearer_auth(token).send().await?).await?;
-        let machines: Vec<MachineIn> = serde_json::from_value(value["machines"].clone()).unwrap_or_default();
+        let value = Self::check(
+            self.http()
+                .get(format!("{url}/v1/machines"))
+                .bearer_auth(token)
+                .send()
+                .await?,
+        )
+        .await?;
+        let machines: Vec<MachineIn> =
+            serde_json::from_value(value["machines"].clone()).unwrap_or_default();
         Ok((machines, value["now"].as_i64().unwrap_or(now_unix())))
     }
 
     // MARK: - Push
 
     /// Where this phone takes pushes: its APNs or FCM device token.
-    pub async fn put_push_token(&self, url: &str, token: &str, platform: &str, device_token: &str, environment: Option<&str>) -> RelayResult<()> {
+    pub async fn put_push_token(
+        &self,
+        url: &str,
+        token: &str,
+        platform: &str,
+        device_token: &str,
+        environment: Option<&str>,
+    ) -> RelayResult<()> {
         Self::check(
             self.http()
                 .put(format!("{url}/v1/push/token"))
@@ -829,36 +1347,82 @@ impl RelayClient {
     }
 
     pub async fn delete_push_token(&self, url: &str, token: &str) -> RelayResult<()> {
-        Self::check(self.http().delete(format!("{url}/v1/push/token")).bearer_auth(token).send().await?).await?;
+        Self::check(
+            self.http()
+                .delete(format!("{url}/v1/push/token"))
+                .bearer_auth(token)
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(())
     }
 
     /// Asks the relay to push this ciphertext to the identity's phones; answers how many it queued.
     pub async fn push(&self, url: &str, token: &str, ciphertext_b64: &str) -> RelayResult<u64> {
-        let value = Self::check(self.http().post(format!("{url}/v1/push")).bearer_auth(token).json(&json!({ "ciphertext": ciphertext_b64 })).send().await?).await?;
+        let value = Self::check(
+            self.http()
+                .post(format!("{url}/v1/push"))
+                .bearer_auth(token)
+                .json(&json!({ "ciphertext": ciphertext_b64 }))
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(value["queued"].as_u64().unwrap_or(0))
     }
 
     // MARK: - Pairing mailbox
 
     /// Unpairs a machine of this identity, this one included.
-    pub async fn revoke_machine(&self, url: &str, token: &str, machine_pubkey: &str) -> RelayResult<()> {
-        Self::check(self.http().delete(format!("{url}/v1/machines/{machine_pubkey}")).bearer_auth(token).send().await?).await?;
+    pub async fn revoke_machine(
+        &self,
+        url: &str,
+        token: &str,
+        machine_pubkey: &str,
+    ) -> RelayResult<()> {
+        Self::check(
+            self.http()
+                .delete(format!("{url}/v1/machines/{machine_pubkey}"))
+                .bearer_auth(token)
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(())
     }
 
     /// Deletes the identity and everything the relay holds for it; every Device gets `410`.
     pub async fn delete_identity(&self, url: &str, token: &str) -> RelayResult<()> {
-        Self::check(self.http().delete(format!("{url}/v1/identity")).bearer_auth(token).send().await?).await?;
+        Self::check(
+            self.http()
+                .delete(format!("{url}/v1/identity"))
+                .bearer_auth(token)
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn pair_create(&self, url: &str, token: &str) -> RelayResult<String> {
-        let value = Self::check(self.http().post(format!("{url}/v1/pair")).bearer_auth(token).send().await?).await?;
+        let value = Self::check(
+            self.http()
+                .post(format!("{url}/v1/pair"))
+                .bearer_auth(token)
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(value["nonce"].as_str().unwrap_or_default().to_string())
     }
 
-    pub async fn pair_post_request(&self, url: &str, nonce: &str, ciphertext: &[u8]) -> RelayResult<()> {
+    pub async fn pair_post_request(
+        &self,
+        url: &str,
+        nonce: &str,
+        ciphertext: &[u8],
+    ) -> RelayResult<()> {
         Self::check(
             self.http()
                 .post(format!("{url}/v1/pair/{nonce}/request"))
@@ -870,12 +1434,30 @@ impl RelayClient {
         Ok(())
     }
 
-    pub async fn pair_get_request(&self, url: &str, token: &str, nonce: &str) -> RelayResult<Option<Vec<u8>>> {
-        let value = Self::check(self.http().get(format!("{url}/v1/pair/{nonce}/request")).bearer_auth(token).send().await?).await?;
+    pub async fn pair_get_request(
+        &self,
+        url: &str,
+        token: &str,
+        nonce: &str,
+    ) -> RelayResult<Option<Vec<u8>>> {
+        let value = Self::check(
+            self.http()
+                .get(format!("{url}/v1/pair/{nonce}/request"))
+                .bearer_auth(token)
+                .send()
+                .await?,
+        )
+        .await?;
         decode_optional(&value)
     }
 
-    pub async fn pair_post_reply(&self, url: &str, token: &str, nonce: &str, ciphertext: &[u8]) -> RelayResult<()> {
+    pub async fn pair_post_reply(
+        &self,
+        url: &str,
+        token: &str,
+        nonce: &str,
+        ciphertext: &[u8],
+    ) -> RelayResult<()> {
         Self::check(
             self.http()
                 .post(format!("{url}/v1/pair/{nonce}/reply"))
@@ -890,21 +1472,35 @@ impl RelayClient {
 
     /// The identity retires a pairing: the mailbox goes and a Device polling it gets a 404.
     pub async fn pair_delete(&self, url: &str, token: &str, nonce: &str) -> RelayResult<()> {
-        Self::check(self.http().delete(format!("{url}/v1/pair/{nonce}")).bearer_auth(token).send().await?).await?;
+        Self::check(
+            self.http()
+                .delete(format!("{url}/v1/pair/{nonce}"))
+                .bearer_auth(token)
+                .send()
+                .await?,
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn pair_get_reply(&self, url: &str, nonce: &str) -> RelayResult<Option<Vec<u8>>> {
-        let value = Self::check(self.http().get(format!("{url}/v1/pair/{nonce}/reply")).send().await?).await?;
+        let value = Self::check(
+            self.http()
+                .get(format!("{url}/v1/pair/{nonce}/reply"))
+                .send()
+                .await?,
+        )
+        .await?;
         decode_optional(&value)
     }
 }
 
 fn decode_optional(value: &Value) -> RelayResult<Option<Vec<u8>>> {
     match value["ciphertext"].as_str() {
-        Some(text) => crate::keys::unb64(text)
-            .map(Some)
-            .map_err(|e| RelayError { status: None, message: format!("bad ciphertext: {e}") }),
+        Some(text) => crate::keys::unb64(text).map(Some).map_err(|e| RelayError {
+            status: None,
+            message: format!("bad ciphertext: {e}"),
+        }),
         None => Ok(None),
     }
 }
@@ -957,12 +1553,21 @@ mod tests {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
             for _ in 0..2000 {
-                socket.send(Message::Text(r#"{"type":"blobs"}"#.into())).await.unwrap();
+                socket
+                    .send(Message::Text(r#"{"type":"blobs"}"#.into()))
+                    .await
+                    .unwrap();
             }
-            socket.send(Message::Text(r#"{"type":"machines"}"#.into())).await.unwrap();
+            socket
+                .send(Message::Text(r#"{"type":"machines"}"#.into()))
+                .await
+                .unwrap();
             // Flush before the ping so a slow Windows peer has the flood before the control frame.
             socket.flush().await.unwrap();
-            socket.send(Message::Ping(Default::default())).await.unwrap();
+            socket
+                .send(Message::Ping(Default::default()))
+                .await
+                .unwrap();
             let mut ponged = false;
             let mut probed = false;
             let waited = tokio::time::timeout(std::time::Duration::from_secs(15), async {
@@ -979,18 +1584,34 @@ mod tests {
                 }
             })
             .await;
-            assert!(waited.is_ok() && ponged && probed, "pong {ponged}, probe {probed}");
+            assert!(
+                waited.is_ok() && ponged && probed,
+                "pong {ponged}, probe {probed}"
+            );
             socket.close(None).await.unwrap();
         });
 
-        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync")).await.unwrap();
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync"))
+            .await
+            .unwrap();
         let mut socket = SyncSocket::start(stream);
         // The round is busy and reads no signal until the relay has said all it had to.
         wait_until_machines_heard(&socket).await;
         socket.probe();
-        assert_eq!(socket.next().await.unwrap(), Signals { blobs: true, machines: true });
+        assert_eq!(
+            socket.next().await.unwrap(),
+            Signals {
+                blobs: true,
+                machines: true
+            }
+        );
         relay.await.unwrap();
-        assert!(tokio::time::timeout(std::time::Duration::from_secs(15), socket.next()).await.unwrap().is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(15), socket.next())
+                .await
+                .unwrap()
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1000,9 +1621,13 @@ mod tests {
         let relay = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut stream = tokio_tungstenite::accept_async(tcp).await.unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()).await.unwrap()
+            tokio::time::timeout(std::time::Duration::from_secs(15), stream.next())
+                .await
+                .unwrap()
         });
-        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync")).await.unwrap();
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync"))
+            .await
+            .unwrap();
         let socket = SyncSocket::start(stream);
         drop(socket);
         assert!(!matches!(relay.await.unwrap(), Some(Ok(_))));
@@ -1020,19 +1645,41 @@ mod tests {
         let relay = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let callback = |request: &Request, response: Response| {
-                let protocol = request.headers().get("beans-protocol").and_then(|v| v.to_str().ok()).map(str::to_string);
-                let format = request.headers().get("beans-format").and_then(|v| v.to_str().ok()).map(str::to_string);
+                let protocol = request
+                    .headers()
+                    .get("beans-protocol")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                let format = request
+                    .headers()
+                    .get("beans-format")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
                 *relay_seen.lock().unwrap() = (protocol, format);
                 Ok(response)
             };
-            let mut socket = tokio_tungstenite::accept_hdr_async(tcp, callback).await.unwrap();
-            socket.send(Message::Text(r#"{"type":"blobs"}"#.into())).await.unwrap();
+            let mut socket = tokio_tungstenite::accept_hdr_async(tcp, callback)
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(r#"{"type":"blobs"}"#.into()))
+                .await
+                .unwrap();
             socket.close(None).await.unwrap();
         });
 
         let client = RelayClient::new().unwrap();
-        let mut socket = client.sync_socket(&format!("http://{address}"), "test-token").await.expect("sync_socket opens");
-        assert_eq!(socket.next().await.unwrap(), Signals { blobs: true, machines: false });
+        let mut socket = client
+            .sync_socket(&format!("http://{address}"), "test-token")
+            .await
+            .expect("sync_socket opens");
+        assert_eq!(
+            socket.next().await.unwrap(),
+            Signals {
+                blobs: true,
+                machines: false
+            }
+        );
         relay.await.unwrap();
         let (protocol, format) = seen.lock().unwrap().clone();
         assert_eq!(protocol.as_deref(), Some("5"));
@@ -1047,7 +1694,10 @@ mod tests {
 
     impl OldSyncSocket {
         fn start(stream: SocketStream) -> Self {
-            Self { stream, due: tokio::time::Instant::now() + SOCKET_SILENCE }
+            Self {
+                stream,
+                due: tokio::time::Instant::now() + SOCKET_SILENCE,
+            }
         }
 
         async fn next(&mut self) -> RelayResult<&'static str> {
@@ -1055,19 +1705,32 @@ mod tests {
             loop {
                 let message = tokio::time::timeout_at(self.due, self.stream.next())
                     .await
-                    .map_err(|_| RelayError { status: None, message: "the sync socket went silent".into() })?
-                    .ok_or_else(|| RelayError { status: None, message: "the relay closed the sync socket".into() })?
+                    .map_err(|_| RelayError {
+                        status: None,
+                        message: "the sync socket went silent".into(),
+                    })?
+                    .ok_or_else(|| RelayError {
+                        status: None,
+                        message: "the relay closed the sync socket".into(),
+                    })?
                     .map_err(socket_error)?;
                 self.due = tokio::time::Instant::now() + SOCKET_SILENCE;
                 match message {
-                    Message::Text(text) => match serde_json::from_str::<Value>(&text).ok().as_ref().and_then(|v| v["type"].as_str()) {
+                    Message::Text(text) => match serde_json::from_str::<Value>(&text)
+                        .ok()
+                        .as_ref()
+                        .and_then(|v| v["type"].as_str())
+                    {
                         Some("blobs") => return Ok("blobs"),
                         Some("machines") => return Ok("machines"),
                         _ => {}
                     },
                     Message::Ping(_) => self.stream.flush().await.map_err(socket_error)?,
                     Message::Close(_) => {
-                        return Err(RelayError { status: None, message: "the relay closed the sync socket".into() })
+                        return Err(RelayError {
+                            status: None,
+                            message: "the relay closed the sync socket".into(),
+                        })
                     }
                     _ => {}
                 }
@@ -1085,10 +1748,19 @@ mod tests {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
             // Main behavior: a write signals every socket of the identity, writer included.
-            socket.send(Message::Text(r#"{"type":"blobs"}"#.into())).await.unwrap();
-            socket.send(Message::Text(r#"{"type":"machines"}"#.into())).await.unwrap();
+            socket
+                .send(Message::Text(r#"{"type":"blobs"}"#.into()))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(r#"{"type":"machines"}"#.into()))
+                .await
+                .unwrap();
             socket.flush().await.unwrap();
-            socket.send(Message::Ping(Default::default())).await.unwrap();
+            socket
+                .send(Message::Ping(Default::default()))
+                .await
+                .unwrap();
             let pong = tokio::time::timeout(std::time::Duration::from_secs(15), async {
                 while let Some(Ok(message)) = socket.next().await {
                     if matches!(message, Message::Pong(_)) {
@@ -1103,11 +1775,19 @@ mod tests {
             socket.close(None).await.unwrap();
         });
 
-        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync")).await.unwrap();
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync"))
+            .await
+            .unwrap();
         let mut socket = SyncSocket::start(stream);
         // `next` returns as soon as any flag is set, so blobs and machines may land across
         // separate calls on a loaded runner. Fold until both are seen.
-        assert_eq!(take_until_both(&mut socket).await, Signals { blobs: true, machines: true });
+        assert_eq!(
+            take_until_both(&mut socket).await,
+            Signals {
+                blobs: true,
+                machines: true
+            }
+        );
         relay.await.unwrap();
     }
 
@@ -1119,12 +1799,20 @@ mod tests {
         let relay = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
-            socket.send(Message::Text(r#"{"type":"blobs"}"#.into())).await.unwrap();
-            socket.send(Message::Text(r#"{"type":"machines"}"#.into())).await.unwrap();
+            socket
+                .send(Message::Text(r#"{"type":"blobs"}"#.into()))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(r#"{"type":"machines"}"#.into()))
+                .await
+                .unwrap();
             socket.close(None).await.unwrap();
         });
 
-        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync")).await.unwrap();
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync"))
+            .await
+            .unwrap();
         let mut socket = OldSyncSocket::start(stream);
         assert_eq!(socket.next().await.unwrap(), "blobs");
         assert_eq!(socket.next().await.unwrap(), "machines");

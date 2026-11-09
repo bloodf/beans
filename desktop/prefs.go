@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 
+	"github.com/bloodf/beans/desktop/l10n"
 	"github.com/egoist/mygo"
 )
 
@@ -18,6 +20,10 @@ type Preferences struct {
 	// at once when it did, and otherwise waits for the answer, so a fresh install goes straight
 	// to onboarding.
 	HadIdentity bool `json:"hadIdentity"`
+	// UnfinishedOnboarding is where onboarding for an identity created here stopped short of its
+	// last step: "phrase" before the backup phrase was saved, "setup" before the first bot and
+	// the provider. A launch with an identity opens onboarding there instead of the main window.
+	UnfinishedOnboarding string `json:"unfinishedOnboarding,omitempty"`
 	// Selection is the chat the main window showed last ("chat:<id>"), so a relaunch lands back
 	// on it rather than on a settings pane.
 	Selection      string `json:"selection"`
@@ -36,27 +42,31 @@ type Preferences struct {
 	SidebarWidth     int  `json:"sidebarWidth"`
 	InspectorWidth   int  `json:"inspectorWidth"`
 	SidebarCollapsed bool `json:"sidebarCollapsed"`
+	// ShowsHiddenChats is the sidebar's Hidden group open; it starts folded. CollapsesOtherChats
+	// folds the group of chats in no section. Sections fold on every Device through the roster;
+	// these two fold on this computer alone.
+	ShowsHiddenChats    bool `json:"showsHiddenChats"`
+	CollapsesOtherChats bool `json:"collapsesOtherChats"`
 }
 
 // PreferencesPatch changes the preferences it names.
 type PreferencesPatch struct {
-	HadIdentity      *bool   `json:"hadIdentity,omitempty"`
-	Selection        *string `json:"selection,omitempty"`
-	ShowsInspector   *bool   `json:"showsInspector,omitempty"`
-	SendOnReturn     *bool   `json:"sendOnReturn,omitempty"`
-	ShowTimestamps   *bool   `json:"showTimestamps,omitempty"`
-	RelayURL         *string `json:"relayURL,omitempty"`
-	CLIPort          *int    `json:"cliPort,omitempty"`
-	AppLanguage      *string `json:"appLanguage,omitempty"`
-	Appearance       *string `json:"appearance,omitempty"`
-	SidebarWidth     *int    `json:"sidebarWidth,omitempty"`
-	InspectorWidth   *int    `json:"inspectorWidth,omitempty"`
-	SidebarCollapsed *bool   `json:"sidebarCollapsed,omitempty"`
+	HadIdentity          *bool   `json:"hadIdentity,omitempty"`
+	UnfinishedOnboarding *string `json:"unfinishedOnboarding,omitempty"`
+	Selection            *string `json:"selection,omitempty"`
+	ShowsInspector       *bool   `json:"showsInspector,omitempty"`
+	SendOnReturn         *bool   `json:"sendOnReturn,omitempty"`
+	ShowTimestamps       *bool   `json:"showTimestamps,omitempty"`
+	RelayURL             *string `json:"relayURL,omitempty"`
+	CLIPort              *int    `json:"cliPort,omitempty"`
+	AppLanguage          *string `json:"appLanguage,omitempty"`
+	Appearance           *string `json:"appearance,omitempty"`
+	SidebarWidth         *int    `json:"sidebarWidth,omitempty"`
+	InspectorWidth       *int    `json:"inspectorWidth,omitempty"`
+	SidebarCollapsed     *bool   `json:"sidebarCollapsed,omitempty"`
+	ShowsHiddenChats     *bool   `json:"showsHiddenChats,omitempty"`
+	CollapsesOtherChats  *bool   `json:"collapsesOtherChats,omitempty"`
 }
-
-// PreferencesChanged tells every window what the preferences are now, after any window changed
-// them: a new language or appearance shows everywhere at once.
-var PreferencesChanged = mygo.NewEvent[Preferences]("prefs:changed")
 
 type prefsStore struct {
 	mu    sync.Mutex
@@ -65,23 +75,34 @@ type prefsStore struct {
 }
 
 var prefs = &prefsStore{}
+var PreferencesChanged = mygo.NewEvent[Preferences]("prefs:changed")
 
+// load reads preferences-v2.json in the app's data directory.
 func (s *prefsStore) load() {
+	path := ""
+	if dir, err := mygo.App.Path(mygo.PathUserData); err == nil {
+		path = filepath.Join(dir, "preferences-v2.json")
+	}
+	s.loadFrom(path)
+}
+
+// loadFrom reads the preferences at `path`, which later changes are saved to; none is the defaults.
+func (s *prefsStore) loadFrom(path string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.value = Preferences{ShowsInspector: true, SendOnReturn: true, ShowTimestamps: true, CLIPort: defaultCLIPort()}
-	dir, err := mygo.App.Path(mygo.PathUserData)
-	if err != nil {
+	s.path = path
+	if path == "" {
 		return
 	}
-	s.path = filepath.Join(dir, "preferences-v2.json")
-	if data, err := os.ReadFile(s.path); err == nil {
-		if err := json.Unmarshal(data, &s.value); err != nil {
+	if data, err := os.ReadFile(path); err == nil {
+		if json.Unmarshal(data, &s.value) != nil {
 			s.value.CLIPort = 0
 		}
 	} else if !os.IsNotExist(err) {
 		s.value.CLIPort = 0
 	}
+
 }
 
 func (s *prefsStore) get() Preferences {
@@ -129,9 +150,12 @@ func (s *prefsStore) update(patch PreferencesPatch) (Preferences, error) {
 		s.mu.Unlock()
 		return s.get(), fmt.Errorf("Restore the isolated Beans CLI port %d and check BEANS_PORT before changing preferences", defaultCLIPort())
 	}
-	v := &s.value
+	v := &candidate
 	if patch.HadIdentity != nil {
 		v.HadIdentity = *patch.HadIdentity
+	}
+	if patch.UnfinishedOnboarding != nil {
+		v.UnfinishedOnboarding = *patch.UnfinishedOnboarding
 	}
 	if patch.Selection != nil {
 		v.Selection = *patch.Selection
@@ -166,17 +190,28 @@ func (s *prefsStore) update(patch PreferencesPatch) (Preferences, error) {
 	if patch.SidebarCollapsed != nil {
 		v.SidebarCollapsed = *patch.SidebarCollapsed
 	}
+	if patch.ShowsHiddenChats != nil {
+		v.ShowsHiddenChats = *patch.ShowsHiddenChats
+	}
+	if patch.CollapsesOtherChats != nil {
+		v.CollapsesOtherChats = *patch.CollapsesOtherChats
+	}
 	saved := *v
-	path := s.path
-	s.mu.Unlock()
-	if path != "" {
-		if data, err := json.MarshalIndent(saved, "", "  "); err == nil {
-			tmp := path + ".tmp"
-			if os.WriteFile(tmp, data, 0o600) == nil {
-				_ = os.Rename(tmp, path)
-			}
+	if s.path != "" {
+		data, err := json.MarshalIndent(saved, "", "  ")
+		if err == nil {
+			err = os.WriteFile(s.path+".tmp", data, 0o600)
+		}
+		if err == nil {
+			err = os.Rename(s.path+".tmp", s.path)
+		}
+		if err != nil {
+			s.mu.Unlock()
+			return s.get(), err
 		}
 	}
+	s.value = saved
+	s.mu.Unlock()
 	return s.get(), nil
 }
 
@@ -199,17 +234,20 @@ func (Prefs) Set(patch PreferencesPatch) (Preferences, error) {
 	PreferencesChanged.Broadcast(after)
 	if after.AppLanguage != before.AppLanguage {
 		syncNativeLanguage()
+		if l10n.Set(after.AppLanguage, mygo.App.Locale()) {
+			app.languageChanged()
+		}
 		if native.win != nil {
 			native.win.Invalidate()
 		}
 	}
-	if after.CLIPort != before.CLIPort {
+	if after.CLIPort != before.CLIPort && app.cli != nil {
 		go app.cli.reconnect()
 	}
 	return after, nil
 }
 
-// applyAppearance forces light or dark for the windows and pages, or follows the system.
+// applyAppearance forces light or dark for the windows, or follows the system.
 func applyAppearance(appearance string) {
 	switch appearance {
 	case "light":
@@ -219,4 +257,13 @@ func applyAppearance(appearance string) {
 	default:
 		mygo.Theme.SetSource(mygo.ThemeSystem)
 	}
+}
+
+// setPrefs adapts native action callbacks, which cannot return binding errors.
+func setPrefs(patch PreferencesPatch) Preferences {
+	value, err := (Prefs{}).Set(patch)
+	if err != nil {
+		log.Printf("preferences: %v", err)
+	}
+	return value
 }

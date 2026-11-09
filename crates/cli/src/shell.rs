@@ -19,7 +19,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use beans_agent::tools::bash_session::{PROMPT_QUIET, WAITING_AFTER};
-use beans_agent::tools::{BashSession, BashSessions, SessionEnd};
+use async_trait::async_trait;
+use beans_agent::agent_loop::ToolExecutionMode;
+use beans_agent::tools::{BashSession, BashSessions, BashTool, SessionEnd};
+use beans_agent::{Tool, ToolError, ToolResult, ToolUpdateFn};
+use tokio_util::sync::CancellationToken;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
@@ -190,6 +194,16 @@ impl Sessions {
         }
     }
 
+    /// The user wrote in the chat, and the turn there holds the message: a wait on a command in
+    /// the background gives way to it (`TurnSessions::user_wrote`), so the bot answers at once.
+    pub fn user_wrote(&self, chat_id: &str) {
+        let sessions: Vec<Arc<BashSession>> =
+            self.entries.lock().unwrap().iter().filter(|e| e.chat_id == chat_id).filter_map(|e| e.session.clone()).filter(|s| s.background()).collect();
+        for session in sessions {
+            session.nudge();
+        }
+    }
+
     /// Stop in the chat: every session there ends, and its card says so, except a command
     /// running in the background, which Running tasks stops.
     pub fn stop_chat(&self, chat_id: &str) {
@@ -223,7 +237,7 @@ impl Sessions {
         let Some(mut message) = app.message(chat_id, message_id) else { return };
         let Body::Tool { run: Some(run), .. } = &mut message.body else { return };
         change(run);
-        app.upsert_message(message, true);
+        put_up(app, message);
     }
 
     /// Call `call_id` returned, and `finish` writes its result into row `message_id`. The result
@@ -261,7 +275,7 @@ impl Sessions {
                 None => {}
             }
         }
-        app.upsert_message(message, true);
+        put_up(app, message);
     }
 
     /// The turn ended before call `call_id` returned. A command already running goes on, and
@@ -345,7 +359,7 @@ impl Sessions {
         }
         follow(run, summary, session);
         run.handed_over = true;
-        app.upsert_message(message, true);
+        put_up(app, message);
     }
 
     /// Writes where session `id` stands to its card. False when no card shows it.
@@ -359,7 +373,7 @@ impl Sessions {
         let Some(mut message) = app.message(&chat_id, &message_id) else { return false };
         let Body::Tool { summary, run: Some(run), .. } = &mut message.body else { return false };
         follow(run, summary, &session);
-        app.upsert_message(message, true);
+        put_up(app, message);
         true
     }
 
@@ -388,6 +402,20 @@ pub(crate) fn wake_job(app: &App, sessions: &Sessions, id: &str) -> Option<crate
         (entry.chat_id.clone(), entry.bot_id.clone(), entry.message_id.clone()?)
     };
     Some(crate::runtime::command_job(app, &chat_id, &bot_id, &message_id))
+}
+
+/// Puts a command's card up, with what the command printed or asks cleared of the Runner's
+/// saved secrets: a command given one may print it, and the card goes to every Device.
+fn put_up(app: &App, mut message: Message) {
+    if let Body::Tool { run: Some(run), .. } = &mut message.body {
+        let redactions = crate::secrets::Redactions::load(app);
+        if !redactions.is_empty() {
+            redactions.option(&mut run.output);
+            redactions.option(&mut run.prompt);
+            redactions.option(&mut run.outcome);
+        }
+    }
+    app.upsert_message(message, true);
 }
 
 /// The last `count` lines of `text` with something on them.
@@ -615,10 +643,39 @@ pub fn bot_shell_extras(app: &App) -> beans_agent::login_shell::Extras {
         path_first,
     }
 }
-/// A codemode shell call uses pipes, not the persistent terminals behind the direct bash tool.
-/// Its nested ToolRunner call must still pass the live bot shell gate and Auto-review hook.
-pub fn script_bash(app: &App, workdir: std::path::PathBuf) -> beans_agent::tools::BashTool {
-    beans_agent::tools::BashTool::for_script(workdir).with_extras(bot_shell_extras(app))
+
+/// The `bash` a turn's codemode scripts call, beside the bot's own: pi's, on pipes with nothing
+/// on stdin, so a call lasts as long as its command, and a script gets the output, exit code,
+/// and time (`BashTool::output_schema`), whatever the code. It keeps no session and has no
+/// card: Auto-review judges each command with the script, and one it holds asks in a
+/// `permission` message. Calls run one at a time, so a script's commands never ask at once.
+pub fn script_bash(app: &Arc<App>, bot_id: &str, workdir: &std::path::Path) -> Arc<dyn Tool> {
+    let secrets = Arc::new(crate::secrets::CommandSecrets { app: app.clone(), bot_id: bot_id.to_string() });
+    Arc::new(ScriptBash(BashTool::for_script(workdir.to_path_buf()).with_extras(bot_shell_extras(app)).with_secrets(secrets)))
+}
+
+struct ScriptBash(BashTool);
+
+#[async_trait]
+impl Tool for ScriptBash {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+    fn description(&self) -> &str {
+        self.0.description()
+    }
+    fn parameters(&self) -> Value {
+        self.0.parameters()
+    }
+    fn output_schema(&self) -> Option<Value> {
+        self.0.output_schema()
+    }
+    fn execution_mode(&self) -> Option<ToolExecutionMode> {
+        Some(ToolExecutionMode::Sequential)
+    }
+    async fn execute(&self, id: &str, args: Value, cancel: CancellationToken, on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+        self.0.execute(id, args, cancel, on_update).await
+    }
 }
 
 /// A turn's reach into the sessions: a bot reaches the ones it started, in the chat it runs in.
@@ -645,5 +702,10 @@ impl BashSessions for TurnSessions {
 
     fn remove(&self, id: &str) {
         self.app.shell_sessions.remove(&self.app, id);
+    }
+
+    /// A message waits in the turn's steering queue.
+    fn user_wrote(&self) -> bool {
+        self.app.steering_queue(&self.chat_id).is_some_and(|queue| !queue.is_empty())
     }
 }

@@ -1,5 +1,7 @@
 # Identity
 
+Account format admission and machine authentication remain independent of account-key generations. Pairing validates the versioned Beans URI before persistence and keyring forwarding preserves the sealed reply-key boundary. Key rotation does not invalidate plaintext already learned by a Device.
+
 An identity is keys you hold.
 
 After Happy’s layering, the Device that creates or restores the identity is the identity device. It alone holds the master secret, so it alone registers the identity on a relay, again when a relay forgot the account. Every paired Device holds the account DEK, and any paired computer pairs others.
@@ -17,7 +19,7 @@ After Happy’s layering, the Device that creates or restores the identity is th
 
 AEAD envelopes are `nonce(24) || ciphertext` with the blob kind as associated data. Sealed boxes are libsodium `crypto_box_seal` (`crypto_box` crate); signatures are `ed25519-dalek`.
 
-Recovery: restore the master secret from the backup phrase → re-derive content keys → unwrap DEKs from the relay. The backup phrase is the identity.
+Recovery: restore the master secret from the backup phrase → re-derive content keys → open the keyring the identity signed on the relay ([the account key](relay-trust.md#the-account-key)). The backup phrase is the identity. The identity device re-derives it from `identity.json` whenever asked: `identity.phrase` answers it (a Device without the master secret has none), `beans identity phrase` prints it, and the desktop app shows it from Settings › Devices (Backup phrase, Show…) after a confirmation.
 
 ## Fresh Beans format
 
@@ -57,26 +59,7 @@ App ↔ CLI on one machine uses `127.0.0.1`; those keys are already local.
 
 ## Unpairing a Device
 
-The local bearer cache binds each token to its relay URL and machine signing key. Invalidating the cache also advances its generation, so a delayed authentication cannot refill it after account or relay replacement. Registration captures the account incarnation, relay generation and machine key before HTTP and rechecks them before changing registration flags, replay cursors, key/roster/history uploads or the saved machine record. Failed relay-setting persistence restores the previous selection without advancing that generation.
-
-Unpair captures the local account incarnation, selected relay generation and machine key before authentication. Authentication, re-registration and revocation completions recheck that ownership before publishing local state; changing the relay away and back also invalidates the old operation. No lifecycle lock spans a network await. A revocation already admitted to the old relay can still complete there, but cannot remove a replacement account's Devices or turns. Successful local removal saves membership and deletes the Device's persisted live turns in one SQLite transaction. If storage fails after remote revocation, memory keeps the Device removed, the error is returned and retry can finish persistence. Notifications read current state after the ownership lock is released.
-
-Any paired Device can unpair any other from its Device list (`device.unpair`), and a Device unpairs itself with `identity.forget`: Unpair on this computer's Devices pane in the Mac and desktop apps, Unpair This Phone on a phone. Either way the CLI calls `DELETE /v1/machines/{machine_pubkey}` with its bearer token: the relay drops the machine row, remembers the key in `revoked_machines`, deletes the envelopes sealed to it, closes its sync socket, and signals `machines` to the identity's other sockets. A revoked key never authenticates again: its bearer tokens are refused, its challenge answers `410 Gone`, and neither the identity nor a paired machine can attest it again. Without a bearer it attests no other machine either, so an unpaired computer pairs nobody. A Device that pairs again generates a new machine key. A Device unpairing itself gives the relay five seconds and forgets the identity either way; one the relay did not hear from stays in the other Devices' lists, offline, until one of them unpairs it.
-
-The relay's machine list is the list of paired Devices. A Device reads it when its sync socket opens and whenever the relay signals `machines`, and drops a Device it no longer lists, so the other Devices see an unpaired one leave at once; a stale `machine` blob for a key the relay does not list is ignored. The unpaired Device learns when its socket closes and the relay refuses the next one: a `410` from the relay makes its CLI forget the identity (keys, credentials, chats), and the app shows onboarding. That holds for the identity device too: a phone can unpair a lost computer, and the backup phrase restores the identity on a new machine key.
-
-Forgetting the identity clears account-owned SQLite state in one transaction, including identity-scoped rejected task envelopes, queued blobs, roster baselines, pending chat creation identities, codemode values, encrypted memory configuration, frozen memory deliveries, deletion fences and private Runner bindings. Memory adapters, approvals and in-flight calls are invalidated. A new identity in the same data directory inherits none of that state; unpairing does not issue remote memory-bank deletion.
-
-Local forget also removes the Runner's installed plugin records, variables, OAuth state, tool catalogs, skills and secret-bearing `mcp.json`. A local plugin incarnation changes before cleanup; pooled connections and pending sign-ins are dropped, and old callbacks cannot publish into a replacement account. `forget-in-progress.json` blocks reopening a home after interrupted cleanup; the running core keeps new-identity and plugin admission closed until a successful forget retry. This is local cleanup, not server-side token revocation or external-effect rollback.
-
-Direct incoming sync application checks the session-captured account identity and Device key under the lifecycle boundary before changing chat, roster, policy, credentials, task, machine or completion state. Roster and policy handlers acquire their policy lock first. Cursor and first-sync/history publication recheck after network waits; stale sessions cannot publish into a replacement account. This boundary does not establish isolation for every asynchronous request or external callback.
-
-Create holds the local lifecycle boundary through key publication. When the caller is the execution owner, explicit fresh creation initializes task authority immediately after clearing the new account store and before creating its default bot; that epoch persists before the first task and survives restart. A non-executing Device view does not initialize task authority. Restore and legacy owner recovery retain their separate admission rules. Restore and joining pairing capture the local incarnation before network awaits and recheck it, together with the absence of an existing identity, under that boundary before saving keys. A forgotten account or competing create makes the old operation fail without replacing the new Device's keys; no blocking lifecycle lock spans a network await.
-
-A machine the relay lists that never sent a `machine` blob is an unknown Device (`sync::settle_unknown_machines`): the snapshot and `roster.changed` list it after the others with `unknown: true` and no name or `os`, and the apps show Unknown Device with a note to unpair a machine nobody recognizes. Any paired Device can attest one, so none stays hidden from the Device list. A Device takes a machine for unknown only once its pull has caught up since its socket opened, so one still reading the log does not mistake the Devices whose blobs it has yet to read, and only ten minutes after the relay attested it, which is time enough for a Device that pairs to send its blob (`beans pair <string>` sends it before it exits). A blob that arrives later makes it a Device like any other.
-
-Account aliases use [Device names](device-names.md).
-See [Device revocation](device-revocation.md) for lost, un-wiped Device boundaries and the proposed, unimplemented containment and rotation contract.
+See [Account lifecycle](account-lifecycle.md#unpairing-a-device).
 
 ## Devices and Runners
 
@@ -89,7 +72,7 @@ Every Device writes its `os` into its machine metadata blob. Values: `macos`, `l
 | `macos`, `linux`, `windows` | **Runner** | Everything a Device can, plus be assigned bots and run Jobs with the account’s credentials. |
 | `ios`, `ipados`, `android`  | Device     | Hold keys, configure account providers, read and write chats, create bots for Runners. |
 
-Runner status is derived from `os` alone. There is no flag to opt a phone in or a desktop out. Peers read `os` from the decrypted metadata blob, so the relay never learns which Devices are Runners.
+Runner status is derived from `os` alone. There is no flag to opt a phone in or a desktop out. Peers read `os` from the decrypted metadata blob, so the relay never learns which Devices are Runners. Any other `os`, and a machine that never sent its `machine` blob, is a Device and never a Runner. The CLI (`Device::is_runner`, which bot create and the team tools check) and the desktop app (`Device.IsRunner`, which its Runner menus offer) make the same test, each tested against the cases in `crates/cli/testdata/runners.json`; the desktop app keeps an `os` it has no name for as the CLI reported it.
 
 ## Relay surface
 
@@ -107,9 +90,25 @@ The relay stores:
 
 Nicknames, Device names and `os`, bot profiles, provider credentials, and chat text live inside encrypted blobs.
 
+Each entity, as a Device keeps it and as the relay holds it:
+
+| Entity             | Device                                                    | Relay                                                  |
+| ------------------ | --------------------------------------------------------- | ------------------------------------------------------ |
+| Identity           | Master + content + signing keys                           | Public key                                             |
+| Device             | Machine keypair, `os`, the name the account gives it      | Machine public key + encrypted metadata blob; the name inside encrypted roster blobs |
+| Bot                | Decrypted profile                                         | Inside encrypted roster blobs                          |
+| Routine            | Name, schedule, prompt, state                             | Inside encrypted roster blobs                          |
+| Task               | Encrypted records, revisions, evidence references, and run claims | Account-encrypted task blobs; execution Jobs sealed to the assigned Runner |
+| Plugin             | Manifest, variables, secrets, tokens on the Runner        | Id and state inside the Runner's encrypted machine blob |
+| Channel            | Its subscription and inbox on the Runner; tokens in the plugin store | Its state inside the Runner's encrypted machine blob |
+| ProviderCredential | `credentials.json` on every Device                        | Inside the encrypted `credentials` blob                |
+| Secret             | A bot's, in `secrets.enc` on its Runner                   | Only as the sealed answer to its card                  |
+| Chat / Message     | Account/chat DEK                                          | Encrypted blobs                                        |
+| Job                | Any paired Device may create; the assigned Runner runs it | Envelope signed by the Device that made it and sealed to that Runner’s machine box key; deleted once run. A hard Stop sends `job_cancel` to the Device running it; the Runner seals how the turn ended (`job_result`) to the requesting Device, and lists the turn and what it is doing in its `machine` blob for every Device |
+
 ## Account credentials
 
-The account has one set of provider credentials (`crates/cli/src/credentials.rs`, with setup in `provider_auth.rs`): API keys with optional base URLs for DeepSeek, Anthropic, OpenCode Zen, and OpenCode Go, the OAuth tokens of a ChatGPT and of a Grok sign-in, and the custom providers the user added, each with its name, protocol, base URL, key, and models (see [Providers](providers.md)). Every Device keeps the set in its core folder as `credentials.json` (mode `0600`) and the relay holds it as one `credentials` blob, encrypted with the account DEK under the slot `credentials`, so the log carries the latest version alone.
+The account has one set of provider credentials (`crates/cli/src/credentials.rs`, with setup in `provider_auth.rs`): API keys with optional base URLs for DeepSeek, Anthropic, OpenCode Zen, and OpenCode Go, the OAuth tokens of a ChatGPT and of a Grok sign-in, and the custom providers the user added, each with its name, protocol, base URL, key, and models (see [Providers](providers.md)). Every Device keeps the set in its core folder as `credentials.json` (mode `0600`) and the relay holds it as one `credentials` blob, encrypted with the account DEK under the slot `credentials`, so the log carries the latest version alone. A password or a key a bot asks for in a chat is not one of these: it stays on that bot's Runner ([Secret requests](secrets.md)).
 
 Production Grok sign-in is disabled before callback binding or network access pending a verified Beans OAuth/referrer contract. This does not rename provider ids/scopes or change the encrypted credential merge. Loopback protocol fixtures remain available.
 
@@ -118,7 +117,7 @@ Production Grok sign-in is disabled before callback binding or network access pe
 - **A blob that arrives** is merged provider by provider, custom ones by their kind, the later `changed_at` winning (`Credentials::merge`); a disconnect, or a deleted custom provider, is a `changed_at` with no credential beside it, so it travels like any change. A Device that holds a later change than the blob it received uploads its own set in return, so two Devices that changed different providers at once both end up with both.
 - **A Device whose credentials the relay never had** (connected before the account carried them, or a relay that was reset) uploads them after its first pull has merged what the relay holds, so an older set never replaces a newer one.
 - **OAuth tokens are shared.** A Runner that refreshes them publishes the new pair. One whose refresh fails because another Runner spent the refresh token first reads the set again and uses the tokens that arrived.
-- **Connecting** an API key checks it against the provider from the Device where it was typed. A subscription sign-in opens the browser on that Device, and Cancel in the Mac and desktop apps' connect sheet stops one still waiting there (`providers.auth.cancel`), so finishing in the browser afterwards connects nothing; the phone uses an in-app browser so its embedded core can receive the provider's loopback callback. **Disconnecting** removes the credential from every Device, and deletes a custom provider.
+- **Connecting** an API key checks it against the provider from the Device where it was typed. A subscription sign-in opens the browser on that Device, and Cancel in the desktop app's connect sheet stops one still waiting there (`providers.auth.cancel`), so finishing in the browser afterwards connects nothing; the phone uses an in-app browser so its embedded core can receive the provider's loopback callback. **Disconnecting** removes the credential from every Device, and deletes a custom provider.
 - **Unpairing** a Device makes its CLI delete `credentials.json` with the rest of the account.
 - **Bot create** may target any paired Runner. The relay payload is ciphertext of the profile.
 

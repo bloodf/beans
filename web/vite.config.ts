@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
@@ -11,7 +11,7 @@ import tailwindcss from '@tailwindcss/vite'
 import { nitro } from 'nitro/vite'
 import { fumadocsMdx } from 'fumadocs-mdx/vite'
 
-import { fetchDesktopRelease } from './src/lib/desktop-release.ts'
+import { type DesktopRelease, fetchDesktopRelease } from './src/lib/releases.ts'
 
 /** The files every Device checks for a newer copy of: the model catalog at `/models/v1.json` and
  * the marketplace index at `/marketplace/v1.json`, the CLI's own `crates/models/catalog.json` and
@@ -22,7 +22,9 @@ const SERVED = [
   ['../crates/cli/marketplace/index.json', './public/marketplace/v1.json'],
 ]
 
-function servedFiles(): Plugin {
+const UPGRADE_URL = './public/desktop-upgrade-url.txt'
+
+function servedFiles(desktop: DesktopRelease | null): Plugin {
   return {
     name: 'beans-served-files',
     buildStart() {
@@ -32,32 +34,38 @@ function servedFiles(): Plugin {
         mkdirSync(dirname(out), { recursive: true })
         writeFileSync(out, JSON.stringify(file))
       }
+      const upgradeURL = fileURLToPath(new URL(UPGRADE_URL, import.meta.url))
+      if (desktop?.mac) writeFileSync(upgradeURL, `${desktop.mac.url}\n`)
+      else rmSync(upgradeURL, { force: true })
     },
   }
 }
 
-const config = defineConfig(async ({ command }) => ({
-  resolve: { tsconfigPaths: true },
-  // Per-platform client availability, read once per build. A server-only release is valid;
-  // API failures still stop the build, and new client assets reach the page with the next deploy.
-  define: {
-    __DESKTOP_RELEASE__: JSON.stringify(await fetchDesktopRelease({ required: command === 'build' })),
-  },
-  // The docs' generated modules import this at the first server render. Found then, it makes the
-  // dev server re-optimize and reload its dependencies mid-render, and that render mixes two copies
-  // of React ("Invalid hook call" at Nav). Declared here, it is optimized at startup.
-  environments: {
-    ssr: { optimizeDeps: { include: ['fumadocs-mdx/runtime/macro'] } },
-  },
-  plugins: [
-    servedFiles(),
-    fumadocsMdx(),
-    devtools(),
-    tailwindcss(),
-    tanstackStart(),
-    nitro(),
-    viteReact(),
-  ],
-}))
+const config = defineConfig(async ({ command }) => {
+  const desktop = await fetchDesktopRelease({ required: command === 'build' })
+  return {
+    resolve: { tsconfigPaths: true },
+    // Per-platform client availability, read once per build. A server-only release is valid;
+    // API failures still stop the build, and new client assets reach the page with the next deploy.
+    define: {
+      __DESKTOP_RELEASE__: JSON.stringify(desktop),
+    },
+    // The docs' generated modules import this at the first server render. Found then, it makes the
+    // dev server re-optimize and reload its dependencies mid-render, and that render mixes two copies
+    // of React ("Invalid hook call" at Nav). Declared here, it is optimized at startup.
+    environments: {
+      ssr: { optimizeDeps: { include: ['fumadocs-mdx/runtime/macro'] } },
+    },
+    plugins: [
+      servedFiles(desktop),
+      fumadocsMdx(),
+      devtools(),
+      tailwindcss(),
+      tanstackStart(),
+      nitro(),
+      viteReact(),
+    ],
+  }
+})
 
 export default config

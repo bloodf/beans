@@ -490,13 +490,19 @@ fn custom_kind(credentials: &Credentials, name: &str) -> String {
 }
 
 /// A custom provider's base URL: required, http(s), and cut back to the root when the user
-/// pasted a whole endpoint, since each adapter adds the path its protocol needs.
+/// pasted a whole endpoint, since each adapter adds the path its protocol needs. A decision
+/// API's is its endpoint, since vendors serve one shape at different paths (OpenRouter's System
+/// One at `/api/alpha/decisions`): the one the user gave, or a root and the path the API has
+/// at TypeSafe and OpenAI.
 fn custom_root(api: CustomApi, base_url: &str) -> Result<String, String> {
     let url = custom_base_url(Some(base_url))?.ok_or("Enter the server's base URL")?;
     let endpoint: &[&str] = match api {
         CustomApi::ChatCompletions => &["/chat/completions", "/models"],
         CustomApi::Responses => &["/responses", "/models"],
         CustomApi::Messages => &["/v1/messages", "/v1/models", "/v1", "/messages", "/models"],
+        CustomApi::SystemOne | CustomApi::Decisions if url.ends_with("/systemone") || url.ends_with("/decisions") => return Ok(url),
+        CustomApi::SystemOne => return Ok(format!("{url}/systemone")),
+        CustomApi::Decisions => return Ok(format!("{url}/decisions")),
     };
     Ok(endpoint.iter().find_map(|path| url.strip_suffix(path)).unwrap_or(&url).to_string())
 }
@@ -515,6 +521,11 @@ async fn list_models(name: &str, api: CustomApi, root: &str, api_key: &str) -> R
     let mut remaining_bytes = MODEL_RESPONSE_LIMIT;
     for page in 0..MAX_PAGES {
         let mut request = match api {
+            CustomApi::SystemOne | CustomApi::Decisions => {
+                let parent = root.rsplit_once('/').map_or(root, |(parent, _)| parent);
+                let request = client.get(format!("{parent}/models"));
+                if api_key.is_empty() { request } else { request.bearer_auth(api_key) }
+            }
             CustomApi::ChatCompletions | CustomApi::Responses => {
                 let request = client.get(format!("{root}/models"));
                 if api_key.is_empty() { request } else { request.bearer_auth(api_key) }
@@ -536,7 +547,16 @@ async fn list_models(name: &str, api: CustomApi, root: &str, api_key: &str) -> R
         }
         let (body, bytes) = bounded_json(response, name, remaining_bytes).await?;
         remaining_bytes -= bytes;
-        let listed = listed_models(&body).ok_or_else(|| format!("{name} did not answer with a model list"))?;
+        let mut listed = listed_models(&body).ok_or_else(|| format!("{name} did not answer with a model list"))?;
+        let entries = body.get("data").or_else(|| body.get("models")).unwrap_or(&body).as_array().unwrap();
+        let decision_ids: std::collections::HashSet<&str> = entries.iter().filter(|entry| {
+            entry.pointer("/architecture/output_modalities").and_then(Value::as_array).is_some_and(|outputs| outputs.iter().any(|output| output == "decisions"))
+                || entry["type"].as_str().is_some_and(|kind| kind == "evaluation" || kind.contains("decision"))
+        }).filter_map(|entry| entry["id"].as_str().or_else(|| entry["name"].as_str())).collect();
+        for (excluded, model) in &mut listed {
+            if api.decides() && !decision_ids.is_empty() { *excluded = !decision_ids.contains(model.id.as_str()); }
+            else if !api.decides() && decision_ids.contains(model.id.as_str()) { *excluded = true; }
+        }
         models.extend(listed.into_iter().filter(|(_, model)| seen.insert(model.id.clone())));
         if body.get("has_more").is_some_and(|value| !value.is_boolean()) {
             return Err(format!("{name} model list has invalid pagination metadata"));
@@ -588,7 +608,7 @@ fn listed_model(entry: &Value) -> Option<(bool, CustomModel)> {
     let tools = entry.pointer("/capabilities/tools").and_then(Value::as_bool);
     let thinking_format = entry.pointer("/capabilities/thinkingFormat").and_then(Value::as_str).map(str::to_string);
     let thinking_can_disable = entry.pointer("/capabilities/thinkingCanDisable").and_then(Value::as_bool);
-    Some((not_chat, CustomModel { id, name, context_window, max_output, images, reasoning, tools, thinking_format, thinking_can_disable }))
+    Some((not_chat, CustomModel { id, name, context_window, max_output, images, reasoning, tools, thinking_format, thinking_can_disable, levels: declared_levels(entry), ..Default::default() }))
 }
 
 /// Runs a ChatGPT sign-in, opening its authorization URL through the Device's UI.
@@ -653,3 +673,19 @@ pub fn disconnect(app: &Arc<App>, kind: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests;
+
+fn declared_levels(entry: &Value) -> Option<Vec<beans_models::ThinkingLevel>> {
+    if entry["reasoning"].as_bool() == Some(false) {
+        return Some(Vec::new());
+    }
+    let mut levels: Vec<beans_models::ThinkingLevel> = entry["supported_reasoning_levels"]
+        .as_array()?
+        .iter()
+        .filter_map(|level| level["effort"].as_str().or_else(|| level.as_str()))
+        .filter_map(|word| word.parse().ok())
+        .filter(|level| *level != beans_models::ThinkingLevel::Off)
+        .collect();
+    levels.sort();
+    levels.dedup();
+    Some(levels).filter(|levels| !levels.is_empty())
+}

@@ -1,10 +1,10 @@
 //! Standalone self-update is unavailable. Beans uses its signed release mechanism;
 //! Runner admission drain is independent in `update_control`.
 
-use std::sync::Arc;
-use serde_json::Value;
 use crate::app::App;
 use crate::model::UpdateStatus;
+use serde_json::Value;
+use std::sync::Arc;
 
 pub const SELF_UPDATING: bool = false;
 pub const UNAVAILABLE: &str = crate::config::SELF_UPDATE_UNAVAILABLE;
@@ -15,7 +15,9 @@ pub const RESTART_EXIT: i32 = 75;
 pub struct Updater;
 
 impl Updater {
-    pub fn status(&self) -> Option<UpdateStatus> { None }
+    pub fn status(&self) -> Option<UpdateStatus> {
+        None
+    }
 }
 
 /// No scheduler, pending-record recovery, download or binary mutation is started.
@@ -49,7 +51,11 @@ mod tests {
     #[tokio::test]
     async fn beans_self_update_fails_closed_before_discovery_or_mutation() {
         let home = tempfile::tempdir().unwrap();
-        let app = App::load(crate::config::Config { home: home.path().into(), port: 4874 }).unwrap();
+        let app = App::load(crate::config::Config {
+            home: home.path().into(),
+            port: 4874,
+        })
+        .unwrap();
         let pending = br#"{"pending":{"version":"9.0.0","previous":"0.1.10"}}"#;
         let retained = home.path().join("beans.previous");
         std::fs::write(app.config.update_path(), pending).unwrap();
@@ -61,7 +67,16 @@ mod tests {
         assert_eq!(install_now(&app).await.unwrap_err(), UNAVAILABLE);
         assert_eq!(set_auto(&app, true).unwrap_err(), UNAVAILABLE);
         for method in ["device.update", "device.auto_update"] {
-            assert_eq!(crate::api::dispatch(&app, method, serde_json::json!({"device_id":"remote","on":true})).await.unwrap_err(), UNAVAILABLE);
+            assert_eq!(
+                crate::api::dispatch(
+                    &app,
+                    method,
+                    serde_json::json!({"device_id":"remote","on":true})
+                )
+                .await
+                .unwrap_err(),
+                UNAVAILABLE
+            );
         }
         start(&app);
         relay_refused(&app);

@@ -12,7 +12,7 @@ Set `BEANS_RELAY_CATALOG_DIR` (or `--catalog-dir`) to an operator-managed direct
 
 ## Deploy on Railway
 
-1. Create a service from this repository and leave **Root Directory** empty: the [`Dockerfile`](Dockerfile) builds with the whole Cargo workspace as context. In the service's **Settings**, set **Healthcheck Path** to `/v1/health`, and **Watch Paths** to `/crates/relay/**`, `/Cargo.toml`, and `/Cargo.lock` so that pushes elsewhere in the repo leave the relay running.
+1. Create a service from this repository and leave **Root Directory** empty: the [`Dockerfile`](Dockerfile) builds with the whole Cargo workspace as context. In the service's **Settings**, set **Healthcheck Path** to `/v1/health`, and **Watch Paths** to `/crates/relay/**`, `/Cargo.toml`, and `/Cargo.lock` so that pushes elsewhere in the repo leave the relay running. Lorca's own relay watches the `relay` branch (**Settings › Source › Branch**), and a deploy is a push of main to it: `git push origin main:relay`.
 2. Set the [variables every deploy needs](#variables-every-deploy-needs).
 3. Pick storage: [SQLite on a volume](#sqlite-on-a-volume) or [Postgres and a bucket](#postgres-and-a-bucket).
 4. Generate a domain under **Settings › Networking**.

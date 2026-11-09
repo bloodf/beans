@@ -102,10 +102,12 @@ vi.doMock("./Composer", () => ({ Composer: "Composer", Surface: "Surface" }));
 vi.doMock("./KeyboardFoot", () => ({ KeyboardFoot: "Foot" }));
 vi.doMock("./layout", () => ({ useWide: () => false }));
 vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
-vi.doMock("./theme", () => ({ usePalette: () => ({}) }));
+vi.doMock("./theme", () => ({ usePalette: () => ({}), withAlpha: (color: string) => color }));
 vi.doMock("./format", () => ({ quoteText: (text: string) => text }));
 vi.doMock("./AnswerSheet", () => ({ AnswerSheet: "Answer" }));
-vi.doMock("../i18n", () => ({ t: (text: string) => text, useLanguage: () => ({ language: "en" }) }));
+vi.doMock("./SecretSheet", () => ({ SecretSheet: "SecretSheet" }));
+vi.doMock("./alert", () => ({ alert: () => { throw new Error("scroll scenarios must not open an alert"); } }));
+vi.doMock("../i18n", () => ({ t: (text: string) => text, tc: (text: string) => text, useLanguage: () => ({ language: "en" }) }));
 const message: Message = { id: "sent", chat_id: "chat", author: { kind: "you" }, body: { kind: "text", text: "sent" }, state: { kind: "complete" }, created_at: 0 };
 let chat: Chat = { id: "chat", kind: "dm", bot_ids: [], messages: [message], unread_count: 0, is_pinned: false, created_at: 0 };
 vi.doMock("../core/prefs", () => ({ savePrefs: () => {}, loadPrefs: () => ({}), coreHome: () => "unused", pathOf: (value: string) => value, wipePrefs: () => {} }));
@@ -122,7 +124,7 @@ vi.doMock("../core/engine", () => ({ chatTitle: () => "Chat", engine: { sendMess
   useStore.setState({ chats: [chat] });
   return message;
 }, loadOlder: async () => {} } }));
-vi.doMock("./transcript", () => ({ buildRows: (current: Chat) => current.messages.map(row => ({ key: row.id, type: "message", message: row })), quoteAuthorName: () => "You", DayRow: "Day", MarkerRow: "Marker", MessageRow: "Message", NoticeRow: "Notice", PermissionRow: "Permission", CommandRow: "Command", StatusRow: "Status", WorkingRow: "Working" }));
+vi.doMock("./transcript", () => ({ buildRows: (current: Chat) => current.messages.map(row => ({ key: row.id, type: "message", message: row })), quoteAuthorName: () => "You", DayRow: "Day", MarkerRow: "Marker", MessageRow: "Message", NoticeRow: "Notice", PermissionRow: "Permission", CommandRow: "Command", AgentRow: "Agent", DraftRow: "Draft", StatusRow: "Status", WorkingRow: "Working" }));
 function find(node: unknown, type: unknown): Node | undefined {
   if (Array.isArray(node)) return node.map(child => find(child, type)).find(Boolean);
   if (!node || typeof node !== "object" || !("type" in node) || !("props" in node)) return;

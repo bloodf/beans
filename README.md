@@ -155,7 +155,7 @@ The relay supports SQLite or Postgres and has a [container recipe](./crates/rela
 | --- | --- |
 | [`crates/`](./crates) | Rust CLI, agent runtime, providers, model catalog, relay, and phone core |
 | [`macos/`](./macos) | AppKit macOS app |
-| [`desktop/`](./desktop) | Go and Solid Windows/Linux app |
+| [`desktop/`](./desktop) | Go and Solid Windows/Linux app, with an opt-in native MyGo shell |
 | [`mobile/`](./mobile) | Expo phone app |
 | [`web/`](./web) | Marketing website and product docs |
 | [`design/brand/`](./design/brand) | Editable SVG logo masters, campaign artwork, and brand exports |

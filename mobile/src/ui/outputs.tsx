@@ -1,29 +1,56 @@
-// A bot's published output in the transcript: a card of its own without a bubble, and a compact
-// row when several of one bot's outputs sit back to back.
+export const OUTPUT_CARD_OPENS_DETAIL = true;
+// What a chat's bots published, after the desktop app's inspector: a row per output in its
+// details, and an output's preview. Files come from the core, fetched from the relay when
+// another Device published them; Open shows one in Quick Look on iOS, and Share hands it to the
+// share sheet, which is where the phone saves a copy.
 
+import { File } from "expo-file-system";
 import { Image } from "expo-image";
-import { useEffect } from "react";
-import { Platform, StyleSheet, Text, View } from "react-native";
+import * as Sharing from "expo-sharing";
+import * as WebBrowser from "expo-web-browser";
+import { useRouter } from "expo-router";
+import { useEffect, useState } from "react";
+import { Platform, ScrollView, Share, StyleSheet, Text, View } from "react-native";
+import { canPreviewFiles, previewFile } from "../../modules/beans-core";
 import { engine } from "../core/engine";
-import {
-  evidenceStatus,
-  evidenceTitle,
-  fileSize,
-  outputKind,
-  outputSymbol,
-  outputTypeName,
-  type Attachment,
-  type Message,
-  type Output,
-  type OutputKind,
-} from "../core/model";
-import { useStore } from "../core/store";
-import { useLanguage } from "../i18n";
+import { evidenceStatus, evidenceTitle, fileSize, isImage, outputKind, outputSymbol, outputTypeName, type Attachment, type Message, type Output, type OutputKind, type OutputSeries } from "../core/model";
+import { useBotMap, useStore } from "../core/store";
+import { t, useLanguage } from "../i18n";
+import { alert } from "./alert";
+import { Row } from "./forms";
+import { stamp } from "./format";
+import { Pressable } from "./Pressable";
 import { Symbol } from "./Symbol";
 import { accentColor, Font, usePalette, type Palette } from "./theme";
 
+/// A text file shows whole in the preview up to this size; a bigger one shows as a file.
+const TEXT_PREVIEW_BYTES = 256 * 1024;
+
 export function outputAttachment(message: Message): Attachment | undefined {
   return message.body.kind === "text" ? message.body.attachments?.[0] : undefined;
+}
+
+/// An output's row: what it is, its name, when it was published (and by whom, in a group), and
+/// how its check went. It opens the output.
+export function OutputRow({ series, isGroup, onPress }: { series: OutputSeries; isGroup: boolean; onPress: () => void }) {
+  useLanguage();
+  const p = usePalette();
+  const bots = useBotMap();
+  const latest = series.versions[0];
+  const output = latest.output!;
+  const when = stamp(new Date(latest.created_at * 1000));
+  const bot = isGroup ? bots.get(output.bot_id)?.name : undefined;
+  const evidence = output.evidence;
+  return (
+    <Row
+      title={output.name}
+      subtitle={bot ? `${bot} · ${when}` : when}
+      icon={outputSymbol(output)}
+      accessory={evidence ? <Text style={[styles.status, { color: evidence.status === "failed" ? p.red : p.secondaryLabel }]}>{evidenceStatus(evidence)}</Text> : undefined}
+      chevron
+      onPress={onPress}
+    />
+  );
 }
 
 /// A card's widest, and the image preview's tallest and shortest.
@@ -51,28 +78,30 @@ function outputTint(output: Output, p: Palette) {
   return accent ? accentColor(accent, p.dark) : p.secondaryLabel;
 }
 
-/// Tap is a no-op until `/chat-info/output/[id]` ships with the output detail slice.
-export const OUTPUT_CARD_OPENS_DETAIL = false;
-
 /// A published output in the transcript, standing without a bubble or a time: an image's preview
 /// (the top of a tall one, as a page's screenshot starts at its top), the file's icon, name, type
-/// and size, and what the bot checked. A run of one bot's outputs joins into one list (`stack`
-/// says whether the cards above and below are in it), a compact row each: the icon (an image's
-/// own picture), name, type and size, and the check's symbol. The card is not pressable yet; the
-/// detail route lands with the output detail slice.
+/// and size, and what the bot checked. A tap opens the output's screen, or fetches again a file
+/// that could not be fetched. A run of one bot's outputs joins into one list (`stack` says
+/// whether the cards above and below are in it), a compact row each: the icon (an image's own
+/// picture), name, type and size, and the check's symbol; the check's words are on the output's
+/// screen.
 export function OutputCard({ message, maxWidth, stack }: { message: Message; maxWidth: number; stack?: { above: boolean; below: boolean } }) {
   useLanguage();
   const p = usePalette();
+  const router = useRouter();
   const output = message.output!;
   const attachment = outputAttachment(message);
   const uri = useStore((s) => (attachment ? s.files[attachment.id] : undefined));
+  const error = useStore((s) => (attachment ? s.fileErrors[attachment.id] : undefined));
   useEffect(() => {
     if (attachment && !uri) void engine.fetchFile(attachment);
   }, [uri, attachment]);
   const width = Math.min(CARD_WIDTH, maxWidth);
   const kind = outputKind(output);
   const tint = outputTint(output, p);
-  const detail = [outputTypeName(output), attachment ? fileSize(attachment.size) : ""].filter(Boolean).join(" · ");
+  const detail = error
+    ? t("Couldn't download · Retry")
+    : [outputTypeName(output), attachment ? fileSize(attachment.size) : ""].filter(Boolean).join(" · ");
   const stacked = !!stack && (stack.above || stack.below);
   let preview: number | undefined;
   if (kind === "image" && attachment && !stacked) {
@@ -84,20 +113,24 @@ export function OutputCard({ message, maxWidth, stack }: { message: Message; max
   const checkSymbol = evidence?.status === "passed" ? "checkmark.circle.fill" : evidence?.status === "failed" ? "xmark.circle.fill" : "circle.dashed";
   const summary = evidence?.summary.trim() ?? "";
   const spoken = [output.name, detail, evidence ? `${evidenceTitle(evidence)} · ${evidenceStatus(evidence)}: ${summary}` : ""].filter(Boolean).join(", ");
+  const open = () =>
+    error && attachment ? engine.retryFile(attachment) : router.push({ pathname: "/chat-info/output/[id]", params: { id: output.id, chat: message.chat_id } });
   if (stacked) {
     return (
-      <View
+      <Pressable
+        onPress={open}
         style={[
           styles.stackRow,
           { width, backgroundColor: p.outputCard, borderColor: p.separator },
           !stack.above && styles.roundedAbove,
           !stack.below && styles.roundedBelow,
         ]}
+        accessibilityRole="button"
         accessibilityLabel={spoken}
       >
         {stack.above && <View style={[styles.stackRule, { backgroundColor: p.separator }]} />}
         <View style={styles.stackIcon}>
-          {kind === "image" && uri ? (
+          {kind === "image" && uri && !error ? (
             <Image source={{ uri }} style={styles.thumbnail} contentFit="cover" transition={150} />
           ) : (
             <Symbol name={outputSymbol(output)} size={20} color={tint} />
@@ -108,20 +141,25 @@ export function OutputCard({ message, maxWidth, stack }: { message: Message; max
             {output.name}
           </Text>
           {detail ? (
-            <Text style={[styles.cardDetail, { color: p.secondaryLabel }]} numberOfLines={1}>
+            <Text style={[styles.cardDetail, { color: error ? p.red : p.secondaryLabel }]} numberOfLines={1}>
               {detail}
             </Text>
           ) : null}
         </View>
         {evidence && <Symbol name={checkSymbol} size={15} color={checkTint} />}
-      </View>
+      </Pressable>
     );
   }
   return (
-    <View style={[styles.card, { width, backgroundColor: p.outputCard, borderColor: p.separator }]} accessibilityLabel={spoken}>
+    <Pressable
+      onPress={open}
+      style={[styles.card, { width, backgroundColor: p.outputCard, borderColor: p.separator }]}
+      accessibilityRole="button"
+      accessibilityLabel={spoken}
+    >
       {preview !== undefined && (
         <View style={[styles.preview, { height: preview, backgroundColor: p.code, borderBottomColor: p.separator }]}>
-          <Image source={uri ? { uri } : undefined} style={StyleSheet.absoluteFill} contentFit="cover" contentPosition="top" transition={150} />
+          <Image source={uri && !error ? { uri } : undefined} style={StyleSheet.absoluteFill} contentFit="cover" contentPosition="top" transition={150} />
         </View>
       )}
       <View style={styles.cardHeader}>
@@ -131,7 +169,7 @@ export function OutputCard({ message, maxWidth, stack }: { message: Message; max
             {output.name}
           </Text>
           {detail ? (
-            <Text style={[styles.cardDetail, { color: p.secondaryLabel }]} numberOfLines={1}>
+            <Text style={[styles.cardDetail, { color: error ? p.red : p.secondaryLabel }]} numberOfLines={1}>
               {detail}
             </Text>
           ) : null}
@@ -153,23 +191,121 @@ export function OutputCard({ message, maxWidth, stack }: { message: Message; max
           </View>
         </View>
       )}
-    </View>
+    </Pressable>
   );
 }
 
+/// The file in Quick Look on iOS; on Android, which has none, the share sheet.
+export async function openFile(attachment: Attachment) {
+  try {
+    const path = await engine.namedFile(attachment);
+    if (canPreviewFiles) await previewFile(path);
+    else await Sharing.shareAsync(encodeURI(`file://${path}`), { mimeType: attachment.mime, dialogTitle: attachment.name });
+  } catch (error) {
+    fileFailed(error);
+  }
+}
+
+/// The share sheet with the file under its own name: AirDrop, another app, or Save to Files.
+export async function shareFile(attachment: Attachment) {
+  try {
+    const path = await engine.namedFile(attachment);
+    await Sharing.shareAsync(encodeURI(`file://${path}`), { mimeType: attachment.mime, dialogTitle: attachment.name });
+  } catch (error) {
+    fileFailed(error);
+  }
+}
+
+export function openLink(url: string) {
+  void WebBrowser.openBrowserAsync(url);
+}
+
+export function shareLink(url: string) {
+  void Share.share(Platform.OS === "ios" ? { url } : { message: url });
+}
+
+function fileFailed(error: unknown) {
+  alert(t("Couldn't get this file"), error instanceof Error ? error.message : String(error));
+}
+
+/// The file as its sheet shows it: an image, the start of a text file, or what it is; while it is
+/// on its way, or when it could not be fetched, it says so. A tap opens it on iOS.
+export function OutputPreview({ attachment }: { attachment: Attachment }) {
+  useLanguage();
+  const p = usePalette();
+  const uri = useStore((s) => s.files[attachment.id]);
+  const error = useStore((s) => s.fileErrors[attachment.id]);
+  useEffect(() => {
+    if (!uri) void engine.fetchFile(attachment);
+  }, [uri, attachment]);
+  const text = useTextPreview(attachment, uri);
+
+  let content: React.ReactNode;
+  if (error) {
+    content = (
+      <View style={styles.placeholder}>
+        <Text style={[styles.placeholderTitle, { color: p.secondaryLabel }]}>{t("This file couldn't be downloaded.")}</Text>
+        <Text style={[styles.placeholderDetail, { color: p.tertiaryLabel }]}>{error.charAt(0).toUpperCase() + error.slice(1)}</Text>
+      </View>
+    );
+  } else if (!uri) {
+    content = (
+      <View style={styles.placeholder}>
+        <Text style={[styles.placeholderTitle, { color: p.secondaryLabel }]}>{t("Downloading…")}</Text>
+      </View>
+    );
+  } else if (isImage(attachment)) {
+    const ratio = attachment.width && attachment.height ? attachment.width / attachment.height : 4 / 3;
+    content = <Image source={{ uri }} style={[styles.image, { aspectRatio: ratio }]} contentFit="contain" transition={150} />;
+  } else if (text !== undefined) {
+    content = (
+      <ScrollView style={[styles.text, { backgroundColor: p.fill }]} nestedScrollEnabled>
+        <Text style={[styles.mono, { color: p.label }]} selectable>
+          {text}
+        </Text>
+      </ScrollView>
+    );
+  } else {
+    content = (
+      <View style={styles.placeholder}>
+        <Symbol name="doc" size={40} color={p.secondaryLabel} />
+        <Text style={[styles.fileName, { color: p.label }]} numberOfLines={2}>
+          {attachment.name}
+        </Text>
+        <Text style={[styles.placeholderDetail, { color: p.secondaryLabel }]}>{fileSize(attachment.size)}</Text>
+      </View>
+    );
+  }
+  return (
+    <Pressable onPress={uri && canPreviewFiles ? () => void openFile(attachment) : undefined} disabled={!uri || !canPreviewFiles} accessibilityLabel={attachment.name} accessibilityRole={uri && canPreviewFiles ? "button" : undefined}>
+      {content}
+    </Pressable>
+  );
+}
+
+/// The words of a text file small enough to show whole.
+function useTextPreview(attachment: Attachment, uri: string | undefined): string | undefined {
+  const textLike = attachment.mime.startsWith("text/") || attachment.mime === "application/json" || attachment.mime === "application/xml";
+  const [text, setText] = useState<{ uri: string; text: string }>();
+  useEffect(() => {
+    if (!uri || !textLike || attachment.size > TEXT_PREVIEW_BYTES) return;
+    let live = true;
+    new File(uri)
+      .text()
+      .then((words) => live && setText({ uri, text: words }))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [uri, textLike, attachment.size]);
+  return text && text.uri === uri ? text.text : undefined;
+}
+
 const styles = StyleSheet.create({
+  status: { fontSize: Font.body },
   card: { borderRadius: 16, borderWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
   preview: { width: "100%", borderBottomWidth: StyleSheet.hairlineWidth },
-  stackRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    minHeight: 50,
-    paddingHorizontal: 13,
-    paddingVertical: 8,
-    borderLeftWidth: StyleSheet.hairlineWidth,
-    borderRightWidth: StyleSheet.hairlineWidth,
-  },
+  stackRow: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 50, paddingHorizontal: 13, paddingVertical: 8, borderLeftWidth: StyleSheet.hairlineWidth, borderRightWidth: StyleSheet.hairlineWidth },
   roundedAbove: { borderTopWidth: StyleSheet.hairlineWidth, borderTopLeftRadius: 16, borderTopRightRadius: 16 },
   roundedBelow: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomLeftRadius: 16, borderBottomRightRadius: 16 },
   // From the text's edge, as a list's rows are divided.
@@ -184,4 +320,11 @@ const styles = StyleSheet.create({
   checkTitle: { fontSize: Font.small, fontWeight: "600" },
   checkSummary: { fontSize: Font.small, lineHeight: 18 },
   checkCommand: { fontSize: Font.caption, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", marginTop: 1 },
+  placeholder: { height: 220, alignItems: "center", justifyContent: "center", gap: 6, paddingHorizontal: 24 },
+  placeholderTitle: { fontSize: Font.body, textAlign: "center" },
+  placeholderDetail: { fontSize: Font.small, textAlign: "center" },
+  fileName: { fontSize: Font.body, fontWeight: "500", textAlign: "center", marginTop: 4 },
+  image: { width: "100%", maxHeight: 300 },
+  text: { height: 240 },
+  mono: { fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace", fontSize: 12, lineHeight: 17, padding: 12 },
 });

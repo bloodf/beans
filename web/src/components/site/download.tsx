@@ -16,7 +16,7 @@ import { Trans, useTranslation } from 'react-i18next'
 
 import { Button } from '#/components/ui/button'
 import { i18nFor, type Language, languages } from '#/i18n'
-import type { DesktopRelease } from '#/lib/desktop-release'
+import type { DesktopRelease } from '#/lib/releases'
 import { cn } from '#/lib/utils'
 import { Logo } from './logo'
 import { Nav, SITE, docsPath, downloadPath } from './nav'
@@ -102,9 +102,10 @@ export function downloadHead(lng: Language) {
 const action = 'h-12 rounded-full px-7 text-base'
 const link = 'underline underline-offset-4 hover:text-foreground'
 
-export function Download({ release: mac }: { release: MacRelease | null }) {
+export function Download({ release }: { release?: MacRelease | null } = {}) {
   const { t, i18n } = useTranslation()
   const desktop = __DESKTOP_RELEASE__
+  const mac = release === undefined ? (desktop?.mac ? { ...desktop.mac, minimumSystemVersion: null, appleSilicon: true } : null) : release
   const windows = desktop?.windows
   const linux = desktop?.linux
   const ios = desktop?.ios

@@ -512,6 +512,14 @@ final class RootSplitViewController: NSSplitViewController {
         presentAsSheet(sheet)
     }
 
+    @objc func presentAccountWork(_ sender: Any? = nil) {
+        guard store.isConnected,
+            presentedViewControllers?.contains(where: { $0 is AccountWorkViewController }) != true else { return }
+        let sheet = AccountWorkViewController()
+        sheet.onOpenChat = { [weak self] id in self?.open(id) }
+        presentAsSheet(sheet)
+    }
+
     func presentPairing() {
         let sheet = PairingSheetViewController()
         presentAsSheet(sheet)

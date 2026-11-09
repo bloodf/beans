@@ -85,7 +85,9 @@ struct RawModel {
     rates: Rates,
     #[serde(default)]
     tiers: Vec<CostTier>,
-    thinking: String,
+    /// Absent for a decision model, which does not think out loud.
+    #[serde(default)]
+    thinking: Option<String>,
     #[serde(default)]
     levels: Vec<String>,
     #[serde(default)]
@@ -128,16 +130,21 @@ fn read(json: &str, required: &BTreeSet<&str>) -> Result<Catalog, String> {
 
 /// One model, or nothing when this version cannot run it as listed.
 fn model(entry: RawModel) -> Option<ModelInfo> {
-    let thinking: ThinkingMode = entry.thinking.parse().ok()?;
     let wire: Option<Wire> = match entry.wire {
         Some(wire) => Some(wire.parse().ok()?),
         None => None,
     };
-    if entry.name.is_empty() || entry.context_window == 0 || entry.max_output == 0
+    if entry.name.is_empty() || entry.context_window == 0 || (entry.max_output == 0 && wire != Some(Wire::SystemOne))
         || !valid_rates(&entry.rates)
         || entry.tiers.iter().any(|tier| tier.input_tokens_above == 0 || !valid_rates(&tier.rates)) {
         return None;
     }
+    let thinking: ThinkingMode = match entry.thinking {
+        Some(thinking) => thinking.parse().ok()?,
+        // A decision model is asked nothing about thinking; the mode is never read.
+        None if wire == Some(Wire::SystemOne) => ThinkingMode::Effort,
+        None => return None,
+    };
     let mut levels: Vec<ThinkingLevel> = entry.levels.iter().filter_map(|level| level.parse().ok()).collect();
     levels.sort();
     levels.dedup();
@@ -241,12 +248,21 @@ mod tests {
         extras["levels"] = json!(["max", "ultra", "low", "low"]);
         extras["wire"] = json!("messages");
         extras["badge"] = json!("New");
-        models.extend([unknown_mode, unknown_wire, no_rates, negative, bad_tier, extras, entry("deepseek", "base")]);
+        // Only a decision model goes without a thinking mode.
+        let mut no_thinking = entry("opencode", "no-thinking");
+        no_thinking.as_object_mut().unwrap().remove("thinking");
+        let mut decides = no_thinking.clone();
+        decides["id"] = json!("decides");
+        decides["wire"] = json!("system-one");
+        decides["max_output"] = json!(0);
+        models.extend([unknown_mode, unknown_wire, no_rates, negative, bad_tier, extras, no_thinking, decides, entry("deepseek", "base")]);
         let parsed = parse(&catalog(Value::Array(models), review)).unwrap();
 
         let ids: Vec<(&str, &str)> = parsed.models.iter().map(|m| (m.provider.as_str(), m.id.as_str())).collect();
         assert!(!ids.contains(&("deepseek", "new-mode")) && !ids.contains(&("opencode", "new-wire")) && !ids.contains(&("deepseek", "no-rates")));
         assert!(!ids.contains(&("deepseek", "negative-rate")) && !ids.contains(&("deepseek", "bad-tier")));
+        assert!(!ids.contains(&("opencode", "no-thinking")));
+        assert!(parsed.models.iter().find(|m| m.id == "decides").is_some_and(|m| m.decides()));
         assert_eq!(ids.iter().filter(|id| **id == ("deepseek", "base")).count(), 1, "an id listed twice keeps its first entry");
         let extras = parsed.models.iter().find(|m| m.id == "extras").unwrap();
         assert_eq!(extras.levels, &[ThinkingLevel::Low, ThinkingLevel::Max]);

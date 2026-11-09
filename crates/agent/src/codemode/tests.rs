@@ -331,7 +331,7 @@ async fn describe_namespace_lists_every_tool_of_a_group() {
     ];
     let catalog = StaticCatalog::with_entries(entries, vec![Namespace { name: "my-tools".into(), description: "Tools of mine".into() }]);
     let codemode = CodemodeTool::new(Arc::new(catalog), CodemodeOptions::default());
-    assert!(codemode.description().contains("`await describeNamespace(name)` gives its description"), "{}", codemode.description());
+    assert!(codemode.description().contains("`await describeNamespace(name)` gives a namespace's description"), "{}", codemode.description());
     let code = "return [await describeNamespace('my_tools'), await describeNamespace('other'), await describeNamespace('nothing')];";
     let result = run(&codemode, code).await;
     let text = text_of(&result);
@@ -340,7 +340,7 @@ async fn describe_namespace_lists_every_tool_of_a_group() {
         "{text}"
     );
     let failed = run(&codemode, "return await describeNamespace();").await;
-    assert!(failed.is_error, "{}", text_of(&failed));
+    assert!(failed.is_error && text_of(&failed).contains("describeNamespace() expects a namespace name"), "{}", text_of(&failed));
 }
 
 /// A call's record carries the `description` its arguments give, for a host's status line.
@@ -419,6 +419,23 @@ async fn describe_namespace_returns_complete_catalog_instructions() {
     let codemode = CodemodeTool::new(Arc::new(Instructed), CodemodeOptions::default());
     let result = run(&codemode, "const ns = await describeNamespace('service'); return [ns.instructions, ns.tools];").await;
     assert_eq!(result.text_content().lines().last(), Some(r#"["First step.\nSecond step: keep complete instructions.",["service__read"]]"#));
+}
+
+struct RefusedNamespace;
+
+#[async_trait]
+impl Catalog for RefusedNamespace {
+    fn entries(&self) -> Vec<Entry> { Vec::new() }
+    async fn describe_namespace(&self, _: &str, _: &CancellationToken) -> Result<Option<NamespaceDetails>, String> {
+        Err("Namespace access removed".into())
+    }
+}
+
+#[tokio::test]
+async fn describe_namespace_propagates_catalog_errors() {
+    let codemode = CodemodeTool::new(Arc::new(RefusedNamespace), CodemodeOptions::default());
+    let result = run(&codemode, "return await describeNamespace('service');").await;
+    assert!(result.is_error && text_of(&result).contains("Namespace access removed"), "{}", text_of(&result));
 }
 
 #[tokio::test]

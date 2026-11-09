@@ -136,7 +136,7 @@ func mimeType(path string, file io.ReadSeeker) string {
 }
 
 // inspect describes a file for an attachment: what it is, how big, and an image's size.
-func inspect(path string) FileInfo {
+func inspectFile(path string) FileInfo {
 	info := FileInfo{Path: path, Name: filepath.Base(path), Mime: "application/octet-stream"}
 	stat, err := os.Stat(path)
 	if err != nil {
@@ -250,7 +250,7 @@ func (Files) Choose(ctx context.Context, options ChooseOptions) ([]FileInfo, err
 	}
 	files := make([]FileInfo, 0, len(paths))
 	for _, path := range paths {
-		files = append(files, inspect(path))
+		files = append(files, inspectFile(path))
 	}
 	return files, nil
 }
@@ -259,7 +259,7 @@ func (Files) Choose(ctx context.Context, options ChooseOptions) ([]FileInfo, err
 func (Files) Inspect(paths []string) []FileInfo {
 	files := make([]FileInfo, 0, len(paths))
 	for _, path := range paths {
-		files = append(files, inspect(path))
+		files = append(files, inspectFile(path))
 	}
 	return files
 }
@@ -288,7 +288,7 @@ func (Files) SavePasted(name string, data []byte) (FileInfo, error) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return FileInfo{}, err
 	}
-	info := inspect(path)
+	info := inspectFile(path)
 	if !info.IsFile {
 		return FileInfo{}, errors.New("the pasted file could not be saved")
 	}
@@ -300,3 +300,60 @@ func (Files) Open(path string) error { return mygo.Shell.OpenPath(path) }
 
 // ShowInFolder shows a file in the file manager.
 func (Files) ShowInFolder(path string) { mygo.Shell.ShowItemInFolder(path) }
+
+// fileInfo is the native composer's integer-dimension representation.
+type fileInfo struct {
+	Path, Name, Mime string
+	Size             int64
+	IsFile           bool
+	Width, Height    int
+}
+
+func inspect(path string) fileInfo {
+	f := inspectFile(path)
+	n := fileInfo{Path: f.Path, Name: f.Name, Mime: f.Mime, Size: f.Size, IsFile: f.IsFile}
+	if f.Width != nil {
+		n.Width = *f.Width
+	}
+	if f.Height != nil {
+		n.Height = *f.Height
+	}
+	return n
+}
+func savePasted(name string, data []byte) (fileInfo, error) {
+	f, err := (Files{}).SavePasted(name, data)
+	if err != nil {
+		return fileInfo{}, err
+	}
+	return inspect(f.Path), nil
+}
+
+// chooseFiles asks for files, as the composer's + button and a bot's Look sheet do, and answers
+// them on the main thread: none when the user cancels.
+func chooseFiles(parent *mygo.Window, title, message, button string, multiple, images bool, done func([]fileInfo)) {
+	var filters []mygo.FileFilter
+	if images {
+		filters = []mygo.FileFilter{{Name: L("Images"), Extensions: []string{"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"}}}
+	}
+	go func() {
+		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+			Parent:      parent,
+			Title:       title,
+			Message:     message,
+			ButtonLabel: button,
+			Multiple:    multiple,
+			Filters:     filters,
+		})
+		var files []fileInfo
+		if err == nil {
+			for _, path := range paths {
+				files = append(files, inspect(path))
+			}
+		}
+		post(func() { done(files) })
+	}()
+}
+
+// openFile opens a file with its default app.
+func openFile(path string)     { go mygo.Shell.OpenPath(path) }
+func showInFolder(path string) { go mygo.Shell.ShowItemInFolder(path) }

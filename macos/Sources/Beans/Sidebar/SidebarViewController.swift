@@ -417,6 +417,8 @@ extension SidebarViewController: NSOutlineViewDelegate {
 extension SidebarViewController: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        menu.addItem(item(L("Account Work…"), #selector(RootSplitViewController.presentAccountWork(_:))))
+        menu.addItem(.separator())
 
         let row = outlineView.clickedRow
         guard row >= 0, let node = outlineView.item(atRow: row) as? SidebarNode,

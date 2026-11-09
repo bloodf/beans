@@ -16,6 +16,14 @@ use crate::serve_owner::ServeOwner;
 /// Work started here and not owned. Latched before any of it starts, never cleared.
 fn declare_startup_gaps(owner: &ServeOwner) {
     for boundary in [
+        "tasks::start",
+        "coding::pull::watch",
+        "event_triggers::run",
+        "channels::run and reader children",
+        "review_execution::run",
+        "update::start",
+        "coding_agents::shutdown",
+        "browser_sessions::shutdown",
         "runtime::resume_sent_jobs",
         "shell::close_stale_rows",
         "plugins::refresh_installed",
@@ -49,7 +57,10 @@ struct Supervisor {
 
 impl Supervisor {
     fn new() -> Arc<Self> {
-        Arc::new(Self { first: Mutex::new(None), arrived: Condvar::new() })
+        Arc::new(Self {
+            first: Mutex::new(None),
+            arrived: Condvar::new(),
+        })
     }
 
     fn lock(&self) -> MutexGuard<'_, Option<StopReason>> {
@@ -68,8 +79,13 @@ impl Supervisor {
     fn wait_first(&self) -> StopReason {
         let mut first = self.lock();
         loop {
-            if let Some(reason) = *first { return reason; }
-            first = self.arrived.wait(first).unwrap_or_else(PoisonError::into_inner);
+            if let Some(reason) = *first {
+                return reason;
+            }
+            first = self
+                .arrived
+                .wait(first)
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 }
@@ -77,7 +93,9 @@ impl Supervisor {
 /// One deadline for the whole drain, including the blocking session shutdown.
 fn drain_budget() -> Duration {
     #[cfg(test)]
-    if let Some(millis) = std::env::var("BEANS_TEST_DRAIN_MS").ok().and_then(|value| value.trim().parse::<u64>().ok())
+    if let Some(millis) = std::env::var("BEANS_TEST_DRAIN_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
     {
         return Duration::from_millis(millis);
     }
@@ -85,26 +103,76 @@ fn drain_budget() -> Duration {
 }
 
 /// Stops the commands bots left running, cancels the turns in flight, and joins owned work.
-async fn drain(owner: &Arc<ServeOwner>, app: &Arc<App>, reason: StopReason) {
+async fn drain(
+    owner: &Arc<ServeOwner>,
+    app: &Arc<App>,
+    reason: StopReason,
+    stop: &tokio_util::sync::CancellationToken,
+    roots: &mut [tokio::task::JoinHandle<()>],
+) {
     let deadline = Instant::now() + drain_budget();
     owner.close_roots();
+    stop.cancel();
     #[cfg(feature = "runner")]
     {
         let app = Arc::clone(app);
         let stopping = tokio::task::spawn_blocking(move || app.shell_sessions.shutdown(&app));
-        let _ = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), stopping).await;
+        let _ = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), stopping)
+            .await;
     }
-    for job in app.running_jobs.lock().unwrap().values() { job.cancel.cancel(); }
+    for job in app.running_jobs.lock().unwrap().values() {
+        job.cancel.cancel();
+    }
+    let stopping = async {
+        let join_roots = async {
+            for root in roots {
+                if let Err(error) = root.await {
+                    tracing::error!(%error, "service root failed before closure acknowledgement");
+                }
+            }
+        };
+        #[cfg(feature = "runner")]
+        tokio::join!(
+            join_roots,
+            app.coding_agents.shutdown(app),
+            app.browser_sessions.shutdown(app)
+        );
+        #[cfg(not(feature = "runner"))]
+        join_roots.await;
+    };
+    if tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), stopping)
+        .await
+        .is_err()
+    {
+        tracing::warn!("service closure exceeded the shared drain deadline");
+    }
     let joined = Arc::clone(owner);
     let outcome = tokio::task::spawn_blocking(move || joined.join_closed_until(deadline)).await;
     match outcome {
         Ok(Ok(())) => tracing::info!(?reason, "owned work joined"),
-        Ok(Err(failure)) => tracing::warn!(%failure, ?reason, "the drain ended before owned work closed"),
+        Ok(Err(failure)) => {
+            tracing::warn!(%failure, ?reason, "the drain ended before owned work closed")
+        }
         Err(error) => tracing::error!(%error, ?reason, "the drain did not finish"),
     }
     if let Some(failure) = owner.flush_refusal() {
         tracing::warn!(%failure, owned_still_running = owner.live(), "beans serve did not track all of its work; no final flush");
     }
+}
+
+// The permit survives until the actual root handle acknowledges closure.
+fn own_root(
+    owner: &Arc<ServeOwner>,
+    boundary: &'static str,
+    handle: tokio::task::JoinHandle<()>,
+) -> tokio::task::JoinHandle<()> {
+    let permit = owner.root_work(boundary);
+    tokio::spawn(async move {
+        let _permit = permit;
+        if let Err(error) = handle.await {
+            tracing::error!(%error, boundary, "owned service root failed");
+        }
+    })
 }
 
 /// Ends the process the way it ended before this drain existed.
@@ -121,10 +189,12 @@ fn terminate_by_signal(number: i32) -> ! {
 
 #[cfg(unix)]
 async fn watch_signals(supervisor: Arc<Supervisor>) {
-    use tokio::signal::unix::{signal, SignalKind};
-    let (Ok(mut terminate), Ok(mut interrupt), Ok(mut hangup)) =
-        (signal(SignalKind::terminate()), signal(SignalKind::interrupt()), signal(SignalKind::hangup()))
-    else {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (Ok(mut terminate), Ok(mut interrupt), Ok(mut hangup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+        signal(SignalKind::hangup()),
+    ) else {
         return;
     };
     let number = tokio::select! {
@@ -157,7 +227,9 @@ fn process_alive(pid: u32) -> bool {
 #[cfg(windows)]
 fn process_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
     unsafe {
         let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
         if handle.is_null() {
@@ -181,6 +253,40 @@ pub async fn run(app: Arc<App>, parent_pid: Option<u32>, ready_stdout: bool) -> 
     if let Some(pid) = parent_pid {
         tokio::spawn(watch_parent(Arc::clone(&supervisor), pid));
     }
+
+    crate::update::start(&app);
+    let stop = tokio_util::sync::CancellationToken::new();
+    let mut roots = vec![own_root(
+        &owner,
+        "tasks::start",
+        crate::tasks::start(&app, stop.child_token()),
+    )];
+    crate::coding::load(&app);
+    roots.push(own_root(
+        &owner,
+        "coding::pull::watch",
+        crate::coding::pull::watch(app.clone(), stop.child_token()),
+    ));
+    crate::catalog::enable(&app);
+    crate::marketplace::enable(&app);
+    roots.push(own_root(
+        &owner,
+        "event_triggers::run",
+        tokio::spawn(crate::event_triggers::run(app.clone(), stop.child_token())),
+    ));
+    roots.push(own_root(
+        &owner,
+        "channels::run",
+        tokio::spawn(crate::channels::run(app.clone(), stop.child_token())),
+    ));
+    roots.push(own_root(
+        &owner,
+        "review_execution::run",
+        tokio::spawn(crate::review_execution::run(
+            app.clone(),
+            stop.child_token(),
+        )),
+    ));
 
     crate::runtime::resume_sent_jobs(&app);
     // A command a Beans that quit left waiting went with it; its row says so now.
@@ -218,7 +324,7 @@ pub async fn run(app: Arc<App>, parent_pid: Option<u32>, ready_stdout: bool) -> 
         tokio::task::spawn_blocking(move || supervisor.wait_first()).await?
     };
 
-    drain(&owner, &app, reason).await;
+    drain(&owner, &app, reason, &stop, &mut roots).await;
     match reason {
         StopReason::ServeEnded => match listener.await {
             Ok(result) => result,
@@ -246,10 +352,20 @@ mod tests {
     #[ignore]
     fn serve_child_process() {
         let home = std::env::var("BEANS_TEST_HOME").expect("BEANS_TEST_HOME");
-        let port: u16 = std::env::var("BEANS_TEST_PORT").ok().and_then(|value| value.trim().parse().ok()).unwrap_or(0);
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let port: u16 = std::env::var("BEANS_TEST_PORT")
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         runtime.block_on(async {
-            let app = crate::app::App::load(crate::config::Config { home: PathBuf::from(home), port }).unwrap();
+            let app = crate::app::App::load(crate::config::Config {
+                home: PathBuf::from(home),
+                port,
+            })
+            .unwrap();
             // What `main` does with it: a Serve that cannot start reports and leaves nonzero.
             if let Err(error) = super::run(app, None, true).await {
                 eprintln!("{error:#}");
@@ -285,8 +401,13 @@ mod tests {
             }
             let _ = arrived_tx.send(());
             held.wait();
-            let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
-            let _ = socket.write_all(header.as_bytes()).and_then(|()| socket.write_all(body.as_bytes()));
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket
+                .write_all(header.as_bytes())
+                .and_then(|()| socket.write_all(body.as_bytes()));
         });
         (url, arrived, gate)
     }
@@ -300,7 +421,12 @@ mod tests {
     impl Gate {
         fn wait(&self) {
             let mut open = self.open.lock().unwrap_or_else(PoisonError::into_inner);
-            while !*open { open = self.changed.wait(open).unwrap_or_else(PoisonError::into_inner); }
+            while !*open {
+                open = self
+                    .changed
+                    .wait(open)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
         }
 
         fn open(&self) {
@@ -316,7 +442,14 @@ mod tests {
     fn child_command(home: &Path, models_url: &str, drain_ms: u64, port: u16) -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
-            .args(["--ignored", "--exact", "serve::tests::serve_child_process", "--nocapture", "--test-threads", "1"])
+            .args([
+                "--ignored",
+                "--exact",
+                "serve::tests::serve_child_process",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
             .env_clear()
             .env("HOME", home)
             .env("USERPROFILE", home)
@@ -346,11 +479,15 @@ mod tests {
 
     impl std::ops::Deref for ChildGuard {
         type Target = Child;
-        fn deref(&self) -> &Child { &self.0 }
+        fn deref(&self) -> &Child {
+            &self.0
+        }
     }
 
     impl std::ops::DerefMut for ChildGuard {
-        fn deref_mut(&mut self) -> &mut Child { &mut self.0 }
+        fn deref_mut(&mut self) -> &mut Child {
+            &mut self.0
+        }
     }
 
     fn spawn_guarded(command: &mut Command) -> ChildGuard {
@@ -363,7 +500,10 @@ mod tests {
 
     /// Waits for the child's own ready record, the same one `beans serve --ready-stdout` prints.
     fn wait_ready(child: &mut ChildGuard) {
-        let stdout = child.stdout.take().expect("the child prints its ready record");
+        let stdout = child
+            .stdout
+            .take()
+            .expect("the child prints its ready record");
         let (ready_tx, ready) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stdout);
@@ -374,7 +514,9 @@ mod tests {
                 }
             }
         });
-        ready.recv_timeout(Duration::from_secs(60)).expect("beans serve reports ready");
+        ready
+            .recv_timeout(Duration::from_secs(60))
+            .expect("beans serve reports ready");
     }
 
     fn signal_child(child: &ChildGuard) {
@@ -382,22 +524,32 @@ mod tests {
     }
 
     fn wait_for_exit(child: &mut ChildGuard) -> std::process::ExitStatus {
-        wait_for_exit_within(child, Duration::from_secs(60))
-            .expect("beans serve ends on its own")
+        wait_for_exit_within(child, Duration::from_secs(60)).expect("beans serve ends on its own")
     }
 
-    fn wait_for_exit_within(child: &mut ChildGuard, within: Duration) -> Option<std::process::ExitStatus> {
+    fn wait_for_exit_within(
+        child: &mut ChildGuard,
+        within: Duration,
+    ) -> Option<std::process::ExitStatus> {
         let deadline = Instant::now() + within;
         loop {
-            if let Some(status) = child.try_wait().unwrap() { return Some(status); }
-            if Instant::now() >= deadline { return None; }
+            if let Some(status) = child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
     }
 
     fn assert_died_by_sigterm(status: std::process::ExitStatus) {
         use std::os::unix::process::ExitStatusExt;
-        assert_eq!(status.signal(), Some(libc::SIGTERM), "the process still ends by its own signal: {status:?}");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGTERM),
+            "the process still ends by its own signal: {status:?}"
+        );
     }
 
     /// A Serve that cannot bind its port says so and leaves, instead of waiting for a stop reason
@@ -410,10 +562,21 @@ mod tests {
         let mut child = spawn_guarded(child_command(&home, "", 700, port).stderr(Stdio::piped()));
         let status = wait_for_exit_within(&mut child, Duration::from_secs(30))
             .expect("a Serve that cannot bind reports and leaves");
-        assert!(!status.success(), "a Serve that cannot bind leaves nonzero: {status:?}");
+        assert!(
+            !status.success(),
+            "a Serve that cannot bind leaves nonzero: {status:?}"
+        );
         let mut reported = String::new();
-        child.stderr.take().unwrap().read_to_string(&mut reported).unwrap();
-        assert!(reported.contains("cannot bind"), "the bind failure is reported: {reported}");
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut reported)
+            .unwrap();
+        assert!(
+            reported.contains("cannot bind"),
+            "the bind failure is reported: {reported}"
+        );
         drop(taken);
         std::fs::remove_dir_all(home).ok();
     }
@@ -427,17 +590,25 @@ mod tests {
         let home = scratch();
         let mut child = spawn_child(&home, &url, 10_000);
         wait_ready(&mut child);
-        assert!(arrived.recv_timeout(Duration::from_secs(30)).is_ok(), "the catalog check started");
+        assert!(
+            arrived.recv_timeout(Duration::from_secs(30)).is_ok(),
+            "the catalog check started"
+        );
 
         signal_child(&child);
         std::thread::sleep(Duration::from_millis(250));
-        assert!(child.try_wait().unwrap().is_none(), "beans serve waits for work it owns");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "beans serve waits for work it owns"
+        );
 
         gate.open();
         assert_died_by_sigterm(wait_for_exit(&mut child));
         let cached: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(home.join("catalog.json")).expect("the owned catalog check finished"),
-        ).unwrap();
+            &std::fs::read_to_string(home.join("catalog.json"))
+                .expect("the owned catalog check finished"),
+        )
+        .unwrap();
         assert_eq!(cached["source"].as_str(), Some(url.as_str()));
         assert!(cached["checked_at"].as_i64().unwrap_or_default() > 0);
         std::fs::remove_dir_all(home).ok();
@@ -450,13 +621,23 @@ mod tests {
         let home = scratch();
         let mut child = spawn_child(&home, &url, 700);
         wait_ready(&mut child);
-        assert!(arrived.recv_timeout(Duration::from_secs(30)).is_ok(), "the catalog check started");
+        assert!(
+            arrived.recv_timeout(Duration::from_secs(30)).is_ok(),
+            "the catalog check started"
+        );
 
         let sent = Instant::now();
         signal_child(&child);
         assert_died_by_sigterm(wait_for_exit(&mut child));
-        assert!(sent.elapsed() >= Duration::from_millis(600), "the drain waited for owned work: {:?}", sent.elapsed());
-        assert!(!home.join("catalog.json").exists(), "the held check never finished, so it cached nothing");
+        assert!(
+            sent.elapsed() >= Duration::from_millis(600),
+            "the drain waited for owned work: {:?}",
+            sent.elapsed()
+        );
+        assert!(
+            !home.join("catalog.json").exists(),
+            "the held check never finished, so it cached nothing"
+        );
         gate.open();
         std::fs::remove_dir_all(home).ok();
     }

@@ -3,8 +3,9 @@
 import { requireNativeModule, type EventSubscription } from "expo-modules-core";
 
 interface Native {
-  start(home: string, name: string, os: string, osVersion: string, model: string): void;
+  start(home: string, name: string, os: string, osVersion: string, model: string): Promise<void>;
   request(method: string, params: string): Promise<string>;
+  previewFile?(path: string): Promise<void>;
   wake(): void;
   /// Android only.
   setOpenChat?(chatId: string | null): void;
@@ -32,8 +33,14 @@ export interface Frame {
   data: unknown;
 }
 
-export function start(home: string, facts: HostFacts) {
-  native.start(home, facts.name, facts.os, facts.os_version, facts.model);
+export function start(home: string, facts: HostFacts): Promise<void> {
+  return native.start(home, facts.name, facts.os, facts.os_version, facts.model);
+}
+
+export const canPreviewFiles = typeof native.previewFile === "function";
+
+export function previewFile(path: string): Promise<void> {
+  return native.previewFile ? native.previewFile(path) : Promise.resolve();
 }
 
 /// One API call. Throws with the core's message when it answers with an error.

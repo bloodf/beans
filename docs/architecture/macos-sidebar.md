@@ -27,3 +27,7 @@ Sidebar: an `NSOutlineView` (`Sidebar/SidebarViewController.swift`) with one ite
 ## Toolbar commands
 
 Command navigation follows [Terminal sessions](terminal-sessions.md): Running tasks opens from the terminal button in the chat toolbar, and a foreground command offers Run in Background before Stop. The Chat menu and command palette expose Run Command in Background (⌃B) only while such a command exists; otherwise the shortcut stays with the composer. Transcript cards, attachments, dictation, reply drafts and working state belong to [macOS chat](macos-chat.md).
+
+## Account work
+
+The chat sidebar context menu opens Account Work as a native sheet with Attention, Tasks and Handoffs tabs. Refresh reads the local CLI. Each tab shows an explicit empty state or request error. Attention offers Resolve with the observed revision; Tasks offers Run Task with its observed revision and a unique request id; Handoffs offers cancellation of the observed job attempt. Actions require confirmation and a connected account. The CLI enforces task authority, dependencies, Runner admission and handoff ownership. Open Chat follows the canonical source chat when it is available locally. A connection change invalidates the visible work; Refresh loads the current account projection.

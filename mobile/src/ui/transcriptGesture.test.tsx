@@ -3,11 +3,11 @@ import { expect, test, vi } from "vitest";
 // Only unavailable runtime boundaries are replaced. MessageRow and its gesture callbacks run.
 type Node = { type: any; props: any };
 const jsx = (type: any, props: any): Node => typeof type === "function" ? type(props) : { type, props };
-vi.doMock("react", () => ({ useMemo: (fn: any) => fn(), useRef: (value: any) => ({ current: value }), useEffect: () => {}, useState: (value: any) => [value, () => {}] }));
+vi.doMock("react", () => ({ memo: <T,>(component: T) => component, useMemo: (fn: any) => fn(), useRef: (value: any) => ({ current: value }), useEffect: () => {}, useState: (value: any) => [value, () => {}] }));
 vi.doMock("react/jsx-runtime", () => ({ jsx, jsxs: jsx }));
 vi.doMock("react/jsx-dev-runtime", () => ({ jsxDEV: jsx }));
 vi.doMock("react-native", () => ({ Alert: {}, Linking: {}, View: "View", Text: "Text", Pressable: "Pressable", ScrollView: "ScrollView", Modal: "Modal", Platform: { OS: "ios" }, StyleSheet: { create: (value: any) => value } }));
-vi.doMock("react-native-reanimated", () => ({ default: { View: "AnimatedView" }, useSharedValue: (value: any) => ({ value }), useAnimatedStyle: (fn: any) => fn, withSpring: (value: any) => value, withSequence: () => 1, withTiming: (value: any) => value }));
+vi.doMock("react-native-reanimated", () => ({ default: { View: "AnimatedView" }, runOnJS: <A extends unknown[], R>(callback: (...args: A) => R) => callback, useSharedValue: (value: any) => ({ value }), useAnimatedStyle: (fn: any) => fn, withSpring: (value: any) => value, withSequence: () => 1, withTiming: (value: any) => value }));
 let haptics = 0;
 vi.doMock("expo-haptics", () => ({ ImpactFeedbackStyle: { Light: "light" }, impactAsync: () => { haptics++; return Promise.resolve(); } }));
 vi.doMock("expo-clipboard", () => ({}));
@@ -17,7 +17,7 @@ vi.doMock("../core/engine", () => ({ engine: new Proxy({}, { get: () => () => { 
 vi.doMock("../core/store", () => ({ useStore: () => ({}) }));
 vi.doMock("../i18n", () => ({ useLanguage: () => {}, t: (value: string) => value, language: "en" }));
 vi.doMock("./attachments", () => ({ AttachmentBlock: "Attachments" }));
-vi.doMock("./Avatar", () => ({ BotAvatar: "Avatar" }));
+vi.doMock("./Avatar", () => ({ BotAvatar: "Avatar", ContactAvatar: "ContactAvatar" }));
 vi.doMock("./Markdown", () => ({ Markdown: "Markdown" }));
 vi.doMock("./outputs", () => ({ OutputCard: "OutputCard" }));
 vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
@@ -40,6 +40,10 @@ class Pan {
   onFinalize(fn: any) { this.config.finalize = fn; return this; }
 }
 vi.doMock("react-native-gesture-handler", () => ({ Gesture: { Pan: () => new Pan() }, GestureDetector: "Detector" }));
+// Keep the gesture callbacks and haptic counters real; replace native-only leaves.
+vi.doMock("./Pressable", () => ({ Pressable: "Pressable" }));
+vi.doMock("./AgentLogo", () => ({ AgentLogo: "AgentLogo" }));
+vi.doMock("./alert", () => ({ alert: () => { throw new Error("reply gestures must not open an alert"); } }));
 const { MessageRow } = await import("./transcript");
 const children = (node: Node): Node[] => [node.props.children].flat().filter(Boolean);
 const find = (node: Node, predicate: (node: Node) => boolean): Node | undefined => predicate(node) ? node : children(node).map((child) => typeof child === "object" ? find(child, predicate) : undefined).find(Boolean);

@@ -24,7 +24,7 @@ export const zh: Messages = {
     accessibleTitle: '拉个群，让 AI 队友分工。',
     body: '和一个队友单聊，或者把几个拉进一个群聊。它们可以读写你的文件、运行命令，并记住你说过的话。交给它们一件事，它们会自己分工协作。',
     how: '看看它怎么运作',
-    platforms: '支持 Mac、Windows 和 Linux，iPhone 和 iPad 版正在公测。',
+    platforms: '支持 Mac、Windows、Linux 和 Android，iPhone 和 iPad 版正在公测。',
   },
   turns: {
     eyebrow: '群聊',
@@ -134,7 +134,6 @@ export const zh: Messages = {
       title: 'Mac',
       body: '和智能体聊天，并在你的 Mac 上运行它们。',
       action: '下载 Mac 版',
-      system: 'macOS {{version}} 或更高版本',
       appleSilicon: 'Apple 芯片',
     },
     windows: {
@@ -158,7 +157,7 @@ export const zh: Messages = {
     },
     android: {
       title: 'Android',
-      body: '在 Android 手机上和智能体聊天。',
+      body: '在 Android 手机上和智能体聊天。扫描桌面二维码即可配对，需要 Android 7.0 或更高版本。',
       action: '下载 APK',
     },
     cli: {
@@ -176,5 +175,51 @@ export const zh: Messages = {
     support: '支持',
     faq: '常见问题',
     download: '下载',
+  },
+  github: {
+    home: '前往 usebeans.app',
+    back: '可以关闭这个页面，回到 Beans。',
+    connected: {
+      title: 'GitHub 已连接。',
+      body: 'Beans GitHub 应用已安装到 {{account}}，并连接到你的 Beans 账户。关注其仓库中拉取请求的例行任务会自行开始。',
+    },
+    not_yours: {
+      title: '这次安装不属于你。',
+      body: 'GitHub 列出的你的账户可访问的安装中没有它，所以 Beans 没有连接它。请在 Beans 的例行任务中安装应用，并以能管理该仓库的 GitHub 账户登录。',
+    },
+    expired: {
+      title: '这个链接已过期。',
+      body: 'Beans 给出的链接一小时内有效。请在例行任务上再次选择“安装应用”。',
+    },
+    requested: {
+      title: '已申请安装。',
+      body: '需要组织的所有者先批准 Beans GitHub 应用。批准后，在例行任务上再次选择“安装应用”即可连接。',
+    },
+    failed: {
+      title: '无法连接 GitHub。',
+      body: 'GitHub 没有完成登录。请在 Beans 的例行任务上选择“安装应用”重试。',
+    },
+  },
+  template: {
+    title: '在 Beans 中分享的智能体',
+    open: '在 Beans 中打开',
+    noApp: '还没有 Beans？<download>下载 Mac、Windows、Linux、Android 或 iPhone 版</download>，然后再打开这个链接。',
+    included: '包含的内容',
+    routines: '例行任务',
+    routinesNote: '例行任务添加后先处于暂停状态。',
+    plugins: '插件',
+    pluginsNote: '连接时用你自己的账号。',
+    memories: '记忆',
+    more: '还有 {{count}} 条',
+    skills: '技能',
+    privacy: '在你的浏览器里解密。Beans 的服务器无法读取这个智能体。',
+    home: '前往 usebeans.app',
+    error: {
+      noKey: { title: '链接不完整。', body: '缺少 # 后面的部分。请向对方要完整的链接。' },
+      notFound: { title: '这个链接已失效。', body: '它已被撤销，或者从未存在。' },
+      badKey: { title: '无法打开这个链接。', body: '密钥不匹配。请确认复制了完整的链接。' },
+      notTemplate: { title: '这个链接里不是 Beans 智能体。', body: '它可能来自更新版本的 Beans。' },
+      unreachable: { title: '无法加载这个智能体。', body: '保存它的中继没有响应。请稍后再试。' },
+    },
   },
 }

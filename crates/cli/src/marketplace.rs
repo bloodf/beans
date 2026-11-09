@@ -26,11 +26,16 @@ pub struct Index {
     pub updated: String,
     pub plugins: Vec<Manifest>,
     pub bots: Vec<BotTemplate>,
+    pub packs: Vec<crate::workflows::Pack>,
 }
 
 impl Index {
     pub fn plugin(&self, id: &str) -> Option<&Manifest> {
         self.plugins.iter().find(|p| p.id == id)
+    }
+
+    pub fn pack(&self, id: &str) -> Option<&crate::workflows::Pack> {
+        self.packs.iter().find(|p| p.id == id)
     }
 
     pub fn bot(&self, id: &str) -> Option<&BotTemplate> {
@@ -67,8 +72,12 @@ pub struct BotTemplate {
     pub summary: String,
     /// What the bot does and how it should work: the new bot's description.
     pub description: String,
+    /// The SF Symbol apps from before characters draw.
     #[serde(default = "default_symbol")]
     pub symbol_name: String,
+    /// One of `BOT_SHAPES`; empty picks one from the new bot's id.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub shape: String,
     #[serde(default = "default_accent")]
     pub accent: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -92,7 +101,7 @@ pub struct BotTemplate {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RoutineTemplate {
     pub name: String,
-    /// Anything `crate::schedule::parse` reads: `every 2h`, `0 9 * * 1-5`.
+    /// A repeating schedule `crate::schedule::parse_repeating` reads: `every 2h`, `0 9 * * 1-5`.
     pub schedule: String,
     pub prompt: String,
 }
@@ -115,11 +124,14 @@ impl BotTemplate {
         if template.name.trim().is_empty() || template.description.trim().is_empty() {
             return Err(format!("The bot template {} needs a name and a description.", template.id));
         }
+        if !template.shape.is_empty() && !crate::model::BOT_SHAPES.contains(&template.shape.as_str()) {
+            return Err(format!("The bot template {} has an unknown shape {:?}.", template.id, template.shape));
+        }
         for routine in &template.routines {
             if routine.name.trim().is_empty() || routine.prompt.trim().is_empty() {
                 return Err(format!("A routine of {} needs a name and a prompt.", template.name));
             }
-            crate::schedule::parse(&routine.schedule).map_err(|e| format!("{} · {}: {e}", template.name, routine.name))?;
+            crate::schedule::parse_repeating(&routine.schedule).map_err(|e| format!("{} · {}: {e}", template.name, routine.name))?;
         }
         Ok(template)
     }
@@ -313,6 +325,8 @@ struct RawIndex {
     plugins: Vec<Value>,
     #[serde(default)]
     bots: Vec<Value>,
+    #[serde(default)]
+    packs: Vec<Value>,
 }
 
 fn parse(text: &str) -> Result<Index, String> {
@@ -332,6 +346,13 @@ fn parse(text: &str) -> Result<Index, String> {
             Ok(bot) if index.bot(&bot.id).is_none() => index.bots.push(bot),
             Ok(_) => tracing::warn!("skipping duplicate marketplace bot"),
             Err(error) => tracing::warn!(%error, "skipping marketplace bot"),
+        }
+    }
+    for entry in &raw.packs {
+        match crate::workflows::Pack::parse(entry, &index) {
+            Ok(pack) if index.pack(&pack.id).is_some() => tracing::warn!(id = %pack.id, "skipping a workflow pack listed twice"),
+            Ok(pack) => index.packs.push(pack),
+            Err(error) => tracing::warn!(%error, "skipping a workflow pack"),
         }
     }
     if index.plugins.is_empty() { return Err("Marketplace index has no valid plugins".into()); }
@@ -467,6 +488,73 @@ mod tests {
         for updated in ["2026-02-30T00:00:00Z", "2026-13-01T00:00:00Z", "2026-10-03T25:00:00Z"] {
             assert!(parse(&text.replace("2026-10-03T00:00:00Z", updated)).is_err());
         }
+    }
+
+    #[test]
+    fn builtin_servers_stay_out_of_what_older_builds_read() {
+        // An older build drops an entry whose server type it does not know, so the index keeps
+        // builtin servers apart from `servers`, and Slack stays readable everywhere.
+        let raw: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
+        for plugin in raw["plugins"].as_array().unwrap() {
+            for server in plugin["servers"].as_object().unwrap().values() {
+                assert!(matches!(server["type"].as_str(), Some("stdio" | "http")), "{}", plugin["id"]);
+            }
+        }
+        let index = bundled();
+        assert!(matches!(index.plugin("slack").unwrap().servers.get("bot"), Some(crate::plugins::ServerSpec::Builtin { service, .. }) if service == "slack"));
+        assert!(matches!(index.plugin("telegram").unwrap().servers.get("telegram"), Some(crate::plugins::ServerSpec::Builtin { service, .. }) if service == "telegram"));
+        assert!(index.plugin("telegram").unwrap().builtin_servers.is_empty());
+    }
+
+    #[test]
+    fn packs_are_additive_and_bad_entries_do_not_hide_the_catalog() {
+        #[derive(Deserialize)]
+        struct OlderIndex { version: u64, plugins: Vec<Value>, bots: Vec<Value> }
+        let old: OlderIndex = serde_json::from_str(BUNDLED_INDEX).unwrap();
+        assert_eq!(old.version, 1);
+        assert!(!old.plugins.is_empty() && !old.bots.is_empty());
+        let mut raw: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
+        let mut unsupported = raw["packs"][0].clone();
+        unsupported["version"] = serde_json::json!(99);
+        raw["packs"].as_array_mut().unwrap().push(unsupported);
+        let bundled = raw["packs"].as_array().unwrap().len() - 1;
+        let parsed = parse(&raw.to_string()).unwrap();
+        assert_eq!(parsed.packs.len(), bundled);
+        assert_eq!(parsed.plugins.len(), old.plugins.len());
+        assert_eq!(parsed.bots.len(), old.bots.len());
+        raw.as_object_mut().unwrap().remove("packs");
+        assert!(parse(&raw.to_string()).unwrap().packs.is_empty());
+    }
+
+    #[test]
+    fn an_index_leaves_out_what_this_build_cannot_read() {
+        let index = parse(
+            r#"{ "version": 1, "updated": "2026-10-02T00:00:00Z", "later": true,
+                 "plugins": [ { "id": "a", "name": "A", "servers": { "s": { "type": "http", "url": "https://a.test/mcp" } }, "later": 1 },
+                              { "id": "a", "name": "A again", "servers": { "s": { "type": "http", "url": "https://a.test/mcp" } } },
+                              { "id": "w", "name": "W", "servers": { "s": { "type": "websocket", "url": "wss://w.test/mcp" } } } ],
+                 "bots": [ { "id": "b", "name": "B", "description": "Does b.", "featured": true },
+                           { "id": "Bad Id", "name": "X", "description": "x" },
+                           { "id": "c", "name": "C", "description": "Does c.", "routines": [ { "name": "r", "schedule": "every fortnight", "prompt": "p" } ] },
+                           { "id": "d", "name": "D", "description": "Does d.", "routines": [ { "name": "Daily", "schedule": "0 9 * * *", "prompt": "Report." } ] } ] }"#,
+        )
+        .unwrap();
+        assert_eq!(index.updated, "2026-10-02T00:00:00Z");
+        assert_eq!(index.plugins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["A", "Browser"], "a second a and a server this build cannot run are left out");
+        assert_eq!(index.bots.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), ["b", "d"], "a bad id and a bad schedule are left out");
+        assert!(index.bot("b").unwrap().featured);
+        assert_eq!(index.bot("d").unwrap().symbol_name, "sparkles", "a template without a look gets the default");
+
+        let a = r#"[ { "id": "a", "name": "A", "servers": { "s": { "type": "http", "url": "https://a.test/mcp" } } } ]"#;
+        let refused = [
+            format!(r#"{{ "version": 2, "updated": "2026-10-02T00:00:00Z", "plugins": {a} }}"#),
+            format!(r#"{{ "updated": "2026-10-02T00:00:00Z", "plugins": {a} }}"#),
+            format!(r#"{{ "version": 1, "updated": "2026-10-02", "plugins": {a} }}"#),
+            r#"{ "version": 1, "updated": "2026-10-02T00:00:00Z", "plugins": [ { "id": "Bad Id", "name": "X" } ] }"#.to_string(),
+        ];
+        for text in refused {
+            assert!(parse(&text).is_err(), "{text}");
+        }
         assert!(parse(&text.replace("\"version\": 1", "\"version\": 2")).is_err());
         assert!(parse(&text.replace("\"version\": 1, ", "")).is_err());
         let mut remote: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
@@ -550,7 +638,7 @@ mod tests {
         let params = serde_json::json!({ "template_id": "pr-reviewer", "runner_id": runner_id, "greeting": "Hi PR Reviewer, introduce yourself." });
         let out = crate::api::dispatch(&app, "bots.create", params).await.unwrap();
         let bot = app.bot(out["bot"]["id"].as_str().unwrap()).unwrap();
-        assert_eq!((bot.name.as_str(), bot.symbol_name.as_str(), bot.accent.as_str()), ("PR Reviewer", "checklist", "blue"));
+        assert_eq!((bot.name.as_str(), bot.symbol_name.as_str(), bot.shape.as_str(), bot.accent.as_str()), ("PR Reviewer", "checklist", "hex", "blue"));
         assert!(bot.description.starts_with("You review pull requests"));
         let routines = app.routines_of(&bot.id);
         assert_eq!(routines.iter().map(|r| (r.name.as_str(), r.is_enabled)).collect::<Vec<_>>(), [("Review new pull requests", false)]);

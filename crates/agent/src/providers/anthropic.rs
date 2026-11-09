@@ -224,11 +224,21 @@ impl AnthropicProvider {
         let mark_last_tool = usize::from(has_system) + marks.len() < MAX_CACHE_MARKS;
 
         let requested = request.max_tokens.unwrap_or(self.max_tokens);
-        let (thinking, output_config, max_tokens) = self.thinking_fields(requested);
+        let (mut thinking, output_config, max_tokens) = self.thinking_fields(requested);
+        // The host allowance also bounds thinking; the model cap still bounds both.
+        let max_tokens = request.max_tokens.map(|cap| max_tokens.min(cap)).unwrap_or(max_tokens);
         let max_tokens = match self.info.as_ref().map(|i| i.max_output).filter(|cap| *cap > 0) {
             Some(cap) => max_tokens.min(cap),
             None => max_tokens,
         };
+        if let Some(budget) = thinking.as_ref().and_then(|v| v["budget_tokens"].as_u64()) {
+            if max_tokens <= 1024 {
+                thinking = None;
+            } else if budget >= max_tokens || request.max_tokens.is_some() {
+                let cap = max_tokens.saturating_sub(1024).max(1024).min(max_tokens - 1);
+                if let Some(thinking) = &mut thinking { thinking["budget_tokens"] = json!(budget.min(cap)); }
+            }
+        }
         let mut body = json!({
             "model": self.model,
             "max_tokens": max_tokens,
@@ -373,21 +383,33 @@ fn normalize_tool_call_id(id: &str) -> String {
 /// For a model that binds each thinking block to the conversation that produced it (Opus 5.5,
 /// Fable 5.1, Sonnet 5.5), drops the thinking from every assistant message in `messages`.
 /// Anthropic refuses a block replayed after the system prompt, the tools, or an earlier message
-/// changed, and always takes a history without thinking. Other models keep theirs.
-pub fn drop_bound_thinking(model: &str, messages: &mut [AgentMessage]) {
+/// changed, and always takes a history without thinking. Other models keep theirs. Whether any
+/// thinking was dropped.
+pub fn drop_bound_thinking(model: &str, messages: &mut [AgentMessage]) -> bool {
     let model = model.to_ascii_lowercase();
     if !["claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5"].iter().any(|id| model.starts_with(id)) {
-        return;
+        return false;
     }
+    let mut dropped = false;
     for message in messages {
         if let AgentMessage::Assistant(assistant) = message {
+            let before = assistant.content.len();
             assistant.content.retain(|part| match part {
                 AssistantPart::Thinking { .. } => false,
                 AssistantPart::ServerBlock { block } => block["type"] != "redacted_thinking",
                 _ => true,
             });
+            dropped |= assistant.content.len() != before;
         }
     }
+    dropped
+}
+
+/// Whether Anthropic refused a request for a thinking block replayed after what preceded it
+/// changed ("Invalid signature in thinking block. The block is bound to a different
+/// conversation.").
+pub fn is_bound_thinking_error(error: &str) -> bool {
+    error.contains("thinking block") && (error.contains("Invalid signature") || error.contains("bound to a different conversation"))
 }
 
 /// Models before adaptive thinking and the filtering web tools: Haiku 4.5 and the 4.5 and
@@ -624,6 +646,10 @@ fn server_tool_summary(name: &str, detail: &str, result: &Value) -> String {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
+    fn default_max_output_tokens(&self) -> Option<u64> {
+        let cap = self.thinking_fields(self.max_tokens).2;
+        Some(self.info.as_ref().map(|info| info.max_output).filter(|limit| *limit > 0).map(|limit| cap.min(limit)).unwrap_or(cap))
+    }
     fn provider_id(&self) -> &str {
         &self.provider_id
     }
@@ -646,12 +672,14 @@ impl Provider for AnthropicProvider {
             let _ = tx.send(AssistantEvent::Error { message: format!("{} does not support tools. Choose a tool-capable model for this bot.", self.model), aborted: false }).await;
             return channel_stream(rx);
         }
+        let configured_budget_too_small = self.thinking_fields(request.max_tokens.unwrap_or(self.max_tokens))
+            .0.as_ref().and_then(|v| v["budget_tokens"].as_u64()).is_some_and(|budget| budget < 1024);
         let mut body = self.body(&request);
         let options = request.options.clone();
         options.before_payload(&mut body);
-        if body["thinking"]["type"] == "enabled" {
+        if configured_budget_too_small || body["thinking"]["type"] == "enabled" {
             let budget = body["thinking"]["budget_tokens"].as_u64().unwrap_or(0);
-            if budget < 1024 || body["max_tokens"].as_u64().unwrap_or(0).saturating_sub(budget) < THINKING_ANSWER_RESERVE {
+            if configured_budget_too_small || budget < 1024 || body["max_tokens"].as_u64().unwrap_or(0).saturating_sub(budget) < THINKING_ANSWER_RESERVE {
                 let _ = tx.send(AssistantEvent::Error { message: "Budget thinking needs at least 1024 thinking tokens plus a 1024-token answer reserve. Use default thinking or a model with a larger output cap.".into(), aborted: false }).await;
                 return channel_stream(rx);
             }
@@ -675,9 +703,8 @@ impl Provider for AnthropicProvider {
                     .header("User-Agent", USER_AGENT);
                 options.apply_to(request).json(&body)
             };
-            let response = match send_with_retry(build, max_retries, max_retry_delay_ms, &cancel).await {
+            let response = match send_with_retry(build, max_retries, max_retry_delay_ms, &cancel, &options).await {
                 Ok(response) => {
-                    options.report(&response);
                     response
                 }
                 Err(failure) => {
@@ -897,6 +924,18 @@ mod tests {
         let mut request_capped = request(vec![LlmMessage::User(UserMessage::text("hi"))]);
         request_capped.max_tokens = Some(500);
         assert_eq!(AnthropicProvider::deepseek("k", None).body(&request_capped)["max_tokens"], 500);
+        let haiku = AnthropicProvider::anthropic("k", Some("claude-haiku-4-5")).with_thinking(Some(ThinkingLevel::Max));
+        let capped = haiku.body(&request_capped);
+        assert_eq!(capped["max_tokens"], 500, "thinking cannot enlarge a host's remaining allowance");
+        assert!(capped.get("thinking").is_none());
+        request_capped.max_tokens = Some(128);
+        let capped = haiku.body(&request_capped);
+        assert_eq!(capped["max_tokens"], 128);
+        assert!(capped.get("thinking").is_none());
+        request_capped.max_tokens = Some(4096);
+        let capped = haiku.body(&request_capped);
+        assert_eq!(capped["max_tokens"], 4096);
+        assert_eq!(capped["thinking"]["budget_tokens"], 3072);
     }
 
     fn budget_provider(cap: u64) -> AnthropicProvider {
@@ -912,7 +951,7 @@ mod tests {
     fn budget_thinking_reserves_answer_tokens_before_the_model_cap_is_applied() {
         for (cap, expected_budget) in [(2048, 1024), (4095, 3071), (4096, 3072)] {
             let mut request = request(vec![LlmMessage::User(UserMessage::text("hi"))]);
-            request.max_tokens = Some(128);
+            request.max_tokens = Some(cap);
             let body = budget_provider(cap).body(&request);
             assert_eq!(body["thinking"]["budget_tokens"], expected_budget, "cap {cap}");
             assert_eq!(body["max_tokens"], cap);

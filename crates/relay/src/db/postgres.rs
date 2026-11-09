@@ -117,6 +117,7 @@ const SCHEMA: &str = "
 /// version 1 is `SCHEMA`, version `n + 2` is `MIGRATIONS[n]`. A deploy runs the old process
 /// beside the new one, so a step only adds (a table, a nullable column, an index). Append;
 /// never edit a step that has shipped.
+#[cfg(test)]
 const MANAGED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS managed_companion_receipts (
     identity_pubkey TEXT NOT NULL, transaction_id TEXT NOT NULL, receipt TEXT NOT NULL,
     policy_ciphertext BYTEA NOT NULL, roster_ciphertext BYTEA NOT NULL,
@@ -125,7 +126,84 @@ const MANAGED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS managed_companion_recei
     PRIMARY KEY(identity_pubkey, transaction_id), UNIQUE(identity_pubkey, roster_seq),
     UNIQUE(identity_pubkey, policy_id), UNIQUE(identity_pubkey, roster_id));
     CREATE TABLE IF NOT EXISTS managed_replay_context(identity_pubkey TEXT PRIMARY KEY, nonce TEXT NOT NULL);";
-const MIGRATIONS: &[&str] = &[MANAGED_SCHEMA];
+// Versions 2 and 3 retain upstream's IDs. Beans used version 2 for managed
+// receipts; version 4 repairs either lineage without rewriting its history.
+const MIGRATIONS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS shares (
+        id              TEXT PRIMARY KEY,
+        identity_pubkey TEXT NOT NULL,
+        ciphertext      BYTEA NOT NULL,
+        created_at      BIGINT NOT NULL,
+        updated_at      BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS shares_identity ON shares(identity_pubkey);",
+    "CREATE TABLE IF NOT EXISTS receiver_states (
+        state           TEXT PRIMARY KEY,
+        receiver        TEXT NOT NULL,
+        identity_pubkey TEXT NOT NULL,
+        created_at      BIGINT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS receiver_accounts (
+        receiver        TEXT NOT NULL,
+        account         TEXT NOT NULL,
+        identity_pubkey TEXT NOT NULL,
+        label           TEXT NOT NULL,
+        scope           TEXT NOT NULL,
+        bound_at        BIGINT NOT NULL,
+        PRIMARY KEY (receiver, account, identity_pubkey)
+    );
+    CREATE TABLE IF NOT EXISTS receiver_subscriptions (
+        id              TEXT PRIMARY KEY,
+        receiver        TEXT NOT NULL,
+        identity_pubkey TEXT NOT NULL,
+        machine_pubkey  TEXT NOT NULL,
+        subject         TEXT NOT NULL,
+        subscription_id TEXT NOT NULL,
+        generation      BIGINT NOT NULL,
+        secret          TEXT NOT NULL,
+        key_hash        TEXT,
+        account         TEXT,
+        state           TEXT,
+        created_at      BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS receiver_subscriptions_subject ON receiver_subscriptions(receiver, subject);
+    CREATE INDEX IF NOT EXISTS receiver_subscriptions_identity ON receiver_subscriptions(identity_pubkey);",
+    "CREATE TABLE IF NOT EXISTS shares (
+        id              TEXT PRIMARY KEY,
+        identity_pubkey TEXT NOT NULL,
+        ciphertext      BYTEA NOT NULL,
+        created_at      BIGINT NOT NULL,
+        updated_at      BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS shares_identity ON shares(identity_pubkey);
+    CREATE TABLE IF NOT EXISTS managed_companion_receipts (
+    identity_pubkey TEXT NOT NULL, transaction_id TEXT NOT NULL, receipt TEXT NOT NULL,
+    policy_ciphertext BYTEA NOT NULL, roster_ciphertext BYTEA NOT NULL,
+    policy_id TEXT NOT NULL, roster_id TEXT NOT NULL,
+    roster_seq BIGINT NOT NULL, size BIGINT NOT NULL,
+    PRIMARY KEY(identity_pubkey, transaction_id), UNIQUE(identity_pubkey, roster_seq),
+    UNIQUE(identity_pubkey, policy_id), UNIQUE(identity_pubkey, roster_id));
+    CREATE TABLE IF NOT EXISTS managed_replay_context(identity_pubkey TEXT PRIMARY KEY, nonce TEXT NOT NULL);",
+];
+
+const RECEIVER_SUB_COLUMNS: &str = "id, receiver, identity_pubkey, machine_pubkey, subject, subscription_id, generation, secret, key_hash, account, state, created_at";
+
+fn receiver_sub(row: &tokio_postgres::Row) -> crate::db::ReceiverSub {
+    crate::db::ReceiverSub {
+        id: row.get(0),
+        receiver: row.get(1),
+        identity_pubkey: row.get(2),
+        machine_pubkey: row.get(3),
+        subject: row.get(4),
+        subscription_id: row.get(5),
+        generation: row.get(6),
+        secret: row.get(7),
+        key_hash: row.get(8),
+        account: row.get(9),
+        state: row.get(10),
+        created_at: row.get(11),
+    }
+}
 
 /// Applies the steps this database has not had. DDL locks whole tables, and the process this
 /// one replaces is writing to them meanwhile, so a step runs once and not at every start, and
@@ -566,12 +644,162 @@ impl Store for Postgres {
             .await?;
         }
         tx.execute("DELETE FROM challenges WHERE machine_pubkey IN (SELECT machine_pubkey FROM machines WHERE identity_pubkey = $1)", &[&identity_pubkey]).await?;
-        for table in ["managed_replay_context", "managed_companion_receipts", "push_tokens", "pairings", "blobs", "deleted_groups", "sequences", "usage", "machines"] {
+        for table in ["managed_replay_context", "managed_companion_receipts", "push_tokens", "pairings", "blobs", "deleted_groups", "sequences", "usage", "shares", "receiver_states", "receiver_accounts", "receiver_subscriptions", "machines"] {
             tx.execute(&format!("DELETE FROM {table} WHERE identity_pubkey = $1"), &[&identity_pubkey]).await?;
         }
         tx.execute("DELETE FROM identities WHERE pubkey = $1", &[&identity_pubkey]).await?;
         tx.commit().await?;
         Ok(DeletedIdentity { machines, files })
+    }
+
+    async fn put_share(&self, identity_pubkey: &str, id: &str, ciphertext: &[u8], max: i64) -> ApiResult<()> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        lock_identity(&tx, identity_pubkey).await?;
+        let owner: Option<String> = tx.query_opt("SELECT identity_pubkey FROM shares WHERE id = $1 FOR UPDATE", &[&id]).await?.map(|row| row.get(0));
+        match owner {
+            Some(owner) if owner != identity_pubkey => return Err(ApiError::forbidden("Not your link")),
+            Some(_) => {
+                tx.execute("UPDATE shares SET ciphertext = $1, updated_at = $2 WHERE id = $3", &[&ciphertext, &now(), &id]).await?;
+            }
+            None => {
+                let count: i64 = tx.query_one("SELECT COUNT(*) FROM shares WHERE identity_pubkey = $1", &[&identity_pubkey]).await?.get(0);
+                if count >= max {
+                    return Err(ApiError::conflict("This account has as many shared links as the relay keeps"));
+                }
+                tx.execute(
+                    "INSERT INTO shares (id, identity_pubkey, ciphertext, created_at, updated_at) VALUES ($1, $2, $3, $4, $4)",
+                    &[&id, &identity_pubkey, &ciphertext, &now()],
+                )
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn share(&self, id: &str) -> ApiResult<Option<Vec<u8>>> {
+        Ok(self.client().await?.query_opt("SELECT ciphertext FROM shares WHERE id = $1", &[&id]).await?.map(|row| row.get(0)))
+    }
+
+    async fn delete_share(&self, identity_pubkey: &str, id: &str) -> ApiResult<bool> {
+        Ok(self.client().await?.execute("DELETE FROM shares WHERE id = $1 AND identity_pubkey = $2", &[&id, &identity_pubkey]).await? > 0)
+    }
+
+    async fn receiver_state_put(&self, state: &str, receiver: &str, identity_pubkey: &str) -> ApiResult<()> {
+        let client = self.client().await?;
+        // States an hour old are done with: a redirect takes minutes.
+        client.execute("DELETE FROM receiver_states WHERE created_at < $1", &[&(now() - 3600)]).await?;
+        client
+            .execute("INSERT INTO receiver_states (state, receiver, identity_pubkey, created_at) VALUES ($1, $2, $3, $4)", &[&state, &receiver, &identity_pubkey, &now()])
+            .await?;
+        Ok(())
+    }
+
+    async fn receiver_state_take(&self, state: &str, receiver: &str, not_before: i64) -> ApiResult<Option<String>> {
+        let row = self
+            .client()
+            .await?
+            .query_opt("DELETE FROM receiver_states WHERE state = $1 RETURNING receiver, identity_pubkey, created_at", &[&state])
+            .await?;
+        Ok(row.filter(|row| row.get::<_, String>(0) == receiver && row.get::<_, i64>(2) >= not_before).map(|row| row.get(1)))
+    }
+
+    async fn receiver_bind(&self, receiver: &str, account: &str, identity_pubkey: &str, label: &str, scope: &str) -> ApiResult<()> {
+        self.client()
+            .await?
+            .execute(
+                "INSERT INTO receiver_accounts (receiver, account, identity_pubkey, label, scope, bound_at) VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (receiver, account, identity_pubkey) DO UPDATE SET label = excluded.label, scope = excluded.scope, bound_at = excluded.bound_at",
+                &[&receiver, &account, &identity_pubkey, &label, &scope, &now()],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn receiver_scope(&self, receiver: &str, account: &str, identity_pubkey: &str) -> ApiResult<Option<String>> {
+        Ok(self
+            .client()
+            .await?
+            .query_opt("SELECT scope FROM receiver_accounts WHERE receiver = $1 AND account = $2 AND identity_pubkey = $3", &[&receiver, &account, &identity_pubkey])
+            .await?
+            .map(|row| row.get(0)))
+    }
+
+    async fn receiver_unbind(&self, receiver: &str, account: &str) -> ApiResult<Vec<crate::db::ReceiverSub>> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        let removed = tx
+            .query(&format!("DELETE FROM receiver_subscriptions WHERE receiver = $1 AND account = $2 RETURNING {RECEIVER_SUB_COLUMNS}"), &[&receiver, &account])
+            .await?
+            .iter()
+            .map(receiver_sub)
+            .collect();
+        tx.execute("DELETE FROM receiver_accounts WHERE receiver = $1 AND account = $2", &[&receiver, &account]).await?;
+        tx.commit().await?;
+        Ok(removed)
+    }
+
+    async fn receiver_subscribe(&self, sub: &crate::db::ReceiverSub, max: i64) -> ApiResult<()> {
+        let mut client = self.client().await?;
+        let tx = client.transaction().await?;
+        lock_identity(&tx, &sub.identity_pubkey).await?;
+        let count: i64 =
+            tx.query_one("SELECT COUNT(*) FROM receiver_subscriptions WHERE identity_pubkey = $1 AND receiver = $2", &[&sub.identity_pubkey, &sub.receiver]).await?.get(0);
+        if count >= max {
+            return Err(ApiError::conflict("This account has as many of these subscriptions as the relay keeps"));
+        }
+        tx.execute(
+            &format!("INSERT INTO receiver_subscriptions ({RECEIVER_SUB_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"),
+            &[&sub.id, &sub.receiver, &sub.identity_pubkey, &sub.machine_pubkey, &sub.subject, &sub.subscription_id, &sub.generation, &sub.secret, &sub.key_hash, &sub.account, &sub.state, &sub.created_at],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn receiver_unsubscribe(&self, identity_pubkey: &str, receiver: &str, id: &str) -> ApiResult<bool> {
+        Ok(self
+            .client()
+            .await?
+            .execute("DELETE FROM receiver_subscriptions WHERE id = $1 AND receiver = $2 AND identity_pubkey = $3", &[&id, &receiver, &identity_pubkey])
+            .await?
+            > 0)
+    }
+
+    async fn receiver_sub(&self, receiver: &str, id: &str) -> ApiResult<Option<crate::db::ReceiverSub>> {
+        Ok(self
+            .client()
+            .await?
+            .query_opt(&format!("SELECT {RECEIVER_SUB_COLUMNS} FROM receiver_subscriptions WHERE id = $1 AND receiver = $2"), &[&id, &receiver])
+            .await?
+            .map(|row| receiver_sub(&row)))
+    }
+
+    async fn receiver_subs(&self, receiver: &str, prefix: &str) -> ApiResult<Vec<crate::db::ReceiverSub>> {
+        // `left` instead of LIKE: a subject is the service's spelling, and may hold `%` or `_`.
+        Ok(self
+            .client()
+            .await?
+            .query(&format!("SELECT {RECEIVER_SUB_COLUMNS} FROM receiver_subscriptions WHERE receiver = $1 AND left(subject, char_length($2::text)) = $2::text"), &[&receiver, &prefix])
+            .await?
+            .iter()
+            .map(receiver_sub)
+            .collect())
+    }
+
+    async fn receiver_set_key(&self, identity_pubkey: &str, receiver: &str, id: &str, key_hash: &str) -> ApiResult<bool> {
+        Ok(self
+            .client()
+            .await?
+            .execute("UPDATE receiver_subscriptions SET key_hash = $1 WHERE id = $2 AND receiver = $3 AND identity_pubkey = $4", &[&key_hash, &id, &receiver, &identity_pubkey])
+            .await?
+            > 0)
+    }
+
+    async fn receiver_set_state(&self, receiver: &str, id: &str, state: &str) -> ApiResult<()> {
+        self.client().await?.execute("UPDATE receiver_subscriptions SET state = $1 WHERE id = $2 AND receiver = $3", &[&state, &id, &receiver]).await?;
+        Ok(())
     }
 
     async fn inactive_identities(&self, before: i64) -> ApiResult<Vec<String>> {
@@ -1169,5 +1397,53 @@ mod format_tests {
         assert!(fresh_schema(10, Some((10, "r")), &["beans-v2".into(), "beans-v2".into()], true).is_err());
         assert!(fresh_schema(10, Some((10, "r")), &["other".into()], true).is_err());
         assert!(!fresh_schema(10, Some((10, "r")), &valid, true).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod migration_lineage_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn both_shipped_lineages_preserve_rows_and_install_all_tables() {
+        let Ok(url) = std::env::var("BEANS_RELAY_TEST_POSTGRES") else { return };
+        let config: tokio_postgres::Config = url.parse().unwrap();
+        let pool = Pool::builder(Manager::new(config, tokio_postgres::NoTls)).max_size(1).build().unwrap();
+        let mut client = pool.get().await.unwrap();
+        for lineage in ["fork2", "upstream2", "upstream3"] {
+            let schema = format!("lineage_{}", uuid::Uuid::new_v4().simple());
+            client.batch_execute(&format!("CREATE SCHEMA {schema}; SET search_path TO {schema}")).await.unwrap();
+            client.batch_execute(SCHEMA).await.unwrap();
+            client.batch_execute("CREATE TABLE schema_version(version BIGINT PRIMARY KEY, applied_at BIGINT NOT NULL); INSERT INTO schema_version VALUES (1,1);").await.unwrap();
+            if lineage == "fork2" {
+                client.batch_execute(MANAGED_SCHEMA).await.unwrap();
+                client.batch_execute("INSERT INTO managed_replay_context VALUES ('account', 'retained-nonce')").await.unwrap();
+            } else {
+                client.batch_execute(MIGRATIONS[0]).await.unwrap();
+                client.execute("INSERT INTO shares VALUES ('link', 'account', $1, 1, 2)", &[&vec![1u8, 2]]).await.unwrap();
+            }
+            client.batch_execute("INSERT INTO schema_version VALUES (2,2)").await.unwrap();
+            if lineage == "upstream3" {
+                client.batch_execute(MIGRATIONS[1]).await.unwrap();
+                client.batch_execute("INSERT INTO schema_version VALUES (3,3)").await.unwrap();
+            }
+            migrate(&mut client).await.unwrap();
+            migrate(&mut client).await.unwrap();
+
+        let tables = ["shares", "receiver_states", "receiver_accounts", "receiver_subscriptions", "managed_companion_receipts", "managed_replay_context"];
+
+            for table in tables {
+                let exists: bool = client.query_one("SELECT to_regclass($1) IS NOT NULL", &[&table]).await.unwrap().get(0);
+                assert!(exists, "{lineage}: {table}");
+            }
+            if lineage == "fork2" {
+                let nonce: String = client.query_one("SELECT nonce FROM managed_replay_context WHERE identity_pubkey='account'", &[]).await.unwrap().get(0);
+                assert_eq!(nonce, "retained-nonce");
+            } else {
+                let ciphertext: Vec<u8> = client.query_one("SELECT ciphertext FROM shares WHERE id='link'", &[]).await.unwrap().get(0);
+                assert_eq!(ciphertext, vec![1, 2]);
+            }
+            client.batch_execute(&format!("SET search_path TO public; DROP SCHEMA {schema} CASCADE")).await.unwrap();
+        }
     }
 }

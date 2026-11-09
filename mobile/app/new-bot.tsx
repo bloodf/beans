@@ -10,6 +10,7 @@ import { Symbol } from "../src/ui/Symbol";
 import { usePalette } from "../src/ui/theme";
 import { deviceSymbol } from "../src/ui/devices";
 import { FormToolbar } from "../src/ui/navigation";
+import { alert } from "../src/ui/alert";
 
 export default function NewBotScreen() {
   useLanguage();
@@ -23,7 +24,8 @@ export default function NewBotScreen() {
   const [runnerId, setRunnerId] = useState<string>(() => runners.find((r) => deviceIsOnline(r.id))?.id ?? runners[0]?.id ?? "");
   const runner = runners.find((r) => r.id === runnerId);
   const statuses = useStore((s) => s.providers);
-  // The connected providers, custom ones after the built-ins, or every built-in while none is.
+  // The connected providers a bot can run with, custom ones after the built-ins, or every
+  // built-in while none is. Decision providers and models are Auto-review's alone.
   const connected = connectedProviders(statuses);
   const catalog = withCustomModels(useStore((s) => s.models), statuses);
   const providers: readonly string[] = connected.length ? connected : PROVIDER_KINDS;
@@ -42,11 +44,11 @@ export default function NewBotScreen() {
 
   async function save() {
     try {
-      const { chatId } = await engine.createBot({ name, description, symbol_name: "sparkles", accent: "indigo", runner_id: runnerId, provider: effectiveProvider, model, thinking });
+      const { chatId } = await engine.createBot({ name, description, accent: "indigo", runner_id: runnerId, provider: effectiveProvider, model, thinking });
       router.dismiss();
       router.push(`/chat/${chatId}`);
     } catch (error) {
-      Alert.alert(t("Could not create the bot"), error instanceof Error ? error.message : String(error));
+      alert(t("Could not create the bot"), error instanceof Error ? error.message : String(error));
     }
   }
 

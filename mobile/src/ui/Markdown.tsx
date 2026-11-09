@@ -8,12 +8,13 @@ import { Font, usePalette } from "./theme";
 
 export function Markdown({ text, color, maxWidth, size = Font.message }: { text: string; color: ColorValue; maxWidth: number; size?: number }) {
   const p = usePalette();
-  const link = color === p.userBubbleText ? color : p.link;
+  // The text size the user picked: Android's view sizes its text in sp, which follows it already;
+  // UIKit's takes points, so iOS scales them here, measuring and drawing alike.
   const { fontScale } = useWindowDimensions();
-  // UIKit takes point sizes; Android's renderer already converts these sizes through SP.
   const scale = Platform.OS === "ios" ? fontScale : 1;
   const fontSize = size * scale;
   const codeFontSize = Font.code * scale;
+  const link = color === p.userBubbleText ? color : p.link;
   const measured = useMemo(() => measureMarkdown(text, maxWidth, fontSize, codeFontSize), [text, maxWidth, fontSize, codeFontSize, fontScale]);
   return (
     <MarkdownView

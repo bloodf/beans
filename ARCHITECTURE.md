@@ -9,7 +9,7 @@ Identity is a **key pair**. Devices pair. The relay stores public keys and ciphe
 ## Constraints
 
 1. **The app speaks only to the local CLI** over localhost websocket. The app ships the CLI binary inside its bundle and starts `beans serve` itself, unless one already answers on the port. The CLI holds keys, talks to the relay, and talks to models.
-2. **The UI is AppKit** (SPM) on macOS: system materials, SF Symbols, Auto Layout, keyboard, accessibility. On Windows and Linux it is a MyGo app, Go and the system webview, that follows the macOS app screen for screen.
+2. **The UI is AppKit** (SPM) on macOS: system materials, SF Symbols, Auto Layout, keyboard, accessibility. On Windows and Linux it is a MyGo app, Go and the system webview, with a Solid default interface and an opt-in native Go interface.
 3. **The CLI owns the agent loop:** inference, tools, streaming, cancellation, orchestration.
 4. **The relay is zero-knowledge:** opaque blobs and public keys. Auth is a signature challenge.
 5. **Every Device records its `os`.** A Device with a desktop `os` (`macos`, `linux`, `windows`) is a **Runner**. Phones and tablets (`ios`, `ipados`, `android`) are Devices, never Runners.
@@ -59,89 +59,101 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 
 | Doc | Read it for |
 | --- | --- |
-| [Account model](docs/architecture/account-model.md) | Entity relationships, Device/relay data ownership and cross-Runner job routing |
-| [Identity](docs/architecture/identity.md) | Key pairs and the identity device, pairing and unpairing, Devices and Runners, what the relay sees, the account's provider credentials |
-| [Device names](docs/architecture/device-names.md) | Account aliases, machine names and durable roster intent |
-| [Device revocation](docs/architecture/device-revocation.md) | Lost, un-wiped Device boundaries and the proposed, unimplemented containment and rotation contract |
-| [Relay](docs/architecture/relay.md) | `crates/relay`: storage on SQLite or Postgres, files, housekeeping, quotas, metrics, rate limits, auth, tables and migrations, the blob, sync socket, and push APIs, deploys |
-| [Computer display](docs/architecture/computer-display.md) | Proposed authenticated display/input transport, Device-bound sessions, lifecycle fences, client feasibility and measurement gaps |
-| [Protocols](docs/architecture/protocols.md) | The app ↔ CLI websocket and the CLI ↔ relay requests and blobs |
-| [Computer ownership](docs/architecture/computer-ownership.md) | Proposed encrypted ownership, async lifecycle, capability compatibility and old-client fixture |
-| [Computer ownership compatibility](docs/architecture/computer-ownership-compatibility.md) | Source-extracted fixture, hashes, replay and evidence limits |
-| [Managed policy receipts and replay](docs/architecture/managed-policy-replay.md) | Staged opaque policy/roster commits, durable receipt retention, authenticated finite replay cuts and teardown boundaries |
-| [Local API](docs/architecture/local-api.md) | The `/ws` socket: trust boundary, field errors, every method with params and results, events, secret-bearing methods, memory and setup bodies |
-| [CLI (runtime)](docs/architecture/runtime.md) | Commands, local websocket access, proxy/certificate trust, diagnostics, agent loop and notifications |
-| [Local storage and startup admission](docs/architecture/storage-admission.md) | Data directory, format admission, staged scratch preload, creation guards and final startup persistence |
-| [Local task authority](docs/architecture/tasks.md) | Exclusive execution ownership, durable Job.id admission, invocation receipts, recovery and replay fences |
-| [CLI service and updates](docs/architecture/service-updates.md) | CLI installation, standalone services, Runner admission drain and update availability |
-| [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review |
-| [Computer provenance](docs/architecture/computer-provenance.md) | Proposed computer-stack discovery contract, dependency/license provenance, artifact verification and pending deployment gates |
-| [Terminal sessions](docs/architecture/terminal-sessions.md) | A bot's commands in terminals of their own: when a call returns, background commands, the command's card, answering and stopping, Running tasks |
-| [Realtime voice evaluation](docs/architecture/voice-evaluation.md) | Pinned voice stack options: licenses, transports, plaintext recipients, privacy choices and pending live evidence |
-| [Codemode and Plugins](docs/architecture/plugins.md) | Scripts that call plugin tools, MCP plugins and their installs, sign-in, plugin calls at turn time |
-| [Skills](docs/architecture/skills.md) | Bounded metadata discovery, Runner and desktop discovery contract, managed copies, provenance and uninstall |
-| [Marketplace](docs/architecture/marketplace.md) | The relay-backed index of plugins and bot templates, offline fallback and updates, bots added from a template, the marketplace sheet |
-| [MCP servers](docs/architecture/mcp-servers.md) | The user's own MCP servers in a Runner's `mcp.json`: the file and other apps' spellings, sign-in, the `mcp.*` methods and `beans mcp`, the apps' MCP Servers section and server sheet |
-| [Bots, Routines, and Memory](docs/architecture/bots.md) | The lead bot, DMs and groups, group descriptions and ownership, who answers, handoffs between bots, routines and their checks, a bot's memory |
-| [Memory service UI](docs/architecture/memory-ui.md) | Client drafts, masked replies, secret/options patches, consent and capability gates |
-| [Memory services](docs/architecture/memory-services.md) | Encrypted config, dispatch, queues, deletion and embeddings |
-| [Bot avatars](docs/architecture/avatars.md) | Generated appearance contract, independent photos, validated API edits, encrypted persistence and fresh-format protocol compatibility |
-| [Providers](docs/architecture/providers.md) | Each model provider and its sign-in, custom providers, thinking levels, compaction, retries |
-| [Zhipu GLM compatibility](docs/architecture/glm-compatibility.md) | Vendor documentation, existing custom-wire evaluation, unsupported reasoning-tool continuation and local transport evidence |
-| [Model catalog and cost](docs/architecture/model-catalog.md) | Shared model metadata, pricing completeness, usage, and public catalog refresh |
-| [macOS app](docs/architecture/macos-app.md) | AppKit launch, windows, onboarding, settings, updates, inspector, Blobatar |
-| [macOS sidebar](docs/architecture/macos-sidebar.md) | Sidebars, search, native chrome, toolbar navigation |
-| [macOS chat](docs/architecture/macos-chat.md) | AppKit transcript, composer, attachments, dictation, and working state |
-| [Composer capabilities](docs/architecture/composer-capabilities.md) | Proposed context/action consumers and their implementation boundaries |
-| [Composer](docs/architecture/composer.md) | Current client/catalog inventory and selected discovery-only action/reference syntax, authority, compatibility, preservation and capability dispositions |
-| [Windows and Linux app](docs/architecture/desktop-app.md) | The MyGo app: its Go side and Solid page, title bar, commands, updates, development and builds |
-| [Phone app](docs/architecture/phone-app.md) | The Expo app over the Rust core: the native module, pairing, relay status, attachments, dictation, notifications, turns |
-| [Phone releases and updates](docs/architecture/phone-updates.md) | TestFlight builds, Android APK releases, and the Android app's self-update: the native gate, daily check and offer, the progress dialog, the package installer |
-| [Phone interface](docs/architecture/phone-interface.md) | Native screens, transcript presentation and adaptive navigation |
-| [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds, testing submissions, accounts and credentials |
-| [Website](docs/architecture/website.md) | `web/`: the site, its docs, and the install scripts it serves |
-| [Languages](docs/architecture/languages.md) | English and Simplified Chinese in each app, and what the CLI words |
-| [Portable setup](docs/architecture/portable-setup.md) | Secret-free configuration recipe boundaries, versioning, ownership, validation and import transaction contract |
+| [Account model](docs/architecture/account-model.md) | Reference |
+| [Identity](docs/architecture/identity.md) | Reference |
+| [Device names](docs/architecture/device-names.md) | Reference |
+| [Device revocation](docs/architecture/device-revocation.md) | Reference |
+| [Relay](docs/architecture/relay.md) | Reference |
+| [Computer display](docs/architecture/computer-display.md) | Reference |
+| [Protocols](docs/architecture/protocols.md) | Reference |
+| [Computer ownership](docs/architecture/computer-ownership.md) | Reference |
+| [Computer ownership compatibility](docs/architecture/computer-ownership-compatibility.md) | Reference |
+| [Managed policy receipts and replay](docs/architecture/managed-policy-replay.md) | Reference |
+| [Local API](docs/architecture/local-api.md) | Reference |
+| [CLI (runtime)](docs/architecture/runtime.md) | Reference |
+| [Local storage and startup admission](docs/architecture/storage-admission.md) | Reference |
+| [Local task authority](docs/architecture/tasks.md) | Reference |
+| [CLI service and updates](docs/architecture/service-updates.md) | Reference |
+| [Tools](docs/architecture/tools.md) | Reference |
+| [Computer provenance](docs/architecture/computer-provenance.md) | Reference |
+| [Terminal sessions](docs/architecture/terminal-sessions.md) | Reference |
+| [Realtime voice evaluation](docs/architecture/voice-evaluation.md) | Reference |
+| [Codemode and Plugins](docs/architecture/plugins.md) | Reference |
+| [Skills](docs/architecture/skills.md) | Reference |
+| [Marketplace](docs/architecture/marketplace.md) | Reference |
+| [MCP servers](docs/architecture/mcp-servers.md) | Reference |
+| [Bots, Routines, and Memory](docs/architecture/bots.md) | Reference |
+| [Memory service UI](docs/architecture/memory-ui.md) | Reference |
+| [Memory services](docs/architecture/memory-services.md) | Reference |
+| [Bot avatars](docs/architecture/avatars.md) | Reference |
+| [Providers](docs/architecture/providers.md) | Reference |
+| [Zhipu GLM compatibility](docs/architecture/glm-compatibility.md) | Reference |
+| [Model catalog and cost](docs/architecture/model-catalog.md) | Reference |
+| [macOS app](docs/architecture/macos-app.md) | Reference |
+| [macOS sidebar](docs/architecture/macos-sidebar.md) | Reference |
+| [macOS chat](docs/architecture/macos-chat.md) | Reference |
+| [Composer capabilities](docs/architecture/composer-capabilities.md) | Reference |
+| [Composer](docs/architecture/composer.md) | Reference |
+| [Windows and Linux app](docs/architecture/desktop-app.md) | Reference |
+| [Phone app](docs/architecture/phone-app.md) | Reference |
+| [Phone releases and updates](docs/architecture/phone-updates.md) | Reference |
+| [Phone interface](docs/architecture/phone-interface.md) | Reference |
+| [Releases](docs/architecture/releases.md) | Reference |
+| [Website](docs/architecture/website.md) | Reference |
+| [Languages](docs/architecture/languages.md) | Reference |
+| [Portable setup](docs/architecture/portable-setup.md) | Reference |
+
+| [Relay trust](docs/architecture/relay-trust.md) | Reference |
+| [Requests between Devices](docs/architecture/requests.md) | Reference |
+| [Notifications](docs/architecture/notifications.md) | Reference |
+| [Bot permissions](docs/architecture/bot-permissions.md) | Reference |
+| [Auto-review](docs/architecture/auto-review.md) | Reference |
+| [Handoffs](docs/architecture/handoffs.md) | Reference |
+| [Review queue](docs/architecture/review-queue.md) | Reference |
+| [Message drafts](docs/architecture/drafts.md) | Reference |
+| [Outputs and evidence](docs/architecture/outputs.md) | Reference |
+| [Stop](docs/architecture/stopping.md) | Reference |
+| [Coding agents](docs/architecture/coding-agents.md) | Reference |
+| [Coding agent roster](docs/architecture/agent-roster.md) | Reference |
+| [Secret requests](docs/architecture/secrets.md) | Reference |
+| [Browser sessions](docs/architecture/browser-sessions.md) | Reference |
+| [Integrations and named accounts](docs/architecture/integrations.md) | Reference |
+| [Workflow onboarding](docs/architecture/workflows.md) | Reference |
+| [Bot templates](docs/architecture/templates.md) | Reference |
+| [Routines](docs/architecture/routines.md) | Reference |
+| [One-time routines, routines on events, and calendar events](docs/architecture/routine-triggers.md) | Reference |
+| [Event triggers](docs/architecture/event-triggers.md) | Reference |
+| [Hosted receivers](docs/architecture/receivers.md) | Reference |
+| [Channels](docs/architecture/channels.md) | Reference |
+| [Channel readers](docs/architecture/channel-readers.md) | Reference |
+| [Coordinator attention](docs/architecture/attention.md) | Reference |
+| [Shared project context](docs/architecture/project-context.md) | Reference |
+| [Playbooks](docs/architecture/playbooks.md) | Reference |
+| [Workflow feedback](docs/architecture/feedback.md) | Reference |
+| [Compaction and usage](docs/architecture/compaction.md) | Reference |
+| [Budgets and connector limits](docs/architecture/budgets.md) | Reference |
+| [Sidebar sections and alerts](docs/architecture/sidebar.md) | Reference |
+| [Desktop app updates](docs/architecture/desktop-updates.md) | Reference |
+| [Phone layout](docs/architecture/phone-layout.md) | Reference |
+| [Repo layout and development](docs/architecture/development.md) | Reference |
+| [Status](docs/architecture/status.md) | Reference |
+
+| [Account lifecycle](docs/architecture/account-lifecycle.md) | Reference |
+| [Agent runtime](docs/architecture/agent-runtime.md) | Reference |
+| [Bot automation](docs/architecture/bot-automation.md) | Reference |
+| [Bot memory and feedback](docs/architecture/bot-memory.md) | Reference |
+| [Durable tasks](docs/architecture/durable-tasks.md) | Reference |
+| [Approval and policy history](docs/architecture/policy-history.md) | Reference |
+| [Relay protocol](docs/architecture/relay-protocol.md) | Reference |
+| [Subject guide](docs/architecture/subject-guide.md) | Reference |
+
+| [Implementation status](docs/architecture/implementation-status.md) | Implementation boundaries |
+| [Repository layout](docs/architecture/repository-layout.md) | Crates and development loops |
 
 ## Repo layout
 
-```
-beans/
-  ARCHITECTURE.md      # this overview and the list of subjects
-  README.md
-  docs/architecture/   # one doc per subject
-  docs/agent/          # beans-agent's own documentation
-  Cargo.toml           # workspace
-  crates/agent/        # beans-agent: loop, tools, codemode (QuickJS), and Messages, Chat Completions, Responses, ChatGPT, and Grok providers
-  crates/models/       # beans-models: the bundled model catalog (windows, thinking levels, rates); Devices check the selected Beans relay's public feed for updates
-  crates/provider-auth/ # OAuth token types and PKCE flows shared by every Device
-  crates/tls/          # beans-tls: the certificate trust of every Device's HTTPS, the system's on macOS and Windows
-  crates/cli/          # beans: the Device core as a library (keys, relay sync, jobs, the JSON API) + runner and server features + the binary
-  crates/mobile/       # beans-mobile: the core for the phone over UniFFI
-  crates/markdown/     # beans-markdown: message Markdown as the blocks and spans every app renders (pulldown-cmark, and GitHub's autolinks for bare URLs and addresses), for the Mac and phone over UniFFI
-  crates/relay/        # beans-relay: axum + SQLite or Postgres, and its Dockerfile
-  macos/               # AppKit SPM app; the build bundles the CLI
-  desktop/             # the Windows and Linux app: MyGo (Go + system webview) with a Solid page; the build bundles the CLI
-  mobile/              # Expo app for iOS and Android: a paired Device over the core (modules/beans-core)
-  web/                 # the site
-  scripts/             # Node/TypeScript scripts: dev loop, bundle build, macOS release, the desktop app's dev loop and builds, string and doc checks
-  .github/workflows/   # release.yml: manual signed Beans releases; test.yml: full PR/manual test matrix; docs.yml: PR/manual doc check; catalog.yml: PR/manual catalog/index check
-```
-
-See [Phone development](docs/architecture/phone-app.md#development-loop) for phone rebuild commands.
-
-`pnpm run dev` runs the macOS Beans Dev loop; `pnpm run build` produces the Beans release bundle. See [macOS development and builds](docs/architecture/macos-app.md#development-and-builds) for rebuild, launch and SDK-stamping mechanisms. `pnpm run relay` runs a local relay. The [phone development loop](docs/architecture/phone-app.md#development-loop) fingerprints native inputs, rebuilds stale pieces and leaves production Beans processes alone.
+See [Repository layout](docs/architecture/repository-layout.md).
 
 ## Status
 
-Implemented mechanisms include crypto and blob sync, relay storage, CLI identity/pairing/restore, the local websocket, API-key and ChatGPT subscription providers, server-side web search, the agent loop, group chats, cross-Runner jobs and handoffs, steering/stop, routines, MCP plugins, permission cards, encrypted phone pushes, `beans service`, and signed app/server update readiness with Runner admission drain. Standalone CLI self-update is unavailable; production Grok OAuth is disabled pending a verified Beans contract. Source implementation is not installed-app or live-service acceptance.
-
-Next: keychain storage, a cost budget per chat.
-
-See [Phone app](docs/architecture/phone-app.md) for phone identity and key ownership.
-
-## Open points
-
-- Keychain instead of 0600 files for the master secret and credentials
-
-When those are chosen, update this file.
+See [Implementation status](docs/architecture/implementation-status.md). Source mechanisms and client coverage are distinct. AppKit upstream screen candidates cover Attention, Tasks and Handoffs only; other upstream screens and desktop native lifecycle integration remain incomplete. Website download routes call `latestMacRelease`; appcast failure disables only Mac. Website readiness-asset selection does not establish cryptographic verification or runtime acceptance.

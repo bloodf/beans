@@ -52,7 +52,8 @@ export const Route = createRootRoute({
 const followAppearance = `{const m=matchMedia('(prefers-color-scheme: dark)'),a=()=>document.documentElement.classList.toggle('dark',m.matches);a();m.addEventListener('change',a)}`
 
 function RootDocument({ children }: { children: React.ReactNode }) {
-  const lng = languageOf(useLocation({ select: (location) => location.pathname }))
+  const pathname = useLocation({ select: (location) => location.pathname })
+  const lng = languageOf(pathname)
   return (
     // The script below adds a class to <html> before React hydrates it.
     <html lang={htmlLang[lng]} suppressHydrationWarning>

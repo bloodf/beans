@@ -1,5 +1,9 @@
 # Phone app
 
+The phone uses the Beans native module identity `beans-core`. Account authority, drafts, memory configuration and generated appearance remain part of the shared core contract. New upstream screens require matching engine, model and store handlers; their presence alone does not establish usable UI.
+
+The JavaScript bridge returns the native startup promise, so the engine waits for account loading before bootstrap and receives startup failures. It exposes native file preview when available; iOS opens the file through Quick Look, while clients without that capability use their sharing flow.
+
 `mobile/` is an Expo app (React Native, expo-router, TypeScript) for iOS and Android. A phone is a Device and never a Runner, and it links the same Device core the CLI is built from rather than porting it: `crates/mobile` (`beans-mobile`) wraps the `beans` library, built without the `runner` and `server` features, in a UniFFI object with three calls, and `mobile/modules/beans-core` is the Expo native module around it.
 
 The phone app (`mobile/`) pairs as a Device with `os` `ios`, `ipados`, or `android`; it is never a Runner and does not hold the master secret. The Device that creates or restores the identity holds the master secret.

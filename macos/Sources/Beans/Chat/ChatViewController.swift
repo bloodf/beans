@@ -120,6 +120,9 @@ final class ChatViewController: NSViewController {
         tableView.rowSizeStyle = .custom
         tableView.dataSource = self
         tableView.delegate = self
+        let actions = NSMenu()
+        actions.delegate = self
+        tableView.menu = actions
         tableView.onLiveResizeEnd = { [weak self] in self?.liveResizeDidEnd() }
         tableView.rowIdentity = { [weak self] row in
             guard let self, rows.indices.contains(row) else { return row }
@@ -756,8 +759,16 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     /// The bot's avatar for a card in a group; nil in a DM.
+    private func transcriptAvatar(for author: Message.Author) -> AvatarView.Content {
+        let current = AvatarView.content(for: author, store: store, in: chatID)
+        // The existing resolver owns photo precedence. Only replace its generated default.
+        if case .bot = current, case let .bot(id) = author,
+           let image = store.bot(id)?.upstreamShapeImage { return .image(image) }
+        return current
+    }
+
     private func cardAvatar(for message: Message) -> AvatarView.Content? {
-        showsAvatar(for: message) ? AvatarView.content(for: message.author, store: store, in: chatID) : nil
+        showsAvatar(for: message) ? transcriptAvatar(for: message.author) : nil
     }
 
     /// The plugin behind a `<plugin>__<tool>` row, by name, from the bot's Runner.
@@ -897,7 +908,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     groupStart: groupStart,
                     authorName: name,
                     nameColor: nameColor,
-                    avatarContent: AvatarView.content(for: message.author, store: store, in: chatID),
+                    avatarContent: transcriptAvatar(for: message.author),
                     segments: layout.rendered(for: message).segments,
                     attachments: items,
                     quote: message.replyTo.map { (name: authorName(of: $0.author), text: $0.text) },
@@ -977,5 +988,139 @@ final class TransparentRowView: NSTableRowView {
     override var isEmphasized: Bool {
         get { false }
         set {}
+    }
+}
+
+
+extension ChatViewController: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let roster = NSMenuItem(title: L("Account coding agents…"), action: #selector(openCodingRoster(_:)), keyEquivalent: "")
+        roster.target = self
+        menu.addItem(roster)
+        let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
+        guard rows.indices.contains(row), case let .message(id, _) = rows[row],
+              let message = message(for: id) else { return }
+        func add(_ title: String, _ selector: Selector) {
+            let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+            item.target = self
+            item.representedObject = message
+            menu.addItem(item)
+        }
+        if message.reviewID != nil, message.reviewVersion != nil {
+            add(L("Review draft…"), #selector(openReview(_:)))
+        }
+        if case let .tool(tool) = message.body, tool.targetAgentID != nil {
+            add(L("Coding agent…"), #selector(openCodingAgent(_:)))
+        }
+    }
+
+    private func showContractError(_ error: Error) {
+        let alert = NSAlert(error: error)
+        alert.runModal()
+    }
+
+    @objc private func openReview(_ sender: NSMenuItem) {
+        guard let message = sender.representedObject as? Message,
+              let id = message.reviewID, let version = message.reviewVersion, let owner = store.deviceNameOwner else { return }
+        Task { @MainActor in
+            do {
+                let item = try await store.review(id)
+                guard store.deviceNameOwner == owner else { return }
+                guard (item["version"] as? NSNumber)?.uint64Value == version else {
+                    throw NSError(domain: "Beans.Review", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                        L("This changed on another Device. Review it again.")])
+                }
+                let payload = item["payload"] as? [String: Any] ?? [:]
+                let pending = item["state"] as? String == "pending"
+                let fields = try ReviewDraftFields(payload: payload, editable: pending)
+                let alert = NSAlert()
+                alert.messageText = L("Review draft")
+                alert.informativeText = [item["rationale"] as? String, message.reviewState].compactMap { $0 }.joined(separator: "\n")
+                let fieldScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 550, height: 420))
+                fieldScroll.hasVerticalScroller = true
+                fields.view.layoutSubtreeIfNeeded()
+                fields.view.setFrameSize(NSSize(width: 540, height: max(420, fields.view.fittingSize.height)))
+                fieldScroll.documentView = fields.view
+                alert.accessoryView = fieldScroll
+                alert.addButton(withTitle: L("Cancel"))
+                if pending {
+                    alert.addButton(withTitle: L("Save edits"))
+                    alert.addButton(withTitle: L("Approve"))
+                    alert.addButton(withTitle: L("Reject"))
+                }
+                let response = alert.runModal()
+                guard store.deviceNameOwner == owner else { return }
+                if response == .alertSecondButtonReturn {
+                    let edited = try fields.payload()
+                    try await store.decideReview(id, version: version, action: .edit, payload: edited)
+                } else if response == .alertThirdButtonReturn {
+                    // Editing and approving are separate decisions. Unsaved text is never approved.
+                    guard NSDictionary(dictionary: try fields.payload()).isEqual(to: payload) else {
+                        throw NSError(domain: "Beans.Review", code: 2, userInfo: [NSLocalizedDescriptionKey: L("Save edits and review the new version before approving.")])
+                    }
+                    try await store.decideReview(id, version: version, action: .approve)
+                } else if response.rawValue == NSApplication.ModalResponse.alertThirdButtonReturn.rawValue + 1 {
+                    try await store.decideReview(id, version: version, action: .reject)
+                }
+            } catch { showContractError(error) }
+        }
+    }
+
+    @objc private func openCodingAgent(_ sender: NSMenuItem) {
+        guard let message = sender.representedObject as? Message, let selectedChat = chatID else { return }
+        presentCodingTranscript(chatID: selectedChat, messageID: message.id)
+    }
+
+    @objc private func openCodingRoster(_ sender: Any?) {
+        Task { @MainActor in
+            do {
+                try await CodingRosterUI.show(store: store) { [weak self] chat, message in
+                    self?.presentCodingTranscript(chatID: chat, messageID: message)
+                }
+            } catch { showContractError(error) }
+        }
+    }
+
+    private func presentCodingTranscript(chatID selectedChat: String, messageID: String) {
+        guard let owner = store.deviceNameOwner else { return }
+        Task { @MainActor in
+            do {
+                let transcript = try await store.codingTranscript(chatID: selectedChat, messageID: messageID)
+                guard store.deviceNameOwner == owner else { return }
+                let data = try JSONSerialization.data(withJSONObject: transcript, options: [.prettyPrinted, .sortedKeys])
+                let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 540, height: 320))
+                view.isEditable = false
+                view.isRichText = false
+                view.string = String(decoding: data, as: UTF8.self)
+                view.setAccessibilityLabel(L("Coding transcript"))
+                let scroll = NSScrollView(frame: view.frame)
+                scroll.documentView = view
+                scroll.hasVerticalScroller = true
+                let input = NSTextField(string: "")
+                input.placeholderString = L("Message to coding agent")
+                input.setAccessibilityLabel(L("Message to coding agent"))
+                let stack = NSStackView(views: [scroll, input])
+                stack.orientation = .vertical
+                stack.frame = NSRect(x: 0, y: 0, width: 540, height: 360)
+                scroll.widthAnchor.constraint(equalToConstant: 540).isActive = true
+                scroll.heightAnchor.constraint(equalToConstant: 320).isActive = true
+                let alert = NSAlert()
+                alert.messageText = L("Coding agent")
+                alert.accessoryView = stack
+                alert.addButton(withTitle: L("Close"))
+                if transcript["open"] as? Bool == true {
+                    alert.addButton(withTitle: L("Send"))
+                    alert.addButton(withTitle: L("Stop"))
+                }
+                let response = alert.runModal()
+                guard store.deviceNameOwner == owner else { return }
+                if response == .alertSecondButtonReturn {
+                    try await store.sendToCodingAgent(chatID: selectedChat, messageID: messageID, text: input.stringValue)
+                } else if response == .alertThirdButtonReturn {
+                    try await store.stopCodingAgent(chatID: selectedChat, messageID: messageID)
+                }
+            } catch { showContractError(error) }
+        }
     }
 }

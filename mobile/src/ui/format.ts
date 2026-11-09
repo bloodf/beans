@@ -1,10 +1,11 @@
-// Stamps, previews, and the working row's words, the rules the Mac app uses
-// (Design/Formatters.swift, AppStore.preview, ChatViewController.activity).
+// Stamps, previews, and the working row's words, the rules the desktop app uses too.
 
-import type { Body, Bot, Chat, Routine } from "../core/model";
-import { attachmentSummary, isSentMessage } from "../core/model";
+import type { Body, Bot, Chat, Message, Routine } from "../core/model";
+import { agentStartRow, agentTitle, agentWrote, attachmentSummary, isAgentRow, isSentMessage } from "../core/model";
 import type { StoreState } from "../core/store";
 import { language, t } from "../i18n";
+import { fnv } from "./characterMotion";
+import { draftTitle } from "./drafts";
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const WEEKDAYS_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -17,7 +18,7 @@ function weekday(date: Date): string {
 }
 
 /// "Sep 10", "9月10日".
-function monthDay(date: Date): string {
+export function monthDay(date: Date): string {
   return language === "zh" ? `${date.getMonth() + 1}月${date.getDate()}日` : `${MONTHS[date.getMonth()]} ${date.getDate()}`;
 }
 
@@ -112,18 +113,6 @@ export function scheduleText(text: string): string {
   return text;
 }
 
-/// The line under a routine's name: the schedule, then what is going on.
-export function routineDetail(routine: Routine): string {
-  const schedule = scheduleText(routine.schedule_text);
-  if (routine.is_running) return `${schedule} · ${t("Running…")}`;
-  if (!routine.is_enabled) return `${schedule} · ${routine.paused_reason === "away" ? t("Paused while you were away") : t("Paused")}`;
-  if (routine.next_run_at) {
-    const when = upcoming(routine.next_run_at);
-    return `${schedule} · ${routine.check ? t("Next check {when}", { when }) : t("Next {when}", { when })}`;
-  }
-  return schedule;
-}
-
 /// "Today 9:00 AM · replied", "Never", "Yesterday 6:00 PM · nothing to report".
 export function lastRunSummary(routine: Routine): string {
   if (!routine.last_run_at) return t("Never");
@@ -151,21 +140,40 @@ export function lastSeen(seenUnix: number | undefined): string {
   return t("Last seen {count}d ago", { count: Math.floor(elapsed / 86400) });
 }
 
-/// The last thing worth previewing: tool calls never are, except a sent message.
+/// The last thing worth previewing: tool calls never are, except a sent message and a coding
+/// agent's start or a message the bot sent it.
 export function preview(chat: Chat, bots: Map<string, Bot>): string {
-  const shown = [...chat.messages].reverse().find((m) => (m.body.kind === "tool" ? isSentMessage(m.body) : true));
+  let shown: Message | undefined;
+  for (let i = chat.messages.length - 1; i >= 0 && !shown; i--) {
+    const m = chat.messages[i];
+    if (m.body.kind !== "tool" || isSentMessage(m.body) || isAgentRow(m.body)) shown = m;
+  }
   if (!shown) return t("No messages yet");
   let body: string;
   switch (shown.body.kind) {
     case "text":
       body = shown.body.text || attachmentSummary(shown.body.attachments ?? []);
       break;
-    case "tool":
-      body = t("Messaged {name}: {detail}", { name: bots.get(shown.body.target_bot_id ?? "")?.name ?? t("a teammate"), detail: shown.body.detail });
+    case "tool": {
+      const tool = shown.body;
+      if (isAgentRow(tool)) {
+        const start = tool.agent ? shown : agentStartRow(chat.messages, tool.target_agent_id ?? "");
+        const agent = start?.body.kind === "tool" ? start.body.agent : undefined;
+        body = t("Messaged {name}: {detail}", { name: agent ? agentTitle(agent) : t("a coding agent"), detail: agentWrote(tool) });
+      } else {
+        body = t("Messaged {name}: {detail}", { name: bots.get(tool.target_bot_id ?? "")?.name ?? t("a teammate"), detail: tool.detail });
+      }
+      break;
+    }
+    case "agent_message":
+      body =
+        shown.author.kind === "you"
+          ? t("You messaged {name}: {detail}", { name: shown.body.title || t("a coding agent"), detail: shown.body.text })
+          : t("Message from {name}: {reason}", { name: shown.body.title || t("a coding agent"), reason: shown.body.text });
       break;
     case "handoff":
       body =
-        chat.kind !== "group" && chat.bot_ids.includes(shown.body.to)
+        chat.bot_ids.includes(shown.body.to) && !chat.bot_ids.includes(shown.body.from)
           ? t("Message from {name}: {reason}", { name: bots.get(shown.body.from)?.name ?? t("a teammate"), reason: shown.body.reason })
           : t("Handed off to {name}", { name: bots.get(shown.body.to)?.name ?? t("a teammate") });
       break;
@@ -183,6 +191,9 @@ export function preview(chat: Chat, bots: Map<string, Bot>): string {
             : t("{who} wants to use {plugin}", { who, plugin });
       break;
     }
+    case "draft":
+      body = draftTitle(shown.body.draft, shown.author.kind === "bot" ? (bots.get(shown.author.bot_id)?.name ?? t("A bot")) : t("A bot"));
+      break;
   }
   const flattened = body.replace(/\n/g, " ").replace(/\*\*/g, "").replace(/`/g, "").trim();
   if (chat.kind === "group" && shown.author.kind === "bot" && shown.body.kind === "text") {
@@ -227,9 +238,9 @@ export function firstLine(text: string): string {
 /// What the working row reads from the store.
 export type WorkState = Pick<StoreState, "running" | "thinking" | "retries" | "chats" | "bots" | "devices">;
 
-/// What the one bot at work in a chat is doing, in the words of the Mac's working row: a model
-/// call waiting to be asked again, its model thinking, or its latest tool, running or just
-/// finished, which the row keeps reading between calls until the bot says something.
+/// What the one bot at work in a chat is doing, in the words of the working row: a model call
+/// waiting to be asked again, its model thinking, or its latest tool, running or just finished,
+/// which the row keeps reading between calls until the bot says something.
 export function workingActivity(s: WorkState, chatId: string): string | null {
   const retry = s.retries[chatId];
   if (retry) {
@@ -240,35 +251,74 @@ export function workingActivity(s: WorkState, chatId: string): string | null {
   for (const r of Object.values(s.running)) if (r.chatId === chatId && r.botId) botIds.add(r.botId);
   if (botIds.size !== 1) return null;
   const [botId] = botIds;
-  if (s.thinking[chatId] === botId) return t("Thinking…");
   const chat = s.chats.find((c) => c.id === chatId);
+  const step = workingStep(chatId, chat?.messages);
+  if (s.thinking[chatId] === botId) return thinkingPhrase(step);
   const last = chat?.messages[chat.messages.length - 1];
   if (last?.author.kind !== "bot" || last.author.bot_id !== botId || last.body.kind !== "tool" || isSentMessage(last.body)) return null;
-  return toolActivity(s, botId, last.body);
+  return toolActivity(s, botId, last.body, step);
+}
+
+// Grok Bot's words for a bot at work with nothing more particular to say: thinking draws from
+// three phrases and working from five, as the desktop app does. The draw is by the step (the chat
+// and its latest message), so a step keeps its words and the next one may change them.
+
+/// The step a chat's work is on: its latest message.
+export function workingStep(chatId: string, messages: readonly { id: string }[] | undefined): string {
+  const last = messages?.[messages.length - 1];
+  return last ? `${chatId}/${last.id}` : chatId;
+}
+
+export function thinkingPhrase(step: string): string {
+  switch (fnv(step + "thinking") % 3) {
+    case 0:
+      return t("Thinking it through…");
+    case 1:
+      return t("Mulling it over…");
+    default:
+      return t("Putting it together…");
+  }
+}
+
+export function workingPhrase(step: string): string {
+  switch (fnv(step) % 5) {
+    case 0:
+      return t("Getting it done…");
+    case 1:
+      return t("Making progress…");
+    case 2:
+      return t("Working on it…");
+    case 3:
+      return t("Handling it…");
+    default:
+      return t("Chipping away…");
+  }
 }
 
 /// What a call means while it runs, in the words of the working row.
-function toolActivity(s: WorkState, botId: string, tool: Extract<Body, { kind: "tool" }>): string {
+function toolActivity(s: WorkState, botId: string, tool: Extract<Body, { kind: "tool" }>, step: string): string {
   switch (tool.name) {
     case "read":
-      return t("Reading a file…");
+      return t("Reading the file…");
     case "write":
     case "edit":
-      return t("Drafting a file…");
+      return t("Jotting it down…");
     case "bash":
-      return tool.description ? t("Running command: {description}…", { description: tool.description }) : t("Running commands…");
+      return tool.description ? t("Running command: {description}…", { description: tool.description }) : t("Running a few commands…");
     case "web_search":
-      return t("Searching the web…");
+      return t("Digging around…");
     case "web_fetch":
-      return t("Reading the web…");
+      return t("Doing some reading…");
     case "grep":
     case "find":
     case "ls":
       return t("Searching files…");
     case "message_bot": {
       const target = s.bots.find((b) => b.id === tool.target_bot_id);
-      return target ? t("Messaging {name}…", { name: target.name }) : t("Messaging another bot…");
+      return target ? t("Checking with {name}…", { name: target.name }) : t("Checking with another bot…");
     }
+    case "coding_agent":
+      return t("Writing some code…");
     case "list_teammates":
       return t("Checking the team…");
     case "create_bot":
@@ -285,10 +335,12 @@ function toolActivity(s: WorkState, botId: string, tool: Extract<Body, { kind: "
     case "bash_input":
       return t("Answering a command…");
     case "bash_output":
-      return t("Waiting on a command…");
+      return t("Waiting on results…");
     case "codemode":
+      // A script: its latest command, else the plugin of its latest plugin call, which the CLI
+      // names.
       if (tool.is_running && tool.script_command) return t("Running command: {description}…", { description: tool.script_command });
-      return tool.description ? t("Using {name}…", { name: tool.description }) : t("Working…");
+      return tool.description ? t("Using {name}…", { name: tool.description }) : workingPhrase(step);
   }
   // A plugin's tool, `<plugin>__<tool>`: "Using GitHub", whether the call is running or just
   // finished, so a run of quick calls never flashes back to "Working" between them.
@@ -299,5 +351,15 @@ function toolActivity(s: WorkState, botId: string, tool: Extract<Body, { kind: "
     const plugin = s.devices.find((d) => d.id === runnerId)?.plugins?.find((p) => p.id === pluginId);
     return t("Using {name}…", { name: plugin?.name ?? pluginId.charAt(0).toUpperCase() + pluginId.slice(1) });
   }
-  return t("Working…");
+  return workingPhrase(step);
+}
+
+/// How long Mute keeps a chat quiet, in seconds; 0 is until unmuted.
+export function muteSpans(): { title: string; seconds: number }[] {
+  return [
+    { title: t("For 1 Hour"), seconds: 3600 },
+    { title: t("For 8 Hours"), seconds: 8 * 3600 },
+    { title: t("For 1 Week"), seconds: 7 * 24 * 3600 },
+    { title: t("Always"), seconds: 0 },
+  ];
 }

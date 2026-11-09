@@ -4,6 +4,7 @@
 //! boundary. Emits [`AgentEvent`]s over a channel in the same order pi does.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -187,7 +188,16 @@ pub struct AgentLoopConfig {
     pub request: crate::request::RequestOptions,
     /// Lets the host cut a step short without ending the run.
     pub interrupt: Option<StepInterrupt>,
+    /// How long a tool call, or the check before it, has to end once its run or step is
+    /// cancelled before the loop stops waiting for it (`STOP_GRACE`).
+    pub stop_grace: Duration,
 }
+
+/// How long a cancelled tool call gets to end. One that has not ended by then (a read blocked on
+/// a named pipe, a server that never answers, a codemode script's calls past their own wind-down)
+/// no longer holds the run: its result says it was cut off, and the run ends, or after an
+/// interrupt goes on.
+pub const STOP_GRACE: Duration = Duration::from_secs(15);
 
 impl AgentLoopConfig {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
@@ -199,11 +209,17 @@ impl AgentLoopConfig {
             retry: None,
             request: Default::default(),
             interrupt: None,
+            stop_grace: STOP_GRACE,
         }
     }
 
     pub fn with_interrupt(mut self, interrupt: StepInterrupt) -> Self {
         self.interrupt = Some(interrupt);
+        self
+    }
+
+    pub fn with_stop_grace(mut self, grace: Duration) -> Self {
+        self.stop_grace = grace;
         self
     }
 
@@ -520,6 +536,7 @@ async fn stream_assistant_response(
     let hooks = &config.hooks;
     let policy = config.retry.as_ref().filter(|p| p.enabled);
     let mut attempt = 0u32;
+    let mut rebound = false;
 
     loop {
         let transformed = hooks.transform_context(context.messages.clone(), cancel).await;
@@ -569,6 +586,25 @@ async fn stream_assistant_response(
         }
 
         let mut final_message = acc.finish(cancel.is_cancelled());
+
+        // A thinking block the provider will not take back, because what preceded it changed
+        // since it was made, would fail every request that carries it: the transcript goes on
+        // without its thinking and the request is asked again, once.
+        if !rebound
+            && final_message.content.is_empty()
+            && !cancel.is_cancelled()
+            && final_message.error_message.as_deref().is_some_and(crate::providers::anthropic::is_bound_thinking_error)
+        {
+            // The failed attempt's own message is empty, so it has no thinking to drop.
+            if crate::providers::anthropic::drop_bound_thinking(provider.model_id(), &mut context.messages) {
+                rebound = true;
+                if added_partial {
+                    context.messages.pop();
+                }
+                tracing::warn!(error = final_message.error_message.as_deref().unwrap_or_default(), "thinking refused; asking again without it");
+                continue;
+            }
+        }
 
         let retryable = policy.is_some_and(|p| attempt < p.max_retries)
             && crate::retry::is_retryable_assistant_error(&final_message)
@@ -702,7 +738,7 @@ async fn execute_sequential(
                 let runner = LoopRunner { context, assistant, config, parent: &tool_call };
                 let (result, is_error) = match execution_denial(context, assistant, &tool_call, &args, config, cancel, None) {
                     Some(reason) => (error_result(reason), true),
-                    None => execute_prepared(&tool, &tool_call, &args, emit, cancel, &runner).await,
+                    None => execute_prepared(&tool, &tool_call, &args, emit, cancel, config.stop_grace, &runner).await,
                 };
                 finalize_executed(context, assistant, tool_call, args, result, is_error, config, None).await
             }
@@ -770,9 +806,10 @@ async fn execute_parallel(
                 let runner = LoopRunner { context, assistant, config, parent: &tool_call };
                 let (result, is_error) = match execution_denial(context, assistant, &tool_call, &args, config, cancel, None) {
                     Some(reason) => (error_result(reason), true),
-                    None => execute_prepared(&tool, &tool_call, &args, emit, cancel, &runner).await,
+                    None => execute_prepared(&tool, &tool_call, &args, emit, cancel, config.stop_grace, &runner).await,
                 };
-                let finalized = finalize_executed(context, assistant, tool_call, args, result, is_error, config, None).await;
+                let finalized =
+                    finalize_executed(context, assistant, tool_call, args, result, is_error, config, None).await;
                 emit_tool_execution_end(&finalized, emit).await;
                 finalized
             }
@@ -832,11 +869,11 @@ async fn prepare_call(
         Err(message) => return Preparation::Immediate { result: error_result(message), is_error: true, blocked: false },
     };
 
-    if let Some(before) = config
-        .hooks
-        .before_tool_call(BeforeToolCallContext { assistant_message: assistant, tool_call, args: &args, context, cancel, parent })
-        .await
-    {
+    let check = config.hooks.before_tool_call(BeforeToolCallContext { assistant_message: assistant, tool_call, args: &args, context, cancel, parent });
+    let Some(before) = unless_stuck(check, cancel, config.stop_grace).await else {
+        return Preparation::Immediate { result: cut_off(config.stop_grace), is_error: true, blocked: false };
+    };
+    if let Some(before) = before {
         if cancel.is_cancelled() {
             return Preparation::Immediate { result: error_result("Operation aborted".into()), is_error: true, blocked: false };
         }
@@ -929,12 +966,38 @@ fn validate_arguments(arguments: &Value) -> Result<Value, String> {
     }
 }
 
+/// Ends once `cancel` has fired and `grace` has passed since: what a call that ignores its
+/// cancellation is raced against.
+async fn stuck_after(cancel: &CancellationToken, grace: Duration) {
+    cancel.cancelled().await;
+    tokio::time::sleep(grace).await;
+}
+
+/// `future`'s output, or `None` when it is still running `grace` after `cancel` fired, and is
+/// dropped.
+async fn unless_stuck<F: std::future::Future>(future: F, cancel: &CancellationToken, grace: Duration) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        output = future => Some(output),
+        _ = stuck_after(cancel, grace) => None,
+    }
+}
+
+/// What a call the loop stopped waiting for answers with, which a later run reads.
+fn cut_off(grace: Duration) -> ToolResult {
+    error_result(format!(
+        "Cut off: this call was stopped and had not ended {} seconds later, so nothing waited for its result. It may have done part of its work, and may still be running.",
+        grace.as_secs()
+    ))
+}
+
 async fn execute_prepared(
     tool: &Arc<dyn Tool>,
     tool_call: &ToolCall,
     args: &Value,
     emit: &Emitter<'_>,
     cancel: &CancellationToken,
+    grace: Duration,
     tools: &dyn ToolRunner,
 ) -> (ToolResult, bool) {
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<ToolResult>();
@@ -948,10 +1011,14 @@ async fn execute_prepared(
 
     let execution = tool.execute_with(&call_id, args.clone(), cancel.clone(), on_update, tools);
     tokio::pin!(execution);
+    let stuck = stuck_after(cancel, grace);
+    tokio::pin!(stuck);
 
     let outcome = loop {
         tokio::select! {
-            result = &mut execution => break result,
+            biased;
+            result = &mut execution => break Some(result),
+            _ = &mut stuck => break None,
             Some(partial) = update_rx.recv() => {
                 emit.send(AgentEvent::ToolExecutionUpdate {
                     tool_call_id: call_id.clone(),
@@ -976,11 +1043,12 @@ async fn execute_prepared(
     }
 
     match outcome {
-        Ok(result) => {
+        Some(Ok(result)) => {
             let is_error = result.is_error;
             (result, is_error)
         }
-        Err(error) => (error_result(error.0), true),
+        Some(Err(error)) => (error_result(error.0), true),
+        None => (cut_off(grace), true),
     }
 }
 
@@ -1063,7 +1131,7 @@ mod tests {
     use super::*;
     use crate::provider::{channel_stream, AssistantEventStream};
     use crate::tool::{ToolError, ToolUpdateFn};
-    use crate::types::Usage;
+    use crate::types::{AssistantPart, Usage};
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -1648,6 +1716,61 @@ mod tests {
         assert_eq!(provider.requests.lock().unwrap().len(), 2);
     }
 
+    /// Fails its first request as Anthropic does for a thinking block replayed after what
+    /// preceded it changed, then answers.
+    struct Binds(Mutex<Vec<ModelRequest>>);
+
+    #[async_trait]
+    impl Provider for Binds {
+        fn provider_id(&self) -> &str {
+            "anthropic"
+        }
+        fn model_id(&self) -> &str {
+            "claude-opus-5-5"
+        }
+        async fn stream(&self, request: ModelRequest, _cancel: CancellationToken) -> AssistantEventStream {
+            let first = {
+                let mut requests = self.0.lock().unwrap();
+                requests.push(request);
+                requests.len() == 1
+            };
+            let (tx, rx) = mpsc::channel(16);
+            tokio::spawn(async move {
+                if first {
+                    let message = "400 Bad Request: messages.1.content.0: Invalid signature in thinking block. The block is bound to a different conversation.";
+                    let _ = tx.send(AssistantEvent::Error { message: message.into(), aborted: false }).await;
+                    return;
+                }
+                let _ = tx.send(AssistantEvent::Start).await;
+                let _ = tx.send(AssistantEvent::TextStart { index: 0 }).await;
+                let _ = tx.send(AssistantEvent::TextDelta { index: 0, delta: "again".into() }).await;
+                let _ = tx.send(AssistantEvent::TextEnd { index: 0 }).await;
+                let _ = tx.send(AssistantEvent::Done { stop_reason: StopReason::Stop, usage: Usage::default() }).await;
+            });
+            channel_stream(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_thinking_is_dropped_and_the_request_asked_again_once() {
+        let provider = Arc::new(Binds(Mutex::new(Vec::new())));
+        let mut earlier = AssistantMessage::empty("anthropic", "claude-opus-5-5");
+        earlier.content = vec![AssistantPart::Thinking { thinking: "hm".into(), signature: Some("sig".into()) }, AssistantPart::Text { text: "Earlier.".into() }];
+        let context = AgentContext { system_prompt: String::new(), messages: vec![AgentMessage::user("hi"), AgentMessage::Assistant(earlier)], tools: vec![], cache_points: Vec::new() };
+        let config = AgentLoopConfig::new(provider.clone()).with_retry(crate::retry::RetryPolicy::default());
+        let (tx, mut rx) = mpsc::channel(256);
+        let run = tokio::spawn(async move { run_agent_loop(vec![AgentMessage::user("go")], context, &config, &tx, CancellationToken::new()).await });
+        while rx.recv().await.is_some() {}
+        let messages = run.await.unwrap();
+        let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
+        assert_eq!((last.stop_reason, last.text().as_str()), (StopReason::Stop, "again"));
+        let requests = provider.0.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let LlmMessage::Assistant(replayed) = &requests[1].messages[1] else { panic!() };
+        assert!(!replayed.content.iter().any(|part| matches!(part, AssistantPart::Thinking { .. })));
+        assert_eq!(replayed.text(), "Earlier.");
+    }
+
     #[tokio::test]
     async fn a_final_failure_is_not_retried() {
         let provider = Scripted::new("p", vec![Turn::Fail("400: messages.0: invalid"), Turn::Text("never")]);
@@ -1657,6 +1780,96 @@ mod tests {
         let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
         assert_eq!(last.stop_reason, StopReason::Error);
         assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    }
+
+    /// Never ends, whatever its token says, as a read blocked on a named pipe: on its run it
+    /// stops the run, or asks for the user's message to be read now.
+    struct Hangs {
+        stop: Option<CancellationToken>,
+        interrupt: Option<(crate::AgentMessageQueue, StepInterrupt)>,
+    }
+
+    #[async_trait]
+    impl Tool for Hangs {
+        fn name(&self) -> &str {
+            "hang"
+        }
+        fn description(&self) -> &str {
+            "hangs"
+        }
+        fn parameters(&self) -> Value {
+            json!({ "type": "object", "properties": {} })
+        }
+        async fn execute(&self, _id: &str, _args: Value, _cancel: CancellationToken, _on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+            if let Some(stop) = &self.stop {
+                stop.cancel();
+            }
+            if let Some((queue, interrupt)) = &self.interrupt {
+                queue.push(AgentMessage::user("skip that, ship it"));
+                assert!(interrupt.interrupt());
+            }
+            std::future::pending().await
+        }
+    }
+
+    /// A call that does not end once stopped holds the run only for the grace: its result says it
+    /// was cut off, and the run ends.
+    #[tokio::test]
+    async fn a_call_that_ignores_its_stop_is_cut_off() {
+        let cancel = CancellationToken::new();
+        let provider = Scripted::new("p", vec![Turn::Call { name: "hang", args: "{}", stop: StopReason::ToolUse }]);
+        let tool = Arc::new(Hangs { stop: Some(cancel.clone()), interrupt: None });
+        let config = AgentLoopConfig::new(provider.clone()).with_stop_grace(std::time::Duration::from_millis(200));
+        let started = std::time::Instant::now();
+        let (messages, events) = tokio::time::timeout(std::time::Duration::from_secs(5), run_with(config, vec![tool], cancel)).await.expect("the run let go");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(200), "the call had its grace");
+        let result = tool_results(&messages)[0];
+        assert!(result.is_error && result.text().starts_with("Cut off: this call was stopped and had not ended 0 seconds later"), "{}", result.text());
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })), "the call's row ends");
+        let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
+        assert_eq!(last.stop_reason, StopReason::Aborted);
+        assert_eq!(provider.requests.lock().unwrap().len(), 2, "the run asked again only to find itself stopped");
+    }
+
+    /// After an interrupt, a call that does not end is cut off and the run reads the user's message.
+    #[tokio::test]
+    async fn an_interrupt_cuts_off_a_call_that_ignores_it() {
+        let provider = Scripted::new("p", vec![Turn::Call { name: "hang", args: "{}", stop: StopReason::ToolUse }, Turn::Text("shipping")]);
+        let queue = crate::AgentMessageQueue::new(crate::QueueMode::All);
+        let interrupt = StepInterrupt::new();
+        let tool = Arc::new(Hangs { stop: None, interrupt: Some((queue.clone(), interrupt.clone())) });
+        let config = AgentLoopConfig::new(provider.clone())
+            .with_hooks(Arc::new(Steering(queue)))
+            .with_interrupt(interrupt)
+            .with_stop_grace(std::time::Duration::from_millis(200));
+        let (messages, _) = tokio::time::timeout(std::time::Duration::from_secs(5), run_with(config, vec![tool], CancellationToken::new())).await.expect("the step let go");
+        assert!(tool_results(&messages)[0].text().starts_with("Cut off:"));
+        assert!(matches!(&messages[3], AgentMessage::User(user) if user.content[0].as_text() == Some("skip that, ship it")));
+        let AgentMessage::Assistant(last) = messages.last().unwrap() else { panic!() };
+        assert_eq!((last.stop_reason, last.text().as_str()), (StopReason::Stop, "shipping"));
+    }
+
+    /// A check before a call that does not end once stopped (a reviewer that never answers) is cut
+    /// off the same way, and the call never runs.
+    struct ChecksForever(CancellationToken);
+
+    #[async_trait]
+    impl LoopHooks for ChecksForever {
+        async fn before_tool_call(&self, _ctx: BeforeToolCallContext<'_>) -> Option<BeforeToolCallResult> {
+            self.0.cancel();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_check_that_ignores_its_stop_is_cut_off() {
+        let cancel = CancellationToken::new();
+        let provider = Scripted::new("p", vec![Turn::Call { name: "count", args: r#"{"limit": 1}"#, stop: StopReason::ToolUse }]);
+        let tool = Arc::new(Counter { runs: Mutex::new(vec![]), cancel_on_run: None });
+        let config = AgentLoopConfig::new(provider).with_hooks(Arc::new(ChecksForever(cancel.clone()))).with_stop_grace(std::time::Duration::from_millis(200));
+        let (messages, _) = tokio::time::timeout(std::time::Duration::from_secs(5), run_with(config, vec![tool.clone()], cancel)).await.expect("the check let go");
+        assert!(tool.runs.lock().unwrap().is_empty());
+        assert!(tool_results(&messages)[0].text().starts_with("Cut off:"));
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ export interface MarkdownViewProps {
   style?: StyleProp<ViewStyle>;
 }
 
-const native = requireNativeModule<{ measure?(markdown: string, maxWidth: number, fontSize: number, codeFontSize: number): { width: number; height: number } }>("MarkdownView");
+const native = requireNativeModule<{ measure(markdown: string, maxWidth: number, fontSize: number, codeFontSize: number): { width: number; height: number } }>("MarkdownView");
 
 // Bound both entry count and retained text during streaming. Longer messages still measure.
 const measurements = new Map<string, { width: number; height: number }>();

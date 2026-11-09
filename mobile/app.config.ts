@@ -9,6 +9,7 @@ export default (): ExpoConfig => {
   const appId = development ? "ai.amoena.beans.dev" : "ai.amoena.beans";
   const appGroup = development ? "group.ai.amoena.beans.dev" : "group.ai.amoena.beans";
   const icon = development ? "./assets/icon-dev.png" : "./assets/icon.png";
+  const adaptiveIcon = development ? "./assets/adaptive-icon-dev.png" : "./assets/adaptive-icon.png";
   const splash = development ? "./assets/splash-icon-dev.png" : "./assets/splash-icon.png";
   const favicon = development ? "./assets/favicon-dev.png" : "./assets/favicon.png";
   const adaptiveIconBackgroundColor = development ? "#181A18" : "#F26744";
@@ -48,6 +49,13 @@ export default (): ExpoConfig => {
         NSSpeechRecognitionUsageDescription: "Beans turns what you say into the message text.",
         NSPhotoLibraryUsageDescription: "Beans attaches photos you pick to a message.",
         CFBundleAllowMixedLocalizations: true,
+        // Export compliance, answered here so App Store Connect asks nothing per build. The core
+        // encrypts with standard algorithms (X25519, Ed25519, ChaCha20-Poly1305, HKDF, SHA-2, and
+        // TLS through rustls), not the system's, and Apple asks documentation for those only of an
+        // app on the App Store in France: the French encryption declaration. With France in the
+        // App Store availability, this becomes true beside ITSEncryptionExportComplianceCode, the
+        // code Apple gives for the approved declaration. docs/releasing-mobile.md.
+        ITSAppUsesNonExemptEncryption: false,
       },
       buildNumber,
       entitlements: {
@@ -61,7 +69,8 @@ export default (): ExpoConfig => {
       ...(process.env.BEANS_GOOGLE_SERVICES_FILE ? { googleServicesFile: process.env.BEANS_GOOGLE_SERVICES_FILE } : {}),
       adaptiveIcon: {
         backgroundColor: adaptiveIconBackgroundColor,
-        foregroundImage: development ? "./assets/adaptive-icon-dev.png" : "./assets/adaptive-icon.png",
+        foregroundImage: adaptiveIcon,
+        monochromeImage: "./assets/adaptive-icon.png",
       },
       predictiveBackGestureEnabled: true,
       versionCode: Number(buildNumber),
@@ -116,6 +125,7 @@ export default (): ExpoConfig => {
       "./plugins/with-android-push-config",
       ["./plugins/with-android-updates", { enabled: !development && process.env.EAS_BUILD_PROFILE === "github" }],
       "./plugins/with-ios-release-signing",
+      "./plugins/with-material-theme",
       "expo-web-browser",
     ],
     experiments: {

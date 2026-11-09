@@ -86,7 +86,7 @@ const env: Record<string, string> = {
   ...(process.env as Record<string, string>),
   LANG: "en_US.UTF-8",
   LC_ALL: "en_US.UTF-8",
-  DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer",
+  DEVELOPER_DIR: process.env.DEVELOPER_DIR ?? "/Applications/Xcode.app/Contents/Developer",
   BEANS_IOS_BUILD_NUMBER: buildNumber,
 }
 delete env.BEANS_MOBILE_VARIANT

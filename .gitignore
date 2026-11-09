@@ -18,3 +18,4 @@ mobile/.env.local
 
 # Built from the current desktop frontend for the marketing demo.
 web/public/app-preview/
+__pycache__/

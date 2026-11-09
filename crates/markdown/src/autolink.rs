@@ -4,8 +4,7 @@
 //! a `www.` link may follow any non-ASCII character, and a link ends at CJK or general
 //! punctuation (`，`, `。`, `）`, `“`, `…`) as it ends at a space.
 //!
-//! `desktop/src/model/autolink.ts` holds the same rules, and these cases, for the Windows and Linux
-//! app.
+//! `desktop/model/autolink.go` holds the same rules, and these cases, for the desktop app.
 
 /// A bare link in a run of text: the byte range it covers and where it goes.
 #[derive(Debug, PartialEq, Eq)]

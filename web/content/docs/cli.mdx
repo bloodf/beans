@@ -43,7 +43,7 @@ On Windows, bots run their commands in Git for Windows' bash, not WSL's, so inst
 | `beans pair` | Shows a pairing string and waits for the other device. |
 | `beans pair <string>` | Joins an account with a pairing string. |
 | `beans provider set <kind> [api-key]` | Connects `deepseek`, `anthropic`, `opencode`, `opencode-go` or `chatgpt`. Production `grok` OAuth is disabled pending a verified Beans contract. The key is read from stdin when omitted; `--base-url` selects an API endpoint. |
-| `beans provider add <name> <base-url>` | Adds a custom provider: any server that speaks OpenAI's or Anthropic's API. `--api` picks `chat-completions` (the default), `responses`, or `messages`; `--model` names a model, once per model; `--api-key-stdin` reads a key. |
+| `beans provider add <name> <base-url>` | Adds a custom provider: any server that speaks OpenAI's or Anthropic's API. `--api` picks `chat-completions` (the default), `responses`, `messages`, `system-one`, or `decisions`; `--model` names a model, once per model; `--api-key-stdin` reads a key. |
 | `beans provider remove <kind>` | Disconnects a provider on every device, or deletes a custom one (`custom:openrouter`, as `provider list` shows it). |
 | `beans provider list` | Lists the connected providers. |
 | `beans mcp …` | Manages this computer's own MCP servers; see [MCP servers](#mcp-servers). |
@@ -56,6 +56,9 @@ On Windows, bots run their commands in Git for Windows' bash, not WSL's, so inst
 | `beans service install` | Runs `beans serve` in the background, now and at every login, and starts it again if it stops. `beans service uninstall` stops it; `beans service status` says whether it runs and where its log is. |
 | `beans status` | Prints this device's state as JSON: devices, bots, chats, providers. |
 | `beans doctor [--json]` | Reports privacy-safe setup evidence: versions, relay health, configured credentials, cached plugin setup and Runner presence. `--json` exports the same report. It discloses relay host/port, not keys, names, paths or messages. If account loading fails, it exits nonzero with no report and a fixed error on stderr, omitting startup logs and private error details; check storage access and account format locally. Review before sharing; nothing is uploaded. Provider health is not checked. |
+| `beans tasks list` | Lists [tasks](/docs/tasks); `--chat-id`, `--owner-bot-id`, and `--state` narrow it. `beans tasks get <id>` shows one. |
+| `beans tasks create`, `update`, `run` | Creates, changes, or starts a task from a JSON object, or `-` to read it from stdin. They need `beans serve` running. |
+| `beans events …` | Manages this Runner's event subscriptions and their gateway; see [Webhooks and events](/docs/events). |
 
 ## MCP servers
 
@@ -118,3 +121,5 @@ Beans desktop apps update their bundled CLI through signed Beans readiness. The 
 Everything is under `~/.beans-v2/`, readable only by your user: identity and machine keys, provider credentials, settings, chats, attachments, plugins, `mcp.json`, source-bound `catalog.json` and `marketplace.json` caches, and one workspace folder per bot with its memory. The disabled CLI updater does not create `update.json`.
 
 The macOS Beans app logs the service to `~/Library/Logs/Beans/cli.log`. Under `beans service` the log is `~/Library/Logs/Beans/serve.log` on macOS, `journalctl --user -u beans` on Linux, and `serve.log` in the CLI home on Windows.
+
+Skills, secrets, feedback, and task, review, and project records are encrypted with the account key. The CLI home also holds `serve-token`, browser profiles and coding-agent worktrees and transcripts.

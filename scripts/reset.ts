@@ -1,7 +1,7 @@
-// Reset Beans on this Mac: stop the app and CLI, wipe identity, keys, credentials, chats,
+// Reset Beans on this computer: stop the app and CLI, wipe identity, keys, credentials, chats,
 // app preferences, and logs. Use --dev for Beans Dev, --build to drop build output too,
 // --relay for the local relay database, and -y to skip the confirmation.
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { rm } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { createInterface } from "node:readline/promises"
@@ -19,17 +19,26 @@ const appName = development ? DEBUG_APP_NAME : APP_NAME
 const bundleID = development ? DEBUG_BUNDLE_ID : BUNDLE_ID
 const port = development ? 4875 : 4874
 const home = join(homedir(), development ? ".beans-dev-v2" : ".beans-v2")
+const mac = process.platform === "darwin"
+const configDir = mac ? join(homedir(), "Library", "Application Support")
+  : process.platform === "win32" ? (process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"))
+  : process.env.XDG_CONFIG_HOME || join(homedir(), ".config")
+const appData = join(configDir, appName)
 const logs = join(homedir(), "Library", "Logs", appName)
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 const targets: { path: string; what: string; on: boolean }[] = [
   { path: home, what: "identity, keys, credentials, chats", on: true },
-  { path: logs, what: "CLI logs", on: true },
+  { path: logs, what: "CLI logs", on: mac },
+  { path: appData, what: "MyGo preferences and window state", on: !mac },
   { path: join(ROOT, "temp", "beans-relay.db"), what: "local relay database", on: wipeRelay },
   { path: join(ROOT, "temp", "beans-relay.db-wal"), what: "local relay database", on: wipeRelay },
   { path: join(ROOT, "temp", "beans-relay.db-shm"), what: "local relay database", on: wipeRelay },
   { path: join(ROOT, "temp", "beans-relay.files"), what: "local relay attachments", on: wipeRelay },
+  { path: join(ROOT, "temp", "dev-cli"), what: "development CLI copy", on: wipeBuild },
+  { path: join(ROOT, "desktop", ".mygo"), what: "MyGo development output", on: wipeBuild },
+  { path: join(ROOT, "desktop", "build"), what: "desktop release output", on: wipeBuild },
   { path: join(ROOT, "target"), what: "Rust build output", on: wipeBuild },
   { path: join(PACKAGE_DIR, ".build"), what: "Swift build output", on: wipeBuild },
 ]
@@ -48,8 +57,55 @@ async function pids(pattern: string): Promise<number[]> {
     .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid)
 }
 
+async function stopWindowsProcesses(): Promise<void> {
+  // Only public scope values cross into PowerShell; never print process arguments or environments.
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+$homePath = $env:BEANS_RESET_HOME
+$appPath = $env:BEANS_RESET_APPDATA
+$devPath = $env:BEANS_RESET_DEVPATH
+$installedPath = $env:BEANS_RESET_INSTALLED
+$items = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('Beans.exe', 'Beans Dev.exe', 'beans-relay.exe') })
+$selected = @()
+foreach ($item in $items) {
+  $exe = $item.ExecutablePath
+  $line = $item.CommandLine
+  if (!$exe -or !$line) { throw 'Cannot identify a Beans process; reset refused' }
+  $scoped = $false
+  foreach ($prefix in @($appPath, $devPath, $installedPath)) {
+    if ($prefix -and $exe.StartsWith($prefix.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { $scoped = $true }
+  }
+  $homeArg = '(?:^|\s)--home(?:=|\s+)(?:"' + [regex]::Escape($homePath) + '"|' + [regex]::Escape($homePath) + ')(?=\s|$)'
+  if ($item.Name -ieq 'beans.exe' -and $line -match $homeArg) { $scoped = $true }
+  if (!$scoped) { throw 'A Beans process has unverified home/config scope; close it before reset' }
+  $selected += $item
+}
+foreach ($item in $selected) {
+  $current = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $item.ProcessId)
+  if ($current -and $current.CreationDate -ne $item.CreationDate) { throw 'Process identity changed; reset refused' }
+  if ($current) { Stop-Process -Id $item.ProcessId -Force -ErrorAction Stop }
+}
+foreach ($item in $selected) {
+  if (Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue) { throw 'Beans is still running; reset refused' }
+}
+`
+  const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+    env: {
+      ...process.env,
+      BEANS_RESET_HOME: home,
+      BEANS_RESET_APPDATA: appData,
+      BEANS_RESET_DEVPATH: join(ROOT, "desktop", development ? ".mygo" : "build", development ? "dev" : "windows-amd64"),
+      BEANS_RESET_INSTALLED: join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "Programs", appName),
+    },
+    stdio: ["ignore", "ignore", "ignore"],
+    timeout: 30_000,
+  })
+  if (result.error || result.status !== 0) throw new Error("Windows process stop could not verify Beans home/config scope; close Beans and its CLI before reset")
+}
+
 async function stopProcesses() {
-  const patterns = [`${appName}.app/Contents/MacOS/${APP_NAME}`, `beans serve --port ${port}`, "beans-relay"]
+  if (process.platform === "win32") return await stopWindowsProcesses()
+  const patterns = [`${appName}.app/Contents/MacOS/${APP_NAME}`, `desktop/.mygo/dev/.*/${appName}`, `beans serve --port ${port}`, "beans-relay"]
   let found: number[] = []
   for (const pattern of patterns) found = found.concat(await pids(pattern))
   found = [...new Set(found)]
@@ -72,7 +128,7 @@ async function confirm(): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
     const answer = (await rl.question(
-      `${color.yellow(`Reset ${appName}?`)} This deletes the identity on this Mac; without the backup phrase it is gone. [y/N] `,
+      `${color.yellow(`Reset ${appName}?`)} This deletes the identity on this computer; without the backup phrase it is gone. [y/N] `,
     )).trim().toLowerCase()
     return answer === "y" || answer === "yes"
   } finally {
@@ -85,7 +141,7 @@ log(`${color.bold("reset")} ${color.dim(home)}`)
 for (const target of targets.filter((t) => t.on && existsSync(t.path))) {
   console.log(`  ${color.red("✘")} ${target.path} ${color.dim(target.what)}`)
 }
-console.log(`  ${color.red("✘")} defaults ${bundleID} ${color.dim("app preferences")}`)
+if (mac) console.log(`  ${color.red("✘")} defaults ${bundleID} ${color.dim("app preferences")}`)
 console.log()
 
 if (!(await confirm())) {
@@ -101,8 +157,10 @@ for (const target of targets.filter((t) => t.on)) {
   log(`removed ${target.path}`)
 }
 
+if (mac) {
 const defaults = spawn("defaults", ["delete", bundleID], { stdio: "ignore" })
 await new Promise<void>((resolveClose) => defaults.once("close", () => resolveClose()))
 log(`cleared preferences ${color.dim(bundleID)}`)
+}
 
 log(color.green("done") + color.dim(" — next launch starts at onboarding"))

@@ -140,7 +140,6 @@ export const en = {
       title: 'Mac',
       body: 'Chat with your bots and run them on your Mac.',
       action: 'Download for Mac',
-      system: 'macOS {{version}} or later',
       appleSilicon: 'Apple silicon',
     },
     windows: {
@@ -164,7 +163,7 @@ export const en = {
     },
     android: {
       title: 'Android',
-      body: 'Chat with your bots from your Android phone.',
+      body: 'Chat with your bots from your Android phone. Scan the desktop QR code to pair. Requires Android 7.0 or later.',
       action: 'Download APK',
     },
     cli: {
@@ -182,6 +181,52 @@ export const en = {
     support: 'Support',
     faq: 'FAQ',
     download: 'Download',
+  },
+  github: {
+    home: 'Go to usebeans.app',
+    back: 'You can close this page and go back to Beans.',
+    connected: {
+      title: 'GitHub is connected.',
+      body: 'The Beans GitHub App is installed on {{account}} and connected to your Beans account. Pull request watches on its repositories start on their own.',
+    },
+    not_yours: {
+      title: "This installation isn't yours.",
+      body: "GitHub doesn't list it among the installations your account can reach, so Beans didn't connect it. Install the App from the routine in Beans, signed in to GitHub as someone who can manage the repository.",
+    },
+    expired: {
+      title: 'This link expired.',
+      body: 'The link from Beans works for an hour. Choose Install App on the routine again.',
+    },
+    requested: {
+      title: 'Install requested.',
+      body: "An owner of the organization approves the Beans GitHub App first. Once they have, choose Install App on the routine again to connect it.",
+    },
+    failed: {
+      title: "Couldn't connect GitHub.",
+      body: "GitHub didn't finish the sign-in. Choose Install App on the routine in Beans to try again.",
+    },
+  },
+  template: {
+    title: 'A bot shared with Beans',
+    open: 'Open in Beans',
+    noApp: "Don't have Beans? <download>Get it for Mac, Windows, Linux, Android, or iPhone</download>, then open this link again.",
+    included: "What's included",
+    routines: 'Routines',
+    routinesNote: 'Routines start paused.',
+    plugins: 'Plugins',
+    pluginsNote: 'You connect your own accounts.',
+    memories: 'Memories',
+    more: 'And {{count}} more',
+    skills: 'Skills',
+    privacy: "Decrypted in your browser. Beans's servers can't read this bot.",
+    home: 'Go to usebeans.app',
+    error: {
+      noKey: { title: 'This link is incomplete.', body: 'The part after # is missing. Ask for the whole link.' },
+      notFound: { title: 'This link no longer works.', body: 'It was revoked, or it never existed.' },
+      badKey: { title: "This link doesn't open.", body: "Its key doesn't match. Check that you copied the whole link." },
+      notTemplate: { title: "This link doesn't hold a Beans bot.", body: 'It may come from a newer version of Beans.' },
+      unreachable: { title: "Couldn't load this bot.", body: "The relay that holds it didn't answer. Try again later." },
+    },
   },
 }
 

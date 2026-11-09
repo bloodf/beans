@@ -100,6 +100,14 @@ final class MarketplaceViewController: NSViewController {
             noticeLabel.bottomAnchor.constraint(equalTo: notice.bottomAnchor, constant: -9),
         ])
         view = container
+        let libraryButton = NSButton(title: L("Workflows and Projects"), target: self, action: #selector(openWorkflowLibrary))
+        libraryButton.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(libraryButton)
+        NSLayoutConstraint.activate([
+            libraryButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 48),
+            libraryButton.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            libraryButton.trailingAnchor.constraint(lessThanOrEqualTo: runnerPopup.leadingAnchor, constant: -8),
+        ])
         updateRunnerPopup()
         show(MarketplaceHomePage(market: self), animated: false)
         load()

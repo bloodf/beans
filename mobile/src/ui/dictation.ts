@@ -6,7 +6,7 @@ import { getLocales } from "expo-localization";
 import { ExpoSpeechRecognitionModule } from "expo-speech-recognition";
 import { ActionSheetIOS } from "react-native";
 import { mutate, useStore } from "../core/store";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { language as appLanguage, t, useLanguage } from "../i18n";
 
 /// Every locale the recognizer knows; Automatic matches the phone's languages against these.
@@ -25,8 +25,15 @@ export async function supportedLanguages(): Promise<string[]> {
   return offered();
 }
 
+/// The last sorted list and what it was sorted from: `localeCompare` with a locale is slow on
+/// Android, and every composer asks for the list as it mounts.
+let sorted: { from: string[] | null; language: string; list: string[] } | null = null;
+
 function offered(): string[] {
-  return (all ?? []).filter((tag) => tag in COMMON).sort((a, b) => languageName(a).localeCompare(languageName(b), appLanguage));
+  if (sorted?.from === all && sorted.language === appLanguage) return sorted.list;
+  const list = (all ?? []).filter((tag) => tag in COMMON).sort((a, b) => languageName(a).localeCompare(languageName(b), appLanguage));
+  sorted = { from: all, language: appLanguage, list };
+  return list;
 }
 
 function normalize(tag: string): string {
@@ -48,14 +55,16 @@ export function automaticLanguage(available: string[] = all ?? []): string {
 
 export function useDictationLanguage(): { setting: string | undefined; language: string } {
   const setting = useStore((s) => s.dictation_lang);
-  return { setting, language: setting ?? automaticLanguage() };
+  // The phone's languages are a synchronous native call; the composer renders with every keystroke.
+  const automatic = useMemo(() => (setting ? undefined : automaticLanguage()), [setting]);
+  return { setting, language: setting ?? automatic! };
 }
 
 export function setDictationLanguage(tag: string | undefined) {
   mutate(() => ({ dictation_lang: tag }));
 }
 
-/// The languages the menus offer, named as the Mac app names them ("Chinese (China mainland)").
+/// The languages the menus offer, named as macOS names them ("Chinese (China mainland)").
 /// Hermes has no `Intl.DisplayNames`, so the names are kept here, in both of the app's languages;
 /// the recognizer knows some sixty locales, and these are the ones most people speak.
 const COMMON: Record<string, { en: string; zh: string }> = {

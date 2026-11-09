@@ -4,6 +4,125 @@ use super::*;
 use beans::app::OutboxItem;
 use beans::relay::RelayClient;
 
+#[tokio::test]
+async fn encrypted_task_records_round_trip_and_replace_only_their_own_slot() {
+    fn task_outbox(app: &beans::app::App) -> OutboxItem {
+        loop {
+            let item = app.store.first_outbox().unwrap().unwrap();
+            let state = app.state.lock().unwrap().clone();
+            app.store
+                .remove_outbox_with_state(&item.id, &state)
+                .unwrap();
+            if item.kind == "task" {
+                return item;
+            }
+        }
+    }
+    let relay = Relay::start(0).await;
+    let app = beans::app::App::load(beans::config::Config {
+        home: relay.home.join("source"),
+        port: 0,
+    })
+    .unwrap();
+    beans::identity::create(&app, Some("Source".into())).unwrap();
+    let bot = app.state.lock().unwrap().bots[0].clone();
+    let chat_id = app.state.lock().unwrap().chats[0].meta.id.clone();
+    let created = beans::api::dispatch(&app, "tasks.create", serde_json::json!({
+        "request_id":"create","owner_bot_id":bot.id,"chat_ids":[chat_id],
+        "goal":"Encrypted durable work","acceptance_criteria":["Verified"],"next_action":"Inspect"
+    })).await.unwrap();
+    let id = created["id"].as_str().unwrap();
+    let first = task_outbox(&app);
+    assert!(!String::from_utf8_lossy(&first.ciphertext).contains("Encrypted durable work"));
+    let uploaded = relay
+        .client
+        .put_blob(&relay.url, &relay.token, first.clone(), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        relay
+            .client
+            .put_blob(&relay.url, &relay.token, first, 0)
+            .await
+            .unwrap(),
+        uploaded
+    );
+    let (page, _) = relay
+        .client
+        .list_blobs(&relay.url, &relay.token, 0, "task")
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 1);
+    let replica = beans::app::App::load(beans::config::Config {
+        home: relay.home.join("replica"),
+        port: 0,
+    })
+    .unwrap();
+    beans::identity::create(&replica, Some("Replica".into())).unwrap();
+    replica
+        .machine
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .account_dek = app.machine_file().unwrap().account_dek;
+    let machine = replica.machine_file().unwrap();
+    beans::sync::apply_blob(&replica, &machine, &page[0]);
+    assert_eq!(beans::tasks::get(&replica, id).unwrap().revision, 1);
+    beans::api::dispatch(
+        &app,
+        "tasks.update",
+        serde_json::json!({
+            "id":id,"request_id":"progress","expected_revision":1,"next_action":"Verify"
+        }),
+    )
+    .await
+    .unwrap();
+    let newest = task_outbox(&app);
+    relay
+        .client
+        .put_blob(&relay.url, &relay.token, newest, 0)
+        .await
+        .unwrap();
+    let (new_page, _) = relay
+        .client
+        .list_blobs(&relay.url, &relay.token, 0, "task")
+        .await
+        .unwrap();
+    assert_eq!(new_page.len(), 1);
+    beans::sync::apply_blob(&replica, &machine, &new_page[0]);
+    assert_eq!(
+        beans::tasks::get(&replica, id).unwrap().next_action,
+        "Verify"
+    );
+    beans::sync::apply_blob(&replica, &machine, &page[0]);
+    assert_eq!(beans::tasks::get(&replica, id).unwrap().revision, 2);
+    for kind in [
+        "roster",
+        "chat",
+        "job",
+        "job_cancel",
+        "job_result",
+        "request",
+        "response",
+        "machine",
+        "credentials",
+        "key",
+        "file",
+        "task",
+        "handoff",
+        "review",
+        "attention",
+        "project_context",
+        "playbook",
+        "event",
+    ] {
+        assert!(db::KINDS.contains(&kind));
+    }
+    assert!(db::SEALED_KINDS.contains(&"event"));
+    assert_eq!(PROTOCOL, beans::relay::PROTOCOL);
+}
+
 struct Relay {
     state: AppState,
     url: String,
@@ -25,16 +144,30 @@ impl Relay {
         Self::start_catalogs(quota_bytes, pusher, None).await
     }
 
-    async fn start_catalogs(quota_bytes: u64, pusher: crate::push::Pusher, files: Option<(&[u8], &[u8])>) -> Self {
+    async fn start_catalogs(
+        quota_bytes: u64,
+        pusher: crate::push::Pusher,
+        files: Option<(&[u8], &[u8])>,
+    ) -> Self {
         Self::start_protocol(quota_bytes, pusher, files, PROTOCOL).await
     }
 
-    async fn start_protocol(quota_bytes: u64, pusher: crate::push::Pusher, files: Option<(&[u8], &[u8])>, min_protocol: u32) -> Self {
+    async fn start_protocol(
+        quota_bytes: u64,
+        pusher: crate::push::Pusher,
+        files: Option<(&[u8], &[u8])>,
+        min_protocol: u32,
+    ) -> Self {
         Self::start_database(quota_bytes, pusher, files, min_protocol, None).await
     }
 
-    async fn start_database(quota_bytes: u64, pusher: crate::push::Pusher, files: Option<(&[u8], &[u8])>,
-        min_protocol: u32, database: Option<&str>) -> Self {
+    async fn start_database(
+        quota_bytes: u64,
+        pusher: crate::push::Pusher,
+        files: Option<(&[u8], &[u8])>,
+        min_protocol: u32,
+        database: Option<&str>,
+    ) -> Self {
         let home = std::env::temp_dir().join(format!("beans-binary-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         let catalog_dir = home.join("catalogs");
@@ -46,12 +179,18 @@ impl Relay {
         }
         let local = Arc::new(db::Local::default());
         let path = home.join("relay.db");
-        let db = db::open(database.unwrap_or(path.to_str().unwrap()), local.clone()).await.unwrap();
+        let db = db::open(database.unwrap_or(path.to_str().unwrap()), local.clone())
+            .await
+            .unwrap();
         let (identity, machine) = if database.is_some() {
             let suffix = uuid::Uuid::new_v4();
             (format!("identity-{suffix}"), format!("machine-{suffix}"))
-        } else { ("identity".into(), "machine".into()) };
-        db.register_identity(&identity, "content", &machine, "box", "attestation").await.unwrap();
+        } else {
+            ("identity".into(), "machine".into())
+        };
+        db.register_identity(&identity, "content", &machine, "box", "attestation")
+            .await
+            .unwrap();
         let state = AppState {
             db,
             local,
@@ -67,9 +206,12 @@ impl Relay {
             stats: Arc::new(crate::metrics::StatsCache::default()),
             instance: "test".into(),
             stopping: tokio_util::sync::CancellationToken::new(),
-            file_store: Arc::new(crate::store::FileStore::Local { dir: home.join("files") }),
+            file_store: Arc::new(crate::store::FileStore::Local {
+                dir: home.join("files"),
+            }),
             pusher: Arc::new(pusher),
             pushes: tokio_util::task::TaskTracker::new(),
+            receivers: Arc::new(crate::receivers::Receivers::default()),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -79,7 +221,10 @@ impl Relay {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("beans-protocol", PROTOCOL.into());
         headers.insert("beans-format", FORMAT.parse().unwrap());
-        let http = reqwest::Client::builder().default_headers(headers).build().unwrap();
+        let http = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap();
         Self {
             state,
             url,
@@ -101,7 +246,10 @@ impl Relay {
     }
 
     async fn upload(&self, id: &str, group: Option<&str>, ciphertext: Vec<u8>) -> i64 {
-        self.client.put_blob(&self.url, &self.token, file(id, group, ciphertext), 0).await.unwrap()
+        self.client
+            .put_blob(&self.url, &self.token, file(id, group, ciphertext), 0)
+            .await
+            .unwrap()
     }
 }
 
@@ -115,45 +263,286 @@ impl Drop for Relay {
 #[tokio::test]
 async fn managed_policy_transport_preserves_cut_and_account_boundaries() {
     let relay = Relay::start(0).await;
-    let request = db::ManagedCompanion { account_id: relay.identity.clone(), transaction_id: "transaction".into(), expected_slot_seq: 0,
-        policy_id: "managed-policy".into(), policy_ciphertext: vec![1,2], roster_id: "managed-roster".into(), roster_ciphertext: vec![3,4], checkpoint_transaction_id: None };
-    let receipt = relay.state.db.commit_managed_companion(request, 0).await.unwrap();
-    relay.state.db.insert_blob(db::NewBlob { identity_pubkey: relay.identity.clone(), id: "ordinary-policy".into(), kind: "policy".into(), recipient_machine_pubkey: None, slot: None, expected_slot_seq: None, group: None, payload: db::Payload::Inline(vec![5]) }, 0).await.unwrap();
+    let request = db::ManagedCompanion {
+        account_id: relay.identity.clone(),
+        transaction_id: "transaction".into(),
+        expected_slot_seq: 0,
+        policy_id: "managed-policy".into(),
+        policy_ciphertext: vec![1, 2],
+        roster_id: "managed-roster".into(),
+        roster_ciphertext: vec![3, 4],
+        checkpoint_transaction_id: None,
+    };
+    let receipt = relay
+        .state
+        .db
+        .commit_managed_companion(request, 0)
+        .await
+        .unwrap();
+    relay
+        .state
+        .db
+        .insert_blob(
+            db::NewBlob {
+                identity_pubkey: relay.identity.clone(),
+                id: "ordinary-policy".into(),
+                kind: "policy".into(),
+                recipient_machine_pubkey: None,
+                slot: None,
+                expected_slot_seq: None,
+                group: None,
+                payload: db::Payload::Inline(vec![5]),
+            },
+            0,
+        )
+        .await
+        .unwrap();
     let url = format!("{}/v1/blobs", relay.url);
-    let first = relay.http.get(&url).bearer_auth(&relay.token).query(&[("policy_replay","1"),("since","0"),("limit","1")]).send().await.unwrap();
+    let first = relay
+        .http
+        .get(&url)
+        .bearer_auth(&relay.token)
+        .query(&[("policy_replay", "1"), ("since", "0"), ("limit", "1")])
+        .send()
+        .await
+        .unwrap();
     assert_eq!(first.status(), StatusCode::OK);
     let first: db::ManagedCut = first.json().await.unwrap();
     assert!(!first.done);
     assert_eq!(first.next_since, receipt.roster_seq);
-    match &first.blobs[0] { db::ManagedCutBlob::Managed { receipt: returned, policy_ciphertext, roster_ciphertext } => { assert_eq!(returned, &receipt); assert_eq!(policy_ciphertext, &[1,2]); assert_eq!(roster_ciphertext, &[3,4]); }, _ => panic!("Missing managed linkage") }
-    let continuation = [("policy_replay", "1".to_string()),("since",first.next_since.to_string()),("context",first.context.clone()),("cut_token",first.cut_token.clone()),("through",first.through.to_string())];
-    let tail = relay.http.get(&url).bearer_auth(&relay.token).query(&continuation).send().await.unwrap();
+    match &first.blobs[0] {
+        db::ManagedCutBlob::Managed {
+            receipt: returned,
+            policy_ciphertext,
+            roster_ciphertext,
+        } => {
+            assert_eq!(returned, &receipt);
+            assert_eq!(policy_ciphertext, &[1, 2]);
+            assert_eq!(roster_ciphertext, &[3, 4]);
+        }
+        _ => panic!("Missing managed linkage"),
+    }
+    let continuation = [
+        ("policy_replay", "1".to_string()),
+        ("since", first.next_since.to_string()),
+        ("context", first.context.clone()),
+        ("cut_token", first.cut_token.clone()),
+        ("through", first.through.to_string()),
+    ];
+    let tail = relay
+        .http
+        .get(&url)
+        .bearer_auth(&relay.token)
+        .query(&continuation)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(tail.status(), StatusCode::OK);
     let tail: db::ManagedCut = tail.json().await.unwrap();
     assert!(tail.done);
     assert_eq!(tail.next_since, first.through);
-    match &tail.blobs[0] { db::ManagedCutBlob::Ordinary { id,ciphertext,.. } => { assert_eq!(id,"ordinary-policy"); assert_eq!(ciphertext,&[5]); }, _ => panic!("Ordinary policy omitted") }
-    let returned = relay.http.get(&url).bearer_auth(&relay.token).query(&[("policy_replay","1"),("receipt_transaction_id","transaction")]).send().await.unwrap();
-    assert_eq!(returned.status(),StatusCode::OK);
-    assert_eq!(returned.json::<db::ManagedReceipt>().await.unwrap(),receipt);
-    relay.state.db.register_identity("other", "content", "other-machine", "box", "attestation").await.unwrap();
-    let other = issue_token(&relay.state.secret,"other","other-machine").0;
-    assert_eq!(relay.http.get(&url).bearer_auth(&other).query(&continuation).send().await.unwrap().status(),StatusCode::CONFLICT);
-    assert_eq!(relay.http.get(&url).bearer_auth(&other).query(&[("policy_replay","1"),("receipt_transaction_id","transaction")]).send().await.unwrap().status(),StatusCode::NOT_FOUND);
-    relay.state.db.reset_managed_replay_context(&relay.identity).await.unwrap();
-    assert_eq!(relay.http.get(&url).bearer_auth(&relay.token).query(&continuation).send().await.unwrap().status(),StatusCode::CONFLICT);
-    for query in ["policy_replay=1&limit=1025", "policy_replay=1&through=1", "policy_replay=1&policy_replay=1", "policy_replay=1&account_id=other"] {
-        assert_eq!(relay.http.get(format!("{url}?{query}")).bearer_auth(&relay.token).send().await.unwrap().status(),StatusCode::BAD_REQUEST);
+    match &tail.blobs[0] {
+        db::ManagedCutBlob::Ordinary { id, ciphertext, .. } => {
+            assert_eq!(id, "ordinary-policy");
+            assert_eq!(ciphertext, &[5]);
+        }
+        _ => panic!("Ordinary policy omitted"),
     }
-    let generic: Value = relay.http.get(&url).bearer_auth(&relay.token).send().await.unwrap().json().await.unwrap();
+    let returned = relay
+        .http
+        .get(&url)
+        .bearer_auth(&relay.token)
+        .query(&[
+            ("policy_replay", "1"),
+            ("receipt_transaction_id", "transaction"),
+        ])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(returned.status(), StatusCode::OK);
+    assert_eq!(
+        returned.json::<db::ManagedReceipt>().await.unwrap(),
+        receipt
+    );
+    relay
+        .state
+        .db
+        .register_identity("other", "content", "other-machine", "box", "attestation")
+        .await
+        .unwrap();
+    let other = issue_token(&relay.state.secret, "other", "other-machine").0;
+    assert_eq!(
+        relay
+            .http
+            .get(&url)
+            .bearer_auth(&other)
+            .query(&continuation)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        relay
+            .http
+            .get(&url)
+            .bearer_auth(&other)
+            .query(&[
+                ("policy_replay", "1"),
+                ("receipt_transaction_id", "transaction")
+            ])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    relay
+        .state
+        .db
+        .reset_managed_replay_context(&relay.identity)
+        .await
+        .unwrap();
+    assert_eq!(
+        relay
+            .http
+            .get(&url)
+            .bearer_auth(&relay.token)
+            .query(&continuation)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    for query in [
+        "policy_replay=1&limit=1025",
+        "policy_replay=1&through=1",
+        "policy_replay=1&policy_replay=1",
+        "policy_replay=1&account_id=other",
+    ] {
+        assert_eq!(
+            relay
+                .http
+                .get(format!("{url}?{query}"))
+                .bearer_auth(&relay.token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let generic: Value = relay
+        .http
+        .get(&url)
+        .bearer_auth(&relay.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert!(generic.get("seq").is_some());
     assert!(generic.get("cut_token").is_none());
     let large = Relay::start(0).await;
-    large.state.db.insert_blob(db::NewBlob { identity_pubkey: large.identity.clone(), id: "large-policy".into(), kind: "policy".into(), recipient_machine_pubkey: None, slot: None, expected_slot_seq: None, group: None, payload: db::Payload::Inline(vec![255; 3 * 1024 * 1024]) }, 0).await.unwrap();
-    assert_eq!(large.http.get(format!("{}/v1/blobs?policy_replay=1",large.url)).bearer_auth(&large.token).send().await.unwrap().status(),StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(relay.http.get(format!("{url}?policy_replay=1")).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
-    relay.state.db.revoke_machine(&relay.identity,&relay.machine).await.unwrap();
-    assert_eq!(relay.http.get(&url).bearer_auth(&relay.token).query(&[("policy_replay","1")]).send().await.unwrap().status(),StatusCode::GONE);
+    large
+        .state
+        .db
+        .insert_blob(
+            db::NewBlob {
+                identity_pubkey: large.identity.clone(),
+                id: "large-policy".into(),
+                kind: "policy".into(),
+                recipient_machine_pubkey: None,
+                slot: None,
+                expected_slot_seq: None,
+                group: None,
+                payload: db::Payload::Inline(vec![255; 3 * 1024 * 1024]),
+            },
+            0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        large
+            .http
+            .get(format!("{}/v1/blobs?policy_replay=1", large.url))
+            .bearer_auth(&large.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        relay
+            .http
+            .get(format!("{url}?policy_replay=1"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    relay
+        .state
+        .db
+        .revoke_machine(&relay.identity, &relay.machine)
+        .await
+        .unwrap();
+    assert_eq!(
+        relay
+            .http
+            .get(&url)
+            .bearer_auth(&relay.token)
+            .query(&[("policy_replay", "1")])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::GONE
+    );
+}
+
+#[tokio::test]
+async fn event_blobs_require_a_recipient_and_travel_as_opaque_ciphertext() {
+    let relay = Relay::start(0).await;
+    let item = OutboxItem {
+        id: "event-envelope".into(),
+        kind: "event".into(),
+        recipient: Some("machine".into()),
+        ciphertext: b"opaque encrypted event".to_vec(),
+        slot: None,
+        group: None,
+    };
+    let seq = relay
+        .client
+        .put_blob(&relay.url, &relay.token, item.clone(), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        relay
+            .client
+            .put_blob(&relay.url, &relay.token, item, 0)
+            .await
+            .unwrap(),
+        seq
+    );
+    let (blobs, _) = relay
+        .client
+        .list_blobs(&relay.url, &relay.token, 0, "event")
+        .await
+        .unwrap();
+    assert_eq!(blobs.len(), 1);
+    assert_eq!(
+        beans::keys::unb64(&blobs[0].ciphertext).unwrap(),
+        b"opaque encrypted event"
+    );
+    let response = relay.http.put(format!("{}/v1/blobs", relay.url)).bearer_auth(&relay.token)
+        .json(&json!({"id": "broadcast-event", "kind": "event", "ciphertext": beans::keys::b64(b"ciphertext")})).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 fn file(id: &str, group: Option<&str>, ciphertext: Vec<u8>) -> OutboxItem {
@@ -171,41 +560,104 @@ fn file(id: &str, group: Option<&str>, ciphertext: Vec<u8>) -> OutboxItem {
 async fn public_catalogs_are_plaintext_cached_and_independent_of_account_protocol() {
     let models = br#"{"models":[{"id":"public-model"}]}"#;
     let marketplace = br#"{"plugins":[{"id":"public-plugin"}]}"#;
-    let relay = Relay::start_catalogs(0, crate::push::Pusher::new(None, None), Some((models, marketplace))).await;
-    let old = reqwest::Client::builder().default_headers({
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("beans-protocol", 2.into());
-        headers
-    }).build().unwrap();
-    for (route, expected) in [("/models/v1.json", models.as_slice()), ("/marketplace/v1.json", marketplace.as_slice())] {
-        let response = old.get(format!("{}{route}", relay.url)).send().await.unwrap();
+    let relay = Relay::start_catalogs(
+        0,
+        crate::push::Pusher::new(None, None),
+        Some((models, marketplace)),
+    )
+    .await;
+    let old = reqwest::Client::builder()
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("beans-protocol", 2.into());
+            headers
+        })
+        .build()
+        .unwrap();
+    for (route, expected) in [
+        ("/models/v1.json", models.as_slice()),
+        ("/marketplace/v1.json", marketplace.as_slice()),
+    ] {
+        let response = old
+            .get(format!("{}{route}", relay.url))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
-        assert_eq!(response.headers()[header::CACHE_CONTROL], "public, max-age=300, must-revalidate");
-        let etag = response.headers()[header::ETAG].to_str().unwrap().to_owned();
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=300, must-revalidate"
+        );
+        let etag = response.headers()[header::ETAG]
+            .to_str()
+            .unwrap()
+            .to_owned();
         let body = response.bytes().await.unwrap();
         assert_eq!(body.as_ref(), expected);
-        assert!(!body.windows(b"identity".len()).any(|part| part == b"identity"));
-        let cached = old.get(format!("{}{route}", relay.url)).header(header::IF_NONE_MATCH, etag).send().await.unwrap();
+        assert!(!body
+            .windows(b"identity".len())
+            .any(|part| part == b"identity"));
+        let cached = old
+            .get(format!("{}{route}", relay.url))
+            .header(header::IF_NONE_MATCH, etag)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
         assert!(cached.bytes().await.unwrap().is_empty());
     }
-    assert_eq!(old.get(format!("{}/v1/machines", relay.url)).send().await.unwrap().status(), StatusCode::UPGRADE_REQUIRED);
-    assert_eq!(reqwest::get(format!("{}/models/v1.json", relay.url)).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(
+        old.get(format!("{}/v1/machines", relay.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UPGRADE_REQUIRED
+    );
+    assert_eq!(
+        reqwest::get(format!("{}/models/v1.json", relay.url))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]
 async fn unavailable_catalogs_fail_without_exposing_account_data() {
     let missing = Relay::start(0).await;
     for route in ["/models/v1.json", "/marketplace/v1.json"] {
-        let response = reqwest::get(format!("{}{route}", missing.url)).await.unwrap();
+        let response = reqwest::get(format!("{}{route}", missing.url))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert!(!response.text().await.unwrap().contains("identity"));
     }
-    let malformed = Relay::start_catalogs(0, crate::push::Pusher::new(None, None), Some((b"not JSON", b"{}"))).await;
-    assert_eq!(reqwest::get(format!("{}/models/v1.json", malformed.url)).await.unwrap().status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(reqwest::get(format!("{}/marketplace/v1.json", malformed.url)).await.unwrap().status(), StatusCode::OK);
-    assert!(matches!(Catalog::load(Some(&malformed.home.join("catalogs/models/v1.json"))), Catalog::Invalid));
+    let malformed = Relay::start_catalogs(
+        0,
+        crate::push::Pusher::new(None, None),
+        Some((b"not JSON", b"{}")),
+    )
+    .await;
+    assert_eq!(
+        reqwest::get(format!("{}/models/v1.json", malformed.url))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(
+        reqwest::get(format!("{}/marketplace/v1.json", malformed.url))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(matches!(
+        Catalog::load(Some(&malformed.home.join("catalogs/models/v1.json"))),
+        Catalog::Invalid
+    ));
     let large = malformed.home.join("catalogs/models/v1.json");
     std::fs::write(&large, vec![b' '; MAX_CATALOG_BYTES as usize + 1]).unwrap();
     assert!(matches!(Catalog::load(Some(&large)), Catalog::Invalid));
@@ -216,14 +668,28 @@ async fn roster_put_requires_expected_slot_seq_and_reports_conflict() {
     let relay = Relay::start(0).await;
     let put = |id: &str, expected: Option<i64>| {
         let mut body = json!({ "id": id, "kind": "roster", "slot": "roster", "ciphertext": "AQ" });
-        if let Some(expected) = expected { body["expected_slot_seq"] = expected.into(); }
-        relay.http.put(format!("{}/v1/blobs", relay.url)).bearer_auth(&relay.token).json(&body)
+        if let Some(expected) = expected {
+            body["expected_slot_seq"] = expected.into();
+        }
+        relay
+            .http
+            .put(format!("{}/v1/blobs", relay.url))
+            .bearer_auth(&relay.token)
+            .json(&body)
     };
-    assert_eq!(put("missing", None).send().await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        put("missing", None).send().await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
     let first = put("one", Some(0)).send().await.unwrap();
     assert_eq!(first.status(), StatusCode::OK);
-    let seq = first.json::<Value>().await.unwrap()["seq"].as_i64().unwrap();
-    assert_eq!(put("two", Some(0)).send().await.unwrap().status(), StatusCode::CONFLICT);
+    let seq = first.json::<Value>().await.unwrap()["seq"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(
+        put("two", Some(0)).send().await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
     let existing = put("one", Some(0)).send().await.unwrap();
     assert_eq!(existing.status(), StatusCode::OK);
     let body = existing.json::<Value>().await.unwrap();
@@ -237,7 +703,12 @@ async fn roster_put_requires_expected_slot_seq_and_reports_conflict() {
 #[tokio::test]
 async fn appearance_roster_floor_cannot_be_lowered_and_old_writers_have_no_effects() {
     let relay = Relay::start_protocol(0, crate::push::Pusher::new(None, None), None, 3).await;
-    let health = reqwest::get(format!("{}/v1/health", relay.url)).await.unwrap().json::<Value>().await.unwrap();
+    let health = reqwest::get(format!("{}/v1/health", relay.url))
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
     assert_eq!(health["protocol"], 5);
     assert_eq!(health["min_protocol"], 5);
     assert_eq!(health["min_roster_protocol"], 5);
@@ -245,129 +716,354 @@ async fn appearance_roster_floor_cannot_be_lowered_and_old_writers_have_no_effec
     assert_eq!(health["memory_config_version"], 1);
     assert_eq!(relay.client.health(&relay.url).await.unwrap(), 5);
     let body = json!({"id":"capable","kind":"roster","slot":"roster","expected_slot_seq":0,"ciphertext":"AQ"});
-    let response = relay.http.put(format!("{}/v1/blobs", relay.url)).header("beans-protocol", "5")
-        .bearer_auth(&relay.token).json(&body).send().await.unwrap();
+    let response = relay
+        .http
+        .put(format!("{}/v1/blobs", relay.url))
+        .header("beans-protocol", "5")
+        .bearer_auth(&relay.token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let seq = response.json::<Value>().await.unwrap()["seq"].as_i64().unwrap();
+    let seq = response.json::<Value>().await.unwrap()["seq"]
+        .as_i64()
+        .unwrap();
     let usage = relay.state.db.stats().await.unwrap().usage_bytes;
     for header in ["4", "3", "2", "0", "garbage", "4294967296"] {
         let mut old = body.clone();
         old["id"] = json!("old");
         old["expected_slot_seq"] = json!(seq);
-        let response = relay.http.put(format!("{}/v1/blobs", relay.url)).header("beans-protocol", header)
-            .bearer_auth(&relay.token).json(&old).send().await.unwrap();
+        let response = relay
+            .http
+            .put(format!("{}/v1/blobs", relay.url))
+            .header("beans-protocol", header)
+            .bearer_auth(&relay.token)
+            .json(&old)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED, "{header}");
-        assert!(relay.state.db.blob("identity", "machine", "old").await.unwrap().is_none());
-        assert_eq!(relay.state.db.blob("identity", "machine", "capable").await.unwrap().unwrap().seq, seq);
+        assert!(relay
+            .state
+            .db
+            .blob("identity", "machine", "old")
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            relay
+                .state
+                .db
+                .blob("identity", "machine", "capable")
+                .await
+                .unwrap()
+                .unwrap()
+                .seq,
+            seq
+        );
         assert_eq!(relay.state.db.stats().await.unwrap().usage_bytes, usage);
     }
-    let no_header = reqwest::Client::new().put(format!("{}/v1/blobs", relay.url)).bearer_auth(&relay.token)
-        .json(&body).send().await.unwrap();
+    let no_header = reqwest::Client::new()
+        .put(format!("{}/v1/blobs", relay.url))
+        .bearer_auth(&relay.token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(no_header.status(), StatusCode::UPGRADE_REQUIRED);
     // The account-wide fresh-format floor cannot be lowered for reads either.
-    assert_eq!(relay.http.get(format!("{}/v1/machines", relay.url)).header("beans-protocol", "3")
-        .bearer_auth(&relay.token).send().await.unwrap().status(), StatusCode::UPGRADE_REQUIRED);
+    assert_eq!(
+        relay
+            .http
+            .get(format!("{}/v1/machines", relay.url))
+            .header("beans-protocol", "3")
+            .bearer_auth(&relay.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UPGRADE_REQUIRED
+    );
 }
 
 #[tokio::test]
 async fn protected_blob_delete_preserves_rows_sequence_and_usage_for_protocol5() {
     let mut databases = vec![None];
-    if let Ok(url) = std::env::var("BEANS_RELAY_TEST_POSTGRES") { databases.push(Some(url)); }
+    if let Ok(url) = std::env::var("BEANS_RELAY_TEST_POSTGRES") {
+        databases.push(Some(url));
+    }
     for database in databases {
-        let relay = Relay::start_database(0, crate::push::Pusher::new(None, None), None, 3, database.as_deref()).await;
-        for (id, kind, ciphertext) in [("roster", "roster", "bG9vaw"), ("policy", "policy", "cGF1c2U"), ("memory_config","memory_config","AQ")] {
+        let relay = Relay::start_database(
+            0,
+            crate::push::Pusher::new(None, None),
+            None,
+            3,
+            database.as_deref(),
+        )
+        .await;
+        for (id, kind, ciphertext) in [
+            ("roster", "roster", "bG9vaw"),
+            ("policy", "policy", "cGF1c2U"),
+            ("memory_config", "memory_config", "AQ"),
+        ] {
             let mut body = json!({"id":id,"kind":kind,"ciphertext":ciphertext});
-            if kind == "roster" { body["slot"] = json!("roster"); body["expected_slot_seq"] = json!(0); }
-            if kind=="memory_config" {body["slot"]=json!("memory_config");}
-            let response = relay.http.put(format!("{}/v1/blobs", relay.url)).bearer_auth(&relay.token)
-                .json(&body).send().await.unwrap();
+            if kind == "roster" {
+                body["slot"] = json!("roster");
+                body["expected_slot_seq"] = json!(0);
+            }
+            if kind == "memory_config" {
+                body["slot"] = json!("memory_config");
+            }
+            let response = relay
+                .http
+                .put(format!("{}/v1/blobs", relay.url))
+                .bearer_auth(&relay.token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
         }
-        let before = relay.http.get(format!("{}/v1/blobs?since=0", relay.url)).bearer_auth(&relay.token)
-            .send().await.unwrap().json::<Value>().await.unwrap();
+        let before = relay
+            .http
+            .get(format!("{}/v1/blobs?since=0", relay.url))
+            .bearer_auth(&relay.token)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
         for id in ["roster", "policy", "memory_config"] {
-            let response = relay.http.delete(format!("{}/v1/blobs/{id}", relay.url))
-                .bearer_auth(&relay.token).send().await.unwrap();
+            let response = relay
+                .http
+                .delete(format!("{}/v1/blobs/{id}", relay.url))
+                .bearer_auth(&relay.token)
+                .send()
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{id}");
-            let after = relay.http.get(format!("{}/v1/blobs?since=0", relay.url)).bearer_auth(&relay.token)
-                .send().await.unwrap().json::<Value>().await.unwrap();
+            let after = relay
+                .http
+                .get(format!("{}/v1/blobs?since=0", relay.url))
+                .bearer_auth(&relay.token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap();
             assert_eq!(after, before, "{id} changed rows or head sequence");
-            assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 1, 11).await.is_ok());
-            assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 2, 11).await.is_err(),
-                "{id} changed stored usage");
+            assert!(relay
+                .state
+                .db
+                .precheck_blob(&relay.identity, "quota-probe", None, 1, 11)
+                .await
+                .is_ok());
+            assert!(
+                relay
+                    .state
+                    .db
+                    .precheck_blob(&relay.identity, "quota-probe", None, 2, 11)
+                    .await
+                    .is_err(),
+                "{id} changed stored usage"
+            );
         }
         let id = "consumed";
-        let response = relay.http.put(format!("{}/v1/blobs", relay.url))
-            .bearer_auth(&relay.token).json(&json!({"id":id,"kind":"chat","ciphertext":"b2s"})).send().await.unwrap();
+        let response = relay
+            .http
+            .put(format!("{}/v1/blobs", relay.url))
+            .bearer_auth(&relay.token)
+            .json(&json!({"id":id,"kind":"chat","ciphertext":"b2s"}))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let response = relay.http.delete(format!("{}/v1/blobs/{id}", relay.url))
-            .bearer_auth(&relay.token).send().await.unwrap();
+        let response = relay
+            .http
+            .delete(format!("{}/v1/blobs/{id}", relay.url))
+            .bearer_auth(&relay.token)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert!(relay.state.db.blob(&relay.identity, &relay.machine, id).await.unwrap().is_none());
-        assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 1, 11).await.is_ok());
-        assert!(relay.state.db.precheck_blob(&relay.identity, "quota-probe", None, 2, 11).await.is_err());
+        assert!(relay
+            .state
+            .db
+            .blob(&relay.identity, &relay.machine, id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(relay
+            .state
+            .db
+            .precheck_blob(&relay.identity, "quota-probe", None, 1, 11)
+            .await
+            .is_ok());
+        assert!(relay
+            .state
+            .db
+            .precheck_blob(&relay.identity, "quota-probe", None, 2, 11)
+            .await
+            .is_err());
     }
 }
 
 #[tokio::test]
 async fn appearance_health_fails_closed_without_an_enforced_supported_roster_floor() {
     for (health, expected) in [
-        (json!({"ok":true,"service":"beans-relay","protocol":4,"min_protocol":4,"min_roster_protocol":4,"format":"beans-v2","memory_config_version":1}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":5}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":3,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":1}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":6,"min_roster_protocol":6,"format":"beans-v2","memory_config_version":1}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":4,"format":"beans-v2","memory_config_version":1}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":4294967300_u64,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":1}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":"5","format":"beans-v2","memory_config_version":1}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":null,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":1}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":5,"memory_config_version":1}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v1","memory_config_version":1}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":"1"}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":2}), false),
-        (json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":1}), true),
-        (json!({"ok":true,"service":"beans-relay","protocol":6,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":1}), true),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":4,"min_protocol":4,"min_roster_protocol":4,"format":"beans-v2","memory_config_version":1}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":5}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":3,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":1}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":6,"min_roster_protocol":6,"format":"beans-v2","memory_config_version":1}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":4,"format":"beans-v2","memory_config_version":1}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":4294967300_u64,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":1}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":"5","format":"beans-v2","memory_config_version":1}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":null,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":1}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":5,"memory_config_version":1}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v1","memory_config_version":1}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":"1"}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":2}),
+            false,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":5,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":1}),
+            true,
+        ),
+        (
+            json!({"ok":true,"service":"beans-relay","protocol":6,"min_protocol":5,"min_roster_protocol":5,"format":"beans-v2","memory_config_version":1}),
+            true,
+        ),
     ] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let response = health.clone();
-        let app = Router::new().route("/v1/health", get(move || { let response = response.clone(); async move { Json(response) } }));
+        let app = Router::new().route(
+            "/v1/health",
+            get(move || {
+                let response = response.clone();
+                async move { Json(response) }
+            }),
+        );
         let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let result = RelayClient::new().unwrap().health(&url).await;
         task.abort();
         assert_eq!(result.is_ok(), expected, "{health}: {result:?}");
-        if !expected { assert_eq!(result.unwrap_err().status, Some(426)); }
+        if !expected {
+            assert_eq!(result.unwrap_err().status, Some(426));
+        }
     }
 }
 
 #[tokio::test]
 async fn fresh_format_admission_blocks_account_routes_before_any_effect() {
     let relay = Relay::start_protocol(0, crate::push::Pusher::new(None, None), None, 0).await;
-    relay.state.db.create_pairing("known", &relay.identity, db::now() + 60).await.unwrap();
+    relay
+        .state
+        .db
+        .create_pairing("known", &relay.identity, db::now() + 60)
+        .await
+        .unwrap();
     let before = relay.state.db.stats().await.unwrap();
-    for (protocol, format) in [(None, None), (Some("4"), Some(FORMAT)), (Some("5"), None), (Some("5"), Some("beans-v1"))] {
+    for (protocol, format) in [
+        (None, None),
+        (Some("4"), Some(FORMAT)),
+        (Some("5"), None),
+        (Some("5"), Some("beans-v1")),
+    ] {
         for (method, path) in [
-            ("POST", "/v1/identities"), ("POST", "/v1/auth/challenge"), ("POST", "/v1/auth/verify"),
-            ("POST", "/v1/machines"), ("POST", "/v1/pair"), ("POST", "/v1/pair/known/request"),
-            ("POST", "/v1/pair/known/reply"), ("GET", "/v1/pair/known/request"),
-            ("GET", "/v1/pair/known/reply"), ("GET", "/v1/sync"), ("GET", "/v1/blobs"),
-            ("PUT", "/v1/blobs"), ("PUT", "/v1/files/test"), ("PUT", "/v1/push/token"),
+            ("POST", "/v1/identities"),
+            ("POST", "/v1/auth/challenge"),
+            ("POST", "/v1/auth/verify"),
+            ("POST", "/v1/machines"),
+            ("POST", "/v1/pair"),
+            ("POST", "/v1/pair/known/request"),
+            ("POST", "/v1/pair/known/reply"),
+            ("GET", "/v1/pair/known/request"),
+            ("GET", "/v1/pair/known/reply"),
+            ("GET", "/v1/sync"),
+            ("GET", "/v1/blobs"),
+            ("PUT", "/v1/blobs"),
+            ("PUT", "/v1/files/test"),
+            ("PUT", "/v1/push/token"),
             ("DELETE", "/v1/identity"),
         ] {
-            let mut request = reqwest::Client::new().request(method.parse().unwrap(), format!("{}{path}", relay.url))
-                .bearer_auth(&relay.token).json(&json!({"ciphertext":"AQ"}));
-            if let Some(protocol) = protocol { request = request.header("beans-protocol", protocol); }
-            if let Some(format) = format { request = request.header("beans-format", format); }
-            assert_eq!(request.send().await.unwrap().status(), StatusCode::UPGRADE_REQUIRED, "{method} {path}");
+            let mut request = reqwest::Client::new()
+                .request(method.parse().unwrap(), format!("{}{path}", relay.url))
+                .bearer_auth(&relay.token)
+                .json(&json!({"ciphertext":"AQ"}));
+            if let Some(protocol) = protocol {
+                request = request.header("beans-protocol", protocol);
+            }
+            if let Some(format) = format {
+                request = request.header("beans-format", format);
+            }
+            assert_eq!(
+                request.send().await.unwrap().status(),
+                StatusCode::UPGRADE_REQUIRED,
+                "{method} {path}"
+            );
         }
     }
     let mut headers = HeaderMap::new();
     headers.append("beans-protocol", "5".parse().unwrap());
     headers.append("beans-protocol", "5".parse().unwrap());
     headers.append("beans-format", FORMAT.parse().unwrap());
-    assert_eq!(reqwest::Client::new().get(format!("{}/v1/machines", relay.url)).headers(headers)
-        .bearer_auth(&relay.token).send().await.unwrap().status(), StatusCode::UPGRADE_REQUIRED);
+    assert_eq!(
+        reqwest::Client::new()
+            .get(format!("{}/v1/machines", relay.url))
+            .headers(headers)
+            .bearer_auth(&relay.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UPGRADE_REQUIRED
+    );
     assert_eq!(relay.state.db.stats().await.unwrap(), before);
-    assert!(relay.state.db.pair_request("known", &relay.identity).await.unwrap().is_none());
+    assert!(relay
+        .state
+        .db
+        .pair_request("known", &relay.identity)
+        .await
+        .unwrap()
+        .is_none());
     assert!(relay.state.db.pair_reply("known").await.unwrap().is_none());
 }
 
@@ -376,17 +1072,49 @@ async fn binary_attachment_round_trip_stays_encrypted_and_idempotent() {
     let relay = Relay::start(0).await;
     let plaintext = b"attachment\0\xff\xfe\x80\r\n";
     let ciphertext = beans::crypto::encrypt(&[9; 32], "file", plaintext).unwrap();
-    assert_eq!(ciphertext.len(), plaintext.len() + beans::crypto::ENVELOPE_OVERHEAD);
-    let seq = relay.upload("att-file", Some("chat"), ciphertext.clone()).await;
-    assert_eq!(relay.upload("att-file", Some("chat"), vec![0; 10]).await, seq);
-    let downloaded = relay.client.get_file(&relay.url, &relay.token, "att-file").await.unwrap().unwrap();
+    assert_eq!(
+        ciphertext.len(),
+        plaintext.len() + beans::crypto::ENVELOPE_OVERHEAD
+    );
+    let seq = relay
+        .upload("att-file", Some("chat"), ciphertext.clone())
+        .await;
+    assert_eq!(
+        relay.upload("att-file", Some("chat"), vec![0; 10]).await,
+        seq
+    );
+    let downloaded = relay
+        .client
+        .get_file(&relay.url, &relay.token, "att-file")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(downloaded, ciphertext);
-    assert_eq!(beans::crypto::decrypt(&[9; 32], "file", &downloaded).unwrap(), plaintext);
-    assert_eq!(std::fs::read(relay.home.join("files/identity/att-file")).unwrap(), ciphertext);
-    let row = relay.state.db.blob("identity", "machine", "att-file").await.unwrap().unwrap();
+    assert_eq!(
+        beans::crypto::decrypt(&[9; 32], "file", &downloaded).unwrap(),
+        plaintext
+    );
+    assert_eq!(
+        std::fs::read(relay.home.join("files/identity/att-file")).unwrap(),
+        ciphertext
+    );
+    let row = relay
+        .state
+        .db
+        .blob("identity", "machine", "att-file")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(row.ciphertext.is_empty());
-    let page = relay.client.list_blobs(&relay.url, &relay.token, 0, "").await.unwrap();
-    assert!(page.0.is_empty(), "JSON sync pages contain no attachment payloads");
+    let page = relay
+        .client
+        .list_blobs(&relay.url, &relay.token, 0, "")
+        .await
+        .unwrap();
+    assert!(
+        page.0.is_empty(),
+        "JSON sync pages contain no attachment payloads"
+    );
     let chat = OutboxItem {
         id: "message".into(),
         kind: "chat".into(),
@@ -395,24 +1123,109 @@ async fn binary_attachment_round_trip_stays_encrypted_and_idempotent() {
         slot: None,
         group: Some("chat".into()),
     };
-    relay.client.put_blob(&relay.url, &relay.token, chat, 0).await.unwrap();
-    let (blobs, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, "").await.unwrap();
+    relay
+        .client
+        .put_blob(&relay.url, &relay.token, chat, 0)
+        .await
+        .unwrap();
+    let (blobs, _) = relay
+        .client
+        .list_blobs(&relay.url, &relay.token, 0, "")
+        .await
+        .unwrap();
     assert_eq!(blobs.len(), 1);
-    assert_eq!(beans::keys::unb64(&blobs[0].ciphertext).unwrap(), [0, 255, 128]);
-    assert_eq!(relay.client.get_file(&relay.url, &relay.token, "message").await.unwrap(), None);
+    assert_eq!(
+        beans::keys::unb64(&blobs[0].ciphertext).unwrap(),
+        [0, 255, 128]
+    );
+    assert_eq!(
+        relay
+            .client
+            .get_file(&relay.url, &relay.token, "message")
+            .await
+            .unwrap(),
+        None
+    );
 
     let other = issue_token(&relay.state.secret, "other-identity", "other-machine").0;
-    assert!(relay.client.get_file(&relay.url, &other, "att-file").await.unwrap().is_none());
-    relay.client.delete_group(&relay.url, &relay.token, "chat").await.unwrap();
-    assert!(relay.client.get_file(&relay.url, &relay.token, "att-file").await.unwrap().is_none());
+    assert!(relay
+        .client
+        .get_file(&relay.url, &other, "att-file")
+        .await
+        .unwrap()
+        .is_none());
+    relay
+        .client
+        .delete_group(&relay.url, &relay.token, "chat")
+        .await
+        .unwrap();
+    assert!(relay
+        .client
+        .get_file(&relay.url, &relay.token, "att-file")
+        .await
+        .unwrap()
+        .is_none());
     assert!(!relay.home.join("files/identity/att-file").exists());
     let error = relay
         .client
-        .put_blob(&relay.url, &relay.token, file("att-late", Some("chat"), vec![1]), 0)
+        .put_blob(
+            &relay.url,
+            &relay.token,
+            file("att-late", Some("chat"), vec![1]),
+            0,
+        )
         .await
         .unwrap_err();
     assert_eq!(error.status, Some(409));
     assert!(!relay.home.join("files/identity/att-late").exists());
+}
+
+#[tokio::test]
+async fn encrypted_review_blobs_round_trip_and_keep_the_latest_version() {
+    let relay = Relay::start(0).await;
+    let make = |id: &str, version: u64| OutboxItem {
+        id: id.into(),
+        kind: "review".into(),
+        recipient: None,
+        ciphertext: beans::crypto::encrypt_json(
+            &[9; 32],
+            "review",
+            &json!({ "id": "review-one", "version": version, "draft": "private draft" }),
+        )
+        .unwrap(),
+        slot: Some(beans::app::Slot::latest(beans::model::relay_name(
+            "review/review-one",
+        ))),
+        group: None,
+    };
+    let first = make("review-first", 1);
+    relay
+        .client
+        .put_blob(&relay.url, &relay.token, first.clone(), 0)
+        .await
+        .unwrap();
+    relay
+        .client
+        .put_blob(&relay.url, &relay.token, first, 0)
+        .await
+        .unwrap();
+    let latest = make("review-last", 2);
+    relay
+        .client
+        .put_blob(&relay.url, &relay.token, latest.clone(), 0)
+        .await
+        .unwrap();
+    let (blobs, _) = relay
+        .client
+        .list_blobs(&relay.url, &relay.token, 0, "review")
+        .await
+        .unwrap();
+    assert_eq!(blobs.len(), 1);
+    assert_eq!(blobs[0].id, "review-last");
+    let ciphertext = beans::keys::unb64(&blobs[0].ciphertext).unwrap();
+    assert_eq!(ciphertext, latest.ciphertext);
+    let content: Value = beans::crypto::decrypt_json(&[9; 32], "review", &ciphertext).unwrap();
+    assert_eq!(content["version"], 2);
 }
 
 #[tokio::test]
@@ -427,7 +1240,16 @@ async fn binary_files_enforce_auth_metadata_quota_and_missing_objects() {
         .await
         .unwrap();
     assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(relay.put("att-empty").body(Vec::new()).send().await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        relay
+            .put("att-empty")
+            .body(Vec::new())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
     assert_eq!(
         relay
             .http
@@ -442,7 +1264,14 @@ async fn binary_files_enforce_auth_metadata_quota_and_missing_objects() {
         StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
     assert_eq!(
-        relay.put("att-file").query(&[("group", "../bad")]).body(vec![1]).send().await.unwrap().status(),
+        relay
+            .put("att-file")
+            .query(&[("group", "../bad")])
+            .body(vec![1])
+            .send()
+            .await
+            .unwrap()
+            .status(),
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
@@ -458,7 +1287,12 @@ async fn binary_files_enforce_auth_metadata_quota_and_missing_objects() {
     );
     let error = relay
         .client
-        .put_blob(&relay.url, &relay.token, file("att-large", None, vec![1; 5]), 0)
+        .put_blob(
+            &relay.url,
+            &relay.token,
+            file("att-large", None, vec![1; 5]),
+            0,
+        )
         .await
         .unwrap_err();
     assert_eq!(error.status, Some(413));
@@ -466,9 +1300,24 @@ async fn binary_files_enforce_auth_metadata_quota_and_missing_objects() {
 
     relay.upload("att-avatar", None, vec![0, 255, 128, 1]).await;
     std::fs::remove_file(relay.home.join("files/identity/att-avatar")).unwrap();
-    assert!(relay.client.get_file(&relay.url, &relay.token, "att-avatar").await.unwrap().is_none());
-    assert!(relay.state.db.blob("identity", "machine", "att-avatar").await.unwrap().is_some());
-    relay.client.delete_blob(&relay.url, &relay.token, "att-avatar").await.unwrap();
+    assert!(relay
+        .client
+        .get_file(&relay.url, &relay.token, "att-avatar")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(relay
+        .state
+        .db
+        .blob("identity", "machine", "att-avatar")
+        .await
+        .unwrap()
+        .is_some());
+    relay
+        .client
+        .delete_blob(&relay.url, &relay.token, "att-avatar")
+        .await
+        .unwrap();
     relay.upload("att-replacement", None, vec![2; 4]).await;
 
     let response = relay
@@ -480,7 +1329,13 @@ async fn binary_files_enforce_auth_metadata_quota_and_missing_objects() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let response = relay.put("att-old").header("beans-protocol", "0").body(vec![1]).send().await.unwrap();
+    let response = relay
+        .put("att-old")
+        .header("beans-protocol", "0")
+        .body(vec![1])
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
 }
 
@@ -491,13 +1346,27 @@ async fn binary_file_limit_includes_the_encryption_envelope_and_caps_chunked_bod
         MAX_FILE_BLOB_BYTES,
         beans::files::MAX_ATTACHMENT_BYTES as usize + beans::crypto::ENVELOPE_OVERHEAD
     );
-    relay.upload("att-boundary", None, vec![0x80; MAX_FILE_BLOB_BYTES]).await;
-    let downloaded = relay.client.get_file(&relay.url, &relay.token, "att-boundary").await.unwrap().unwrap();
+    relay
+        .upload("att-boundary", None, vec![0x80; MAX_FILE_BLOB_BYTES])
+        .await;
+    let downloaded = relay
+        .client
+        .get_file(&relay.url, &relay.token, "att-boundary")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(downloaded.len(), MAX_FILE_BLOB_BYTES);
     assert!(downloaded.iter().all(|&byte| byte == 0x80));
     drop(downloaded);
-    let chunks = futures::stream::iter((0..101).map(|_| Ok::<_, std::io::Error>(Bytes::from(vec![0; 1024 * 1024]))));
-    let response = relay.put("att-overflow").body(reqwest::Body::wrap_stream(chunks)).send().await.unwrap();
+    let chunks = futures::stream::iter(
+        (0..101).map(|_| Ok::<_, std::io::Error>(Bytes::from(vec![0; 1024 * 1024]))),
+    );
+    let response = relay
+        .put("att-overflow")
+        .body(reqwest::Body::wrap_stream(chunks))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert!(!relay.home.join("files/identity/att-overflow").exists());
 }
@@ -508,37 +1377,82 @@ async fn file_overflow_finishes_small_tails_but_caps_unfinished_senders() {
     use std::sync::Arc;
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
-    let body = Body::from_stream(futures::stream::iter([
-        Ok::<_, std::io::Error>(Bytes::from_static(b"1234")),
-        Ok(Bytes::from_static(b"5")),
-        Ok(Bytes::from_static(b"tail")),
-    ]).inspect(move |_| { count.fetch_add(1, Ordering::SeqCst); }));
-    assert_eq!(read_file_bytes(body, 4).await.unwrap_err().status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(received.load(Ordering::SeqCst), 3, "the rejected request reaches EOF before response");
+    let body = Body::from_stream(
+        futures::stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"1234")),
+            Ok(Bytes::from_static(b"5")),
+            Ok(Bytes::from_static(b"tail")),
+        ])
+        .inspect(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    assert_eq!(
+        read_file_bytes(body, 4).await.unwrap_err().status,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        received.load(Ordering::SeqCst),
+        3,
+        "the rejected request reaches EOF before response"
+    );
 
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     const CHUNK: [u8; 1024] = [0; 1024];
-    let body = Body::from_stream(futures::stream::repeat_with(|| Ok::<_, std::io::Error>(Bytes::from_static(&CHUNK)))
-        .inspect(move |_| { count.fetch_add(1, Ordering::SeqCst); }));
-    assert_eq!(read_file_bytes(body, 4).await.unwrap_err().status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert!(received.load(Ordering::SeqCst) <= 1 + FILE_OVERFLOW_DRAIN_BYTES / 1024, "an endless sender has a byte budget");
+    let body = Body::from_stream(
+        futures::stream::repeat_with(|| Ok::<_, std::io::Error>(Bytes::from_static(&CHUNK)))
+            .inspect(move |_| {
+                count.fetch_add(1, Ordering::SeqCst);
+            }),
+    );
+    assert_eq!(
+        read_file_bytes(body, 4).await.unwrap_err().status,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert!(
+        received.load(Ordering::SeqCst) <= 1 + FILE_OVERFLOW_DRAIN_BYTES / 1024,
+        "an endless sender has a byte budget"
+    );
 
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
-    let body = Body::from_stream(futures::stream::iter([
-        Ok::<_, std::io::Error>(Bytes::from_static(b"overflow")),
-        Ok(Bytes::from(vec![0; FILE_OVERFLOW_DRAIN_BYTES + 1])),
-        Ok(Bytes::from_static(b"must remain unread")),
-    ]).inspect(move |_| { count.fetch_add(1, Ordering::SeqCst); }));
-    assert_eq!(read_file_bytes(body, 4).await.unwrap_err().status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(received.load(Ordering::SeqCst), 2, "a frame exceeding the cleanup budget ends draining immediately");
+    let body = Body::from_stream(
+        futures::stream::iter([
+            Ok::<_, std::io::Error>(Bytes::from_static(b"overflow")),
+            Ok(Bytes::from(vec![0; FILE_OVERFLOW_DRAIN_BYTES + 1])),
+            Ok(Bytes::from_static(b"must remain unread")),
+        ])
+        .inspect(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    assert_eq!(
+        read_file_bytes(body, 4).await.unwrap_err().status,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        received.load(Ordering::SeqCst),
+        2,
+        "a frame exceeding the cleanup budget ends draining immediately"
+    );
 
-    let body = Body::from_stream(futures::stream::once(async {
-        Ok::<_, std::io::Error>(Bytes::from_static(b"overflow"))
-    }).chain(futures::stream::pending()));
-    let result = tokio::time::timeout(FILE_OVERFLOW_DRAIN_TIME + std::time::Duration::from_secs(1), read_file_bytes(body, 4)).await;
-    assert_eq!(result.expect("a stalled sender has a time budget").unwrap_err().status, StatusCode::PAYLOAD_TOO_LARGE);
+    let body = Body::from_stream(
+        futures::stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"overflow")) })
+            .chain(futures::stream::pending()),
+    );
+    let result = tokio::time::timeout(
+        FILE_OVERFLOW_DRAIN_TIME + std::time::Duration::from_secs(1),
+        read_file_bytes(body, 4),
+    )
+    .await;
+    assert_eq!(
+        result
+            .expect("a stalled sender has a time budget")
+            .unwrap_err()
+            .status,
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
 }
 
 /// A relay told to stop still hands APNs the pushes it answered `queued` for, and stops waiting
@@ -550,42 +1464,88 @@ async fn a_stopping_relay_delivers_the_pushes_it_took() {
 
     /// A relay whose identity has a phone that takes pushes at `phone_token`.
     async fn relay_with_phone(apns_url: &str, phone_token: &str) -> Relay {
-        let apns = crate::push::Apns::new(crate::push::tests::P8, "KEYID12345".into(), "TEAMID1234".into(), "ai.amoena.beans".into(), Some(apns_url.into())).unwrap();
+        let apns = crate::push::Apns::new(
+            crate::push::tests::P8,
+            "KEYID12345".into(),
+            "TEAMID1234".into(),
+            "ai.amoena.beans".into(),
+            Some(apns_url.into()),
+        )
+        .unwrap();
         let relay = Relay::start_with(0, crate::push::Pusher::new(Some(apns), None)).await;
-        relay.state.db.register_identity("identity", "content", "phone", "phone-box", "attestation").await.unwrap();
-        let token = db::PushToken { machine_pubkey: "phone".into(), platform: "apns".into(), token: phone_token.into(), environment: "sandbox".into() };
-        relay.state.db.set_push_token("identity", &token).await.unwrap();
+        relay
+            .state
+            .db
+            .register_identity("identity", "content", "phone", "phone-box", "attestation")
+            .await
+            .unwrap();
+        let token = db::PushToken {
+            machine_pubkey: "phone".into(),
+            platform: "apns".into(),
+            token: phone_token.into(),
+            environment: "sandbox".into(),
+        };
+        relay
+            .state
+            .db
+            .set_push_token("identity", &token)
+            .await
+            .unwrap();
         relay
     }
 
     // APNs takes a while over the token `slow`, and never answers for `stuck`.
     let delivered = Arc::new(AtomicUsize::new(0));
-    let apns = Router::new().route("/3/device/{token}", post({
-        let delivered = delivered.clone();
-        move |Path(token): Path<String>| async move {
-            if token == "stuck" {
-                std::future::pending::<()>().await;
+    let apns = Router::new().route(
+        "/3/device/{token}",
+        post({
+            let delivered = delivered.clone();
+            move |Path(token): Path<String>| async move {
+                if token == "stuck" {
+                    std::future::pending::<()>().await;
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                delivered.fetch_add(1, Ordering::Relaxed);
+                StatusCode::OK
             }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            delivered.fetch_add(1, Ordering::Relaxed);
-            StatusCode::OK
-        }
-    }));
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let apns_url = format!("http://{}", listener.local_addr().unwrap());
     let apns = tokio::spawn(async move { axum::serve(listener, apns).await.unwrap() });
 
     let relay = relay_with_phone(&apns_url, "slow").await;
-    assert_eq!(relay.client.push(&relay.url, &relay.token, &b64url_encode(b"notice")).await.unwrap(), 1);
+    assert_eq!(
+        relay
+            .client
+            .push(&relay.url, &relay.token, &b64url_encode(b"notice"))
+            .await
+            .unwrap(),
+        1
+    );
     crate::stop(&relay.state, Duration::from_secs(5)).await;
-    assert_eq!(delivered.load(Ordering::Relaxed), 1, "the push reached APNs before the relay stopped");
+    assert_eq!(
+        delivered.load(Ordering::Relaxed),
+        1,
+        "the push reached APNs before the relay stopped"
+    );
 
     let relay = relay_with_phone(&apns_url, "stuck").await;
-    assert_eq!(relay.client.push(&relay.url, &relay.token, &b64url_encode(b"notice")).await.unwrap(), 1);
+    assert_eq!(
+        relay
+            .client
+            .push(&relay.url, &relay.token, &b64url_encode(b"notice"))
+            .await
+            .unwrap(),
+        1
+    );
     let started = Instant::now();
     crate::stop(&relay.state, Duration::from_millis(300)).await;
     let waited = started.elapsed();
-    assert!(waited >= Duration::from_millis(300) && waited < Duration::from_secs(3), "waited {waited:?}");
+    assert!(
+        waited >= Duration::from_millis(300) && waited < Duration::from_secs(3),
+        "waited {waited:?}"
+    );
     assert_eq!(delivered.load(Ordering::Relaxed), 1);
     apns.abort();
 }
@@ -607,74 +1567,146 @@ async fn until(what: &str, done: impl Fn() -> bool) {
 #[tokio::test]
 async fn a_paired_computer_pairs_another() {
     let relay = Relay::start(0).await;
-    let app = |name: &str| beans::app::App::load(beans::config::Config { home: relay.home.join(name), port: 0 })
-        .unwrap_or_else(|error| panic!("loading {name} fixture: {error:#}"));
+    let app = |name: &str| {
+        beans::app::App::load(beans::config::Config {
+            home: relay.home.join(name),
+            port: 0,
+        })
+        .unwrap_or_else(|error| panic!("loading {name} fixture: {error:#}"))
+    };
     let (first, second, third) = (app("first"), app("second"), app("third"));
     beans::identity::create(&first, Some("First".into())).unwrap();
     first.set_relay_url(Some(relay.url.clone())).unwrap();
 
     let (_, code) = beans::pairing::start(first.clone()).await.unwrap();
-    beans::pairing::accept(second.clone(), &code, Some("Second".into())).await.unwrap();
+    beans::pairing::accept(second.clone(), &code, Some("Second".into()))
+        .await
+        .unwrap();
     assert!(!second.is_identity_device());
 
     let (nonce, code) = beans::pairing::start(second.clone()).await.unwrap();
-    beans::pairing::accept(third.clone(), &code, Some("Third".into())).await.unwrap();
+    beans::pairing::accept(third.clone(), &code, Some("Third".into()))
+        .await
+        .unwrap();
     let (account, joined) = (first.machine_file().unwrap(), third.machine_file().unwrap());
     assert_eq!(joined.identity_pubkey, account.identity_pubkey);
     assert_eq!(joined.account_dek, account.account_dek);
-    assert_eq!(relay.state.db.machines_for(&account.identity_pubkey).await.unwrap().len(), 3);
-    third.relay.token(&relay.url, &joined.machine().unwrap()).await.unwrap();
-    until("the second computer sees the pairing complete", || beans::pairing::status(&second, &nonce)["state"] == "completed").await;
-    assert_eq!(beans::pairing::status(&second, &nonce)["device"]["name"], "Third");
+    assert_eq!(
+        relay
+            .state
+            .db
+            .machines_for(&account.identity_pubkey)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    third
+        .relay
+        .token(&relay.url, &joined.machine().unwrap())
+        .await
+        .unwrap();
+    until("the second computer sees the pairing complete", || {
+        beans::pairing::status(&second, &nonce)["state"] == "completed"
+    })
+    .await;
+    assert_eq!(
+        beans::pairing::status(&second, &nonce)["device"]["name"],
+        "Third"
+    );
 
-    beans::sync::unpair_device(&first, &second.this_device_id().unwrap()).await.unwrap();
+    beans::sync::unpair_device(&first, &second.this_device_id().unwrap())
+        .await
+        .unwrap();
     let error = beans::pairing::start(second.clone()).await.unwrap_err();
     assert!(error.to_string().contains("unpaired"), "{error}");
 }
 
 /// Through a relay: what a phone signs reaches its Runner and the answer comes back. What the
-/// relay plants for the Runner, sealed with nothing but its public key, changes nothing.
+/// relay plants for the Runner, sealed with nothing but its public key, changes nothing, and
+/// neither does a request the phone signed once, delivered again under a new blob id.
 #[tokio::test]
 async fn a_runner_answers_only_what_a_device_signed() {
     let relay = Relay::start(0).await;
-    let app = |name: &str| beans::app::App::load(beans::config::Config { home: relay.home.join(name), port: 0 })
-        .unwrap_or_else(|error| panic!("loading {name} fixture: {error:#}"));
+    let app = |name: &str| {
+        beans::app::App::load(beans::config::Config {
+            home: relay.home.join(name),
+            port: 0,
+        })
+        .unwrap()
+    };
     let (runner, phone) = (app("runner"), app("phone"));
     beans::identity::create(&runner, Some("Runner".into())).unwrap();
     runner.set_relay_url(Some(relay.url.clone())).unwrap();
     let (_, code) = beans::pairing::start(runner.clone()).await.unwrap();
-    beans::pairing::accept(phone.clone(), &code, Some("Phone".into())).await.unwrap();
-    let loops = [tokio::spawn(beans::sync::run(runner.clone())), tokio::spawn(beans::sync::run(phone.clone()))];
-    let (runner_id, phone_id) = (runner.this_device_id().unwrap(), phone.this_device_id().unwrap());
+    beans::pairing::accept(phone.clone(), &code, Some("Phone".into()))
+        .await
+        .unwrap();
+    let loops = [
+        tokio::spawn(beans::sync::run(runner.clone())),
+        tokio::spawn(beans::sync::run(phone.clone())),
+    ];
+    let (runner_id, phone_id) = (
+        runner.this_device_id().unwrap(),
+        phone.this_device_id().unwrap(),
+    );
     // Each knows the other from the account's records, and the phone sees the Runner online.
     // The relay can list the Runner online before its machine blob reaches the phone, and
     // `requests::ask` refuses a Runner the phone holds no record and key for.
-    until("the phone knows the Runner and its key", || phone.device(&runner_id).is_some_and(|runner| !runner.box_pubkey.is_empty())).await;
-    until("the phone sees the Runner online", || phone.device_is_online(&runner_id)).await;
-    until("the Runner knows the phone", || runner.device(&phone_id).is_some()).await;
+    until("the phone knows the Runner and its key", || {
+        phone
+            .device(&runner_id)
+            .is_some_and(|runner| !runner.box_pubkey.is_empty())
+    })
+    .await;
+    until("the phone sees the Runner online", || {
+        phone.device_is_online(&runner_id)
+    })
+    .await;
+    until("the Runner knows the phone", || {
+        runner.device(&phone_id).is_some()
+    })
+    .await;
     let chef = runner.state.lock().unwrap().bots[0].id.clone();
-    beans::requests::ask(&phone, &runner_id, "memory.read", serde_json::json!({ "bot_id": chef })).await.unwrap();
+    beans::requests::ask(
+        &phone,
+        &runner_id,
+        "memory.read",
+        serde_json::json!({ "bot_id": chef }),
+    )
+    .await
+    .unwrap();
 
     let mcp = runner.config.mcp_path();
     let servers = || std::fs::read_to_string(&mcp).unwrap_or_default();
-    let token = phone.relay.token(&relay.url, &phone.machine_file().unwrap().machine().unwrap()).await.unwrap();
+    let token = phone
+        .relay
+        .token(
+            &relay.url,
+            &phone.machine_file().unwrap().machine().unwrap(),
+        )
+        .await
+        .unwrap();
     let upload = |id: &str, ciphertext: Vec<u8>| {
-        let item = OutboxItem { id: id.into(), kind: "request".into(), recipient: Some(runner_id.clone()), ciphertext, slot: None, group: None };
+        let item = OutboxItem {
+            id: id.into(),
+            kind: "request".into(),
+            recipient: Some(runner_id.clone()),
+            ciphertext,
+            slot: None,
+            group: None,
+        };
         relay.client.put_blob(&relay.url, &token, item, 0)
     };
     let runner_device = phone.device(&runner_id).unwrap();
-    let save = |name: &str| beans::model::Request {
-        id: format!("req-{name}"),
-        verb: "mcp.save".into(),
-        requested_by: phone_id.clone(),
-        body: serde_json::json!({ "name": name, "config": { "command": "true" } }),
-        created_at: beans::config::now_secs(),
-    };
-    // Beans signs the request body under `beans-request-v1` (no separate envelope module).
-    let signed = {
-        let mut request = save("docs");
-        let body = request.body.clone();
-        let machine = phone.machine_file().unwrap().machine().unwrap();
+    let save = |name: &str| {
+        let mut request = beans::model::Request {
+            id: format!("req-{name}"),
+            verb: "mcp.save".into(),
+            requested_by: phone_id.clone(),
+            created_at: beans::config::now_unix() as f64,
+            body: serde_json::json!({ "name": name, "config": { "command": "true" } }),
+        };
         let bytes = serde_json::to_vec(&(
             "beans-request-v1",
             &request.id,
@@ -682,31 +1714,177 @@ async fn a_runner_answers_only_what_a_device_signed() {
             &request.requested_by,
             &runner_id,
             request.created_at,
-            &body,
+            &request.body,
         ))
         .unwrap();
-        request.body = serde_json::json!({ "payload": body, "signature": machine.sign(&bytes) });
-        beans::crypto::seal_json(&runner_device.box_pubkey, &request).unwrap()
+        request.body = serde_json::json!({"payload": request.body,
+            "signature": phone.machine_file().unwrap().machine().unwrap().sign(&bytes)});
+        request
     };
-    upload("signed", signed).await.unwrap();
-    until("the Runner saves the signed request's server", || servers().contains("docs")).await;
-    beans::requests::ask(&phone, &runner_id, "mcp.remove", serde_json::json!({ "name": "docs" })).await.unwrap();
+    let signed = beans::envelope::seal(&phone, "request", &runner_device, &save("docs")).unwrap();
+    upload("signed", signed.clone()).await.unwrap();
+    until("the Runner saves the signed request's server", || {
+        servers().contains("docs")
+    })
+    .await;
+    beans::requests::ask(
+        &phone,
+        &runner_id,
+        "mcp.remove",
+        serde_json::json!({ "name": "docs" }),
+    )
+    .await
+    .unwrap();
     assert!(!servers().contains("docs"));
 
-    let planted = save("planted");
-    let (answer, refused) = tokio::sync::oneshot::channel();
-    phone.pending_responses.lock().unwrap().insert(planted.id.clone(), answer);
-    let unsigned = beans::crypto::seal_json(&runner_device.box_pubkey, &planted).unwrap();
+    upload("delivered-again", signed).await.unwrap();
+    let mut inner_unsigned = save("outer-only");
+    inner_unsigned.body = inner_unsigned.body["payload"].clone();
+    upload(
+        "outer-only",
+        beans::envelope::seal(&phone, "request", &runner_device, &inner_unsigned).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let unsigned = beans::crypto::seal_json(&runner_device.box_pubkey, &save("planted")).unwrap();
     upload("planted", unsigned).await.unwrap();
-    // Each request runs in its own task. Wait for this request's refusal through the relay,
-    // not an unrelated request that could finish before the planted one is handled.
-    let response = tokio::time::timeout(beans::requests::REQUEST_TIMEOUT, refused)
-        .await
-        .expect("the Runner answers the planted request")
-        .expect("the planted request's response reaches the phone");
-    assert_eq!(response.request_id, planted.id);
-    assert_eq!(response.error.as_deref(), Some("Unsigned request"));
+    // The Runner reads its envelopes in the order the relay took them, so once it answers a
+    // question asked after these, it has read them.
+    beans::requests::ask(
+        &phone,
+        &runner_id,
+        "memory.read",
+        serde_json::json!({ "bot_id": chef }),
+    )
+    .await
+    .unwrap();
+    assert!(!servers().contains("docs"), "the request again");
     assert!(!servers().contains("planted"));
+    assert!(
+        !servers().contains("outer-only"),
+        "an outer signature cannot replace the inner request signature"
+    );
+    for task in loops {
+        task.abort();
+    }
+}
+
+/// Through a relay: unpairing a Device makes a new account key. The other Devices get it, and
+/// so do a Device paired afterwards and one restored from the backup phrase. What the account
+/// writes from then on does not open with the keys the unpaired Device kept.
+#[tokio::test]
+async fn unpairing_a_device_makes_an_account_key_it_never_gets() {
+    let relay = Relay::start(0).await;
+    let app = |name: &str| {
+        beans::app::App::load(beans::config::Config {
+            home: relay.home.join(name),
+            port: 0,
+        })
+        .unwrap()
+    };
+    let (identity, phone, laptop) = (app("identity"), app("phone"), app("laptop"));
+    let phrase = beans::identity::create(&identity, Some("Identity".into()))
+        .unwrap()
+        .join(" ");
+    identity.set_relay_url(Some(relay.url.clone())).unwrap();
+    for (device, name) in [(&phone, "Phone"), (&laptop, "Laptop")] {
+        let (_, code) = beans::pairing::start(identity.clone()).await.unwrap();
+        beans::pairing::accept(device.clone(), &code, Some(name.into()))
+            .await
+            .unwrap();
+    }
+    let mut loops = vec![
+        tokio::spawn(beans::sync::run(identity.clone())),
+        tokio::spawn(beans::sync::run(phone.clone())),
+        tokio::spawn(beans::sync::run(laptop.clone())),
+    ];
+    let laptop_id = laptop.this_device_id().unwrap();
+    until("the identity device knows the laptop", || {
+        identity.device(&laptop_id).is_some()
+    })
+    .await;
+    let kept = laptop.dek().unwrap();
+
+    beans::sync::unpair_device(&identity, &laptop_id)
+        .await
+        .unwrap();
+    until("the identity device made a new key", || {
+        identity
+            .dek()
+            .is_some_and(|held| held.newest() != kept.newest())
+    })
+    .await;
+    let keys = identity.dek().unwrap();
+    until("the phone has the new key", || {
+        phone
+            .dek()
+            .is_some_and(|held| held.newest() == keys.newest())
+    })
+    .await;
+    assert!(phone.state.lock().unwrap().unpaired.contains(&laptop_id));
+
+    let mut scout = identity.state.lock().unwrap().bots[0].clone();
+    scout.id = String::new();
+    scout.name = "Scout".into();
+    identity.create_bot_with_dm(scout, None).unwrap();
+    until("the phone has the new bot", || {
+        phone
+            .state
+            .lock()
+            .unwrap()
+            .bots
+            .iter()
+            .any(|bot| bot.name == "Scout")
+    })
+    .await;
+    let (rosters, _) = relay
+        .client
+        .list_blobs(
+            &relay.url,
+            &identity
+                .relay
+                .token(
+                    &relay.url,
+                    &identity.machine_file().unwrap().machine().unwrap(),
+                )
+                .await
+                .unwrap(),
+            0,
+            "roster",
+        )
+        .await
+        .unwrap();
+    let roster = beans::keys::unb64(&rosters.last().unwrap().ciphertext).unwrap();
+    assert!(
+        beans::crypto::decrypt_json::<beans::model::RosterBlob>(&kept, "roster", &roster).is_err(),
+        "the laptop's keys open nothing new"
+    );
+
+    // A Device paired now, and one restored from the phrase, read the account as it is.
+    let tablet = app("tablet");
+    let (_, code) = beans::pairing::start(identity.clone()).await.unwrap();
+    beans::pairing::accept(tablet.clone(), &code, Some("Tablet".into()))
+        .await
+        .unwrap();
+    assert_eq!(tablet.dek().unwrap().newest(), keys.newest());
+    loops.push(tokio::spawn(beans::sync::run(tablet.clone())));
+    until("the tablet has the new bot", || {
+        tablet
+            .state
+            .lock()
+            .unwrap()
+            .bots
+            .iter()
+            .any(|bot| bot.name == "Scout")
+    })
+    .await;
+    let restored = app("restored");
+    restored.set_relay_url(Some(relay.url.clone())).unwrap();
+    beans::identity::restore(&restored, &phrase, Some("Restored".into()))
+        .await
+        .unwrap();
+    assert_eq!(restored.dek().unwrap(), keys);
     for task in loops {
         task.abort();
     }
@@ -717,21 +1895,59 @@ async fn a_runner_answers_only_what_a_device_signed() {
 #[tokio::test]
 async fn attesting_a_machine_takes_a_bearer_and_keeps_keys_apart() {
     let relay = Relay::start(0).await;
-    let key = |seed: u8| b64url_encode(ed25519_dalek::SigningKey::from_bytes(&[seed; 32]).verifying_key().as_bytes());
+    let key = |seed: u8| {
+        b64url_encode(
+            ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+                .verifying_key()
+                .as_bytes(),
+        )
+    };
     let (laptop, box_key) = (key(1), b64url_encode(&[2; 32]));
-    relay.client.attest(&relay.url, &relay.token, &laptop, &box_key).await.unwrap();
-    relay.client.attest(&relay.url, &relay.token, &laptop, &box_key).await.unwrap();
-    assert_eq!(relay.state.db.machines_for("identity").await.unwrap().len(), 2);
+    relay
+        .client
+        .attest(&relay.url, &relay.token, &laptop, &box_key)
+        .await
+        .unwrap();
+    relay
+        .client
+        .attest(&relay.url, &relay.token, &laptop, &box_key)
+        .await
+        .unwrap();
+    assert_eq!(
+        relay.state.db.machines_for("identity").await.unwrap().len(),
+        2
+    );
 
-    let refused = relay.client.attest(&relay.url, &relay.token, &laptop, &b64url_encode(&[3; 32])).await.unwrap_err();
+    let refused = relay
+        .client
+        .attest(&relay.url, &relay.token, &laptop, &b64url_encode(&[3; 32]))
+        .await
+        .unwrap_err();
     assert_eq!(refused.status, Some(409));
-    let refused = relay.client.attest(&relay.url, "not-a-token", &key(4), &box_key).await.unwrap_err();
+    let refused = relay
+        .client
+        .attest(&relay.url, "not-a-token", &key(4), &box_key)
+        .await
+        .unwrap_err();
     assert_eq!(refused.status, Some(401));
-    let refused = relay.client.attest(&relay.url, &relay.token, "not-a-key", &box_key).await.unwrap_err();
+    let refused = relay
+        .client
+        .attest(&relay.url, &relay.token, "not-a-key", &box_key)
+        .await
+        .unwrap_err();
     assert_eq!(refused.status, Some(400));
 
-    assert!(relay.state.db.revoke_machine("identity", &laptop).await.unwrap());
-    let refused = relay.client.attest(&relay.url, &relay.token, &laptop, &box_key).await.unwrap_err();
+    assert!(relay
+        .state
+        .db
+        .revoke_machine("identity", &laptop)
+        .await
+        .unwrap());
+    let refused = relay
+        .client
+        .attest(&relay.url, &relay.token, &laptop, &box_key)
+        .await
+        .unwrap_err();
     assert_eq!(refused.status, Some(410));
 }
 
@@ -744,7 +1960,11 @@ async fn sync_upgrade_keeps_beans_protocol_and_format_headers() {
     assert_eq!(PROTOCOL, 5);
     assert_eq!(FORMAT, "beans-v2");
 
-    let mut socket = relay.client.sync_socket(&relay.url, &relay.token).await.expect("sync opens with protocol 5 / beans-v2");
+    let mut socket = relay
+        .client
+        .sync_socket(&relay.url, &relay.token)
+        .await
+        .expect("sync opens with protocol 5 / beans-v2");
     // Opening the socket publishes a machines event for this identity.
     let first = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
         .await
@@ -770,7 +1990,10 @@ async fn sync_upgrade_keeps_beans_protocol_and_format_headers() {
         .await
         .expect("timed out waiting for blob signal")
         .expect("socket closed before blob signal");
-    assert!(signals.blobs, "new client must see main-behavior writer notifications");
+    assert!(
+        signals.blobs,
+        "new client must see main-behavior writer notifications"
+    );
     drop(socket);
 
     let refused = reqwest::Client::new()
@@ -780,7 +2003,11 @@ async fn sync_upgrade_keeps_beans_protocol_and_format_headers() {
         .send()
         .await
         .unwrap();
-    assert_eq!(refused.status(), StatusCode::UPGRADE_REQUIRED, "sync without Beans-Format must fail closed");
+    assert_eq!(
+        refused.status(),
+        StatusCode::UPGRADE_REQUIRED,
+        "sync without Beans-Format must fail closed"
+    );
 
     let admitted = relay
         .http
@@ -789,5 +2016,528 @@ async fn sync_upgrade_keeps_beans_protocol_and_format_headers() {
         .send()
         .await
         .unwrap();
-    assert_eq!(admitted.status(), StatusCode::OK, "protocol 5 / beans-v2 headers still admit account routes");
+    assert_eq!(
+        admitted.status(),
+        StatusCode::OK,
+        "protocol 5 / beans-v2 headers still admit account routes"
+    );
+}
+
+#[tokio::test]
+async fn shared_links_are_read_by_anyone_and_changed_by_their_owner() {
+    let relay = Relay::start(0).await;
+    let put = |token: String, id: &str, bytes: &[u8]| {
+        let (client, url, id, bytes) = (
+            &relay.client,
+            relay.url.clone(),
+            id.to_string(),
+            bytes.to_vec(),
+        );
+        async move { client.put_share(&url, &token, &id, bytes).await }
+    };
+    put(relay.token.clone(), "link-1", b"sealed").await.unwrap();
+
+    // A browser reads it with no token and no protocol, and may read the answer.
+    let read = reqwest::get(format!("{}/v1/shares/link-1", relay.url))
+        .await
+        .unwrap();
+    assert_eq!(read.status(), 200);
+    assert_eq!(read.headers()["access-control-allow-origin"], "*");
+    assert_eq!(read.bytes().await.unwrap().as_ref(), b"sealed");
+    let missing = reqwest::get(format!("{}/v1/shares/nothing", relay.url))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+    assert_eq!(missing.headers()["access-control-allow-origin"], "*");
+    assert!(relay
+        .client
+        .get_share(&relay.url, "nothing")
+        .await
+        .unwrap()
+        .is_none());
+
+    // The owner replaces it under the same id; another identity can neither replace nor delete it.
+    put(relay.token.clone(), "link-1", b"sealed again")
+        .await
+        .unwrap();
+    assert_eq!(
+        relay
+            .client
+            .get_share(&relay.url, "link-1")
+            .await
+            .unwrap()
+            .unwrap(),
+        b"sealed again"
+    );
+    relay
+        .state
+        .db
+        .register_identity("other", "content-2", "machine-2", "box-2", "attestation")
+        .await
+        .unwrap();
+    let other = issue_token(&relay.state.secret, "other", "machine-2").0;
+    assert_eq!(
+        put(other.clone(), "link-1", b"taken")
+            .await
+            .unwrap_err()
+            .status,
+        Some(403)
+    );
+    assert_eq!(
+        relay
+            .client
+            .delete_share(&relay.url, &other, "link-1")
+            .await
+            .unwrap_err()
+            .status,
+        Some(404)
+    );
+    assert_eq!(
+        relay
+            .client
+            .get_share(&relay.url, "link-1")
+            .await
+            .unwrap()
+            .unwrap(),
+        b"sealed again"
+    );
+
+    // A template's size at most, and so many links per identity.
+    let too_large = vec![0u8; MAX_SHARE_BYTES + 1];
+    assert_eq!(
+        put(relay.token.clone(), "link-big", &too_large)
+            .await
+            .unwrap_err()
+            .status,
+        Some(413)
+    );
+    for i in 1..MAX_SHARES {
+        put(relay.token.clone(), &format!("link-q{i}"), b"q")
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        put(relay.token.clone(), "link-over", b"q")
+            .await
+            .unwrap_err()
+            .status,
+        Some(409)
+    );
+    put(
+        relay.token.clone(),
+        "link-1",
+        b"replacing is not another link",
+    )
+    .await
+    .unwrap();
+
+    relay
+        .client
+        .delete_share(&relay.url, &relay.token, "link-1")
+        .await
+        .unwrap();
+    assert!(relay
+        .client
+        .get_share(&relay.url, "link-1")
+        .await
+        .unwrap()
+        .is_none());
+    // An identity that goes takes its links along.
+    relay
+        .state
+        .db
+        .delete_identity("identity", false)
+        .await
+        .unwrap();
+    assert!(relay
+        .client
+        .get_share(&relay.url, "link-q1")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn attention_slots_round_trip_as_ciphertext_at_protocol_three() {
+    assert_eq!(PROTOCOL, beans::relay::PROTOCOL);
+    let relay = Relay::start(1_000_000).await;
+    let dek = beans::keys::random_32();
+    let payload =
+        serde_json::json!({"source":{"chat_id":"private-chat"},"summary":"Private decision"});
+    for (id, summary) in [
+        ("attention-first", "Private decision"),
+        ("attention-latest", "Updated decision"),
+    ] {
+        let mut payload = payload.clone();
+        payload["summary"] = summary.into();
+        relay
+            .client
+            .put_blob(
+                &relay.url,
+                &relay.token,
+                OutboxItem {
+                    id: id.into(),
+                    kind: "attention".into(),
+                    recipient: None,
+                    ciphertext: beans::crypto::encrypt_json(&dek, "attention", &payload).unwrap(),
+                    slot: Some(beans::app::Slot::latest("opaque-attention-slot")),
+                    group: None,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+    }
+    let (blobs, _) = relay
+        .client
+        .list_blobs(&relay.url, &relay.token, 0, "attention")
+        .await
+        .unwrap();
+    assert_eq!(blobs.len(), 1);
+    assert_eq!(blobs[0].id, "attention-latest");
+    let bytes = beans::keys::unb64(&blobs[0].ciphertext).unwrap();
+    let opened: serde_json::Value = beans::crypto::decrypt_json(&dek, "attention", &bytes).unwrap();
+    assert_eq!(opened["summary"], "Updated decision");
+    assert!(beans::crypto::decrypt_json::<serde_json::Value>(
+        &beans::keys::random_32(),
+        "attention",
+        &bytes
+    )
+    .is_err());
+    let response = relay
+        .http
+        .get(format!("{}/v1/blobs?kinds=attention", relay.url))
+        .bearer_auth(&relay.token)
+        .header("beans-protocol", "2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UPGRADE_REQUIRED);
+}
+
+#[tokio::test]
+async fn handoff_request_report_and_cancellation_round_trip_in_independent_slots() {
+    let relay = Relay::start(0).await;
+    let key = [42; 32];
+    let make = |id: &str, role: &str, text: &str| OutboxItem {
+        id: id.into(),
+        kind: "handoff".into(),
+        recipient: None,
+        ciphertext: beans::crypto::encrypt(&key, "handoff", text.as_bytes()).unwrap(),
+        slot: Some(beans::app::Slot::latest(format!("handoff-test-1-{role}"))),
+        group: None,
+    };
+    relay
+        .client
+        .put_blob(
+            &relay.url,
+            &relay.token,
+            make("request", "request", "contract"),
+            0,
+        )
+        .await
+        .unwrap();
+    relay
+        .client
+        .put_blob(
+            &relay.url,
+            &relay.token,
+            make("started", "report", "running"),
+            0,
+        )
+        .await
+        .unwrap();
+    relay
+        .client
+        .put_blob(
+            &relay.url,
+            &relay.token,
+            make("finished", "report", "completed with evidence"),
+            0,
+        )
+        .await
+        .unwrap();
+    relay
+        .client
+        .put_blob(
+            &relay.url,
+            &relay.token,
+            make("cancel", "cancel", "requester cancelled"),
+            0,
+        )
+        .await
+        .unwrap();
+    let (rows, _) = relay
+        .client
+        .list_blobs(&relay.url, &relay.token, 0, beans::sync::POLL_KINDS)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+        ["request", "finished", "cancel"]
+    );
+    for (row, expected) in
+        rows.iter()
+            .zip(["contract", "completed with evidence", "requester cancelled"])
+    {
+        let ciphertext = beans::keys::unb64(&row.ciphertext).unwrap();
+        assert_ne!(ciphertext, expected.as_bytes());
+        assert_eq!(
+            beans::crypto::decrypt(&key, "handoff", &ciphertext).unwrap(),
+            expected.as_bytes()
+        );
+    }
+    let health: Value = relay
+        .http
+        .get(format!("{}/v1/health", relay.url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["protocol"], 5);
+    assert!(!db::SEALED_KINDS.contains(&"handoff"));
+}
+
+#[tokio::test]
+async fn project_context_sync_is_encrypted_separate_from_transcript_paging_and_group_deleted() {
+    let relay = Relay::start(0).await;
+    let dek = [9; 32];
+    let plaintext = serde_json::json!({ "chat_id": "project-a", "entry": { "text": "confidential project brief" } });
+    let ciphertext = beans::crypto::encrypt_json(&dek, "project_context", &plaintext).unwrap();
+    let context = OutboxItem {
+        id: "project-revision".into(),
+        kind: "project_context".into(),
+        recipient: None,
+        ciphertext: ciphertext.clone(),
+        slot: Some(beans::app::Slot::latest("project-revision")),
+        group: Some("project-a".into()),
+    };
+    relay
+        .client
+        .put_blob(&relay.url, &relay.token, context.clone(), 0)
+        .await
+        .unwrap();
+    relay
+        .client
+        .put_blob(&relay.url, &relay.token, context, 0)
+        .await
+        .unwrap();
+    for i in 0..410 {
+        relay
+            .client
+            .put_blob(
+                &relay.url,
+                &relay.token,
+                OutboxItem {
+                    id: format!("message-{i}"),
+                    kind: "chat".into(),
+                    recipient: None,
+                    ciphertext: vec![i as u8],
+                    slot: Some(beans::app::Slot::latest(format!("message-{i}"))),
+                    group: Some("project-a".into()),
+                },
+                0,
+            )
+            .await
+            .unwrap();
+    }
+    let (blobs, _) = relay
+        .client
+        .list_blobs(&relay.url, &relay.token, 0, "project_context")
+        .await
+        .unwrap();
+    assert_eq!(
+        blobs.len(),
+        1,
+        "context is loaded independently of the newest transcript page"
+    );
+    let downloaded = beans::keys::unb64(&blobs[0].ciphertext).unwrap();
+    assert_eq!(downloaded, ciphertext);
+    assert_eq!(
+        beans::crypto::decrypt_json::<serde_json::Value>(&dek, "project_context", &downloaded)
+            .unwrap(),
+        plaintext
+    );
+    let (page, has_more) = relay
+        .client
+        .group_page(&relay.url, &relay.token, "project-a", None, 400)
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 400);
+    assert!(has_more);
+    assert!(page
+        .iter()
+        .flat_map(|slot| &slot.blobs)
+        .all(|blob| blob.kind == "chat"));
+    relay
+        .client
+        .delete_group(&relay.url, &relay.token, "project-a")
+        .await
+        .unwrap();
+    assert!(relay
+        .client
+        .list_blobs(&relay.url, &relay.token, 0, "project_context")
+        .await
+        .unwrap()
+        .0
+        .is_empty());
+    let late = OutboxItem {
+        id: "late-context".into(),
+        kind: "project_context".into(),
+        recipient: None,
+        ciphertext,
+        slot: None,
+        group: Some("project-a".into()),
+    };
+    assert_eq!(
+        relay
+            .client
+            .put_blob(&relay.url, &relay.token, late, 0)
+            .await
+            .unwrap_err()
+            .status,
+        Some(409)
+    );
+}
+
+// Unsigned ciphertext cannot establish a requester or satisfy a pending response.
+#[tokio::test]
+async fn unsigned_requests_and_forged_responses_fail_at_the_envelope_boundary() {
+    let relay = Relay::start(0).await;
+    let app = |name: &str| {
+        beans::app::App::load(beans::config::Config {
+            home: relay.home.join(name),
+            port: 0,
+        })
+        .unwrap_or_else(|error| panic!("loading {name} fixture: {error:#}"))
+    };
+    let (runner, phone) = (app("runner"), app("phone"));
+    beans::identity::create(&runner, Some("Runner".into())).unwrap();
+    runner.set_relay_url(Some(relay.url.clone())).unwrap();
+    let (_, code) = beans::pairing::start(runner.clone()).await.unwrap();
+    beans::pairing::accept(phone.clone(), &code, Some("Phone".into()))
+        .await
+        .unwrap();
+    let loops = [
+        tokio::spawn(beans::sync::run(runner.clone())),
+        tokio::spawn(beans::sync::run(phone.clone())),
+    ];
+    let (runner_id, phone_id) = (
+        runner.this_device_id().unwrap(),
+        phone.this_device_id().unwrap(),
+    );
+    // Each knows the other from the account's records, and the phone sees the Runner online.
+    // The relay can list the Runner online before its machine blob reaches the phone, and
+    // `requests::ask` refuses a Runner the phone holds no record and key for.
+    until("the phone knows the Runner and its key", || {
+        phone
+            .device(&runner_id)
+            .is_some_and(|runner| !runner.box_pubkey.is_empty())
+    })
+    .await;
+    until("the phone sees the Runner online", || {
+        phone.device_is_online(&runner_id)
+    })
+    .await;
+    until("the Runner knows the phone", || {
+        runner.device(&phone_id).is_some()
+    })
+    .await;
+    for task in loops {
+        task.abort();
+    }
+    let runner_device = phone.device(&runner_id).unwrap();
+    let phone_device = runner.device(&phone_id).unwrap();
+    let request = beans::model::Request {
+        id: "unsigned-request".into(),
+        verb: "mcp.save".into(),
+        requested_by: phone_id.clone(),
+        created_at: beans::config::now_unix() as f64,
+        body: serde_json::json!({ "name": "planted", "config": { "command": "true" } }),
+    };
+    let apply =
+        |app: &Arc<beans::app::App>, kind: &str, id: &str, recipient: &str, ciphertext: Vec<u8>| {
+            let blob = beans::relay::BlobIn {
+                id: id.into(),
+                kind: kind.into(),
+                recipient_machine_pubkey: Some(recipient.into()),
+                seq: 1,
+                ciphertext: beans::keys::b64(&ciphertext),
+                created_at: 0,
+            };
+            beans::sync::apply_blob(app, &app.machine_file().unwrap(), &blob);
+        };
+    let unsigned = beans::crypto::seal_json(&runner_device.box_pubkey, &request).unwrap();
+    assert!(beans::envelope::open::<beans::model::Request>(
+        &runner,
+        &runner.machine_file().unwrap(),
+        "request",
+        &unsigned,
+    )
+    .is_err());
+    apply(&runner, "request", "planted", &runner_id, unsigned);
+    assert!(!std::fs::read_to_string(runner.config.mcp_path())
+        .unwrap_or_default()
+        .contains("planted"));
+    let (answer, mut refused) = tokio::sync::oneshot::channel();
+    phone
+        .pending_responses
+        .lock()
+        .unwrap()
+        .insert(request.id.clone(), (runner_id.clone(), answer));
+    let response = beans::model::Response {
+        request_id: request.id.clone(),
+        body: serde_json::Value::Null,
+        error: Some("Unsigned request".into()),
+    };
+    let forged = beans::crypto::seal_json(&phone_device.box_pubkey, &response).unwrap();
+    apply(&phone, "response", "forged", &phone_id, forged);
+    assert!(matches!(
+        refused.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(phone
+        .pending_responses
+        .lock()
+        .unwrap()
+        .contains_key(&request.id));
+    let wrong_runner = beans::envelope::seal(&phone, "response", &phone_device, &response).unwrap();
+    apply(
+        &phone,
+        "response",
+        "wrong-authenticated-runner",
+        &phone_id,
+        wrong_runner,
+    );
+    assert!(matches!(
+        refused.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert!(phone
+        .pending_responses
+        .lock()
+        .unwrap()
+        .contains_key(&request.id));
+    // Only the expected Runner's authenticated response may consume the waiter.
+    let authenticated =
+        beans::envelope::seal(&runner, "response", &phone_device, &response).unwrap();
+    apply(
+        &phone,
+        "response",
+        "authenticated",
+        &phone_id,
+        authenticated,
+    );
+    let received = refused
+        .try_recv()
+        .expect("the expected Runner's signed response reaches the waiter");
+    assert_eq!(received.request_id, request.id);
+    assert_eq!(received.error.as_deref(), Some("Unsigned request"));
+    assert!(!phone
+        .pending_responses
+        .lock()
+        .unwrap()
+        .contains_key(&request.id));
 }

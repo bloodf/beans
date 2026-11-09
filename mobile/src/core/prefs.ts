@@ -10,6 +10,15 @@ export interface Prefs extends UpdatePreferences {
   dictation_lang?: string;
   /// The app's own language ("en", "zh"); unset follows the phone's.
   app_lang?: string;
+  /// Android: false turns off the daily check for a new release (updates.ts).
+  update_checks?: boolean;
+  /// Android: when the last check for a new release answered, in ms since the epoch.
+  update_checked_at?: number;
+  /// Android: the release the user chose to skip.
+  update_skipped?: string;
+  /// The chat list's Hidden group is open; its group of chats in no section is folded.
+  shows_hidden?: boolean;
+  collapses_others?: boolean;
 }
 
 function root(): Directory {

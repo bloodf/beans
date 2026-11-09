@@ -1,15 +1,29 @@
 //! Plaintext domain model. Lives on Devices; crosses the network only inside encrypted blobs.
-//! Field names match what the macOS app decodes.
+//! Field names match what the apps decode.
 
 use serde::{Deserialize, Serialize};
 
 pub const MAX_GROUP_BOTS: usize = 6;
+
+/// The bodies a bot's character takes, after Grok Bot's. The apps draw each one and pick one from
+/// the bot's id when `Bot::shape` is empty.
+pub const BOT_SHAPES: [&str; 12] = [
+    "blob", "pebble", "squircle", "cloud", "drop", "sparkle", "clover", "flower", "heart", "hex",
+    "star", "cushion",
+];
+
+pub fn default_symbol() -> String {
+    "sparkles".into()
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProviderStatus {
     pub kind: String,
     pub is_connected: bool,
     pub detail: String,
+    /// The model Auto-review runs on it unless the user picks another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_model: Option<String>,
     /// A custom API base URL, when the credential has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
@@ -48,6 +62,9 @@ pub struct Device {
     /// Plugins installed on that Runner, with their setup state. Secrets stay on the Runner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginStatus>,
+    /// The channels this Runner's bots listen on, with their state. Tokens stay on the Runner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<crate::channels::ChannelStatus>,
     /// The `beans` this Device runs, as `beans --version` says it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
@@ -55,8 +72,23 @@ pub struct Device {
     /// where an app updates the CLI it carries, and on phones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<UpdateStatus>,
+    /// The desktop app that carries this Runner's CLI and updates itself, while it is open: its
+    /// version and how its updates stand. Unset for a CLI on its own and on phones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<AppStatus>,
     #[serde(default)]
     pub updated_at: i64,
+}
+
+/// The desktop app on a Runner, as its `machine` blob tells every Device: its version and its
+/// updates, which any Device can ask it to install.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AppStatus {
+    pub version: String,
+    /// `auto` installs a newer version by itself; `state` is `installing`, or `restarting` while
+    /// the installed version waits for the Runner's bots before the app relaunches into it.
+    #[serde(flatten)]
+    pub update: UpdateStatus,
 }
 
 /// A self-updating CLI's updates, as every Device sees them in its `machine` blob.
@@ -97,11 +129,37 @@ pub struct PluginStatus {
     /// What the state means, for a row's subtitle.
     #[serde(default)]
     pub detail: String,
+    /// `mcp.json` for a server from the Runner's `mcp.json`, which the apps edit as one; none for
+    /// a plugin from the marketplace or its own manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Marketplace service and user label of a named connection. `id` selects the instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_name: Option<String>,
 }
 
 impl Device {
+    /// Whether the Device runs bots: its `os` is a desktop one. The apps judge it the same way
+    /// (`Device.IsRunner` in `desktop/model`), against the same cases in
+    /// `crates/cli/testdata/runners.json`.
     pub fn is_runner(&self) -> bool {
         matches!(self.os.as_str(), "macos" | "linux" | "windows")
+    }
+
+    /// The system by the name people know it by, else what the Device reported.
+    pub fn platform(&self) -> &str {
+        match self.os.as_str() {
+            "macos" => "macOS",
+            "linux" => "Linux",
+            "windows" => "Windows",
+            "ios" => "iOS",
+            "ipados" => "iPadOS",
+            "android" => "Android",
+            "" => "an unknown system",
+            other => other,
+        }
     }
 }
 
@@ -116,19 +174,34 @@ pub struct Capabilities {
 }
 
 impl Default for Capabilities {
-    fn default() -> Self { Self { shell: true, write: true, plugins: None } }
+    fn default() -> Self {
+        Self {
+            shell: true,
+            write: true,
+            plugins: None,
+        }
+    }
 }
 
 impl Capabilities {
     pub fn validate(&self) -> Result<(), String> {
-        if self.plugins.as_ref().is_some_and(|ids| ids.iter().any(|id| !crate::plugins::is_id(id) || ids.iter().filter(|other| *other == id).count() != 1)) {
+        if self.plugins.as_ref().is_some_and(|ids| {
+            ids.iter().any(|id| {
+                !crate::plugins::is_id(id) || ids.iter().filter(|other| *other == id).count() != 1
+            })
+        }) {
             return Err("capabilities.plugins must contain unique plugin ids".into());
         }
         Ok(())
     }
 
     pub fn permits(&self, tool: &str, plugin_id: Option<&str>) -> bool {
-        if let Some(id) = plugin_id { return self.plugins.as_ref().is_none_or(|ids| ids.iter().any(|allowed| allowed == id)); }
+        if let Some(id) = plugin_id {
+            return self
+                .plugins
+                .as_ref()
+                .is_none_or(|ids| ids.iter().any(|allowed| allowed == id));
+        }
         match tool {
             "bash" | "bash_input" | "bash_output" => self.shell,
             "write" | "edit" | "propose" => self.write,
@@ -145,6 +218,10 @@ pub struct Bot {
     pub description: String,
     /// Legacy profile fields retained on the wire; generated avatars use the stable bot id.
     pub symbol_name: String,
+    /// The character's body, one of `BOT_SHAPES`, drawn flat in the accent with two eyes: the
+    /// look when there is no image. Empty picks one from the id (`shapeFor` in the apps).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub shape: String,
     pub accent: String,
     /// Uploaded photo, independent of generated appearance, carried as an encrypted `file`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,6 +248,10 @@ pub struct Bot {
     pub workdir: Option<String>,
     #[serde(default)]
     pub capabilities: Capabilities,
+    /// User-controlled capabilities, synced in the encrypted roster. Missing means full
+    /// existing access; an explicit policy can only be changed through the user's API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<crate::permissions::BotPermissions>,
     pub created_at: f64,
 }
 
@@ -197,11 +278,24 @@ pub struct AutoReview {
     pub is_enabled: bool,
     #[serde(default)]
     pub rules: Vec<AutoReviewRule>,
+    /// The provider that reviews, any the account has connected; unset for the bot's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Each provider's review model the user picked, by kind: a chat model or a decision model.
+    /// A provider without one reviews with its default
+    /// ([`Credentials::review_model`](crate::credentials::Credentials::review_model)).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub models: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for AutoReview {
     fn default() -> Self {
-        AutoReview { is_enabled: true, rules: Vec::new() }
+        AutoReview {
+            is_enabled: true,
+            rules: Vec::new(),
+            provider: None,
+            models: Default::default(),
+        }
     }
 }
 
@@ -237,8 +331,15 @@ impl Bot {
     /// Where this bot's tools run, keyed by id so renames never move files. Created on first use.
     pub fn working_directory(&self, beans_home: &std::path::Path) -> std::path::PathBuf {
         let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-        match self.workdir.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
-            Some(dir) if dir.starts_with('~') => home.join(dir.trim_start_matches('~').trim_start_matches('/')),
+        match self
+            .workdir
+            .as_deref()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+        {
+            Some(dir) if dir.starts_with('~') => {
+                home.join(dir.trim_start_matches('~').trim_start_matches('/'))
+            }
             Some(dir) => std::path::PathBuf::from(dir),
             None => beans_home.join("workspaces").join(&self.id),
         }
@@ -249,8 +350,15 @@ impl Bot {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Author {
     You,
-    Bot { bot_id: String },
+    Bot {
+        bot_id: String,
+    },
     System,
+    /// Someone outside Lorca writing in a channel's conversation (a Telegram group, a Slack
+    /// thread). Their words are data for the bot, never the user's instructions or approval.
+    Contact {
+        name: String,
+    },
 }
 
 /// A file sent with a message. Its bytes travel as a `file` blob whose id is this id,
@@ -265,6 +373,10 @@ pub struct Attachment {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// SHA-256 of the bytes, hex. The message carries it under the newest account key, so a
+    /// download that does not match it is refused (`files::ensure_local`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 impl Attachment {
@@ -318,11 +430,32 @@ pub enum Body {
         /// `bash` row has one; the apps show it in place of the row.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run: Option<CommandRun>,
+        /// The coding agent a `coding_agent` start call started, for as long as the agent runs
+        /// and after: the apps show the row as "Messaged ⬢ Title", and list it under Coding.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentRun>,
+        /// The coding agent a `coding_agent` send call wrote to, by id: the apps show the row as
+        /// "Messaged ⬢ Title" too.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_agent_id: Option<String>,
     },
     Handoff {
         from: String,
         to: String,
         reason: String,
+    },
+    /// What a coding agent said when it was done with what it was asked, its report to the user,
+    /// or why it ended on its own (`failed`). The apps show it as "Message from ⬢ Title"; the
+    /// bot that runs the agent wakes for it: to relay the report to the user, or to say why it
+    /// ended (`crate::coding`).
+    AgentMessage {
+        agent_id: String,
+        /// `claude`, `codex`, `opencode`, `pi`, or `fx`.
+        agent_kind: String,
+        title: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        failed: bool,
     },
     Notice {
         text: String,
@@ -365,7 +498,83 @@ pub enum Body {
         link: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,
+        /// A secret request (`tool` = `secret`): the values the bot asks for and where they go.
+        /// The answer never comes back into the card: it is sealed to the bot's Runner.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret: Option<SecretAsk>,
     },
+    /// An email or Slack message the bot wrote in the chat, waiting for the user to send it: the
+    /// chat's view of its review item (`review-status-<review id>`), rewritten as it changes.
+    Draft {
+        review_id: String,
+        /// The item's version, which an edit, Send, and Discard name.
+        version: u64,
+        /// The item's state: `pending`, `approved`, `executing`, `succeeded`, `failed`,
+        /// `rejected`, `cancelled`, or `uncertain`.
+        state: String,
+        plugin_id: String,
+        /// The account it goes out from: "Gmail · Work".
+        account: String,
+        draft: MessageDraft,
+        /// Why it was not sent, or why it needs another look.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        /// Whether, with drafts off, the bot sends such a message itself: false for a mail
+        /// server that only makes drafts, which keeps them in the account's Drafts.
+        #[serde(default)]
+        direct: bool,
+    },
+}
+
+/// A message a bot wrote to people, as its draft card shows and edits it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MessageDraft {
+    /// `email` or `slack`.
+    #[serde(default)]
+    pub kind: String,
+    /// Email addresses, or the Slack channel or person's id.
+    #[serde(default)]
+    pub to: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cc: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bcc: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subject: String,
+    #[serde(default)]
+    pub body: String,
+    /// The files it carries, by name; an edit keeps the ones it still names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<DraftAttachment>,
+    /// What it answers: the email's id, or the Slack thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DraftAttachment {
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
+/// What a secret request asks for: one or more named values, and where the Runner uses them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SecretAsk {
+    /// `browser` (typed into a sign-in page of `site` in the bot's Browser), `command` (an
+    /// environment variable of the bot's commands), or `plugin` (a setting of the card's plugin).
+    #[serde(rename = "use")]
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+    pub fields: Vec<SecretField>,
+}
+
+/// One value a secret request asks for: the name the bot uses it by, and what the card calls it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SecretField {
+    pub name: String,
+    pub label: String,
 }
 
 /// A message quoted by the user's reply: who wrote it and how it opens, kept with the reply, so
@@ -387,9 +596,19 @@ fn plain_text(markdown: &str) -> String {
     let mut out = String::with_capacity(markdown.len());
     for event in Parser::new(markdown) {
         match event {
-            Event::Text(text) | Event::Code(text) | Event::InlineMath(text) | Event::DisplayMath(text) => out.push_str(&text),
+            Event::Text(text)
+            | Event::Code(text)
+            | Event::InlineMath(text)
+            | Event::DisplayMath(text) => out.push_str(&text),
             Event::SoftBreak | Event::HardBreak | Event::Rule => out.push(' '),
-            Event::End(TagEnd::Paragraph | TagEnd::Item | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::TableCell | TagEnd::TableRow) => out.push(' '),
+            Event::End(
+                TagEnd::Paragraph
+                | TagEnd::Item
+                | TagEnd::Heading(_)
+                | TagEnd::CodeBlock
+                | TagEnd::TableCell
+                | TagEnd::TableRow,
+            ) => out.push(' '),
             _ => {}
         }
     }
@@ -400,16 +619,172 @@ impl ReplyTo {
     /// The quote of `message`, when it is one a reply can answer: a text message, the user's or
     /// a bot's.
     pub fn quoting(message: &Message) -> Option<ReplyTo> {
-        let Body::Text { text, attachments, .. } = &message.body else { return None };
-        let mut line = plain_text(text).split_whitespace().collect::<Vec<_>>().join(" ");
+        let Body::Text {
+            text, attachments, ..
+        } = &message.body
+        else {
+            return None;
+        };
+        let mut line = plain_text(text)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         if line.is_empty() {
-            line = attachments.iter().map(|attachment| attachment.name.as_str()).collect::<Vec<_>>().join(", ");
+            line = attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
         }
         if line.chars().count() > REPLY_QUOTE_CHARS {
-            line = format!("{}…", line.chars().take(REPLY_QUOTE_CHARS).collect::<String>().trim_end());
+            line = format!(
+                "{}…",
+                line.chars()
+                    .take(REPLY_QUOTE_CHARS)
+                    .collect::<String>()
+                    .trim_end()
+            );
         }
-        Some(ReplyTo { message_id: message.id.clone(), author: message.author.clone(), text: line })
+        Some(ReplyTo {
+            message_id: message.id.clone(),
+            author: message.author.clone(),
+            text: line,
+        })
     }
+}
+
+/// A coding agent a bot runs on its Runner (`crate::coding`), as the row of the `coding_agent`
+/// call that started it carries it: what it was asked and where it works, how it stands, and
+/// what came of it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentRun {
+    /// The bot's handle for it, across turns: `agent-3f9a2c1d`.
+    pub id: String,
+    /// `claude` (Claude Code), `codex`, `opencode`, `pi`, or `fx`.
+    pub kind: String,
+    /// What the bot calls the job, which names the agent wherever it shows: "Docs: use
+    /// mygo.json in the launcher examples".
+    #[serde(default)]
+    pub title: String,
+    /// What it was asked: the prompt's first line.
+    pub task: String,
+    /// Where it works, from the home folder: the folder the bot gave it.
+    #[serde(default)]
+    pub folder: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// `starting`, `working`, `asking` (its question waits for the user on a permission card
+    /// in the chat), `idle` (done with what it was asked; it takes a follow-up). Once it ended:
+    /// `failed` or `stopped`.
+    pub state: String,
+    /// Why it ended, in words: "Stopped", "Claude Code exited with code 1".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The pull request it opened, when its transcript names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<String>,
+    /// How that pull request stands on its host, as the Runner last read it: `open`, `draft`,
+    /// `merged`, or `closed`; none before a read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_state: Option<String>,
+    /// What its work changed against the commit it started from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<AgentChanges>,
+    /// The Runner it runs on, by name: "Workbench".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// The same Runner, by Device id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// The repository its folder is a clone of, from its `origin` remote: "github.com/egoist/lorca".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// When it started, in Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
+    /// When it last changed state, in Unix seconds: the apps list the agents by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<f64>,
+}
+
+impl AgentRun {
+    /// It has not ended: it may still ask, work, or take a follow-up.
+    pub fn is_open(&self) -> bool {
+        matches!(
+            self.state.as_str(),
+            "asking" | "starting" | "working" | "idle"
+        )
+    }
+}
+
+/// The coding agents a bot can run, by the name the bot and the apps use: the account's default
+/// order of preference.
+pub const CODING_AGENT_KINDS: [&str; 5] = ["claude", "codex", "opencode", "pi", "fx"];
+
+/// A coding agent's name: "Claude Code", "Codex", "OpenCode", "pi", "fx".
+pub fn coding_agent_name(kind: &str) -> &'static str {
+    match kind {
+        "codex" => "Codex",
+        "opencode" => "OpenCode",
+        "pi" => "pi",
+        "fx" => "fx",
+        _ => "Claude Code",
+    }
+}
+
+/// Which coding agents a Runner's bots may start, in the order its user prefers them: a start
+/// that names none takes the first one on that the Runner has installed (`crate::coding::settings`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CodingAgents {
+    pub agents: Vec<CodingAgentChoice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CodingAgentChoice {
+    /// `claude`, `codex`, `opencode`, `pi`, or `fx`.
+    pub kind: String,
+    pub enabled: bool,
+}
+
+impl Default for CodingAgents {
+    fn default() -> Self {
+        CodingAgents {
+            agents: CODING_AGENT_KINDS
+                .iter()
+                .map(|kind| CodingAgentChoice {
+                    kind: kind.to_string(),
+                    enabled: true,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl CodingAgents {
+    /// Every agent Lorca knows once, in this order, with any it did not list on at the end.
+    pub fn normalized(mut self) -> CodingAgents {
+        let mut seen = std::collections::HashSet::new();
+        self.agents.retain(|choice| {
+            CODING_AGENT_KINDS.contains(&choice.kind.as_str()) && seen.insert(choice.kind.clone())
+        });
+        for kind in CODING_AGENT_KINDS {
+            if !seen.contains(kind) {
+                self.agents.push(CodingAgentChoice {
+                    kind: kind.to_string(),
+                    enabled: true,
+                });
+            }
+        }
+        self
+    }
+}
+
+/// What a coding agent's work changed: its commits, edits not committed yet, and new files.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentChanges {
+    pub files: u32,
+    pub added: u32,
+    pub removed: u32,
 }
 
 /// A `bash` call as its card shows it: Auto-review checking it, the question it asks, the
@@ -428,7 +803,8 @@ pub struct CommandRun {
     pub command: String,
     /// `checking` (Auto-review is judging it), `asking` (for the user's permission), `running`
     /// (printing, or silent), `waiting` (at a question the user can read). Once it ended:
-    /// `exited`, `failed` (a nonzero code), `stopped`, `denied` (not allowed, so never run),
+    /// `exited`, `failed` (a nonzero code), `stopped`, `denied` (not allowed, or held by
+    /// Auto-review, so never run),
     /// `expired` (nobody answered in time), or `dismissed` (the user sent a new message instead
     /// of answering, so never run).
     pub state: String,
@@ -454,9 +830,13 @@ pub struct CommandRun {
     /// The Runner it runs on, by name, for Auto-review's question: "Workbench".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
-    /// Why Auto-review asked.
+    /// Why Auto-review asked, or held it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Auto-review held it and told the bot why, without asking the user: the card is
+    /// `denied`, and the apps read it as "Held by Auto-review".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
     /// The plain-language rule Always allow adds, which Auto-review proposed. Without one the
     /// question offers only Allow once and Deny.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -481,7 +861,12 @@ impl CommandRun {
 
 impl Body {
     pub fn text(text: impl Into<String>) -> Self {
-        Body::Text { text: text.into(), attachments: Vec::new(), mentions: Vec::new(), reply_to: None }
+        Body::Text {
+            text: text.into(),
+            attachments: Vec::new(),
+            mentions: Vec::new(),
+            reply_to: None,
+        }
     }
 }
 
@@ -511,6 +896,31 @@ pub struct Message {
     /// step's reply and tools are done, or at once when the user asks (`chats.send_now`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub queued: bool,
+    /// A published deliverable or verification artifact; each version is a separate message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<crate::outputs::Output>,
+    /// Coordinator summaries, urgent escalations, and quiet specialist reports have their
+    /// own notification policy, shared by the Runner and the apps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<crate::attention::Notification>,
+    /// The message's id on the channel a conversation mirrors: a Telegram message id or a
+    /// Slack `ts`. Set on a contact's message and on what the bot sent there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    /// The browser recording the user sent a bot with this message. The steps and screenshots
+    /// stay encrypted on the Runner that recorded them; that Runner shows them to the bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<RecordingRef>,
+}
+
+/// A recording of what the user did in one of a bot's browser profiles.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecordingRef {
+    pub id: String,
+    pub bot_id: String,
+    /// The profile's name.
+    pub profile: String,
+    pub steps: usize,
 }
 
 /// How much of a tool call's detail the apps get: enough for the "Messaged ◉ X" marker.
@@ -529,15 +939,29 @@ impl Message {
     pub fn for_app(&self) -> Message {
         let mut message = self.clone();
         match &mut message.body {
-            Body::Tool { detail, arguments, result, .. } => {
+            Body::Tool {
+                detail,
+                arguments,
+                result,
+                ..
+            } => {
                 *arguments = serde_json::Value::Null;
                 *result = None;
                 if detail.chars().count() > APP_TOOL_DETAIL_CHARS {
                     *detail = detail.chars().take(APP_TOOL_DETAIL_CHARS).collect();
                 }
             }
-            Body::Permission { plugin_id, arguments, command, .. } => {
-                if let Some(text) = arguments.get("command").and_then(serde_json::Value::as_str).filter(|_| plugin_id == "computer") {
+            Body::Permission {
+                plugin_id,
+                arguments,
+                command,
+                ..
+            } => {
+                if let Some(text) = arguments
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|_| plugin_id == "computer")
+                {
                     *command = Some(text.chars().take(APP_COMMAND_CHARS).collect());
                 }
                 *arguments = serde_json::Value::Null;
@@ -554,9 +978,13 @@ impl Message {
             author,
             body,
             state: MessageState::Complete,
+            notification: None,
             created_at: crate::config::now_secs(),
             promoted_at: None,
             queued: false,
+            output: None,
+            external_id: None,
+            recording: None,
         }
     }
 
@@ -564,17 +992,23 @@ impl Message {
         matches!(self.state, MessageState::Complete)
     }
 
-
-    /// A reply, failure, or pending confirmation the user has not seen. Tool activity and
-    /// updates to an answered question do not add to the count.
+    /// A reply, failure, or pending confirmation the user has not seen, or a coding agent's
+    /// report to the user. Tool activity and updates to an answered question do not add to the
+    /// count, nor does why an agent ended, which its bot's reply tells.
     pub fn counts_unread(&self) -> bool {
-        if !matches!(self.author, Author::Bot { .. }) {
+        if !matches!(self.author, Author::Bot { .. })
+            || self.notification == Some(crate::attention::Notification::Quiet)
+        {
             return false;
         }
         match &self.body {
-            Body::Text { .. } => matches!(self.state, MessageState::Complete | MessageState::Failed { .. }),
+            Body::Text { .. } => matches!(
+                self.state,
+                MessageState::Complete | MessageState::Failed { .. }
+            ),
             Body::Permission { .. } => self.is_complete() && self.confirmation().is_some(),
             Body::Tool { .. } => self.confirmation().is_some(),
+            Body::AgentMessage { failed, .. } => !failed,
             _ => false,
         }
     }
@@ -583,7 +1017,9 @@ impl Message {
     /// summary, or the command of a `bash` card that asks.
     pub fn confirmation(&self) -> Option<String> {
         match &self.body {
-            Body::Permission { summary, decision, .. } if decision == "pending" => Some(summary.clone()),
+            Body::Permission {
+                summary, decision, ..
+            } if decision == "pending" => Some(summary.clone()),
             Body::Tool { run: Some(run), .. } if run.state == "asking" => {
                 let line = run.command.lines().next().unwrap_or("").trim();
                 Some(format!("$ {}", line.chars().take(180).collect::<String>()))
@@ -613,7 +1049,53 @@ pub struct ChatMeta {
     pub description: Option<String>,
     #[serde(default)]
     pub is_pinned: bool,
+    /// The sidebar section the chat is listed under; none lists it with the chats in no section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_id: Option<String>,
+    /// Out of the sidebar but kept: search finds it, and the sidebar's Hidden group lists it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_hidden: bool,
+    /// No alerts for the chat on any Device while set; its unread count is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mute: Option<Mute>,
     pub created_at: f64,
+    /// A conversation a channel opened: a direct chat with its bot that mirrors one thread on
+    /// Telegram or Slack, named by `title`. The bot's own DM has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<ChatChannel>,
+}
+
+/// Where a channel's conversation happens outside Lorca.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatChannel {
+    /// The channel (its event subscription) that opened the conversation.
+    pub channel_id: String,
+    /// `telegram` or `slack`.
+    pub service: String,
+    /// The plugin instance of the account the bot speaks through.
+    pub account_id: String,
+    /// The chat on the service: a Telegram chat id, a Slack channel id.
+    pub chat_id: String,
+    /// A Telegram forum topic or a Slack thread's `ts`, when the conversation is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+/// A chat's notifications are off until `until` (unix seconds), or until unmuted without one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Mute {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<f64>,
+}
+
+/// A named group of chats in the sidebar, in the order the roster lists them. Every Device
+/// shows the same sections, folded the same way.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Section {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collapsed: bool,
 }
 
 impl ChatMeta {
@@ -621,17 +1103,30 @@ impl ChatMeta {
         self.kind == "group"
     }
 
+    /// Whether the chat's alerts are off at `now` (unix seconds).
+    pub fn is_muted(&self, now: f64) -> bool {
+        self.mute
+            .as_ref()
+            .is_some_and(|mute| mute.until.is_none_or(|until| now < until))
+    }
+
     /// A group's owner: the one set while it is a member, else the first member.
     pub fn owner(&self) -> Option<&str> {
         if !self.is_group() {
             return None;
         }
-        self.owner_bot_id.as_deref().filter(|id| self.bot_ids.iter().any(|member| member == id)).or(self.bot_ids.first().map(String::as_str))
+        self.owner_bot_id
+            .as_deref()
+            .filter(|id| self.bot_ids.iter().any(|member| member == id))
+            .or(self.bot_ids.first().map(String::as_str))
     }
 
     /// A group's description, when it has one.
     pub fn purpose(&self) -> Option<&str> {
-        self.description.as_deref().map(str::trim).filter(|text| self.is_group() && !text.is_empty())
+        self.description
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| self.is_group() && !text.is_empty())
     }
 }
 
@@ -641,12 +1136,68 @@ pub struct Chat {
     pub meta: ChatMeta,
     #[serde(default)]
     pub unread_count: u32,
-    /// What the turns run here used. Kept on this Runner, never synced.
+    /// What the turns run here used. This Runner uploads it as a `ChatBlob::Usage`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ChatUsage>,
     /// Summaries standing in for the older part of the chat, one per bot. Kept on this Runner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compactions: Vec<Compaction>,
+    /// What the turns other Runners ran here used, by Runner id, as each last reported it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub runner_usage: std::collections::BTreeMap<String, ChatUsage>,
+}
+
+impl Chat {
+    /// The chat's usage as the apps show it: the context of `runner_id`, the Runner the chat's
+    /// bot (a group's owner) runs on, and what the turns on every Runner spent. `this_device` is
+    /// the Device answering. Until that Runner reports, the context is the latest report's.
+    pub fn shown_usage(
+        &self,
+        runner_id: Option<&str>,
+        this_device: Option<&str>,
+    ) -> Option<ChatUsage> {
+        let mut reports: Vec<(&str, &ChatUsage)> = self
+            .runner_usage
+            .iter()
+            .filter(|(id, _)| Some(id.as_str()) != this_device)
+            .map(|(id, usage)| (id.as_str(), usage))
+            .collect();
+        if let Some(usage) = &self.usage {
+            reports.push((this_device.unwrap_or_default(), usage));
+        }
+        let (base_runner, base) = reports
+            .iter()
+            .find(|(id, _)| Some(*id) == runner_id)
+            .or_else(|| {
+                reports
+                    .iter()
+                    .max_by(|a, b| a.1.updated_at.total_cmp(&b.1.updated_at))
+            })
+            .copied()?;
+        let mut shown = base.clone();
+        for (_, usage) in reports.iter().filter(|(id, _)| *id != base_runner) {
+            shown.input_tokens += usage.input_tokens;
+            shown.output_tokens += usage.output_tokens;
+            shown.cache_read_tokens += usage.cache_read_tokens;
+            shown.cost_usd += usage.cost_usd;
+            shown.cost_known = match (shown.cost_known, usage.cost_known) {
+                (Some(true), Some(true)) => Some(true),
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                _ => None,
+            };
+            shown.api_cost_usd += usage.api_cost_usd;
+            shown.subscription_estimate_usd += usage.subscription_estimate_usd;
+            shown.unknown_price_calls += usage.unknown_price_calls;
+            shown.turns += usage.turns;
+            shown.updated_at = shown.updated_at.max(usage.updated_at);
+            for pricing in &usage.pricing_kinds {
+                if !shown.pricing_kinds.contains(pricing) {
+                    shown.pricing_kinds.push(*pricing);
+                }
+            }
+        }
+        Some(shown)
+    }
 }
 
 /// The tokens and money the turns in a chat used. `context_tokens` and `context_window` are
@@ -665,6 +1216,14 @@ pub struct ChatUsage {
     /// Whether cost_usd is a complete total rather than a known subtotal.
     #[serde(default)]
     pub cost_known: Option<bool>,
+    #[serde(default)]
+    pub api_cost_usd: f64,
+    #[serde(default)]
+    pub subscription_estimate_usd: f64,
+    #[serde(default)]
+    pub unknown_price_calls: u64,
+    #[serde(default)]
+    pub pricing_kinds: Vec<crate::budgets::Pricing>,
     pub turns: u64,
     /// The model of the last turn.
     pub model: String,
@@ -693,8 +1252,24 @@ pub struct Routine {
     pub name: String,
     /// The task, written to the bot, handed to it on every run.
     pub prompt: String,
-    /// `every 30m`, `every 2h`, `every 1d`, or five cron fields in the Runner's local time.
+    /// Original task authority retained when feedback revises the workflow text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_authorization_prompt: Option<String>,
+    /// `every 30m`, `every 2h`, `every 1d`, or five cron fields in `timezone`.
     pub schedule: String,
+    /// The IANA timezone a cron schedule reads in: the Runner's when the routine was made,
+    /// unless the bot named another.
+    #[serde(default = "crate::schedule::local_timezone")]
+    pub timezone: String,
+    /// What a Runner that was off at a due time does when it is back: one run, or none.
+    #[serde(default)]
+    pub missed_run_policy: crate::routine_health::MissedRunPolicy,
+    /// The last due time the Runner took or skipped, so a restart neither repeats nor drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scheduled_at: Option<f64>,
+    /// How the routine's checks and runs have gone, as its Runner records them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<crate::routine_health::CheckHealth>,
     pub is_enabled: bool,
     /// When the schedule started counting: creation, or the last resume.
     pub enabled_at: f64,
@@ -711,13 +1286,30 @@ pub struct Routine {
     /// skips it. `last_run_at` and `last_outcome` count the runs, not the checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<String>,
+    /// What the routine listens to when it runs on events: each event about its subject starts
+    /// a run, and the routine ends after one that says it ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<crate::routine_events::RoutineEvents>,
+    /// The Calendar account whose events place the runs of a schedule around events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<crate::routine_triggers::CalendarTrigger>,
     pub created_at: f64,
 }
 
 impl Routine {
-    /// The time the next run counts from: the last run, else when the routine was armed.
+    /// The time the next run counts from: the last run, due time taken, or check, else when the
+    /// routine was armed.
     pub fn anchor(&self) -> i64 {
-        self.last_run_at.unwrap_or(0.0).max(self.enabled_at) as i64
+        self.last_run_at
+            .unwrap_or(0.0)
+            .max(self.last_scheduled_at.unwrap_or(0.0))
+            .max(
+                self.health
+                    .as_ref()
+                    .and_then(|health| health.last_check_at)
+                    .unwrap_or(0.0),
+            )
+            .max(self.enabled_at) as i64
     }
 
     /// When the next run is due, or `None` when paused or the schedule is unreadable.
@@ -731,7 +1323,29 @@ impl Routine {
         if !self.is_enabled {
             return None;
         }
-        crate::schedule::parse(&self.schedule).ok()?.next_after(since.max(self.anchor()))
+        let schedule = crate::schedule::parse(&self.schedule).ok()?;
+        match &schedule {
+            // A one-time routine is due at its time until a run at or after it, by schedule or by hand.
+            crate::schedule::Schedule::Once(_) => {
+                return schedule
+                    .once_instant(&self.timezone)
+                    .filter(|at| !crate::routine_triggers::once_taken(self, *at))
+            }
+            crate::schedule::Schedule::Events(offset) => {
+                return crate::routine_triggers::next_event_run(self, *offset).map(|(due, _)| due)
+            }
+            // A routine on events runs when they come, never on a clock.
+            crate::schedule::Schedule::OnEvents => return None,
+            _ => {}
+        }
+        let next = schedule.next_after(since.max(self.anchor()), &self.timezone)?;
+        // After a failure that backs off, no sooner than the retry.
+        let retry = self
+            .health
+            .as_ref()
+            .and_then(|health| health.retry_at())
+            .unwrap_or(0.0);
+        Some(next.max(retry as i64))
     }
 }
 
@@ -766,7 +1380,6 @@ pub struct PolicyBlob {
     pub version: PolicyVersion,
 }
 
-
 /// A saved workflow: a bot's definition kept as the raw JSON it was saved with, so a newer
 /// schema or field survives a round trip through an older Device untouched. Only the bot's
 /// Runner reads the definition (`crate::workflow`).
@@ -779,10 +1392,15 @@ pub struct WorkflowRecord {
     pub created_at: f64,
 }
 
-/// `kind = roster`: bots, chat metadata, and routines. Latest wins.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+/// `kind = roster`: bots, chat metadata, routines, and the names the account gives its Devices.
+/// Latest wins for each one it lists; one it leaves out is gone only when `deleted` names it.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 #[serde(default)]
 pub struct RosterBlob {
+    /// Workflow setups, merged one by one (`workflows::merge`); a build that does not know
+    /// workflows leaves the field out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_setups: Option<Vec<crate::workflows::Setup>>,
     pub bots: Vec<Bot>,
     pub chats: Vec<ChatMeta>,
     /// Account aliases keyed by Device id; machine metadata keeps the original name.
@@ -791,6 +1409,9 @@ pub struct RosterBlob {
     /// Opaque edit ids include resets, whose alias value is absent.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub device_name_edits: std::collections::BTreeMap<String, String>,
+    /// The sidebar's sections, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<Section>,
     #[serde(default)]
     pub routines: Vec<Routine>,
     #[serde(default)]
@@ -809,7 +1430,126 @@ pub struct RosterBlob {
     pub policy_capabilities: std::collections::HashMap<String, Capabilities>,
     #[serde(default)]
     pub deleted_bot_versions: std::collections::HashMap<String, PolicyVersion>,
+    /// The bots the account shares as links, with their keys.
+    #[serde(default)]
+    pub shared_links: Vec<crate::templates::links::SharedLink>,
+    /// The machine pubkeys of the Devices unpaired from the account. A Device keeps every key it
+    /// reads here, and puts the ones a roster left out back in its own.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub unpaired: std::collections::BTreeSet<String>,
+    /// The ids of the bots, chats, and routines deleted on any Device. A Device keeps every id
+    /// it reads here and keeps what a roster leaves out that no Device deleted, so a roster
+    /// from a Device that had not heard of a new bot yet does not delete it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub deleted: std::collections::BTreeSet<String>,
     pub updated_at: f64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+struct RosterBlobWire {
+    /// Workflow setups, merged one by one (`workflows::merge`); a build that does not know
+    /// workflows leaves the field out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_setups: Option<Vec<crate::workflows::Setup>>,
+    pub bots: Vec<Bot>,
+    pub chats: Vec<ChatMeta>,
+    /// Account aliases keyed by Device id; machine metadata keeps the original name.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub device_names: std::collections::BTreeMap<String, String>,
+    /// Opaque edit ids include resets, whose alias value is absent.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub device_name_edits: std::collections::BTreeMap<String, String>,
+    /// The sidebar's sections, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<Section>,
+    #[serde(default)]
+    pub routines: Vec<Routine>,
+    #[serde(default)]
+    pub workflows: Vec<WorkflowRecord>,
+    #[serde(default)]
+    pub auto_review: AutoReview,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub policy_clock: u64,
+    #[serde(default)]
+    pub pause_version: PolicyVersion,
+    #[serde(default)]
+    pub capability_versions: std::collections::HashMap<String, PolicyVersion>,
+    #[serde(default)]
+    pub policy_capabilities: std::collections::HashMap<String, Capabilities>,
+    #[serde(default)]
+    pub deleted_bot_versions: std::collections::HashMap<String, PolicyVersion>,
+    /// The bots the account shares as links, with their keys.
+    #[serde(default)]
+    pub shared_links: Vec<crate::templates::links::SharedLink>,
+    /// The machine pubkeys of the Devices unpaired from the account. A Device keeps every key it
+    /// reads here, and puts the ones a roster left out back in its own.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub unpaired: std::collections::BTreeSet<String>,
+    /// The ids of the bots, chats, and routines deleted on any Device. A Device keeps every id
+    /// it reads here and keeps what a roster leaves out that no Device deleted, so a roster
+    /// from a Device that had not heard of a new bot yet does not delete it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub deleted: std::collections::BTreeSet<String>,
+    pub updated_at: f64,
+}
+
+impl<'de> Deserialize<'de> for RosterBlob {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| D::Error::custom("roster must be an object"))?;
+        let mut legacy = Vec::new();
+        if let Some(workflows) = object.get_mut("workflows") {
+            let entries = workflows
+                .as_array_mut()
+                .ok_or_else(|| D::Error::custom("workflows must be an array"))?;
+            let mut records = Vec::new();
+            for entry in std::mem::take(entries) {
+                let record = entry.get("definition").is_some() && entry.get("bot_id").is_some();
+                let setup = entry.get("pack").is_some() && entry.get("runner_id").is_some();
+                match (record, setup) {
+                    (true, false) => records.push(entry),
+                    (false, true) => legacy.push(
+                        serde_json::from_value::<crate::workflows::Setup>(entry)
+                            .map_err(D::Error::custom)?,
+                    ),
+                    _ => return Err(D::Error::custom("ambiguous or invalid workflow record")),
+                }
+            }
+            *entries = records;
+        }
+        let mut wire: RosterBlobWire = serde_json::from_value(value).map_err(D::Error::custom)?;
+        if !legacy.is_empty() {
+            let mut setups = legacy;
+            crate::workflows::merge(&mut setups, wire.workflow_setups.take());
+            wire.workflow_setups = Some(setups);
+        }
+        Ok(Self {
+            workflow_setups: wire.workflow_setups,
+            bots: wire.bots,
+            chats: wire.chats,
+            device_names: wire.device_names,
+            device_name_edits: wire.device_name_edits,
+            sections: wire.sections,
+            routines: wire.routines,
+            workflows: wire.workflows,
+            auto_review: wire.auto_review,
+            paused: wire.paused,
+            policy_clock: wire.policy_clock,
+            pause_version: wire.pause_version,
+            capability_versions: wire.capability_versions,
+            policy_capabilities: wire.policy_capabilities,
+            deleted_bot_versions: wire.deleted_bot_versions,
+            shared_links: wire.shared_links,
+            unpaired: wire.unpaired,
+            deleted: wire.deleted,
+            updated_at: wire.updated_at,
+        })
+    }
 }
 
 /// `kind = chat`: one transcript operation.
@@ -817,24 +1557,56 @@ pub struct RosterBlob {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ChatBlob {
     /// Insert or replace by message id.
-    Upsert { message: Message },
-    Remove { chat_id: String, message_id: String },
-    ClearUnread { chat_id: String },
+    Upsert {
+        message: Message,
+    },
+    Remove {
+        chat_id: String,
+        message_id: String,
+    },
+    ClearUnread {
+        chat_id: String,
+    },
+    /// What the turns `runner_id` ran in the chat used so far, as `Chat::usage` holds it there.
+    Usage {
+        chat_id: String,
+        runner_id: String,
+        usage: ChatUsage,
+    },
 }
 
 impl ChatBlob {
     /// Versions of a message share a slot, and so does its removal, which leaves the relay
     /// nothing of the message but the removal. A chat's read marks share another. A tool row
     /// goes up while its call runs, for the status line on other Devices, and the finished row
-    /// replaces it outright, so the relay keeps one version of each call.
+    /// replaces it outright, so the relay keeps one version of each call. A Runner's usage of a
+    /// chat keeps its latest report.
     pub fn slot(&self) -> crate::app::Slot {
         match self {
             // A command's card shows in the transcript, so like a message it keeps the place it
             // first took in the log however often it changes.
-            ChatBlob::Upsert { message } if matches!(message.body, Body::Tool { run: None, .. }) => crate::app::Slot::latest(relay_name(&message.id)),
-            ChatBlob::Upsert { message } => crate::app::Slot::first_and_latest(relay_name(&message.id)),
+            ChatBlob::Upsert { message }
+                if matches!(
+                    message.body,
+                    Body::Tool {
+                        run: None,
+                        agent: None,
+                        ..
+                    }
+                ) =>
+            {
+                crate::app::Slot::latest(relay_name(&message.id))
+            }
+            ChatBlob::Upsert { message } => {
+                crate::app::Slot::first_and_latest(relay_name(&message.id))
+            }
             ChatBlob::Remove { message_id, .. } => crate::app::Slot::latest(relay_name(message_id)),
-            ChatBlob::ClearUnread { chat_id } => crate::app::Slot::latest(relay_name(&format!("read-{chat_id}"))),
+            ChatBlob::ClearUnread { chat_id } => {
+                crate::app::Slot::latest(relay_name(&format!("read-{chat_id}")))
+            }
+            ChatBlob::Usage {
+                chat_id, runner_id, ..
+            } => crate::app::Slot::latest(relay_name(&format!("usage-{chat_id}-{runner_id}"))),
         }
     }
 
@@ -842,7 +1614,9 @@ impl ChatBlob {
     pub fn group(&self) -> String {
         match self {
             ChatBlob::Upsert { message } => relay_name(&message.chat_id),
-            ChatBlob::Remove { chat_id, .. } | ChatBlob::ClearUnread { chat_id } => relay_name(chat_id),
+            ChatBlob::Remove { chat_id, .. }
+            | ChatBlob::ClearUnread { chat_id }
+            | ChatBlob::Usage { chat_id, .. } => relay_name(chat_id),
         }
     }
 }
@@ -854,11 +1628,16 @@ pub fn relay_name(name: &str) -> String {
         && name.len() <= 64
         && name != "."
         && name != ".."
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
     if plain {
         return name.to_string();
     }
-    <sha2::Sha256 as sha2::Digest>::digest(name.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+    <sha2::Sha256 as sha2::Digest>::digest(name.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// `kind = machine`: a Device's own metadata and presence claims.
@@ -868,6 +1647,11 @@ pub struct MachineBlob {
     /// The turns in flight on this Device, so every other Device shows the bots at work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turns: Vec<LiveTurn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub budgets: Vec<crate::budgets::BudgetSnapshot>,
+    /// The chat the desktop app shows in front of the user, so no Runner pushes it to a phone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watching: Option<String>,
 }
 
 /// `kind = job`, sealed to the Runner's box key: run one bot turn in one chat.
@@ -876,11 +1660,22 @@ pub struct Job {
     pub id: String,
     pub chat_id: String,
     pub bot_id: String,
+    /// Canonical durable task context. Child/handoff Jobs may reference it without owning
+    /// the task's execution claim; only `kind = task` is a durable task run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// The authority's immutable dispatch snapshot, so a Job can arrive before task sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_context: Option<crate::tasks::Task>,
     /// `turn` for a user message in a DM, `room_turn` for one member's turn in a group,
     /// `message` for a teammate's message_bot, `routine` for a run of a routine, `command` for
-    /// a command the bot left running that ended.
+    /// a command the bot left running that ended, `agent` for a coding agent the bot runs that
+    /// is done, whose report it relays, or ended on its own, `event` for a service event an event subscription's inbox admitted.
     pub kind: String,
     pub trigger_message_id: String,
+    /// A durable delegated request or the continuation that reads its report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<crate::handoffs::HandoffJob>,
     /// `routine`: which routine is running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<String>,
@@ -969,7 +1764,12 @@ pub enum JobActivity {
     /// The model started thinking; the bot's next message is what came of it.
     Thinking,
     /// A model call failed in a way worth another try; the turn waits `delay_ms` and asks again.
-    Retry { attempt: u32, max_attempts: u32, delay_ms: u64, error: String },
+    Retry {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        error: String,
+    },
 }
 
 impl JobActivity {
@@ -978,7 +1778,12 @@ impl JobActivity {
         let (chat_id, bot_id) = (chat_id.to_string(), bot_id.to_string());
         match self {
             JobActivity::Thinking => crate::events::Event::JobThinking { chat_id, bot_id },
-            JobActivity::Retry { attempt, max_attempts, delay_ms, error } => crate::events::Event::JobRetry {
+            JobActivity::Retry {
+                attempt,
+                max_attempts,
+                delay_ms,
+                error,
+            } => crate::events::Event::JobRetry {
                 chat_id,
                 bot_id,
                 attempt: *attempt,
@@ -998,21 +1803,23 @@ pub struct JobCancel {
     pub job_id: String,
 }
 
-/// `kind = request`: a question for one Runner from another Device, sealed to the Runner's box
-/// key. The verbs read and write a bot's memory, which lives on its Runner.
+/// `kind = request`: a question for one Runner from another Device, in an envelope the asking
+/// Device signs (`envelope.rs`); the answer goes back to the signer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Request {
-    pub id: String,
-    /// `memory.read` or `memory.write`.
-    pub verb: String,
-    /// The Device asking; the answer is sealed to it.
+    #[serde(default)]
     pub requested_by: String,
     #[serde(default)]
-    pub body: serde_json::Value,
     pub created_at: f64,
+    pub id: String,
+    /// `memory.read`, `mcp.save`, and the rest that `requests::answer` takes.
+    pub verb: String,
+    #[serde(default)]
+    pub body: serde_json::Value,
 }
 
-/// `kind = response`: the Runner's answer to a `Request`, sealed to the Device that asked.
+/// `kind = response`: the Runner's answer to a `Request`, signed by it and sealed to the Device
+/// that asked.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Response {
     pub request_id: String,
@@ -1022,13 +1829,17 @@ pub struct Response {
     pub error: Option<String>,
 }
 
-/// Pairing handshake payloads (sealed boxes).
+/// Pairing handshake payloads. The request is sealed to the pairing string's `ek`, which the
+/// relay never sees; the reply is encrypted with the request's `reply_key`, so only the Device
+/// that holds the pairing string could have written it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairRequest {
     pub format: crate::config::Format,
     pub machine_pubkey: String,
     pub box_pubkey: String,
     pub device: Device,
+    /// A random key, base64url, that the reply is encrypted with.
+    pub reply_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1036,12 +1847,17 @@ pub struct PairReply {
     pub format: crate::config::Format,
     pub identity_pubkey: String,
     pub content_pubkey: String,
+    /// Generation 0 of the account key.
     pub account_dek: String,
     pub relay_url: String,
+    /// The account key's later generations, as the identity signed them.
+    #[serde(default)]
+    pub keyrings: Vec<crate::keys::SignedKeyring>,
 }
 
 /// Facts a host passes in when they cannot be probed: a phone names itself through the app.
-static HOST_FACTS: std::sync::OnceLock<(String, String, String, String)> = std::sync::OnceLock::new();
+static HOST_FACTS: std::sync::OnceLock<(String, String, String, String)> =
+    std::sync::OnceLock::new();
 
 /// Sets the name, os, os version, and model `host_facts` answers with, once per process.
 pub fn set_host_facts(name: String, os: String, os_version: String, model: String) {
@@ -1050,21 +1866,32 @@ pub fn set_host_facts(name: String, os: String, os_version: String, model: Strin
 
 /// Machine facts for this host: what the app set, or probed from the system once per process.
 pub fn host_facts() -> (String, String, String, String) {
-    static PROBED: std::sync::OnceLock<(String, String, String, String)> = std::sync::OnceLock::new();
-    HOST_FACTS.get().unwrap_or_else(|| PROBED.get_or_init(probe_host)).clone()
+    static PROBED: std::sync::OnceLock<(String, String, String, String)> =
+        std::sync::OnceLock::new();
+    HOST_FACTS
+        .get()
+        .unwrap_or_else(|| PROBED.get_or_init(probe_host))
+        .clone()
 }
 
 /// A Mac's marketing name with its chip, "MacBook Air (M5)". `hw.model` is an identifier such as
 /// `Mac17,3` on current Macs, which says nothing a person or an icon can use.
 fn mac_model_name() -> Option<String> {
-    let output = std::process::Command::new("system_profiler").args(["SPHardwareDataType", "-json"]).output().ok()?;
+    let output = std::process::Command::new("system_profiler")
+        .args(["SPHardwareDataType", "-json"])
+        .output()
+        .ok()?;
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
     let hardware = json.get("SPHardwareDataType")?.get(0)?;
     let name = hardware.get("machine_name")?.as_str()?.trim();
     if name.is_empty() {
         return None;
     }
-    let chip = hardware.get("chip_type").and_then(|c| c.as_str()).map(|c| c.trim_start_matches("Apple ").trim()).filter(|c| !c.is_empty());
+    let chip = hardware
+        .get("chip_type")
+        .and_then(|c| c.as_str())
+        .map(|c| c.trim_start_matches("Apple ").trim())
+        .filter(|c| !c.is_empty());
     Some(match chip {
         Some(chip) => format!("{name} ({chip})"),
         None => name.to_string(),
@@ -1083,7 +1910,9 @@ fn computer_name() -> Option<String> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     } else if cfg!(target_os = "linux") {
-        std::fs::read_to_string("/etc/machine-info").ok().and_then(|info| pretty_hostname(&info))
+        std::fs::read_to_string("/etc/machine-info")
+            .ok()
+            .and_then(|info| pretty_hostname(&info))
     } else {
         None
     };
@@ -1101,7 +1930,11 @@ fn pretty_hostname(machine_info: &str) -> Option<String> {
         let mut name = String::new();
         let mut chars = quoted.chars();
         while let Some(c) = chars.next() {
-            name.push(if c == '\\' { chars.next().unwrap_or(c) } else { c });
+            name.push(if c == '\\' {
+                chars.next().unwrap_or(c)
+            } else {
+                c
+            });
         }
         name
     } else if let Some(quoted) = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')) {
@@ -1121,15 +1954,23 @@ fn host_name() -> Option<String> {
     if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
         return None;
     }
-    let length = buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len());
-    let name = String::from_utf8_lossy(&buffer[..length]).trim().to_string();
+    let length = buffer
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(buffer.len());
+    let name = String::from_utf8_lossy(&buffer[..length])
+        .trim()
+        .to_string();
     (!name.is_empty()).then_some(name)
 }
 
 /// The computer name Windows sets in every process's environment.
 #[cfg(windows)]
 fn host_name() -> Option<String> {
-    std::env::var("COMPUTERNAME").ok().map(|name| name.trim().to_string()).filter(|name| !name.is_empty())
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
 }
 
 fn probe_host() -> (String, String, String, String) {
@@ -1188,42 +2029,149 @@ mod app_view_tests {
     }
 
     #[test]
+    fn a_bot_keeps_the_symbol_released_apps_read_beside_its_shape() {
+        // Apps from before characters require `symbol_name` in the roster.
+        let bot: Bot = serde_json::from_value(serde_json::json!({
+            "id": "bot", "name": "Scout", "description": "", "accent": "teal", "runner_id": "runner",
+            "provider": "deepseek", "created_at": 1.0
+        }))
+        .unwrap();
+        assert_eq!(
+            (bot.symbol_name.as_str(), bot.shape.as_str()),
+            ("sparkles", "")
+        );
+        let value = serde_json::to_value(&bot).unwrap();
+        assert_eq!(value["symbol_name"], "sparkles");
+        assert!(
+            value.get("shape").is_none(),
+            "an empty shape stays off the wire"
+        );
+
+        let shaped = Bot {
+            shape: "cloud".into(),
+            ..bot
+        };
+        let value = serde_json::to_value(&shaped).unwrap();
+        assert_eq!(
+            (value["symbol_name"].as_str(), value["shape"].as_str()),
+            (Some("sparkles"), Some("cloud"))
+        );
+    }
+
+    #[test]
     fn the_apps_get_a_tool_row_without_its_payload() {
-        let tool = Message::new("c", Author::Bot { bot_id: "b".into() }, Body::Tool {
-            name: "read".into(), summary: "Read a file".into(), detail: "x".repeat(5000), is_running: false,
-            call_id: "call".into(), arguments: serde_json::json!({ "path": "big" }), result: Some("y".repeat(100_000)), is_error: false, description: None, target_bot_id: None,
-            script_command: None, run: None,
-        });
-        let Body::Tool { detail, arguments, result, summary, .. } = tool.for_app().body else { panic!() };
-        assert_eq!((detail.len(), arguments.is_null(), result, summary.as_str()), (400, true, None, "Read a file"));
+        let tool = Message::new(
+            "c",
+            Author::Bot { bot_id: "b".into() },
+            Body::Tool {
+                name: "read".into(),
+                summary: "Read a file".into(),
+                detail: "x".repeat(5000),
+                is_running: false,
+                call_id: "call".into(),
+                arguments: serde_json::json!({ "path": "big" }),
+                result: Some("y".repeat(100_000)),
+                is_error: false,
+                description: None,
+                target_bot_id: None,
+                script_command: None,
+                run: None,
+                agent: None,
+                target_agent_id: None,
+            },
+        );
+        let Body::Tool {
+            detail,
+            arguments,
+            result,
+            summary,
+            ..
+        } = tool.for_app().body
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (detail.len(), arguments.is_null(), result, summary.as_str()),
+            (400, true, None, "Read a file")
+        );
     }
 
     #[test]
     fn permission_cards_drop_the_reviewed_payload() {
-        let permission = Message::new("c", Author::Bot { bot_id: "b".into() }, Body::Permission {
-            plugin_id: "computer".into(), plugin_name: "Mac".into(), tool: "bash".into(), summary: "Run a command".into(),
-            arguments: serde_json::json!({ "command": "secret" }), decision: "pending".into(), reason: None, rule: None, command: None, title: None, content: None, path: None, link: None, code: None,
-        });
+        let permission = Message::new(
+            "c",
+            Author::Bot { bot_id: "b".into() },
+            Body::Permission {
+                plugin_id: "computer".into(),
+                plugin_name: "Mac".into(),
+                tool: "bash".into(),
+                summary: "Run a command".into(),
+                arguments: serde_json::json!({ "command": "secret" }),
+                decision: "pending".into(),
+                reason: None,
+                rule: None,
+                command: None,
+                title: None,
+                content: None,
+                path: None,
+                link: None,
+                code: None,
+                secret: None,
+            },
+        );
         let app = permission.for_app();
-        let Body::Permission { arguments, summary, command, .. } = &app.body else { panic!() };
+        let Body::Permission {
+            arguments,
+            summary,
+            command,
+            ..
+        } = &app.body
+        else {
+            panic!()
+        };
         assert!(arguments.is_null());
         assert_eq!(summary, "Run a command");
         assert_eq!(command.as_deref(), Some("secret"));
         // A phone stores the app view; reading it again keeps the command.
-        let Body::Permission { command, .. } = app.for_app().body else { panic!() };
+        let Body::Permission { command, .. } = app.for_app().body else {
+            panic!()
+        };
         assert_eq!(command.as_deref(), Some("secret"));
     }
 
     #[test]
     fn proposal_card_preserves_reviewed_bytes_for_apps() {
         let text = "🌍".repeat(20_000);
-        let card = Message::new("c", Author::Bot { bot_id: "b".into() }, Body::Permission {
-            plugin_id: "computer".into(), plugin_name: "Runner".into(), tool: "propose".into(),
-            summary: "Review draft".into(), arguments: serde_json::json!({ "content": "hidden" }), decision: "pending".into(),
-            reason: None, rule: None, command: None, title: Some("Draft".into()), content: Some(text.clone()),
-            path: Some("notes/draft.md".into()), link: None, code: None,
-        });
-        let Body::Permission { content, arguments, path, .. } = card.for_app().for_app().body else { panic!() };
+        let card = Message::new(
+            "c",
+            Author::Bot { bot_id: "b".into() },
+            Body::Permission {
+                plugin_id: "computer".into(),
+                plugin_name: "Runner".into(),
+                tool: "propose".into(),
+                summary: "Review draft".into(),
+                arguments: serde_json::json!({ "content": "hidden" }),
+                decision: "pending".into(),
+                reason: None,
+                rule: None,
+                command: None,
+                title: Some("Draft".into()),
+                content: Some(text.clone()),
+                path: Some("notes/draft.md".into()),
+                link: None,
+                code: None,
+                secret: None,
+            },
+        );
+        let Body::Permission {
+            content,
+            arguments,
+            path,
+            ..
+        } = card.for_app().for_app().body
+        else {
+            panic!()
+        };
         assert_eq!(content.as_deref(), Some(text.as_str()));
         assert_eq!(path.as_deref(), Some("notes/draft.md"));
         assert!(arguments.is_null());
@@ -1236,19 +2184,40 @@ mod host_tests {
 
     #[test]
     fn a_linux_desktop_goes_by_its_pretty_hostname() {
-        assert_eq!(pretty_hostname("PRETTY_HOSTNAME=\"Kevin's ThinkPad\"\nCHASSIS=laptop\n").as_deref(), Some("Kevin's ThinkPad"));
-        assert_eq!(pretty_hostname("PRETTY_HOSTNAME=devbox").as_deref(), Some("devbox"));
-        assert_eq!(pretty_hostname(r#"PRETTY_HOSTNAME="The \"Lab\" \$box""#).as_deref(), Some(r#"The "Lab" $box"#));
-        assert_eq!(pretty_hostname("PRETTY_HOSTNAME='My Box'").as_deref(), Some("My Box"));
-        assert_eq!(pretty_hostname("#PRETTY_HOSTNAME=Old\nCHASSIS=server\n"), None);
+        assert_eq!(
+            pretty_hostname("PRETTY_HOSTNAME=\"Kevin's ThinkPad\"\nCHASSIS=laptop\n").as_deref(),
+            Some("Kevin's ThinkPad")
+        );
+        assert_eq!(
+            pretty_hostname("PRETTY_HOSTNAME=devbox").as_deref(),
+            Some("devbox")
+        );
+        assert_eq!(
+            pretty_hostname(r#"PRETTY_HOSTNAME="The \"Lab\" \$box""#).as_deref(),
+            Some(r#"The "Lab" $box"#)
+        );
+        assert_eq!(
+            pretty_hostname("PRETTY_HOSTNAME='My Box'").as_deref(),
+            Some("My Box")
+        );
+        assert_eq!(
+            pretty_hostname("#PRETTY_HOSTNAME=Old\nCHASSIS=server\n"),
+            None
+        );
         assert_eq!(pretty_hostname("PRETTY_HOSTNAME=\n"), None);
     }
 
     #[cfg(unix)]
     #[test]
     fn the_host_name_is_what_hostname_prints() {
-        let printed = std::process::Command::new("hostname").output().unwrap().stdout;
-        assert_eq!(host_name().as_deref(), Some(String::from_utf8_lossy(&printed).trim()));
+        let printed = std::process::Command::new("hostname")
+            .output()
+            .unwrap()
+            .stdout;
+        assert_eq!(
+            host_name().as_deref(),
+            Some(String::from_utf8_lossy(&printed).trim())
+        );
     }
 }
 
@@ -1261,20 +2230,173 @@ mod policy_tests {
         let bot: Bot = serde_json::from_value(serde_json::json!({
             "id": "bot", "name": "Bot", "description": "", "symbol_name": "", "accent": "",
             "runner_id": "runner", "provider": "deepseek", "created_at": 0.0
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(bot.capabilities.permits("bash", None));
         assert!(bot.capabilities.permits("write", None));
         assert!(bot.capabilities.permits("plugin__tool", Some("plugin")));
 
         let limited: Capabilities = serde_json::from_value(serde_json::json!({
             "shell": false, "write": false, "plugins": ["calendar"]
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!limited.permits("bash_input", None));
         assert!(!limited.permits("edit", None));
         assert!(!limited.permits("github__read", Some("github")));
         assert!(limited.permits("calendar__read", Some("calendar")));
         assert!(limited.permits("read", None));
-        assert!(serde_json::from_value::<Capabilities>(serde_json::json!({"plugins": ["calendar", "calendar"]})).unwrap().validate().is_err());
-        assert!(!serde_json::from_value::<RosterBlob>(serde_json::json!({"bots": [], "chats": [], "updated_at": 1.0})).unwrap().paused);
+        assert!(serde_json::from_value::<Capabilities>(
+            serde_json::json!({"plugins": ["calendar", "calendar"]})
+        )
+        .unwrap()
+        .validate()
+        .is_err());
+        assert!(
+            !serde_json::from_value::<RosterBlob>(
+                serde_json::json!({"bots": [], "chats": [], "updated_at": 1.0})
+            )
+            .unwrap()
+            .paused
+        );
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+
+    /// The cases the desktop app's `Device.IsRunner` is tested against too
+    /// (`desktop/model/runners_test.go`). A machine the relay lists that never sent its
+    /// `machine` blob is no Device here; the apps get it with an empty `os`.
+    #[test]
+    fn runners_are_the_devices_the_apps_offer_as_runners() {
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../testdata/runners.json")).unwrap();
+        assert!(cases.len() >= 9);
+        for case in cases {
+            let os = if case["unknown"] == true {
+                ""
+            } else {
+                case["os"].as_str().unwrap()
+            };
+            let device = Device {
+                id: "d".into(),
+                name: "D".into(),
+                os: os.into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                device.is_runner(),
+                case["runner"].as_bool().unwrap(),
+                "{case}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    fn used(context_tokens: u64, cost_usd: f64, turns: u64, updated_at: f64) -> ChatUsage {
+        ChatUsage {
+            context_tokens,
+            context_window: 100_000,
+            cost_usd,
+            turns,
+            input_tokens: turns * 10,
+            model: format!("m{context_tokens}"),
+            updated_at,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_context_is_the_bots_runners_and_the_spend_every_runners() {
+        let mut chat: Chat = serde_json::from_value(
+            serde_json::json!({ "id": "c", "kind": "group", "bot_ids": ["b"], "created_at": 0.0 }),
+        )
+        .unwrap();
+        assert_eq!(chat.shown_usage(Some("far"), Some("here")), None);
+
+        chat.runner_usage
+            .insert("far".into(), used(5_000, 0.5, 2, 20.0));
+        chat.runner_usage
+            .insert("near".into(), used(9_000, 0.25, 1, 30.0));
+        let shown = chat.shown_usage(Some("far"), Some("here")).unwrap();
+        assert_eq!(
+            (
+                shown.context_tokens,
+                shown.model.as_str(),
+                shown.cost_usd,
+                shown.turns,
+                shown.input_tokens,
+                shown.updated_at
+            ),
+            (5_000, "m5000", 0.75, 3, 30, 30.0)
+        );
+
+        // This Device's own turns count as its own report; a stale echo of it is ignored.
+        chat.usage = Some(used(7_000, 1.0, 4, 10.0));
+        chat.runner_usage
+            .insert("here".into(), used(1, 100.0, 100, 99.0));
+        let shown = chat.shown_usage(Some("here"), Some("here")).unwrap();
+        assert_eq!(
+            (shown.context_tokens, shown.cost_usd, shown.turns),
+            (7_000, 1.75, 7)
+        );
+
+        // Until the bot's Runner reports, the context is the latest report's.
+        let shown = chat.shown_usage(Some("new"), Some("here")).unwrap();
+        assert_eq!((shown.context_tokens, shown.cost_usd), (9_000, 1.75));
+    }
+}
+
+#[cfg(test)]
+mod workflow_wire_compat_tests {
+    use super::*;
+    use serde_json::json;
+    fn setup() -> serde_json::Value {
+        json!({"id":"setup", "runner_id":"runner", "pack":{
+            "id":"pack", "name":"Pack", "outcome":"Outcome", "description":"Description",
+            "questions":[], "specialists":[], "routines":[], "sample_specialist":"bot", "sample_prompt":"Sample"
+        }, "templates":{}, "answers":{}, "bot_ids":{}, "routine_ids":{},
+        "owned_routine_ids":[], "connection_ids":{}, "phase":"questions", "sample":null})
+    }
+    #[test]
+    fn legacy_and_fork_workflows_decode_into_separate_subjects() {
+        let record = json!({"id":"record", "bot_id":"bot", "name":"Saved", "definition":{"schema":99}, "created_at":1.0});
+        let roster: RosterBlob =
+            serde_json::from_value(json!({"workflows":[record.clone(), setup()]})).unwrap();
+        assert_eq!(roster.workflows.len(), 1);
+        assert_eq!(roster.workflows[0].definition, json!({"schema":99}));
+        assert_eq!(roster.workflow_setups.as_ref().unwrap()[0].id, "setup");
+        let wire = serde_json::to_value(&roster).unwrap();
+        assert_eq!(wire["workflows"], json!([record]));
+        assert_eq!(wire["workflow_setups"][0]["id"], "setup");
+        assert_eq!(serde_json::from_value::<RosterBlob>(wire).unwrap(), roster);
+    }
+    #[test]
+    fn malformed_and_ambiguous_workflows_are_rejected() {
+        for value in [json!({"workflows":[{"id":"bad"}]}), json!({"workflows":{}})] {
+            assert!(serde_json::from_value::<RosterBlob>(value).is_err());
+        }
+        let mut ambiguous = setup();
+        ambiguous["definition"] = json!({});
+        ambiguous["bot_id"] = json!("bot");
+        assert!(serde_json::from_value::<RosterBlob>(json!({"workflows":[ambiguous]})).is_err());
+        assert!(serde_json::from_value::<RosterBlob>(
+            json!({"workflows":[{"pack":{},"runner_id":"runner"}]})
+        )
+        .is_err());
+    }
+    #[test]
+    fn absent_setup_field_stays_absent() {
+        let roster: RosterBlob = serde_json::from_value(json!({})).unwrap();
+        assert!(roster.workflow_setups.is_none());
+        assert!(serde_json::to_value(roster)
+            .unwrap()
+            .get("workflow_setups")
+            .is_none());
     }
 }

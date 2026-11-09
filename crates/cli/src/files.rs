@@ -4,6 +4,7 @@
 //! bot's working directory for its turn, and the app shows them in the transcript.
 
 use std::path::{Path, PathBuf};
+use std::io::Read;
 use std::sync::Arc;
 
 #[cfg(feature = "runner")]
@@ -137,14 +138,32 @@ fn store_at(dir: &Path, file: &OutgoingFile) -> anyhow::Result<Attachment> {
         .or_else(|| source.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "file".into());
     let mime = file.mime.clone().filter(|m| m.contains('/')).unwrap_or_else(|| mime_for(&name).to_string());
-    let bytes = std::fs::read(source)?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(source)?.take(MAX_ATTACHMENT_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        anyhow::bail!("{} is larger than {} MB", file.path, MAX_ATTACHMENT_BYTES / 1024 / 1024);
+    }
     write_at(dir, &id, &bytes)?;
     let (width, height) = match (file.width, file.height) {
         (Some(w), Some(h)) => (Some(w), Some(h)),
         _ if mime.starts_with("image/") => image_size(&bytes),
         _ => (None, None),
     };
-    Ok(Attachment { id, name, mime, size: metadata.len(), width, height })
+    Ok(Attachment { id, name, mime, size: bytes.len() as u64, width, height, sha256: Some(sha256(&bytes)) })
+}
+
+/// Keeps bytes that came from elsewhere, such as a photo someone sent a channel, under `id`, and
+/// returns their attachment record. Like `store`, it uploads nothing.
+pub fn keep(app: &App, id: &str, name: &str, mime: &str, bytes: &[u8]) -> anyhow::Result<Attachment> {
+    if !valid_id(id) {
+        anyhow::bail!("Invalid attachment id");
+    }
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        anyhow::bail!("{name} is larger than {} MB", MAX_ATTACHMENT_BYTES / 1024 / 1024);
+    }
+    write_local(app, id, bytes)?;
+    let (width, height) = if mime.starts_with("image/") { image_size(bytes) } else { (None, None) };
+    Ok(Attachment { id: id.to_string(), name: name.to_string(), mime: mime.to_string(), size: bytes.len() as u64, width, height, sha256: Some(sha256(bytes)) })
 }
 
 fn write_local(app: &App, id: &str, bytes: &[u8]) -> anyhow::Result<()> {
@@ -172,6 +191,9 @@ pub fn push_blob(app: &App, chat_id: Option<&str>, attachment: &Attachment) -> a
 
 /// The attachment's bytes on this machine, fetched from the relay when another Device sent it.
 pub async fn ensure_local(app: &Arc<App>, attachment: &Attachment) -> anyhow::Result<PathBuf> {
+    if !valid_id(&attachment.id) {
+        anyhow::bail!("Invalid attachment id");
+    }
     let path = local_path(app, &attachment.id);
     if path.is_file() {
         return Ok(path);
@@ -188,7 +210,35 @@ pub async fn ensure_local(app: &Arc<App>, attachment: &Attachment) -> anyhow::Re
         .map_err(|e| anyhow::anyhow!(e.message))?
         .ok_or_else(|| anyhow::anyhow!("the relay no longer has {}", attachment.name))?;
     let bytes = crate::crypto::decrypt(&dek, "file", &ciphertext)?;
+    // A Device that kept an older account key could put other bytes up under the same id.
+    if attachment.sha256.as_ref().is_some_and(|expected| *expected != sha256(&bytes)) {
+        anyhow::bail!("{} on the relay is not the file that was sent", attachment.name);
+    }
     write_local(app, &attachment.id, &bytes)?;
+    Ok(path)
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn valid_id(id: &str) -> bool {
+    id.starts_with("att-") && id.len() <= 48 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// A private copy with the real filename and extension, so native preview/open/save handlers
+/// recognize reports and recordings. The immutable attachment id keeps versions apart.
+pub fn named_local_path(app: &App, attachment: &Attachment) -> anyhow::Result<PathBuf> {
+    if !valid_id(&attachment.id) { anyhow::bail!("Invalid attachment id"); }
+    let dir = app.config.files_dir().join("open").join(&attachment.id);
+    std::fs::create_dir_all(&dir)?;
+    crate::config::set_private(&dir)?;
+    let path = dir.join(safe_name(&attachment.name));
+    if !path.is_file() {
+        std::fs::copy(local_path(app, &attachment.id), &path)?;
+        crate::config::set_private(&path)?;
+    }
     Ok(path)
 }
 
@@ -386,17 +436,30 @@ mod tests {
         let home = std::env::temp_dir().join(format!("beans-files-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&home).unwrap();
         let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
-        let image = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(2600, 100, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 60])));
-        let mut png = Vec::new();
-        image.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
-        write_local(&app, "image-1", &png).unwrap();
-        let attachment = Attachment { id: "image-1".into(), name: "wrong.jpg".into(), mime: "image/jpeg".into(), size: png.len() as u64, width: None, height: None };
-        let parts = content_parts(&app, &attachment, &home.join("work"), true);
-        assert!(parts[1].as_text().unwrap().contains("displayed at 2000x77"));
-        let ContentPart::Image { data, mime_type } = &parts[2] else { panic!("missing image") };
-        assert!(matches!(mime_type.as_str(), "image/png" | "image/jpeg"), "actual decoded bytes decide type");
-        assert_eq!(image::load_from_memory(&base64::engine::general_purpose::STANDARD.decode(data).unwrap()).unwrap().width(), 2000);
-        assert!(app.config.files_dir().join("image-1.inline.json").is_file());
+        let workdir = home.join("work");
+        let picture = |width: u32, height: u32| {
+            let image = image::DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(width, height, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 60])));
+            let mut png = Vec::new();
+            image.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+            png
+        };
+        let parts = |id: &str, name: &str, mime: &str, bytes: &[u8]| {
+            write_local(&app, id, bytes).unwrap();
+            let attachment = Attachment { id: id.into(), name: name.into(), mime: mime.into(), size: bytes.len() as u64, width: None, height: None, sha256: None };
+            content_parts(&app, &attachment, &workdir, true)
+        };
+        let labeled = parts("att-1", "shot.jpg", "image/jpeg", &picture(64, 48));
+        assert!(matches!(&labeled[1], ContentPart::Image { mime_type, .. } if mime_type == "image/png"), "the type its bytes say: {labeled:?}");
+        let large = parts("att-2", "pano.png", "image/png", &picture(2600, 100));
+        assert_eq!(large[1], ContentPart::text("[Image: original 2600x100, displayed at 2000x77. Multiply coordinates by 1.30 to map to original image.]"));
+        assert!(matches!(&large[2], ContentPart::Image { .. }), "{large:?}");
+        assert!(app.config.files_dir().join("att-2.inline.json").is_file(), "made once, then kept");
+        let kept = Attachment { id: "att-2".into(), name: "pano.png".into(), mime: "image/png".into(), size: 0, width: None, height: None, sha256: None };
+        std::fs::remove_file(local_path(&app, "att-2")).unwrap();
+        assert_eq!(content_parts_from_kept(&app, &kept), large[1..], "the next turn reads what was kept");
+        let heic = parts("att-3", "IMG_0001.heic", "image/heic", b"\0\0\0\x18ftypheic\0\0\0\0mif1heic");
+        assert!(heic[1].as_text().is_some_and(|text| text.starts_with("[IMG_0001.heic is not shown as an image: it is an image/heic image")), "{heic:?}");
+        assert_eq!(parts("att-4", "notes.txt", "text/plain", b"hi").len(), 1, "a file that is no image is only named");
         drop(app);
         let _ = std::fs::remove_dir_all(home);
     }

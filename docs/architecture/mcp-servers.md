@@ -1,5 +1,7 @@
 # MCP servers
 
+The local Runner owns MCP connections and OAuth callbacks. Remote Device status remains origin-only and excludes secret values. Client forms use masked secrets and rebase drafts; OAuth metadata does not grant a client permission to reveal stored credentials.
+
 A Runner keeps custom MCP servers in private `mcp.json` under its CLI data directory. The file uses `{ "mcpServers": { "name": { "command": "…", "args": [] } } }`; remote entries use `type: "http"`, `url`, and optional `headers`. Entries may also set `env`, `cwd`, `description`, `disabled`, `timeout`, `oauth`, `toolExposure`, and `exposure`. Each valid enabled entry becomes a Runner plugin (`source: mcp.json`, server `mcp`), visible to bots through codemode and subject to their plugin capabilities and Auto-review. A disabled or invalid entry does not run.
 
 ## File and lifecycle

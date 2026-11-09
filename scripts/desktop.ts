@@ -1,4 +1,7 @@
-// The Windows and Linux app in desktop/, built with MyGo.
+// The Windows and Linux app in desktop/, built with the Go-module-pinned MyGo tool.
+// Optional local Darwin packaging: build darwin/arm64 --local-darwin. Requires the
+// desktop config signing/notary fields. local-darwin-assets.json is local evidence;
+// the unified release collector must explicitly admit it before any publication.
 //
 //   pnpm run desktop                      Beans Dev with live reload: builds the CLI for this
 //                                         computer and runs `mygo dev`, whose app launches it
@@ -14,7 +17,7 @@
 //                                         Signed local assets, listed in build/release-assets.json.
 //   pnpm run release-desktop [platforms]  Upload only release assets to the existing Beans draft.
 
-import { copyFileSync, chmodSync, existsSync, mkdirSync, readdirSync } from "node:fs"
+import { copyFileSync, chmodSync, existsSync, mkdirSync, readdirSync, constants } from "node:fs"
 import { writeFile, readFile } from "node:fs/promises"
 import { spawn, spawnSync } from "node:child_process"
 import { delimiter, join, relative } from "node:path"
@@ -23,10 +26,11 @@ import { extractReleaseNotes } from "./changelog.ts"
 import { rawReleaseSecret } from "./release-signing.ts"
 
 const DESKTOP = join(ROOT, "desktop")
-const MYGO = join(DESKTOP, "node_modules", ".bin", process.platform === "win32" ? "mygo.exe" : "mygo")
+const MYGO = ["go", "tool", "mygo"]
 
 /** The Rust target of the CLI each MyGo platform ships, static builds for Linux. */
 const RUST_TARGETS: Record<string, string> = {
+  "darwin/arm64": "aarch64-apple-darwin",
   "linux/amd64": "x86_64-unknown-linux-musl",
   "linux/arm64": "aarch64-unknown-linux-musl",
   "windows/amd64": "x86_64-pc-windows-gnu",
@@ -75,7 +79,7 @@ async function dev(): Promise<number> {
   }
   const binary = process.platform === "win32" ? `${cli.path}.exe` : cli.path
   log(`${color.bold("running")} ${color.dim("mygo dev")}`)
-  return await run([MYGO, "dev"], { cwd: DESKTOP, env: {
+  return await run([...MYGO, "dev"], { cwd: DESKTOP, env: {
     BEANS_CLI: binary,
     BEANS_DEV: "1",
     BEANS_ALLOWED_ORIGINS: "http://localhost:5178,http://127.0.0.1:5178",
@@ -92,12 +96,16 @@ async function placeCLI(platform: string): Promise<boolean> {
   const [goos, goarch] = platform.split("/")
   const exe = goos === "windows" ? `${CLI_NAME}.exe` : CLI_NAME
   let built: string
-  if (goos === "windows" && platform === hostPlatform()) {
+  if (goos !== "linux" && platform === hostPlatform()) {
     // Windows builds its own CLI with its own toolchain.
     log(`${color.bold("building")} ${color.dim("the CLI (release)")}`)
     const cli = await buildCLI("release")
     if (!cli.ok) return false
-    built = `${cli.path}.exe`
+    built = goos === "windows" ? `${cli.path}.exe` : cli.path
+  } else if (goos === "darwin") {
+    if (process.platform !== "darwin") throw new Error("Darwin packaging requires a Mac")
+    if ((await run(["cargo", "build", "--release", "--locked", "-p", CLI_NAME, "--target", target])) !== 0) return false
+    built = join(ROOT, "target", target, "release", exe)
   } else {
     log(`${color.bold("building")} ${color.dim(`the CLI for ${target}`)}`)
     if ((await run(["cargo", "zigbuild", "--release", "--locked", "-p", CLI_NAME, "--target", target])) !== 0) return false
@@ -122,7 +130,16 @@ function releaseState(tag: string): "draft" | "published" | "none" {
   return view.stdout.trim() === "true" ? "draft" : "published"
 }
 
-async function build(platforms: string[], options: { upload?: boolean } = {}): Promise<number> {
+async function build(platforms: string[], options: { upload?: boolean; localDarwin?: boolean } = {}): Promise<number> {
+  const darwin = platforms.includes("darwin/arm64")
+  if (platforms.some((platform) => !RUST_TARGETS[platform])) throw new Error("Unsupported desktop platform")
+  if (darwin && (!options.localDarwin || options.upload || process.platform !== "darwin")) {
+    throw new Error("Darwin MyGo requires --local-darwin on a Mac and cannot upload")
+  }
+  if (options.localDarwin && (!darwin || platforms.length !== 1)) throw new Error("--local-darwin requires only darwin/arm64")
+  if (darwin && (!process.env.SIGN_IDENTITY || !process.env.NOTARY_PROFILE)) {
+    throw new Error("Local Darwin signing requires SIGN_IDENTITY and NOTARY_PROFILE")
+  }
   const version = readVersion()
   const env = { MYGO_UPDATER_PRIVATE_KEY: await rawReleaseSecret() }
   if (options.upload) {
@@ -147,13 +164,19 @@ async function build(platforms: string[], options: { upload?: boolean } = {}): P
     }
   }
   log(`${color.bold("building")} ${color.dim(`the app for ${platforms.join(", ")}`)}`)
-  const command = [MYGO, "build", "-platform", platforms.join(","), ...(options.upload ? ["-upload"] : [])]
+  const command = [...MYGO, "build", "-platform", platforms.join(","), ...(options.upload ? ["-upload"] : [])]
   const status = await run(command, { cwd: DESKTOP, env })
   if (status === 0) {
     const assets = new Map<string, string>()
     for (const platform of platforms) {
       const target = platform.replace("/", "-")
       const directory = join(DESKTOP, "build", target)
+      // Normalize the new tool's architecture-qualified installer to the Beans inventory name.
+      if (platform === "windows/amd64") {
+        const installer = join(directory, `Beans Setup ${version} amd64.exe`)
+        if (!existsSync(installer)) throw new Error("MyGo did not stage the Windows installer")
+        copyFileSync(installer, join(directory, `Beans Setup ${version}.exe`), constants.COPYFILE_EXCL)
+      }
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
         if (!entry.isFile()) continue
         const name = entry.name
@@ -162,13 +185,18 @@ async function build(platforms: string[], options: { upload?: boolean } = {}): P
           assets.set(name, relative(ROOT, join(directory, name)))
         }
       }
-      if (!assets.has(`beans-${version}-${target}.tar.gz`) || !assets.has(`update-${target}.json`)) {
+      if (platform === "darwin/arm64") {
+        const dmg = `Beans ${version} arm64.dmg`
+        if (!existsSync(join(directory, dmg))) throw new Error("MyGo did not stage the Darwin disk image")
+        assets.clear()
+        assets.set(dmg, relative(ROOT, join(directory, dmg)))
+      } else if (!assets.has(`beans-${version}-${target}.tar.gz`) || !assets.has(`update-${target}.json`)) {
         throw new Error(`MyGo did not stage the signed archive and metadata for ${target}`)
       }
     }
-    const manifest = join(DESKTOP, "build", "release-assets.json")
+    const manifest = join(DESKTOP, "build", darwin ? "local-darwin-assets.json" : "release-assets.json")
     await writeFile(manifest, JSON.stringify({
-      version, tag: TAG_PREFIX + version, assets: [...assets.values()],
+      version, tag: TAG_PREFIX + version, ...(darwin ? { schema: 1, variant: { localOnly: true, implementation: "mygo", platform: "darwin-arm64", identifier: "app.beans" } } : {}), assets: [...assets.values()],
     }, null, 2) + "\n")
     log(`${color.green("staged")} ${color.dim(relative(ROOT, manifest))}`)
   }
@@ -180,13 +208,14 @@ async function build(platforms: string[], options: { upload?: boolean } = {}): P
 const [mode, ...args] = process.argv.slice(2)
 if (mode === "build" || mode === "release") {
   const stageOnly = args.includes("--stage-only")
-  const unknown = args.find((arg) => arg.startsWith("--") && arg !== "--stage-only")
+  const localDarwin = args.includes("--local-darwin")
+  const unknown = args.find((arg) => arg.startsWith("--") && arg !== "--stage-only" && arg !== "--local-darwin")
   const positional = args.filter((arg) => !arg.startsWith("--"))
   if (unknown || positional.length > 1) {
     throw new Error("usage: pnpm exec tsx scripts/desktop.ts build|release [platforms] [--stage-only]")
   }
   const host = hostPlatform()
   const platforms = positional[0]?.split(",").filter((platform) => platform !== "") ?? (host.startsWith("darwin") ? ["linux/amd64", "windows/amd64"] : [host])
-  process.exit(await build(platforms, { upload: mode === "release" && !stageOnly }))
+  process.exit(await build(platforms, { upload: mode === "release" && !stageOnly, localDarwin }))
 }
 process.exit(await dev())

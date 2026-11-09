@@ -47,7 +47,7 @@ pub fn push_open(home: String, sealed: String) -> Option<PushNotice> {
     let config = Config { home: PathBuf::from(home), port: 0 };
     if !config.validate_home().ok()? { return None; }
     let machine: beans::keys::MachineFile = beans::config::read_json_strict(&config.machine_path()).ok()??;
-    let notice = beans::push::open(&machine.dek().ok()?, &beans::keys::unb64(&sealed).ok()?).ok()?;
+    let notice = beans::push::open(machine.dek().ok()?.newest(), &beans::keys::unb64(&sealed).ok()?).ok()?;
     Some(PushNotice { title: notice.title, subtitle: notice.subtitle, body: notice.body, chat_id: notice.chat_id })
 }
 
@@ -105,10 +105,11 @@ impl Core {
         response.to_string()
     }
 
-    /// The key pushes are sealed under, for the iOS notification service extension, which
-    /// runs outside the app and reads it from the shared keychain. `None` until paired.
+    /// The key pushes are sealed under, that of the newest account key, for the iOS
+    /// notification service extension, which runs outside the app and reads it from the shared
+    /// keychain. `None` until paired.
     pub fn push_key(&self) -> Option<Vec<u8>> {
-        self.app.dek().map(|dek| beans::keys::push_key(&dek).to_vec())
+        self.app.dek().map(|keys| beans::keys::push_key(keys.newest()).to_vec())
     }
 
     /// The app came to the foreground: sync now rather than after the backoff.
@@ -256,11 +257,16 @@ mod tests {
                 owner_bot_id: None,
                 description: None,
                 is_pinned: false,
+                section_id: None,
+                is_hidden: false,
+                mute: None,
                 created_at: 1.0,
+                channel: None,
             },
             unread_count: 0,
             usage: None,
             compactions: Vec::new(),
+            runner_usage: Default::default(),
         });
         let tool = beans::model::Message::new(
             chat_id,
@@ -278,6 +284,8 @@ mod tests {
                 target_bot_id: None,
                 script_command: None,
                 run: None,
+                agent: None,
+                target_agent_id: None,
             },
         );
         let tool_id = tool.id.clone();

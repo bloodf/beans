@@ -14,7 +14,7 @@ Every computer or phone you pair is a **Device**. A Device with a desktop OS (ma
 
 ## Pair a device
 
-Pairing needs a [relay](/docs/relay) that both devices can reach. Set it in **Settings › Advanced › Relay URL** first.
+Pairing goes through Beans's [relay](/docs/relay), so both devices need to be online.
 
 <Steps>
 <Step>
@@ -49,6 +49,10 @@ The new device receives your account key, then your bots, provider credentials, 
 ## Manage devices
 
 **Settings › Devices** shows each device's role, core version, last-seen time and machine key. CLI self-update is [unavailable in Beans](/docs/cli#updates); desktop apps use the signed Beans updater. **Settings › Bots** and **Settings › Plugins** show the selected device's bots and plugins.
+
+
+To rename a device, click **Rename…** beside its name at the top of **Settings › Devices** (on a phone, tap **Rename…** on the device's screen), type a new name, and choose **Rename**. Any device can rename any other, and every paired device shows the new name. Leave the name blank to go back to the one the computer or phone goes by.
+
 
 A device that is paired to your account but has never sent its name or system shows as **Unknown Device**. If you don't recognize it, unpair it.
 

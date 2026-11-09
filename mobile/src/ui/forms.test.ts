@@ -28,8 +28,9 @@ vi.doMock("@expo/ui/swift-ui/modifiers", () => ({
   truncationMode: () => ({}),
 }));
 vi.doMock("@expo/ui/community/menu", () => ({ MenuView: "MenuView" }));
+vi.doMock("@expo/ui/jetpack-compose", () => ({ Checkbox: "Checkbox", Host: "ComposeHost", RadioButton: "RadioButton", Switch: "ComposeSwitch" }));
 vi.doMock("./Symbol", () => ({ Symbol: "Symbol" }));
-vi.doMock("./theme", () => ({ Font: { body: 17, small: 15 }, usePalette: () => ({ cell: "cell", separator: "separator", secondaryLabel: "secondaryLabel" }) }));
+vi.doMock("./theme", () => ({ Font: { body: 17, small: 15 }, withAlpha: (color: string) => color, usePalette: () => ({ cell: "cell", separator: "separator", secondaryLabel: "secondaryLabel" }) }));
 
 const { Section, ToggleRow, FieldRow } = await import("./forms");
 

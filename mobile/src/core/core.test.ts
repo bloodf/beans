@@ -12,6 +12,19 @@ test("new setup selects the full catalog while edits preserve an empty selection
 });
 import {
   addModelRow,
+  agentIsOpen,
+  agentMessageFromUser,
+  agentIsRunning,
+  agentName,
+  agentStartRow,
+  agentStarted,
+  agentTitle,
+  agentWrote,
+  isAgentRow,
+  pullRequestLabel,
+  readyCodingAgent,
+  type AgentRun,
+  type CodingAgent,
   attachmentSummary,
   connectedProviders,
   contextWindowLabel,
@@ -24,6 +37,7 @@ import {
   fileSize,
   filterModelRows,
   isCustomProvider,
+  isDecisionAPI,
   isHTTPURL,
   isLoopbackHost,
   isProviderKind,
@@ -33,6 +47,7 @@ import {
   modelLabel,
   modelListingNote,
   presetForURL,
+  presetGroup,
   providerConnectMethod,
   providerDefaultBaseURL,
   providerKinds,
@@ -40,6 +55,10 @@ import {
   providerModels,
   providerUsesAPIKey,
   PROVIDER_KINDS,
+  reviewModelRows,
+  reviewModels,
+  reviewPicker,
+  reviewProviders,
   runsInForeground,
   runsInTerminal,
   savedModelRows,
@@ -49,6 +68,7 @@ import {
   urlHost,
   thinkingLevels,
   withCustomModels,
+  withReviewModel,
   type ProviderModel,
   type Body,
   type Bot,
@@ -57,7 +77,7 @@ import {
   type ProviderStatus,
 } from "./model";
 import { parsePairingString } from "./pairing";
-import { daySeparator, joinDictation, preview, stamp, time, workingActivity, type WorkState } from "../ui/format";
+import { daySeparator, joinDictation, preview, stamp, time, workingActivity, workingPhrase, workingStep, type WorkState } from "../ui/format";
 
 let nextId = 0;
 const uuid = () => `m-${++nextId}`;
@@ -145,6 +165,45 @@ describe("model", () => {
     // Ended.
     for (const state of ["exited", "failed", "stopped", "denied", "expired", "dismissed"] as const) expect(call(false, state, true)).toBe(false);
     expect(showsCard({ kind: "tool", name: "read", summary: "", detail: "", is_running: false })).toBe(false);
+  });
+
+  test("a Runner's bots use its first coding agent that is on and installed", () => {
+    const agent = (kind: string, enabled: boolean, installed: boolean): CodingAgent => ({ kind, name: agentName(kind), enabled, installed, version: installed ? "1.0.0" : null });
+    expect(readyCodingAgent([agent("claude", false, true), agent("codex", true, false), agent("pi", true, true), agent("fx", true, true)])?.kind).toBe("pi");
+    expect(readyCodingAgent([agent("claude", false, true), agent("codex", true, false)])).toBeUndefined();
+    expect(readyCodingAgent([])).toBeUndefined();
+  });
+
+  test("a coding agent stops while it runs and has a page once it started", () => {
+    const agent = (state: AgentRun["state"], more: Partial<AgentRun> = {}): AgentRun => ({ id: "agent-1", kind: "claude", title: "Fix the login", task: "Fix it", folder: "~/Projects/site", branch: "fix-it", state, ...more });
+    expect(agentName("claude")).toBe("Claude Code");
+    expect(agentName("codex")).toBe("Codex");
+    expect(agentName("opencode")).toBe("OpenCode");
+    expect(agentName("pi")).toBe("pi");
+    expect(agentName("fx")).toBe("fx");
+    expect(agentTitle(agent("working"))).toBe("Fix the login");
+    expect(agentTitle(agent("working", { title: "" }))).toBe("Fix it");
+    for (const state of ["starting", "working", "asking"] as const) expect(agentIsRunning(agent(state))).toBe(true);
+    // Done, it waits for a follow-up; ended, it takes none.
+    for (const state of ["idle", "failed", "stopped"] as const) expect(agentIsRunning(agent(state))).toBe(false);
+    expect(agentIsOpen(agent("idle"))).toBe(true);
+    expect(agentIsOpen(agent("failed"))).toBe(false);
+    expect(agentStarted(agent("working"))).toBe(true);
+    // A start that failed before the agent had an id has no page.
+    expect(agentStarted(agent("failed", { id: "" }))).toBe(false);
+    expect(pullRequestLabel("https://github.com/acme/shop/pull/7")).toBe("#7");
+  });
+
+  test("a coding agent's start and the messages sent to it show; its other calls don't", () => {
+    const start: Body = { kind: "tool", name: "coding_agent", summary: "", detail: "Fix the login form", is_running: false, agent: { id: "agent-1", kind: "codex", title: "Login", task: "Fix", state: "working" } };
+    const sent: Body = { kind: "tool", name: "coding_agent", summary: "", detail: "Also the tests", is_running: false, target_agent_id: "agent-1" };
+    const read: Body = { kind: "tool", name: "coding_agent", summary: "", detail: "{}", is_running: false };
+    expect([start, sent, read].map(isAgentRow)).toEqual([true, true, false]);
+    // While the call runs its detail is the arguments; the marker reads the prompt from them.
+    expect(agentWrote({ ...(sent as Extract<Body, { kind: "tool" }>), is_running: true, detail: "{…}", arguments: { action: "send", id: "agent-1", message: "Also the tests" } })).toBe("Also the tests");
+    const messages = [start, sent].map((body, i) => ({ id: `m${i}`, chat_id: "c", author: { kind: "bot" as const, bot_id: "b" }, body, state: { kind: "complete" as const }, created_at: i }));
+    expect(agentStartRow(messages, "agent-1")?.id).toBe("m0");
+    expect(agentStartRow(messages, "")).toBeUndefined();
   });
 
   test("a command runs in its terminal from its session's start to its end", () => {
@@ -278,6 +337,39 @@ describe("custom providers", () => {
     expect(customRequestURL("chat-completions", "  ")).toBe("");
   });
 
+  test("protocols name their path and base URL example", () => {
+    expect(customAPI("messages")).toMatchObject({ title: "Anthropic Messages", path: "/messages", placeholder: "https://api.example.com/v1" });
+    expect(customAPI("responses")).toMatchObject({ title: "OpenAI Responses", path: "/responses", placeholder: "https://api.example.com/v1" });
+    // A protocol this build does not know reads as the first.
+    expect(customAPI(undefined).id).toBe("chat-completions");
+  });
+
+  test("presets start the form from a server people often add", () => {
+    expect(CUSTOM_PRESETS.map((preset) => [preset.name, preset.api, preset.baseURL])).toEqual([
+      ["OpenAI", "responses", "https://api.openai.com/v1"],
+      ["OpenRouter", "chat-completions", "https://openrouter.ai/api/v1"],
+      ["Gemini", "chat-completions", "https://generativelanguage.googleapis.com/v1beta/openai"],
+      ["Groq", "chat-completions", "https://api.groq.com/openai/v1"],
+      ["Together AI", "chat-completions", "https://api.together.xyz/v1"],
+      ["Ollama", "chat-completions", "http://localhost:11434/v1"],
+      ["LM Studio", "chat-completions", "http://localhost:1234/v1"],
+      ["OpenRouter Decisions", "system-one", "https://openrouter.ai/api/alpha/decisions"],
+      ["OpenAI Decisions", "decisions", "https://api.openai.com/v1/decisions"],
+      ["TypeSafe", "system-one", "https://api.typesafe.ai/v1/systemone"],
+    ]);
+    expect(CUSTOM_PRESETS.filter((preset) => preset.local).map((preset) => preset.name)).toEqual(["Ollama", "LM Studio"]);
+    // Add Custom Provider's groups, in the menu's order.
+    expect(CUSTOM_PRESETS.map(presetGroup)).toEqual(["cloud", "cloud", "cloud", "cloud", "cloud", "local", "local", "decisions", "decisions", "decisions"]);
+    expect(customPreset("TypeSafe")?.keyPlaceholder()).toBe("Key from typesafe.ai");
+    expect(customPreset("OpenRouter Decisions")?.keyPlaceholder()).toBe("sk-or-… from openrouter.ai/keys");
+    expect(customPreset("together ai")?.keyPlaceholder()).toBe("Key from api.together.ai");
+    expect(customPreset("Lab")).toBeUndefined();
+    expect(customPreset(undefined)).toBeUndefined();
+    // A preset the account has already is that provider, whatever the case of its name.
+    expect(customProviderNamed("openrouter", statuses)?.kind).toBe("custom:openrouter");
+    expect(customProviderNamed("Groq", statuses)).toBeUndefined();
+    expect(customProviderNamed("DeepSeek", statuses)).toBeUndefined();
+  });
 
   test("a base URL names its host, which names a provider left unnamed", () => {
     expect(urlHost("https://openrouter.ai/api/v1")).toBe("openrouter.ai");
@@ -304,6 +396,18 @@ describe("custom providers", () => {
     expect(defaultProviderName("https://generativelanguage.googleapis.com/v1beta/openai")).toBe("Gemini");
     expect(defaultProviderName("http://192.168.1.20:11434/v1")).toBe("192.168.1.20:11434");
     expect(defaultProviderName("")).toBe("");
+  });
+
+  test("a server with several presets names the one of the API picked", () => {
+    expect(presetForURL("https://openrouter.ai/api/alpha/decisions", "system-one")?.name).toBe("OpenRouter Decisions");
+    expect(presetForURL("https://openrouter.ai/api/v1", "chat-completions")?.name).toBe("OpenRouter");
+    expect(presetForURL("https://api.openai.com/v1", "decisions")?.name).toBe("OpenAI Decisions");
+    expect(presetForURL("https://api.openai.com/v1", "responses")?.name).toBe("OpenAI");
+    // An API none of the server's presets has, or none at all, takes its first.
+    expect(presetForURL("https://openrouter.ai/api/v1", "responses")?.name).toBe("OpenRouter");
+    expect(presetForURL("https://api.openai.com/v1/decisions")?.name).toBe("OpenAI");
+    expect(defaultProviderName("https://api.typesafe.ai/v1", "system-one")).toBe("TypeSafe");
+    expect(defaultProviderName("https://openrouter.ai/api/alpha/decisions", "system-one")).toBe("OpenRouter Decisions");
   });
 
   test("context windows read the short way", () => {
@@ -400,6 +504,129 @@ describe("custom providers", () => {
   });
 });
 
+describe("decision providers", () => {
+  const typesafe: ProviderStatus = {
+    kind: "custom:typesafe",
+    is_connected: true,
+    detail: "https://api.typesafe.ai/v1/systemone",
+    base_url: "https://api.typesafe.ai/v1/systemone",
+    name: "TypeSafe",
+    api: "system-one",
+    models: [{ id: "jev-latest", name: "Jev", levels: [] }, { id: "jev-1.13", levels: [] }],
+    review_model: "jev-latest",
+  };
+  // A custom provider whose status names no review model.
+  const lab: ProviderStatus = { kind: "custom:lab", is_connected: true, detail: "", base_url: "http://192.168.1.20:11434/v1", name: "Lab", api: "chat-completions", models: [{ id: "llama4", levels: ["low"] }] };
+  // The review models the core names: DeepSeek's in the catalog, OpenCode Zen's not.
+  const reviewModelOf: Record<string, string> = { deepseek: "deepseek-flash", opencode: "zen-mini" };
+  const statuses: ProviderStatus[] = [
+    ...PROVIDER_KINDS.map((kind) => ({ kind, is_connected: kind === "deepseek" || kind === "opencode", detail: "", review_model: reviewModelOf[kind] })),
+    typesafe,
+    lab,
+  ];
+  // The core's catalog as the snapshot carries it, OpenCode Zen's decision model among the chat
+  // models, and the custom providers' after it.
+  const catalog = withCustomModels(
+    [
+      { provider: "deepseek", id: "deepseek-pro", name: "DeepSeek Pro", levels: ["off", "high"], decides: false },
+      { provider: "deepseek", id: "deepseek-flash", name: "DeepSeek Flash", levels: ["off", "high"], decides: false },
+      { provider: "opencode", id: "jev-1.13", name: "Jev 1.13", levels: [], decides: true },
+      { provider: "opencode", id: "kimi-k3", name: "Kimi K3", levels: ["max"], decides: false },
+    ],
+    statuses,
+  );
+
+  test("speak a decision API at its endpoint", () => {
+    expect(["system-one", "decisions"].map(isDecisionAPI)).toEqual([true, true]);
+    expect(["chat-completions", "responses", "messages", undefined].map(isDecisionAPI)).toEqual([false, false, false, false]);
+    expect(customAPI("system-one")).toMatchObject({ title: "System One", path: "/systemone", placeholder: "https://api.example.com/v1" });
+    expect(customAPI("decisions")).toMatchObject({ title: "OpenAI Decisions", path: "/decisions", placeholder: "https://api.example.com/v1" });
+    // A URL that ends in a decision path is the endpoint as typed; any other gets the API's path.
+    expect(customRequestURL("system-one", "https://openrouter.ai/api/alpha/decisions")).toBe("https://openrouter.ai/api/alpha/decisions");
+    expect(customRequestURL("system-one", " https://api.typesafe.ai/v1/systemone/ ")).toBe("https://api.typesafe.ai/v1/systemone");
+    expect(customRequestURL("system-one", "https://api.typesafe.ai/v1")).toBe("https://api.typesafe.ai/v1/systemone");
+    expect(customRequestURL("decisions", "https://api.openai.com/v1")).toBe("https://api.openai.com/v1/decisions");
+    expect(customRequestURL("decisions", "https://ai-gateway.vercel.sh/v1/decisions")).toBe("https://ai-gateway.vercel.sh/v1/decisions");
+    expect(customRequestURL("decisions", "https://x/v1/systemone")).toBe("https://x/v1/systemone");
+    expect(customRequestURL("decisions", "")).toBe("");
+  });
+
+  test("no bot picker offers a decision provider or model", () => {
+    expect(providerKinds(statuses)).toEqual([...PROVIDER_KINDS, "custom:lab"]);
+    // New Bot's first provider is one a bot can run.
+    expect(connectedProviders([typesafe, lab])).toEqual(["custom:lab"]);
+    expect(connectedProviders(statuses)).toEqual(["deepseek", "opencode", "custom:lab"]);
+    // The default is the first model that does not decide.
+    expect(providerModels(catalog, "opencode").map((model) => model.id)).toEqual(["kimi-k3"]);
+    expect(thinkingLevels(catalog, "opencode", undefined)).toEqual(["max"]);
+    expect(providerModels(catalog, "custom:typesafe")).toEqual([]);
+    expect(providerModels(catalog, "custom:lab").map((model) => model.id)).toEqual(["llama4"]);
+  });
+
+  test("Auto-review can run every connected provider's models, decision models among them", () => {
+    expect(reviewProviders(statuses)).toEqual(["deepseek", "opencode", "custom:typesafe", "custom:lab"]);
+    expect(reviewModels(catalog, "opencode").map((model) => [model.id, !!model.decides])).toEqual([
+      ["jev-1.13", true],
+      ["kimi-k3", false],
+    ]);
+    expect(reviewModels(catalog, "custom:typesafe").map((model) => [model.name, model.decides])).toEqual([
+      ["Jev", true],
+      ["jev-1.13", true],
+    ]);
+  });
+
+  test("Reviews with offers the bot's provider, then every connected one", () => {
+    const review = { is_enabled: true, rules: [] };
+    const connected = ["deepseek", "opencode", "custom:typesafe", "custom:lab"];
+    expect(reviewPicker(review, statuses)).toEqual({ providers: connected, provider: undefined });
+    expect(reviewPicker({ ...review, provider: "custom:typesafe" }, statuses)).toEqual({ providers: connected, provider: "custom:typesafe" });
+    // A provider the account no longer has reads as the bot's, as the core then reviews.
+    expect(reviewPicker({ ...review, provider: "anthropic" }, statuses).provider).toBeUndefined();
+    expect(reviewPicker({ ...review, provider: "custom:gone" }, statuses).provider).toBeUndefined();
+    expect(reviewPicker(review, [])).toEqual({ providers: [], provider: undefined });
+  });
+
+  test("Review Models has a row for every connected provider, Default or the model picked", () => {
+    const review = { is_enabled: true, rules: [], models: { opencode: "jev-1.13", "custom:typesafe": "jev-0.9" } };
+    const rows = reviewModelRows(review, statuses, catalog);
+    expect(rows.map((row) => [row.kind, row.defaultName, row.picked])).toEqual([
+      // Default names the status's review model, by its name in the catalog, else its id.
+      ["deepseek", "DeepSeek Flash", undefined],
+      ["opencode", "zen-mini", "jev-1.13"],
+      ["custom:typesafe", "Jev", "jev-0.9"],
+      // No review model named: just Default.
+      ["custom:lab", undefined, undefined],
+    ]);
+    // All a provider's models, decision models among them.
+    expect(rows[1].models.map((model) => [model.id, !!model.decides])).toEqual([
+      ["jev-1.13", true],
+      ["kimi-k3", false],
+    ]);
+    // A picked model the list lacks is still shown, titled by its id.
+    expect(rows[2].models.map((model) => [model.id, model.name])).toEqual([
+      ["jev-latest", "Jev"],
+      ["jev-1.13", "jev-1.13"],
+      ["jev-0.9", "jev-0.9"],
+    ]);
+    expect(rows[0].models.map((model) => model.id)).toEqual(["deepseek-pro", "deepseek-flash"]);
+    // No provider connected, no rows.
+    expect(reviewModelRows(review, [lab].map((status) => ({ ...status, is_connected: false })), catalog)).toEqual([]);
+  });
+
+  test("a provider's review model is picked or put back to its default, the others' kept", () => {
+    const review = { is_enabled: false, rules: [], provider: "custom:typesafe" };
+    const picked = withReviewModel(review, "anthropic", "claude-opus-5");
+    expect(picked).toEqual({ ...review, models: { anthropic: "claude-opus-5" } });
+    const both = withReviewModel(picked, "deepseek", "deepseek-pro");
+    expect(both.models).toEqual({ anthropic: "claude-opus-5", deepseek: "deepseek-pro" });
+    expect(withReviewModel(both, "deepseek", "deepseek-flash").models).toEqual({ anthropic: "claude-opus-5", deepseek: "deepseek-flash" });
+    expect(withReviewModel(both, "anthropic", undefined).models).toEqual({ deepseek: "deepseek-pro" });
+    // The last one put back leaves none.
+    expect(withReviewModel(picked, "anthropic", undefined)).toEqual({ ...review, models: undefined });
+    expect(withReviewModel(review, "grok", undefined).models).toBeUndefined();
+  });
+});
+
 describe("attachments", () => {
   const photo = { id: "att-1", name: "IMG_1.jpg", mime: "image/jpeg", size: 2_500_000 };
   const doc = { id: "att-2", name: "report.pdf", mime: "application/pdf", size: 900 };
@@ -424,8 +651,8 @@ describe("attachments", () => {
 
 describe("format", () => {
   const bots = new Map<string, Bot>([
-    ["b1", { id: "b1", name: "Chef", description: "", symbol_name: "sparkles", accent: "indigo", runner_id: "r", provider: "deepseek", created_at: 0 }],
-    ["b2", { id: "b2", name: "Scout", description: "", symbol_name: "magnifyingglass", accent: "teal", runner_id: "r", provider: "deepseek", created_at: 0 }],
+    ["b1", { id: "b1", name: "Chef", description: "", accent: "indigo", runner_id: "r", provider: "deepseek", created_at: 0 }],
+    ["b2", { id: "b2", name: "Scout", description: "", accent: "teal", runner_id: "r", provider: "deepseek", created_at: 0 }],
   ]);
   const chat = (kind: "dm" | "group", messages: Chat["messages"]): Chat => ({ id: "c", kind, bot_ids: ["b1", "b2"], is_pinned: false, created_at: 0, messages, unread_count: 0 });
   const msg = (author: Chat["messages"][number]["author"], body: Body): Chat["messages"][number] => ({ id: uuid(), chat_id: "c", author, body, state: { kind: "complete" }, created_at: 1 });
@@ -442,6 +669,21 @@ describe("format", () => {
     expect(preview(chat("dm", [sent]), bots)).toBe("Messaged Scout: please look");
     const handoff = msg({ kind: "bot", bot_id: "b1" }, { kind: "handoff", from: "b1", to: "b2", reason: "over to you" });
     expect(preview({ ...chat("dm", [handoff]), bot_ids: ["b2"] }, bots)).toBe("Message from Chef: over to you");
+    // A handoff's report reaches the requesting bot's group from outside it.
+    const report = msg({ kind: "bot", bot_id: "b2" }, { kind: "handoff", from: "b2", to: "b1", reason: "done" });
+    expect(preview({ ...chat("group", [report]), bot_ids: ["b1", "b3"] }, bots)).toBe("Message from Scout: done");
+    // A coding agent, by the title the bot gave its job.
+    const started = msg({ kind: "bot", bot_id: "b1" }, { kind: "tool", name: "coding_agent", summary: "", detail: "Fix the login form\nand its tests", is_running: false, agent: { id: "agent-1", kind: "claude", title: "Login fix", task: "Fix", state: "working" } });
+    expect(preview(chat("dm", [started]), bots)).toBe("Messaged Login fix: Fix the login form and its tests");
+    const followUp = msg({ kind: "bot", bot_id: "b1" }, { kind: "tool", name: "coding_agent", summary: "", detail: "Run them too", is_running: false, target_agent_id: "agent-1" });
+    expect(preview(chat("dm", [started, followUp]), bots)).toBe("Messaged Login fix: Run them too");
+    const said = msg({ kind: "bot", bot_id: "b1" }, { kind: "agent_message", agent_id: "agent-1", agent_kind: "claude", title: "Login fix", text: "Done, PR #7" });
+    expect(preview(chat("dm", [started, said]), bots)).toBe("Message from Login fix: Done, PR #7");
+    // What the user wrote the agent from its page.
+    const wrote = msg({ kind: "you" }, { kind: "agent_message", agent_id: "agent-1", agent_kind: "claude", title: "Login fix", text: "Also check\nthe signup form" });
+    expect(preview(chat("dm", [started, said, wrote]), bots)).toBe("You messaged Login fix: Also check the signup form");
+    expect(agentMessageFromUser(wrote)).toBe(true);
+    expect(agentMessageFromUser(said)).toBe(false);
   });
 
   test("the working row reads what the one bot at work is doing", () => {
@@ -462,22 +704,30 @@ describe("format", () => {
     expect(activity([you])).toBeNull();
     expect(activity([you, tool("bash", { description: "Install dependencies" })])).toBe("Running command: Install dependencies…");
     // Between calls the row keeps the last one.
-    expect(activity([you, tool("bash", { is_running: false })])).toBe("Running commands…");
+    expect(activity([you, tool("bash", { is_running: false })])).toBe("Running a few commands…");
     expect(activity([you, tool("memory_update")])).toBe("Taking a note…");
-    expect(activity([you, tool("message_bot", { target_bot_id: "b2" })])).toBe("Messaging Scout…");
+    expect(activity([you, tool("coding_agent")])).toBe("Writing some code…");
+    expect(activity([you, tool("message_bot", { target_bot_id: "b2" })])).toBe("Checking with Scout…");
     expect(activity([you, tool("message_bot", { summary: "Messaged Scout", is_running: false })])).toBeNull();
     expect(activity([you, tool("github__create_issue")])).toBe("Using Github…");
     const runner = { id: "r", name: "Mac", model: "", os: "macos", os_version: "", machine_key: "", is_this_device: false, status: "online" as const, last_seen: 0, plugins: [{ id: "github", name: "GitHub", state: "ready" as const }] };
     expect(activity([you, tool("github__create_issue")], { devices: [runner] })).toBe("Using GitHub…");
-    expect(activity([you, tool("routines")])).toBe("Working…");
+    // A call with nothing more particular to say reads as one of the working phrases, kept for its
+    // step and drawn again at the next.
+    const working = ["Getting it done…", "Making progress…", "Working on it…", "Handling it…", "Chipping away…"];
+    const routines = tool("routines");
+    expect(working).toContain(activity([you, routines]));
+    expect(activity([you, routines])).toBe(workingPhrase(workingStep("c", [you, routines])));
+    const drawn = new Set(Array.from({ length: 40 }, (_, i) => workingPhrase(`c/${i}`)));
+    expect(drawn.size).toBe(working.length);
     // A script reads as the plugin its latest call used, which the CLI puts in its description.
-    expect(activity([you, tool("codemode")])).toBe("Working…");
+    expect(working).toContain(activity([you, tool("codemode")]));
     expect(activity([you, tool("codemode", { description: "Linear", is_running: false })])).toBe("Using Linear…");
     expect(activity([you, tool("codemode", { description: "Linear", script_command: "Install dependencies" })])).toBe("Running command: Install dependencies…");
     expect(activity([you, tool("codemode", { description: "Linear", script_command: "Install dependencies", is_running: false })])).toBe("Using Linear…");
     // What the bot said since is the news; its thinking and a retry outrank the last call.
     expect(activity([you, tool("read"), msg({ kind: "bot", bot_id: "b1" }, { kind: "text", text: "Done" })])).toBeNull();
-    expect(activity([you, tool("read")], { thinking: { c: "b1" } })).toBe("Thinking…");
+    expect(["Thinking it through…", "Mulling it over…", "Putting it together…"]).toContain(activity([you, tool("read")], { thinking: { c: "b1" } }));
     expect(activity([you], { thinking: { c: "b1" }, retries: { c: { attempt: 2, max_attempts: 3, delay_ms: 3600 } } })).toBe("Retrying (2 of 3) in 4 s…");
     // Two bots at work read as their names.
     expect(activity([you, tool("read")], { running: { a: { chatId: "c", botId: "b1" }, b: { chatId: "c", botId: "b2" } } })).toBeNull();

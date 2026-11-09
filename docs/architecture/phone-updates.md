@@ -1,5 +1,7 @@
 # Phone releases and updates
 
+An Android update requires the Beans signed readiness inventory for that client, its immutable source identity and matching artifact digest. A mobile-only tag or server readiness cannot authorize installation. The existing download, progress and package-installer flow operates after this authorization boundary.
+
 iOS builds go to TestFlight, which updates them. Android GitHub APKs ship on stable `beans-vX.Y.Z` releases as `Beans-X.Y.Z.apk`, built by the all-scope release path ([Releases](releases.md)). The root `package.json` supplies the version; EAS remote versions own Android versionCode and iOS buildNumber. Play AAB and TestFlight IPA updates stay with those stores. Local `scripts/android-release.ts` remains a separate release tool.
 
 ## Distribution and native gate

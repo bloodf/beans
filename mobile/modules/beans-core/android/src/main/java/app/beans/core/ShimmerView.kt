@@ -15,9 +15,9 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.views.ExpoView
 
-/// A container whose contents shimmer, as the Mac's working row does: a gradient mask dims
-/// them to 40% and sweeps a bright band, 30% of the width, from the leading edge to the
-/// trailing one in 1.5 s, resting a quarter second between sweeps.
+/// A container whose contents shimmer, as the working row's do: a gradient mask dims them to 40%
+/// and sweeps a bright band, 30% of the width, from the leading edge to the trailing one in 1.5 s,
+/// resting a quarter second between sweeps.
 class ShimmerViewModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ShimmerView")

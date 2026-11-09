@@ -1068,6 +1068,34 @@ final class AppStore {
     /// Answers a question: a permission card's, or a command card's. `allow`, `always`, or
     /// `deny`. The CLI confirms with the card's new state.
     func answerPermission(chatID: Chat.ID, messageID: Message.ID, decision: String) {
+        if let message = chat(chatID)?.messages.first(where: { $0.id == messageID }),
+           case let .permission(request) = message.body, request.tool == "secret", decision != "deny" {
+            guard request.isPending, let secret = request.secret, !secret.fields.isEmpty else { return }
+            let alert = NSAlert()
+            alert.messageText = request.summary
+            alert.informativeText = [secret.use, secret.site].compactMap { $0 }.joined(separator: " · ")
+            alert.addButton(withTitle: L("Allow once"))
+            alert.addButton(withTitle: L("Cancel"))
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            var fields: [(String, NSSecureTextField)] = []
+            for field in secret.fields {
+                stack.addArrangedSubview(NSTextField(labelWithString: field.label))
+                let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+                input.setAccessibilityLabel(field.label)
+                stack.addArrangedSubview(input)
+                fields.append((field.name, input))
+            }
+            stack.frame = NSRect(x: 0, y: 0, width: 320, height: CGFloat(fields.count * 54))
+            alert.accessoryView = stack
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            var values: [String: String] = [:]
+            for (name, input) in fields { values[name] = input.stringValue; input.stringValue = "" }
+            // The CLI seals values to the assigned Runner; never put them in a message.
+            perform("chats.permission", ["chat_id": chatID, "message_id": messageID, "decision": "allow", "values": values])
+            return
+        }
         update(messageID, in: chatID) { message in
             switch message.body {
             case var .permission(request):
@@ -1862,5 +1890,56 @@ final class AppStore {
         catalog = MockData.models()
         sortChats()
         emit(.snapshotReplaced)
+    }
+}
+
+
+extension AppStore {
+    // The caller retains the displayed version. Never fetch a newer version to retry a decision.
+    func review(_ id: String) async throws -> [String: Any] {
+        let data = try await client.request("reviews.get", ["id": id])
+        guard let item = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CocoaError(.coderReadCorrupt)
+        }
+        return item
+    }
+
+    func decideReview(_ id: String, version: UInt64, action: ReviewAction,
+                      payload: [String: Any]? = nil) async throws {
+        var params: [String: Any] = ["id": id, "expected_version": version]
+        if let payload { params["payload"] = payload }
+        _ = try await client.request("reviews." + action.rawValue, params)
+    }
+
+    enum ReviewAction: String { case edit, approve, reject, cancel }
+
+    func codingTranscript(chatID: String, messageID: String) async throws -> [String: Any] {
+        let data = try await client.request("coding.transcript", ["chat_id": chatID, "message_id": messageID])
+        guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CocoaError(.coderReadCorrupt)
+        }
+        return value
+    }
+
+    func sendToCodingAgent(chatID: String, messageID: String, text: String) async throws {
+        _ = try await client.request("coding.send", ["chat_id": chatID, "message_id": messageID, "text": text])
+    }
+
+    func stopCodingAgent(chatID: String, messageID: String) async throws {
+        _ = try await client.request("coding.stop", ["chat_id": chatID, "message_id": messageID])
+    }
+
+    func codingRoster() async throws -> Data {
+        try await client.request("coding.list", [:])
+    }
+
+    func codingSettings(runnerID: String) async throws -> Data {
+        try await client.request("coding.agents", ["runner_id": runnerID])
+    }
+
+    // Keep the user's order, including disabled choices. The Runner validates supported kinds.
+    func setCodingSettings(runnerID: String, agents: [(kind: String, enabled: Bool)]) async throws -> Data {
+        try await client.request("coding.agents.set", ["runner_id": runnerID,
+            "agents": agents.map { ["kind": $0.kind, "enabled": $0.enabled] as [String: Any] }])
     }
 }

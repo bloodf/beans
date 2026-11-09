@@ -82,3 +82,7 @@ Files are staged on the target filesystem and renamed into place. Before any sto
 For manual recovery, stop the updater timer, inspect `state.json`, the affected service and retained journals, repair the reported fault and recover originals if needed. Clear only the relevant `failed`/`failed_reason` or `operator_hold` after reviewing that recovery; retain progress, version floors and original files. An interrupted pass without a hold resumes the partial rollout and rechecks the relay first. The signed updater replaces itself only after all targets succeed.
 
 Platform-specific packaging and installation behavior are in [Mac releases](releasing-mac.md) and [Windows/Linux releases](releasing-desktop.md). Native Android installation requires OS approval. An ad-hoc IPA installs only on provisioned devices; GitHub cannot silently replace an installed native iOS app. Store submission runs separately through the manual testing-only workflow described in [Releases](architecture/releases.md#exact-credential-consumers).
+
+## Cutting a release
+
+See [Release workflow](#release-workflow). The root Beans version and signed readiness inventory authorize release scope.

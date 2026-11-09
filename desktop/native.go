@@ -279,7 +279,7 @@ func (n *nativeDesktop) attach(id string) {
 		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: win, Title: "Attach files", Multiple: true})
 		files := make([]FileInfo, 0, len(paths))
 		for _, path := range paths {
-			files = append(files, inspect(path))
+			files = append(files, inspectFile(path))
 		}
 		postMain(func() {
 			if epoch != n.store.Epoch || win != n.win || n.store.Drafts[id] != draft {

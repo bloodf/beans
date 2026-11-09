@@ -25,13 +25,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bloodf/beans/desktop/model"
 	"github.com/coder/websocket"
 	"github.com/egoist/mygo"
 )
 
 // MyGo's plugin installs immediately and has no pre-install callback. Use its
 // supported low-level updater and install only after an ordinary, guarded quit.
-// Never call Relaunch: the next user launch runs the new version.
+// Remote relaunch requests also pass through the guarded quit before installation.
 type UpdaterState struct {
 	Version            string `json:"version"`
 	LastCheck          int64  `json:"lastCheck"`
@@ -64,6 +65,7 @@ type beansUpdater struct {
 	relayURL                 string
 	lease                    *desktopUpdateLease
 	finishing                bool
+	relaunchAfterInstall     bool
 }
 
 var desktopUpdater beansUpdater
@@ -538,6 +540,8 @@ func (Host) SetAutomaticUpdates(checks, downloads bool) UpdaterState {
 	u.mu.Unlock()
 	state := Host{}.UpdaterState()
 	UpdaterChanged.Broadcast(state)
+	invalidateWindows()
+	go remoteUpdates.report()
 	return state
 }
 
@@ -595,6 +599,8 @@ func (u *beansUpdater) check(user bool) {
 	u.saveLocked()
 	u.mu.Unlock()
 	UpdaterChanged.Broadcast(Host{}.UpdaterState())
+	invalidateWindows()
+	go remoteUpdates.report()
 	if up == nil {
 		if user {
 			_, _ = mygo.Dialog.Message(mygo.MessageOptions{Message: desktopUpdateWord("You're up to date")})
@@ -626,6 +632,8 @@ func (u *beansUpdater) check(user bool) {
 		u.saveLocked()
 		u.mu.Unlock()
 		UpdaterChanged.Broadcast(Host{}.UpdaterState())
+		invalidateWindows()
+		go remoteUpdates.report()
 		accepted = result.Button == 0
 	}
 	if accepted {
@@ -635,6 +643,7 @@ func (u *beansUpdater) check(user bool) {
 			(user || !automatic || (u.prefs.AutomaticDownloads && (u.prefs.AutomaticChecks == nil || *u.prefs.AutomaticChecks))) {
 			u.pending, u.pendingProtocol, u.pendingManual = up, ready.Protocol, user || !automatic
 			u.pendingRelease = ready
+			u.relaunchAfterInstall = false
 		}
 		u.mu.Unlock()
 	}
@@ -736,7 +745,14 @@ func updaterBeforeQuit(event *mygo.QuitEvent) bool {
 			}
 			u.mu.Unlock()
 			if err == nil {
-				mygo.App.Quit()
+				u.mu.Lock()
+				relaunch := u.relaunchAfterInstall
+				u.mu.Unlock()
+				if relaunch {
+					mygo.App.Relaunch()
+				} else {
+					mygo.App.Quit()
+				}
 			}
 		})
 		if err != nil {
@@ -1115,4 +1131,293 @@ func (t verifiedUpdateTransport) RoundTrip(request *http.Request) (*http.Respons
 	clean.Header.Del("Cookie")
 	clean.Header.Del("Authorization")
 	return t.base.RoundTrip(clean)
+}
+
+func updatesEnabled() bool { return mygo.Updater.Enabled() && !isDevelopment() }
+func checkForUpdates()     { Host{}.CheckForUpdates() }
+
+type updaterState struct {
+	LastCheck          time.Time
+	AutomaticChecks    bool
+	AutomaticDownloads bool
+}
+
+func currentUpdaterState() updaterState {
+	state := Host{}.UpdaterState()
+	var checked time.Time
+	if state.LastCheck != 0 {
+		checked = time.Unix(state.LastCheck, 0)
+	}
+	return updaterState{LastCheck: checked, AutomaticChecks: state.AutomaticChecks, AutomaticDownloads: state.AutomaticDownloads}
+}
+func setAutomaticUpdates(checks, downloads bool) { Host{}.SetAutomaticUpdates(checks, downloads) }
+
+var remoteUpdates = &appUpdates{
+	enabled:  updatesEnabled,
+	version:  mygo.App.Version,
+	auto:     func() bool { s := currentUpdaterState(); return s.AutomaticChecks && s.AutomaticDownloads },
+	check:    checkAppRelease,
+	relaunch: func() { mygo.RunOnMain(func() { mygo.App.Quit() }) },
+	now:      time.Now,
+}
+
+// appRelease is a newer version the feed offers.
+type appRelease struct {
+	version string
+	install func(ctx context.Context) error
+}
+
+// Checking and staging never download or install. finishUpdaterOnQuit owns installation.
+func checkAppRelease(ctx context.Context) (*appRelease, error) {
+	ready, err := readyDesktopRelease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ctx = context.WithValue(ctx, verifiedUpdateContextKey{}, ready)
+	up, err := mygo.Updater.Check(ctx)
+	if err != nil || up == nil {
+		return nil, err
+	}
+	if up.Version != ready.Version {
+		return nil, errors.New("MyGo metadata does not match the signed Beans release")
+	}
+	return &appRelease{version: up.Version, install: func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return desktopUpdater.stageRemoteUpdate(ctx, up, ready)
+	}}, nil
+}
+
+// appCheckInterval is how often the app looks for a newer version for the other Devices to see,
+// besides when one of them shows this Device.
+const appCheckInterval = 24 * time.Hour
+
+// appRecheckGap is how long after a check a Device that shows this one leaves the answer as it
+// is, so panes opened again and again stay within the GitHub API's 60 requests an hour.
+const appRecheckGap = 5 * time.Minute
+
+type appUpdates struct {
+	enabled  func() bool
+	version  func() string
+	auto     func() bool
+	check    func(context.Context) (*appRelease, error)
+	relaunch func()
+	now      func() time.Time
+
+	mu sync.Mutex
+	// latest is the newest version the last check found, when it is newer than this one.
+	latest string
+	// checked is when a check last went through.
+	checked time.Time
+	// state is "installing", "restarting" while the installed version waits for the bots, or "".
+	state string
+	// err is why the last check or install failed, until one goes through.
+	err string
+	// busy is set while a check or an install runs.
+	busy bool
+	// wanted is an install a Device asked for while a background check ran, which follows it.
+	// One asked for while an install checks is answered by that install.
+	wanted bool
+	// waiting is set while a request waits for the CLI to say the Runner is idle.
+	waiting bool
+	timer   *time.Timer
+}
+
+// connected runs each time the app's CLI answers: it says how the app's updates stand, after a
+// check when the last one is a day old, and picks up the relaunch a restarted CLI interrupted.
+func (u *appUpdates) connected() {
+	if !u.enabled() || store.IsMock {
+		return
+	}
+	u.mu.Lock()
+	due := u.now().Sub(u.checked) >= appCheckInterval && !u.busy
+	if due {
+		u.busy = true
+	}
+	restarting := u.state == "restarting"
+	u.mu.Unlock()
+	if due {
+		u.refresh()
+	} else {
+		u.report()
+	}
+	if restarting {
+		u.relaunchWhenIdle()
+	}
+}
+
+// checkNow is the `app.update.check` of a Device that shows this one: the app looks at its feed
+// now, unless it did in the last minutes or a check or an install runs.
+func (u *appUpdates) checkNow() {
+	if !u.enabled() || store.IsMock {
+		return
+	}
+	u.mu.Lock()
+	due := !u.busy && u.state == "" && u.now().Sub(u.checked) >= appRecheckGap
+	if due {
+		u.busy = true
+	}
+	u.mu.Unlock()
+	if due {
+		u.refresh()
+	}
+}
+
+// refresh checks the feed for a newer version, says what it found, and checks again a day later.
+// The caller set busy.
+func (u *appUpdates) refresh() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	release, err := u.check(ctx)
+	cancel()
+	u.mu.Lock()
+	u.busy = false
+	u.found(release, err)
+	if u.wanted {
+		u.wanted = false
+		go u.install()
+	}
+	if u.timer != nil {
+		u.timer.Stop()
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(appCheckInterval, func() {
+		u.mu.Lock()
+		due := !u.busy && u.state == ""
+		if due {
+			u.busy = true
+		} else if u.timer == timer {
+			// An install runs: look again later, as a failed one leaves the version as it was.
+			timer.Reset(appCheckInterval)
+		}
+		u.mu.Unlock()
+		if due {
+			u.refresh()
+		}
+	})
+	u.timer = timer
+	u.mu.Unlock()
+	u.report()
+}
+
+// found records what a check answered. u.mu is held.
+func (u *appUpdates) found(release *appRelease, err error) {
+	if err != nil {
+		u.err = err.Error()
+		return
+	}
+	u.checked, u.err, u.latest = u.now(), "", ""
+	if release != nil {
+		u.latest = release.version
+	}
+}
+
+// install checks the signed feed and stages an update for the guarded quit path.
+func (u *appUpdates) install() {
+	if !u.enabled() || store.IsMock {
+		return
+	}
+	u.mu.Lock()
+	if u.busy || u.state != "" {
+		// A background check runs: the install follows it. One under way goes on.
+		u.wanted = u.busy && u.state == ""
+		u.mu.Unlock()
+		return
+	}
+	u.busy = true
+	u.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	release, err := u.check(ctx)
+	cancel()
+	u.mu.Lock()
+	u.found(release, err)
+	if err != nil || release == nil {
+		u.busy, u.wanted = false, false
+		u.mu.Unlock()
+		u.report()
+		return
+	}
+	u.state = "installing"
+	u.mu.Unlock()
+	u.report()
+
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Minute)
+	err = release.install(ctx)
+	cancel()
+	u.mu.Lock()
+	u.busy, u.wanted = false, false
+	if err != nil {
+		u.state, u.err = "", err.Error()
+		u.mu.Unlock()
+		u.report()
+		return
+	}
+	u.state = "restarting"
+	u.mu.Unlock()
+	u.report()
+	u.relaunchWhenIdle()
+}
+
+// relaunchWhenIdle waits for CLI idleness, then requests the ordinary guarded quit.
+// The production callback never relaunches before finishUpdaterOnQuit installs successfully.
+func (u *appUpdates) relaunchWhenIdle() {
+	u.mu.Lock()
+	if u.waiting {
+		u.mu.Unlock()
+		return
+	}
+	u.waiting = true
+	u.mu.Unlock()
+	err := store.RelaunchWhenIdle()
+	u.mu.Lock()
+	u.waiting = false
+	u.mu.Unlock()
+	if err == nil {
+		u.relaunch()
+	}
+}
+
+// report tells the CLI how the app's updates stand.
+func (u *appUpdates) report() {
+	if !u.enabled() || store.IsMock {
+		return
+	}
+	u.mu.Lock()
+	report := model.AppUpdateReport{
+		Version: u.version(),
+		Auto:    u.auto(),
+		State:   u.state,
+	}
+	if u.latest != "" {
+		latest := u.latest
+		report.Latest = &latest
+	}
+	if u.err != "" {
+		err := u.err
+		report.Error = &err
+	}
+	u.mu.Unlock()
+	if err := store.ReportAppUpdate(report); err != nil {
+		log.Printf("telling the CLI about the app's updates: %s", model.ErrorText(err))
+	}
+}
+
+// stageRemoteUpdate only records a verified candidate. The ordinary quit path owns
+// page guards, selected-relay admission, the pinned child lease and installation.
+func (u *beansUpdater) stageRemoteUpdate(ctx context.Context, up *mygo.Update, ready *verifiedDesktopRelease) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if up == nil || ready == nil || up.Version != ready.Version {
+		return errors.New("MyGo metadata does not match the signed Beans release")
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.checkingQuit || u.quitApproved || u.installationQuitApproved || u.finishing {
+		return errors.New("An update quit is already in progress")
+	}
+	u.pending, u.pendingRelease, u.pendingProtocol = up, ready, ready.Protocol
+	u.pendingManual, u.relaunchAfterInstall = true, true
+	return nil
 }

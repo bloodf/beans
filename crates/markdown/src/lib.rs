@@ -1,7 +1,6 @@
 //! Markdown for message bodies: pulldown-cmark's event stream folded into the block structure
-//! the apps' native text views render (a UITextView on iOS, a TextView on Android, and the same
-//! shape for the Mac). The views only style what they are handed, so every screen reads a
-//! message the same way.
+//! the phone app's native text views render (a UITextView on iOS, a TextView on Android). The
+//! views only style what they are handed, so every screen reads a message the same way.
 
 mod autolink;
 

@@ -1,4 +1,4 @@
-// SF Symbols, the same names the Mac app and bot profiles use, with Material Symbols standing
+// SF Symbols, the same names the desktop app and bot profiles use, with Material Symbols standing
 // in on Android.
 
 import { SymbolView, type SymbolViewProps, type SymbolWeight } from "expo-symbols";
@@ -40,6 +40,7 @@ const ANDROID: Record<string, string> = {
   "wand.and.stars": "auto_fix_high",
   "hammer.fill": "handyman",
   "book.fill": "menu_book",
+  "book.closed": "menu_book",
   "paintbrush.fill": "brush",
   "chart.bar.fill": "bar_chart",
   "terminal.fill": "terminal",
@@ -59,13 +60,32 @@ const ANDROID: Record<string, string> = {
   "cart.fill": "shopping_cart",
   "arrow.triangle.turn.up.right.diamond.fill": "alt_route",
   "chevron.right": "chevron_right",
-  "chevron.up.chevron.down": "unfold_more",
+  "chevron.down": "expand_more",
+  "bell.slash.fill": "notifications_off",
+  // A value menu: Material's dropdown arrow.
+  "chevron.up.chevron.down": "arrow_drop_down",
   "arrow.down": "arrow_downward",
   "plus": "add",
+  // Durable tasks' states and evidence.
+  "circle": "radio_button_unchecked",
+  "arrow.triangle.2.circlepath": "sync",
+  clock: "schedule",
+  "pause.circle": "pause_circle",
+  alarm: "alarm",
+  "arrow.triangle.pull": "merge",
+  "exclamationmark.circle.fill": "error",
+  "checkmark.circle": "check_circle",
+  "xmark.circle": "cancel",
+  "bubble.left": "chat_bubble",
+  play: "play_arrow",
+  "arrow.counterclockwise": "replay",
   "xmark": "close",
-  "ellipsis": "more_horiz",
+  // Android's overflow menu is the vertical one.
+  "ellipsis": "more_vert",
   "crown.fill": "workspace_premium",
   "key.fill": "key",
+  key: "key",
+  lock: "lock",
   "person.badge.key.fill": "badge",
   "antenna.radiowaves.left.and.right": "cell_tower",
   "link": "link",
@@ -73,13 +93,36 @@ const ANDROID: Record<string, string> = {
   "mic.fill": "mic",
   "waveform": "graphic_eq",
   "paperclip": "attach_file",
+  flag: "flag",
+  "checkmark.seal": "verified",
   "photo.on.rectangle": "photo_library",
   photo: "image",
   "doc.fill": "description",
+  doc: "draft",
+  "doc.text": "description",
+  "doc.richtext": "picture_as_pdf",
+  // What a published output is.
+  "richtext.page": "picture_as_pdf",
+  "text.page": "description",
+  "zipper.page": "folder_zip",
+  document: "draft",
+  curlybraces: "data_object",
+  tablecells: "table",
+  "circle.dashed": "radio_button_unchecked",
+  film: "movie",
+  eye: "visibility",
+  safari: "open_in_browser",
+  "square.and.arrow.up": "share",
+  "square.and.arrow.down": "download",
+  "doc.on.doc": "content_copy",
+  "arrow.clockwise": "refresh",
   "folder.fill": "folder",
   "xmark.circle.fill": "cancel",
   "arrowshape.turn.up.left.fill": "reply",
-  "binoculars.fill": "search",
+  "binoculars.fill": "travel_explore",
+  "text.bubble": "chat",
+  "person.crop.circle.badge.checkmark": "how_to_reg",
+  "bubble.left.and.bubble.right": "forum",
   "chevron.left.forwardslash.chevron.right": "code",
   "pencil.and.scribble": "draw",
   "bolt.horizontal.fill": "electric_bolt",
@@ -97,6 +140,25 @@ const ANDROID: Record<string, string> = {
   tablecells: "table",
   "circle.dashed": "radio_button_unchecked",
   film: "movie",
+
+  "doc.text.magnifyingglass": "pageview",
+  // Workflow feedback.
+  "hand.thumbsup": "thumb_up",
+  pencil: "edit",
+  "pencil.line": "edit_note",
+  "eye.slash": "visibility_off",
+  "exclamationmark.triangle": "warning",
+  // Workflows.
+  envelope: "mail",
+  // Channels' services.
+  paperplane: "send",
+  number: "tag",
+  "arrow.triangle.branch": "call_split",
+  "point.3.connected.trianglepath.dotted": "account_tree",
+  // Coding agents: how one stands, its transcript's plan, and the grip that reorders them.
+  "line.3.horizontal": "drag_handle",
+  "stop.circle": "stop_circle",
+  "circle.dotted.circle": "pending",
 };
 
 export interface SymbolProps {
@@ -121,28 +183,3 @@ export function Symbol({ name, size = 17, color, weight = "medium", style, type 
     />
   );
 }
-
-/// Symbols offered when creating a bot, a subset the Mac app also knows.
-export const BOT_SYMBOLS = [
-  "sparkles",
-  "wand.and.stars",
-  "hammer.fill",
-  "book.fill",
-  "paintbrush.fill",
-  "chart.bar.fill",
-  "terminal.fill",
-  "globe",
-  "brain.head.profile",
-  "magnifyingglass",
-  "envelope.fill",
-  "calendar",
-  "flask.fill",
-  "bolt.fill",
-  "leaf.fill",
-  "shield.fill",
-  "binoculars.fill",
-  "chevron.left.forwardslash.chevron.right",
-  "pencil.and.scribble",
-  "bolt.horizontal.fill",
-  "flame.fill",
-];

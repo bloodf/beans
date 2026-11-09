@@ -9,7 +9,12 @@ use beans::config::Config;
 use beans::{identity, keys, pairing, runtime, sync};
 
 #[derive(usage::Cli, Debug)]
-#[usage(bin = "beans", version, about = "Beans CLI: identity, local API, agent loop, relay sync", unknown_flags = "error")]
+#[usage(
+    bin = "beans",
+    version,
+    about = "Beans CLI: identity, local API, agent loop, relay sync",
+    unknown_flags = "error"
+)]
 struct Cli {
     /// Data directory (default ~/.beans-v2; Dev ~/.beans-dev-v2).
     #[usage(long, env = "BEANS_HOME", global)]
@@ -31,9 +36,7 @@ struct Cli {
 #[derive(Subcommands, Debug)]
 enum Command {
     /// Explicit storage-only transition and admission of an empty marked scratch home.
-    StorageUpgrade {
-        scratch_home: PathBuf,
-    },
+    StorageUpgrade { scratch_home: PathBuf },
     /// Run the local API the app connects to.
     Serve {
         /// Exit when this process is gone. The app passes its own pid so a killed app never
@@ -67,6 +70,11 @@ enum Command {
         #[usage(subcommand)]
         command: McpCommand,
     },
+    /// Runner event subscriptions and encrypted gateway delivery.
+    Events {
+        #[usage(subcommand)]
+        command: EventsCommand,
+    },
     /// The marketplace: the plugins and bots Beans offers to add.
     Marketplace {
         #[usage(subcommand)]
@@ -81,6 +89,11 @@ enum Command {
     Chats {
         #[usage(subcommand)]
         command: ChatsCommand,
+    },
+    /// Durable work: inspect tasks, or create/update/run with a JSON object or - for stdin.
+    Tasks {
+        #[usage(subcommand)]
+        command: TasksCommand,
     },
     /// CLI self-update is unavailable in Beans; use the signed Beans update mechanism.
     SelfUpdate,
@@ -120,6 +133,34 @@ enum UpdateCommand {
 }
 
 #[derive(Subcommands, Debug)]
+enum TasksCommand {
+    /// List tasks; filters refer to canonical ids.
+    List {
+        #[usage(long)]
+        chat_id: Option<String>,
+        #[usage(long)]
+        owner_bot_id: Option<String>,
+        #[usage(long)]
+        state: Option<String>,
+    },
+    Get {
+        id: String,
+    },
+    /// JSON uses owner_bot_id, goal, acceptance_criteria, next_action, chat_ids, request_id.
+    Create {
+        json: String,
+    },
+    /// JSON uses id, expected_revision, request_id and the fields to change.
+    Update {
+        json: String,
+    },
+    /// JSON uses id, expected_revision, request_id and optional chat_id.
+    Run {
+        json: String,
+    },
+}
+
+#[derive(Subcommands, Debug)]
 enum IdentityCommand {
     /// Create a new identity on this Device and print the backup phrase.
     New {
@@ -134,6 +175,38 @@ enum IdentityCommand {
     },
     /// Print the identity id and public keys.
     Show,
+    /// Print the backup phrase again. Only on the Device that holds the identity.
+    Phrase,
+}
+
+#[derive(Subcommands, Debug)]
+enum EventsCommand {
+    /// Read configuration, queue state and health, without secrets or payloads.
+    List,
+    /// Create a subscription from a JSON configuration file.
+    Add { file: PathBuf },
+    /// Replace configuration from a JSON file; target stays fixed.
+    Edit { id: String, file: PathBuf },
+    /// Hold a subscription's work; deliveries still queue.
+    Pause { id: String },
+    /// Run held work again.
+    Resume { id: String },
+    /// Rotate the gateway signing key; export a new route afterwards.
+    Reconnect {
+        id: String,
+        #[usage(long)]
+        expires_at: Option<i64>,
+    },
+    /// Export the signing secret and Runner public keys to a private file.
+    Route { id: String, file: PathBuf },
+    /// Delete a subscription and its queue.
+    Remove { id: String },
+    /// Explicitly retry a delivery after reviewing failed or interrupted work.
+    Retry { id: String },
+    /// Drop a pending, failed, or interrupted delivery; a redelivery of it stays ignored.
+    Discard { id: String },
+    /// Verify a signed envelope from stdin and durably queue encrypted delivery.
+    Forward { file: PathBuf },
 }
 
 #[derive(Subcommands, Debug)]
@@ -150,16 +223,22 @@ enum ProviderCommand {
         base_url: Option<String>,
     },
     /// Add a custom provider: any server that speaks OpenAI's Chat Completions or Responses, or
-    /// Anthropic's Messages, such as a gateway or a model server on your network.
+    /// Anthropic's Messages, such as a gateway or a model server on your network, or a decision
+    /// API (System One, OpenAI's Decisions) whose models Auto-review can run.
     Add {
         /// The name the apps show.
         name: String,
-        /// The API root, such as https://openrouter.ai/api/v1 or http://localhost:11434/v1.
+        /// The API root, such as https://openrouter.ai/api/v1 or http://localhost:11434/v1; for a
+        /// decision API, its endpoint, such as https://openrouter.ai/api/alpha/decisions.
         base_url: String,
         /// The wire protocol it speaks.
-        #[usage(long, choices("chat-completions", "responses", "messages"), default = "chat-completions")]
+        #[usage(
+            long,
+            choices("chat-completions", "responses", "messages", "system-one", "decisions"),
+            default = "chat-completions"
+        )]
         api: String,
-        /// A model id bots can pick; repeat for more. Omit to take every model the server lists.
+        /// A model id it offers; repeat for more. Omit to take every model the server lists.
         #[usage(long)]
         model: Vec<String>,
         /// Read an API key from stdin. Without it the server is called with no key.
@@ -286,14 +365,32 @@ async fn main() -> anyhow::Result<()> {
     // apps start it, so `beans` typed to see what it does, a bot's included, never starts a second
     // one or makes a data folder.
     let Some(command) = cli.command else {
-        print!("{}", Cli::render_help(Cli::command(), false).unwrap_or_default());
+        print!(
+            "{}",
+            Cli::render_help(Cli::command(), false).unwrap_or_default()
+        );
         return Ok(());
     };
     // `beans mcp` and `beans chats` say how each step went in their own words; the log keeps to
     // warnings.
-    let quiet = matches!(command, Command::Mcp { .. } | Command::Marketplace { .. } | Command::Models { .. } | Command::Chats { .. });
+    let quiet = matches!(
+        command,
+        Command::Mcp { .. }
+            | Command::Marketplace { .. }
+            | Command::Models { .. }
+            | Command::Chats { .. }
+            | Command::Tasks { .. }
+    );
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| if quiet { "beans=warn,beans_agent=warn".into() } else { "beans=info,beans_agent=info".into() }))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                if quiet {
+                    "beans=warn,beans_agent=warn".into()
+                } else {
+                    "beans=info,beans_agent=info".into()
+                }
+            }),
+        )
         .with_target(false)
         // Colors for a terminal; a service's log file or journal gets plain text.
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
@@ -307,7 +404,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Service { command } => return service(&config, command).await,
         Command::SelfUpdate => anyhow::bail!("{}", beans::update::UNAVAILABLE),
         Command::StorageUpgrade { scratch_home } => {
-            let _store = Config { home: scratch_home, port: 0 }.preload_staged_storage()?;
+            let _store = Config {
+                home: scratch_home,
+                port: 0,
+            }
+            .preload_staged_storage()?;
             return Ok(());
         }
         command => command,
@@ -318,19 +419,26 @@ async fn main() -> anyhow::Result<()> {
         tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || App::load(config))
             .map_err(|_| anyhow::anyhow!("Doctor could not load local account data; no report was produced. Check storage access and account format locally; private details are omitted."))?
     } else {
-        if matches!(command, Command::Serve { .. }) { App::load_owner(config)? } else { App::load(config)? }
+        if matches!(command, Command::Serve { .. }) {
+            App::load_owner(config)?
+        } else {
+            App::load(config)?
+        }
     };
 
     match command {
-        Command::Serve { parent_pid, ready_stdout } => {
+        Command::Serve {
+            parent_pid,
+            ready_stdout,
+        } => {
             if app.legacy_execution_closed()? {
                 tracing::warn!("Legacy home remains available; only explicit local user submissions can mint new tasks, ambiguous synced and automatic execution stays closed");
             }
             app.close_orphan_proposals()?;
             beans::service::trim_log();
-            beans::update::start(&app);
             beans::serve::run(app, parent_pid, ready_stdout).await
         }
+        Command::Events { command } => events(&app, command).await,
         Command::Identity { command } => match command {
             IdentityCommand::New { name } => {
                 let phrase = identity::create(&app, name)?;
@@ -338,7 +446,9 @@ async fn main() -> anyhow::Result<()> {
                 println!("Backup phrase (write it down; it is the identity):\n");
                 println!("  {}\n", phrase.join(" "));
                 if app.relay_url().is_none() {
-                    println!("No relay configured. Set BEANS_RELAY_URL to sync with other Devices.");
+                    println!(
+                        "No relay configured. Set BEANS_RELAY_URL to sync with other Devices."
+                    );
                 } else {
                     flush_outbox_once(&app).await;
                 }
@@ -352,7 +462,10 @@ async fn main() -> anyhow::Result<()> {
             IdentityCommand::Show => {
                 match app.machine_file() {
                     Some(machine) => {
-                        println!("identity id:   {}", keys::identity_id(&machine.identity_pubkey));
+                        println!(
+                            "identity id:   {}",
+                            keys::identity_id(&machine.identity_pubkey)
+                        );
                         println!("identity key:  {}", machine.identity_pubkey);
                         println!("machine key:   {}", machine.machine()?.pubkey());
                         println!("device name:   {} ({})", machine.name, machine.os);
@@ -363,11 +476,23 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Ok(())
             }
+            IdentityCommand::Phrase => {
+                let phrase = identity::phrase(&app)?;
+                println!("Backup phrase (anyone who has it has the identity):\n");
+                println!("  {}", phrase.join(" "));
+                Ok(())
+            }
         },
-        Command::Pair { pairing_string, name } => match pairing_string {
+        Command::Pair {
+            pairing_string,
+            name,
+        } => match pairing_string {
             Some(text) => {
                 let device = pairing::accept(app.clone(), &text, name).await?;
-                println!("Paired as {}. Run `beans serve` to sync.", device["name"].as_str().unwrap_or("this Device"));
+                println!(
+                    "Paired as {}. Run `beans serve` to sync.",
+                    device["name"].as_str().unwrap_or("this Device")
+                );
                 // The machine blob goes up now, so the other Devices learn what joined.
                 flush_outbox_once(&app).await;
                 Ok(())
@@ -380,11 +505,17 @@ async fn main() -> anyhow::Result<()> {
                     let status = pairing::status(&app, &nonce);
                     match status["state"].as_str() {
                         Some("completed") => {
-                            println!("Paired {}.", status["device"]["name"].as_str().unwrap_or("a Device"));
+                            println!(
+                                "Paired {}.",
+                                status["device"]["name"].as_str().unwrap_or("a Device")
+                            );
                             flush_outbox_once(&app).await;
                             return Ok(());
                         }
-                        Some("failed") => anyhow::bail!("{}", status["error"].as_str().unwrap_or("pairing failed")),
+                        Some("failed") => anyhow::bail!(
+                            "{}",
+                            status["error"].as_str().unwrap_or("pairing failed")
+                        ),
                         _ => {}
                     }
                 }
@@ -397,10 +528,31 @@ async fn main() -> anyhow::Result<()> {
             let app = app.clone();
             tokio::spawn(async move { mcp(&app, command).await }).await?
         }
-        Command::Marketplace { command: MarketplaceCommand::Reload } => reload(&app, "marketplace.reload", beans::marketplace::enable, "marketplace").await,
-        Command::Models { command: ModelsCommand::Reload } => reload(&app, "models.reload", beans::catalog::enable, "model catalog").await,
+        Command::Marketplace {
+            command: MarketplaceCommand::Reload,
+        } => {
+            reload(
+                &app,
+                "marketplace.reload",
+                beans::marketplace::enable,
+                "marketplace",
+            )
+            .await
+        }
+        Command::Models {
+            command: ModelsCommand::Reload,
+        } => {
+            reload(
+                &app,
+                "models.reload",
+                beans::catalog::enable,
+                "model catalog",
+            )
+            .await
+        }
         Command::Chats { command } => chats(&app, command).await,
         Command::SelfUpdate => unreachable!("disabled before the data folder opens"),
+        Command::Tasks { command } => tasks(&app, command).await,
         Command::Service { .. } => unreachable!(),
         Command::Status => {
             let snapshot = app.snapshot();
@@ -420,12 +572,17 @@ async fn main() -> anyhow::Result<()> {
 /// `{"serving": false}` when nothing listens there.
 async fn update(port: u16, command: UpdateCommand) -> anyhow::Result<()> {
     let token = || -> anyhow::Result<String> {
-        let path = std::env::var_os(beans::update_control::TOKEN_FILE_ENV).ok_or_else(|| anyhow::anyhow!("Set BEANS_UPDATE_TOKEN_FILE to the update control token file."))?;
+        let path = std::env::var_os(beans::update_control::TOKEN_FILE_ENV).ok_or_else(|| {
+            anyhow::anyhow!("Set BEANS_UPDATE_TOKEN_FILE to the update control token file.")
+        })?;
         beans::update_control::read_token(std::path::Path::new(&path)).map_err(anyhow::Error::msg)
     };
     let (method, params) = match command {
         UpdateCommand::Status => ("update.status", serde_json::json!({})),
-        UpdateCommand::Prepare { ttl } => ("update.prepare", serde_json::json!({ "token": token()?, "ttl": ttl })),
+        UpdateCommand::Prepare { ttl } => (
+            "update.prepare",
+            serde_json::json!({ "token": token()?, "ttl": ttl }),
+        ),
         UpdateCommand::Cancel => ("update.cancel", serde_json::json!({ "token": token()? })),
     };
     let reply = match serve_call(port, method, &params).await? {
@@ -440,9 +597,16 @@ async fn update(port: u16, command: UpdateCommand) -> anyhow::Result<()> {
 /// change at once; otherwise here, followed by one sync pass.
 async fn provider(app: &std::sync::Arc<App>, command: ProviderCommand) -> anyhow::Result<()> {
     let (method, params) = match command {
-        ProviderCommand::Set { kind, api_key, base_url } => {
+        ProviderCommand::Set {
+            kind,
+            api_key,
+            base_url,
+        } => {
             if !beans::credentials::PROVIDER_KINDS.contains(&kind.as_str()) {
-                anyhow::bail!("Unknown provider {kind}. Use one of: {}", beans::credentials::PROVIDER_KINDS.join(", "));
+                anyhow::bail!(
+                    "Unknown provider {kind}. Use one of: {}",
+                    beans::credentials::PROVIDER_KINDS.join(", ")
+                );
             }
             let params = if matches!(kind.as_str(), "chatgpt" | "grok") {
                 if api_key.is_some() || base_url.is_some() {
@@ -457,22 +621,41 @@ async fn provider(app: &std::sync::Arc<App>, command: ProviderCommand) -> anyhow
                 };
                 serde_json::json!({ "api_key": api_key, "base_url": base_url })
             };
-            let method_kind = if kind == "opencode-go" { "opencode_go" } else { &kind };
+            let method_kind = if kind == "opencode-go" {
+                "opencode_go"
+            } else {
+                &kind
+            };
             (format!("providers.connect_{method_kind}"), params)
         }
-        ProviderCommand::Add { name, base_url, api, model, api_key_stdin } => {
-            let api_key = if api_key_stdin { read_api_key()? } else { String::new() };
+        ProviderCommand::Add {
+            name,
+            base_url,
+            api,
+            model,
+            api_key_stdin,
+        } => {
+            let api_key = if api_key_stdin {
+                read_api_key()?
+            } else {
+                String::new()
+            };
             let params = serde_json::json!({ "name": name, "base_url": base_url, "api": api, "models": model, "api_key": api_key });
             ("providers.connect_custom".to_string(), params)
         }
-        ProviderCommand::Remove { kind } => ("providers.disconnect".to_string(), serde_json::json!({ "kind": kind })),
+        ProviderCommand::Remove { kind } => (
+            "providers.disconnect".to_string(),
+            serde_json::json!({ "kind": kind }),
+        ),
         ProviderCommand::List => {
             // A running serve holds the same set: both load and save the one credentials file.
-            print_providers(&serde_json::to_value(app.credentials.lock().unwrap().statuses())?);
+            print_providers(&serde_json::to_value(
+                app.credentials.lock().unwrap().statuses(),
+            )?);
             return Ok(());
         }
     };
-    let result = match serve_call(app.config.port, &method, &params).await? {
+    let result = match serve_call(&app.config, &method, &params).await? {
         Some(result) => result,
         None => {
             let result = Box::pin(beans::api::dispatch(app, &method, params)).await;
@@ -485,8 +668,50 @@ async fn provider(app: &std::sync::Arc<App>, command: ProviderCommand) -> anyhow
     Ok(())
 }
 
-/// Names groups and bots as the apps show them. A change goes through the running `beans serve`
-/// when there is one, so the apps see it at once; otherwise here, followed by one sync pass.
+/// Task reads can use the local replica; mutations use the service's live authority routing.
+async fn tasks(app: &std::sync::Arc<App>, command: TasksCommand) -> anyhow::Result<()> {
+    use serde_json::{json, Value};
+    let parse = |input: String| -> anyhow::Result<Value> {
+        let input = if input == "-" {
+            std::io::read_to_string(std::io::stdin())?
+        } else {
+            input
+        };
+        let value: Value = serde_json::from_str(&input)?;
+        anyhow::ensure!(value.is_object(), "Task parameters must be a JSON object.");
+        Ok(value)
+    };
+    let (method, params) = match command {
+        TasksCommand::List {
+            chat_id,
+            owner_bot_id,
+            state,
+        } => (
+            "tasks.list",
+            json!({"chat_id":chat_id,"owner_bot_id":owner_bot_id,"state":state}),
+        ),
+        TasksCommand::Get { id } => ("tasks.get", json!({"id":id,"refresh":true})),
+        TasksCommand::Create { json } => ("tasks.create", parse(json)?),
+        TasksCommand::Update { json } => ("tasks.update", parse(json)?),
+        TasksCommand::Run { json } => ("tasks.run", parse(json)?),
+    };
+    let result = match serve_call(&app.config, method, &params).await? {
+        Some(result) => result.map_err(anyhow::Error::msg)?,
+        None if matches!(method, "tasks.list" | "tasks.get") => {
+            let mut params = params;
+            params["refresh"] = serde_json::json!(false);
+            beans::tasks::dispatch(app, method, params)
+                .await
+                .map_err(anyhow::Error::msg)?
+        }
+        None => anyhow::bail!("Start beans serve to edit or run durable tasks."),
+    };
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+/// Names groups and bots as the apps show them. A change goes through the running service
+/// when there is one, or updates the local state and syncs once.
 async fn chats(app: &std::sync::Arc<App>, command: ChatsCommand) -> anyhow::Result<()> {
     match command {
         ChatsCommand::List => {
@@ -494,18 +719,23 @@ async fn chats(app: &std::sync::Arc<App>, command: ChatsCommand) -> anyhow::Resu
             Ok(())
         }
         ChatsCommand::SetOwner { group, bot } => {
-            let chat = app.find_group(&group).map_err(|message| anyhow::anyhow!("{message} `beans chats list` shows the groups."))?;
-            let bot = app.find_member(&chat, &bot).map_err(|message| anyhow::anyhow!(message))?;
+            let chat = app.find_group(&group).map_err(|message| {
+                anyhow::anyhow!("{message} `beans chats list` shows the groups.")
+            })?;
+            let bot = app
+                .find_member(&chat, &bot)
+                .map_err(|message| anyhow::anyhow!(message))?;
             let title = app.chat_title(&chat.meta);
             if chat.meta.owner() == Some(bot.id.as_str()) {
                 println!("{} is already the owner of {title}.", bot.name);
                 return Ok(());
             }
             let params = serde_json::json!({ "chat_id": chat.meta.id, "bot_id": bot.id });
-            let result = match serve_call(app.config.port, "chats.set_owner", &params).await? {
+            let result = match serve_call(&app.config, "chats.set_owner", &params).await? {
                 Some(result) => result,
                 None => {
-                    let result = Box::pin(beans::api::dispatch(app, "chats.set_owner", params)).await;
+                    let result =
+                        Box::pin(beans::api::dispatch(app, "chats.set_owner", params)).await;
                     flush_outbox_once(app).await;
                     result
                 }
@@ -519,7 +749,14 @@ async fn chats(app: &std::sync::Arc<App>, command: ChatsCommand) -> anyhow::Resu
 
 /// The groups, then the direct chats, each by title: id, title, and a group's bots with its owner.
 fn print_chats(app: &App) {
-    let chats: Vec<beans::model::ChatMeta> = app.state.lock().unwrap().chats.iter().map(|chat| chat.meta.clone()).collect();
+    let chats: Vec<beans::model::ChatMeta> = app
+        .state
+        .lock()
+        .unwrap()
+        .chats
+        .iter()
+        .map(|chat| chat.meta.clone())
+        .collect();
     if chats.is_empty() {
         println!("No chats yet.");
         return;
@@ -532,19 +769,37 @@ fn print_chats(app: &App) {
                     .iter()
                     .map(|id| {
                         let name = runtime::name_of(app, id);
-                        if chat.owner() == Some(id.as_str()) { format!("{name} (owner)") } else { name }
+                        if chat.owner() == Some(id.as_str()) {
+                            format!("{name} (owner)")
+                        } else {
+                            name
+                        }
                     })
                     .collect::<Vec<_>>()
                     .join(", ")
             } else {
                 "direct chat".to_string()
             };
-            (!chat.is_group(), app.chat_title(chat), chat.id.clone(), detail)
+            (
+                !chat.is_group(),
+                app.chat_title(chat),
+                chat.id.clone(),
+                detail,
+            )
         })
         .collect();
     rows.sort_by_key(|row| (row.0, row.1.to_lowercase()));
-    let id_width = rows.iter().map(|row| row.2.chars().count()).max().unwrap_or(0);
-    let title_width = rows.iter().map(|row| row.1.chars().count()).max().unwrap_or(0).min(32);
+    let id_width = rows
+        .iter()
+        .map(|row| row.2.chars().count())
+        .max()
+        .unwrap_or(0);
+    let title_width = rows
+        .iter()
+        .map(|row| row.1.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(32);
     for (_, title, id, detail) in rows {
         println!("  {id:<id_width$}  {title:<title_width$}  {detail}");
     }
@@ -564,26 +819,111 @@ fn print_providers(providers: &serde_json::Value) {
     for provider in providers.as_array().into_iter().flatten() {
         let mut detail = provider["detail"].as_str().unwrap_or_default().to_string();
         if let Some(name) = provider["name"].as_str() {
-            let models: Vec<&str> = provider["models"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect();
-            let mut shown = models.iter().take(5).copied().collect::<Vec<_>>().join(", ");
+            let models: Vec<&str> = provider["models"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| m["id"].as_str())
+                .collect();
+            let mut shown = models
+                .iter()
+                .take(5)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
             if models.len() > 5 {
                 shown.push_str(&format!(", and {} more", models.len() - 5));
             }
-            detail = format!("{name} · {} · {detail} · {shown}", provider["api"].as_str().unwrap_or_default());
+            detail = format!(
+                "{name} · {} · {detail} · {shown}",
+                provider["api"].as_str().unwrap_or_default()
+            );
         }
-        println!("{:<10} {detail}", provider["kind"].as_str().unwrap_or_default());
+        println!(
+            "{:<10} {detail}",
+            provider["kind"].as_str().unwrap_or_default()
+        );
     }
 }
 
 /// An `mcp.*` request to the running `beans serve` when there is one, so the app sees the change
 /// at once and the server runs there; else here. Says which it was.
-async fn mcp_call(app: &std::sync::Arc<App>, method: &str, params: serde_json::Value) -> anyhow::Result<(serde_json::Value, bool)> {
-    let (result, live) = match serve_call(app.config.port, method, &params).await? {
+async fn mcp_call(
+    app: &std::sync::Arc<App>,
+    method: &str,
+    params: serde_json::Value,
+) -> anyhow::Result<(serde_json::Value, bool)> {
+    let (result, live) = match serve_call(&app.config, method, &params).await? {
         Some(result) => (result, true),
         // Boxed, as `main`'s future lives on the main thread's stack, a megabyte on Windows.
-        None => (Box::pin(beans::api::dispatch(app, method, params)).await, false),
+        None => (
+            Box::pin(beans::api::dispatch(app, method, params)).await,
+            false,
+        ),
     };
     Ok((result.map_err(|message| anyhow::anyhow!(message))?, live))
+}
+
+async fn events(app: &std::sync::Arc<App>, command: EventsCommand) -> anyhow::Result<()> {
+    use serde_json::json;
+    let mut route_file = None;
+    let read = |file: &PathBuf| -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::from_slice(&std::fs::read(file)?)?)
+    };
+    let (method, params) = match command {
+        EventsCommand::List => ("events.list", json!({})),
+        EventsCommand::Add { file } => ("events.create", json!({"config": read(&file)?})),
+        EventsCommand::Edit { id, file } => {
+            ("events.update", json!({"id": id, "config": read(&file)?}))
+        }
+        EventsCommand::Pause { id } => ("events.pause", json!({"id": id})),
+        EventsCommand::Resume { id } => ("events.resume", json!({"id": id})),
+        EventsCommand::Reconnect { id, expires_at } => (
+            "events.reconnect",
+            json!({"id": id, "expires_at": expires_at}),
+        ),
+        EventsCommand::Route { id, file } => {
+            route_file = Some(file);
+            ("events.route", json!({"id": id}))
+        }
+        EventsCommand::Remove { id } => ("events.delete", json!({"id": id})),
+        EventsCommand::Retry { id } => ("events.retry", json!({"id": id})),
+        EventsCommand::Discard { id } => ("events.discard", json!({"id": id})),
+        EventsCommand::Forward { file } => {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::io::stdin()
+                .take((2 * beans::event_triggers::MAX_PAYLOAD_BYTES + 4096) as u64)
+                .read_to_end(&mut bytes)?;
+            let event: serde_json::Value = serde_json::from_slice(&bytes)?;
+            (
+                "events.forward",
+                json!({"route": read(&file)?, "envelope": event}),
+            )
+        }
+    };
+    let (reply, live) = mcp_call(app, method, params).await?;
+    if let Some(file) = route_file {
+        // create_new prevents overwriting or following a symlink to an existing private file.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options.open(&file)?;
+        use std::io::Write;
+        output.write_all(&serde_json::to_vec_pretty(&reply)?)?;
+        output.sync_all()?;
+        println!("Saved gateway route to {}", file.display());
+    } else {
+        println!("{}", serde_json::to_string_pretty(&reply)?);
+    }
+    if !live && method == "events.forward" {
+        flush_outbox_once(app).await;
+    }
+    Ok(())
 }
 
 async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<()> {
@@ -594,12 +934,35 @@ async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<(
             let method = if reloading { "mcp.reload" } else { "mcp.list" };
             let (mut list, live) = mcp_call(app, method, json!({})).await?;
             // Await enabled servers that are still connecting before reporting health.
-            let names: Vec<String> = list["servers"].as_array().into_iter().flatten()
-                .filter(|s| s["enabled"] != false && !s["problem"].is_string() && (!live || s["status"]["state"] != "ready"))
-                .filter_map(|s| s["name"].as_str().map(str::to_string)).collect();
+            let names: Vec<String> = list["servers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| {
+                    s["enabled"] != false
+                        && !s["problem"].is_string()
+                        && (!live || s["status"]["state"] != "ready")
+                })
+                .filter_map(|s| s["name"].as_str().map(str::to_string))
+                .collect();
             if !names.is_empty() {
-                println!("Connecting {}…", if names.len() == 1 { names[0].clone() } else { format!("{} servers", names.len()) });
-                for result in futures::future::join_all(names.iter().map(|name| mcp_call(app, "mcp.reconnect", json!({ "name": name, "fresh": false })))).await {
+                println!(
+                    "Connecting {}…",
+                    if names.len() == 1 {
+                        names[0].clone()
+                    } else {
+                        format!("{} servers", names.len())
+                    }
+                );
+                for result in futures::future::join_all(names.iter().map(|name| {
+                    mcp_call(
+                        app,
+                        "mcp.reconnect",
+                        json!({ "name": name, "fresh": false }),
+                    )
+                }))
+                .await
+                {
                     result?;
                 }
                 list = mcp_call(app, "mcp.list", json!({})).await?.0;
@@ -616,23 +979,47 @@ async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<(
             print_mcp_server(&server);
             Ok(())
         }
-        McpCommand::Add { name, transport, env, header, description, timeout, target } => {
-            let config = mcp_config(transport.as_deref(), &env, &header, description, timeout, &target)?;
-            let (saved, _) = mcp_call(app, "mcp.save", json!({ "name": name, "config": config })).await?;
-            println!("Added {name} to {}.", saved["path"].as_str().unwrap_or("mcp.json"));
+        McpCommand::Add {
+            name,
+            transport,
+            env,
+            header,
+            description,
+            timeout,
+            target,
+        } => {
+            let config = mcp_config(
+                transport.as_deref(),
+                &env,
+                &header,
+                description,
+                timeout,
+                &target,
+            )?;
+            let (saved, _) =
+                mcp_call(app, "mcp.save", json!({ "name": name, "config": config })).await?;
+            println!(
+                "Added {name} to {}.",
+                saved["path"].as_str().unwrap_or("mcp.json")
+            );
             let server = mcp_connect(app, &name).await?;
             println!("{}", mcp_outcome(&server));
             Ok(())
         }
         McpCommand::AddJson { name, json } => {
-            let servers = beans::plugins::mcp_json::parse_servers(&json).map_err(|e| anyhow::anyhow!(e))?;
+            let servers =
+                beans::plugins::mcp_json::parse_servers(&json).map_err(|e| anyhow::anyhow!(e))?;
             let entry = match servers.as_slice() {
                 [(_, entry)] => entry.clone().map_err(|e| anyhow::anyhow!(e))?,
                 many => anyhow::bail!("That JSON has {} servers. Give one server's JSON, or add them all with `beans mcp import <file>`.", many.len()),
             };
             let config = serde_json::Value::from(&entry);
-            let (saved, _) = mcp_call(app, "mcp.save", json!({ "name": name, "config": config })).await?;
-            println!("Added {name} to {}.", saved["path"].as_str().unwrap_or("mcp.json"));
+            let (saved, _) =
+                mcp_call(app, "mcp.save", json!({ "name": name, "config": config })).await?;
+            println!(
+                "Added {name} to {}.",
+                saved["path"].as_str().unwrap_or("mcp.json")
+            );
             let server = mcp_connect(app, &name).await?;
             println!("{}", mcp_outcome(&server));
             Ok(())
@@ -643,14 +1030,24 @@ async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<(
             Ok(())
         }
         McpCommand::Enable { name } => {
-            mcp_call(app, "mcp.set_enabled", json!({ "name": name, "enabled": true })).await?;
+            mcp_call(
+                app,
+                "mcp.set_enabled",
+                json!({ "name": name, "enabled": true }),
+            )
+            .await?;
             println!("Turned {name} on.");
             let server = mcp_connect(app, &name).await?;
             println!("{}", mcp_outcome(&server));
             Ok(())
         }
         McpCommand::Disable { name } => {
-            mcp_call(app, "mcp.set_enabled", json!({ "name": name, "enabled": false })).await?;
+            mcp_call(
+                app,
+                "mcp.set_enabled",
+                json!({ "name": name, "enabled": false }),
+            )
+            .await?;
             println!("Turned {name} off. Bots no longer see it.");
             Ok(())
         }
@@ -667,12 +1064,22 @@ async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<(
             Ok(())
         }
         McpCommand::Hide { name, tool } => {
-            mcp_call(app, "mcp.hide_tool", json!({ "name": name, "tool": tool, "hidden": true })).await?;
+            mcp_call(
+                app,
+                "mcp.hide_tool",
+                json!({ "name": name, "tool": tool, "hidden": true }),
+            )
+            .await?;
             println!("Hid {tool} of {name}. Bots no longer see it.");
             Ok(())
         }
         McpCommand::Show { name, tool } => {
-            mcp_call(app, "mcp.hide_tool", json!({ "name": name, "tool": tool, "hidden": false })).await?;
+            mcp_call(
+                app,
+                "mcp.hide_tool",
+                json!({ "name": name, "tool": tool, "hidden": false }),
+            )
+            .await?;
             println!("Bots see {name}'s {tool} again.");
             Ok(())
         }
@@ -684,7 +1091,12 @@ async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<(
 /// Without a running `beans serve` the server ran in this process, which stops it before leaving.
 async fn mcp_connect(app: &std::sync::Arc<App>, name: &str) -> anyhow::Result<serde_json::Value> {
     eprintln!("Connecting {name}…");
-    let (got, live) = mcp_call(app, "mcp.reconnect", serde_json::json!({ "name": name, "fresh": false })).await?;
+    let (got, live) = mcp_call(
+        app,
+        "mcp.reconnect",
+        serde_json::json!({ "name": name, "fresh": false }),
+    )
+    .await?;
     if !live {
         if let Some(id) = got["server"]["id"].as_str() {
             app.mcp.forget(id);
@@ -715,19 +1127,41 @@ fn mcp_outcome(server: &serde_json::Value) -> String {
 /// The entry `beans mcp add` writes: a command with its environment, or a URL with its headers.
 /// What follows a command is its arguments, flags included (`npx -y …`, `docker run -e …`); what
 /// follows a URL is read as this command's own flags, which people write after it.
-fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], description: Option<String>, timeout: Option<u64>, target: &[String]) -> anyhow::Result<serde_json::Value> {
-    let Some(first) = target.first() else { anyhow::bail!("Give the command to run, or the server's URL, after the name.") };
+fn mcp_config(
+    transport: Option<&str>,
+    env: &[String],
+    headers: &[String],
+    description: Option<String>,
+    timeout: Option<u64>,
+    target: &[String],
+) -> anyhow::Result<serde_json::Value> {
+    let Some(first) = target.first() else {
+        anyhow::bail!("Give the command to run, or the server's URL, after the name.")
+    };
     let is_url = first.starts_with("http://") || first.starts_with("https://");
-    let (mut transport, mut env, mut headers, mut description, mut timeout) = (transport.map(str::to_string), env.to_vec(), headers.to_vec(), description, timeout);
+    let (mut transport, mut env, mut headers, mut description, mut timeout) = (
+        transport.map(str::to_string),
+        env.to_vec(),
+        headers.to_vec(),
+        description,
+        timeout,
+    );
     let mut target = target.to_vec();
     if is_url && transport.as_deref() != Some("stdio") {
         let mut rest = target.split_off(1).into_iter();
         while let Some(word) = rest.next() {
             let (flag, attached) = match word.split_once('=') {
-                Some((flag, value)) if flag.starts_with("--") => (flag.to_string(), Some(value.to_string())),
+                Some((flag, value)) if flag.starts_with("--") => {
+                    (flag.to_string(), Some(value.to_string()))
+                }
                 _ => (word.clone(), None),
             };
-            let mut value = || attached.clone().or_else(|| rest.next()).ok_or_else(|| anyhow::anyhow!("{flag} needs a value."));
+            let mut value = || {
+                attached
+                    .clone()
+                    .or_else(|| rest.next())
+                    .ok_or_else(|| anyhow::anyhow!("{flag} needs a value."))
+            };
             match flag.as_str() {
                 "-H" | "--header" => headers.push(value()?),
                 "-e" | "--env" => env.push(value()?),
@@ -749,7 +1183,10 @@ fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], descr
     let mut config = serde_json::Map::new();
     if remote {
         if target.len() > 1 {
-            anyhow::bail!("A remote server is one URL; {} more words follow it.", target.len() - 1);
+            anyhow::bail!(
+                "A remote server is one URL; {} more words follow it.",
+                target.len() - 1
+            );
         }
         if !env.is_empty() {
             anyhow::bail!("-e sets a command's environment. A remote server takes headers: -H \"Name: value\".");
@@ -758,7 +1195,9 @@ fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], descr
         config.insert("url".into(), first.clone().into());
         let mut map = serde_json::Map::new();
         for header in headers {
-            let (name, value) = header.split_once(':').ok_or_else(|| anyhow::anyhow!("A header is \"Name: value\", not {header:?}."))?;
+            let (name, value) = header
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("A header is \"Name: value\", not {header:?}."))?;
             map.insert(name.trim().to_string(), value.trim().into());
         }
         if !map.is_empty() {
@@ -766,7 +1205,9 @@ fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], descr
         }
     } else {
         if !headers.is_empty() {
-            anyhow::bail!("-H sets a remote server's headers. A command takes its environment: -e KEY=value.");
+            anyhow::bail!(
+                "-H sets a remote server's headers. A command takes its environment: -e KEY=value."
+            );
         }
         config.insert("command".into(), first.clone().into());
         if target.len() > 1 {
@@ -774,7 +1215,9 @@ fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], descr
         }
         let mut map = serde_json::Map::new();
         for variable in env {
-            let (name, value) = variable.split_once('=').ok_or_else(|| anyhow::anyhow!("An environment variable is KEY=value, not {variable:?}."))?;
+            let (name, value) = variable.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("An environment variable is KEY=value, not {variable:?}.")
+            })?;
             map.insert(name.trim().to_string(), value.into());
         }
         if !map.is_empty() {
@@ -787,7 +1230,15 @@ fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], descr
     // The file reads a timeout of 1000 or more as milliseconds, as Gemini CLI writes it, so a long one
     // is written that way.
     if let Some(seconds) = timeout.filter(|seconds| *seconds > 0) {
-        config.insert("timeout".into(), (if seconds >= 1000 { seconds * 1000 } else { seconds }).into());
+        config.insert(
+            "timeout".into(),
+            (if seconds >= 1000 {
+                seconds * 1000
+            } else {
+                seconds
+            })
+            .into(),
+        );
     }
     Ok(serde_json::Value::Object(config))
 }
@@ -798,20 +1249,41 @@ async fn mcp_import(app: &std::sync::Arc<App>, file: Option<PathBuf>) -> anyhow:
     let named = file.is_some();
     let sources: Vec<(String, PathBuf)> = match file {
         Some(path) => vec![(path.display().to_string(), path)],
-        None => beans::plugins::mcp_json::known_sources().into_iter().map(|(app, path)| (app.to_string(), path)).collect(),
+        None => beans::plugins::mcp_json::known_sources()
+            .into_iter()
+            .map(|(app, path)| (app.to_string(), path))
+            .collect(),
     };
     if sources.is_empty() {
-        println!("No other app's MCP servers on this computer. Name a file: beans mcp import <file>");
+        println!(
+            "No other app's MCP servers on this computer. Name a file: beans mcp import <file>"
+        );
         return Ok(());
     }
     let (list, _) = mcp_call(app, "mcp.list", json!({})).await?;
-    if let Some(error) = list["error"].as_str() { anyhow::bail!("{error}"); }
-    let mut names: std::collections::HashSet<String> = list["servers"].as_array().into_iter().flatten().filter_map(|s| s["name"].as_str().map(str::to_string)).collect();
+    if let Some(error) = list["error"].as_str() {
+        anyhow::bail!("{error}");
+    }
+    let mut names: std::collections::HashSet<String> = list["servers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["name"].as_str().map(str::to_string))
+        .collect();
     for (label, path) in sources {
         // A file named here may hold servers any way a README writes them; an app's settings file
         // holds them under its servers' object, or has none.
-        let read = |text: String| if named { beans::plugins::mcp_json::parse_servers(&text) } else { beans::plugins::mcp_json::servers_in_app_config(&text) };
-        let servers = match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(read) {
+        let read = |text: String| {
+            if named {
+                beans::plugins::mcp_json::parse_servers(&text)
+            } else {
+                beans::plugins::mcp_json::servers_in_app_config(&text)
+            }
+        };
+        let servers = match std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(read)
+        {
             Ok(servers) if servers.is_empty() => {
                 println!("{label}: no MCP servers.");
                 continue;
@@ -826,14 +1298,25 @@ async fn mcp_import(app: &std::sync::Arc<App>, file: Option<PathBuf>) -> anyhow:
         let (mut added, mut skipped) = (Vec::new(), Vec::new());
         for (name, entry) in servers {
             let Some(name) = name else {
-                skipped.push("a server with no name (add it with `beans mcp add-json <name> <json>`)".to_string());
+                skipped.push(
+                    "a server with no name (add it with `beans mcp add-json <name> <json>`)"
+                        .to_string(),
+                );
                 continue;
             };
             match entry {
-                _ if names.contains(&name) => skipped.push(format!("{name}: mcp.json has it already")),
+                _ if names.contains(&name) => {
+                    skipped.push(format!("{name}: mcp.json has it already"))
+                }
                 Err(problem) if named => anyhow::bail!("{label}: {name}: {problem}"),
                 Err(problem) => skipped.push(format!("{name}: {problem}")),
-                Ok(entry) => match mcp_call(app, "mcp.save", json!({ "name": name, "config": serde_json::Value::from(&entry) })).await {
+                Ok(entry) => match mcp_call(
+                    app,
+                    "mcp.save",
+                    json!({ "name": name, "config": serde_json::Value::from(&entry) }),
+                )
+                .await
+                {
                     Ok(_) => {
                         names.insert(name.clone());
                         added.push(name);
@@ -860,9 +1343,23 @@ fn command_line(server: &serde_json::Value) -> String {
     if let Some(url) = config["url"].as_str() {
         return url.to_string();
     }
-    let words = std::iter::once(config["command"].as_str().unwrap_or_default()).chain(config["args"].as_array().into_iter().flatten().filter_map(|arg| arg.as_str()));
+    let words = std::iter::once(config["command"].as_str().unwrap_or_default()).chain(
+        config["args"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|arg| arg.as_str()),
+    );
     words
-        .map(|word| if word.is_empty() || word.contains(|c: char| c.is_whitespace() || c == '"' || c == '\'') { format!("\"{}\"", word.replace('"', "\\\"")) } else { word.to_string() })
+        .map(|word| {
+            if word.is_empty()
+                || word.contains(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            {
+                format!("\"{}\"", word.replace('"', "\\\""))
+            } else {
+                word.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -870,7 +1367,9 @@ fn command_line(server: &serde_json::Value) -> String {
 /// A value whose name says it is a key, token, or password, cut to its last four characters.
 fn masked(name: &str, value: &str) -> String {
     let lower = name.to_ascii_lowercase();
-    let secret = ["key", "token", "secret", "password", "auth", "credential"].iter().any(|word| lower.contains(word));
+    let secret = ["key", "token", "secret", "password", "auth", "credential"]
+        .iter()
+        .any(|word| lower.contains(word));
     if !secret || (value.starts_with("${") && value.ends_with('}')) {
         return value.to_string();
     }
@@ -906,9 +1405,14 @@ fn mcp_state(server: &serde_json::Value) -> String {
 /// sign-in or setup.
 fn mcp_needs_attention(list: &serde_json::Value) -> bool {
     list["error"].is_string()
-        || list["servers"].as_array().into_iter().flatten().any(|server| {
-            server["enabled"] != false && (server["problem"].is_string() || server["status"]["state"] != "ready")
-        })
+        || list["servers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|server| {
+                server["enabled"] != false
+                    && (server["problem"].is_string() || server["status"]["state"] != "ready")
+            })
 }
 
 fn print_mcp_list(list: &serde_json::Value) {
@@ -918,13 +1422,25 @@ fn print_mcp_list(list: &serde_json::Value) {
     }
     let servers = list["servers"].as_array().cloned().unwrap_or_default();
     if servers.is_empty() {
-        println!("No MCP servers in {path} yet. Add one with `beans mcp add <name> <command or URL>`.");
+        println!(
+            "No MCP servers in {path} yet. Add one with `beans mcp add <name> <command or URL>`."
+        );
         return;
     }
     println!("{path}\n");
-    let width = servers.iter().filter_map(|s| s["name"].as_str()).map(|n| n.chars().count()).max().unwrap_or(0);
+    let width = servers
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .map(|n| n.chars().count())
+        .max()
+        .unwrap_or(0);
     let states: Vec<String> = servers.iter().map(mcp_state).collect();
-    let state_width = states.iter().map(|s| s.chars().count()).max().unwrap_or(0).min(40);
+    let state_width = states
+        .iter()
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(40);
     for (server, state) in servers.iter().zip(&states) {
         let name = server["name"].as_str().unwrap_or_default();
         let target: String = command_line(server).chars().take(90).collect();
@@ -939,12 +1455,24 @@ fn print_mcp_server(server: &serde_json::Value) {
     if config["url"].is_string() {
         row("URL", config["url"].as_str().unwrap_or_default());
         for (name, value) in config["headers"].as_object().into_iter().flatten() {
-            row("Header", &format!("{name}: {}", masked(name, value.as_str().unwrap_or_default())));
+            row(
+                "Header",
+                &format!(
+                    "{name}: {}",
+                    masked(name, value.as_str().unwrap_or_default())
+                ),
+            );
         }
     } else {
         row("Command", &command_line(server));
         for (name, value) in config["env"].as_object().into_iter().flatten() {
-            row("Env", &format!("{name}={}", masked(name, value.as_str().unwrap_or_default())));
+            row(
+                "Env",
+                &format!(
+                    "{name}={}",
+                    masked(name, value.as_str().unwrap_or_default())
+                ),
+            );
         }
         if let Some(cwd) = config["cwd"].as_str() {
             row("Folder", cwd);
@@ -955,40 +1483,81 @@ fn print_mcp_server(server: &serde_json::Value) {
     }
     if let Some(timeout) = config["timeout"].as_u64() {
         // 1000 or more is milliseconds, as the file reads it.
-        let seconds = if timeout >= 1000 { timeout.div_ceil(1000) } else { timeout };
-        row("Timeout", &format!("{seconds} s without an answer or progress"));
+        let seconds = if timeout >= 1000 {
+            timeout.div_ceil(1000)
+        } else {
+            timeout
+        };
+        row(
+            "Timeout",
+            &format!("{seconds} s without an answer or progress"),
+        );
     }
     row("State", &mcp_state(server));
     if server["status"]["state"] == "needs_auth" {
-        row("", &format!("Run `beans mcp sign-in {}`.", server["name"].as_str().unwrap_or_default()));
+        row(
+            "",
+            &format!(
+                "Run `beans mcp sign-in {}`.",
+                server["name"].as_str().unwrap_or_default()
+            ),
+        );
     }
     let tools = server["tools"].as_array().cloned().unwrap_or_default();
     if !tools.is_empty() {
         println!("  Tools");
-        let width = tools.iter().filter_map(|t| t["name"].as_str()).map(|n| n.chars().count()).max().unwrap_or(0).min(36);
+        let width = tools
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .map(|n| n.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(36);
         for tool in tools {
-            let about: String = tool["description"].as_str().unwrap_or_default().chars().take(100).collect();
-            let hidden = if tool["hidden"] == true { " (hidden from bots)" } else { "" };
-            println!("    {:<width$}  {about}{hidden}", tool["name"].as_str().unwrap_or_default());
+            let about: String = tool["description"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .take(100)
+                .collect();
+            let hidden = if tool["hidden"] == true {
+                " (hidden from bots)"
+            } else {
+                ""
+            };
+            println!(
+                "    {:<width$}  {about}{hidden}",
+                tool["name"].as_str().unwrap_or_default()
+            );
         }
     }
 }
 
 /// `beans models reload` and `beans marketplace reload`: checks the configured feed now,
 /// through the running `beans serve`, or with none, here into its cache for the next start.
-async fn reload(app: &std::sync::Arc<App>, method: &str, enable: fn(&App), what: &str) -> anyhow::Result<()> {
-    let (reply, live) = match serve_call(app.config.port, method, &serde_json::json!({})).await? {
+async fn reload(
+    app: &std::sync::Arc<App>,
+    method: &str,
+    enable: fn(&App),
+    what: &str,
+) -> anyhow::Result<()> {
+    let (reply, live) = match serve_call(&app.config, method, &serde_json::json!({})).await? {
         Some(reply) => (reply, true),
         None => {
             enable(app);
-            (Box::pin(beans::api::dispatch(app, method, serde_json::json!({}))).await, false)
+            (
+                Box::pin(beans::api::dispatch(app, method, serde_json::json!({}))).await,
+                false,
+            )
         }
     };
     let reply = reply.map_err(anyhow::Error::msg)?;
     let updated = reply["updated"].as_str().unwrap_or_default();
     match (reply["changed"] == true, live) {
         (true, true) => println!("beans serve now uses the {what} of {updated}."),
-        (true, false) => println!("Saved the {what} of {updated}; beans serve uses it when it starts."),
+        (true, false) => {
+            println!("Saved the {what} of {updated}; beans serve uses it when it starts.")
+        }
         (false, _) => println!("The {what} of {updated} is the latest."),
     }
     Ok(())
@@ -1000,7 +1569,11 @@ async fn service(config: &Config, command: ServiceCommand) -> anyhow::Result<()>
     match command {
         ServiceCommand::Install => {
             // Another beans serve on the port would keep the service's from starting.
-            if !service::status(config).running.is_some() && serve_call(config.port, "hello", &serde_json::json!({})).await?.is_some() {
+            if !service::status(config).running.is_some()
+                && serve_call(config, "hello", &serde_json::json!({}))
+                    .await?
+                    .is_some()
+            {
                 anyhow::bail!(
                     "A beans serve already answers on port {}. Stop it first; on a computer with the Beans app, the app runs beans serve itself.",
                     config.port
@@ -1022,15 +1595,23 @@ async fn service(config: &Config, command: ServiceCommand) -> anyhow::Result<()>
         ServiceCommand::Status => {
             let status = service::status(config);
             match (status.installed, status.running) {
-                (true, Some(pid)) => println!("Installed, running (pid {pid}). Log: {}", status.log),
+                (true, Some(pid)) => {
+                    println!("Installed, running (pid {pid}). Log: {}", status.log)
+                }
                 (true, None) => println!("Installed, not running. Log: {}", status.log),
-                (false, _) => println!("Not installed. Run beans service install to keep beans serve running."),
+                (false, _) => println!(
+                    "Not installed. Run beans service install to keep beans serve running."
+                ),
             }
         }
         ServiceCommand::Run { env } => {
             #[cfg(windows)]
             {
-                let env: Vec<(String, String)> = env.iter().filter_map(|pair| pair.split_once('=')).map(|(name, value)| (name.to_string(), value.to_string())).collect();
+                let env: Vec<(String, String)> = env
+                    .iter()
+                    .filter_map(|pair| pair.split_once('='))
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect();
                 for (name, value) in &env {
                     std::env::set_var(name, value);
                 }
@@ -1047,21 +1628,53 @@ async fn service(config: &Config, command: ServiceCommand) -> anyhow::Result<()>
     Ok(())
 }
 
-/// One request to the `beans serve` on `port`; `None` when nothing listens there.
-async fn serve_call(port: u16, method: &str, params: &serde_json::Value) -> anyhow::Result<Option<Result<serde_json::Value, String>>> {
+/// One request to the `beans serve` on the configured port, with the token in the data
+/// directory; `None` when nothing listens there.
+async fn serve_call(
+    config: &Config,
+    method: &str,
+    params: &serde_json::Value,
+) -> anyhow::Result<Option<Result<serde_json::Value, String>>> {
     use futures::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-    let Ok((mut socket, _)) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws")).await else { return Ok(None) };
-    socket.send(Message::Text(serde_json::json!({ "id": 1, "method": method, "params": params }).to_string().into())).await?;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::{Error, Message};
+    let port = config.port;
+    let mut request = format!("ws://127.0.0.1:{port}/ws").into_client_request()?;
+    if let Some(token) = config.serve_token() {
+        request
+            .headers_mut()
+            .insert("Authorization", format!("Bearer {token}").parse()?);
+    }
+    let mut socket = match tokio_tungstenite::connect_async(request).await {
+        Ok((socket, _)) => socket,
+        Err(Error::Http(response)) => anyhow::bail!(
+            "The lorca serve on port {port} refused this command ({}): it keeps its data in another folder than {}.",
+            response.status(),
+            config.home.display()
+        ),
+        Err(_) => return Ok(None),
+    };
+    socket
+        .send(Message::Text(
+            serde_json::json!({ "id": 1, "method": method, "params": params })
+                .to_string()
+                .into(),
+        ))
+        .await?;
     // Events share the socket; the reply is the message with our id.
     while let Some(message) = socket.next().await {
-        let Message::Text(text) = message? else { continue };
+        let Message::Text(text) = message? else {
+            continue;
+        };
         let value: serde_json::Value = serde_json::from_str(&text)?;
         if value["id"] != 1 {
             continue;
         }
         return Ok(Some(match value.get("error") {
-            Some(error) => Err(error["message"].as_str().unwrap_or("request failed").to_string()),
+            Some(error) => Err(error["message"]
+                .as_str()
+                .unwrap_or("request failed")
+                .to_string()),
             None => Ok(value["result"].clone()),
         }));
     }
@@ -1077,20 +1690,72 @@ async fn flush_outbox_once(app: &std::sync::Arc<App>) {
 async fn doctor(app: &std::sync::Arc<App>, json: bool) {
     let report = beans::diagnostics::report(app).await;
     if json {
-        println!("{}", serde_json::to_string_pretty(&report).expect("diagnostics JSON"));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("diagnostics JSON")
+        );
         return;
     }
-    let ok = |label: &str, good: bool, detail: String| println!("{} {label}: {detail}", if good { "✔" } else { "✘" });
-    ok("home", report["home"]["exists"] == true, "directory present (path omitted)".into());
-    ok("identity", report["this_device"]["has_identity"] == true, if app.has_identity() { "present".into() } else { "run `beans identity new`".into() });
-    println!("• port: {}", if report["port"]["free"] == true { "free" } else { "busy (beans serve running?)" });
+    let ok = |label: &str, good: bool, detail: String| {
+        println!("{} {label}: {detail}", if good { "✔" } else { "✘" })
+    };
+    ok(
+        "home",
+        report["home"]["exists"] == true,
+        "directory present (path omitted)".into(),
+    );
+    ok(
+        "identity",
+        report["this_device"]["has_identity"] == true,
+        if app.has_identity() {
+            "present".into()
+        } else {
+            "run `beans identity new`".into()
+        },
+    );
+    println!(
+        "• port: {}",
+        if report["port"]["free"] == true {
+            "free"
+        } else {
+            "busy (beans serve running?)"
+        }
+    );
     let relay = &report["relay"];
-    ok("relay", relay["reason"] == "none", format!("{}: {}{}", relay["host"].as_str().unwrap_or("host omitted"), relay["reason"].as_str().unwrap(), relay["http_status"].as_u64().map(|s| format!(" (HTTP {s})")).unwrap_or_default()));
-    println!("• providers: configured credentials only; health not checked\n{}", report["providers"]);
-    println!("• plugins: cached setup state, not a live probe\n{}", report["plugins"]);
+    ok(
+        "relay",
+        relay["reason"] == "none",
+        format!(
+            "{}: {}{}",
+            relay["host"].as_str().unwrap_or("host omitted"),
+            relay["reason"].as_str().unwrap(),
+            relay["http_status"]
+                .as_u64()
+                .map(|s| format!(" (HTTP {s})"))
+                .unwrap_or_default()
+        ),
+    );
+    println!(
+        "• providers: configured credentials only; health not checked\n{}",
+        report["providers"]
+    );
+    println!(
+        "• plugins: cached setup state, not a live probe\n{}",
+        report["plugins"]
+    );
     let mcp = &report["mcp_json"];
-    ok("mcp.json", mcp["file_error"] == false && mcp["problems"] == 0, format!("{} servers, {} configuration problems, file error: {}", mcp["servers"], mcp["problems"], mcp["file_error"]));
+    ok(
+        "mcp.json",
+        mcp["file_error"] == false && mcp["problems"] == 0,
+        format!(
+            "{} servers, {} configuration problems, file error: {}",
+            mcp["servers"], mcp["problems"], mcp["file_error"]
+        ),
+    );
     println!("• versions: {}", report["versions"]);
-    println!("• Runners: presence only, not admission readiness\n{}", report["runners"]);
+    println!(
+        "• Runners: presence only, not admission readiness\n{}",
+        report["runners"]
+    );
     println!("Review before sharing; report discloses relay host/port. Nothing is uploaded.");
 }

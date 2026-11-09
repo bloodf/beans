@@ -167,3 +167,36 @@ func (Menus) Popup(ctx context.Context, items []MenuItemSpec, x, y int) string {
 		return ""
 	}
 }
+
+// menuCommand routes page-owned commands to the window that registered them.
+func (a *appDelegate) menuCommand(spec MenuItemSpec, win *mygo.Window) {
+	switch spec.ID {
+	case "settings":
+		a.showSettings()
+		return
+	case "showOnboarding":
+		a.showOnboarding()
+		return
+	case "quit":
+		mygo.App.Quit()
+		return
+	}
+	if spec.OpensMain {
+		if a.onboarding != nil {
+			return
+		}
+		a.showMainWindow()
+		if a.main != nil {
+			_ = MenuCommand.Emit(a.main.win, spec.ID)
+		}
+		return
+	}
+	target := win
+	if target == nil || target.IsDestroyed() {
+		if a.main == nil {
+			return
+		}
+		target = a.main.win
+	}
+	_ = MenuCommand.Emit(target, spec.ID)
+}

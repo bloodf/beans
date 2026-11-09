@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "mygo dev",
-    "build": "mygo build",
-    "generate": "mygo generate",
+    "dev": "go tool mygo dev",
+    "build": "go tool mygo build",
+    "generate": "go tool mygo generate",
     "dev:web": "vite",
     "build:web": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",

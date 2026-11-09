@@ -188,7 +188,7 @@ go -C desktop test ./...
 
 ## License and credits
 
-Beans is licensed under [GPL-3.0-only](./LICENSE) and builds on [Lorca](https://github.com/egoist/lorca) by egoist, preserving its source history and required attribution. The vendored Blobatar avatar source by Alain is [MIT-licensed](./packages/beans-blobatar/LICENSE).
+Beans is licensed under [MIT](./LICENSE) and builds on [Lorca](https://github.com/egoist/lorca) by egoist, preserving its source history and required attribution. The vendored Blobatar avatar source by Alain is [MIT-licensed](./packages/beans-blobatar/LICENSE).
 
 The read-only tracked-name check takes the provenance name explicitly: `pnpm run scripts/check-tracked-names.ts Lorca`. It inspects tracked paths/content, allows provenance only here and preserves its enumerated required legal notices; run it after tracked path moves are reconciled.
 

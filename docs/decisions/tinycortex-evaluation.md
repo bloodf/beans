@@ -10,7 +10,7 @@ This decision rejects direct import of the pinned engine and its retrieval/prove
 The evaluated project is tinyhumansai/tinycortex at `72ce1d176aa3dc3a9ece14b9e61ecef9a8ae6b53`, not CortexDB Memory v2. Primary sources at that exact revision:
 
 - [Manifest](https://github.com/tinyhumansai/tinycortex/blob/72ce1d176aa3dc3a9ece14b9e61ecef9a8ae6b53/Cargo.toml).
-- [Complete license text](https://github.com/tinyhumansai/tinycortex/blob/72ce1d176aa3dc3a9ece14b9e61ecef9a8ae6b53/LICENSE), read before this recommendation. The manifest declares `GPL-3.0-only`; LICENSE contains GNU GPL version 3, 29 June 2007. Beans also declares GPL-3.0-only. Licensing is not the rejection reason. No upstream code is copied by this decision.
+- [Complete license text](https://github.com/tinyhumansai/tinycortex/blob/72ce1d176aa3dc3a9ece14b9e61ecef9a8ae6b53/LICENSE), read before this recommendation. The manifest declares `GPL-3.0-only`; LICENSE contains GNU GPL version 3, 29 June 2007. Beans declares MIT. Licensing is not the rejection reason. No upstream code is copied by this decision.
 - [Memory module](https://github.com/tinyhumansai/tinycortex/blob/72ce1d176aa3dc3a9ece14b9e61ecef9a8ae6b53/src/memory/mod.rs), [global retrieval](https://github.com/tinyhumansai/tinycortex/blob/72ce1d176aa3dc3a9ece14b9e61ecef9a8ae6b53/src/memory/retrieval/global.rs), and [source retrieval](https://github.com/tinyhumansai/tinycortex/blob/72ce1d176aa3dc3a9ece14b9e61ecef9a8ae6b53/src/memory/retrieval/source.rs).
 
 ## Safety stop before prototype

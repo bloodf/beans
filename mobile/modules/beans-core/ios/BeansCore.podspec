@@ -9,7 +9,7 @@ Pod::Spec.new do |s|
   s.version        = package['version']
   s.summary        = package['description']
   s.description    = package['description']
-  s.license        = { :type => 'GPL-3.0-only', :file => '../../../../LICENSE' }
+  s.license        = { :type => 'MIT', :file => '../../../../LICENSE' }
   s.author         = 'Beans'
   s.homepage       = 'https://github.com/bloodf/beans'
   s.platforms      = { :ios => '16.4' }

@@ -125,7 +125,7 @@ beans/
   mobile/              # Expo app for iOS and Android: a paired Device over the core (modules/beans-core)
   web/                 # the site
   scripts/             # Node/TypeScript scripts: dev loop, bundle build, macOS release, the desktop app's dev loop and builds, string and doc checks
-  .github/workflows/   # release.yml: manual signed Beans releases; test.yml: full PR/manual test matrix; docs.yml: PR/manual doc check; catalog.yml: PR/manual catalog/index check
+  .github/workflows/   # release.yml: manual signed Beans releases; test.yml: manual test matrix; docs.yml: manual doc check; catalog.yml: manual catalog/index check
 ```
 
 See [Phone development](docs/architecture/phone-app.md#development-loop) for phone rebuild commands.

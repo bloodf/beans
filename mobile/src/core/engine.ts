@@ -6,6 +6,7 @@
 import * as WebBrowser from "expo-web-browser";
 import { AppState, Platform, type AppStateStatus } from "react-native";
 import * as core from "../../modules/beans-core";
+import { setPastedImageCleanup } from "./composerDraft";
 import { t } from "../i18n";
 import { hostFacts } from "./host";
 import type { BotLook } from "./look";
@@ -44,6 +45,8 @@ export interface PickedFile {
   size?: number;
   width?: number;
   height?: number;
+  /** Created by ImagePasteView, not a photo-library or document-picker source. */
+  pasted?: true;
 }
 
 export interface PairProgress {
@@ -70,6 +73,7 @@ class Engine {
   async start() {
     if (this.started) return;
     this.started = true;
+    setPastedImageCleanup(core.deletePastedImages);
     const active = AppState.currentState === "active";
     useStore.setState({ dictation_lang: loadPrefs().dictation_lang, appActive: active, activeSince: active ? Date.now() : 0 });
     core.onEvent((frame) => this.receive(frame));

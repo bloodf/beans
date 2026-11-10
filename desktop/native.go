@@ -19,19 +19,22 @@ import (
 // The native window shares the admitted account and sole CLI transport. The
 // complete web client remains available until native feature parity is proven.
 type nativeDesktop struct {
-	store              *model.NativeStore
-	win                *mygo.Window
-	authority          cliAuthority
-	shell              nativeShellLayout
-	onboardingStep     nativeOnboardingStep
-	avatars            *nativeAvatars
-	activity           *nativeAvatarActivity
-	memory             *nativeMemory
-	memoryPanel        nativeMemoryPanel
-	look               *nativeLookEditor
-	memoryRecovery     map[string]memoryForms
-	diagnostics        *nativeDiagnostics
-	diagnosticsExports int
+	store               *model.NativeStore
+	win                 *mygo.Window
+	titleWindow         *mygo.Window
+	windowTitle         string
+	windowTitleRevision uint64
+	authority           cliAuthority
+	shell               nativeShellLayout
+	onboardingStep      nativeOnboardingStep
+	avatars             *nativeAvatars
+	activity            *nativeAvatarActivity
+	memory              *nativeMemory
+	memoryPanel         nativeMemoryPanel
+	look                *nativeLookEditor
+	memoryRecovery      map[string]memoryForms
+	diagnostics         *nativeDiagnostics
+	diagnosticsExports  int
 }
 
 func nativeEnabled() bool { return os.Getenv("BEANS_NATIVE") == "1" }

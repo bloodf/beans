@@ -36,3 +36,5 @@ The same sheet adds a KeepBoth action for an installed inactive copy, available 
 
 
 Mounted skills checks import the shared `.browser.tsx` consumers. The dedicated skills driver and the desktop aggregate execute the same preserved discovery, library, Keep Both and Compare assertions; the driver retains its source-binding requirements under the renamed module paths.
+
+The mounted skills driver freezes owned frontend inputs, records their hashes and rejects changes during capture or execution. Intercepted Vite responses bind transformed modules to frozen source maps; browser script bytes must equal the recorded responses, and required modules must report execution coverage. The driver launches Node/Vite in its own POSIX session and tears down the owned process group before removing the frozen directory. Python binding fixtures and Linux process-tree tests validate these boundaries separately from mounted browser execution.

@@ -86,6 +86,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [Memory service UI](docs/architecture/memory-ui.md) | Client drafts, masked replies, secret/options patches, consent and capability gates |
 | [Memory services](docs/architecture/memory-services.md) | Encrypted config, dispatch, queues, deletion and embeddings |
 | [Bot avatars](docs/architecture/avatars.md) | Generated appearance contract, independent photos, validated API edits, encrypted persistence and fresh-format protocol compatibility |
+| [Typed decisions](docs/architecture/typed-decisions.md) | Pure validation and capability preflight |
 | [Providers](docs/architecture/providers.md) | Each model provider and its sign-in, custom providers, thinking levels, compaction, retries |
 | [Zhipu GLM compatibility](docs/architecture/glm-compatibility.md) | Vendor documentation, existing custom-wire evaluation, unsupported reasoning-tool continuation and local transport evidence |
 | [Model catalog and cost](docs/architecture/model-catalog.md) | Shared model metadata, pricing completeness, usage, and public catalog refresh |

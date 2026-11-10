@@ -65,3 +65,5 @@ The team tools offer the same provider models and thinking levels as the apps' p
 ## Zhipu GLM compatibility evaluation
 
 [Zhipu GLM compatibility](glm-compatibility.md) records primary vendor documentation, the chosen existing custom Chat Completions contract, local transport evidence, encrypted credential mapping, and unsupported reasoning-enabled tool continuation. No separate provider or preset is added.
+
+[Staged typed decisions](typed-decisions.md) describes the pure decision validator and capability preflight.

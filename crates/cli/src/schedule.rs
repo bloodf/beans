@@ -89,12 +89,13 @@ fn parse_every(rest: &str) -> Result<Schedule, String> {
             (amount, unit)
         }
     };
-    let secs = match unit {
-        "m" | "min" | "mins" | "minute" | "minutes" => amount * 60,
-        "h" | "hr" | "hrs" | "hour" | "hours" => amount * 3600,
-        "d" | "day" | "days" => amount * 86_400,
+    let multiplier = match unit {
+        "m" | "min" | "mins" | "minute" | "minutes" => 60,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
+        "d" | "day" | "days" => 86_400,
         _ => return Err(format!("Could not read the interval {rest:?}. Use every 30m, every 2h, or every 1d.")),
     };
+    let secs = amount.checked_mul(multiplier).ok_or("That interval is longer than a year.")?;
     if secs < MIN_INTERVAL_SECS {
         return Err("That runs too often. A routine runs at most every five minutes.".into());
     }
@@ -154,10 +155,11 @@ fn parse_value(text: &str, min: u32, max: u32, names: &[&str]) -> Result<u32, St
 
 impl Schedule {
     /// The first time this schedule fires strictly after `after` (unix seconds), in the local
-    /// time zone. `None` when nothing matches in the next two years.
+    /// time zone. `None` when an interval exceeds the timestamp range or no cron matches
+    /// in the next two years.
     pub fn next_after(&self, after: i64) -> Option<i64> {
         match self {
-            Schedule::Every(secs) => Some(after + secs),
+            Schedule::Every(secs) => after.checked_add(*secs),
             Schedule::Cron(cron) => cron.next_after(after),
         }
     }
@@ -354,6 +356,26 @@ mod tests {
     }
 
     #[test]
+    fn oversized_intervals_reject_without_overflow_or_wraparound() {
+        for input in [
+            "every 9223372036854775807m", "every 9223372036854775807h",
+            "every 9223372036854775807d", "every 144115188075855873d",
+        ] {
+            assert!(parse(input).is_err(), "accepted {input}");
+        }
+        assert_eq!(parse("every 366d").unwrap(), Schedule::Every(366 * 86_400));
+        assert!(parse("every 367d").is_err());
+    }
+
+    #[test]
+    fn interval_next_firing_does_not_wrap_timestamp() {
+        let schedule = parse("every 5m").unwrap();
+        assert_eq!(schedule.next_after(i64::MAX - 300), Some(i64::MAX));
+        assert_eq!(schedule.next_after(i64::MAX - 299), None);
+        assert_eq!(schedule.next_after(i64::MIN), Some(i64::MIN + 300));
+    }
+
+    #[test]
     fn intervals_parse_and_read_back() {
         assert_eq!(parse("every 30m").unwrap(), Schedule::Every(1800));
         assert_eq!(parse("every 2 hours").unwrap(), Schedule::Every(7200));
@@ -366,6 +388,9 @@ mod tests {
         assert_eq!(parse("every 120m").unwrap().canonical(), "every 2h");
         assert!(parse("every 2m").unwrap_err().contains("too often"));
         assert!(parse("every fortnight").is_err());
+        for unit in ["m", "h", "d"] {
+            assert!(parse(&format!("every {}{unit}", i64::MAX)).unwrap_err().contains("longer than a year"));
+        }
         assert_eq!(parse("every 30m").unwrap().next_after(1000), Some(2800));
     }
 

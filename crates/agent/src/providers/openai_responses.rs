@@ -148,6 +148,11 @@ impl Provider for OpenAiResponsesProvider {
         self.info.as_deref()
     }
 
+    fn default_max_output_tokens(&self) -> Option<u64> {
+        // This wire omits max_output_tokens unless the host supplies a per-request cap.
+        None
+    }
+
     async fn stream(
         &self,
         request: ModelRequest,
@@ -160,7 +165,10 @@ impl Provider for OpenAiResponsesProvider {
         }
         let mut body = self.body(&request);
         let options = request.options.clone();
-        options.before_payload(&mut body);
+        if let Err(message) = options.before_payload_with_output_cap(&mut body, "max_output_tokens") {
+            let _ = tx.send(AssistantEvent::Error { message, aborted: false }).await;
+            return channel_stream(rx);
+        }
         let api_key = options.api_key(&self.api_key).await;
         let url = format!("{}/responses", self.base_url);
         let client = self.client.clone();
@@ -176,11 +184,8 @@ impl Provider for OpenAiResponsesProvider {
                 options.apply_to(request).json(&body)
             };
             let response =
-                match send_with_retry(build, max_retries, max_retry_delay_ms, &cancel).await {
-                    Ok(response) => {
-                        options.report(&response);
-                        response
-                    }
+                match send_with_retry(build, max_retries, max_retry_delay_ms, &cancel, &options).await {
+                    Ok(response) => response,
                     Err(failure) => {
                         let aborted = matches!(failure, RequestFailure::Aborted);
                         let _ = tx

@@ -46,6 +46,10 @@ impl Provider for OpenCodeHeaders {
         self.inner.model_info()
     }
 
+    fn default_max_output_tokens(&self) -> Option<u64> {
+        self.inner.default_max_output_tokens()
+    }
+
     async fn stream(&self, mut request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream {
         request.options.headers.insert("User-Agent".into(), USER_AGENT.into());
         if let Some(session_id) = request.options.session_id.clone() {
@@ -724,10 +728,13 @@ mod tests {
                 let listed = CustomModel { id: "claude-opus-5".into(), images: capability, reasoning: capability, tools: capability, thinking_format: Some(format.into()), thinking_can_disable: Some(true), max_output: Some(4096), ..Default::default() };
                 let provider = CustomProvider { name: "Neutral".into(), api, base_url: format!("{root}{suffix}"), api_key: "fixture-key".into(), models: vec![listed], created_at: 1, integration: None, capabilities: None };
                 let adapter = custom_provider("custom:neutral", &provider, "claude-opus-5", Some(ThinkingLevel::Medium));
+                // This success fixture must fund enabled budget thinking and its answer reserve.
+                // Small allowances remain valid when metadata does not enable budget thinking.
+                let output_allowance = if format == "claude-budget" && capability == Some(true) { 4096 } else { 128 };
                 let request = ModelRequest {
                     system_prompt: "fixture system".into(),
                     messages: vec![LlmMessage::User(UserMessage { content: vec![ContentPart::text("fixture input"), ContentPart::Image { data: "AA==".into(), mime_type: "image/png".into() }], timestamp: 0 })],
-                    tools: Vec::new(), cache_points: Vec::new(), max_tokens: Some(128),
+                    tools: Vec::new(), cache_points: Vec::new(), max_tokens: Some(output_allowance),
                     options: Default::default(),
                 };
                 let events: Vec<_> = adapter.stream(request, CancellationToken::new()).await.collect().await;
@@ -745,6 +752,7 @@ mod tests {
                         assert!(headers.contains("x-api-key: fixture-key"));
                         assert!(headers.contains("anthropic-version: 2023-06-01"));
                         assert!(!headers.contains("authorization:"));
+                        assert_eq!(body["max_tokens"], output_allowance, "metadata must not enlarge the host allowance");
                         assert_eq!(body.get("thinking").is_some(), capability == Some(true));
                         if capability == Some(true) {
                             if format == "claude-budget" {

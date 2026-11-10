@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::bash_session::{BashSessions, WAITING_AFTER};
 use super::truncate::{format_size, truncate_tail, TruncatedBy, TruncationOptions, DEFAULT_MAX_BYTES};
-use crate::tool::{Tool, ToolError, ToolResult, ToolUpdateFn};
+use crate::tool::{fold_cleanup, DirectRunner, ExecutionScope, Tool, ToolError, ToolResult, ToolRunner, ToolUpdateFn};
 
 pub(crate) const UPDATE_THROTTLE_MS: u64 = 250;
 
@@ -52,6 +52,7 @@ const NO_SHELL: &str = "Commands run in Git for Windows' bash, and none was foun
      %LOCALAPPDATA%\\Programs\\Git, or beside a git.exe on PATH. Install Git for Windows from https://git-scm.com/downloads/win, \
      and commands run from the next message on; or set BEANS_SHELL to the full path of a bash.exe and restart Beans.";
 
+#[derive(Clone)]
 pub struct BashTool {
     cwd: PathBuf,
     /// None on a Windows computer without Git for Windows' bash: every call then fails saying so.
@@ -286,6 +287,45 @@ impl Tool for BashTool {
         parameters
     }
     async fn execute(&self, id: &str, args: Value, cancel: CancellationToken, on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+        let scope = ExecutionScope::root(&cancel);
+        let mut result = self.execute_scoped(id, args, cancel, on_update, &DirectRunner, &scope).await;
+        let completed = scope.drain().await;
+        fold_cleanup(&mut result, &completed);
+        result
+    }
+
+    async fn execute_scoped(&self, id: &str, args: Value, cancel: CancellationToken, on_update: ToolUpdateFn, _tools: &dyn ToolRunner, scope: &ExecutionScope) -> Result<ToolResult, ToolError> {
+        if self.terminal().is_some() {
+            #[cfg(test)]
+            let result = self.execute_owned(id, args, cancel, on_update, None).await;
+            #[cfg(not(test))]
+            let result = self.execute_owned(id, args, cancel, on_update).await;
+            return result;
+        }
+        let scope = scope.child(&cancel).map_err(ToolError)?;
+        let owned = self.clone();
+        let id = id.to_string();
+        let worker_id = id.clone();
+        #[cfg(test)]
+        let probe = scope.probe.clone();
+        let waiter = scope.spawn_pipe(&id, move |cancel| async move {
+            #[cfg(test)]
+            let result = owned.execute_owned(&worker_id, args, cancel, on_update, probe).await;
+            #[cfg(not(test))]
+            let result = owned.execute_owned(&worker_id, args, cancel, on_update).await;
+            result.map_err(|error| error.0)
+        }).map_err(ToolError)?;
+        match waiter.completion().await.result() {
+            Ok(result) => Ok(result.clone()),
+            Err(error) => Err(ToolError(error.to_string())),
+        }
+    }
+}
+
+impl BashTool {
+    async fn execute_owned(&self, id: &str, args: Value, cancel: CancellationToken, on_update: ToolUpdateFn,
+        #[cfg(test)] probe: Option<Arc<crate::tool::LifecycleProbe>>,
+    ) -> Result<ToolResult, ToolError> {
         let command = args["command"].as_str().ok_or("command is required")?.to_string();
         let timeout = args["timeout"].as_f64();
         if let Some(t) = timeout {
@@ -340,17 +380,30 @@ impl Tool for BashTool {
         let mut output: Vec<u8> = Vec::new();
         let mut last_update = tokio::time::Instant::now() - std::time::Duration::from_secs(1);
         let deadline = timeout.map(|t| tokio::time::Instant::now() + std::time::Duration::from_secs_f64(t));
+        let timeout_elapsed = async {
+            #[cfg(test)]
+            if let Some(arm) = probe.as_ref().filter(|_| timeout.is_some()).and_then(|probe| probe.timeout_arm.as_ref()) {
+                arm.acquire().await.expect("fixture timeout arm").forget();
+                tokio::time::sleep(Duration::from_secs_f64(timeout.expect("armed fixture timeout"))).await;
+                return;
+            }
+            if let Some(deadline) = deadline {
+                tokio::time::sleep_until(deadline).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::pin!(timeout_elapsed);
         let mut timed_out = false;
         let mut aborted = false;
 
         let mut pipes_closed = false;
         let mut status = None;
         loop {
-            let sleep_until = deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600));
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => { aborted = true; break; }
-                _ = tokio::time::sleep_until(sleep_until), if deadline.is_some() => { timed_out = true; break; }
+                _ = &mut timeout_elapsed => { timed_out = true; break; }
                 waited = child.wait(), if status.is_none() => {
                     status = Some(waited);
                 }
@@ -358,6 +411,11 @@ impl Tool for BashTool {
                     match chunk {
                         Some(bytes) => {
                             output.extend_from_slice(&bytes);
+                            #[cfg(test)]
+                            if let Some(probe) = &probe {
+                                let _ = probe.events.send("pipe_ready");
+                                probe.release.acquire().await.expect("fixture release").forget();
+                            }
                             if last_update.elapsed() >= Duration::from_millis(UPDATE_THROTTLE_MS) {
                                 last_update = tokio::time::Instant::now();
                                 let text = if self.script { super::sanitize::terminal_text(&output) } else { String::from_utf8_lossy(&output).into_owned() };
@@ -376,6 +434,8 @@ impl Tool for BashTool {
         let mut cleanup_problem = None;
         if aborted || timed_out {
             let cleanup_deadline = tokio::time::Instant::now() + CANCEL_CLEANUP;
+            #[cfg(test)]
+            if let Some(probe) = &probe { let _ = probe.events.send("cleanup_started"); }
             let cleanup = async {
                 #[cfg(unix)]
                 if pid != 0 && unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } == -1 {
@@ -418,6 +478,8 @@ impl Tool for BashTool {
         }
         // Do not wait for aborted readers or queued bytes past the cleanup deadline.
         rx.close();
+        #[cfg(test)]
+        if let Some(probe) = &probe { let _ = probe.events.send("cleanup_finished"); }
         let status = match status {
             Some(Ok(status)) => Some(status),
             Some(Err(error)) => {
@@ -508,6 +570,43 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn scoped_pipe_honors_its_call_token_and_preserves_unrelated_process() {
+        struct Canary(std::process::Child);
+        impl Drop for Canary {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut canary = Canary(std::process::Command::new("/bin/sleep")
+            .arg("30").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn().unwrap());
+        let owner_cancel = CancellationToken::new();
+        let scope = ExecutionScope::root(&owner_cancel);
+        let call_cancel = CancellationToken::new();
+        let stop = call_cancel.clone();
+        let update: ToolUpdateFn = Arc::new(move |partial| {
+            if partial.text_content().contains("ready") { stop.cancel(); }
+        });
+        let mut tool = BashTool::for_script(std::env::temp_dir());
+        tool.shell = Some("/bin/bash".into());
+        let result = tokio::time::timeout(Duration::from_secs(5), tool.execute_scoped(
+            "separate-token", json!({"command": "printf ready; sleep 30"}),
+            call_cancel, update, &DirectRunner, &scope,
+        )).await;
+        // Drain even on failure so the regression never abandons its command.
+        let completed = scope.drain().await;
+        assert!(!owner_cancel.is_cancelled());
+        assert!(canary.0.try_wait().unwrap().is_none(), "unrelated process was terminated");
+        let result = result.expect("the call token must cancel a scoped pipe worker").unwrap();
+        assert!(result.is_error);
+        assert!(result.text_content().contains("Command aborted"));
+        assert_eq!(result.structured.as_ref().unwrap()["output"], "ready");
+        assert_eq!(completed.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn pipe_cancellation_bounds_cleanup_and_preserves_normal_output() {
         struct HeldPipe(PathBuf);
         impl Drop for HeldPipe {
@@ -546,7 +645,7 @@ mod tests {
             });
             // Job control moves this real pipe holder outside the shell's process group.
             let result = tokio::time::timeout(Duration::from_secs(5), tool.execute(
-                "held", json!({"command": "set -m; sleep 30 & echo $! > held.pid; printf held; wait"}), cancel, update,
+                "held", json!({"command": "set -m; sh -c 'echo $$ > held.pid; exec sleep 30' & while [ ! -s held.pid ]; do sleep 0.01; done; printf held; wait"}), cancel, update,
             )).await;
             let elapsed = stopped_rx.try_recv().expect("pipe holder printed before cancellation").elapsed();
             let pid: i32 = std::fs::read_to_string(dir.join("held.pid")).unwrap().trim().parse().unwrap();
@@ -629,9 +728,26 @@ mod tests {
         assert!(failed.is_error);
         assert_eq!(failed.structured.as_ref().unwrap()["output"], "boom");
         assert_eq!(failed.structured.as_ref().unwrap()["exit_code"], 3);
-        let timed_out = tool.execute("2", json!({"command": "echo before; sleep 5", "timeout": 0.05}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        let cancel = CancellationToken::new();
+        let mut scope = ExecutionScope::root(&cancel);
+        let (events, _observed) = tokio::sync::mpsc::unbounded_channel();
+        let arm = Arc::new(tokio::sync::Semaphore::new(0));
+        scope.probe = Some(Arc::new(crate::tool::LifecycleProbe {
+            events,
+            release: tokio::sync::Semaphore::new(1),
+            timeout_arm: Some(arm.clone()),
+            completed: std::sync::Mutex::new(vec![]),
+        }));
+        // A spawned shell need not print within 50 ms. Start the fixture's unchanged timeout
+        // only after the real pipe reader delivers the output whose retention is under test.
+        let update = Arc::new(move |partial: ToolResult| {
+            if partial.text_content().contains("before") { arm.add_permits(1); }
+        });
+        let timed_out = tool.execute_scoped("2", json!({"command": "echo before; sleep 5", "timeout": 0.05}), cancel, update, &DirectRunner, &scope).await.unwrap();
+        scope.drain().await;
         assert!(timed_out.is_error);
         assert_eq!(timed_out.structured.as_ref().unwrap()["exit_code"], Value::Null);
+        assert!(timed_out.text_content().contains("timed out"));
         assert!(timed_out.structured.as_ref().unwrap()["output"].as_str().unwrap().contains("before"));
     }
 

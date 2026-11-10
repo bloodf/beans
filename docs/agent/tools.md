@@ -118,13 +118,13 @@ A message the model's output limit cut off (`stop_reason` `Length`) never runs i
 - `is_error: bool`: the call failed, and this result says how (below).
 - `terminate: bool`: a hint that the run should stop after this batch (see below).
 
-Builders: `ToolResult::text(s)`, `.with_details(value)`, `.terminating()`. `result.text_content()` joins the text parts.
+Construct with `ToolResult::default()` or `ToolResult::text(s)`, then assign public output fields; `.with_details(value)` and `.terminating()` cover common changes. Runtime cleanup classification is crate-owned and exposed only through the read-only `cleanup_is_uncertain()` query. `result.text_content()` joins text and any separate cleanup diagnostic. Transform a delegated result in place to retain its classification.
 
 ### Errors
 
 Return `Err(ToolError)` on failure. Do not encode failures as successful content. The error text becomes the tool result's content with `is_error: true`, and the model sees it on its next turn. `ToolError` converts from `String`, `&str`, and `serde_json::Error`.
 
-A failure with more to say than a message, such as an MCP result with `isError` and structured output, returns `Ok(ToolResult { is_error: true, .. })`: the loop treats it as an error result, with its content and structured output kept.
+A failure with more to say than a message, such as an MCP result with `isError` and structured output, sets `result.is_error = true` and returns `Ok(result)`: the loop treats it as an error result, with its content and structured output kept.
 
 ### Calling other tools
 

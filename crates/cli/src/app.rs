@@ -251,6 +251,9 @@ pub struct App {
     /// The checks of this Runner's routines.
     #[cfg(feature = "runner")]
     pub routine_checks: crate::routines::Checks,
+    /// The local models this Runner may read messages for a schedule with.
+    #[cfg(feature = "runner")]
+    pub schedule_models: crate::schedule_models::runner::Runtime,
     /// The local update lease, and the admission count every new turn, room, routine, check,
     /// and relay envelope passes through (`update_control`).
     pub update: crate::update_control::Control,
@@ -522,6 +525,8 @@ impl App {
             mcp: crate::plugins::mcp::Pool::new(),
             #[cfg(feature = "runner")]
             routine_checks: crate::routines::Checks::default(),
+            #[cfg(feature = "runner")]
+            schedule_models: Default::default(),
             update: crate::update_control::Control::default(),
             http,
         });
@@ -846,6 +851,8 @@ impl App {
         }
         #[cfg(feature = "runner")]
         self.memory_runtime.cancel_all();
+        #[cfg(feature = "runner")]
+        self.schedule_models.clear();
         close_result?;
         let marker = self.config.home.join("forget-in-progress.json");
         config::write_json_private(&marker, &serde_json::json!({ "forget_in_progress": true }))?;
@@ -1394,6 +1401,8 @@ impl App {
         }
         #[cfg(feature = "runner")]
         self.memory_runtime.cancel_all();
+        #[cfg(feature = "runner")]
+        self.schedule_models.clear();
         for job in self.running_jobs.lock().unwrap().values() { job.cancel.cancel(); }
         #[cfg(feature = "runner")]
         {
@@ -1928,7 +1937,7 @@ impl App {
 
     pub fn routine_out(&self, routine: &Routine) -> Value {
         let mut out = serde_json::to_value(routine).unwrap_or_default();
-        out["schedule_text"] = json!(crate::schedule::parse(&routine.schedule).map(|s| s.describe()).unwrap_or_else(|_| routine.schedule.clone()));
+        out["schedule_text"] = json!(crate::schedule::parse_stored(&routine.schedule).map(|s| s.describe()).unwrap_or_else(|_| routine.schedule.clone()));
         out["next_run_at"] = json!(crate::routines::next_run_shown(self, routine).map(|t| t as f64));
         out["is_running"] = json!(self.is_routine_running(&routine.id));
         out

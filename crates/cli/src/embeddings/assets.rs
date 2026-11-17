@@ -9,10 +9,12 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord,Serialize,Deserialize)]
 #[serde(rename_all="snake_case")]
-pub enum AssetKind { Runtime,Model,Tokenizer }
+pub enum AssetKind { Runtime,Model,Tokenizer,
+    /// A static embedding table (safetensors), read without a native runtime.
+    Weights }
 impl AssetKind {
-    fn filename(self)->&'static str {
-        match self {Self::Model=>"model.onnx",Self::Tokenizer=>"tokenizer.json",Self::Runtime=>{
+    pub fn filename(self)->&'static str {
+        match self {Self::Model=>"model.onnx",Self::Tokenizer=>"tokenizer.json",Self::Weights=>"model.safetensors",Self::Runtime=>{
             #[cfg(target_os="windows")] {"onnxruntime.dll"}
             #[cfg(target_os="macos")] {"libonnxruntime.dylib"}
             #[cfg(not(any(target_os="macos",target_os="windows")))] {"libonnxruntime.so"}
@@ -36,6 +38,33 @@ pub struct BoundAsset {pub path:PathBuf,pub bytes:u64,pub sha256:String}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalBinding {pub runtime:BoundAsset,pub model:BoundAsset,pub tokenizer:BoundAsset}
+/// What an approved plan installed, one asset per kind, in the plan's order.
+#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledAssets {pub assets:Vec<(AssetKind,BoundAsset)>}
+impl InstalledAssets {
+    pub fn get(&self,kind:AssetKind)->Option<&BoundAsset> {self.assets.iter().find(|(k,_)|*k==kind).map(|(_,a)|a)}
+}
+/// Where an approved download may be redirected, besides nowhere. Hugging Face answers a file
+/// URL with a redirect to its CDN; the pinned size and SHA-256 still decide what is installed.
+#[derive(Clone,Debug,Default,PartialEq,Eq)]
+pub struct RedirectHosts {
+    /// Hosts allowed as they are, like `huggingface.co`.
+    pub exact:BTreeSet<String>,
+    /// Allowed parent domains, like `hf.co`: `cdn-lfs.hf.co` matches, `evilhf.co` does not.
+    pub parents:BTreeSet<String>,
+}
+impl RedirectHosts {
+    fn allows(&self,url:&reqwest::Url,allow_insecure_http:bool)->bool {
+        if url.scheme()!="https" && !(allow_insecure_http && url.scheme()=="http") {return false;}
+        let Some(host)=url.host_str().map(str::to_ascii_lowercase) else {return false};
+        self.exact.contains(&host) || self.parents.iter().any(|parent|host.strip_suffix(parent.as_str()).is_some_and(|rest|rest.ends_with('.')))
+    }
+}
+/// The most redirects one download follows.
+const MAX_REDIRECTS:usize=3;
+/// The kinds a runtime-backed ONNX embedding installs.
+pub const ONNX_ASSETS:[AssetKind;3]=[AssetKind::Runtime,AssetKind::Model,AssetKind::Tokenizer];
 struct Pending {plan:AssetPlan,digest:String,expires:Instant}
 struct StagingGuard(Option<PathBuf>);
 impl Drop for StagingGuard {
@@ -57,6 +86,10 @@ pub struct AssetInstaller {
 }
 impl AssetInstaller {
     pub fn new(root:PathBuf,allowed_origins:BTreeSet<String>,allow_insecure_http:bool)->Result<Self,EmbeddingError> {
+        Self::with_redirects(root,allowed_origins,allow_insecure_http,RedirectHosts::default())
+    }
+    /// As `new`, following at most three redirects, each only to `redirects`.
+    pub fn with_redirects(root:PathBuf,allowed_origins:BTreeSet<String>,allow_insecure_http:bool,redirects:RedirectHosts)->Result<Self,EmbeddingError> {
         if !root.is_absolute() {return Err(EmbeddingError::InvalidInput);}
         for origin in &allowed_origins {
             let url=super::types::validate_url(origin)?;
@@ -64,13 +97,23 @@ impl AssetInstaller {
                 return Err(EmbeddingError::InvalidProfile);
             }
         }
-        let client=beans_tls::client_builder().redirect(reqwest::redirect::Policy::none())
+        let policy=if redirects==RedirectHosts::default() {reqwest::redirect::Policy::none()} else {
+            reqwest::redirect::Policy::custom(move|attempt| {
+                if attempt.previous().len()>MAX_REDIRECTS || !redirects.allows(attempt.url(),allow_insecure_http) {attempt.stop()} else {attempt.follow()}
+            })
+        };
+        let client=beans_tls::client_builder().redirect(policy)
             .connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(300))
             .no_gzip().build().map_err(|_|EmbeddingError::Transport)?;
         Ok(Self{root,allowed_origins,allow_insecure_http,client,pending:Mutex::new(HashMap::new())})
     }
+    /// A runtime-backed ONNX embedding: exactly a runtime, a model, and a tokenizer.
     pub fn preview(&self,plan:AssetPlan)->Result<AssetPreview,EmbeddingError> {
-        self.validate_plan(&plan)?;
+        self.preview_assets(plan,&ONNX_ASSETS)
+    }
+    /// A plan of exactly the `required` kinds, one asset each.
+    pub fn preview_assets(&self,plan:AssetPlan,required:&[AssetKind])->Result<AssetPreview,EmbeddingError> {
+        self.validate_plan(&plan,required)?;
         let digest=format!("{:x}",Sha256::digest(serde_json::to_vec(&plan).map_err(|_|EmbeddingError::InvalidInput)?));
         let token=uuid::Uuid::new_v4().to_string();
         let preview=AssetPreview {token:token.clone(),digest:digest.clone(),expires_in_seconds:600,
@@ -81,9 +124,10 @@ impl AssetInstaller {
         pending.insert(token,Pending{plan,digest,expires:Instant::now()+Duration::from_secs(600)});
         Ok(preview)
     }
-    fn validate_plan(&self,plan:&AssetPlan)->Result<(),EmbeddingError> {
+    fn validate_plan(&self,plan:&AssetPlan,required:&[AssetKind])->Result<(),EmbeddingError> {
         let kinds=plan.assets.iter().map(|a|a.kind).collect::<BTreeSet<_>>();
-        if plan.assets.len()!=3 || kinds.len()!=3 {return Err(EmbeddingError::InvalidInput);}
+        let required=required.iter().copied().collect::<BTreeSet<_>>();
+        if plan.assets.len()!=required.len() || kinds!=required {return Err(EmbeddingError::InvalidInput);}
         for a in &plan.assets {
             EmbeddingFingerprint::parse(&a.sha256)?;
             if a.bytes==0 || a.bytes>2*1024*1024*1024 || a.license.trim().is_empty() || a.license.len()>4096 {
@@ -102,6 +146,12 @@ impl AssetInstaller {
         Ok(())
     }
     pub async fn apply(&self,token:&str,digest:&str,confirmed:bool,cancel:CancellationToken)->Result<LocalBinding,EmbeddingError> {
+        let installed=self.apply_assets(token,digest,confirmed,cancel).await?;
+        let bound=|kind|installed.get(kind).cloned().ok_or(EmbeddingError::InvalidInput);
+        Ok(LocalBinding{runtime:bound(AssetKind::Runtime)?,model:bound(AssetKind::Model)?,tokenizer:bound(AssetKind::Tokenizer)?})
+    }
+    /// Installs an approved preview of any kinds, as `apply` does.
+    pub async fn apply_assets(&self,token:&str,digest:&str,confirmed:bool,cancel:CancellationToken)->Result<InstalledAssets,EmbeddingError> {
         if !confirmed {return Err(EmbeddingError::ApprovalRequired);}
         let pending={
             let mut map=self.pending.lock();
@@ -139,11 +189,8 @@ impl AssetInstaller {
             let root_copy=root.clone();
             let _=tokio::task::spawn_blocking(move||std::fs::File::open(root_copy).and_then(|f|f.sync_all())).await;
         }
-        let bound=|kind| {
-            let a=pending.plan.assets.iter().find(|a|a.kind==kind).expect("validated three asset kinds");
-            BoundAsset{path:destination.join(kind.filename()),bytes:a.bytes,sha256:a.sha256.clone()}
-        };
-        Ok(LocalBinding{runtime:bound(AssetKind::Runtime),model:bound(AssetKind::Model),tokenizer:bound(AssetKind::Tokenizer)})
+        Ok(InstalledAssets{assets:pending.plan.assets.iter()
+            .map(|a|(a.kind,BoundAsset{path:destination.join(a.kind.filename()),bytes:a.bytes,sha256:a.sha256.clone()})).collect()})
     }
     async fn transfer(&self,plan:&AssetPlan,staging:&Path)->Result<(),EmbeddingError> {
         for a in &plan.assets {
@@ -323,6 +370,65 @@ mod tests {
             assert_eq!(installer.apply(&preview.token,&preview.digest,true,CancellationToken::new()).await.unwrap_err(),expected);
             task.await.unwrap();let mut entries=fs::read_dir(&destination).await.unwrap();assert!(entries.next_entry().await.unwrap().is_none());
             fs::remove_dir_all(source).await.unwrap();fs::remove_dir_all(destination).await.unwrap();
+        }
+    }
+    /// A static embedding needs no runtime: exactly its weights and tokenizer. A runtime-backed
+    /// plan stays exactly a runtime, a model, and a tokenizer, so a plan with weights in place of
+    /// the runtime cannot reach `apply`'s binding.
+    #[tokio::test]
+    async fn plans_are_exactly_the_kinds_they_install() {
+        let source=root();fs::create_dir(&source).await.unwrap();
+        let asset=|kind:AssetKind,bytes:&[u8]|{let path=source.join(kind.filename());std::fs::write(&path,bytes).unwrap();
+            AssetRequest{kind,source:AssetSource::Supplied{path},license:"fixture CC0".into(),bytes:bytes.len() as u64,sha256:format!("{:x}",Sha256::digest(bytes))}};
+        let weights=asset(AssetKind::Weights,b"fixture weights");let tokenizer=asset(AssetKind::Tokenizer,b"fixture tokenizer");
+        let model=asset(AssetKind::Model,b"fixture model");
+        let destination=root();let installer=AssetInstaller::new(destination.clone(),BTreeSet::new(),false).unwrap();
+        let static_plan=AssetPlan{assets:vec![weights.clone(),tokenizer.clone()]};
+        assert_eq!(installer.preview(static_plan.clone()).unwrap_err(),EmbeddingError::InvalidInput);
+        assert_eq!(installer.preview(AssetPlan{assets:vec![weights.clone(),tokenizer.clone(),model.clone()]}).unwrap_err(),EmbeddingError::InvalidInput);
+        assert_eq!(installer.preview_assets(AssetPlan{assets:vec![weights.clone(),weights.clone()]},&[AssetKind::Weights,AssetKind::Tokenizer]).unwrap_err(),EmbeddingError::InvalidInput);
+        let preview=installer.preview_assets(static_plan,&[AssetKind::Weights,AssetKind::Tokenizer]).unwrap();
+        let installed=installer.apply_assets(&preview.token,&preview.digest,true,CancellationToken::new()).await.unwrap();
+        assert_eq!(verified_bytes(installed.get(AssetKind::Weights).unwrap(),1024).await.unwrap(),b"fixture weights");
+        assert_eq!(verified_bytes(installed.get(AssetKind::Tokenizer).unwrap(),1024).await.unwrap(),b"fixture tokenizer");
+        assert!(installed.get(AssetKind::Runtime).is_none());
+        fs::remove_dir_all(source).await.unwrap();fs::remove_dir_all(destination).await.unwrap();
+    }
+    /// Redirects are followed only to the hosts an installer names, and the pinned size and
+    /// checksum still decide; any other redirect fails with nothing installed.
+    #[tokio::test]
+    async fn downloads_follow_redirects_only_to_named_hosts() {
+        use tokio::{net::TcpListener,io::{AsyncReadExt,AsyncWriteExt}};
+        let body=b"fixture Weights";
+        let serve=|listener:TcpListener,response:String|tokio::spawn(async move {
+            let (mut stream,_)=listener.accept().await.unwrap();let mut buf=[0u8;4096];assert!(stream.read(&mut buf).await.unwrap()>0);
+            stream.write_all(response.as_bytes()).await.unwrap();});
+        for (target_host,followed) in [("localhost",true),("127.0.0.1",false)] {
+            let origin_listener=TcpListener::bind("127.0.0.1:0").await.unwrap();let origin=format!("http://{}",origin_listener.local_addr().unwrap());
+            let cdn=TcpListener::bind("127.0.0.1:0").await.unwrap();let cdn_port=cdn.local_addr().unwrap().port();
+            let location=format!("http://{target_host}:{cdn_port}/blob");
+            let first=serve(origin_listener,format!("HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\n\r\n"));
+            let second=followed.then(||serve(cdn,format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\nfixture Weights",body.len())));
+            let destination=root();
+            let redirects=RedirectHosts{exact:["localhost".to_string()].into(),parents:BTreeSet::new()};
+            let installer=AssetInstaller::with_redirects(destination.clone(),[origin.clone()].into(),true,redirects).unwrap();
+            let plan=AssetPlan{assets:vec![AssetRequest{kind:AssetKind::Weights,source:AssetSource::Download{url:format!("{origin}/resolve/main/model.safetensors")},
+                license:"fixture CC0".into(),bytes:body.len() as u64,sha256:format!("{:x}",Sha256::digest(body))}]};
+            let preview=installer.preview_assets(plan,&[AssetKind::Weights]).unwrap();
+            let result=installer.apply_assets(&preview.token,&preview.digest,true,CancellationToken::new()).await;
+            first.await.unwrap();
+            if let Some(second)=second {second.await.unwrap();
+                assert_eq!(verified_bytes(result.unwrap().get(AssetKind::Weights).unwrap(),1024).await.unwrap(),body);
+            } else {
+                assert_eq!(result.unwrap_err(),EmbeddingError::Redirect);
+                let mut entries=fs::read_dir(&destination).await.unwrap();assert!(entries.next_entry().await.unwrap().is_none());
+            }
+            fs::remove_dir_all(destination).await.unwrap();
+        }
+        let hosts=RedirectHosts{exact:["huggingface.co".to_string()].into(),parents:["hf.co".to_string()].into()};
+        for (url,allowed) in [("https://huggingface.co/x",true),("https://cdn-lfs.hf.co/x",true),("https://cas-bridge.xethub.hf.co/x",true),
+            ("https://evilhf.co/x",false),("https://hf.co.evil.com/x",false),("http://cdn-lfs.hf.co/x",false),("https://huggingface.co.evil/x",false)] {
+            assert_eq!(hosts.allows(&reqwest::Url::parse(url).unwrap(),false),allowed,"{url}");
         }
     }
     #[cfg(feature="embedding-local")]

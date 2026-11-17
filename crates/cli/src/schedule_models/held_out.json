@@ -1,0 +1,205 @@
+{
+ "version": 1,
+ "messages": [
+  {
+   "language": "en",
+   "recurring": true,
+   "text": "Can you summarize my unread email and, if it's not too much trouble, run this daily so I see it each morning?"
+  },
+  {
+   "language": "en",
+   "recurring": true,
+   "text": "Check the build status every two hours and tell me if it breaks."
+  },
+  {
+   "language": "en",
+   "recurring": true,
+   "text": "Please send me a weather report every Monday at 8."
+  },
+  {
+   "language": "en",
+   "recurring": true,
+   "text": "From now on, do this every morning: list my meetings."
+  },
+  {
+   "language": "en",
+   "recurring": true,
+   "text": "I'd love it if you could post the sales numbers weekly."
+  },
+  {
+   "language": "en",
+   "recurring": false,
+   "text": "Summarize my unread email."
+  },
+  {
+   "language": "en",
+   "recurring": false,
+   "text": "I go running every morning before work."
+  },
+  {
+   "language": "en",
+   "recurring": false,
+   "text": "Remind me tomorrow at 9 to call the bank."
+  },
+  {
+   "language": "en",
+   "recurring": false,
+   "text": "How often do the routines run?"
+  },
+  {
+   "language": "en",
+   "recurring": false,
+   "text": "Send the report to Anna at 5pm today."
+  },
+  {
+   "language": "pt",
+   "recurring": true,
+   "text": "Pode resumir meus e-mails não lidos e agende para esse prompt rodar diariamente, por favor."
+  },
+  {
+   "language": "pt",
+   "recurring": true,
+   "text": "Verifique o site a cada duas horas e me avise se cair."
+  },
+  {
+   "language": "pt",
+   "recurring": true,
+   "text": "Toda segunda-feira às 9, me mande um resumo das vendas."
+  },
+  {
+   "language": "pt",
+   "recurring": true,
+   "text": "A partir de agora, faça isso todas as manhãs."
+  },
+  {
+   "language": "pt",
+   "recurring": false,
+   "text": "Resuma meus e-mails não lidos."
+  },
+  {
+   "language": "pt",
+   "recurring": false,
+   "text": "Eu corro todas as manhãs antes do trabalho."
+  },
+  {
+   "language": "pt",
+   "recurring": false,
+   "text": "Me lembre amanhã às 9 de ligar para o banco."
+  },
+  {
+   "language": "pt",
+   "recurring": false,
+   "text": "Envie o relatório para a Ana hoje às 17h."
+  },
+  {
+   "language": "es",
+   "recurring": true,
+   "text": "Revisa mi bandeja de entrada todos los días a las 8 y dime lo importante."
+  },
+  {
+   "language": "es",
+   "recurring": true,
+   "text": "Hazme un resumen de las noticias cada semana, por favor."
+  },
+  {
+   "language": "es",
+   "recurring": false,
+   "text": "Resume este documento, por favor."
+  },
+  {
+   "language": "es",
+   "recurring": false,
+   "text": "Voy al gimnasio todos los días."
+  },
+  {
+   "language": "fr",
+   "recurring": true,
+   "text": "Envoie-moi la météo tous les matins à 7h."
+  },
+  {
+   "language": "fr",
+   "recurring": true,
+   "text": "Peux-tu vérifier les commandes toutes les heures ?"
+  },
+  {
+   "language": "fr",
+   "recurring": false,
+   "text": "Envoie-moi la météo de demain."
+  },
+  {
+   "language": "fr",
+   "recurring": false,
+   "text": "Je fais du vélo tous les week-ends."
+  },
+  {
+   "language": "de",
+   "recurring": true,
+   "text": "Schick mir jeden Montag um 9 Uhr eine Zusammenfassung."
+  },
+  {
+   "language": "de",
+   "recurring": true,
+   "text": "Prüfe bitte stündlich, ob der Server läuft."
+  },
+  {
+   "language": "de",
+   "recurring": false,
+   "text": "Fasse diesen Artikel zusammen."
+  },
+  {
+   "language": "de",
+   "recurring": false,
+   "text": "Ich trinke jeden Morgen Kaffee."
+  },
+  {
+   "language": "it",
+   "recurring": true,
+   "text": "Controlla le email ogni giorno alle 9 e fammi un riassunto."
+  },
+  {
+   "language": "it",
+   "recurring": false,
+   "text": "Controlla le email adesso."
+  },
+  {
+   "language": "ja",
+   "recurring": true,
+   "text": "毎朝9時に天気を教えてください。"
+  },
+  {
+   "language": "ja",
+   "recurring": true,
+   "text": "メールを要約して、これを毎日実行して。"
+  },
+  {
+   "language": "ja",
+   "recurring": false,
+   "text": "このメールを要約してください。"
+  },
+  {
+   "language": "ja",
+   "recurring": false,
+   "text": "私は毎朝走っています。"
+  },
+  {
+   "language": "zh",
+   "recurring": true,
+   "text": "每天早上八点给我发一份新闻摘要。"
+  },
+  {
+   "language": "zh",
+   "recurring": false,
+   "text": "帮我总结一下这封邮件。"
+  },
+  {
+   "language": "ru",
+   "recurring": true,
+   "text": "Проверяй почту каждый час и сообщай мне о важном."
+  },
+  {
+   "language": "ru",
+   "recurring": false,
+   "text": "Проверь почту сейчас."
+  }
+ ]
+}

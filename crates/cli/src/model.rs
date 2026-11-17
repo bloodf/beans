@@ -731,7 +731,7 @@ impl Routine {
         if !self.is_enabled {
             return None;
         }
-        crate::schedule::parse(&self.schedule).ok()?.next_after(since.max(self.anchor()))
+        crate::schedule::parse_stored(&self.schedule).ok()?.next_after(since.max(self.anchor()))
     }
 }
 

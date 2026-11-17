@@ -232,14 +232,19 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         }
         _ => None,
     };
-    let remote_memory = if let Some(access) = &memory_access {
-        let query = app.message(&job.chat_id,&job.trigger_message_id).and_then(|m|match m.body {Body::Text{text,..}=>Some(text),_=>None}).unwrap_or_default();
-        crate::memory_service::dispatch::automatic_recall(app,access,&query,cancel.clone()).await
-    } else { None };
+    // Memory recall and the read for a schedule both read the user's message, so they run together.
+    let recall = async {
+        if let Some(access) = &memory_access {
+            let query = app.message(&job.chat_id,&job.trigger_message_id).and_then(|m|match m.body {Body::Text{text,..}=>Some(text),_=>None}).unwrap_or_default();
+            crate::memory_service::dispatch::automatic_recall(app,access,&query,cancel.clone()).await
+        } else { None }
+    };
+    let (remote_memory, schedule) = tokio::join!(recall, schedule_note(app, &bot, job, &cancel));
     let notes = TurnNotes {
         recent_work: recent_work_brief(app, &bot, &chat.meta.id, now_secs() as i64),
         cue: if job.kind == "room_turn" { Some(room_turn_cue(app, &chat, &bot, job)) } else { command_end.clone().or(check_found) },
         setup: job.setup.as_ref().map(|setup| setup_cue(app, setup)),
+        schedule,
         remote_memory,
     };
     let (mut messages, mut cache_points) = with_turn_notes(messages, &notes);
@@ -890,7 +895,58 @@ struct TurnNotes {
     cue: Option<String>,
     /// The first turn of a bot added from a marketplace template.
     setup: Option<String>,
+    /// What a read of the user's message found it asks to happen regularly
+    /// (`crate::schedule_intent`).
+    schedule: Option<String>,
     remote_memory: Option<String>,
+}
+
+/// Whether the user's message asks for something to happen regularly, anywhere in it and in any
+/// language, as a note for the turn. Only a user's message in a direct chat, where routines run,
+/// is read, the way the Runner's `Detection` mode says: by the small model of the bot's provider,
+/// whose cost counts in the chat's spending; by the local model the user installed, which costs
+/// no tokens; by the local model first and the small model only for what it flags; or not at
+/// all. A read that fails or takes too long is no note, and a local mode whose model is not
+/// ready reads nothing rather than spend tokens.
+async fn schedule_note(app: &Arc<App>, bot: &Bot, job: &Job, cancel: &CancellationToken) -> Option<String> {
+    use crate::schedule_models::{runner, Detection};
+    if job.kind != "turn" || job.routine_id.is_some() {
+        return None;
+    }
+    let text = app.message(&job.chat_id, &job.trigger_message_id).and_then(|m| match m.body {
+        Body::Text { text, .. } => Some(text),
+        _ => None,
+    })?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let local = || async { tokio::time::timeout(runner::READ_WAIT, runner::read(app, &text, cancel)).await.ok().flatten() };
+    match runner::mode(app) {
+        Detection::Off => return None,
+        Detection::Reader => {}
+        Detection::Local => {
+            let (words, score) = local().await?;
+            return (score > runner::LOCAL_THRESHOLD).then(|| crate::schedule_intent::local_note(&words));
+        }
+        Detection::LocalThenReader => {
+            let (_, score) = local().await?;
+            if score <= runner::GATE_THRESHOLD {
+                return None;
+            }
+        }
+    }
+    let (model, thinking) = providers::review_model(app, &bot.provider);
+    if model.is_empty() {
+        return None;
+    }
+    let provider = providers::provider_for(app, &bot.provider, Some(&model), thinking).ok()?;
+    let read = tokio::time::timeout(crate::schedule_intent::WAIT, crate::schedule_intent::read(&provider, thinking, &job.chat_id, &text, cancel)).await;
+    let Ok(read) = read else {
+        tracing::debug!(chat = %job.chat_id, "reading a message for a schedule took too long");
+        return None;
+    };
+    app.add_side_usage(&job.chat_id, &read.usage);
+    read.intent.map(|intent| intent.note())
 }
 
 /// The rebuilt transcript followed by the turn's notes, and the transcript's cache points.
@@ -904,6 +960,9 @@ fn with_turn_notes(mut messages: Vec<AgentMessage>, notes: &TurnNotes) -> (Vec<A
         Some(cue) => messages.push(AgentMessage::User(UserMessage::text(cue.clone()))),
         None if ends_with_reply => messages.push(AgentMessage::User(UserMessage::text("Continue."))),
         None => {}
+    }
+    if let Some(schedule) = &notes.schedule {
+        messages.push(AgentMessage::User(UserMessage::text(schedule.clone())));
     }
     if let Some(setup) = &notes.setup {
         messages.push(AgentMessage::User(UserMessage::text(setup.clone())));
@@ -1621,7 +1680,7 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
 
 /// The schedule in words, or the raw text when it no longer parses.
 fn schedule_words(schedule: &str) -> String {
-    crate::schedule::parse(schedule).map(|s| s.describe()).unwrap_or_else(|_| schedule.to_string())
+    crate::schedule::parse_stored(schedule).map(|s| s.describe()).unwrap_or_else(|_| schedule.to_string())
 }
 
 /// The routines part of the system prompt: what a routine is, how to set one up, and the
@@ -1629,9 +1688,10 @@ fn schedule_words(schedule: &str) -> String {
 fn routines_prompt(app: &App, bot: &Bot) -> String {
     let mut prompt = String::from(
         "\nRoutines: a routine is a task you run on a schedule in your direct chat with the user, with nobody typing: a \
-         morning brief, an hourly check, a weekly report. When the user wants something done regularly, set it up with \
-         the routines tool (a name, a schedule, and the task written as an instruction to yourself), then say the schedule \
-         back in words. To watch for something, give the routine a check, a script that runs without you and starts the \
+         morning brief, an hourly check, a weekly report. When the user wants something done regularly, whatever language \
+         they ask in, set it up with the routines tool (a name, a schedule, and the task written as an instruction to \
+         yourself), then say the schedule back in words, in their language. To watch for something, give the routine a \
+         check, a script that runs without you and starts the \
          run only when it finds something. Edit, pause, resume, run, or delete one when asked.\n",
     );
     let routines = app.routines_of(&bot.id);
@@ -2624,19 +2684,27 @@ struct Routines {
     bot: Bot,
 }
 
-#[async_trait]
-impl Tool for Routines {
-    fn name(&self) -> &str {
-        "routines"
-    }
-    fn description(&self) -> &str {
+/// The routines tool as the bot reads it. Requests come in any language; the schedule is always
+/// written in one form, from the same list of requests, so "daily" and "diariamente" agree.
+static ROUTINES_DESCRIPTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let requests = crate::schedule::REQUESTS
+        .iter()
+        .map(|(request, schedule)| format!("{request}: {schedule}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
         "Your routines: tasks you run on a schedule in your direct chat with the user, with nobody typing. list shows them; \
          create takes a name, a schedule, and a prompt (the task, written as an instruction to yourself, with everything a \
          run needs since the user is not there to answer), and a check when one fits; edit changes any of those on an \
          existing one (check \"\" removes the check); pause, resume, run (a run right now), and delete take the routine's \
-         name. A schedule is every 30m, every 2h, every 1d, or five cron fields in your Runner's local time (0 9 * * 1-5 is \
-         weekdays at 9:00 AM); at most one run per five minutes. Set one up when the user asks for something regular, and \
-         tell them the schedule in words.\n\
+         name. A schedule is every 30m, every 2h, every 1d, every 2w, or five cron fields in your Runner's local time \
+         (0 9 * * 1-5 is weekdays at 9:00 AM); at most one run per five minutes. The user may ask in any language \
+         (\"run this daily\", \"agende para esse prompt rodar diariamente\", \"todos los lunes a las 9\"): read what \
+         they mean and write the schedule in this form, never in their words, so a request means the same schedule in \
+         every language: {requests}. Without a time, a daily or weekly one counts from now; say when it runs next so \
+         they can name a time instead. Set one up when the user asks for something regular, and tell them the schedule \
+         and its next run in words, in their language. A refused schedule comes back with the \
+         reason: fix it and try again instead of asking the user for cron.\n\
          A check is JavaScript your Runner runs at each due time before you, with no model, so a quiet one runs no turn: \
          use one to watch something (an inbox, a repository, a feed, a page). It runs like a codemode script with only the \
          read-only plugin tools, read, grep, find, ls, store() and load() (shared with your scripts in your direct chat), and \
@@ -2644,6 +2712,16 @@ impl Tool for Routines {
          or an empty string, list, or object) and the run is skipped. Keep what it has seen with store() and return only \
          what is new. It runs once when you save it, so that first run should record what is already there; you get its \
          result. A call that could change something ends a check, and a failing check starts the run with its error."
+    )
+});
+
+#[async_trait]
+impl Tool for Routines {
+    fn name(&self) -> &str {
+        "routines"
+    }
+    fn description(&self) -> &str {
+        &ROUTINES_DESCRIPTION
     }
     fn parameters(&self) -> Value {
         json!({
@@ -2652,7 +2730,7 @@ impl Tool for Routines {
                 "action": { "type": "string", "enum": ["list", "create", "edit", "pause", "resume", "run", "delete"] },
                 "routine": { "type": "string", "description": "The routine's name, for edit, pause, resume, run, and delete" },
                 "name": { "type": "string", "description": "A short name, for create or a rename" },
-                "schedule": { "type": "string", "description": "every 30m, every 2h, every 1d, or five cron fields like 0 9 * * 1-5" },
+                "schedule": { "type": "string", "description": "In this form whatever language the user asked in: every 30m, every 2h, every 1d, every 2w, or five cron fields like 0 9 * * 1-5" },
                 "prompt": { "type": "string", "description": "What to do on each run, as an instruction to yourself" },
                 "check": { "type": "string", "description": "JavaScript run before each run, returning what needs you or nothing; \"\" on edit removes it" },
                 "enabled": { "type": "boolean", "description": "create: start it on (default) or paused" }
@@ -3056,11 +3134,11 @@ mod tests {
             },
             _ => String::new(),
         };
-        let none = TurnNotes { recent_work: None, cue: None, setup: None, remote_memory: None };
+        let none = TurnNotes { recent_work: None, cue: None, setup: None, schedule: None, remote_memory: None };
 
         // In a group the bot's last reply is followed by everyone else's messages.
         let transcript = vec![AgentMessage::user("plan it?"), reply("I'll draft it."), AgentMessage::user("[Scout]: done"), AgentMessage::user("thanks")];
-        let notes = TurnNotes { recent_work: Some("[Recently in your other chats …]".into()), cue: Some("[Your turn in the group …]".into()), setup: None, remote_memory: None };
+        let notes = TurnNotes { recent_work: Some("[Recently in your other chats …]".into()), cue: Some("[Your turn in the group …]".into()), setup: None, schedule: None, remote_memory: None };
         let (messages, points) = with_turn_notes(transcript.clone(), &notes);
         assert_eq!(points, vec![4, 1], "the transcript's end, and the last turn's before the bot's reply");
         assert_eq!(messages[4..].iter().map(said).collect::<Vec<_>>(), ["[Recently in your other chats …]", "[Your turn in the group …]"]);
@@ -3073,6 +3151,78 @@ mod tests {
         // A first turn caches its transcript alone.
         let (messages, points) = with_turn_notes(vec![AgentMessage::user("hi")], &none);
         assert_eq!((points, messages.len()), (vec![1], 1));
+    }
+
+    /// A read's note follows the user's message, after the transcript's cache point, and is
+    /// not part of the transcript the next turn rebuilds.
+    #[test]
+    fn a_schedule_note_follows_the_users_message() {
+        let said = |message: &AgentMessage| match message {
+            AgentMessage::User(UserMessage { content, .. }) => match content.as_slice() {
+                [ContentPart::Text { text }] => text.clone(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+        let note = "[Before this turn, a read of the user's latest message found it asks for something to happen regularly …]";
+        let notes = TurnNotes { recent_work: None, cue: None, setup: None, schedule: Some(note.into()), remote_memory: Some("[memory]".into()) };
+        let asked = "Resume meus e-mails e agende para esse prompt rodar diariamente";
+        let (messages, points) = with_turn_notes(vec![AgentMessage::user(asked)], &notes);
+        assert_eq!(points, vec![1]);
+        assert_eq!(messages.iter().map(said).collect::<Vec<_>>(), [asked, note, "[memory]"]);
+    }
+
+    /// Only a user's own message in a direct chat is read, and only by a provider with a small
+    /// model to read it.
+    #[tokio::test]
+    async fn only_a_users_message_in_a_direct_chat_is_read_for_a_schedule() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        app.state.lock().unwrap().chats.push(chat("chat", "dm", None, &["b1"]));
+        let body = Body::Text { text: "Summarize my inbox and run this daily".into(), attachments: vec![], mentions: vec![], reply_to: None };
+        let message = Message::new("chat", Author::You, body);
+        let message_id = message.id.clone();
+        app.upsert_message(message, false);
+        let cancel = CancellationToken::new();
+        let job = |kind: &str| Job { kind: kind.into(), trigger_message_id: message_id.clone(), ..room_job("chat", "b1") };
+        let unread = Bot { provider: "custom:gone".into(), ..bot("b1", "Chef") };
+        assert_eq!(providers::review_model(app, &unread.provider).0, "", "no small model");
+        assert_eq!(schedule_note(app, &unread, &job("turn"), &cancel).await, None);
+        let chef = bot("b1", "Chef");
+        for kind in ["room_turn", "message", "command", "routine"] {
+            assert_eq!(schedule_note(app, &chef, &job(kind), &cancel).await, None, "{kind}");
+        }
+        let routine_run = Job { routine_id: Some("r1".into()), ..job("turn") };
+        assert_eq!(schedule_note(app, &chef, &routine_run, &cancel).await, None);
+        let no_message = Job { trigger_message_id: "gone".into(), ..job("turn") };
+        assert_eq!(schedule_note(app, &chef, &no_message, &cancel).await, None);
+    }
+
+    /// A Runner set to read locally, or not at all, reads nothing and spends nothing while no
+    /// local model is ready, and a local mode with nothing selected starts no load.
+    #[tokio::test]
+    async fn the_detection_mode_decides_who_reads_a_message() {
+        use crate::schedule_models::{runner::Runtime, Detection};
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        app.state.lock().unwrap().chats.push(chat("chat", "dm", None, &["b1"]));
+        let body = Body::Text { text: "Resuma meus e-mails e agende para esse prompt rodar diariamente".into(), attachments: vec![], mentions: vec![], reply_to: None };
+        let message = Message::new("chat", Author::You, body);
+        let job = Job { kind: "turn".into(), trigger_message_id: message.id.clone(), ..room_job("chat", "b1") };
+        app.upsert_message(message, false);
+        let cancel = CancellationToken::new();
+        assert_eq!(crate::schedule_models::runner::mode(app), Detection::Reader, "the default");
+        for mode in [Detection::Off, Detection::Local, Detection::LocalThenReader] {
+            Runtime::set_mode(app, mode);
+            assert_eq!(crate::schedule_models::runner::mode(app), mode);
+            assert_eq!(schedule_note(app, &bot("b1", "Chef"), &job, &cancel).await, None, "{mode:?}");
+        }
+        let status = crate::schedule_models::serve_as(app, "schedule_models.status", json!({}), &app.this_device_id().unwrap()).await.unwrap();
+        assert_eq!((status["state"].as_str(), status["mode"].as_str()), (Some("none_selected"), Some("local_then_reader")));
+        let back = json!({ "mode": "reader" });
+        crate::schedule_models::serve_as(app, "schedule_models.select", back, &app.this_device_id().unwrap()).await.unwrap();
+        assert_eq!(crate::schedule_models::runner::mode(app), Detection::Reader);
     }
 
     /// Answers each request with the next scripted reply, a tool call (`name {json}`) or text,
@@ -4685,6 +4835,46 @@ mod tests {
         let listed: Value = serde_json::from_str(listed.content[0].as_text().unwrap()).unwrap();
         let runs_with = |t: &Value| (t["provider"].clone(), t["model"].clone(), t["thinking"].clone());
         assert_eq!(runs_with(&listed["teammates"][1]), (json!("custom:router"), json!("anthropic/claude-opus-5"), json!("max")));
+    }
+
+    /// The model reads a request in whatever language it came in; the tool tells it the one form
+    /// to write, from the same list the parser is tested against.
+    #[tokio::test]
+    async fn the_routines_tool_writes_one_schedule_for_a_request_in_any_language() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let chef = bot("b1", "Chef");
+        app.state.lock().unwrap().bots = vec![chef.clone()];
+        let tool = Routines { app: app.clone(), bot: chef };
+        let description = tool.description();
+        assert!(description.contains("any language") && description.contains("in their language"));
+        for (request, schedule) in crate::schedule::REQUESTS {
+            assert!(description.contains(&format!("{request}: {schedule}")), "{request}");
+        }
+        let parameter = tool.parameters()["properties"]["schedule"]["description"].as_str().unwrap().to_string();
+        assert!(parameter.contains("whatever language"));
+        assert!(routines_prompt(app, &app.bot("b1").unwrap()).contains("in their language"));
+
+        // "Run this daily" and "agende para esse prompt rodar diariamente" are the same request.
+        let daily = crate::schedule::REQUESTS.iter().find(|(request, _)| request.starts_with("daily")).unwrap().1;
+        let no_updates: ToolUpdateFn = Arc::new(|_| {});
+        let create = |name: &str, schedule: &str| {
+            let args = json!({ "action": "create", "name": name, "schedule": schedule, "prompt": "Report." });
+            tool.execute("call", args, CancellationToken::new(), no_updates.clone())
+        };
+        let english = create("Daily report", daily).await.unwrap();
+        let portuguese = create("Relatório diário", daily).await.unwrap();
+        let routines = app.routines_of("b1");
+        assert_eq!(routines.iter().map(|r| r.schedule.as_str()).collect::<Vec<_>>(), ["every 1d", "every 1d"]);
+        for result in [&english, &portuguese] {
+            let text = result.content[0].as_text().unwrap();
+            assert!(text.contains("Every day · next run"), "{text}");
+        }
+
+        // Their words instead of the form are refused with the forms, for the model to try again.
+        let refused = create("Relatório", "diariamente").await.unwrap_err();
+        assert!(refused.0.contains("every 1d"), "{}", refused.0);
+        assert_eq!(app.routines_of("b1").len(), 2);
     }
 
     #[tokio::test]

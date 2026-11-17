@@ -192,7 +192,7 @@ pub fn reauthorize(app: &Arc<App>, id: &str) -> Result<Routine, String> {
     let chat=app.chat(&job.chat_id).ok_or("Routine DM unavailable")?;
     if chat.meta.kind!="dm" { return Err("Routine requires its direct chat.".into()); }
     let lease=app.task_lease(&job).map_err(|e|e.to_string())?;
-    let next=schedule::parse(&routine.schedule)?.next_after(now_unix()).ok_or("Schedule has no future occurrence")?;
+    let next=schedule::parse_stored(&routine.schedule)?.next_after(now_unix()).ok_or("Schedule has no future occurrence")?;
     let binding=crate::local_store::schedule_binding(&app.state.lock().unwrap(),&routine).map_err(|e|e.to_string())?;
     app.store.reauthorize_schedule(&lease,id,&binding,next).map_err(|e|e.to_string())?;
     Ok(routine)
@@ -201,7 +201,7 @@ pub fn reauthorize(app: &Arc<App>, id: &str) -> Result<Routine, String> {
 #[cfg(feature="runner")]
 fn capture_schedule(app: &App, routine: &Routine, now: i64) -> anyhow::Result<Option<crate::local_store::ScheduleLease>> {
     let binding=crate::local_store::schedule_binding(&app.state.lock().unwrap(),routine)?;
-    let next=schedule::parse(&routine.schedule).map_err(anyhow::Error::msg)?.next_after(now).ok_or_else(||anyhow::anyhow!("No future occurrence"))?;
+    let next=schedule::parse_stored(&routine.schedule).map_err(anyhow::Error::msg)?.next_after(now).ok_or_else(||anyhow::anyhow!("No future occurrence"))?;
     app.store.schedule_lease(&routine.id,&binding,now,next)
 }
 // MARK: - Running
@@ -415,7 +415,7 @@ pub fn next_run_shown(app: &App, routine: &Routine) -> Option<i64> {
     let next = routine.next_run_at()?;
     let now = now_unix();
     if routine.check.is_some() && next <= now {
-        return schedule::parse(&routine.schedule).ok().and_then(|schedule| schedule.next_after(now)).or(Some(next));
+        return schedule::parse_stored(&routine.schedule).ok().and_then(|schedule| schedule.next_after(now)).or(Some(next));
     }
     Some(next)
 }
@@ -461,7 +461,7 @@ fn commit_scheduled_check(app: &App, routine: &Routine, job: &mut Job, lease: &c
     let binding=crate::local_store::schedule_binding(&app.state.lock().unwrap(),&current)?;
     anyhow::ensure!(binding==schedule.binding,"Schedule revision changed");
     let now=now_unix();
-    let next=schedule::parse(&current.schedule).map_err(anyhow::Error::msg)?.next_after(now.max(schedule.occurrence)).ok_or_else(||anyhow::anyhow!("No future occurrence"))?;
+    let next=schedule::parse_stored(&current.schedule).map_err(anyhow::Error::msg)?.next_after(now.max(schedule.occurrence)).ok_or_else(||anyhow::anyhow!("No future occurrence"))?;
     job.check = found.report();
     let run=routine.check.is_none() || job.check.is_some();
     app.store.commit_scheduled_occurrence(lease,run.then_some(&*job),&routine.id,schedule,next,&job.chat_id,&job.bot_id,now,&writes.set,&writes.delete)?;
@@ -1013,7 +1013,10 @@ mod tests {
         let dm = app.dm_with("b1", None).unwrap();
         assert!(!app.store.codemode_values(&dm.meta.id, "b1").unwrap().contains_key("runs"), "a staged check does not consume values");
         let committed = check_now(app, &watch, &CancellationToken::new()).await;
-        assert_eq!(committed, checked, "explicit execution commits the same check result");
+        // The wall time a result reports differs from run to run; everything else must match.
+        let steady = |run: &CheckRun| CheckRun { result: run.result.lines().filter(|line| !line.starts_with("Wall time ")).collect::<Vec<_>>().join("\n"), ..run.clone() };
+        assert!(checked.result.contains("\nWall time "), "{}", checked.result);
+        assert_eq!(steady(&committed), steady(&checked), "explicit execution commits the same check result");
         assert_eq!(app.store.codemode_values(&dm.meta.id, "b1").unwrap()["runs"], serde_json::json!(1));
 
         let writes = edit(app, &watch.id, None, None, None, Some("await tools.write({ path: 'x.txt', content: 'y' });")).unwrap();

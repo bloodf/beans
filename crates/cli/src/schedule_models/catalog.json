@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "note": "Models a Runner may download and run on its CPU to notice a request to repeat something. Each is at most 100 MB with its tokenizer. A file with null bytes and sha256 is not pinned yet: it installs only from files the user supplies, and downloads once `scripts/schedule-intent-eval/pin_models.py` fills it in.",
+  "models": [
+    {
+      "id": "wordllama-l2-256",
+      "name": "WordLlama L2 Supercat, 256 dimensions",
+      "engine": "static",
+      "languages": "Best in English and other Latin-script languages; weak in Chinese and Japanese",
+      "license": "MIT (WordLlama). The vectors come from Llama 2 token embeddings; review the Llama 2 Community License before shipping them.",
+      "repo": "dleemiller/word-llama-l2-supercat",
+      "revision": "main",
+      "files": {
+        "weights": { "path": "l2_supercat_256.safetensors", "bytes": 16384096, "sha256": "64b47a2dc493cb8e85944076601189739852d7b64e0e1eedcb1937a251cd9fd5" },
+        "tokenizer": { "path": "l2_supercat_tokenizer_config.json", "bytes": 1842796, "sha256": "93248f2a9ec36c7b35f700a033d5f36228aae48db61aee31007fa49062cdeb68" }
+      },
+      "static": { "tensor": "embedding.weight", "dimensions": 256, "add_special_tokens": false },
+      "pinned_from": "The PyPI wheel wordllama 0.4.0.post1, which ships both files; not yet compared with the Hugging Face copies.",
+      "other_sources": [
+        "pip download wordllama==0.4.0.post1 --no-deps, then unzip the wheel: wordllama/weights/l2_supercat_256.safetensors and wordllama/tokenizers/l2_supercat_tokenizer_config.json"
+      ],
+      "measured": "17 of 20 requests and 3 of 20 look-alikes flagged on held_out.json, with thresholds picked on that set (scripts/schedule-intent-eval)"
+    },
+    {
+      "id": "wordllama-l3-128",
+      "name": "WordLlama L3 Supercat, 128 dimensions",
+      "engine": "static",
+      "languages": "Llama 3 tokenizer, which covers many more scripts than Llama 2's; trained on English",
+      "license": "MIT (WordLlama). The vectors come from Llama 3 token embeddings; review the Llama 3 Community License before shipping them.",
+      "repo": "dleemiller/wordllama-l3-supercat",
+      "revision": "main",
+      "files": {
+        "weights": { "path": "l3_supercat_128.safetensors", "bytes": null, "sha256": null },
+        "tokenizer": { "path": "l3_supercat_tokenizer_config.json", "bytes": null, "sha256": null }
+      },
+      "approx_bytes": 42000000,
+      "static": { "tensor": "embedding.weight", "dimensions": 128, "add_special_tokens": false },
+      "other_sources": [],
+      "measured": null
+    },
+    {
+      "id": "wordllama-l3-256",
+      "name": "WordLlama L3 Supercat, 256 dimensions",
+      "engine": "static",
+      "languages": "Llama 3 tokenizer, which covers many more scripts than Llama 2's; trained on English",
+      "license": "MIT (WordLlama). The vectors come from Llama 3 token embeddings; review the Llama 3 Community License before shipping them.",
+      "repo": "dleemiller/wordllama-l3-supercat",
+      "revision": "main",
+      "files": {
+        "weights": { "path": "l3_supercat_256.safetensors", "bytes": null, "sha256": null },
+        "tokenizer": { "path": "l3_supercat_tokenizer_config.json", "bytes": null, "sha256": null }
+      },
+      "approx_bytes": 75000000,
+      "static": { "tensor": "embedding.weight", "dimensions": 256, "add_special_tokens": false },
+      "other_sources": [],
+      "measured": null
+    },
+    {
+      "id": "potion-base-8m",
+      "name": "Model2Vec potion-base-8M",
+      "engine": "static",
+      "languages": "English",
+      "license": "MIT",
+      "repo": "minishlab/potion-base-8M",
+      "revision": "main",
+      "files": {
+        "weights": { "path": "model.safetensors", "bytes": null, "sha256": null },
+        "tokenizer": { "path": "tokenizer.json", "bytes": null, "sha256": null }
+      },
+      "approx_bytes": 32000000,
+      "static": { "tensor": "embeddings", "dimensions": 256, "add_special_tokens": false },
+      "other_sources": [],
+      "measured": null
+    },
+    {
+      "id": "all-minilm-l6-v2-int8",
+      "name": "all-MiniLM-L6-v2, 8-bit ONNX",
+      "engine": "onnx",
+      "languages": "English",
+      "license": "Apache-2.0",
+      "repo": "Xenova/all-MiniLM-L6-v2",
+      "revision": "main",
+      "files": {
+        "model": { "path": "onnx/model_quantized.onnx", "bytes": null, "sha256": null },
+        "tokenizer": { "path": "tokenizer.json", "bytes": null, "sha256": null }
+      },
+      "approx_bytes": 24000000,
+      "onnx": {
+        "dimensions": 384, "max_tokens": 128, "pooling": "mean", "prefix": "",
+        "tensors": { "input_ids": "input_ids", "attention_mask": "attention_mask", "token_type_ids": "token_type_ids", "output": "last_hidden_state" },
+        "add_special_tokens": true, "pad_id": 0, "pad_type_id": 0, "pad_token": "[PAD]"
+      },
+      "other_sources": [],
+      "measured": null
+    },
+    {
+      "id": "bge-small-en-v1.5-int8",
+      "name": "BGE small English v1.5, 8-bit ONNX",
+      "engine": "onnx",
+      "languages": "English",
+      "license": "MIT",
+      "repo": "Xenova/bge-small-en-v1.5",
+      "revision": "main",
+      "files": {
+        "model": { "path": "onnx/model_quantized.onnx", "bytes": null, "sha256": null },
+        "tokenizer": { "path": "tokenizer.json", "bytes": null, "sha256": null }
+      },
+      "approx_bytes": 35000000,
+      "onnx": {
+        "dimensions": 384, "max_tokens": 128, "pooling": "cls", "prefix": "",
+        "tensors": { "input_ids": "input_ids", "attention_mask": "attention_mask", "token_type_ids": "token_type_ids", "output": "last_hidden_state" },
+        "add_special_tokens": true, "pad_id": 0, "pad_type_id": 0, "pad_token": "[PAD]"
+      },
+      "other_sources": [],
+      "measured": null
+    }
+  ]
+}

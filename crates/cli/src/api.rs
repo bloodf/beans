@@ -124,6 +124,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "skills.library.keep_both" => crate::skill_library::dispatch(app, method, params).await,
         method if method.starts_with("memory.") && !matches!(method, "memory.read" | "memory.write") =>
             crate::memory_service::api::dispatch(app, method, params).await,
+        method if crate::schedule_models::is_method(method) => crate::schedule_models::dispatch(app, method, params).await,
         "hello" => Ok(json!({
             "version": crate::config::VERSION,
             // Which process and binary answer, so `beans service` can tell a leftover old

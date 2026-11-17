@@ -1,0 +1,411 @@
+{
+ "version": 1,
+ "languages": {
+  "en": {
+   "tasks": [
+    "summarize my email",
+    "check the website",
+    "send me the weather",
+    "list my meetings",
+    "back up the notes",
+    "review new pull requests",
+    "post the sales numbers"
+   ],
+   "rec": [
+    "every day",
+    "daily",
+    "every morning",
+    "every Monday at 9",
+    "every two hours",
+    "weekly",
+    "each week",
+    "every hour",
+    "on weekdays at 8",
+    "from now on every morning",
+    "every night at 10",
+    "twice a day"
+   ],
+   "once": [
+    "now",
+    "today",
+    "tomorrow at 9",
+    "at 5pm",
+    "this afternoon",
+    "right away",
+    "once",
+    "next Monday"
+   ],
+   "habit": [
+    "I {h} every day",
+    "I usually {h} every morning",
+    "we {h} every week",
+    "my team {h} every Monday"
+   ],
+   "hv": [
+    "go running",
+    "drink coffee",
+    "have a meeting",
+    "go to the gym",
+    "read the news"
+   ],
+   "ask": [
+    "can you {t} {r}?",
+    "please {t} {r}",
+    "{t} {r}",
+    "I'd like you to {t} {r}",
+    "{t}, and do this {r}",
+    "could you {t} and repeat it {r}"
+   ],
+   "q": [
+    "how often do routines run?",
+    "what time is it?",
+    "did you {t}?",
+    "why is it slow?"
+   ]
+  },
+  "pt": {
+   "tasks": [
+    "resuma meus e-mails",
+    "verifique o site",
+    "me mande a previsão do tempo",
+    "liste minhas reuniões",
+    "faça backup das notas",
+    "revise os pull requests"
+   ],
+   "rec": [
+    "todos os dias",
+    "diariamente",
+    "toda manhã",
+    "toda segunda às 9",
+    "a cada duas horas",
+    "semanalmente",
+    "toda semana",
+    "de hora em hora",
+    "nos dias úteis às 8",
+    "a partir de agora todas as manhãs"
+   ],
+   "once": [
+    "agora",
+    "hoje",
+    "amanhã às 9",
+    "às 17h",
+    "hoje à tarde",
+    "imediatamente",
+    "uma vez",
+    "na próxima segunda"
+   ],
+   "habit": [
+    "eu {h} todos os dias",
+    "eu costumo {h} toda manhã",
+    "nós {h} toda semana"
+   ],
+   "hv": [
+    "corro",
+    "tomo café",
+    "vou à academia",
+    "leio as notícias"
+   ],
+   "ask": [
+    "pode {t} {r}?",
+    "por favor, {t} {r}",
+    "{t} {r}",
+    "quero que você {t} {r}",
+    "{t} e faça isso {r}",
+    "agende para {t} {r}"
+   ],
+   "q": [
+    "com que frequência as rotinas rodam?",
+    "que horas são?",
+    "você já {t}?"
+   ]
+  },
+  "es": {
+   "tasks": [
+    "resume mis correos",
+    "revisa el sitio web",
+    "envíame el clima",
+    "lista mis reuniones",
+    "haz copia de las notas"
+   ],
+   "rec": [
+    "todos los días",
+    "diariamente",
+    "cada mañana",
+    "cada lunes a las 9",
+    "cada dos horas",
+    "semanalmente",
+    "cada semana",
+    "cada hora",
+    "de ahora en adelante cada mañana"
+   ],
+   "once": [
+    "ahora",
+    "hoy",
+    "mañana a las 9",
+    "a las 5",
+    "esta tarde",
+    "una vez",
+    "el próximo lunes"
+   ],
+   "habit": [
+    "yo {h} todos los días",
+    "suelo {h} cada mañana",
+    "nosotros {h} cada semana"
+   ],
+   "hv": [
+    "corro",
+    "tomo café",
+    "voy al gimnasio",
+    "leo las noticias"
+   ],
+   "ask": [
+    "¿puedes {t} {r}?",
+    "por favor, {t} {r}",
+    "{t} {r}",
+    "quiero que {t} {r}",
+    "{t} y hazlo {r}"
+   ],
+   "q": [
+    "¿cada cuánto se ejecutan las rutinas?",
+    "¿qué hora es?"
+   ]
+  },
+  "fr": {
+   "tasks": [
+    "résume mes e-mails",
+    "vérifie le site",
+    "envoie-moi la météo",
+    "liste mes réunions"
+   ],
+   "rec": [
+    "tous les jours",
+    "chaque matin",
+    "tous les lundis à 9h",
+    "toutes les deux heures",
+    "chaque semaine",
+    "toutes les heures",
+    "quotidiennement"
+   ],
+   "once": [
+    "maintenant",
+    "aujourd'hui",
+    "demain à 9h",
+    "à 17h",
+    "une fois",
+    "lundi prochain"
+   ],
+   "habit": [
+    "je {h} tous les jours",
+    "d'habitude je {h} chaque matin"
+   ],
+   "hv": [
+    "cours",
+    "bois du café",
+    "vais à la salle de sport"
+   ],
+   "ask": [
+    "peux-tu {t} {r} ?",
+    "s'il te plaît, {t} {r}",
+    "{t} {r}",
+    "{t} et fais-le {r}"
+   ],
+   "q": [
+    "à quelle fréquence les routines tournent-elles ?",
+    "quelle heure est-il ?"
+   ]
+  },
+  "de": {
+   "tasks": [
+    "fasse meine E-Mails zusammen",
+    "prüfe die Webseite",
+    "schick mir das Wetter",
+    "liste meine Termine"
+   ],
+   "rec": [
+    "jeden Tag",
+    "täglich",
+    "jeden Morgen",
+    "jeden Montag um 9 Uhr",
+    "alle zwei Stunden",
+    "wöchentlich",
+    "jede Woche",
+    "stündlich"
+   ],
+   "once": [
+    "jetzt",
+    "heute",
+    "morgen um 9",
+    "um 17 Uhr",
+    "einmal",
+    "nächsten Montag"
+   ],
+   "habit": [
+    "ich {h} jeden Tag",
+    "normalerweise {h} ich jeden Morgen"
+   ],
+   "hv": [
+    "laufe",
+    "trinke Kaffee",
+    "gehe ins Fitnessstudio"
+   ],
+   "ask": [
+    "kannst du {r} {t}?",
+    "bitte {t} {r}",
+    "{t} {r}",
+    "{t} und mach das {r}"
+   ],
+   "q": [
+    "wie oft laufen die Routinen?",
+    "wie spät ist es?"
+   ]
+  },
+  "it": {
+   "tasks": [
+    "riassumi le mie email",
+    "controlla il sito",
+    "mandami il meteo"
+   ],
+   "rec": [
+    "ogni giorno",
+    "ogni mattina",
+    "ogni lunedì alle 9",
+    "ogni due ore",
+    "ogni settimana",
+    "ogni ora"
+   ],
+   "once": [
+    "adesso",
+    "oggi",
+    "domani alle 9",
+    "una volta"
+   ],
+   "habit": [
+    "io {h} ogni giorno",
+    "di solito {h} ogni mattina"
+   ],
+   "hv": [
+    "corro",
+    "bevo il caffè"
+   ],
+   "ask": [
+    "puoi {t} {r}?",
+    "per favore {t} {r}",
+    "{t} {r}"
+   ],
+   "q": [
+    "che ore sono?"
+   ]
+  },
+  "ja": {
+   "tasks": [
+    "メールを要約して",
+    "サイトを確認して",
+    "天気を送って"
+   ],
+   "rec": [
+    "毎日",
+    "毎朝",
+    "毎週月曜日の9時に",
+    "2時間ごとに",
+    "毎週",
+    "毎時間"
+   ],
+   "once": [
+    "今",
+    "今日",
+    "明日の9時に",
+    "一度だけ"
+   ],
+   "habit": [
+    "私は{h}",
+    "私たちは{h}"
+   ],
+   "hv": [
+    "毎朝走っています",
+    "毎日コーヒーを飲みます"
+   ],
+   "ask": [
+    "{r}{t}",
+    "{t}、これを{r}実行して",
+    "{r}{t}ください"
+   ],
+   "q": [
+    "今何時ですか？"
+   ]
+  },
+  "zh": {
+   "tasks": [
+    "总结我的邮件",
+    "检查网站",
+    "给我发天气"
+   ],
+   "rec": [
+    "每天",
+    "每天早上",
+    "每周一九点",
+    "每两个小时",
+    "每周",
+    "每小时"
+   ],
+   "once": [
+    "现在",
+    "今天",
+    "明天九点",
+    "一次"
+   ],
+   "habit": [
+    "我{h}"
+   ],
+   "hv": [
+    "每天早上跑步",
+    "每天喝咖啡"
+   ],
+   "ask": [
+    "请{r}{t}",
+    "{r}{t}",
+    "{t}，以后{r}都这样做"
+   ],
+   "q": [
+    "现在几点？"
+   ]
+  },
+  "ru": {
+   "tasks": [
+    "проверяй почту",
+    "присылай погоду",
+    "делай резервную копию заметок"
+   ],
+   "rec": [
+    "каждый день",
+    "ежедневно",
+    "каждое утро",
+    "каждый понедельник в 9",
+    "каждые два часа",
+    "каждую неделю",
+    "каждый час"
+   ],
+   "once": [
+    "сейчас",
+    "сегодня",
+    "завтра в 9",
+    "один раз"
+   ],
+   "habit": [
+    "я {h} каждый день",
+    "обычно я {h} каждое утро"
+   ],
+   "hv": [
+    "бегаю",
+    "пью кофе"
+   ],
+   "ask": [
+    "пожалуйста, {t} {r}",
+    "{t} {r}",
+    "можешь {t} {r}?"
+   ],
+   "q": [
+    "который час?"
+   ]
+  }
+ }
+}

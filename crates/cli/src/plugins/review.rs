@@ -232,7 +232,7 @@ pub async fn review(app: &Arc<App>, bot: &Bot, chat_id: &str, trigger: &Trigger,
 /// Temperature 0 for a review model with its thinking off, so the same action in the same chat
 /// gets the same answer instead of one that flips between runs. A model that thinks keeps its
 /// provider's default, which some of them require.
-struct Steady;
+pub(crate) struct Steady;
 
 #[async_trait]
 impl RequestHooks for Steady {

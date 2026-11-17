@@ -254,10 +254,16 @@ enum ServiceCommand {
     /// Start beans serve now and at every login: a launchd agent on macOS, a systemd user unit on
     /// Linux, a sign-in item on Windows.
     Install,
-    /// Stop beans serve and no longer start it at login.
+    /// Stop beans serve and no longer start it at login, removing whatever an earlier install
+    /// left: a half-installed service, or one still running without its definition.
     Uninstall,
-    /// Whether the service is installed and running, and where its log is.
+    /// Whether the service is installed and running, where its log is, and what is wrong with it.
     Status,
+    /// Bring an installed service onto this beans, keeping the home, port, and relay it serves,
+    /// and stop an old beans serve left holding the port. A healthy service is left running, and
+    /// nothing changes when nothing needs to. The installers run this after replacing beans, and
+    /// the Beans app at every launch.
+    Refresh,
     /// The supervisor a sign-in starts on Windows.
     #[usage(hide)]
     Run {
@@ -999,21 +1005,23 @@ async fn service(config: &Config, command: ServiceCommand) -> anyhow::Result<()>
     use beans::service;
     match command {
         ServiceCommand::Install => {
-            // Another beans serve on the port would keep the service's from starting.
-            if !service::status(config).running.is_some() && serve_call(config.port, "hello", &serde_json::json!({})).await?.is_some() {
-                anyhow::bail!(
-                    "A beans serve already answers on port {}. Stop it first; on a computer with the Beans app, the app runs beans serve itself.",
-                    config.port
-                );
-            }
+            // A beans serve already on the port is stopped when it is an old one left over, and
+            // refuses the install otherwise (the app's Runner, or one started by hand).
             let status = service::install(config)?;
+            for note in &status.notes {
+                println!("{note}");
+            }
             match status.running {
                 Some(pid) => println!("beans serve runs in the background (pid {pid}) and starts again at every login. Log: {}", status.log),
                 None => println!("Installed the service, but beans serve is not running yet. Log: {}", status.log),
             }
         }
         ServiceCommand::Uninstall => {
-            if service::uninstall(config)? {
+            let uninstalled = service::uninstall(config)?;
+            for note in &uninstalled.notes {
+                println!("{note}");
+            }
+            if uninstalled.removed {
                 println!("Stopped beans serve; it no longer starts at login.");
             } else {
                 println!("The service is not installed.");
@@ -1024,7 +1032,27 @@ async fn service(config: &Config, command: ServiceCommand) -> anyhow::Result<()>
             match (status.installed, status.running) {
                 (true, Some(pid)) => println!("Installed, running (pid {pid}). Log: {}", status.log),
                 (true, None) => println!("Installed, not running. Log: {}", status.log),
-                (false, _) => println!("Not installed. Run beans service install to keep beans serve running."),
+                (false, Some(pid)) => println!("Not installed, but the service manager still runs it (pid {pid})."),
+                (false, None) if status.notes.is_empty() => println!("Not installed. Run beans service install to keep beans serve running."),
+                (false, None) => println!("Not installed."),
+            }
+            for note in &status.notes {
+                println!("{note}");
+            }
+            if !status.notes.is_empty() {
+                println!("beans service install (or refresh, to keep what it serves) puts it right; beans service uninstall removes it.");
+            }
+        }
+        ServiceCommand::Refresh => {
+            let refreshed = service::refresh(config)?;
+            for note in &refreshed.notes {
+                println!("{note}");
+            }
+            match (refreshed.installed, refreshed.changed) {
+                (false, false) => println!("No service is installed; nothing to refresh."),
+                (false, true) => println!("No service is installed; cleaned up what was left."),
+                (true, true) => println!("The service is up to date with this beans."),
+                (true, false) => println!("The service is up to date; nothing to change."),
             }
         }
         ServiceCommand::Run { env } => {

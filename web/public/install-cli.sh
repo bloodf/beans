@@ -118,6 +118,25 @@ add_to_path() {
 	added=1
 }
 
+# refresh_service: a service `beans service install` set up moves onto the beans just installed,
+# keeping the home, port and relay it serves, and restarts if it was running, so the old binary
+# stops; one that ran a beans from another folder moves here too. With no service, nothing
+# happens. A release without `service refresh` is left alone.
+refresh_service() {
+	# A release without it fails its help; reading help text would break on colour or wrapping.
+	"$install_dir/beans" service refresh --help >/dev/null 2>&1 || return 0
+	if refreshed=$("$install_dir/beans" service refresh 2>&1); then
+		case $refreshed in
+			"No service is installed"*) ;;
+			*) say "$refreshed" ;;
+		esac
+	else
+		say "The beans service could not move onto this version, so it is as it was:" >&2
+		say "$refreshed" >&2
+		say "Run beans service status to see why, and beans service install to set it up again." >&2
+	fi
+}
+
 main() {
 	detect_target
 
@@ -156,6 +175,7 @@ main() {
 	installed=$("$install_dir/beans" --version 2>/dev/null) || die "$install_dir/beans does not start on this computer"
 
 	say "Installed $installed at $install_dir/beans"
+	refresh_service
 	case ":$PATH:" in
 		*":$install_dir:"*) ;;
 		*)
@@ -174,7 +194,7 @@ main() {
 
 	say ""
 	if [ -f "${BEANS_HOME:-$HOME/.beans-v2}/machine.json" ]; then
-		say "If beans serve is running, restart it to run the new version. CLI self-update is unavailable in Beans."
+		say "A beans serve you started yourself runs the old version until you restart it. CLI self-update is unavailable in Beans."
 	else
 		say "To make this computer a Runner, pair it with your account and start the service:"
 		say "  beans pair 'beans://pair?v=2&...'   # from Pair a Device in the app"

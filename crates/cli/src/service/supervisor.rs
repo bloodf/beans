@@ -31,9 +31,50 @@ fn command_home(args: &[String]) -> Option<&str> {
     home
 }
 
-pub(super) fn matches(record: &Record, created_at: u64, image: &Path, expected_image: &Path, home: &Path, args: &[String]) -> bool {
-    record.pid != 0 && record.created_at == created_at && image == expected_image
-        && record.home == home && command_home(args).is_some_and(|value| Path::new(value) == home)
+/// Whether the process image `image` runs one of `programs`, or a program the Windows installer
+/// moved aside to replace it. A running `beans.exe` cannot be overwritten, only renamed, so the
+/// installer renames it `beans.exe.old-<32 hex digits>` in its folder and the supervisor runs on
+/// from there until it is stopped.
+pub(super) fn runs_program(image: &Path, programs: &[&Path]) -> bool {
+    let name = |path: &Path| path.file_name().and_then(|name| name.to_str()).map(str::to_ascii_lowercase);
+    programs.iter().any(|program| {
+        image == *program
+            || (image.parent() == program.parent()
+                && name(image).zip(name(program)).is_some_and(|(image, program)| {
+                    image.strip_prefix(&program).and_then(|rest| rest.strip_prefix(".old-"))
+                        .is_some_and(|id| id.len() == 32 && id.chars().all(|c| c.is_ascii_hexdigit()))
+                }))
+    })
+}
+
+pub(super) fn matches(record: &Record, created_at: u64, image: &Path, programs: &[&Path], home: &Path, args: &[String]) -> bool {
+    identify(record, created_at, image, programs, home, args) == Identity::Supervisor
+}
+
+/// What the process a record's PID names now is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Identity {
+    /// This home's supervisor, proven.
+    Supervisor,
+    /// Another process that was created later under the same PID (Windows reuses PIDs quickly,
+    /// and a record can outlive a restart of the computer): the record is stale, nothing is
+    /// running for it, and the other process is never touched.
+    Reused,
+    /// Created when the supervisor was, but not provably it: refused, and left untouched.
+    Unproven,
+}
+
+pub(super) fn identify(record: &Record, created_at: u64, image: &Path, programs: &[&Path], home: &Path, args: &[String]) -> Identity {
+    if record.pid == 0 {
+        return Identity::Unproven;
+    }
+    if record.created_at != created_at {
+        return Identity::Reused;
+    }
+    match runs_program(image, programs) && record.home == home && command_home(args).is_some_and(|value| Path::new(value) == home) {
+        true => Identity::Supervisor,
+        false => Identity::Unproven,
+    }
 }
 
 #[cfg(windows)]
@@ -128,15 +169,29 @@ impl Handle {
     }
 }
 
+/// The supervisor this home's record names, proven to be one: the same process creation, a
+/// home-bound `service run` command line, and an image that is this `beans`, one of `installed`
+/// (the programs service definitions name), or one the installer moved aside.
 #[cfg(windows)]
-pub(super) fn bound(config: &Config) -> anyhow::Result<Option<(Record, Handle)>> {
+pub(super) fn bound(config: &Config, installed: &[PathBuf]) -> anyhow::Result<Option<(Record, Handle)>> {
     let Some(record) = read_record(config)? else { return Ok(None); };
     anyhow::ensure!(record.pid != 0, "Invalid supervisor PID; data is untouched");
     let Some(handle) = Handle::open(record.pid)? else { return Ok(None); };
     let home = std::fs::canonicalize(&config.home)?;
-    anyhow::ensure!(matches(&record, handle.created_at()?, &handle.image()?, &super::exe()?, &home, &handle.args()?),
-        "PID does not identify this home's Beans supervisor; data is untouched");
-    Ok(Some((record, handle)))
+    // The process image is canonical (a verbatim path); so must the programs be.
+    let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let exe = canonical(&super::exe()?);
+    let installed: Vec<PathBuf> = installed.iter().map(|path| canonical(path)).collect();
+    let programs: Vec<&Path> = std::iter::once(exe.as_path()).chain(installed.iter().map(PathBuf::as_path)).collect();
+    let created_at = handle.created_at()?;
+    if record.created_at != created_at {
+        return Ok(None);
+    }
+    match identify(&record, created_at, &handle.image()?, &programs, &home, &handle.args()?) {
+        Identity::Supervisor => Ok(Some((record, handle))),
+        Identity::Reused => Ok(None),
+        Identity::Unproven => anyhow::bail!("PID does not identify this home's Beans supervisor; data is untouched"),
+    }
 }
 
 #[cfg(windows)]
@@ -164,19 +219,84 @@ mod tests {
         let image = Path::new("beans.exe");
         let record = Record { format: Format::BeansV2, pid: 42, created_at: 100, home: home.into() };
         let args: Vec<String> = ["beans.exe", "service", "run", "--env", "BEANS_HOME=account"].map(String::from).into();
-        assert!(matches(&record, 100, image, image, home, &args));
-        assert!(!matches(&record, 101, image, image, home, &args), "reused PID");
-        assert!(!matches(&record, 100, Path::new("other.exe"), image, home, &args));
-        assert!(!matches(&record, 100, image, image, Path::new("other-home"), &args));
+        assert!(matches(&record, 100, image, &[image], home, &args));
+        assert!(!matches(&record, 101, image, &[image], home, &args), "reused PID");
+        assert!(!matches(&record, 100, Path::new("other.exe"), &[image], home, &args));
+        assert!(!matches(&record, 100, image, &[image], Path::new("other-home"), &args));
         let mut other = args.clone();
         other[4] = "BEANS_HOME=other-home".into();
-        assert!(!matches(&record, 100, image, image, home, &other));
+        assert!(!matches(&record, 100, image, &[image], home, &other));
         other = args.clone();
         other[2] = "status".into();
-        assert!(!matches(&record, 100, image, image, home, &other));
+        assert!(!matches(&record, 100, image, &[image], home, &other));
         other = args.clone();
         other.extend(["--env".into(), "beans_home=other-home".into()]);
-        assert!(!matches(&record, 100, image, image, home, &other), "duplicate home evidence");
+        assert!(!matches(&record, 100, image, &[image], home, &other), "duplicate home evidence");
+    }
+
+    #[test]
+    fn a_record_whose_pid_was_reused_is_stale_not_an_error() {
+        let home = Path::new("account");
+        let image = Path::new("beans.exe");
+        let record = Record { format: Format::BeansV2, pid: 42, created_at: 100, home: home.into() };
+        let args: Vec<String> = ["beans.exe", "service", "run", "--env", "BEANS_HOME=account"].map(String::from).into();
+        assert_eq!(identify(&record, 100, image, &[image], home, &args), Identity::Supervisor);
+        // After a restart, PID 42 is some other program, created later.
+        let other: Vec<String> = ["svchost.exe", "-k", "netsvcs"].map(String::from).into();
+        assert_eq!(identify(&record, 555, Path::new(r"C:\Windows\System32\svchost.exe"), &[image], home, &other), Identity::Reused);
+        assert_eq!(identify(&record, 555, image, &[image], home, &args), Identity::Reused, "even another beans, created later");
+        // Same creation, but not provably this home's supervisor: refused, untouched.
+        assert_eq!(identify(&record, 100, Path::new("other.exe"), &[image], home, &args), Identity::Unproven);
+        assert_eq!(identify(&record, 100, image, &[image], Path::new("elsewhere"), &args), Identity::Unproven);
+        assert_eq!(identify(&Record { pid: 0, ..record }, 100, image, &[image], home, &args), Identity::Unproven);
+    }
+
+    #[test]
+    fn the_home_is_read_only_from_a_well_formed_service_run_command_line() {
+        let line = |args: &[&str]| args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        assert_eq!(command_home(&line(&["beans.exe", "service", "run", "--env", "BEANS_HOME=C:\\h"])), Some("C:\\h"));
+        assert_eq!(command_home(&line(&["beans.exe", "service", "run", "--env", "BEANS_PORT=1", "--env", "beans_home=C:\\h=x"])), Some("C:\\h=x"), "names ignore case; values keep =");
+        assert_eq!(command_home(&line(&["beans.exe", "service", "run", "--env", "BEANS_HOME="])), Some(""));
+        for args in [
+            vec!["beans.exe", "service", "run"],
+            vec!["beans.exe", "service", "run", "--env"],
+            vec!["beans.exe", "service", "run", "--env", "BEANS_HOME"],
+            vec!["beans.exe", "service", "run", "--other", "BEANS_HOME=x"],
+            vec!["beans.exe", "service", "status", "--env", "BEANS_HOME=x"],
+            vec!["beans.exe", "run", "service", "--env", "BEANS_HOME=x"],
+            vec!["beans.exe", "service", "run", "--env", "BEANS_HOME=a", "--env", "BEANS_HOME=a"],
+            vec!["beans.exe"],
+            vec![],
+        ] {
+            assert_eq!(command_home(&line(&args)), None, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_supervisor_the_installer_moved_aside_is_still_recognized() {
+        let program = Path::new(r"C:\Users\me\.local\bin\beans.exe");
+        let moved = Path::new(r"C:\Users\me\.local\bin\beans.exe.old-0123456789abcdef0123456789ABCDEF");
+        let record = Record { format: Format::BeansV2, pid: 42, created_at: 100, home: "account".into() };
+        let args: Vec<String> = ["beans.exe", "service", "run", "--env", "BEANS_HOME=account"].map(String::from).into();
+        assert!(matches(&record, 100, moved, &[program], Path::new("account"), &args));
+        assert!(runs_program(Path::new(r"C:\Users\me\.local\bin\BEANS.EXE.old-0123456789abcdef0123456789abcdef"), &[program]), "Windows names ignore case");
+        // Only a sibling renamed the installer's way, and only with the other proofs.
+        for image in [
+            r"C:\Users\me\Downloads\beans.exe.old-0123456789abcdef0123456789abcdef",
+            r"C:\Users\me\.local\bin\beans.exe.old-",
+            r"C:\Users\me\.local\bin\beans.exe.old-0123",
+            r"C:\Users\me\.local\bin\beans.exe.old-0123456789abcdef0123456789abcdeg",
+            r"C:\Users\me\.local\bin\beans.exe.bak",
+            r"C:\Users\me\.local\bin\other.exe",
+            r"C:\Users\me\.local\bin\beans.exe.old-0123456789abcdef0123456789abcdef\x.exe",
+        ] {
+            assert!(!runs_program(Path::new(image), &[program]), "{image}");
+        }
+        assert!(!matches(&record, 101, moved, &[program], Path::new("account"), &args), "a reused PID is still refused");
+        // The program a Run key names counts alongside this one.
+        let elsewhere = Path::new(r"D:\tools\beans.exe");
+        assert!(matches(&record, 100, elsewhere, &[program, elsewhere], Path::new("account"), &args));
+        assert!(!matches(&record, 100, elsewhere, &[program], Path::new("account"), &args));
     }
 
     #[test]

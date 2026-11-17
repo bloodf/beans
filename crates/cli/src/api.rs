@@ -126,6 +126,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             crate::memory_service::api::dispatch(app, method, params).await,
         "hello" => Ok(json!({
             "version": crate::config::VERSION,
+            // Which process and binary answer, so `beans service` can tell a leftover old
+            // `beans serve` on this port from the app's own Runner.
+            "pid": std::process::id(),
+            "executable": std::env::current_exe().ok().map(|path| path.to_string_lossy().into_owned()),
             "has_identity": app.has_identity(),
             "is_identity_device": app.is_identity_device(),
             "device_id": app.this_device_id(),

@@ -77,6 +77,30 @@
     }
 
     Write-Host "Installed $installed at $exe"
+
+    # A service `beans service install` set up moves onto the beans.exe just installed, keeping the
+    # home, port and relay it serves, and its supervisor, still running from the file moved aside
+    # above, restarts from the new one; after that the old file can go too. With no service,
+    # nothing happens. A release without `service refresh` is left alone. Native output on stderr
+    # must not stop this script, so errors only continue here.
+    $preference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        # A release without it fails its help; reading help text would break on colour or wrapping.
+        & $exe service refresh --help *> $null
+        if ($LASTEXITCODE -eq 0) {
+            $refreshed = (& $exe service refresh 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "The beans service could not move onto this version, so it is as it was: $refreshed"
+                Write-Warning 'Run beans service status to see why, and beans service install to set it up again.'
+            } elseif ($refreshed -and $refreshed -notlike 'No service is installed*') {
+                Write-Host $refreshed
+            }
+            Get-ChildItem -Path $dir -Filter 'beans.exe.old-*' | Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+    } finally {
+        $ErrorActionPreference = $preference
+    }
     $inDir = { param($entry) $entry -and [Environment]::ExpandEnvironmentVariables($entry).TrimEnd('\') -eq $dir.TrimEnd('\') }
     if ($env:BEANS_NO_MODIFY_PATH -eq '1') {
         if (-not ($env:Path -split ';' | Where-Object { & $inDir $_ })) { Write-Host "$dir is not on your PATH." }
@@ -106,7 +130,7 @@
     $beansHome = $env:BEANS_HOME
     if (-not $beansHome) { $beansHome = Join-Path $HOME '.beans-v2' }
     if (Test-Path (Join-Path $beansHome 'machine.json')) {
-        Write-Host 'If beans serve is running, restart it to run the new version. CLI self-update is unavailable in Beans.'
+        Write-Host 'A beans serve you started yourself runs the old version until you restart it. CLI self-update is unavailable in Beans.'
     } else {
         Write-Host 'To make this computer a Runner, pair it with your account and start the service:'
         Write-Host "  beans pair 'beans://pair?v=2&...'   # from Pair a Device in the app"

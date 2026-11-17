@@ -306,6 +306,10 @@ async fn reference_frames_round_trip_over_ws() {
     // Exact documented frames, substituting only the chat id.
     let hello = exchange(&mut socket, r#"{"id":1,"method":"hello","params":{}}"#.into(), json!(1)).await;
     assert_eq!(hello["result"]["has_identity"], true);
+    // `beans service` tells a leftover old serve on the port from the app's Runner by these.
+    assert_eq!(hello["result"]["pid"], std::process::id());
+    assert_eq!(hello["result"]["executable"], std::env::current_exe().unwrap().to_string_lossy().as_ref());
+    assert_eq!(hello["result"]["version"], env!("CARGO_PKG_VERSION"));
     let send = r#"{"id":2,"method":"chats.send","params":{"chat_id":"<chat id>","text":"Hello"}}"#.replace("<chat id>", &s.chat);
     let reply = exchange(&mut socket, send, json!(2)).await;
     let id = reply["result"]["message"]["id"].as_str().unwrap();

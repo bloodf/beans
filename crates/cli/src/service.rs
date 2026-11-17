@@ -219,9 +219,23 @@ fn xml_char(c: char) -> bool {
 ///
 /// The other control characters cannot be written in an XML plist at all. Until there is a
 /// decided policy for them, such a value stops the install, and nothing is written.
+/// The first character of `text` a plist cannot carry unchanged, if any.
+#[cfg(test)]
+fn plist_refused(text: &str) -> Option<char> {
+    match text.starts_with('\u{feff}') {
+        true => Some('\u{feff}'),
+        false => text.chars().find(|c| !xml_char(*c)),
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 fn plist_string(what: &str, text: &str) -> Result<String, Unrepresentable> {
     refuse_nul(what, text)?;
+    // CoreFoundation reads a leading U+FEFF as a byte order mark and drops it, written
+    // plainly or as a character reference.
+    if text.starts_with('\u{feff}') {
+        return Err(Unrepresentable { what: what.to_string(), character: '\u{feff}', reason: "macOS drops at the start of a property list string".into() });
+    }
     let mut escaped = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -2161,11 +2175,11 @@ mod tests {
             let environment = hard_environment(&value);
             match launchd_plist("app.beans.serve", "/beans", "/log", &environment) {
                 Ok(plist) => {
-                    assert!(value.chars().all(xml_char), "{value:?}");
+                    assert_eq!(plist_refused(&value), None, "{value:?}");
                     assert_eq!(read_plist(&plist).1[1..], environment[..], "{value:?}");
                 }
                 Err(error) => {
-                    assert_eq!(Some(error.character), value.chars().find(|c| !xml_char(*c)), "{value:?}");
+                    assert_eq!(Some(error.character), plist_refused(&value), "{value:?}");
                 }
             }
         }
@@ -2207,7 +2221,7 @@ mod tests {
     #[test]
     fn plutil_reads_every_plist_back_unchanged() {
         let dir = tempfile::tempdir().unwrap();
-        for (i, value) in corpus().into_iter().filter(|value| value.chars().all(xml_char)).enumerate() {
+        for (i, value) in corpus().into_iter().filter(|value| plist_refused(value).is_none()).enumerate() {
             let environment = hard_environment(&value);
             let exe = format!("/Applications/{value}/beans");
             let path = dir.path().join(format!("{i}.plist"));

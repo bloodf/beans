@@ -74,7 +74,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [Local storage and startup admission](docs/architecture/storage-admission.md) | Data directory, format admission, staged scratch preload, creation guards and final startup persistence |
 | [Local task authority](docs/architecture/tasks.md) | Exclusive execution ownership, durable Job.id admission, invocation receipts, recovery and replay fences |
 | [CLI service and updates](docs/architecture/service-updates.md) | CLI installation, standalone services, Runner admission drain and update availability |
-| [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review |
+| [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review, [secrets](docs/architecture/secrets.md) |
 | [Computer provenance](docs/architecture/computer-provenance.md) | Proposed computer-stack discovery contract, dependency/license provenance, artifact verification and pending deployment gates |
 | [Terminal sessions](docs/architecture/terminal-sessions.md) | A bot's commands in terminals of their own: when a call returns, background commands, the command's card, answering and stopping, Running tasks |
 | [Realtime voice evaluation](docs/architecture/voice-evaluation.md) | Pinned voice stack options: licenses, transports, plaintext recipients, privacy choices and pending live evidence |

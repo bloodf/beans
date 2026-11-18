@@ -599,10 +599,13 @@ export function behaviorTitle(behavior: AutoReviewRule["behavior"]): string {
 }
 
 /** The check on effectful plugin actions and shell commands, shared by every Device through the
- * roster: on, a small model on the bot's provider asks only when needed; off, each one asks. */
+ * roster: on, a small model on the bot's provider asks only when needed; off, each one asks.
+ * Full access skips it all: bots act with no review and no question, secrets included, though
+ * a secret's value still never reaches a model. */
 export interface AutoReview {
   isEnabled: boolean;
   rules: AutoReviewRule[];
+  fullAccess: boolean;
 }
 
 // MARK: - Plugins

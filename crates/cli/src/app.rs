@@ -234,6 +234,11 @@ pub struct App {
     pub shell_sessions: crate::shell::Sessions,
     /// What this Runner has installed, with the secrets kept apart.
     pub plugins: Mutex<crate::plugins::Store>,
+    /// The user's secrets this Runner has seen, which models see as placeholders.
+    pub secrets: crate::secret_shield::Vault,
+    /// The secrets the user keeps on this Runner, encrypted with this machine's key.
+    #[cfg(feature = "runner")]
+    pub secret_store: crate::secret_store::SecretStore,
     /// Serializes local plugin admission/publication with account reset, including callbacks.
     pub(crate) plugin_lifecycle: parking_lot::ReentrantMutex<std::cell::Cell<(u64, bool)>>,
     /// Selected-relay ownership, including settings changes away and back.
@@ -517,6 +522,9 @@ impl App {
             #[cfg(feature = "runner")]
             shell_sessions: crate::shell::Sessions::default(),
             plugins: Mutex::new(plugins),
+            secrets: crate::secret_shield::Vault::default(),
+            #[cfg(feature = "runner")]
+            secret_store: crate::secret_store::SecretStore::default(),
             marketplace,
             catalog: crate::catalog::Updates::default(),
             #[cfg(feature = "cli")]
@@ -1374,6 +1382,11 @@ impl App {
 
     pub fn auto_review(&self) -> AutoReview {
         self.state.lock().unwrap().auto_review.clone()
+    }
+
+    /// Full access is on: bots act with no review and no question (`AutoReview::full_access`).
+    pub fn full_access(&self) -> bool {
+        self.state.lock().unwrap().auto_review.full_access
     }
 
     pub fn is_paused(&self) -> bool { self.state.lock().unwrap().paused }

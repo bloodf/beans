@@ -717,6 +717,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             if let Some(enabled) = params["is_enabled"].as_bool() {
                 auto_review.is_enabled = enabled;
             }
+            // Only when given: an app that does not know Full access leaves it as it is.
+            if let Some(full_access) = params["full_access"].as_bool() {
+                auto_review.full_access = full_access;
+            }
             if let Some(rules) = params["rules"].as_array() {
                 auto_review.rules = rules
                     .iter()

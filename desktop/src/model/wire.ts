@@ -238,6 +238,8 @@ export interface WireRoutine {
 export interface WireAutoReview {
   is_enabled: boolean;
   rules?: { id: string; text: string; behavior: string; tool?: string | null }[] | null;
+  /** Written only when on; a CLI that does not know it never sends it. */
+  full_access?: boolean | null;
 }
 
 export interface WireProvider {
@@ -692,9 +694,10 @@ export function toRoutine(wire: WireRoutine): Routine {
 }
 
 export function toAutoReview(wire: WireAutoReview | null | undefined): AutoReview {
-  if (!wire) return { isEnabled: true, rules: [] };
+  if (!wire) return { isEnabled: true, rules: [], fullAccess: false };
   return {
     isEnabled: wire.is_enabled,
+    fullAccess: wire.full_access === true,
     rules: (wire.rules ?? []).map((rule) => ({
       id: rule.id,
       text: rule.text,

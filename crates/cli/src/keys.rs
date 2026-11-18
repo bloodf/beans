@@ -31,6 +31,12 @@ fn derive(secret: &[u8; 32], info: &str) -> [u8; 32] {
     out
 }
 
+/// The key the Runner's secret store is encrypted under: from this machine's own secret, so
+/// the store opens on this machine alone and never syncs.
+pub fn secrets_key(machine_secret: &[u8; 32]) -> [u8; 32] {
+    derive(machine_secret, "machine/secrets")
+}
+
 /// The key pushes are sealed under, so the phone's notification extension holds this one
 /// key and never the account DEK.
 pub fn push_key(dek: &[u8; 32]) -> [u8; 32] {

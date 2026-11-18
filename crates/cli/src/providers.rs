@@ -154,7 +154,13 @@ pub fn thinking_level(bot: &crate::model::Bot) -> Option<ThinkingLevel> {
     bot.thinking.as_deref().and_then(|s| s.parse().ok())
 }
 
+/// The provider for `kind`, behind the secret shield: every model call is sent placeholders
+/// instead of the user's secrets (`secret_shield`).
 pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: Option<ThinkingLevel>) -> Result<Arc<dyn Provider>, String> {
+    unshielded_provider(app, kind, model, thinking).map(|provider| crate::secret_shield::shielded(app, provider))
+}
+
+fn unshielded_provider(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: Option<ThinkingLevel>) -> Result<Arc<dyn Provider>, String> {
     let model = model.filter(|m| !m.trim().is_empty()).map(str::to_string);
     match kind {
         kind if is_custom(kind) => {

@@ -48,6 +48,7 @@ export const Entries = {
   automaticDownloads: () => entry("general", L("Download and install updates automatically"), { keywords: [L("update upgrade background")] }),
   autoReviewSwitch: () => entry("auto-review", L("Check actions before they run"), { keywords: [L("auto-review approve approval permission plugin ask")] }),
   autoReviewRules: () => entry("auto-review", L("Auto-review Rules"), { keywords: [L("rule allow automatically ask first always allow")] }),
+  fullAccess: () => entry("auto-review", L("Full access"), { keywords: [L("yolo full access no review never ask autonomous unattended")] }),
   relayURL: () => entry("advanced", L("Relay URL"), { keywords: [L("server self-host sync pairing connection")] }),
   cliPort: () => entry("advanced", L("CLI port"), { keywords: [L("localhost 127.0.0.1 serve connection")] }),
   onboarding: () => entry("advanced", L("Onboarding"), { keywords: [L("show onboarding again setup welcome restore")] }),
@@ -81,7 +82,7 @@ export function entriesIn(pane: SettingsPane, device: Device | undefined, store:
         hostInfo().updatesEnabled ? [Entries.version(), Entries.automaticChecks(), Entries.automaticDownloads()] : [],
       );
     case "auto-review":
-      return [Entries.autoReviewSwitch(), Entries.autoReviewRules()];
+      return [Entries.autoReviewSwitch(), Entries.fullAccess(), Entries.autoReviewRules()];
     case "advanced":
       return [Entries.relayURL(), Entries.cliPort(), Entries.onboarding()].concat(store.hasIdentity === true ? [Entries.deleteAccount()] : []);
     case "bots":

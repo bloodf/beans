@@ -598,6 +598,7 @@ dependencies = [
 name = "beans"
 version = "0.1.10"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "arrow-array",
  "arrow-ipc",

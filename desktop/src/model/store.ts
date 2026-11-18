@@ -290,7 +290,7 @@ export class AppStore {
   /** Every bot's routines, from the roster. */
   routines: Routine[] = [];
   /** Auto-review, shared through the roster. */
-  autoReview: AutoReview = { isEnabled: true, rules: [] };
+  autoReview: AutoReview = { isEnabled: true, rules: [], fullAccess: false };
   /** The account's provider credentials, the same on every Device. */
   providers: ProviderCredential[] = [];
   /** The models the CLI's catalog offers, for the Model and Thinking pickers. */
@@ -1370,6 +1370,7 @@ export class AppStore {
     this.emit({ kind: "rosterChanged" });
     this.perform("auto_review.set", {
       is_enabled: value.isEnabled,
+      full_access: value.fullAccess,
       rules: value.rules.map((rule) => ({ id: rule.id, text: rule.text, behavior: rule.behavior, ...(rule.tool ? { tool: rule.tool } : {}) })),
     });
   }

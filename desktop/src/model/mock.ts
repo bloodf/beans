@@ -207,6 +207,7 @@ export async function mockMarketplace(): Promise<Marketplace> {
 export function autoReview(): AutoReview {
   return {
     isEnabled: true,
+    fullAccess: false,
     rules: [
       { id: "ar-1", text: "use GitHub create_issue", behavior: "allow", tool: "github/create_issue" },
       { id: "ar-2", text: "comment on a pull request", behavior: "ask" },

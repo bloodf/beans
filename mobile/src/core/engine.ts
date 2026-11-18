@@ -427,7 +427,7 @@ class Engine {
   /// gives a new rule its id.
   setAutoReview(value: AutoReview) {
     useStore.setState({ auto_review: value });
-    void core.request("auto_review.set", { is_enabled: value.is_enabled, rules: value.rules });
+    void core.request("auto_review.set", { is_enabled: value.is_enabled, rules: value.rules, full_access: value.full_access === true });
   }
 
   // MARK: - Providers

@@ -3,7 +3,7 @@
 
 import { expect, test } from "vitest";
 import { contextSummary, runsInForeground } from "./models";
-import { toUsage, toBot, toCustomModel, toMessage, toProviders, type WireBot } from "./wire";
+import { toAutoReview, toUsage, toBot, toCustomModel, toMessage, toProviders, type WireBot } from "./wire";
 
 test("statuses keep custom providers after the built-in ones and leave out unknown kinds", () => {
   const providers = toProviders([
@@ -99,4 +99,13 @@ test("compacted context stays approximate through wire mapping until measured ag
   for (const context_estimated of [false, null, undefined]) {
     expect(contextSummary(toUsage({ ...wire, context_estimated }))).toBe("40k of 1.0M · 4%");
   }
+});
+
+test("full access is off unless the CLI says it is on, so a CLI that does not know it reads as off", () => {
+  expect(toAutoReview(undefined)).toEqual({ isEnabled: true, rules: [], fullAccess: false });
+  expect(toAutoReview(null).fullAccess).toBe(false);
+  expect(toAutoReview({ is_enabled: true, rules: [] }).fullAccess).toBe(false);
+  expect(toAutoReview({ is_enabled: false, rules: null, full_access: null }).fullAccess).toBe(false);
+  const on = toAutoReview({ is_enabled: false, rules: [{ id: "r1", text: "deploy", behavior: "allow" }], full_access: true });
+  expect(on).toEqual({ isEnabled: false, fullAccess: true, rules: [{ id: "r1", text: "deploy", behavior: "allow", tool: undefined }] });
 });

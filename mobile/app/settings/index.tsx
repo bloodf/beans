@@ -108,6 +108,18 @@ export default function SettingsScreen() {
     });
   }
 
+  /// Full access asks first: with it, nothing stops a bot's mistake or a page that tricks it.
+  function confirmFullAccess() {
+    Alert.alert(
+      t("Turn on full access?"),
+      t("Bots will run every command, change any file, and use plugins and your secrets without asking you or Auto-review, in routines too, on every Device's bots. A mistake, or a web page or message that tricks a bot, is not stopped. Secret values still never reach a model, and Pause still stops every bot."),
+      [
+        { text: t("Cancel"), style: "cancel" },
+        { text: t("Turn On"), style: "destructive", onPress: () => engine.setAutoReview({ ...autoReview, full_access: true }) },
+      ],
+    );
+  }
+
   function editRule(id: string) {
     const rule = autoReview.rules.find((r) => r.id === id);
     if (!rule) return;
@@ -261,6 +273,21 @@ export default function SettingsScreen() {
             />
           ))}
           <Row title={t("Add rule…")} onPress={addRule} />
+        </Section>
+
+        <Section
+          title={t("Full access")}
+          footer={
+            autoReview.full_access === true
+              ? t("On: bots run every command, file change, and plugin action at once, with no review and no question, in routines too. Auto-review and its rules are not used.")
+              : t("Let bots run every command, file change, and plugin action at once, with no review and no question. Secret values still never reach a model.")
+          }
+        >
+          <ToggleRow
+            title={t("Full access")}
+            value={autoReview.full_access === true}
+            onValueChange={(on) => (on ? confirmFullAccess() : engine.setAutoReview({ ...autoReview, full_access: false }))}
+          />
         </Section>
 
         <Section

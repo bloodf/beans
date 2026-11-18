@@ -321,7 +321,9 @@ export function showsCard(tool: Extract<Body, { kind: "tool" }>): boolean {
 export type AutoReviewRule = { id: string; text: string; behavior: "allow" | "ask"; tool?: string };
 
 /// The check on effectful plugin actions and shell commands, shared through the roster.
-export type AutoReview = { is_enabled: boolean; rules: AutoReviewRule[] };
+/// `full_access`: bots act with no review and no question, secrets included, though a secret's
+/// value still never reaches a model. Absent means off, as a core that does not know it sends.
+export type AutoReview = { is_enabled: boolean; rules: AutoReviewRule[]; full_access?: boolean };
 
 export type MessageState =
   | { kind: "thinking" }

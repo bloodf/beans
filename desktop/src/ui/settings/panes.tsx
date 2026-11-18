@@ -412,6 +412,23 @@ function AutoReviewPane() {
         </AccessoryRow>
         <NoteRow text={L("Beans checks each action before it runs and asks you first when needed. Add rules to customize what bots can do automatically.")} />
       </Section>
+      <Section title={Entries.fullAccess().row} style="heading">
+        <AccessoryRow label={Entries.fullAccess().row}>
+          <Switch
+            small
+            checked={review().fullAccess}
+            label={Entries.fullAccess().row}
+            onChange={(on) => (on ? void confirmFullAccess() : store.setAutoReview({ ...store.autoReview, fullAccess: false }))}
+          />
+        </AccessoryRow>
+        <NoteRow
+          text={
+            review().fullAccess
+              ? L("Full access is on: bots run every command, file change, and plugin action at once, with no review and no question, in routines too. Auto-review and its rules are not used.")
+              : L("Let bots run every command, file change, and plugin action at once, with no review and no question. Secret values still never reach a model.")
+          }
+        />
+      </Section>
       <Section
         title={Entries.autoReviewRules().row}
         style="heading"
@@ -441,6 +458,20 @@ function AutoReviewPane() {
       />
     </PaneFrame>
   );
+}
+
+/** Full access asks first: with it, nothing stops a bot's mistake or a page that tricks it. */
+async function confirmFullAccess(): Promise<void> {
+  const answer = await alert({
+    message: L("Turn on full access?"),
+    informative: L(
+      "Bots will run every command, change any file, and use plugins and your secrets without asking you or Auto-review, in routines too, on every Device's bots. A mistake, or a web page or message that tricks a bot, is not stopped. Secret values still never reach a model, and Pause still stops every bot.",
+    ),
+    style: "critical",
+    buttons: [{ title: L("Turn On"), destructive: true }, { title: L("Cancel") }],
+  });
+  // Cancelled, nothing changes: the switch shows what the roster says.
+  if (answer === 0) store.setAutoReview({ ...store.autoReview, fullAccess: true });
 }
 
 /** Add and Edit share one sheet. Rule text is editable; a rule for an exact plugin tool keeps its

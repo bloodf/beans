@@ -113,7 +113,7 @@ async fn policy_history_survives_reload_and_direct_encrypted_reconciliation() {
     let home_b = Scratch::new();
     let mut a = home_a.load();
     identity::create(&a, Some("Synthetic A".into())).unwrap();
-    a.set_auto_review(AutoReview { is_enabled: false, rules: vec![] });
+    a.set_auto_review(AutoReview { is_enabled: false, rules: vec![], full_access: false });
     let bot = a.state.lock().unwrap().bots[0].id.clone();
     let dm = a.state.lock().unwrap().chats[0].meta.id.clone();
     let runner = a.this_device_id().unwrap();

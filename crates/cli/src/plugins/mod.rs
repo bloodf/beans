@@ -375,6 +375,14 @@ pub struct Store {
     pub mcp: mcp_json::McpFile,
 }
 
+impl Store {
+    /// Every plugin's secrets, for the secret shield to keep from models.
+    #[cfg(feature = "runner")]
+    pub(crate) fn secret_values(&self) -> Value {
+        serde_json::to_value(&self.secrets).unwrap_or_default()
+    }
+}
+
 /// A device-flow code waiting to be entered: which server it signs in, and where.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignInCode {

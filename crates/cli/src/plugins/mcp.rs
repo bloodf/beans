@@ -1904,6 +1904,10 @@ pub async fn review_call(
         return Some(crate::local_review::blocked(format!("{} is not permitted for this bot.", ctx.tool_call.name)));
     }
     let name = tool.tool.name.to_string();
+    // Full access: no review and no question; the bot's permission above still holds.
+    if app.full_access() {
+        return None;
+    }
     let review_description = match access(app, &tool, ctx.cancel).await {
         Access::ReadOnly => return None,
         Access::Stopped => return Some(crate::local_review::blocked("Stopped".into())),
@@ -2503,6 +2507,27 @@ pub async fn ask_with_rule(
     always_rule: Option<AutoReviewRule>,
     cancel: &CancellationToken,
 ) -> Decision {
+    let offer = always_rule.as_ref().filter(|rule| rule.tool.is_none()).map(|rule| rule.text.clone());
+    ask_offering(app, chat_id, bot_id, plugin_id, plugin_name, tool, summary, arguments, reason, offer, always_rule, cancel).await
+}
+
+/// A permission card that offers Always allow as `offer` says, which the caller keeps when the
+/// user chooses it (a secret's grant), adding `always_rule` to Auto-review only if there is one.
+#[allow(clippy::too_many_arguments)]
+pub async fn ask_offering(
+    app: &Arc<App>,
+    chat_id: &str,
+    bot_id: &str,
+    plugin_id: &str,
+    plugin_name: &str,
+    tool: &str,
+    summary: &str,
+    arguments: Value,
+    reason: Option<String>,
+    offer: Option<String>,
+    always_rule: Option<AutoReviewRule>,
+    cancel: &CancellationToken,
+) -> Decision {
     let message = Message::new(
         chat_id,
         Author::Bot { bot_id: bot_id.to_string() },
@@ -2514,7 +2539,7 @@ pub async fn ask_with_rule(
             arguments,
             decision: "pending".into(),
             reason,
-            rule: always_rule.as_ref().filter(|rule| rule.tool.is_none()).map(|rule| rule.text.clone()),
+            rule: offer,
             command: None,
             title: None,
             content: None,

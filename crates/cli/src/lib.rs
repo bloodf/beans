@@ -40,6 +40,11 @@ pub mod schedule_models;
 #[cfg(feature = "runner")]
 pub mod schedule_intent;
 mod search;
+/// Secret values stay on the Runner: the model sees placeholders.
+pub mod secret_shield;
+/// The secrets the user keeps on this Runner, and the tool bots keep them with.
+#[cfg(feature = "runner")]
+pub mod secret_store;
 #[cfg(feature = "runner")]
 pub mod scripts;
 pub mod served;

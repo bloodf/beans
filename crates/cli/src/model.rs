@@ -197,11 +197,17 @@ pub struct AutoReview {
     pub is_enabled: bool,
     #[serde(default)]
     pub rules: Vec<AutoReviewRule>,
+    /// Full access: bots run every command and action with no review and no question, in
+    /// routines too, their secrets included. The values of secrets still never reach a model,
+    /// and a bot's capabilities, Pause, and Stop still hold. Off unless the user turns it on; a
+    /// Device that does not know it reads it as off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full_access: bool,
 }
 
 impl Default for AutoReview {
     fn default() -> Self {
-        AutoReview { is_enabled: true, rules: Vec::new() }
+        AutoReview { is_enabled: true, rules: Vec::new(), full_access: false }
     }
 }
 
@@ -1255,6 +1261,20 @@ mod host_tests {
 #[cfg(test)]
 mod policy_tests {
     use super::*;
+
+    /// Full access is off unless the user turns it on, and a roster from a Device that does
+    /// not know it reads as off; off, it is not written, so such a Device reads what it knows.
+    #[test]
+    fn full_access_is_off_unless_turned_on() {
+        assert!(!AutoReview::default().full_access);
+        let old: AutoReview = serde_json::from_value(serde_json::json!({ "is_enabled": true, "rules": [] })).unwrap();
+        assert!(!old.full_access);
+        assert_eq!(serde_json::to_value(AutoReview::default()).unwrap(), serde_json::json!({ "is_enabled": true, "rules": [] }));
+        let on = AutoReview { full_access: true, ..AutoReview::default() };
+        let written = serde_json::to_value(&on).unwrap();
+        assert_eq!(written["full_access"], true);
+        assert_eq!(serde_json::from_value::<AutoReview>(written).unwrap(), on);
+    }
 
     #[test]
     fn legacy_bots_keep_tools_and_restricted_bots_deny_calls() {

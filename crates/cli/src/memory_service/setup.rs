@@ -187,7 +187,8 @@ async fn vector_space(app:&Arc<App>,connection:&Connection,cancel:CancellationTo
     let (revision,p)=profile(app,id)?;
     let spec=embeddings::EmbeddingSpec::from_profile(&p).map_err(|_|MemoryError::new("invalid_embedding_profile"))?;
     let embedding:Arc<dyn Embedding>=match p.mode {
-        EmbeddingMode::Api=>Arc::new(embeddings::api::ApiEmbedding::new(&p,connection.allow_insecure_http,embeddings::EmbeddingLimits::default()).map_err(|_|MemoryError::new("invalid_embedding_profile"))?),
+        // Text sent to an embedding service goes behind the secret shield.
+        EmbeddingMode::Api=>crate::secret_shield::shielded_embedding(app,Arc::new(embeddings::api::ApiEmbedding::new(&p,connection.allow_insecure_http,embeddings::EmbeddingLimits::default()).map_err(|_|MemoryError::new("invalid_embedding_profile"))?)),
         EmbeddingMode::LocalCpu=>{
             let registered=app.memory_runtime.setup.embeddings.lock();
             registered.get(id).filter(|(r,_)|r==&revision).map(|(_,e)|e.clone()).ok_or_else(||MemoryError::new("local_embedding_setup_required"))?

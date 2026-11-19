@@ -42,19 +42,23 @@ impl LocalEmbedding {
             // Copy and hash from one source handle into a fresh private read-only path.
             let runtime=ProtectedRuntime::prepare(binding.runtime)?;
             initialize_runtime(runtime,fenced,deadline)?;
-            let session=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Session::builder().map_err(|_|EmbeddingError::RuntimeUnavailable)?
-                    .with_execution_providers([ort::ep::CPU::default().build()]).map_err(|_|EmbeddingError::RuntimeUnavailable)?
-                    .with_intra_threads(1).map_err(|_|EmbeddingError::RuntimeUnavailable)?
-                    .with_inter_threads(1).map_err(|_|EmbeddingError::RuntimeUnavailable)?
-                    .with_logger(Arc::new(|_,_,_,_,_|{})).map_err(|_|EmbeddingError::RuntimeUnavailable)?
-                    .commit_from_memory(&model).map_err(|_|EmbeddingError::ModelContract)
-            })).map_err(|_|EmbeddingError::RuntimeUnavailable)??;
+            let session=session_from(&model)?;
             validate_session(&session,&config,dimensions)?;
             Ok((session,tokenizer))
         }).await?;
         Ok(Self{spec,tokenizer:Arc::new(tokenizer),session:Arc::new(tokio::sync::Mutex::new(session)),limits})
     }
+}
+/// A one-thread CPU session for `model`'s verified bytes, the runtime already initialized.
+pub(super) fn session_from(model:&[u8])->Result<Session,EmbeddingError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Session::builder().map_err(|_|EmbeddingError::RuntimeUnavailable)?
+            .with_execution_providers([ort::ep::CPU::default().build()]).map_err(|_|EmbeddingError::RuntimeUnavailable)?
+            .with_intra_threads(1).map_err(|_|EmbeddingError::RuntimeUnavailable)?
+            .with_inter_threads(1).map_err(|_|EmbeddingError::RuntimeUnavailable)?
+            .with_logger(Arc::new(|_,_,_,_,_|{})).map_err(|_|EmbeddingError::RuntimeUnavailable)?
+            .commit_from_memory(model).map_err(|_|EmbeddingError::ModelContract)
+    })).map_err(|_|EmbeddingError::RuntimeUnavailable)?
 }
 fn configure_tokenizer(bytes:&[u8],config:&LocalModelConfig)->Result<Tokenizer,EmbeddingError> {
     let mut tokenizer=Tokenizer::from_bytes(bytes).map_err(|_|EmbeddingError::ModelContract)?;
@@ -68,7 +72,7 @@ struct SetupGuard(Arc<Mutex<bool>>);
 impl Drop for SetupGuard {fn drop(&mut self){*self.0.lock()=true;}}
 /// Native environment/session creation is not preemptible. Cancellation fences work
 /// before it starts; once started, await quiescence before returning a cancelled status.
-async fn native_setup<T:Send+'static>(cancel:CancellationToken,deadline:tokio::time::Instant,
+pub(super) async fn native_setup<T:Send+'static>(cancel:CancellationToken,deadline:tokio::time::Instant,
     setup:impl FnOnce(&Mutex<bool>)->Result<T,EmbeddingError>+Send+'static)->Result<T,EmbeddingError> {
     if cancel.is_cancelled() {return Err(EmbeddingError::Cancelled);}
     if tokio::time::Instant::now()>=deadline {return Err(EmbeddingError::Timeout);}
@@ -87,12 +91,15 @@ async fn native_setup<T:Send+'static>(cancel:CancellationToken,deadline:tokio::t
         result=&mut worker=>result.map_err(|_|EmbeddingError::RuntimeUnavailable)?,
     }
 }
-fn initialize_runtime(runtime:ProtectedRuntime,fenced:&Mutex<bool>,deadline:tokio::time::Instant)->Result<(),EmbeddingError> {
+pub(super) fn initialize_runtime(runtime:ProtectedRuntime,fenced:&Mutex<bool>,deadline:tokio::time::Instant)->Result<(),EmbeddingError> {
     let mut current=RUNTIME.lock();
     if *fenced.lock() {return Err(EmbeddingError::Cancelled);}
     if tokio::time::Instant::now()>=deadline {return Err(EmbeddingError::Timeout);}
     if let Some(existing)=current.as_ref() {
-        if existing.approved!=runtime.original || !existing.committed {return Err(EmbeddingError::RuntimeConflict);}
+        // The same library bytes are the same runtime wherever their copy lives: each install
+        // keeps its own, and a Runner loads several models (text and images) in one process.
+        let same=existing.approved.bytes==runtime.original.bytes && existing.approved.sha256==runtime.original.sha256;
+        if !same || !existing.committed {return Err(EmbeddingError::RuntimeConflict);}
         return Ok(());
     }
     let builder=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||ort::init_from(&runtime.path)))
@@ -127,7 +134,7 @@ fn validate_session(session:&Session,config:&LocalModelConfig,dimensions:usize)-
         _=>Err(EmbeddingError::ModelContract),
     }
 }
-struct TerminateOnDrop(Arc<RunOptions>);
+pub(super) struct TerminateOnDrop(pub(super) Arc<RunOptions>);
 impl Drop for TerminateOnDrop {fn drop(&mut self){let _=self.0.terminate();}}
 #[async_trait::async_trait]
 impl Embedding for LocalEmbedding {

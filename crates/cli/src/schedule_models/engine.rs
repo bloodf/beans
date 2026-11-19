@@ -7,9 +7,17 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio_util::sync::CancellationToken;
 
-use super::{CatalogModel, OnnxSpec, StaticSpec};
+use super::{CatalogModel, Engine, OnnxSpec, StaticSpec};
 use crate::embeddings::assets::{verified_bytes, AssetKind, BoundAsset, InstalledAssets, LocalBinding};
-use crate::embeddings::{Embedding, EmbeddingError, EmbeddingLimits, EmbeddingPurpose};
+use crate::embeddings::image::LocalImageEmbedding;
+use crate::embeddings::local::LocalEmbedding;
+use crate::embeddings::{Embedding, EmbeddingBatch, EmbeddingError, EmbeddingFingerprint, EmbeddingLimits, EmbeddingPurpose};
+
+/// Limits for a local model: loading a few hundred megabytes and running a batch on one thread
+/// take longer than the 5 seconds an embedding API gets, so both have the longest allowed.
+fn local_limits() -> EmbeddingLimits {
+    EmbeddingLimits { timeout: std::time::Duration::from_secs(30), ..EmbeddingLimits::default() }
+}
 
 /// The most bytes a static table or tokenizer may be, past the catalog's own limit.
 const MAX_FILE_BYTES: u64 = super::MAX_MODEL_BYTES;
@@ -23,6 +31,9 @@ impl Encoder {
     /// Loads an installed model, checking every file again.
     pub async fn load(model: &CatalogModel, installed: &InstalledAssets, cancel: CancellationToken) -> Result<Encoder, EmbeddingError> {
         let asset = |kind| installed.get(kind).cloned().ok_or(EmbeddingError::SetupRequired);
+        if model.engine == Engine::Clip {
+            return Err(EmbeddingError::InvalidProfile);
+        }
         match (&model.static_spec, &model.onnx) {
             (Some(spec), None) => {
                 let weights = verified_bytes(&asset(AssetKind::Weights)?, MAX_FILE_BYTES).await?;
@@ -40,7 +51,7 @@ impl Encoder {
                     tokenizer: asset(AssetKind::Tokenizer)?,
                 };
                 let profile = onnx_profile(model, spec, &binding.model, &binding.tokenizer)?;
-                let embedding = crate::embeddings::local::LocalEmbedding::load(&profile, binding, EmbeddingLimits::default(), cancel).await?;
+                let embedding = crate::embeddings::local::LocalEmbedding::load(&profile, binding, local_limits(), cancel).await?;
                 Ok(Encoder::Onnx(Arc::new(embedding)))
             }
             _ => Err(EmbeddingError::InvalidProfile),
@@ -74,8 +85,8 @@ pub fn onnx_profile(model: &CatalogModel, spec: &OnnxSpec, onnx: &BoundAsset, to
         "dimensions": spec.dimensions,
         "normalization": "l2",
         "distance": "cosine",
-        "document_prefix": spec.prefix,
-        "query_prefix": spec.prefix,
+        "document_prefix": spec.document_prefix.as_deref().unwrap_or(&spec.prefix),
+        "query_prefix": spec.query_prefix.as_deref().unwrap_or(&spec.prefix),
         "local": {
             "model_sha256": onnx.sha256,
             "tokenizer_sha256": tokenizer.sha256,
@@ -89,6 +100,70 @@ pub fn onnx_profile(model: &CatalogModel, spec: &OnnxSpec, onnx: &BoundAsset, to
         },
     }))
     .map_err(|_| EmbeddingError::InvalidProfile)
+}
+
+/// An installed catalog text model as an `Embedding`, with the purpose's prefix where the
+/// model has one: what semantic search embeds with.
+pub struct CatalogEmbedding {
+    fingerprint: EmbeddingFingerprint,
+    encoder: Encoder,
+}
+
+impl CatalogEmbedding {
+    /// Loads a static or ONNX catalog model, checking every file again. `fingerprint` names
+    /// these exact files (`Install::fingerprint`).
+    pub async fn load(model: &CatalogModel, installed: &InstalledAssets, fingerprint: &str, cancel: CancellationToken) -> Result<CatalogEmbedding, EmbeddingError> {
+        if model.engine == Engine::Clip {
+            return Err(EmbeddingError::InvalidProfile);
+        }
+        let encoder = Encoder::load(model, installed, cancel).await?;
+        Ok(CatalogEmbedding { fingerprint: files_fingerprint(&model.id, fingerprint), encoder })
+    }
+}
+
+/// What identifies a catalog model's exact files, as an embedding fingerprint.
+pub fn files_fingerprint(model_id: &str, files: &str) -> EmbeddingFingerprint {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("beans.catalog-model\0{model_id}\0{files}").as_bytes());
+    EmbeddingFingerprint::parse(&format!("{digest:x}")).expect("a SHA-256 is a fingerprint")
+}
+
+#[async_trait::async_trait]
+impl Embedding for CatalogEmbedding {
+    fn fingerprint(&self) -> &EmbeddingFingerprint {
+        &self.fingerprint
+    }
+    async fn embed(&self, purpose: EmbeddingPurpose, texts: &[String], cancel: CancellationToken) -> Result<EmbeddingBatch, EmbeddingError> {
+        let vectors = match &self.encoder {
+            Encoder::Static(encoder) => texts.iter().map(|text| encoder.encode(text)).collect(),
+            Encoder::Onnx(embedding) => embedding.embed(purpose, texts, cancel).await?.vectors,
+        };
+        Ok(EmbeddingBatch { fingerprint: self.fingerprint.clone(), vectors })
+    }
+}
+
+/// An installed image model: its pooled text tower, which embeds queries into the space, and
+/// its vision tower, which embeds images. Both through the installed ONNX Runtime.
+pub struct ClipModel {
+    pub text: LocalEmbedding,
+    pub images: LocalImageEmbedding,
+}
+
+impl ClipModel {
+    pub async fn load(model: &CatalogModel, installed: &InstalledAssets, cancel: CancellationToken) -> Result<ClipModel, EmbeddingError> {
+        let (Engine::Clip, Some(text), Some(image)) = (model.engine, &model.onnx, &model.image) else { return Err(EmbeddingError::InvalidProfile) };
+        let asset = |kind| installed.get(kind).cloned().ok_or(EmbeddingError::SetupRequired);
+        let binding = LocalBinding { runtime: asset(AssetKind::Runtime)?, model: asset(AssetKind::Model)?, tokenizer: asset(AssetKind::Tokenizer)? };
+        let profile = onnx_profile(model, text, &binding.model, &binding.tokenizer)?;
+        let runtime = binding.runtime.clone();
+        let text = LocalEmbedding::load(&profile, binding, local_limits(), cancel.clone()).await?;
+        let images = LocalImageEmbedding::load(image, text_dimensions(model), runtime, asset(AssetKind::ImageModel)?, cancel).await?;
+        Ok(ClipModel { text, images })
+    }
+}
+
+fn text_dimensions(model: &CatalogModel) -> usize {
+    model.onnx.as_ref().map_or(0, |spec| spec.dimensions)
 }
 
 /// A static embedding model: one vector per token, averaged over a text's tokens.

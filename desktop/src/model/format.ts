@@ -101,6 +101,12 @@ export function kilobytes(bytes: number): string {
   return kb >= 10 || kb === Math.round(kb) ? `${Math.round(kb)} KB` : `${kb.toFixed(1)} KB`;
 }
 
+/** "35 MB", "1.2 GB": a model's download. */
+export function megabytes(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  return `${Math.max(1, Math.round(bytes / 1e6))} MB`;
+}
+
 /** "950", "12k", "1.2M" */
 export function tokens(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;

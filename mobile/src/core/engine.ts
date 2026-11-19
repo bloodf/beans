@@ -9,7 +9,7 @@ import * as core from "../../modules/beans-core";
 import { t } from "../i18n";
 import { hostFacts } from "./host";
 import type { BotLook } from "./look";
-import { providerConnectMethod, type Attachment, type AutoReview, type Bot, type BotCapabilities, type Chat, type ChatMeta, type ChatSearchResults, type ChatUsage, type CustomAPI, type CustomModel, type Message, type ProviderKind, type ProviderStatus } from "./model";
+import { providerConnectMethod, type Attachment, type AutoReview, type Bot, type BotCapabilities, type Chat, type ChatMeta, type ChatRelatedResults, type ChatSearchResults, type ChatUsage, type CustomAPI, type CustomModel, type Message, type ProviderKind, type ProviderStatus } from "./model";
 import { coreHome, loadPrefs, pathOf, wipePrefs } from "./prefs";
 import { clearPushes, installPushHandlers, registerForPushes } from "./push";
 import { composerDraftGeneration, composerDraftKey, discardComposerDraft } from "./updateDrafts";
@@ -302,6 +302,13 @@ class Engine {
     const value = query.trim();
     if (!value) return { chats: [], messages: [], files: [], history_complete: true };
     return core.request<ChatSearchResults>("chats.search", { query: value, limit: 24 });
+  }
+
+  /// Messages near the query in meaning. The phone embeds nothing: the core asks a Runner.
+  async searchRelated(query: string): Promise<ChatRelatedResults> {
+    const value = query.trim();
+    if (!value) return { state: "off", related: [], runner_id: null };
+    return core.request<ChatRelatedResults>("chats.search_semantic", { query: value, limit: 8 });
   }
 
   /// The attachment's bytes, from this phone's copy or the relay, as a file URI in the store.

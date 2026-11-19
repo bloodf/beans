@@ -85,6 +85,10 @@ import {
   type WireRelayStatus,
   type WireRosterChanged,
   type WireSearchResults,
+  type WireRelatedResults,
+  type WireLocalModels,
+  type WireModelPreview,
+  type WireSearchIndexStatus,
   type WireSnapshot,
   type WireSyncAccount,
 } from "./wire";
@@ -1614,6 +1618,38 @@ export class AppStore {
   async searchChats(query: string): Promise<WireSearchResults> {
     if (this.isMock) return { chats: [], messages: [], files: [], history_complete: true };
     return this.request<WireSearchResults>("chats.search", { query, limit: 24 });
+  }
+
+  /** Messages near the query in meaning, and pictures by what they show, from the Runner's search models. */
+  async searchRelated(query: string): Promise<WireRelatedResults> {
+    if (this.isMock) return { state: "off", related: [], runner_id: null };
+    return this.request<WireRelatedResults>("chats.search_semantic", { query, limit: 8 });
+  }
+
+  /** What a Runner searches with, and how far its indexing has come. */
+  async searchIndexStatus(runnerID: string): Promise<WireSearchIndexStatus> {
+    return this.request<WireSearchIndexStatus>("search_index.status", { runner_id: runnerID });
+  }
+
+  /** Changes any of `text`, `image_model_id`, and `describe` on a Runner; null turns one off.
+   * `confirmExternal` is the user's yes to sending messages or images to a provider. */
+  async chooseSearch(runnerID: string, choice: Record<string, unknown>, confirmExternal = false): Promise<WireSearchIndexStatus> {
+    return this.request<WireSearchIndexStatus>("search_index.select", { runner_id: runnerID, ...choice, confirm_external: confirmExternal });
+  }
+
+  /** The catalog of models a Runner can download and run on its CPU. */
+  async localModels(runnerID: string): Promise<WireLocalModels> {
+    return this.request<WireLocalModels>("schedule_models.list", { runner_id: runnerID });
+  }
+
+  /** What downloading `modelID` takes, for the user to approve before `installLocalModel`. */
+  async previewLocalModel(runnerID: string, modelID: string): Promise<WireModelPreview> {
+    return this.request<WireModelPreview>("schedule_models.preview", { runner_id: runnerID, model_id: modelID, source: { kind: "download" } });
+  }
+
+  /** Downloads and installs what `preview` showed, now that the user approved it. */
+  async installLocalModel(runnerID: string, preview: WireModelPreview): Promise<void> {
+    await this.request("schedule_models.apply", { runner_id: runnerID, preview_token: preview.preview_token, preview_digest: preview.preview_digest, confirm: true });
   }
 
   /** Tells the CLI which chat the user is looking at (null when none, or the app is not in front),

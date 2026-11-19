@@ -1,0 +1,1 @@
+DELETE FROM task_invocations WHERE EXISTS(SELECT 1 FROM local_tasks t WHERE t.account_epoch=task_invocations.account_epoch AND t.task_id=task_invocations.task_id AND t.resolved_at<=?1 AND (t.routine_id IS NULL OR NOT EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=t.account_epoch AND r.task_id=t.task_id AND r.state='unknown')))

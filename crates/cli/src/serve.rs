@@ -199,6 +199,8 @@ pub async fn run(app: Arc<App>, parent_pid: Option<u32>, ready_stdout: bool) -> 
     tokio::spawn(beans_agent::login_shell::environment());
     tokio::spawn(crate::sync::run(Arc::clone(&app)));
     tokio::spawn(crate::routines::run(Arc::clone(&app)));
+    // Embeds new messages for semantic search, once the user selects a model for it.
+    tokio::spawn(crate::search_index::runner::run(Arc::clone(&app)));
     #[cfg(feature = "provider-auth")]
     tokio::spawn(crate::app::refresh_models_periodically(Arc::clone(&app)));
 

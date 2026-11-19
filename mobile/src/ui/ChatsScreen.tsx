@@ -5,7 +5,7 @@ import { Link, Stack, useRouter } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Platform, Pressable, StyleSheet, Text, useWindowDimensions, type StyleProp, type TextStyle, View } from "react-native";
 import { chatTitle, engine } from "../core/engine";
-import type { Bot, Chat, ChatSearchResults } from "../core/model";
+import type { Bot, Chat, ChatRelatedHit, ChatSearchResults } from "../core/model";
 import { markRead, useBotMap, useStore, useWorkingBotIds } from "../core/store";
 import { t, useLanguage } from "../i18n";
 import { AvatarCluster } from "./Avatar";
@@ -54,6 +54,7 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
   const workingBots = useWorkingBotIds();
   const [query, setQuery] = useState("");
   const [matches, setMatches] = useState<ChatSearchResults>({ chats: [], messages: [], files: [], history_complete: true });
+  const [related, setRelated] = useState<ChatRelatedHit[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchGeneration, setSearchGeneration] = useState(0);
   const searchOwner = useRef<{ active: boolean; query: string } | null>(null);
@@ -61,6 +62,7 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
   function updateQuery(value: string) {
     setQuery(value);
     setMatches({ chats: [], messages: [], files: [], history_complete: true });
+    setRelated([]);
     setSearching(!!value.trim());
   }
 
@@ -80,17 +82,29 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
         || state.deviceId !== source.deviceId || state.paired !== source.paired)) {
         owner.active = false;
         setMatches({ chats: [], messages: [], files: [], history_complete: true });
+        setRelated([]);
         setSearchGeneration(generation => generation + 1);
       }
     });
     setSearching(true);
     setMatches({ chats: [], messages: [], files: [], history_complete: true });
+    setRelated([]);
     const timer = setTimeout(() => {
       if (!owner.active) return;
       void engine
         .searchChats(value)
         .then((results) => {
-          if (owner.active) setMatches(results);
+          if (!owner.active) return;
+          setMatches(results);
+          // Meaning matches come from a Runner, after the exact ones, and never hold them up.
+          void engine
+            .searchRelated(value)
+            .then((found) => {
+              if (!owner.active) return;
+              const pictures = found.image_state === "ready" ? (found.images ?? []) : [];
+              setRelated([...pictures, ...(found.state === "ready" ? found.related : [])]);
+            })
+            .catch(() => { if (owner.active) setRelated([]); });
         })
         .catch(() => { if (owner.active) setMatches({ chats: [], messages: [], files: [], history_complete: false }); })
         .finally(() => {
@@ -134,8 +148,18 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
       if (!chat) continue;
       rows.push({ key: `file:${hit.message_id}:${hit.attachment_id}`, kind: "file", chat, snippet: hit.name, createdAt: hit.created_at });
     }
+    const shown = new Set([...matches.messages, ...matches.files].map((hit) => hit.message_id));
+    for (const hit of related) {
+      const chat = byId.get(hit.chat_id);
+      // A picture shows once, whether found by what it shows or by its description.
+      const key = hit.kind === "image" ? hit.attachment_id ?? hit.message_id : hit.message_id;
+      if (!chat || shown.has(key) || (hit.kind !== "image" && shown.has(hit.message_id))) continue;
+      shown.add(key);
+      const snippet = hit.kind === "file" && hit.name ? hit.name : hit.snippet;
+      rows.push({ key: `related:${key}`, kind: hit.kind === "image" ? "picture" : "related", chat, snippet, createdAt: hit.created_at });
+    }
     return rows;
-  }, [chats, bots, items, matches, query, language, searchGeneration, ownsSearch]);
+  }, [chats, bots, items, matches, related, query, language, searchGeneration, ownsSearch]);
 
   const searchingText = query.trim();
   const data: (Chat | SearchRow)[] = searchingText ? searchRows : items;
@@ -403,11 +427,15 @@ function MenuChatRow({ chat, bots, title, working, responding, selected, width: 
 
 type SearchRow = {
   key: string;
-  kind: "chat" | "message" | "file";
+  kind: "chat" | "message" | "file" | "related" | "picture";
   chat: Chat;
   snippet: string;
   createdAt?: number;
 };
+
+function searchKind(kind: SearchRow["kind"]): string {
+  return kind === "file" ? t("Files") : kind === "message" ? t("Messages") : kind === "related" ? t("Related") : kind === "picture" ? t("Pictures") : t("Chats");
+}
 
 function SearchResultRow({ item, bots, query, onPress }: { item: SearchRow; bots: Map<string, Bot>; query: string; onPress: () => void }) {
   useLanguage();
@@ -415,7 +443,7 @@ function SearchResultRow({ item, bots, query, onPress }: { item: SearchRow; bots
   const members = item.chat.bot_ids.map((id) => bots.get(id)).filter((bot): bot is Bot => !!bot);
   const at = item.createdAt ?? lastActivity(item.chat);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={`${(item.kind === "file" ? t("Files") : item.kind === "message" ? t("Messages") : t("Chats"))}, ${chatTitle(item.chat)}, ${item.snippet}`} onPress={onPress} style={({ pressed }) => [styles.searchRow, { backgroundColor: pressed ? p.fill : "transparent" }]}>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${searchKind(item.kind)}, ${chatTitle(item.chat)}, ${item.snippet}`} onPress={onPress} style={({ pressed }) => [styles.searchRow, { backgroundColor: pressed ? p.fill : "transparent" }]}>
       <AvatarCluster bots={members} chatId={item.chat.id} size={44} />
       <View style={styles.searchText}>
         <View style={styles.searchTitleLine}>
@@ -424,7 +452,7 @@ function SearchResultRow({ item, bots, query, onPress }: { item: SearchRow; bots
         </View>
         <HighlightedText text={item.snippet} query={query} style={[styles.searchSnippet, { color: p.secondaryLabel }]} numberOfLines={2} />
       </View>
-      {item.kind !== "chat" ? <Text style={{ color: p.tertiaryLabel }}>{(item.kind === "file" ? t("Files") : t("Messages"))}</Text> : null}
+      {item.kind !== "chat" ? <Text style={{ color: p.tertiaryLabel }}>{searchKind(item.kind)}</Text> : null}
     </Pressable>
   );
 }

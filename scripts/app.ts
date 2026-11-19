@@ -3,6 +3,7 @@ import { cp, rm, mkdir, chmod, copyFile, readdir, readFile, rename, writeFile } 
 import { spawn } from "node:child_process"
 import { join, resolve } from "node:path"
 import { releasePublicKey } from "./release-signing.ts"
+import { isPinned, placeOnnxRuntime, runtimeFile, targetFor } from "./onnxruntime.ts"
 
 export const ROOT = resolve(import.meta.dirname, "..")
 export const PACKAGE_DIR = join(ROOT, "macos")
@@ -318,6 +319,9 @@ async function signBundle(bundle: string, sparkle: string, identity: string, con
     if (existsSync(nested) && !(await sign(nested))) return false
   }
   if (!(await sign(version))) return false
+  // The ONNX Runtime the CLI loads for local models, signed like the CLI beside it.
+  const runtime = join(bundle, "Contents", "Resources", "bin", runtimeFile(targetFor("darwin", process.arch)))
+  if (existsSync(runtime) && !(await sign(runtime, ["--identifier", `${identifier}.onnxruntime`]))) return false
   if (!(await sign(join(bundle, "Contents", "Resources", "bin", CLI_NAME), ["--identifier", `${identifier}.cli`]))) {
     return false
   }
@@ -400,6 +404,15 @@ export async function buildApp(config: Config, options: BuildOptions = {}): Prom
   await rm(cliDestination, { force: true })
   await copyFile(cli.path, cliDestination)
   await chmod(cliDestination, 0o755)
+  // Local embedding and image models run on the pinned ONNX Runtime beside the CLI; the
+  // models themselves are downloaded later, with the user's approval.
+  const runtimeTarget = targetFor("darwin", process.arch)
+  if (isPinned(runtimeTarget)) {
+    options.onStep?.("placing the pinned ONNX Runtime beside the CLI")
+    await placeOnnxRuntime(runtimeTarget, cliBinDir)
+  } else {
+    log(color.yellow(`no ONNX Runtime is pinned for ${runtimeTarget}: this build runs static models only`))
+  }
 
   options.onStep?.(`bundling the CLI and Sparkle, signing with ${options.signIdentity ?? "an ad-hoc identity"}`)
   const sparkle = await embedSparkle(bundle)

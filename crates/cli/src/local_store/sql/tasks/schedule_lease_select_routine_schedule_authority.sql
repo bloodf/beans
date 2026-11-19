@@ -1,0 +1,1 @@
+SELECT revision,binding,next_at FROM routine_schedule_authority WHERE routine_id=?1 AND binding=?2 AND revoked=0 AND next_at<=?3 AND account_epoch=(SELECT account_epoch FROM task_authority WHERE id=1 AND closed=0)

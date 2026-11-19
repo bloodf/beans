@@ -1,0 +1,1 @@
+ALTER TABLE metadata ADD COLUMN policy_json TEXT NOT NULL DEFAULT '{}'

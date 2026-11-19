@@ -119,3 +119,50 @@ test("search results retain authority across deferred switches and sticky ABA", 
     }
   } finally { dispose(); globalThis.setTimeout = originalTimeout; globalThis.clearTimeout = originalClear; }
 });
+
+test("meaning matches follow the exact ones, skip what they show, and keep search authority", async () => {
+  const originalTimeout = globalThis.setTimeout, originalClear = globalThis.clearTimeout;
+  globalThis.setTimeout = ((run: () => void) => { const id = ++timerID; timers.set(id, run); return id; }) as any;
+  globalThis.clearTimeout = ((id: number) => { timers.delete(id); }) as any;
+  const dispose = () => { for (const item of slots) item?.cleanup?.(); slots = []; timers.clear(); replies.length = 0; };
+  const source = { paired: true, identityId: "A", relayUrl: "relay-A", deviceId: "phone-A", relayConnected: true, chats: [{ id: "same", title: "Same chat", kind: "group", bot_ids: [], messages: [], unread_count: 0 }], bots: [] };
+  const related = (snippet: string) => ({ state: "ready", runner_id: "runner", related: [
+    { kind: "message", chat_id: "same", message_id: "message", snippet: "already an exact hit", created_at: 1, score: 0.9 },
+    { kind: "message", chat_id: "same", message_id: "meaning", snippet, created_at: 2, score: 0.8 },
+    { kind: "file", chat_id: "same", message_id: "scan", name: "receipt.pdf", snippet: "receipt.pdf", created_at: 3, score: 0.7 },
+    { kind: "message", chat_id: "gone", message_id: "elsewhere", snippet: "a chat this phone lacks", created_at: 4, score: 0.6 },
+  ] });
+  try {
+    dispose(); resetStore(); useStore.setState(source as any); startSearch();
+    expect(replies.length).toBe(1);
+    replies.shift()!(result("exact")); await flush();
+    // Only once the exact results are in is a Runner asked.
+    expect(replies.length).toBe(1);
+    replies.shift()!(related("near in meaning")); await flush();
+    const rows = find(render(), "List")!.props.data;
+    expect(rows.map((row: any) => [row.kind, row.snippet])).toEqual([
+      ["chat", "exact"], ["message", "exact"], ["file", "exact"], ["related", "near in meaning"], ["related", "receipt.pdf"],
+    ]);
+    // Pictures lead their own rows, each once, whether found by what they show or by a description.
+    dispose(); resetStore(); useStore.setState(source as any); startSearch();
+    replies.shift()!(result("exact")); await flush();
+    const picture = { kind: "image", chat_id: "same", message_id: "beach", attachment_id: "att-beach", name: "IMG_1.jpg", created_at: 5 };
+    replies.shift()!({ state: "ready", image_state: "ready", runner_id: "runner",
+      images: [{ ...picture, snippet: "IMG_1.jpg", score: 0.3 }],
+      related: [{ ...picture, snippet: "Two people on a sandy beach", score: 0.8 }] }); await flush();
+    const pictures = find(render(), "List")!.props.data.filter((row: any) => row.kind === "picture");
+    expect(pictures.map((row: any) => row.snippet)).toEqual(["IMG_1.jpg"]);
+    // A Runner that is off or offline adds nothing.
+    dispose(); resetStore(); useStore.setState(source as any); startSearch();
+    replies.shift()!(result("exact")); await flush();
+    replies.shift()!({ state: "unreachable", runner_id: "runner", related: related("x").related }); await flush();
+    expect(find(render(), "List")!.props.data.some((row: any) => row.kind === "related")).toBe(false);
+    // Results for an account this phone no longer shows never appear.
+    dispose(); resetStore(); useStore.setState(source as any); startSearch();
+    replies.shift()!(result("exact")); await flush();
+    const pending = replies.shift()!;
+    useStore.setState({ identityId: "B" });
+    pending(related("private A")); await flush();
+    expect(find(render(false), "List")!.props.data).toEqual([]);
+  } finally { dispose(); globalThis.setTimeout = originalTimeout; globalThis.clearTimeout = originalClear; }
+});

@@ -53,7 +53,7 @@ const ollama: ProviderCredential = {
   api: "chat-completions",
   models: [
     { id: "qwen3:8b", levels: ["low", "medium", "high"] },
-    { id: "anthropic/claude-sonnet-5", name: "Anthropic: Claude Sonnet 5", levels: ["off", "low", "medium", "high", "xhigh", "max"] },
+    { id: "anthropic/claude-sonnet-5", name: "Anthropic: Claude Sonnet 5", levels: ["off", "low", "medium", "high", "xhigh", "max"], images: true },
   ],
 };
 
@@ -72,11 +72,11 @@ test("a custom provider goes by its name, and by its slug once it is deleted", (
   expect(providerName("custom:my-lab", [ollama])).toBe("my-lab");
 });
 
-test("a custom provider offers its saved models with the levels the CLI gives each", () => {
+test("a custom provider offers its saved models with the levels the CLI gives each, and whether they take images", () => {
   const catalog = withCustomModels([{ provider: "grok", id: "grok-4.7", label: "Grok 4.7", levels: ["low", "medium", "high", "xhigh"] }], [ollama]);
   expect(providerModels(catalog, "custom:ollama")).toEqual([
-    { provider: "custom:ollama", id: "qwen3:8b", label: "qwen3:8b", levels: ["low", "medium", "high"] },
-    { provider: "custom:ollama", id: "anthropic/claude-sonnet-5", label: "Anthropic: Claude Sonnet 5", levels: ["off", "low", "medium", "high", "xhigh", "max"] },
+    { provider: "custom:ollama", id: "qwen3:8b", label: "qwen3:8b", levels: ["low", "medium", "high"], images: false },
+    { provider: "custom:ollama", id: "anthropic/claude-sonnet-5", label: "Anthropic: Claude Sonnet 5", levels: ["off", "low", "medium", "high", "xhigh", "max"], images: true },
   ]);
   expect(providerModels(catalog, "custom:gone")).toEqual([]);
   expect(providerModels(catalog, "grok")[0]?.label).toBe("Grok 4.7");

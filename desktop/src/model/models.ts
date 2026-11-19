@@ -142,6 +142,8 @@ export interface ProviderModel {
   id: string;
   label: string;
   levels: string[];
+  /** Whether it takes images. */
+  images?: boolean;
 }
 
 /** The models a provider offers, in the catalog's order; the first is the default the CLI uses. */
@@ -168,7 +170,7 @@ export function thinkingLevels(models: ProviderModel[], kind: ProviderKind, mode
 export function withCustomModels(models: ProviderModel[], providers: readonly ProviderCredential[]): ProviderModel[] {
   const custom = providers.flatMap((provider) =>
     isCustomKind(provider.kind)
-      ? (provider.models ?? []).map((model) => ({ provider: provider.kind, id: model.id, label: model.name ?? model.id, levels: model.levels ?? [] }))
+      ? (provider.models ?? []).map((model) => ({ provider: provider.kind, id: model.id, label: model.name ?? model.id, levels: model.levels ?? [], images: model.images ?? false }))
       : [],
   );
   return [...models, ...custom];
@@ -1193,14 +1195,14 @@ export function spendSummary(usage: ChatUsage): string {
 
 // MARK: - Settings
 
-export type SettingsPane = "general" | "providers" | "auto-review" | "plugins" | "bots" | "device" | "advanced";
+export type SettingsPane = "general" | "providers" | "auto-review" | "plugins" | "bots" | "search" | "device" | "advanced";
 
-export const settingsPanes: SettingsPane[] = ["general", "providers", "auto-review", "plugins", "bots", "device", "advanced"];
+export const settingsPanes: SettingsPane[] = ["general", "providers", "auto-review", "plugins", "bots", "search", "device", "advanced"];
 
-/** Bots and plugins live on a Runner, so these panes show one Device, picked at the top of the
- * page. The others hold this computer's settings and the account's. */
+/** Bots, plugins, and search models live on a Runner, so these panes show one Device, picked at
+ * the top of the page. The others hold this computer's settings and the account's. */
 export function isDeviceScoped(pane: SettingsPane): boolean {
-  return pane === "bots" || pane === "plugins" || pane === "device";
+  return pane === "bots" || pane === "plugins" || pane === "search" || pane === "device";
 }
 
 export function paneTitle(pane: SettingsPane): string {
@@ -1217,6 +1219,8 @@ export function paneTitle(pane: SettingsPane): string {
       return L("Providers");
     case "plugins":
       return L("Plugins");
+    case "search":
+      return L("Search");
     case "device":
       return L("Devices");
   }
@@ -1236,6 +1240,8 @@ export function paneSymbol(pane: SettingsPane): string {
       return "key";
     case "plugins":
       return "puzzlepiece.extension";
+    case "search":
+      return "magnifyingglass";
     case "device":
       return "desktopcomputer";
   }

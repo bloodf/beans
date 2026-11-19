@@ -1,0 +1,1 @@
+UPDATE local_tasks SET cancel_requested=1,state=CASE WHEN EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=local_tasks.account_epoch AND r.task_id=local_tasks.task_id) THEN 'needs_review' ELSE 'interrupted' END WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND state='queued'

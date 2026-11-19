@@ -1,8 +1,11 @@
 //! Device-local search over current roster and canonical message rows. No files are opened.
-use anyhow::Context;
+//! Message rows are found through the folded `message_search` prefilter; only candidates
+//! are decoded, and each is confirmed with the same matcher the roster search uses.
+use std::collections::HashSet;
+
 use serde_json::{json, Value};
 
-use crate::{app::App, local_store::{search_matches, search_snippet, search_terms}, model::{Body, Message}};
+use crate::{app::App, local_store::{search_body_text, search_matches, search_snippet, search_terms, SearchScope}, model::Body};
 
 pub(crate) fn query(app: &App, query: &str, limit: usize) -> anyhow::Result<Value> {
     let terms = search_terms(query);
@@ -27,52 +30,46 @@ pub(crate) fn query(app: &App, query: &str, limit: usize) -> anyhow::Result<Valu
             if chats.len() == limit { break; }
         }
     }
-    let connection = app.store.connection.lock().unwrap();
-    let mut statement = connection.prepare(
-        "SELECT message_json FROM messages
-         WHERE body_kind IN ('text', 'handoff', 'notice', 'permission')
-         ORDER BY created_at DESC, chat_id, position DESC, id",
-    )?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    let roster: HashSet<&str> = state.chats.iter().map(|chat| chat.meta.id.as_str()).collect();
+    // Each category walks its own candidates, so a full one never keeps decoding for the other.
     let mut messages = Vec::new();
-    let mut files = Vec::new();
-    for row in rows {
-        let message: Message = serde_json::from_str(&row?).context("decoding search result")?;
-        if !state.chats.iter().any(|chat| chat.meta.id == message.chat_id) { continue; }
-        let text = match &message.body {
-            Body::Text { text, attachments, .. } => {
-                for attachment in attachments {
-                    if files.len() < limit && search_matches(&attachment.name, &terms) {
-                        files.push(json!({
-                            "chat_id": message.chat_id, "message_id": message.id,
-                            "attachment_id": attachment.id, "name": attachment.name,
-                            "snippet": search_snippet(&attachment.name, &terms),
-                            "created_at": message.created_at,
-                        }));
-                    }
-                }
-                text.as_str()
-            }
-            Body::Handoff { reason, .. } => reason,
-            Body::Notice { text, .. } => text,
-            Body::Permission { summary, .. } => summary,
-            Body::Tool { .. } => continue,
-        };
-        if messages.len() < limit && search_matches(text, &terms) {
+    app.store.visit_search_candidates(&terms, SearchScope::Text, |message| {
+        if messages.len() >= limit { return false; }
+        if !roster.contains(message.chat_id.as_str()) { return true; }
+        let Some(text) = search_body_text(&message.body) else { return true };
+        if search_matches(text, &terms) {
             messages.push(json!({
                 "chat_id": message.chat_id, "message_id": message.id,
                 "snippet": search_snippet(text, &terms), "author": message.author,
                 "created_at": message.created_at,
             }));
         }
-        if messages.len() == limit && files.len() == limit { break; }
-    }
+        messages.len() < limit
+    })?;
+    let mut files = Vec::new();
+    app.store.visit_search_candidates(&terms, SearchScope::Files, |message| {
+        if files.len() >= limit { return false; }
+        if !roster.contains(message.chat_id.as_str()) { return true; }
+        let Body::Text { attachments, .. } = &message.body else { return true };
+        for attachment in attachments {
+            if files.len() < limit && search_matches(&attachment.name, &terms) {
+                files.push(json!({
+                    "chat_id": message.chat_id, "message_id": message.id,
+                    "attachment_id": attachment.id, "name": attachment.name,
+                    "snippet": search_snippet(&attachment.name, &terms),
+                    "created_at": message.created_at,
+                }));
+            }
+        }
+        files.len() < limit
+    })?;
+    let connection = app.store.connection.lock().unwrap();
     let mut history = connection.prepare("SELECT chat_id FROM chat_history")?;
     let cursors = history.query_map([], |row| row.get::<_, String>(0))?;
     let mut history_complete = true;
     for cursor in cursors {
         let id = cursor?;
-        if state.chats.iter().any(|chat| chat.meta.id == id) {
+        if roster.contains(id.as_str()) {
             history_complete = false;
             break;
         }

@@ -1,0 +1,1 @@
+INSERT INTO task_invocations(account_epoch,task_id,owner_epoch,execution_id,invocation_id,parent_id,ordinal,attempt_id,receipt_id,revision,digest,state) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'pending') ON CONFLICT DO NOTHING

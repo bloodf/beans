@@ -9,13 +9,14 @@ read at, so the download URL never changes under the pin.
 
 It downloads each file (set HF_TOKEN for a gated repository), hashes it, and checks it against the
 SHA-256 Hugging Face reports for large files. For an ONNX model with onnxruntime installed, it also
-checks the model's tensors against the catalog entry. It refuses a model over 100 MB, and changes
-nothing unless every file of that model reads cleanly. Review the diff before committing it.
+checks the model's tensors against the catalog entry (both towers of an image model). It refuses a
+model over 1 GB, and changes nothing unless every file of that model reads cleanly. Review the diff
+before committing it.
 """
 import argparse, hashlib, json, os, pathlib, sys, tempfile, urllib.parse, urllib.request
 
 CATALOG = pathlib.Path(__file__).resolve().parents[2] / "crates" / "cli" / "src" / "schedule_models" / "catalog.json"
-MAX_MODEL_BYTES = 100_000_000
+MAX_MODEL_BYTES = 1_000_000_000
 
 
 def request(url):
@@ -26,8 +27,9 @@ def request(url):
 
 
 def files_of(model):
-    graph = "weights" if model["engine"] == "static" else "model"
-    return [(graph, model["files"][graph]), ("tokenizer", model["files"]["tokenizer"])]
+    """The model's files by role, in the catalog's order (`CatalogModel::files`)."""
+    graphs = {"static": ["weights"], "onnx": ["model"], "clip": ["model", "image_model"]}[model["engine"]]
+    return [(role, model["files"][role]) for role in graphs] + [("tokenizer", model["files"]["tokenizer"])]
 
 
 def commit_and_lfs(endpoint, model):
@@ -47,9 +49,11 @@ def read(source, path_out):
         while chunk := stream.read(1 << 20):
             size += len(chunk)
             if size > MAX_MODEL_BYTES:
-                raise ValueError("more than 100 MB")
+                raise ValueError("more than 1 GB")
             digest.update(chunk)
             out.write(chunk)
+    if size == 0:
+        raise ValueError("empty file")  # the Runner's catalog check refuses a 0-byte pin
     return size, digest.hexdigest()
 
 
@@ -74,6 +78,26 @@ def check_onnx(model, path):
         raise ValueError(f"output width {output.shape[-1]} is not {spec['dimensions']}")
 
 
+def check_image_onnx(model, path):
+    """An image model's vision tower: one float [batch, 3, size, size] input, a float
+    [batch, dimensions] output (`embeddings::image::validate_session`)."""
+    try:
+        import onnxruntime
+    except ImportError:
+        print("  (onnxruntime not installed: image tensor contract not checked)")
+        return
+    spec, width = model["image"], model["onnx"]["dimensions"]
+    session = onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    inputs = session.get_inputs()
+    fits = lambda shape, want: len(shape) == len(want) and all(not isinstance(s, int) or s in (-1, w) for s, w in zip(shape, want))
+    if len(inputs) != 1 or inputs[0].name != spec["input"] or inputs[0].type != "tensor(float)" or not fits(inputs[0].shape, [-1, 3, spec["size"], spec["size"]]):
+        raise ValueError(f"inputs {[(i.name, i.type, i.shape) for i in inputs]} are not one float {spec['input']} [batch, 3, {spec['size']}, {spec['size']}]")
+    outputs = {o.name: o for o in session.get_outputs()}
+    output = outputs.get(spec["output"])
+    if output is None or output.type != "tensor(float)" or not fits(output.shape, [-1, width]):
+        raise ValueError(f"output {spec['output']} missing or not float [batch, {width}]: {[(o.name, o.type, o.shape) for o in outputs.values()]}")
+
+
 def pin(model, endpoint, offline):
     pins, revision, lfs = {}, model["revision"], {}
     if not offline:
@@ -87,10 +111,12 @@ def pin(model, endpoint, offline):
                 raise ValueError(f"{file['path']}: Hugging Face lists {lfs[file['path']]}, the download hashes to {sha256}")
             if role == "model":
                 check_onnx(model, local)
+            if role == "image_model":
+                check_image_onnx(model, local)
             pins[role] = (size, sha256)
     total = sum(size for size, _ in pins.values())
     if total > MAX_MODEL_BYTES:
-        raise ValueError(f"{total} bytes, more than 100 MB")
+        raise ValueError(f"{total} bytes, more than 1 GB")
     return revision, pins
 
 

@@ -1,0 +1,1 @@
+UPDATE local_tasks SET resolved_at=?5 WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND state IN ('finished','interrupted','needs_review') AND NOT EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=?1 AND r.task_id=?2 AND r.state='started')

@@ -1,0 +1,1 @@
+SELECT EXISTS(SELECT 1 FROM local_tasks t WHERE account_epoch=?1 AND routine_id=?2 AND (state IN ('queued','running') OR (state IN ('interrupted','needs_review') AND resolved_at IS NULL) OR EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=t.account_epoch AND r.task_id=t.task_id AND r.state IN ('started','unknown'))))

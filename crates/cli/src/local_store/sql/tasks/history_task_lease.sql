@@ -1,0 +1,1 @@
+SELECT account_epoch,owner_epoch,execution_id FROM local_tasks WHERE task_id=?1 AND state IN ('finished','interrupted','needs_review') AND account_epoch=(SELECT account_epoch FROM task_authority WHERE id=1 AND owner_epoch=?2 AND closed=0)

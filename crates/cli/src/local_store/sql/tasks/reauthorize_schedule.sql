@@ -1,0 +1,1 @@
+INSERT INTO routine_schedule_authority VALUES(?1,?2,?3,?4,?5,0) ON CONFLICT(account_epoch,routine_id) DO UPDATE SET revision=excluded.revision,binding=excluded.binding,next_at=excluded.next_at,revoked=0

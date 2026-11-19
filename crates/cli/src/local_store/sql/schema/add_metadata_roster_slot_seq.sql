@@ -1,0 +1,1 @@
+ALTER TABLE metadata ADD COLUMN roster_slot_seq INTEGER NOT NULL DEFAULT 0

@@ -16,6 +16,11 @@
 //! The API (`schedule_models.*`) is for the user's apps; no model tool reaches it.
 
 pub mod classifier;
+#[cfg(all(test, feature = "runner"))]
+mod mock_hub;
+pub mod recommend;
+#[cfg(feature = "runner")]
+pub mod hub;
 #[cfg(feature = "embedding-local")]
 pub mod engine;
 #[cfg(feature = "runner")]
@@ -28,14 +33,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::app::App;
-use crate::embeddings::{Pooling, TensorNames};
+use crate::embeddings::{ImageSpec, Pooling, TensorNames};
 
 /// The catalog the Runner offers, built in.
 pub const CATALOG_JSON: &str = include_str!("catalog.json");
-/// The most a model may be, its tokenizer included, in bytes.
-pub const MAX_MODEL_BYTES: u64 = 100_000_000;
-/// Hugging Face, where catalog files download from.
-pub const HUGGING_FACE: &str = "https://huggingface.co";
+/// The most a model may be, its tokenizer included, in bytes: room for multilingual text
+/// models and image models, which run to a few hundred megabytes.
+pub const MAX_MODEL_BYTES: u64 = 1_000_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,8 +54,11 @@ pub struct Catalog {
 pub enum Engine {
     /// A token table averaged per text: no native runtime.
     Static,
-    /// A transformer through ONNX Runtime, which the user supplies.
+    /// A transformer through ONNX Runtime.
     Onnx,
+    /// An image model: a vision tower and a text tower sharing one space, through ONNX Runtime.
+    /// For semantic image search only; it reads no schedules.
+    Clip,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,7 +85,14 @@ pub struct OnnxSpec {
     pub dimensions: usize,
     pub max_tokens: usize,
     pub pooling: Pooling,
+    /// Put before every text, unless the purpose has its own below.
     pub prefix: String,
+    /// Put before a search query, for models trained with one ("query: ").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_prefix: Option<String>,
+    /// Put before a text being indexed ("passage: ").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_prefix: Option<String>,
     pub tensors: TensorNames,
     pub add_special_tokens: bool,
     pub pad_id: u32,
@@ -92,13 +106,16 @@ pub struct CatalogFiles {
     /// A static model's table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weights: Option<CatalogFile>,
-    /// An ONNX model's graph.
+    /// An ONNX model's graph; an image model's text tower.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<CatalogFile>,
+    /// An image model's vision tower.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_model: Option<CatalogFile>,
     pub tokenizer: CatalogFile,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogModel {
     pub id: String,
@@ -118,28 +135,44 @@ pub struct CatalogModel {
     pub static_spec: Option<StaticSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onnx: Option<OnnxSpec>,
+    /// An image model's vision tower; its `onnx` is the text tower.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_from: Option<String>,
     /// Other ways to get the same files.
     #[serde(default)]
     pub other_sources: Vec<String>,
+    /// How well it finds things, from public benchmarks, 1 (least) to 9: a rough order among
+    /// catalog models for suggesting one (`recommend`).
+    #[serde(default = "default_rank")]
+    pub rank: u8,
+    /// Whether it reads many languages well, Chinese and Japanese included.
+    #[serde(default)]
+    pub multilingual: bool,
     /// How it did on `held_out.json`, when measured.
     pub measured: Option<String>,
 }
 
+fn default_rank() -> u8 {
+    1
+}
+
 impl CatalogModel {
-    /// The model's files by role: `weights` or `model`, then `tokenizer`.
+    /// The model's files by role: `weights` or `model` (and an image model's `image_model`),
+    /// then `tokenizer`.
     pub fn files(&self) -> Vec<(&'static str, &CatalogFile)> {
-        let graph = match self.engine {
-            Engine::Static => self.files.weights.as_ref().map(|f| ("weights", f)),
-            Engine::Onnx => self.files.model.as_ref().map(|f| ("model", f)),
+        let graphs = match self.engine {
+            Engine::Static => vec![self.files.weights.as_ref().map(|f| ("weights", f))],
+            Engine::Onnx => vec![self.files.model.as_ref().map(|f| ("model", f))],
+            Engine::Clip => vec![self.files.model.as_ref().map(|f| ("model", f)), self.files.image_model.as_ref().map(|f| ("image_model", f))],
         };
-        graph.into_iter().chain([("tokenizer", &self.files.tokenizer)]).collect()
+        graphs.into_iter().flatten().chain([("tokenizer", &self.files.tokenizer)]).collect()
     }
 
-    /// Where a file downloads from.
-    pub fn url(&self, file: &CatalogFile) -> String {
-        format!("{HUGGING_FACE}/{}/resolve/{}/{}", self.repo, self.revision, file.path)
+    /// What the model is for: `text` (schedules and text search) or `image` (image search).
+    pub fn kind(&self) -> &'static str {
+        if self.engine == Engine::Clip { "image" } else { "text" }
     }
 
     /// Whether every file's size and SHA-256 are pinned, so it may download.
@@ -150,7 +183,7 @@ impl CatalogModel {
     /// The pinned total size, or the approximate one.
     pub fn size(&self) -> u64 {
         if self.pinned() {
-            self.files().iter().filter_map(|(_, f)| f.bytes).sum()
+            self.files().iter().filter_map(|(_, f)| f.bytes).fold(0, u64::saturating_add)
         } else {
             self.approx_bytes.unwrap_or(u64::MAX)
         }
@@ -160,16 +193,19 @@ impl CatalogModel {
         self.static_spec.as_ref().map(|s| s.dimensions).or(self.onnx.as_ref().map(|o| o.dimensions)).unwrap_or(0)
     }
 
-    /// The catalog entry as the apps show it: what it is, its state, and how to get its files.
-    pub fn listing(&self) -> Value {
+    /// The catalog entry as the apps show it: what it is, its state, and where `hub` serves its
+    /// files.
+    #[cfg(feature = "runner")]
+    pub fn listing(&self, hub: &hub::Hub) -> Value {
         let mut value = serde_json::to_value(self).unwrap_or_default();
         value["pinned"] = self.pinned().into();
         value["bytes"] = self.size().into();
-        value["needs_onnx_runtime"] = (self.engine == Engine::Onnx).into();
+        value["needs_onnx_runtime"] = (self.engine != Engine::Static).into();
+        value["kind"] = self.kind().into();
         value["downloads"] = self
             .files()
             .iter()
-            .map(|(role, file)| serde_json::json!({ "role": role, "url": self.url(file), "path": file.path, "bytes": file.bytes, "sha256": file.sha256 }))
+            .map(|(role, file)| serde_json::json!({ "role": role, "url": hub.file_url(self, file), "path": file.path, "bytes": file.bytes, "sha256": file.sha256 }))
             .collect::<Vec<_>>()
             .into();
         value
@@ -189,10 +225,17 @@ impl CatalogModel {
         if repo.len() != 2 || !repo.iter().all(|part| segment(part)) || !segment(&self.revision) {
             return Err(format!("{id}: the repository is owner/name and the revision one segment"));
         }
-        match (self.engine, &self.static_spec, &self.onnx, &self.files.weights, &self.files.model) {
-            (Engine::Static, Some(spec), None, Some(_), None) if !spec.tensor.is_empty() => {}
-            (Engine::Onnx, None, Some(spec), None, Some(_)) if spec.max_tokens > 0 && spec.max_tokens <= 512 => {}
-            _ => return Err(format!("{id}: a static model has weights and a static spec; an ONNX model has a model file and an onnx spec")),
+        let files = &self.files;
+        match (self.engine, &self.static_spec, &self.onnx, &self.image) {
+            (Engine::Static, Some(spec), None, None) if !spec.tensor.is_empty() && files.weights.is_some() && files.model.is_none() && files.image_model.is_none() => {}
+            (Engine::Onnx, None, Some(spec), None) if (1..=512).contains(&spec.max_tokens) && files.weights.is_none() && files.model.is_some() && files.image_model.is_none() => {}
+            (Engine::Clip, None, Some(text), Some(image))
+                if (1..=512).contains(&text.max_tokens) && text.pooling == Pooling::Pooled && image.validate().is_ok()
+                    && files.weights.is_none() && files.model.is_some() && files.image_model.is_some() => {}
+            _ => return Err(format!("{id}: a static model has weights and a static spec; an ONNX model has a model file and an onnx spec; an image model adds an image_model file and a valid image spec, and its text tower is pooled")),
+        }
+        if !(1..=9).contains(&self.rank) {
+            return Err(format!("{id}: rank is 1 to 9"));
         }
         if !(1..=4096).contains(&self.dimensions()) {
             return Err(format!("{id}: dimensions out of range"));
@@ -308,23 +351,28 @@ mod tests {
         for model in &catalog.models {
             assert!(model.size() <= MAX_MODEL_BYTES, "{}", model.id);
             for (_, file) in model.files() {
-                let url = model.url(file);
-                assert!(url.starts_with(&format!("{HUGGING_FACE}/{}/resolve/", model.repo)), "{url}");
+                let url = hub::Hub::hugging_face().file_url(model, file);
+                assert!(url.starts_with(&format!("{}/{}/resolve/", hub::HUGGING_FACE, model.repo)), "{url}");
                 assert!(reqwest::Url::parse(&url).is_ok(), "{url}");
             }
-            let listing = model.listing();
+            let listing = model.listing(&hub::Hub::hugging_face());
             assert_eq!(listing["id"], model.id.as_str());
-            assert_eq!(listing["downloads"].as_array().unwrap().len(), 2);
+            assert_eq!(listing["downloads"].as_array().unwrap().len(), model.files().len());
+            assert_eq!(listing["kind"], if model.engine == Engine::Clip { "image" } else { "text" });
         }
         // The pinned model is the one measured, pinned from the PyPI wheel that ships it.
         let measured = catalog.model("wordllama-l2-256").unwrap();
         assert!(measured.pinned() && measured.measured.is_some());
         assert_eq!(measured.size(), 16_384_096 + 1_842_796);
         assert_eq!(
-            measured.url(measured.files.weights.as_ref().unwrap()),
+            hub::Hub::hugging_face().file_url(measured, measured.files.weights.as_ref().unwrap()),
             format!("https://huggingface.co/dleemiller/word-llama-l2-supercat/resolve/{}/l2_supercat_256.safetensors", measured.revision)
         );
         assert!(catalog.models.iter().any(|m| m.engine == Engine::Onnx) && catalog.models.iter().any(|m| !m.pinned()));
+        // Search needs Chinese and Japanese, and pictures.
+        assert!(catalog.models.iter().any(|m| m.kind() == "text" && m.languages.contains("Chinese")));
+        let image = catalog.models.iter().find(|m| m.engine == Engine::Clip).unwrap();
+        assert_eq!(image.files().iter().map(|(role, _)| *role).collect::<Vec<_>>(), ["model", "image_model", "tokenizer"]);
     }
 
     #[test]
@@ -348,6 +396,16 @@ mod tests {
             m.files.weights.as_mut().unwrap().sha256 = None;
         })
         .contains("approximate"));
+        let clip = catalog().model("clip-vit-b32-int8").unwrap().clone();
+        let broken_clip = |change: &dyn Fn(&mut CatalogModel)| {
+            let mut model = clip.clone();
+            change(&mut model);
+            model.validate().unwrap_err()
+        };
+        assert!(broken_clip(&|m| m.onnx.as_mut().unwrap().pooling = Pooling::Mean).contains("pooled"));
+        assert!(broken_clip(&|m| m.image = None).contains("image spec"));
+        assert!(broken_clip(&|m| m.files.image_model = None).contains("image_model"));
+        assert!(broken_clip(&|m| m.image.as_mut().unwrap().size = 4).contains("image spec"));
         let mut twice = catalog().clone();
         twice.models.push(good.clone());
         assert!(twice.validate().unwrap_err().contains("twice"));

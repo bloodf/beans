@@ -15,7 +15,7 @@ test("all-platform CLI preflight rejects missing notes before loading private cr
   const path = await mkdtemp(join(tmpdir(), "beans-release-preflight-")); paths.push(path);
   await mkdir(join(path, "scripts"));
   await mkdir(join(path, "updates"));
-  for (const name of ["app.ts", "changelog.ts", "release-signing.ts", "release-github.ts"]) {
+  for (const name of ["app.ts", "onnxruntime.ts", "changelog.ts", "release-signing.ts", "release-github.ts"]) {
     await copyFile(join(ROOT, "scripts", name), join(path, "scripts", name));
   }
   await copyFile(join(ROOT, "updates", "public-key.txt"), join(path, "updates", "public-key.txt"));

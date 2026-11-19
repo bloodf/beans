@@ -189,6 +189,12 @@ pub async fn ensure_local(app: &Arc<App>, attachment: &Attachment) -> anyhow::Re
         .ok_or_else(|| anyhow::anyhow!("the relay no longer has {}", attachment.name))?;
     let bytes = crate::crypto::decrypt(&dek, "file", &ciphertext)?;
     write_local(app, &attachment.id, &bytes)?;
+    // Semantic search skipped it while it was not here; now its messages can be indexed.
+    if attachment.is_image() {
+        if let Err(error) = app.store.requeue_picture(&attachment.id) {
+            tracing::warn!(%error, "queueing a fetched picture for search");
+        }
+    }
     Ok(path)
 }
 

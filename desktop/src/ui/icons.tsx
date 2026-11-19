@@ -130,6 +130,7 @@ import {
   Reply,
   CircleX,
   type IconNode,
+  Image as ImageIcon,
 } from "lucide";
 import { createMemo } from "solid-js";
 import type { JSX } from "@solidjs/web";
@@ -167,6 +168,7 @@ const symbols: Record<string, IconNode> = {
   "arrowshape.turn.up.left": Reply,
   "arrowshape.turn.up.left.fill": Reply,
   "doc.fill": File,
+  photo: ImageIcon,
   "chevron.left": ChevronLeft,
   "chevron.right": ChevronRight,
   "chevron.down": ChevronDown,

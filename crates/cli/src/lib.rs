@@ -45,6 +45,9 @@ pub mod secret_shield;
 /// The secrets the user keeps on this Runner, and the tool bots keep them with.
 #[cfg(feature = "runner")]
 pub mod secret_store;
+pub mod search_index;
+#[cfg(feature = "runner")]
+pub(crate) mod runner_state;
 #[cfg(feature = "runner")]
 pub mod scripts;
 pub mod served;
@@ -56,6 +59,8 @@ pub mod skill_discovery;
 pub mod skill_library;
 pub mod sync;
 pub mod local_store;
+#[cfg(feature = "runner")]
+pub mod machine;
 #[cfg(feature = "runner")]
 pub mod turns;
 pub mod update_control;

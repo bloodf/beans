@@ -30,6 +30,8 @@ export const zh: Record<string, string> = {
   "Passed": "已通过",
   "Not verified": "未验证",
   "Search covers downloaded history only": "搜索仅涵盖已下载的历史记录",
+  "Related": "相关",
+  "Pictures": "图片",
   "{count} bot": "{count} 个智能体",
   "{count} bots": "{count} 个智能体",
   "{count} files": "{count} 个文件",

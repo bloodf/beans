@@ -11,10 +11,12 @@ use tokio_util::sync::CancellationToken;
 #[serde(rename_all="snake_case")]
 pub enum AssetKind { Runtime,Model,Tokenizer,
     /// A static embedding table (safetensors), read without a native runtime.
-    Weights }
+    Weights,
+    /// An image model's vision tower (ONNX), beside its text tower in `Model`.
+    ImageModel }
 impl AssetKind {
     pub fn filename(self)->&'static str {
-        match self {Self::Model=>"model.onnx",Self::Tokenizer=>"tokenizer.json",Self::Weights=>"model.safetensors",Self::Runtime=>{
+        match self {Self::Model=>"model.onnx",Self::ImageModel=>"image_model.onnx",Self::Tokenizer=>"tokenizer.json",Self::Weights=>"model.safetensors",Self::Runtime=>{
             #[cfg(target_os="windows")] {"onnxruntime.dll"}
             #[cfg(target_os="macos")] {"libonnxruntime.dylib"}
             #[cfg(not(any(target_os="macos",target_os="windows")))] {"libonnxruntime.so"}
@@ -23,7 +25,11 @@ impl AssetKind {
 }
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(tag="kind",rename_all="snake_case",deny_unknown_fields)]
-pub enum AssetSource { Supplied {path:PathBuf},Download {url:String} }
+pub enum AssetSource { Supplied {path:PathBuf},Download {url:String},
+    /// One file (`member`) of an archive downloaded from `url` and pinned by its own `bytes` and
+    /// `sha256`: the ONNX Runtime library in its official wheel. The asset's size and hash are
+    /// the member's.
+    Archive {url:String,bytes:u64,sha256:String,member:String} }
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssetRequest {pub kind:AssetKind,pub source:AssetSource,pub license:String,pub bytes:u64,pub sha256:String}
@@ -55,12 +61,22 @@ pub struct RedirectHosts {
     pub parents:BTreeSet<String>,
 }
 impl RedirectHosts {
-    fn allows(&self,url:&reqwest::Url,allow_insecure_http:bool)->bool {
+    pub(crate) fn allows(&self,url:&reqwest::Url,allow_insecure_http:bool)->bool {
         if url.scheme()!="https" && !(allow_insecure_http && url.scheme()=="http") {return false;}
         let Some(host)=url.host_str().map(str::to_ascii_lowercase) else {return false};
         self.exact.contains(&host) || self.parents.iter().any(|parent|host.strip_suffix(parent.as_str()).is_some_and(|rest|rest.ends_with('.')))
     }
 }
+/// The ONNX Runtime library shipped beside this executable (release builds place it there), or
+/// named by `BEANS_ONNXRUNTIME` for development and tests. A candidate, not a trust decision:
+/// installs hash it and show it in their preview like any other file.
+pub fn bundled_runtime()->Option<PathBuf> {
+    if let Some(path)=std::env::var_os("BEANS_ONNXRUNTIME").map(PathBuf::from) {return path.is_file().then_some(path);}
+    let path=std::env::current_exe().ok()?.parent()?.join(AssetKind::Runtime.filename());
+    path.is_file().then_some(path)
+}
+/// The largest archive a runtime is unpacked from.
+const MAX_ARCHIVE_BYTES:u64=256*1024*1024;
 /// The most redirects one download follows.
 const MAX_REDIRECTS:usize=3;
 /// The kinds a runtime-backed ONNX embedding installs.
@@ -136,13 +152,20 @@ impl AssetInstaller {
             match &a.source {
                 AssetSource::Supplied{path} if !path.is_absolute()=>return Err(EmbeddingError::InvalidInput),
                 AssetSource::Supplied{..}=>{},
-                AssetSource::Download{url}=>{
-                    let url=super::types::validate_url(url)?;
-                    if (url.scheme()!="https" && !self.allow_insecure_http)
-                        || !self.allowed_origins.contains(&url.origin().ascii_serialization()) {return Err(EmbeddingError::InvalidProfile);}
+                AssetSource::Download{url}=>self.check_download(url)?,
+                AssetSource::Archive{url,bytes,sha256,member}=>{
+                    self.check_download(url)?;
+                    EmbeddingFingerprint::parse(sha256)?;
+                    if *bytes==0 || *bytes>MAX_ARCHIVE_BYTES || member.is_empty() || member.len()>512 {return Err(EmbeddingError::InvalidInput);}
                 }
             }
         }
+        Ok(())
+    }
+    fn check_download(&self,url:&str)->Result<(),EmbeddingError> {
+        let url=super::types::validate_url(url)?;
+        if (url.scheme()!="https" && !self.allow_insecure_http)
+            || !self.allowed_origins.contains(&url.origin().ascii_serialization()) {return Err(EmbeddingError::InvalidProfile);}
         Ok(())
     }
     pub async fn apply(&self,token:&str,digest:&str,confirmed:bool,cancel:CancellationToken)->Result<LocalBinding,EmbeddingError> {
@@ -209,13 +232,24 @@ impl AssetInstaller {
                         if n==0 {break;} write_chunk(&mut output,&mut hash,&mut size,&buffer[..n],a.bytes).await?;}
                 },
                 AssetSource::Download{url}=>{
-                    let mut response=self.client.get(url).header(reqwest::header::ACCEPT_ENCODING,"identity").send().await.map_err(super::api::transport_error)?;
-                    if response.status().is_redirection() {return Err(EmbeddingError::Redirect);}
-                    if !response.status().is_success() {return Err(EmbeddingError::Service);}
-                    if response.content_length().is_some_and(|n|n!=a.bytes) {return Err(EmbeddingError::AssetMismatch);}
+                    let mut response=self.get(url,a.bytes).await?;
                     while let Some(chunk)=response.chunk().await.map_err(super::api::transport_error)? {
                         write_chunk(&mut output,&mut hash,&mut size,&chunk,a.bytes).await?;
                     }
+                }
+                AssetSource::Archive{url,bytes,sha256,member}=>{
+                    // The whole archive is checked against its pin before anything is read from it.
+                    let mut response=self.get(url,*bytes).await?;
+                    let (mut archive,mut archive_hash,mut archive_size)=(Vec::new(),Sha256::new(),0u64);
+                    while let Some(chunk)=response.chunk().await.map_err(super::api::transport_error)? {
+                        if chunk.len() as u64>bytes.saturating_sub(archive_size) {return Err(EmbeddingError::AssetMismatch);}
+                        archive_hash.update(&chunk);archive_size+=chunk.len() as u64;archive.extend_from_slice(&chunk);
+                    }
+                    if archive_size!=*bytes || format!("{:x}",archive_hash.finalize())!=*sha256 {return Err(EmbeddingError::AssetMismatch);}
+                    let (member,expected)=(member.clone(),a.bytes);
+                    let library=tokio::task::spawn_blocking(move||super::archive::extract_member(&archive,&member,expected))
+                        .await.map_err(|_|EmbeddingError::InstallFailed)?.map_err(|error|{tracing::warn!(%error,"unpacking a runtime archive");EmbeddingError::AssetMismatch})?;
+                    write_chunk(&mut output,&mut hash,&mut size,&library,a.bytes).await?;
                 }
             }
             if size!=a.bytes || format!("{:x}",hash.finalize())!=a.sha256 {return Err(EmbeddingError::AssetMismatch);}
@@ -223,6 +257,16 @@ impl AssetInstaller {
             output.sync_all().await.map_err(|_|EmbeddingError::InstallFailed)?;
         }
         Ok(())
+    }
+}
+impl AssetInstaller {
+    /// An approved download's answer, refused unless it is the file itself at the pinned size.
+    async fn get(&self,url:&str,bytes:u64)->Result<reqwest::Response,EmbeddingError> {
+        let response=self.client.get(url).header(reqwest::header::ACCEPT_ENCODING,"identity").send().await.map_err(super::api::transport_error)?;
+        if response.status().is_redirection() {return Err(EmbeddingError::Redirect);}
+        if !response.status().is_success() {return Err(EmbeddingError::Service);}
+        if response.content_length().is_some_and(|n|n!=bytes) {return Err(EmbeddingError::AssetMismatch);}
+        Ok(response)
     }
 }
 async fn write_chunk(output:&mut fs::File,hash:&mut Sha256,size:&mut u64,chunk:&[u8],expected:u64)->Result<(),EmbeddingError> {

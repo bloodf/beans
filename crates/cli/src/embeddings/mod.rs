@@ -4,9 +4,15 @@ pub use types::*;
 #[cfg(feature = "runner")]
 pub mod api;
 #[cfg(feature = "runner")]
+pub mod archive;
+#[cfg(feature = "runner")]
 pub mod assets;
+#[cfg(feature = "runner")]
+pub mod runtime_download;
 #[cfg(feature = "embedding-local")]
 pub mod local;
+#[cfg(feature = "embedding-local")]
+pub mod image;
 
 #[cfg(feature = "runner")]
 #[async_trait::async_trait]

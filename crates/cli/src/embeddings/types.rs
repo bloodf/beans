@@ -45,6 +45,29 @@ impl LocalModelConfig {
     }
 }
 
+/// How an image model's vision tower takes an image: RGB, the shortest side resized to `size`
+/// and center-cropped square, scaled to 0..1 and normalized per channel, fed as `input`
+/// (`[batch, 3, size, size]`), giving pooled `output` vectors (`[batch, dimensions]`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageSpec {
+    pub input: String,
+    pub output: String,
+    pub size: u32,
+    pub mean: [f32; 3],
+    pub std: [f32; 3],
+}
+impl ImageSpec {
+    pub fn validate(&self) -> Result<(), EmbeddingError> {
+        let name = |n: &str| !n.is_empty() && n.len() <= 256 && !n.chars().any(char::is_control);
+        if !name(&self.input) || !name(&self.output) || self.input == self.output || !(16..=1024).contains(&self.size)
+            || self.mean.iter().chain(&self.std).any(|v| !v.is_finite()) || self.std.iter().any(|v| *v <= 0.0) {
+            return Err(EmbeddingError::InvalidProfile);
+        }
+        Ok(())
+    }
+}
+
 /// Errors contain no raw request, URL, credentials, response body or native-library cause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EmbeddingError {

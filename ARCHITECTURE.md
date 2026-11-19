@@ -85,10 +85,10 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [Bots, Routines, and Memory](docs/architecture/bots.md) | The lead bot, DMs and groups, group descriptions and ownership, who answers, handoffs between bots, routines and their checks, a bot's memory |
 | [Memory service UI](docs/architecture/memory-ui.md) | Client drafts, masked replies, secret/options patches, consent and capability gates |
 | [Memory services](docs/architecture/memory-services.md) | Encrypted config, dispatch, queues, deletion and embeddings |
-| [Schedule models](docs/architecture/schedule-models.md) | Local CPU models that notice routine requests: catalog, installs, detection modes |
+| [Schedule models](docs/architecture/schedule-models.md) | Local CPU models: catalog, installs, routine detection, [semantic search](docs/architecture/semantic-search.md) |
 | [Bot avatars](docs/architecture/avatars.md) | Generated appearance contract, independent photos, validated API edits, encrypted persistence and fresh-format protocol compatibility |
 | [Providers](docs/architecture/providers.md) | Each model provider and its sign-in, custom providers, thinking levels, compaction, retries |
-| [Zhipu GLM compatibility](docs/architecture/glm-compatibility.md) | Vendor documentation, existing custom-wire evaluation, unsupported reasoning-tool continuation and local transport evidence |
+| [Zhipu GLM compatibility](docs/architecture/glm-compatibility.md) | Chosen contract, vendor documentation, unsupported reasoning-tool continuation |
 | [Model catalog and cost](docs/architecture/model-catalog.md) | Shared model metadata, pricing completeness, usage, and public catalog refresh |
 | [macOS app](docs/architecture/macos-app.md) | AppKit launch, windows, onboarding, settings, updates, inspector, Blobatar |
 | [macOS sidebar](docs/architecture/macos-sidebar.md) | Sidebars, search, native chrome, toolbar navigation |
@@ -99,7 +99,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [Phone app](docs/architecture/phone-app.md) | The Expo app over the Rust core: the native module, pairing, relay status, attachments, dictation, notifications, turns |
 | [Phone releases and updates](docs/architecture/phone-updates.md) | TestFlight builds, Android APK releases, and the Android app's self-update: the native gate, daily check and offer, the progress dialog, the package installer |
 | [Phone interface](docs/architecture/phone-interface.md) | Native screens, transcript presentation and adaptive navigation |
-| [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds, testing submissions, accounts and credentials |
+| [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds, submissions, credentials, [tests](docs/architecture/testing.md) |
 | [Website](docs/architecture/website.md) | `web/`: the site, its docs, and the install scripts it serves |
 | [Languages](docs/architecture/languages.md) | English and Simplified Chinese in each app, and what the CLI words |
 | [Portable setup](docs/architecture/portable-setup.md) | Secret-free configuration recipe boundaries, versioning, ownership, validation and import transaction contract |

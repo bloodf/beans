@@ -41,6 +41,7 @@ import { presentMcpServer } from "../sheets/mcpServer";
 import { presentPlugin } from "../sheets/plugin";
 import { presentSkillDiscovery } from "../sheets/skillDiscovery";
 import { Entries } from "./search";
+import { SearchPane } from "./searchPane";
 
 export function SettingsPage(props: { pane: SettingsPane }) {
   return <>{paneFor(props.pane)}</>;
@@ -58,6 +59,8 @@ function paneFor(pane: SettingsPane): JSX.Element {
       return <PluginsPane />;
     case "bots":
       return <BotsPane />;
+    case "search":
+      return <SearchPane />;
     case "device":
       return <DevicePane />;
     case "advanced":
@@ -67,7 +70,7 @@ function paneFor(pane: SettingsPane): JSX.Element {
 
 /** A page: its cards and footnotes in a column that scrolls. A setting a search picked scrolls into
  * view and flashes. */
-function PaneFrame(props: { pane: SettingsPane; children: JSX.Element }) {
+export function PaneFrame(props: { pane: SettingsPane; children: JSX.Element }) {
   let scroller: HTMLDivElement | undefined;
   const flash = (row: string) => {
     if (!scroller) return;
@@ -112,7 +115,7 @@ function PaneFrame(props: { pane: SettingsPane; children: JSX.Element }) {
   );
 }
 
-function Footnote(props: { text: string }) {
+export function Footnote(props: { text: string }) {
   return <div class="settings-footnote">{props.text}</div>;
 }
 
@@ -524,14 +527,14 @@ function presentRuleEditor(rule: AutoReviewRule | null, onSave: (rule: AutoRevie
 // MARK: - Device panes
 
 /** The Device the Plugins, Bots, and Devices panes show, picked in the window's toolbar. */
-function pickedDevice(): Device | undefined {
+export function pickedDevice(): Device | undefined {
   track.roster();
   const id = settingsDeviceID.read();
   return id ? store.device(id) : undefined;
 }
 
 /** The one row a Runner's section shows for a Device that is not one, or before the CLI answers. */
-function Placeholder(props: { device: Device | undefined; children: JSX.Element }) {
+export function Placeholder(props: { device: Device | undefined; children: JSX.Element }) {
   return (
     <Show when={props.device} fallback={<KeyValueRow label={L("Waiting for the CLI")} value="" />}>
       {(device) => (

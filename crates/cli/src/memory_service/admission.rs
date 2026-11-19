@@ -4,6 +4,7 @@ use rusqlite::{params,OptionalExtension};
 use super::{dispatch::{self,TurnAccess},queue::Delivery,types::*};
 use crate::{app::App,local_store::LocalStore,model::{Author,Body,Job}};
 use tokio_util::sync::CancellationToken;
+use crate::local_store::sql;
 
 #[derive(Clone,Serialize,Deserialize)]
 pub(crate) struct AdmittedText {pub source:Source,pub text:String}
@@ -16,30 +17,30 @@ pub(crate) struct Admission {
 fn storage()->MemoryError{MemoryError::new("memory_storage_failed")}
 impl LocalStore {
     pub(crate) fn memory_admission(&self,id:&str)->Result<Option<Admission>,MemoryError>{
-        let json:Option<String>=self.connection.lock().unwrap().query_row("SELECT json FROM memory_turn_admissions WHERE job_id=?1",[id],|r|r.get(0)).optional().map_err(|_|storage())?;
+        let json:Option<String>=self.connection.lock().unwrap().query_row(sql!("memory/admission"),[id],|r|r.get(0)).optional().map_err(|_|storage())?;
         json.map(|v|serde_json::from_str(&v).map_err(|_|storage())).transpose()
     }
     fn admit_memory_turn(&self,id:&str,record:&Admission)->Result<Admission,MemoryError>{
-        self.connection.lock().unwrap().execute("INSERT OR IGNORE INTO memory_turn_admissions(job_id,json) VALUES(?1,?2)",
+        self.connection.lock().unwrap().execute(sql!("memory/admit_turn"),
             params![id,serde_json::to_string(record).map_err(|_|storage())?]).map_err(|_|storage())?;
         self.memory_admission(id)?.ok_or_else(storage)
     }
     pub(crate) fn enqueue_admitted_memory(&self,d:&Delivery,turn_id:&str)->Result<(),MemoryError>{
         let mut connection=self.connection.lock().unwrap();let tx=connection.transaction().map_err(|_|storage())?;
-        let json:String=tx.query_row("SELECT json FROM memory_turn_admissions WHERE job_id=?1",[turn_id],|r|r.get(0)).map_err(|_|storage())?;
+        let json:String=tx.query_row(sql!("memory/admission"),[turn_id],|r|r.get(0)).map_err(|_|storage())?;
         let mut record:Admission=serde_json::from_str(&json).map_err(|_|storage())?;
         if record.captured{return Err(MemoryError::new("turn_already_captured"));}
         if record.bot_id!=d.bot_id||record.scope.as_ref()!=Some(&d.scope)||record.consent_revision!=d.consent_revision||record.consent_revision.is_none(){
             return Err(MemoryError::new("consent_changed"));
         }
-        let prior:Option<String>=tx.query_row("SELECT json FROM memory_deliveries WHERE id=?1",[&d.id],|r|r.get(0)).optional().map_err(|_|storage())?;
+        let prior:Option<String>=tx.query_row(sql!("memory/delivery_json"),[&d.id],|r|r.get(0)).optional().map_err(|_|storage())?;
         if let Some(json)=prior{let old:Delivery=serde_json::from_str(&json).map_err(|_|storage())?;
             if old.document!=d.document||old.scope!=d.scope||old.bot_id!=d.bot_id{return Err(MemoryError::new("request_id_conflict"));}
         }else{
-            tx.execute("INSERT INTO memory_deliveries(id,bot_id,state,json) VALUES(?1,?2,'queued',?3)",params![d.id,d.bot_id,serde_json::to_string(d).map_err(|_|storage())?]).map_err(|_|storage())?;
+            tx.execute(sql!("memory/insert_admitted_delivery"),params![d.id,d.bot_id,serde_json::to_string(d).map_err(|_|storage())?]).map_err(|_|storage())?;
         }
         record.captured=true;record.trigger=None;
-        tx.execute("UPDATE memory_turn_admissions SET json=?2 WHERE job_id=?1",params![turn_id,serde_json::to_string(&record).map_err(|_|storage())?]).map_err(|_|storage())?;
+        tx.execute(sql!("memory/update_admission"),params![turn_id,serde_json::to_string(&record).map_err(|_|storage())?]).map_err(|_|storage())?;
         tx.commit().map_err(|_|storage())?;Ok(())
     }
 }

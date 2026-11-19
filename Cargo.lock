@@ -615,6 +615,7 @@ dependencies = [
  "data-encoding",
  "dirs",
  "ed25519-dalek",
+ "flate2",
  "futures",
  "hkdf",
  "if-addrs",

@@ -14,6 +14,7 @@ const expected: Record<string, string> = {
   "src/ui/motion.browser.tsx": "checkReducedMotion",
   "src/ui/overlay.browser.tsx": "checkSheetDialogName",
   "src/ui/palette.browser.tsx": "checkSearchResults",
+  "src/ui/settings/searchPane.browser.tsx": "checkSearchSuggestion",
   "src/ui/sheets/skillDiscovery.browser.tsx": "checkSkillDiscoveryConsumer",
   "src/ui/sheets/skillLibrary.browser.tsx": "checkSkillLibraryConsumer",
 };

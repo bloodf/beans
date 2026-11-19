@@ -1,0 +1,1 @@
+DELETE FROM local_tasks WHERE resolved_at<=?1 AND (routine_id IS NULL OR NOT EXISTS(SELECT 1 FROM task_effect_receipts r WHERE r.account_epoch=local_tasks.account_epoch AND r.task_id=local_tasks.task_id AND r.state='unknown'))

@@ -259,6 +259,9 @@ pub struct App {
     /// The local models this Runner may read messages for a schedule with.
     #[cfg(feature = "runner")]
     pub schedule_models: crate::schedule_models::runner::Runtime,
+    /// The model this Runner embeds messages with for semantic search, and its indexer's state.
+    #[cfg(feature = "runner")]
+    pub search_index: crate::search_index::runner::Runtime,
     /// The local update lease, and the admission count every new turn, room, routine, check,
     /// and relay envelope passes through (`update_control`).
     pub update: crate::update_control::Control,
@@ -535,6 +538,8 @@ impl App {
             routine_checks: crate::routines::Checks::default(),
             #[cfg(feature = "runner")]
             schedule_models: Default::default(),
+            #[cfg(feature = "runner")]
+            search_index: Default::default(),
             update: crate::update_control::Control::default(),
             http,
         });
@@ -861,6 +866,8 @@ impl App {
         self.memory_runtime.cancel_all();
         #[cfg(feature = "runner")]
         self.schedule_models.clear();
+        #[cfg(feature = "runner")]
+        self.search_index.clear();
         close_result?;
         let marker = self.config.home.join("forget-in-progress.json");
         config::write_json_private(&marker, &serde_json::json!({ "forget_in_progress": true }))?;
@@ -1416,6 +1423,8 @@ impl App {
         self.memory_runtime.cancel_all();
         #[cfg(feature = "runner")]
         self.schedule_models.clear();
+        #[cfg(feature = "runner")]
+        self.search_index.clear();
         for job in self.running_jobs.lock().unwrap().values() { job.cancel.cancel(); }
         #[cfg(feature = "runner")]
         {
@@ -2451,11 +2460,12 @@ pub async fn refresh_models_periodically(app: Arc<App>) {
 }
 
 /// The models the apps offer in their pickers, in the catalog's order, so each provider's first
-/// is its default: the provider, id, and name, and the thinking levels each one takes.
+/// is its default: the provider, id, and name, the thinking levels each one takes, and whether it
+/// takes images (what Settings › Search offers to describe pictures).
 fn models_out() -> Vec<Value> {
     beans_models::models()
         .iter()
-        .map(|model| json!({ "provider": model.provider, "id": model.id, "name": model.name, "levels": model.levels }))
+        .map(|model| json!({ "provider": model.provider, "id": model.id, "name": model.name, "levels": model.levels, "images": model.images }))
         .collect()
 }
 

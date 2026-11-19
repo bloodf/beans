@@ -21,15 +21,19 @@ use tokio_util::sync::CancellationToken;
 use super::classifier::Classifier;
 use super::{Catalog, Detection, Engine, MAX_MODEL_BYTES};
 use crate::app::App;
-use crate::embeddings::assets::{AssetInstaller, AssetKind, AssetPlan, AssetRequest, AssetSource, InstalledAssets, RedirectHosts};
+#[cfg(feature = "embedding-local")]
+use crate::runner_state::Loader;
+use crate::runner_state::{AccountFile, Settings};
+use super::hub::Hub;
+use crate::embeddings::assets::{AssetInstaller, AssetKind, AssetPlan, AssetRequest, AssetSource, InstalledAssets};
+use crate::embeddings::runtime_download::{self, Pinned};
 
-const STATE_FILE: &str = "schedule-models/state.json";
 const ASSET_DIR: &str = "schedule-models/assets";
 const APPROVAL_SECS: u64 = 600;
 const MAX_APPROVALS: usize = 16;
 /// The largest ONNX Runtime library a user may supply, as local memory embeddings allow.
 const MAX_RUNTIME_BYTES: u64 = 256 * 1024 * 1024;
-const RUNTIME_LICENSE: &str = "ONNX Runtime (MIT), supplied by the user";
+const RUNTIME_LICENSE: &str = "ONNX Runtime (MIT)";
 /// Above this, a message reads as a request in `local` mode: more likely than not.
 pub const LOCAL_THRESHOLD: f32 = 0.0;
 /// Above this, `local_then_reader` passes a message on to the small model. Lower than
@@ -41,14 +45,43 @@ pub const READ_WAIT: Duration = Duration::from_secs(3);
 #[cfg(feature = "embedding-local")]
 const MAX_QUOTE_CHARS: usize = 300;
 
+/// Where ONNX and image models get their runtime when the user names none: the library beside
+/// this executable (the apps ship one), else the pinned wheel for this platform, downloaded as
+/// part of the model's approved preview.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct RuntimeSupply {
+    pub beside: Option<PathBuf>,
+    pub download: Option<Pinned>,
+}
+
+impl RuntimeSupply {
+    fn this() -> RuntimeSupply {
+        RuntimeSupply { beside: crate::embeddings::assets::bundled_runtime(), download: runtime_download::pinned() }
+    }
+
+    /// Disk an ONNX model's install takes for its runtime: its library, when it downloads one.
+    pub(crate) fn download_bytes(&self) -> u64 {
+        if self.beside.is_some() {
+            return 0;
+        }
+        self.download.as_ref().map_or(0, |pin| pin.library_bytes)
+    }
+
+    fn origin(&self) -> Option<String> {
+        self.download.as_ref().and_then(|pin| reqwest::Url::parse(&pin.url).ok()).map(|url| url.origin().ascii_serialization())
+    }
+}
+
 /// What the Runner keeps between runs, for one account.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Saved {
-    account: String,
     mode: Detection,
     selected: Option<String>,
     installs: BTreeMap<String, Install>,
+}
+
+impl Settings for Saved {
+    const PATH: &'static str = "schedule-models/state.json";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,7 +93,6 @@ struct Install {
     installed_at: f64,
 }
 
-#[cfg_attr(not(feature = "embedding-local"), allow(dead_code))]
 impl Install {
     /// What identifies these exact files.
     fn fingerprint(&self) -> String {
@@ -78,35 +110,10 @@ struct Approval {
     digest: String,
 }
 
-/// Where catalog files download from. Tests point it at a local server.
-#[derive(Clone)]
-pub(crate) struct DownloadPolicy {
-    base: String,
-    allow_insecure_http: bool,
-    redirects: RedirectHosts,
-}
-
-impl Default for DownloadPolicy {
-    fn default() -> Self {
-        let hosts = |names: &[&str]| names.iter().map(|n| n.to_string()).collect();
-        DownloadPolicy {
-            base: super::HUGGING_FACE.into(),
-            allow_insecure_http: false,
-            // Hugging Face sends file downloads on to its CDN (cdn-lfs.hf.co, cas-bridge.xethub.hf.co).
-            redirects: RedirectHosts {
-                exact: hosts(&["huggingface.co", "hf.co"]),
-                parents: hosts(&["huggingface.co", "hf.co"]),
-            },
-        }
-    }
-}
 
 /// A model ready to read messages.
 #[cfg(feature = "embedding-local")]
 struct Loaded {
-    account: String,
-    model_id: String,
-    fingerprint: String,
     encoder: super::engine::Encoder,
     classifier: Classifier,
 }
@@ -116,20 +123,20 @@ struct Loaded {
 pub struct Runtime {
     approvals: Mutex<HashMap<String, Approval>>,
     installer: Mutex<Option<(String, Arc<AssetInstaller>)>>,
-    saved: Mutex<Option<Saved>>,
+    settings: AccountFile<Saved>,
     /// The catalog in place of the built-in one, for tests.
     catalog: Mutex<Option<&'static Catalog>>,
-    /// Held through each read, change, and write of the saved state.
-    edit: Mutex<()>,
-    policy: Mutex<Option<DownloadPolicy>>,
-    /// Cancels installs and loads when the account pauses or is forgotten.
+    /// The hub in place of `Hub::from_env`, for tests.
+    hub: Mutex<Option<Hub>>,
+    /// The computer in place of this one, for tests.
+    machine: Mutex<Option<super::recommend::Machine>>,
+    /// Where runtimes come from, in place of this build's, for tests.
+    runtime_supply: Mutex<Option<RuntimeSupply>>,
+    /// Cancels installs when the account pauses or is forgotten.
     cancel: Mutex<CancellationToken>,
+    /// The selected model, by `load_key`.
     #[cfg(feature = "embedding-local")]
-    loaded: Mutex<Option<Arc<Loaded>>>,
-    /// The model a load is under way for.
-    loading: Mutex<Option<String>>,
-    /// Why the selected model did not load, until it does.
-    load_error: Mutex<Option<String>>,
+    models: Arc<Loader<Loaded>>,
 }
 
 impl Runtime {
@@ -141,21 +148,37 @@ impl Runtime {
         drop(cancel);
         self.approvals.lock().clear();
         *self.installer.lock() = None;
-        *self.saved.lock() = None;
+        self.settings.forget();
         #[cfg(feature = "embedding-local")]
-        {
-            *self.loaded.lock() = None;
-        }
-        *self.loading.lock() = None;
-        *self.load_error.lock() = None;
+        self.models.reset();
     }
 
     fn cancel_token(&self) -> CancellationToken {
         self.cancel.lock().child_token()
     }
 
-    fn policy(&self) -> DownloadPolicy {
-        self.policy.lock().clone().unwrap_or_default()
+    fn hub(&self) -> Hub {
+        self.hub.lock().clone().unwrap_or_else(Hub::from_env)
+    }
+
+    /// This computer, as a suggestion reads it; tests set another.
+    fn machine(&self, app: &App) -> super::recommend::Machine {
+        self.machine.lock().clone().unwrap_or_else(|| crate::machine::this(&app.config.home.join(ASSET_DIR), &self.runtime_supply()))
+    }
+
+    fn runtime_supply(&self) -> RuntimeSupply {
+        self.runtime_supply.lock().clone().unwrap_or_else(RuntimeSupply::this)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_runtime_supply(&self, supply: RuntimeSupply) {
+        *self.runtime_supply.lock() = Some(supply);
+        *self.installer.lock() = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_machine(&self, machine: super::recommend::Machine) {
+        *self.machine.lock() = Some(machine);
     }
 
     /// Sets the mode as `schedule_models.select` would, without a model.
@@ -180,12 +203,8 @@ impl Runtime {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_policy(&self, base: &str, allow_insecure_http: bool, redirects: RedirectHosts) {
-        *self.policy.lock() = Some(DownloadPolicy {
-            base: base.into(),
-            allow_insecure_http,
-            redirects,
-        });
+    pub(crate) fn set_hub(&self, hub: Hub) {
+        *self.hub.lock() = Some(hub);
         *self.installer.lock() = None;
     }
 }
@@ -196,50 +215,29 @@ fn catalog(app: &App) -> &'static Catalog {
 }
 
 fn account(app: &App) -> Result<String, String> {
-    app.machine_file().map(|m| m.identity_pubkey).ok_or_else(|| "identity_required".into())
-}
-
-fn state_path(app: &App) -> PathBuf {
-    app.config.home.join(STATE_FILE)
+    crate::runner_state::account(app)
 }
 
 /// The saved state for the current account; another account's reads as nothing saved.
 fn saved(app: &App) -> Result<Saved, String> {
-    let account = account(app)?;
-    let mut cache = app.schedule_models.saved.lock();
-    if let Some(saved) = cache.as_ref().filter(|s| s.account == account) {
-        return Ok(saved.clone());
-    }
-    let saved = match std::fs::read(state_path(app)) {
-        Ok(bytes) => serde_json::from_slice::<Saved>(&bytes).ok().filter(|s| s.account == account),
-        Err(_) => None,
-    }
-    .unwrap_or(Saved { account, ..Saved::default() });
-    *cache = Some(saved.clone());
-    Ok(saved)
+    app.schedule_models.settings.get(app)
 }
 
 /// Reads, changes, and writes the saved state as one step, while `still` holds.
 fn edit<T>(app: &App, still: impl Fn() -> Result<(), String>, change: impl FnOnce(&mut Saved) -> Result<T, String>) -> Result<T, String> {
-    let _edit = app.schedule_models.edit.lock();
-    still()?;
-    let mut saved = saved(app)?;
-    let result = change(&mut saved)?;
-    crate::config::write_json_private(&state_path(app), &saved).map_err(|_| "storage_failed".to_string())?;
-    *app.schedule_models.saved.lock() = Some(saved);
-    Ok(result)
+    app.schedule_models.settings.edit(app, still, change)
 }
 
 /// Who asked, for which account, and whether both still hold: the account is the same, the
 /// requester is this Device or still paired, and the account is not paused.
-struct Authority {
+pub(crate) struct Authority {
     actor: String,
     account: String,
     incarnation: u64,
 }
 
 impl Authority {
-    fn capture(app: &App, actor: &str) -> Result<Authority, String> {
+    pub(crate) fn capture(app: &App, actor: &str) -> Result<Authority, String> {
         let incarnation = app.plugin_admission(None).map_err(|_| "authority_changed".to_string())?.get().0;
         let authority = Authority {
             actor: actor.into(),
@@ -250,7 +248,7 @@ impl Authority {
         Ok(authority)
     }
 
-    fn check(&self, app: &App) -> Result<(), String> {
+    pub(crate) fn check(&self, app: &App) -> Result<(), String> {
         let _lifecycle = app.plugin_admission(Some(self.incarnation)).map_err(|_| "authority_changed".to_string())?;
         if account(app)? != self.account {
             return Err("authority_changed".into());
@@ -289,16 +287,26 @@ pub async fn serve(app: &Arc<App>, method: &str, params: Value, actor: &str) -> 
     }
 }
 
+/// How many recent messages a suggestion reads for their languages.
+const LANGUAGE_SAMPLE: usize = 300;
+
 fn list(app: &App) -> Result<Value, String> {
     let saved = saved(app)?;
     let catalog = catalog(app);
+    let hub = app.schedule_models.hub();
+    let machine = app.schedule_models.machine(app);
+    let (texts, images) = app.store.chat_sample(LANGUAGE_SAMPLE).map_err(|_| "storage_failed")?;
+    let needs = super::recommend::Needs { multilingual: super::recommend::needs_multilingual(&texts), images };
+    let (fits, recommended) = super::recommend::recommend(catalog, &machine, &needs, |id| saved.installs.contains_key(id));
     let models: Vec<Value> = catalog
         .models
         .iter()
-        .map(|model| {
-            let mut listing = model.listing();
+        .zip(fits)
+        .map(|(model, (_, fit))| {
+            let mut listing = model.listing(&hub);
             listing["installed"] = saved.installs.contains_key(&model.id).into();
             listing["selected"] = (saved.selected.as_deref() == Some(model.id.as_str())).into();
+            listing["fit"] = json!(fit);
             listing
         })
         .collect();
@@ -306,10 +314,13 @@ fn list(app: &App) -> Result<Value, String> {
         "note": catalog.note,
         "max_bytes": MAX_MODEL_BYTES,
         "models": models,
+        "machine": machine,
+        "needs": needs,
+        "recommended": recommended,
         "mode": saved.mode,
         "selected": saved.selected,
         "runs_models": cfg!(feature = "embedding-local"),
-        "onnx_runtime": "ONNX models need the ONNX Runtime shared library (onnxruntime.dll, libonnxruntime.dylib, or libonnxruntime.so), version 1.27 or newer, CPU build; pass its path as `runtime` to preview. Static models need nothing else.",
+        "onnx_runtime": "ONNX and image models run on the ONNX Runtime shared library (onnxruntime.dll, libonnxruntime.dylib, or libonnxruntime.so), version 1.27 or newer, CPU build: the one beside this CLI, else the pinned official build for this computer, downloaded with the model once you approve its preview, or one whose path you pass as `runtime`. Static models need nothing else.",
     }))
 }
 
@@ -320,28 +331,37 @@ fn status(app: &App) -> Result<Value, String> {
         "selected": saved.selected,
         "installed": saved.installs.keys().collect::<Vec<_>>(),
         "state": load_state(app, &saved),
-        "error": app.schedule_models.load_error.lock().clone(),
+        "error": load_error(app, &saved),
     }))
+}
+
+/// What identifies a loaded model: the account, the model, and its exact installed files.
+fn load_key(app: &App, saved: &Saved, model_id: &str) -> Option<String> {
+    let install = saved.installs.get(model_id)?;
+    Some(format!("{}\0{model_id}\0{}", account(app).ok()?, install.fingerprint()))
 }
 
 /// Whether the selected model is ready to read messages.
 fn load_state(app: &App, saved: &Saved) -> &'static str {
-    let Some(selected) = &saved.selected else { return "none_selected" };
-    if !cfg!(feature = "embedding-local") {
-        return "runtime_unavailable";
-    }
+    let Some(key) = saved.selected.as_deref().and_then(|id| load_key(app, saved, id)) else { return "none_selected" };
     #[cfg(feature = "embedding-local")]
-    if app.schedule_models.loaded.lock().as_ref().is_some_and(|l| &l.model_id == selected && l.account == saved.account) {
-        return "ready";
+    return app.schedule_models.models.status(&key);
+    #[cfg(not(feature = "embedding-local"))]
+    {
+        let _ = key;
+        "runtime_unavailable"
     }
-    if app.schedule_models.loading.lock().as_deref() == Some(selected.as_str()) {
-        return "loading";
+}
+
+fn load_error(app: &App, saved: &Saved) -> Option<String> {
+    let key = saved.selected.as_deref().and_then(|id| load_key(app, saved, id))?;
+    #[cfg(feature = "embedding-local")]
+    return app.schedule_models.models.error(&key);
+    #[cfg(not(feature = "embedding-local"))]
+    {
+        let _ = key;
+        None
     }
-    if app.schedule_models.load_error.lock().is_some() {
-        return "failed";
-    }
-    let _ = app;
-    "not_loaded"
 }
 
 #[derive(Deserialize)]
@@ -366,7 +386,7 @@ async fn preview(app: &Arc<App>, authority: &Authority, params: Value) -> Result
     let request: Request = decode(params)?;
     let model = catalog(app).model(&request.model_id).ok_or("unknown_model")?;
     let cancel = app.schedule_models.cancel_token();
-    let policy = app.schedule_models.policy();
+    let hub = app.schedule_models.hub();
     let supplied_source = matches!(request.source, Source::Supplied { .. });
     let mut assets = Vec::new();
     if let Source::Supplied { files } = &request.source {
@@ -384,7 +404,7 @@ async fn preview(app: &Arc<App>, authority: &Authority, params: Value) -> Result
                 AssetRequest {
                     kind,
                     source: AssetSource::Download {
-                        url: format!("{}/{}/resolve/{}/{}", policy.base, model.repo, model.revision, file.path),
+                        url: hub.file_url(model, file),
                     },
                     license: model.license.clone(),
                     bytes,
@@ -411,23 +431,38 @@ async fn preview(app: &Arc<App>, authority: &Authority, params: Value) -> Result
     if assets.iter().map(|a| a.bytes).sum::<u64>() > MAX_MODEL_BYTES {
         return Err("model_too_large".into());
     }
-    match (model.engine, &request.runtime) {
-        (Engine::Onnx, Some(path)) => {
-            let (bytes, sha256) = hash_file(path, MAX_RUNTIME_BYTES, &cancel).await?;
-            assets.push(AssetRequest {
-                kind: AssetKind::Runtime,
-                source: AssetSource::Supplied { path: path.clone() },
-                license: RUNTIME_LICENSE.into(),
-                bytes,
-                sha256,
-            });
+    // ONNX and image models use the runtime the user names, else the one shipped beside this
+    // executable, else the pinned one for this platform, downloaded with the model. Whichever it
+    // is, the preview shows it, by size and SHA-256, like the model's own files.
+    let supply = app.schedule_models.runtime_supply();
+    let mut runtime_fetch = None;
+    if model.engine == Engine::Static {
+        if request.runtime.is_some() {
+            return Err("runtime_not_needed".into());
         }
-        (Engine::Onnx, None) => return Err("runtime_required".into()),
-        (Engine::Static, Some(_)) => return Err("runtime_not_needed".into()),
-        (Engine::Static, None) => {}
+    } else {
+        let asset = match (request.runtime.clone().or_else(|| supply.beside.clone()), &supply.download) {
+            (Some(path), _) => {
+                let (bytes, sha256) = hash_file(&path, MAX_RUNTIME_BYTES, &cancel).await?;
+                AssetRequest { kind: AssetKind::Runtime, source: AssetSource::Supplied { path }, license: RUNTIME_LICENSE.into(), bytes, sha256 }
+            }
+            (None, Some(pin)) => {
+                let from = reqwest::Url::parse(&pin.url).ok().and_then(|url| url.host_str().map(str::to_owned)).unwrap_or_default();
+                runtime_fetch = Some(json!({ "version": runtime_download::version(), "bytes": pin.bytes, "from": from }));
+                AssetRequest {
+                    kind: AssetKind::Runtime,
+                    source: AssetSource::Archive { url: pin.url.clone(), bytes: pin.bytes, sha256: pin.sha256.clone(), member: pin.member.clone() },
+                    license: RUNTIME_LICENSE.into(),
+                    bytes: pin.library_bytes,
+                    sha256: pin.library_sha256.clone(),
+                }
+            }
+            (None, None) => return Err("runtime_required".into()),
+        };
+        assets.push(asset);
     }
     let kinds: Vec<AssetKind> = assets.iter().map(|a| a.kind).collect();
-    let installer = installer(app, &policy)?;
+    let installer = installer(app, &hub, &supply)?;
     authority.check(app)?;
     let preview = installer.preview_assets(AssetPlan { assets }, &kinds).map_err(|_| "invalid_asset_plan")?;
     let token = uuid::Uuid::new_v4().to_string();
@@ -460,6 +495,10 @@ async fn preview(app: &Arc<App>, authority: &Authority, params: Value) -> Result
         "license": model.license,
         "pinned": model.pinned(),
         "source": if supplied_source { "supplied" } else { "download" },
+        // Where the files come from, for the approval to name.
+        "hub": (!supplied_source).then(|| hub.label()),
+        // The ONNX Runtime downloaded with the model, when none is here: `{version, bytes, from}`.
+        "runtime_download": runtime_fetch,
         "total_bytes": preview.total_bytes,
         "assets": preview.assets,
     }))
@@ -468,23 +507,27 @@ async fn preview(app: &Arc<App>, authority: &Authority, params: Value) -> Result
 fn kind_of(role: &str) -> AssetKind {
     match role {
         "weights" => AssetKind::Weights,
+        "image_model" => AssetKind::ImageModel,
         "model" => AssetKind::Model,
         _ => AssetKind::Tokenizer,
     }
 }
 
-/// One installer per account, downloading only from the policy's base origin.
-fn installer(app: &App, policy: &DownloadPolicy) -> Result<Arc<AssetInstaller>, String> {
+/// One installer per account, hub, and runtime source, downloading only from the hub's origin
+/// and, for a runtime, the origin of its pinned wheel.
+fn installer(app: &App, hub: &Hub, supply: &RuntimeSupply) -> Result<Arc<AssetInstaller>, String> {
     let account = account(app)?;
+    let runtime_origin = supply.origin();
+    let owner = format!("{account}\0{}\0{}", hub.base, runtime_origin.as_deref().unwrap_or(""));
     let mut installer = app.schedule_models.installer.lock();
-    if let Some((_, installer)) = installer.as_ref().filter(|(owner, _)| *owner == account) {
+    if let Some((_, installer)) = installer.as_ref().filter(|(cached, _)| *cached == owner) {
         return Ok(installer.clone());
     }
-    let origin = reqwest::Url::parse(&policy.base).map_err(|_| "invalid_asset_policy")?.origin().ascii_serialization();
     let namespace = format!("{:x}", Sha256::digest(format!("beans-schedule-models\0{account}").as_bytes()));
     let root = app.config.home.join(ASSET_DIR).join(&namespace[..32]);
-    let created = Arc::new(AssetInstaller::with_redirects(root, [origin].into(), policy.allow_insecure_http, policy.redirects.clone()).map_err(|_| "invalid_asset_policy")?);
-    *installer = Some((account, created.clone()));
+    let origins = [Some(hub.origin()?), runtime_origin].into_iter().flatten().collect();
+    let created = Arc::new(AssetInstaller::with_redirects(root, origins, hub.allow_insecure_http, hub.redirects.clone()).map_err(|_| "invalid_model_hub")?);
+    *installer = Some((owner, created.clone()));
     Ok(created)
 }
 
@@ -563,7 +606,9 @@ async fn apply(app: &Arc<App>, authority: &Authority, params: Value) -> Result<V
     if let Some(previous) = previous {
         remove_files(&previous.assets);
     }
-    let state = prepare_now(app, &approval.model_id, cancel).await;
+    // An image model is for search; only text models read schedules.
+    let image_model = catalog(app).model(&approval.model_id).is_some_and(|m| m.engine == Engine::Clip);
+    let state = if image_model { "installed".into() } else { prepare_now(app, &approval.model_id).await };
     Ok(json!({ "installed": true, "model_id": approval.model_id, "state": state }))
 }
 
@@ -593,14 +638,19 @@ async fn select(app: &Arc<App>, authority: &Authority, params: Value) -> Result<
             if request.model_id.as_ref().is_some_and(|id| !saved.installs.contains_key(id)) {
                 return Err("model_not_installed".into());
             }
+            if request.model_id.as_ref().and_then(|id| catalog(app).model(id)).is_some_and(|m| m.engine == Engine::Clip) {
+                return Err("image_model_reads_no_schedules".into());
+            }
             saved.mode = request.mode;
             saved.selected = request.model_id.clone();
             Ok(saved.clone())
         },
     )?;
-    *app.schedule_models.load_error.lock() = None;
+    // A new choice is a fresh start, a failed load included.
+    #[cfg(feature = "embedding-local")]
+    app.schedule_models.models.reset();
     let state = match &request.model_id {
-        Some(id) => prepare_now(app, id, app.schedule_models.cancel_token()).await,
+        Some(id) => prepare_now(app, id).await,
         None => "none_selected".into(),
     };
     Ok(json!({ "mode": saved.mode, "selected": saved.selected, "state": state }))
@@ -626,45 +676,33 @@ async fn remove(app: &Arc<App>, authority: &Authority, params: Value) -> Result<
         },
     )?;
     #[cfg(feature = "embedding-local")]
-    {
-        let mut loaded = app.schedule_models.loaded.lock();
-        if loaded.as_ref().is_some_and(|l| l.model_id == request.model_id) {
-            *loaded = None;
-        }
-    }
+    app.schedule_models.models.reset();
     remove_files(&install.assets);
     Ok(json!({ "removed": true, "mode": saved.mode, "selected": saved.selected }))
 }
 
 /// Loads `model_id`, training its classifier the first time, and says how that went.
-async fn prepare_now(app: &Arc<App>, model_id: &str, cancel: CancellationToken) -> String {
+async fn prepare_now(app: &Arc<App>, model_id: &str) -> String {
     #[cfg(feature = "embedding-local")]
     {
-        *app.schedule_models.loading.lock() = Some(model_id.to_string());
-        let result = load(app, model_id, cancel).await;
-        *app.schedule_models.loading.lock() = None;
-        match result {
-            Ok(()) => {
-                *app.schedule_models.load_error.lock() = None;
-                "ready".into()
-            }
-            Err(error) => {
-                tracing::warn!(%error, model = model_id, "loading a schedule model");
-                *app.schedule_models.load_error.lock() = Some(error.clone());
-                error
-            }
+        let Some(key) = saved(app).ok().and_then(|saved| load_key(app, &saved, model_id)) else { return "model_not_installed".into() };
+        let (app, model_id) = (app.clone(), model_id.to_string());
+        match app.schedule_models.models.clone().load_now(&key, |cancel| async move { load(&app, &model_id, cancel).await }).await {
+            Ok(_) => "ready".into(),
+            Err(error) => error,
         }
     }
     #[cfg(not(feature = "embedding-local"))]
     {
-        let _ = (app, model_id, cancel);
+        let _ = (app, model_id);
         "runtime_unavailable".into()
     }
 }
 
 #[cfg(feature = "embedding-local")]
-async fn load(app: &Arc<App>, model_id: &str, cancel: CancellationToken) -> Result<(), String> {
+async fn load(app: &Arc<App>, model_id: &str, cancel: CancellationToken) -> Result<Loaded, String> {
     use super::classifier::{parts, training_messages};
+    let account = account(app)?;
     let saved = saved(app)?;
     let install = saved.installs.get(model_id).cloned().ok_or("model_not_installed")?;
     let model = catalog(app).model(model_id).ok_or("unknown_model")?;
@@ -681,16 +719,9 @@ async fn load(app: &Arc<App>, model_id: &str, cancel: CancellationToken) -> Resu
                 .map_err(|_| "training_failed")?
                 .ok_or("training_failed")?;
             // Kept with the install it was trained for, unless that changed meanwhile.
-            let account = saved.account.clone();
             edit(
                 app,
-                || {
-                    if crate::schedule_models::runner::account(app)? == account {
-                        Ok(())
-                    } else {
-                        Err("authority_changed".into())
-                    }
-                },
+                || if self::account(app)? == account { Ok(()) } else { Err("authority_changed".into()) },
                 |current| {
                     if let Some(kept) = current.installs.get_mut(model_id).filter(|i| i.fingerprint() == install.fingerprint()) {
                         kept.classifier = Some(classifier.clone());
@@ -706,17 +737,7 @@ async fn load(app: &Arc<App>, model_id: &str, cancel: CancellationToken) -> Resu
     if classifier.best(&probe).is_none_or(|(_, score)| !score.is_finite()) {
         return Err("training_failed".into());
     }
-    if cancel.is_cancelled() {
-        return Err("cancelled".into());
-    }
-    *app.schedule_models.loaded.lock() = Some(Arc::new(Loaded {
-        account: saved.account,
-        model_id: model_id.to_string(),
-        fingerprint: install.fingerprint(),
-        encoder,
-        classifier,
-    }));
-    Ok(())
+    Ok(Loaded { encoder, classifier })
 }
 
 #[cfg(feature = "embedding-local")]
@@ -734,6 +755,15 @@ fn error_code(error: crate::embeddings::EmbeddingError) -> String {
     .into()
 }
 
+/// An installed catalog model, for other local uses (semantic search): its catalog entry, its
+/// checked files, and what identifies those exact files. Installing and removing stay here.
+pub(crate) fn installed(app: &App, model_id: &str) -> Result<(super::CatalogModel, InstalledAssets, String), String> {
+    let saved = saved(app)?;
+    let install = saved.installs.get(model_id).ok_or("model_not_installed")?;
+    let model = catalog(app).model(model_id).ok_or("unknown_model")?;
+    Ok((model.clone(), install.assets.clone(), install.fingerprint()))
+}
+
 /// How this Runner reads messages for a schedule now.
 pub fn mode(app: &App) -> Detection {
     saved(app).map(|s| s.mode).unwrap_or_default()
@@ -747,15 +777,12 @@ pub async fn read(app: &Arc<App>, text: &str, cancel: &CancellationToken) -> Opt
     {
         let saved = saved(app).ok()?;
         let selected = saved.selected.clone()?;
-        let install = saved.installs.get(&selected)?;
-        let loaded = app
-            .schedule_models
-            .loaded
-            .lock()
-            .clone()
-            .filter(|l| l.model_id == selected && l.account == saved.account && l.fingerprint == install.fingerprint());
-        let Some(loaded) = loaded else {
-            start_loading(app, &selected);
+        let key = load_key(app, &saved, &selected)?;
+        let Some(loaded) = app.schedule_models.models.ready(&key) else {
+            // Loaded in the background for the next message, unless its last load failed: then
+            // the user selects it again after fixing what `status` reports.
+            let app = app.clone();
+            app.schedule_models.models.clone().start(&key, move |cancel| async move { load(&app, &selected, cancel).await });
             return None;
         };
         let parts = super::classifier::parts(text);
@@ -769,28 +796,6 @@ pub async fn read(app: &Arc<App>, text: &str, cancel: &CancellationToken) -> Opt
         let _ = (app, text, cancel);
         None
     }
-}
-
-/// Loads the selected model in the background, once at a time, unless its last load failed:
-/// then the user selects it again after fixing what `status` reports.
-#[cfg(feature = "embedding-local")]
-fn start_loading(app: &Arc<App>, model_id: &str) {
-    if app.schedule_models.load_error.lock().is_some() {
-        return;
-    }
-    {
-        let mut loading = app.schedule_models.loading.lock();
-        if loading.is_some() {
-            return;
-        }
-        *loading = Some(model_id.to_string());
-    }
-    let app = app.clone();
-    let model_id = model_id.to_string();
-    tokio::spawn(async move {
-        let cancel = app.schedule_models.cancel_token();
-        let _ = prepare_now(&app, &model_id, cancel).await;
-    });
 }
 
 #[cfg(test)]

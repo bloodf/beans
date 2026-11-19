@@ -1,0 +1,1 @@
+UPDATE task_invocations SET state='admitted' WHERE account_epoch=?1 AND task_id=?2 AND owner_epoch=?3 AND execution_id=?4 AND invocation_id=?5 AND parent_id IS ?6 AND ordinal=?7 AND attempt_id=?8 AND receipt_id=?9 AND revision=?10 AND digest=?11 AND state='authorized'

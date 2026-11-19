@@ -53,6 +53,9 @@ export const Entries = {
   cliPort: () => entry("advanced", L("CLI port"), { keywords: [L("localhost 127.0.0.1 serve connection")] }),
   onboarding: () => entry("advanced", L("Onboarding"), { keywords: [L("show onboarding again setup welcome restore")] }),
   deleteAccount: () => entry("advanced", L("Delete Account"), { row: L("Account"), keywords: [L("erase remove wipe relay data identity")] }),
+  searchText: () => entry("search", L("Search messages with"), { keywords: [L("semantic meaning embedding index model multilingual provider")] }),
+  searchImages: () => entry("search", L("Find pictures with"), { keywords: [L("images photos pictures image model clip")] }),
+  describeImages: () => entry("search", L("Describe pictures with"), { keywords: [L("vision describe images photos pictures")] }),
   machineKey: () => entry("device", L("Machine key"), { keywords: [L("device os role runner last seen relay")] }),
   pairing: () => entry("device", L("Pairing"), { keywords: [L("unpair remove device paired")] }),
   bot: (bot: Bot, providers: readonly ProviderCredential[]) =>
@@ -94,6 +97,8 @@ export function entriesIn(pane: SettingsPane, device: Device | undefined, store:
       const servers = device && isRunner(device) ? [Entries.mcpServers(device), ...plugins.filter(isMcpServer).map(Entries.mcpServer)] : [];
       return [...plugins.filter((plugin) => !isMcpServer(plugin)).map(Entries.plugin), ...servers];
     }
+    case "search":
+      return device && isRunner(device) ? [Entries.searchText(), Entries.searchImages(), Entries.describeImages()] : [];
     case "device":
       return device ? [Entries.machineKey(), Entries.pairing()] : [Entries.machineKey()];
   }

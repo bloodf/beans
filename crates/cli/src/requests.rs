@@ -182,6 +182,8 @@ async fn dispatch_verified(app: &Arc<App>, request: &Request, body: &Value) -> R
             crate::memory_service::api::serve_as(app,verb,body.clone(),&request.requested_by).await
         },
         verb if crate::schedule_models::is_method(verb) => crate::schedule_models::serve_as(app, verb, body.clone(), &request.requested_by).await,
+        verb if crate::search_index::is_method(verb) => crate::search_index::serve_as(app, verb, body.clone(), &request.requested_by).await,
+        "chats.search_semantic" => crate::search_index::serve_semantic_as(app, body.clone(), &request.requested_by).await,
         verb if verb.starts_with("memory.service.") || verb.starts_with("memory.operations.") =>
             crate::memory_service::api::serve(app, verb, body.clone()).await,
         "memory.read" => memory_read(app, body["bot_id"].as_str().ok_or("missing bot_id")?),

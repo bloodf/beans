@@ -17,7 +17,7 @@ import { hasSheet } from "./overlay";
 import { open, reveal, settingsDeviceID, showSettings } from "./root";
 import { entriesIn } from "./settings/search";
 import type { Bot } from "../model/models";
-import type { WireSearchResults } from "../model/wire";
+import type { WireRelatedHit, WireSearchResults } from "../model/wire";
 
 interface PaletteItem {
   icon: { kind: "symbol"; name: string } | { kind: "chat"; bots: Bot[] };
@@ -121,7 +121,7 @@ function settings(): PaletteItem[] {
   return [...panes, ...entries];
 }
 
-function searchSections(results: WireSearchResults): PaletteSection[] {
+function searchSections(results: WireSearchResults, related: WireRelatedHit[] = []): PaletteSection[] {
   const hits = (list: { chat_id: string; snippet: string }[]) =>
     list.flatMap((hit) => {
       const chat = store.chat(hit.chat_id);
@@ -136,7 +136,26 @@ function searchSections(results: WireSearchResults): PaletteSection[] {
       if (!chat) return [];
       return [item({ icon: { kind: "symbol", name: "doc" }, title: hit.name, subtitle: store.title(chat), isSearchOnly: true, chatID: chat.id, run: () => open(chat.id) })];
     }) },
+    { title: L("Related"), items: relatedItems(results, related.filter((hit) => hit.kind !== "image")) },
+    { title: L("Pictures"), items: relatedItems(results, related.filter((hit) => hit.kind === "image")) },
   ].filter((section) => section.items.length > 0);
+}
+
+/** Meaning matches the exact sections do not already show, best first, each message or picture once. */
+function relatedItems(results: WireSearchResults, related: WireRelatedHit[]): PaletteItem[] {
+  const shown = new Set([...results.messages, ...results.files].map((hit) => hit.message_id));
+  return related.flatMap((hit) => {
+    const chat = store.chat(hit.chat_id);
+    const key = hit.attachment_id ?? hit.message_id;
+    if (!chat || shown.has(key) || (hit.kind !== "image" && shown.has(hit.message_id))) return [];
+    shown.add(key);
+    if ((hit.kind === "file" || hit.kind === "image") && hit.name) {
+      const symbol = hit.kind === "image" ? "photo" : "doc";
+      const subtitle = hit.kind === "image" && hit.snippet !== hit.name ? hit.snippet : store.title(chat);
+      return [item({ icon: { kind: "symbol", name: symbol }, title: hit.name, subtitle, isSearchOnly: true, chatID: chat.id, run: () => open(chat.id) })];
+    }
+    return [item({ icon: { kind: "chat", bots: store.botsIn(chat) }, title: store.title(chat), subtitle: hit.snippet, isSearchOnly: true, chatID: chat.id, run: () => open(chat.id) })];
+  });
 }
 
 // MARK: - Search
@@ -289,6 +308,8 @@ function Palette() {
   ];
   const [query, setQuery] = createSignal("");
   const [results, setResults] = createSignal<WireSearchResults>({ chats: [], messages: [], files: [], history_complete: true });
+  /** Meaning matches, which arrive after the exact ones and never hold them up. */
+  const [related, setRelated] = createSignal<WireRelatedHit[]>([]);
   const [searching, setSearching] = createSignal(false);
   /** The row the arrows or the pointer picked; none follows the list's first item. */
   const [picked, setPicked] = createSignal<number | null>(null);
@@ -303,7 +324,7 @@ function Palette() {
 
   const rows = createMemo((): Row[] => {
     let matched = filter(query().trim() ? sections.filter((section) => section.title !== L("Chats")) : sections, query());
-    if (query().trim() !== "") matched = merge(searchSections(results()), matched);
+    if (query().trim() !== "") matched = merge(searchSections(results(), related()), matched);
     return matched.flatMap((section): Row[] => [{ kind: "header", title: section.title }, ...section.items.map((entry): Row => ({ kind: "item", item: entry }))]);
   });
   const firstItem = () => rows().findIndex((row) => row.kind === "item");
@@ -330,6 +351,17 @@ function Palette() {
       return;
     }
     searchTimer = setTimeout(() => {
+      store.searchRelated(trimmed).then(
+        (found) => {
+          if (generation !== searchGeneration) return;
+          // Pictures found by what they show lead; described ones follow in the same section.
+          const pictures = found.image_state === "ready" ? (found.images ?? []) : [];
+          setRelated([...pictures, ...(found.state === "ready" ? found.related : [])]);
+        },
+        () => {
+          if (generation === searchGeneration) setRelated([]);
+        },
+      );
       store.searchChats(trimmed).then(
         (found) => {
           if (generation !== searchGeneration) return;
@@ -377,6 +409,7 @@ function Palette() {
     const unsubscribe = store.subscribe((event) => {
       if (["snapshotReplaced", "chatsChanged", "chatChanged", "messageAdded", "messageChanged", "messageRemoved", "olderMessagesLoaded", "rosterChanged", "identityChanged"].includes(event.kind) && query().trim()) {
         setResults({ chats: [], messages: [], files: [], history_complete: true });
+        setRelated([]);
         setSearching(true);
         searchMessages(query());
       }
@@ -413,6 +446,7 @@ function Palette() {
               const text = event.currentTarget.value;
               setQuery(text);
               setResults({ chats: [], messages: [], files: [], history_complete: true });
+              setRelated([]);
               setSearching(text.trim() !== "");
               listChanged();
               searchMessages(text);

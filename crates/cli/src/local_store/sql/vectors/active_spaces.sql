@@ -1,0 +1,1 @@
+SELECT space FROM message_vector_spaces

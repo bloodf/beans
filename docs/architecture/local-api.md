@@ -94,7 +94,7 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | `chats.set_description` | `chat_id`, `description?` | `null` |
 | `chats.pin` | `chat_id`, `pinned?` (toggles when absent) | `null` |
 | `chats.add_bot`, `chats.remove_bot`, `chats.set_owner` | `chat_id`, `bot_id` | `null` |
-| `chats.search` | `query`, `limit?` (1–50, default 20) | `chats`, `messages` |
+| `chats.search` | `query`, `limit?` (1–50, default 20) | `chats`, `messages`; [by meaning](semantic-search.md) |
 | `chats.messages` | `chat_id`, `before?`, `limit?` (1–200) | `messages`, `has_more` |
 | `chats.permission` | `chat_id`, `message_id`, `decision` (`allow`, `always`, `deny`) | `answered` or the plugin sign-in reply |
 | `bash.stdin`, `bash.stop`, `bash.background` | `chat_id`, `message_id`; `bash.stdin` also `text?`, `enter?` | the Runner's reply |

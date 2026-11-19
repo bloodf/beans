@@ -191,6 +191,31 @@ export interface ChatSearchResults {
   history_complete: boolean;
 }
 
+/// A message near a query in meaning (`chats.search_semantic`), found by a Runner's local model.
+export interface ChatRelatedHit {
+  kind: "message" | "file" | "image";
+  chat_id: string;
+  message_id: string;
+  snippet: string;
+  author: Author;
+  created_at: number;
+  score: number;
+  attachment_id?: string;
+  name?: string;
+}
+
+/// `state` is `ready` when a Runner searched; otherwise why `related` is empty (`off` until a
+/// model is selected, `unreachable` while the Runner is offline).
+export interface ChatRelatedResults {
+  state: string;
+  related: ChatRelatedHit[];
+  /** Pictures found by what they show, with the Runner's local image model. */
+  image_state?: string;
+  images?: ChatRelatedHit[];
+  runner_id: string | null;
+  error?: string | null;
+}
+
 /// A file sent with a message. Its bytes travel as a `file` blob under this id, encrypted with
 /// the account key; the phone keeps a copy in its documents directory once it has them.
 export interface Attachment {

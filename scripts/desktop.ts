@@ -8,8 +8,10 @@
 //                                         `mygo build -platform`. Platforms are MyGo's, comma
 //                                         separated (linux/amd64,windows/amd64); the default is
 //                                         this computer's, or Linux and Windows on x86-64 from a
-//                                         Mac. The Linux CLIs are static (musl) and, like other
-//                                         computers' CLIs, build with cargo-zigbuild.
+//                                         Mac. The Linux CLIs link glibc 2.28 (the app's webview
+//                                         needs glibc anyway), so they can load the ONNX Runtime
+//                                         shipped beside them, and, like other computers' CLIs,
+//                                         build with cargo-zigbuild.
 //   pnpm exec tsx scripts/desktop.ts release <platforms> --stage-only
 //                                         Signed local assets, listed in build/release-assets.json.
 //   pnpm run release-desktop [platforms]  Upload only release assets to the existing Beans draft.
@@ -20,15 +22,18 @@ import { spawn, spawnSync } from "node:child_process"
 import { delimiter, join, relative } from "node:path"
 import { CLI_NAME, ROOT, buildCLI, color, log, readVersion, RELEASES_REPO, TAG_PREFIX } from "./app.ts"
 import { extractReleaseNotes } from "./changelog.ts"
+import { isPinned, placeOnnxRuntime, targetFor } from "./onnxruntime.ts"
 import { rawReleaseSecret } from "./release-signing.ts"
 
 const DESKTOP = join(ROOT, "desktop")
 const MYGO = join(DESKTOP, "node_modules", ".bin", process.platform === "win32" ? "mygo.exe" : "mygo")
 
-/** The Rust target of the CLI each MyGo platform ships, static builds for Linux. */
+/** The Rust target of the CLI each MyGo platform ships. Linux builds link glibc 2.28, the
+ * oldest the pinned ONNX Runtime wheels support (manylinux_2_28): a static musl CLI cannot load
+ * a shared library, so it could run only static models. cargo-zigbuild reads the suffix. */
 const RUST_TARGETS: Record<string, string> = {
-  "linux/amd64": "x86_64-unknown-linux-musl",
-  "linux/arm64": "aarch64-unknown-linux-musl",
+  "linux/amd64": "x86_64-unknown-linux-gnu.2.28",
+  "linux/arm64": "aarch64-unknown-linux-gnu.2.28",
   "windows/amd64": "x86_64-pc-windows-gnu",
 }
 
@@ -101,7 +106,8 @@ async function placeCLI(platform: string): Promise<boolean> {
   } else {
     log(`${color.bold("building")} ${color.dim(`the CLI for ${target}`)}`)
     if ((await run(["cargo", "zigbuild", "--release", "--locked", "-p", CLI_NAME, "--target", target])) !== 0) return false
-    built = join(ROOT, "target", target, "release", exe)
+    // cargo-zigbuild builds into the target's own folder, without the glibc version.
+    built = join(ROOT, "target", target.replace(/\.\d+\.\d+$/, ""), "release", exe)
   }
   const directory = join(DESKTOP, "resources", `${goos}-${goarch}`, "bin")
   mkdirSync(directory, { recursive: true })
@@ -109,6 +115,12 @@ async function placeCLI(platform: string): Promise<boolean> {
   copyFileSync(built, placed)
   if (goos !== "windows") chmodSync(placed, 0o755)
   log(`${color.green("placed")} ${color.dim(placed)}`)
+  // Local ONNX and image models run on the pinned ONNX Runtime beside the CLI, which loads it
+  // at run time. A static musl CLI could not load it; every target here can.
+  if (!target.endsWith("-musl") && isPinned(targetFor(goos, goarch))) {
+    const runtime = await placeOnnxRuntime(targetFor(goos, goarch), directory)
+    log(`${color.green("placed")} ${color.dim(runtime)}`)
+  }
   return true
 }
 

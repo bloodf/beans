@@ -313,6 +313,8 @@ export interface WireModel {
   name: string;
   /** The thinking levels it takes, lowest first. */
   levels: string[];
+  /** Whether it takes images; absent from older CLIs. */
+  images?: boolean;
 }
 
 export interface WireRosterChanged {
@@ -337,6 +339,117 @@ export interface WireSearchResults {
   messages: { chat_id: string; message_id: string; snippet: string; author: WireAuthor; created_at: number }[];
   files: { chat_id: string; message_id: string; attachment_id: string; name: string; snippet: string; created_at: number }[];
   history_complete: boolean;
+}
+
+/** A message near a query in meaning (`chats.search_semantic`): `file` hits matched an attachment's name, `image` hits a picture, by what it shows or its description. */
+export interface WireRelatedHit {
+  kind: "message" | "file" | "image";
+  chat_id: string;
+  message_id: string;
+  snippet: string;
+  author: WireAuthor;
+  created_at: number;
+  score: number;
+  attachment_id?: string;
+  name?: string;
+}
+
+/** A state is `ready` when a Runner searched that space; otherwise why its list is empty (`off` until a model is chosen). */
+export interface WireRelatedResults {
+  state: string;
+  related: WireRelatedHit[];
+  /** Pictures found by what they show, with a local image model. */
+  image_state?: string;
+  images?: WireRelatedHit[];
+  runner_id: string | null;
+  error?: string | null;
+}
+
+/** Where a Runner's text vectors come from: a local catalog model, or an embedding provider. */
+export type WireTextSource = { kind: "local"; model_id: string } | { kind: "provider"; profile_id: string };
+export interface WireDescriber {
+  provider: string;
+  model: string;
+}
+
+/** One role of semantic search on a Runner: what is chosen, whether it is ready, and its queue. */
+export interface WireSearchRole<Choice> {
+  choice: Choice | null;
+  state: string;
+  error?: string | null;
+  indexed: number;
+  pending: number;
+}
+
+/** `search_index.status`. */
+export interface WireSearchIndexStatus {
+  text: WireSearchRole<WireTextSource>;
+  image: WireSearchRole<string>;
+  describe: { choice: WireDescriber | null; pending: number };
+  /** The account's embedding profiles in API mode: choosing one sends messages to its provider. */
+  profiles: { id: string; model: string; dimensions: number; has_secret: boolean }[];
+  runs_models: boolean;
+}
+
+/** A catalog model a Runner can download and run (`schedule_models.list`). */
+export interface WireLocalModel {
+  id: string;
+  name: string;
+  /** `text`: schedules and text search; `image`: finding pictures. */
+  kind: "text" | "image";
+  languages: string;
+  license: string;
+  installed: boolean;
+  /** Only pinned models download. */
+  pinned: boolean;
+  bytes: number;
+  /** How the model suits the Runner's computer. Absent from Runners older than suggestions. */
+  fit?: WireModelFit;
+}
+
+/** One model against the Runner's computer. */
+export interface WireModelFit {
+  /** Whether the Runner can run and download it: its `reasons` then hold only notes. */
+  fits: boolean;
+  /** Why it does not fit (`needs_onnx_runtime`, `not_enough_memory`, `not_enough_disk`,
+   * `not_downloadable`), then notes (`english_only`, `multilingual`, `slow_here`, `installed`). */
+  reasons: string[];
+  /** About how much memory it takes loaded. */
+  memory_bytes: number;
+}
+
+/** What the Runner knows of its computer; an unknown fact is null. */
+export interface WireMachine {
+  memory_bytes: number | null;
+  free_disk_bytes: number | null;
+  cores: number;
+  os: string;
+  arch: string;
+  onnx_runtime: boolean;
+}
+
+export interface WireLocalModels {
+  models: WireLocalModel[];
+  max_bytes: number;
+  /** The model to suggest per kind, for this computer and these chats. Nothing downloads until
+   * the user approves a preview. */
+  recommended?: { text: string | null; image: string | null };
+  machine?: WireMachine;
+  /** What the chats call for: several languages, pictures. */
+  needs?: { multilingual: boolean; images: boolean };
+}
+
+/** What an install will download, for the user to approve. */
+export interface WireModelPreview {
+  preview_token: string;
+  preview_digest: string;
+  name: string;
+  license: string;
+  total_bytes: number;
+  /** Where the files download from ("Hugging Face", or a mirror's host); null for supplied files. */
+  hub?: string | null;
+  /** The ONNX Runtime downloaded with the model when the Runner has none beside it. */
+  runtime_download?: { version: string; bytes: number; from: string } | null;
 }
 
 export interface WireMarketplacePlugin {
@@ -745,7 +858,7 @@ export function toCustomModel(wire: WireCustomModel): CustomModel {
 }
 
 export function toModels(wire: WireModel[] | null | undefined): ProviderModel[] {
-  return (wire ?? []).map((model) => ({ provider: model.provider, id: model.id, label: model.name, levels: model.levels }));
+  return (wire ?? []).map((model) => ({ provider: model.provider, id: model.id, label: model.name, levels: model.levels, images: model.images ?? false }));
 }
 
 export function toMarketplacePlugin(wire: WireMarketplacePlugin): MarketplacePlugin {

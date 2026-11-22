@@ -11,7 +11,8 @@
     "build:web": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts && tsx test-browser.ts",
-    "test:unit": "vitest run --config vitest.config.ts"
+    "test:unit": "vitest run --config vitest.config.ts",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
     "@beans/blobatar": "file:../packages/beans-blobatar",

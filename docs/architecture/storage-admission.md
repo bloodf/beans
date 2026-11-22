@@ -17,3 +17,46 @@ Configured absolute macOS `/var/...` homes support only the verified system `/va
 ## Store layout
 
 `crates/cli/src/local_store/` is one `LocalStore` over one SQLite file, split by subject: `tasks` (execution authority, all writes through `safety`), `messages` (the transcript), `state` (the account projection and codemode values), `outbox` (relay uploads and roster baselines), `search` (the exact-search projection), and `vectors` (semantic search). Each holds only logic. Every statement is a file under `sql/<area>/<name>.sql`, embedded with `sql!` at build time, and `tests::sql` checks each one against the schema. `sql/schema/core.sql` creates the account tables on every open. Columns added after a table shipped are `schema/add_*.sql` entries in `ADDED_COLUMNS`, applied when `schema/has_column.sql` finds them missing. The derived search tables and their triggers are `schema/search.sql`; a new `SEARCH_INDEX_VERSION` drops and rebuilds them (`schema/search_drop.sql`), so they never need a migration. Image descriptions cost tokens to make, so they live with the account tables and survive a rebuild. `schema/clear.sql` is what forgetting the account deletes.
+
+## Retention dry-run
+
+`LocalStore::retention_dry_run` (`crates/cli/src/retention.rs`) reads one exact chat and returns a typed local
+transcript plan. `RetentionPolicy` defaults to `Disabled`. An explicit `Before`
+cutoff uses Unix seconds and excludes the boundary. Only complete, unqueued rows
+older than that cutoff qualify; a later promotion also prevents selection.
+Active or unknown chat admission returns no candidates. `OwnedAndIdle` describes
+only the caller's snapshot and grants no execution authority. No runtime, API or
+sweeper calls this planner, and no retention settings are persisted.
+
+Every plan carries `InventoryIncomplete`. Candidate IDs describe local display
+history only. There is no deletion executor or deletion receipt. A missing chat
+returns an empty local list and does not prove absence on another Device or the
+relay. The planner does not claim data was deleted everywhere.
+
+The retention inventory is deliberately unresolved outside local message rows:
+
+| Store | Current retention boundary |
+| --- | --- |
+| SQLite messages, compactions and chat usage | Only message IDs are planned; compactions and usage remain untouched. |
+| `files/`, inline image JSON and workspace attachment copies | Shared references and ownership need reconciliation; no file deletion is planned. |
+| Bot `MEMORY.md`, diary and embeddings | Derived text can combine chats; no age-based removal is planned. |
+| Memory service deliveries, remote documents and banks | Existing revision/epoch deletion fences and uncertain deliveries remain authoritative; no remote request is made. |
+| Relay chat/file blobs, group deletes and local outbox | Existing group-delete propagation is separate; this planner queues nothing and cannot attest relay or paired-Device removal. |
+| Task/effect receipts, replay fences and tombstones | Preserved. Display-history deletion never authorizes stale task replay or reissue of unknown effects. |
+| Managed policy receipts and policy history | Preserved by their existing storage boundaries. |
+| SQLite WAL/SHM, backups, snapshots and exported copies | Residual copies; SQL deletion would not constitute secure erasure. |
+
+The issue 109 safety contract remains a prerequisite for any executor. It requires
+account-lifetime minimal `(account_epoch, task_id, replay-denial marker)`
+tombstones without TTL, preserving unresolved started/unknown/needs-review
+records. Explicitly resolved details have a separate 30-day retention rule.
+These structural identifiers reveal task linkage and survive display-history
+removal until account forget closes the epoch. They carry no tool arguments or
+result text. The planner neither implements nor relaxes that contract.
+
+Any future irreversible operation must confirm the exact account epoch, chat,
+cutoff, selected IDs, dependent stores and current plan revision, then revalidate
+ownership and inactive turns under the admission fence. A preview or generic
+confirmation cannot authorize it. Unknown store ownership, unresolved effects or
+incomplete inventory must block execution. Account teardown remains a separate
+operation. This dry-run supplies no such confirmation or authority.

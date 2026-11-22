@@ -47,9 +47,13 @@ jobs:
           SCOPE: ${{ inputs.scope }}
           GH_TOKEN: ${{ github.token }}
           BEANS_UPDATE_PRIVATE_KEY: ${{ secrets.BEANS_UPDATE_PRIVATE_KEY }}
+          # Approved public mobile signer pins (#275), a JSON profile map; unused by server scope.
+          BEANS_PUBLIC_TRUST_POLICY: ${{ vars.BEANS_PUBLIC_TRUST_POLICY }}
         run: |
           set -euo pipefail
-          pnpm exec tsx scripts/release-github.ts check "$TAG" "$SCOPE"
+          trust=()
+          if [[ "$SCOPE" == all ]]; then printf '%s' "$BEANS_PUBLIC_TRUST_POLICY" > "$RUNNER_TEMP/public-trust.json"; trust=(--public-trust-policy "$RUNNER_TEMP/public-trust.json"); fi
+          pnpm exec tsx scripts/release-github.ts check "$TAG" "$SCOPE" "${trust[@]}"
           gh api "repos/bloodf/beans/releases/tags/$TAG" > "$RUNNER_TEMP/release.json"
           node --import tsx --input-type=module -e 'const r = JSON.parse(await (await import("node:fs/promises")).readFile(process.argv[1], "utf8")); if (r.draft || r.prerelease || r.tag_name !== process.env.TAG) throw new Error("Only the exact published stable release can be finalized")' "$RUNNER_TEMP/release.json"
           revision=$(git rev-parse HEAD)
@@ -341,7 +345,12 @@ jobs:
         env:
           PROFILE: ${{ matrix.profile }}
           REVISION: ${{ needs.prepare.outputs.revision }}
-        run: pnpm exec tsx scripts/release-eas.ts build "$PROFILE" "$REVISION" dist/mobile-assets
+          BEANS_PUBLIC_TRUST_POLICY: ${{ vars.BEANS_PUBLIC_TRUST_POLICY }}
+        # The public trust policy and the inspection tools are admitted before any EAS work (#275).
+        run: |
+          set -euo pipefail
+          printf '%s' "$BEANS_PUBLIC_TRUST_POLICY" > "$RUNNER_TEMP/public-trust.json"
+          pnpm exec tsx scripts/release-eas.ts build "$PROFILE" "$REVISION" dist/mobile-assets --public-trust-policy "$RUNNER_TEMP/public-trust.json"
       - uses: actions/upload-artifact@v7
         with:
           name: mobile-${{ matrix.profile }}
@@ -389,4 +398,9 @@ jobs:
           REVISION: ${{ needs.prepare.outputs.revision }}
           BEANS_UPDATE_PRIVATE_KEY: ${{ secrets.BEANS_UPDATE_PRIVATE_KEY }}
           GH_TOKEN: ${{ github.token }}
-        run: pnpm exec tsx scripts/release-github.ts publish "$TAG" "$REVISION" dist/release-assets "$SCOPE"
+          BEANS_PUBLIC_TRUST_POLICY: ${{ vars.BEANS_PUBLIC_TRUST_POLICY }}
+        run: |
+          set -euo pipefail
+          trust=()
+          if [[ "$SCOPE" == all ]]; then printf '%s' "$BEANS_PUBLIC_TRUST_POLICY" > "$RUNNER_TEMP/public-trust.json"; trust=(--public-trust-policy "$RUNNER_TEMP/public-trust.json"); fi
+          pnpm exec tsx scripts/release-github.ts publish "$TAG" "$REVISION" dist/release-assets "$SCOPE" "${trust[@]}"

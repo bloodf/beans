@@ -205,7 +205,7 @@ jobs:
       - name: Require native Apple metadata tools
         run: test -x /usr/bin/plutil && command -v zip && command -v unzip
       - name: Verify generated native release metadata and refusals
-        run: pnpm exec vitest run --config vitest.config.ts scripts/release-native-identity.test.ts
+        run: pnpm exec vitest run --config vitest.config.ts scripts/release-native-identity.test.ts scripts/release-trust.test.ts
       # The markdown crate's static library, xcframework, and Swift bindings, as `pnpm run dev`
       # builds them into macos/Libraries and macos/Sources/BeansMarkdown.
       - name: Build the markdown crate for Swift

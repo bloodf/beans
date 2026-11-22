@@ -25,15 +25,17 @@ Server CI requires only `BEANS_UPDATE_PRIVATE_KEY`, matching the committed publi
 
 ### Source interfaces
 
-`buildReleaseManifest(tag, revision, directory, scope = "server")` and `writeReleaseManifest(tag, revision, directory, scope = "server")` take `ReleaseScope = "server" | "all"`; `coreVersion` and `releaseProtocol` remain exported. The manifest builder checks inventory and CLI checksum consistency without signing; the writer signs the exact resulting bytes. With staged assets and the signing key supplied securely to the signing commands:
+`buildReleaseManifest(tag, revision, directory, scope = "server", verify?)` and `writeReleaseManifest(tag, revision, directory, scope = "server", verify?)` take `ReleaseScope = "server" | "all"` and, for `all`, the mobile binary verifier of [Mobile release trust](architecture/mobile-release-trust.md); `coreVersion` and `releaseProtocol` remain exported. The manifest builder checks inventory and CLI checksum consistency without signing; the writer signs the exact resulting bytes. With staged assets and the signing key supplied securely to the signing commands:
 
 ```text
-pnpm exec tsx scripts/release-github.ts check <tag> [server|all]
+pnpm exec tsx scripts/release-github.ts check <tag> [server|all] [--public-trust-policy <file>]
 pnpm exec tsx scripts/release-github.ts collect <source> <dir> [server|all]
 pnpm exec tsx scripts/release-github.ts desktop <inventory> <dir>
-pnpm exec tsx scripts/release-github.ts manifest <tag> <revision> <dir> [server|all]
-pnpm exec tsx scripts/release-github.ts publish <tag> <revision> <dir> [server|all]
+pnpm exec tsx scripts/release-github.ts manifest <tag> <revision> <dir> [server|all] [--public-trust-policy <file>]
+pnpm exec tsx scripts/release-github.ts publish <tag> <revision> <dir> [server|all] [--public-trust-policy <file>]
 ```
+
+`all` scope requires `--public-trust-policy` and, until Apple authorization exists, refuses at the IPA gate.
 
 `collect` validates against the named distribution inventory; desktop staging reads the build's explicit asset inventory. `publish` requires GitHub CLI authentication with release-write access and rechecks the published release and exact tag revision. Do not finalize uncommitted or different-source builds by supplying the tag's revision string.
 

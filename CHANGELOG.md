@@ -6,6 +6,7 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 
 ## [Unreleased]
 
+- Mobile release binaries are staged and published only after native identity and an explicitly approved public signer policy (`--public-trust-policy`) pass: exact APK signer sets and the AAB upload signer are pinned, policy and tools are admitted before any EAS work, and every binary of an all-platform manifest is re-verified. IPA and therefore all-platform publication stay refused until Apple authorization exists; server releases are unchanged. Android-tool release fixtures are skipped with a reason when the SDK is missing and required in CI.
 - Full access: a switch in Auto-review settings, on every Device, that lets bots run every command, file change, plugin action, and use of a secret at once, with no review and no question, in routines too. Turning it on asks first. Secret values still never reach a model, and a bot's permissions and Pause still hold.
 - Writing or editing a file outside a bot's working folder now goes through Auto-review, as a shell command does.
 - Screenshots from a plugin that was just given a secret, or whose page shows one, are withheld from the model until the page no longer shows it; code a bot writes to read your secrets asks before it runs; a harmless-looking file that is a link to a key goes to Auto-review; and with `BEANS_SHELL` set to a shell other than bash or sh, every command does.

@@ -132,6 +132,20 @@ impl RequestOptions {
         }
     }
 
+    /// Gives the hooks the body, then keeps the explicit output cap the adapter put in `field`
+    /// (`max_tokens` or `max_output_tokens`): a hook may lower it, but raising, removing or
+    /// retyping it refuses the request. A body with no cap has nothing to keep.
+    pub fn before_payload_with_output_cap(&self, body: &mut Value, field: &str) -> Result<(), String> {
+        let cap = body.get(field).and_then(Value::as_u64);
+        self.before_payload(body);
+        match cap {
+            Some(cap) if !body.get(field).and_then(Value::as_u64).is_some_and(|tokens| tokens <= cap) => {
+                Err("Request payload exceeds or removes the effective output cap.".into())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Applies the options to a request: the affinity header, the extra headers, the timeout.
     pub fn apply_to(&self, mut request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(session_id) = &self.session_id {
@@ -180,6 +194,43 @@ pub struct RequestOptionsPatch {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// Sets the output-cap field the test names to a fixed value.
+    struct Override(Value);
+
+    #[async_trait]
+    impl RequestHooks for Override {
+        fn before_payload(&self, payload: &mut Value) {
+            for field in ["max_tokens", "max_output_tokens"] {
+                if payload.get(field).is_some() || payload.get("model").is_some() {
+                    payload[field] = self.0.clone();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn payload_hooks_cannot_raise_remove_or_retype_an_output_cap() {
+        for field in ["max_tokens", "max_output_tokens"] {
+            for replacement in [serde_json::json!(4096), Value::Null, serde_json::json!("2048")] {
+                let options = RequestOptions::default().with_hooks(Arc::new(Override(replacement)));
+                let mut body = serde_json::json!({(field): 2048});
+                assert_eq!(options.before_payload_with_output_cap(&mut body, field), Err("Request payload exceeds or removes the effective output cap.".into()));
+            }
+            let options = RequestOptions::default().with_hooks(Arc::new(Override(serde_json::json!(1024))));
+            let mut body = serde_json::json!({(field): 2048});
+            assert!(options.before_payload_with_output_cap(&mut body, field).is_ok());
+            assert_eq!(body[field], 1024);
+            // Without an adapter cap there is nothing to keep: a hook may add one.
+            let mut uncapped = serde_json::json!({"model": "fixture"});
+            assert!(options.before_payload_with_output_cap(&mut uncapped, field).is_ok());
+            assert_eq!(uncapped[field], 1024);
+            // No hooks: the body is unchanged and accepted.
+            let mut plain = serde_json::json!({(field): 2048});
+            assert!(RequestOptions::default().before_payload_with_output_cap(&mut plain, field).is_ok());
+            assert_eq!(plain[field], 2048);
+        }
+    }
 
     struct Spy(Mutex<Vec<String>>);
 

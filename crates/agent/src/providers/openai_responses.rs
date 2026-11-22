@@ -165,7 +165,10 @@ impl Provider for OpenAiResponsesProvider {
         }
         let mut body = self.body(&request);
         let options = request.options.clone();
-        options.before_payload(&mut body);
+        if let Err(message) = options.before_payload_with_output_cap(&mut body, "max_output_tokens") {
+            let _ = tx.send(AssistantEvent::Error { message, aborted: false }).await;
+            return channel_stream(rx);
+        }
         let api_key = options.api_key(&self.api_key).await;
         let url = format!("{}/responses", self.base_url);
         let client = self.client.clone();
@@ -222,6 +225,30 @@ mod tests {
             cache_points: Vec::new(),
             max_tokens: Some(200),
             options: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn payload_hooks_cannot_raise_or_remove_the_output_cap() {
+        use futures::StreamExt;
+        struct Override(Value);
+        #[async_trait::async_trait]
+        impl crate::request::RequestHooks for Override {
+            fn before_payload(&self, payload: &mut Value) {
+                payload["max_output_tokens"] = self.0.clone();
+            }
+        }
+        for replacement in [json!(4096), Value::Null, json!("2048")] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let provider = (|base: &str| OpenAiResponsesProvider::new("custom:fixture", base, "k", "fixture"))(&format!("http://{}/v1", listener.local_addr().unwrap()));
+            let mut request = request();
+            request.max_tokens = Some(2048);
+            request.options = request.options.with_hooks(std::sync::Arc::new(Override(replacement))).with_timeout(std::time::Duration::from_millis(100));
+            let events: Vec<_> = provider.stream(request, CancellationToken::new()).await.collect().await;
+            assert!(matches!(&events[..], [AssistantEvent::Error { message, aborted: false }] if message.contains("effective output cap")), "{events:?}");
+            // Refused before any request reaches the service.
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
         }
     }
 

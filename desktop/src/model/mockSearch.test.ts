@@ -19,6 +19,7 @@ test("the catalog has a suggestion, installed models, and one that does not fit"
   expect(listing.models.find((model) => model.id === listing.recommended?.image)?.installed).toBe(false);
   expect(listing.models.some((model) => model.fit?.fits === false)).toBe(true);
   expect(listing.models.filter((model) => model.installed).map((model) => model.id)).toEqual(["multilingual-e5-small", "clip-vit-b32"]);
+  expect(listing.disk_bytes).toBe(135_000_000 + 605_000_000);
   expect(downloadOrder(listing.models, listing.recommended?.image)[0]?.id).toBe("siglip-base");
   const preview = mockModelPreview(listing, "siglip-base");
   expect(preview).toMatchObject({ name: "SigLIP Base", hub: "Hugging Face", total_bytes: 813_000_000 });

@@ -86,12 +86,12 @@ All go to the Runner named by `runner_id` (through a signed request when it is a
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `schedule_models.list` | `runner_id` | `models` (each catalog entry with `pinned`, `bytes`, `needs_onnx_runtime`, `downloads` `[{role, url, path, bytes, sha256}]`, `installed`, `selected`, `fit` `{fits, reasons, memory_bytes}`), `recommended` `{text, image}`, `machine` `{memory_bytes, free_disk_bytes, cores, os, arch, onnx_runtime}`, `needs` `{multilingual, images}`, `mode`, `selected`, `max_bytes`, `runs_models`, `onnx_runtime`, `note` |
+| `schedule_models.list` | `runner_id` | `models` (each catalog entry with `pinned`, `bytes`, `needs_onnx_runtime`, `downloads` `[{role, url, path, bytes, sha256}]`, `installed`, `installed_bytes` (what an install takes on disk, its runtime copy included), `selected`, `fit` `{fits, reasons, memory_bytes}`), `disk_bytes` (all installs), `recommended` `{text, image}`, `machine` `{memory_bytes, free_disk_bytes, cores, os, arch, onnx_runtime}`, `needs` `{multilingual, images}`, `mode`, `selected`, `max_bytes`, `runs_models`, `onnx_runtime`, `note` |
 | `schedule_models.status` | `runner_id` | `mode`, `selected`, `installed` (ids), `state` (`ready`, `loading`, `not_loaded`, `failed`, `none_selected`, `runtime_unavailable`), `error` |
 | `schedule_models.preview` | `runner_id`, `model_id`, `source` (`{kind:"download"}` or `{kind:"supplied", files:{weights|model, image_model?, tokenizer}}` with absolute paths), `runtime?` (absolute path, ONNX and image models; default the shipped one) | `preview_token`, `preview_digest`, `expires_in_seconds`, `runner_id`, `model_id`, `name`, `license`, `pinned`, `source`, `hub` (null for supplied files), `runtime_download` (`{version, bytes, from}` when the runtime downloads with the model), `total_bytes`, `assets` |
 | `schedule_models.apply` | `runner_id`, `preview_token`, `preview_digest`, `confirm` | `installed`, `model_id`, `state` |
 | `schedule_models.select` | `runner_id`, `mode`, `model_id` (required for `local` and `local_then_reader`) | `mode`, `selected`, `state` |
-| `schedule_models.remove` | `runner_id`, `model_id` | `removed`, `mode`, `selected` |
+| `schedule_models.remove` | `runner_id`, `model_id` | `removed`, `mode`, `selected`; search drops the model at once and reports its choice not loaded. The desktop's Settings › Search lists installed models with their size, what uses them and a Remove action that confirms first |
 | `schedule_models.progress` | `runner_id` | `installing`: `{model_id, done_bytes, total_bytes}` or null |
 | `schedule_models.cancel` | `runner_id`, `model_id?` | `cancelled` (the apply answers `install_cancelled`) |
 

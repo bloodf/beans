@@ -1679,6 +1679,12 @@ export class AppStore {
     return this.request<WireModelPreview>("schedule_models.preview", { runner_id: runnerID, model_id: modelID, source: { kind: "download" } });
   }
 
+  /** Removes an installed model from a Runner's disk; search or schedules using it stop using it. */
+  async removeLocalModel(runnerID: string, modelID: string): Promise<void> {
+    if (this.isMock) throw new RequestError(L("The demo does not remove models."));
+    await this.request("schedule_models.remove", { runner_id: runnerID, model_id: modelID });
+  }
+
   /** The download under way on a Runner, for a progress line. */
   async localModelProgress(runnerID: string): Promise<WireInstallProgress> {
     if (this.isMock) return { installing: null };

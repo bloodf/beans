@@ -68,3 +68,18 @@ export function progressText(progress: WireInstallProgress | null, modelID: stri
   const percent = Math.min(100, Math.floor((installing.done_bytes / installing.total_bytes) * 100));
   return L("Downloading… %d%% (%@ of %@)", percent, Format.megabytes(installing.done_bytes), Format.megabytes(installing.total_bytes));
 }
+
+/** An installed model's row: its kind, what it takes on disk, and what uses it. */
+export function installedSummary(model: WireLocalModel, usedBy: string[]): string {
+  const kind = model.kind === "image" ? L("Pictures") : L("Text");
+  const size = model.installed_bytes ? [Format.megabytes(model.installed_bytes)] : [];
+  const uses = usedBy.length > 0 ? [L("Used by %@", usedBy.join(", "))] : [];
+  return [kind, ...size, ...uses].join(" · ");
+}
+
+/** What removing `model` will stop, for the confirmation. */
+export function removalWarning(model: WireLocalModel, usedBy: string[], runner: string): string {
+  const freed = model.installed_bytes ? L("It frees %@ on %@.", Format.megabytes(model.installed_bytes), runner) : "";
+  const stops = usedBy.length > 0 ? L("%@ stops using it until you choose another model.", usedBy.join(", ")) : "";
+  return [freed, stops].filter(Boolean).join(" ");
+}

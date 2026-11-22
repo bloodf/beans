@@ -43,13 +43,14 @@ export async function checkSearchSuggestion(): Promise<Record<string, string>> {
     searchIndexStatus: store.searchIndexStatus, localModels: store.localModels,
     previewLocalModel: store.previewLocalModel, installLocalModel: store.installLocalModel,
     localModelProgress: store.localModelProgress, cancelLocalModelInstall: store.cancelLocalModelInstall,
+    removeLocalModel: store.removeLocalModel,
   };
   store.searchIndexStatus = async () => status;
   store.localModels = async () => { calls.push("list"); return listing; };
   store.previewLocalModel = async (_runner, id) => { calls.push(`preview ${id}`); return preview; };
   store.installLocalModel = async (_runner, approved) => {
     calls.push(`install ${approved.preview_token}`);
-    listing = { ...listing, models: listing.models.map((m) => (m.id === "best" ? { ...m, installed: true } : m)) };
+    listing = { ...listing, disk_bytes: 135_000_000, models: listing.models.map((m) => (m.id === "best" ? { ...m, installed: true, installed_bytes: 135_000_000 } : m)) };
   };
   const device = { id: "runner", name: "Studio", os: "linux", plugins: [] } as unknown as Device;
   const dispose = render(() => (<><SearchSettings device={device} /><SheetHost /></>), root);
@@ -82,7 +83,7 @@ export async function checkSearchSuggestion(): Promise<Record<string, string>> {
     dialog()!.querySelector<HTMLElement>(".alert")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await settle();
     assert(calls.includes("install token"), `Approving did not install: ${calls.join(", ")}`);
-    assert(!row("Best model") && !root.textContent?.includes("Suggested for Studio"), "An installed suggestion is still offered");
+    assert(!download("Best model") && !root.textContent?.includes("Suggested for Studio"), "An installed suggestion is still offered");
 
     // A download under way shows how far it has come and can be cancelled (#581).
     let stop: ((error: Error) => void) | undefined;
@@ -103,7 +104,23 @@ export async function checkSearchSuggestion(): Promise<Record<string, string>> {
     assert(calls.includes("cancel small"), `Cancel did not reach the Runner: ${calls.join(", ")}`);
     assert(!dialog(), "A cancelled download is reported as a failure");
     assert(!row("Small model")?.textContent?.includes("Downloading"), "The row still says it is downloading");
-    return { order: order.join(" › "), approval: "hub and runtime named; cancel installs nothing; approve installs once", download: "progress shown; cancel stops it quietly" };
+
+    // Installed models list what they take and can be removed, after a confirmation (#582).
+    assert(root.textContent?.includes("Local models use 135 MB on Studio."), "The disk used by models is not shown");
+    const installedRow = () => rows().find((r) => r.dataset.label === "Best model");
+    assert(installedRow()?.textContent?.includes("Text · 135 MB"), `The installed model's row: ${installedRow()?.textContent}`);
+    store.removeLocalModel = async (_runner, id) => {
+      calls.push(`remove ${id}`);
+      listing = { ...listing, disk_bytes: 0, models: listing.models.map((m) => (m.id === id ? { ...m, installed: false, installed_bytes: null } : m)) };
+    };
+    [...(installedRow()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((b) => b.textContent?.includes("Remove"))!.click();
+    await settle();
+    assert(dialog()?.textContent?.includes("It frees 135 MB on Studio."), `The removal does not say what it frees: ${dialog()?.textContent}`);
+    dialog()!.querySelector<HTMLElement>(".alert")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    assert(calls.includes("remove best"), `Removing did not reach the Runner: ${calls.join(", ")}`);
+    assert(!root.textContent?.includes("Installed Models"), "The removed model is still listed");
+    return { order: order.join(" › "), approval: "hub and runtime named; cancel installs nothing; approve installs once", download: "progress shown; cancel stops it quietly", remove: "size shown; removal confirmed and applied" };
   } finally {
     Object.assign(store, saved);
     dispose();

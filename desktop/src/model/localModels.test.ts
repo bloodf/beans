@@ -1,7 +1,7 @@
 // The Search pane's model list: the suggestion first, what fits next, and each row's words.
 
 import { expect, test } from "vitest";
-import { canDownload, downloadOrder, modelSummary, modelTooltip, previewSummary, progressText, reasonText } from "./localModels";
+import { canDownload, downloadOrder, installedSummary, modelSummary, modelTooltip, previewSummary, progressText, reasonText, removalWarning } from "./localModels";
 import type { WireLocalModel, WireModelPreview } from "./wire";
 
 function model(id: string, fields: Partial<WireLocalModel> = {}): WireLocalModel {
@@ -74,4 +74,16 @@ test("a download under way reads as its percent and bytes", () => {
   expect(progressText(progress("other", 1, 2), "m"), "another model's download").toBeUndefined();
   expect(progressText({ installing: null }, "m")).toBeUndefined();
   expect(progressText(null, "m")).toBeUndefined();
+});
+
+// Issue #582: installed models say what they take on disk and what uses them, and removing one
+// says what it frees and what stops.
+test("installed models read as their kind, size and use", () => {
+  const text = model("e5", { installed: true, installed_bytes: 135_000_000 });
+  const clip = model("clip", { kind: "image", installed: true, installed_bytes: 605_000_000 });
+  expect(installedSummary(text, ["Search"])).toBe("Text · 135 MB · Used by Search");
+  expect(installedSummary(clip, [])).toBe("Pictures · 605 MB");
+  expect(installedSummary(model("old", { installed: true }), [])).toBe("Text");
+  expect(removalWarning(text, ["Search"], "Studio")).toBe("It frees 135 MB on Studio. Search stops using it until you choose another model.");
+  expect(removalWarning(clip, [], "Studio")).toBe("It frees 605 MB on Studio.");
 });

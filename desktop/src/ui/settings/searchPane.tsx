@@ -9,7 +9,8 @@
 
 import { createEffect, createSignal, For, onSettled, Show } from "solid-js";
 import { L } from "../../l10n";
-import { canDownload, downloadOrder, modelSummary, modelTooltip, previewSummary, progressText } from "../../model/localModels";
+import { canDownload, downloadOrder, installedSummary, modelSummary, modelTooltip, previewSummary, progressText, removalWarning } from "../../model/localModels";
+import * as Format from "../../model/format";
 import { providerName, withCustomModels, type Device, type ProviderKind } from "../../model/models";
 import { errorText, store } from "../../model/store";
 import type { WireInstallProgress, WireLocalModel, WireLocalModels, WireSearchIndexStatus, WireSearchRole, WireTextSource } from "../../model/wire";
@@ -66,6 +67,7 @@ export function SearchSettings(props: { device: Device }) {
   const [status, setStatus] = createSignal<WireSearchIndexStatus | null>(null);
   const [catalog, setCatalog] = createSignal<WireLocalModel[]>([]);
   const [recommended, setRecommended] = createSignal<WireLocalModels["recommended"]>(undefined);
+  const [diskBytes, setDiskBytes] = createSignal(0);
   const [failure, setFailure] = createSignal<string | null>(null);
   /** The model being downloaded, whose row shows a spinner. */
   const [installing, setInstalling] = createSignal<string | null>(null);
@@ -81,6 +83,7 @@ export function SearchSettings(props: { device: Device }) {
       setStatus(next);
       setCatalog(models.models);
       setRecommended(models.recommended);
+      setDiskBytes(models.disk_bytes ?? 0);
       setFailure(null);
     } catch (error) {
       if (load === loads) setFailure(errorText(error));
@@ -149,6 +152,34 @@ export function SearchSettings(props: { device: Device }) {
       }
     } finally {
       setInstalling(null);
+    }
+  };
+  /** What uses an installed model on this Runner: search by meaning, finding pictures. */
+  const usedBy = (model: WireLocalModel) => {
+    const current = status();
+    if (!current) return [];
+    return [
+      ...(current.text.choice?.kind === "local" && current.text.choice.model_id === model.id ? [L("Search")] : []),
+      ...(current.image.choice === model.id ? [L("Pictures")] : []),
+    ];
+  };
+  const [removing, setRemoving] = createSignal<string | null>(null);
+  const remove = async (model: WireLocalModel) => {
+    const answer = await alert({
+      message: L("Remove “%@”?", model.name),
+      informative: removalWarning(model, usedBy(model), props.device.name),
+      buttons: [{ title: L("Remove") }, { title: L("Cancel") }],
+      style: "warning",
+    });
+    if (answer !== 0) return;
+    setRemoving(model.id);
+    try {
+      await store.removeLocalModel(props.device.id, model.id);
+      await load();
+    } catch (error) {
+      void alert({ message: L("Couldn't remove “%@”", model.name), informative: errorText(error) });
+    } finally {
+      setRemoving(null);
     }
   };
   const cancelInstall = (model: WireLocalModel) => {
@@ -258,6 +289,23 @@ export function SearchSettings(props: { device: Device }) {
               <NoteRow text={L("This Runner's build cannot run local models.")} tint="var(--red)" />
             </Show>
           </Section>
+          <Show when={catalog().some((model) => model.installed)}>
+            <Section title={L("Installed Models")} style="heading">
+              <For each={catalog().filter((model) => model.installed)} keyed={(model) => model.id}>
+                {(model) => (
+                  <ActionRow
+                    label={model().name}
+                    value={installedSummary(model(), usedBy(model()))}
+                    tint="var(--label-2)"
+                    actionTitle={L("Remove…")}
+                    busy={removing() === model().id}
+                    onAction={() => void remove(model())}
+                  />
+                )}
+              </For>
+              <NoteRow text={L("Local models use %@ on %@.", Format.megabytes(diskBytes()), props.device.name)} tint="var(--label-2)" />
+            </Section>
+          </Show>
         </>
       )}
     </Show>

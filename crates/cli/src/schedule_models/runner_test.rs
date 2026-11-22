@@ -501,11 +501,22 @@ async fn an_installed_model_embeds_messages_for_semantic_search() {
     assert_eq!(found["related"][0]["message_id"], "first");
     assert!((found["related"][0]["score"].as_f64().unwrap() - 1.0).abs() < 0.02);
 
+    let list = call(app, "schedule_models.list", json!({})).await.unwrap();
+    let listed = list["models"].as_array().unwrap().iter().find(|m| m["id"] == "fixture-static").unwrap().clone();
+    let (weights_bytes, tokenizer_bytes) = (std::fs::metadata(&weights).unwrap().len(), std::fs::metadata(&tokenizer).unwrap().len());
+    assert_eq!(listed["installed_bytes"], weights_bytes + tokenizer_bytes, "what the install takes on disk (#582)");
+    assert_eq!(list["disk_bytes"], weights_bytes + tokenizer_bytes);
+
+    // Removing the model search uses leaves search without it at once, with no restart (#582).
     call(app, "schedule_models.remove", json!({ "model_id": "fixture-static" })).await.unwrap();
-    app.search_index.clear();
     let gone = crate::api::dispatch(app, "chats.search_semantic", json!({ "query": "a b" })).await.unwrap();
     assert_ne!(gone["state"], "ready");
     assert!(gone["related"].as_array().unwrap().is_empty());
+    let status = crate::search_index::serve_as(app, "search_index.status", json!({}), &me).await.unwrap();
+    assert_ne!(status["text"]["state"], "ready", "{status}");
+    let list = call(app, "schedule_models.list", json!({})).await.unwrap();
+    assert_eq!(list["disk_bytes"], 0);
+    assert!(list["models"].as_array().unwrap().iter().all(|m| m["installed_bytes"].is_null()));
 }
 
 /// The real ONNX Runtime (`BEANS_ONNXRUNTIME`, which `scripts/test-rust.ts` fetches and pins): an

@@ -94,6 +94,11 @@ struct Install {
 }
 
 impl Install {
+    /// The bytes its files take.
+    fn bytes(&self) -> u64 {
+        self.assets.assets.iter().map(|(_, asset)| asset.bytes).sum()
+    }
+
     /// What identifies these exact files.
     fn fingerprint(&self) -> String {
         self.assets.assets.iter().map(|(_, a)| a.sha256.as_str()).collect::<Vec<_>>().join(":")
@@ -317,6 +322,8 @@ fn list(app: &App) -> Result<Value, String> {
         .map(|(model, (_, fit))| {
             let mut listing = model.listing(&hub);
             listing["installed"] = saved.installs.contains_key(&model.id).into();
+            // What the install takes on disk, its runtime copy included (#582).
+            listing["installed_bytes"] = saved.installs.get(&model.id).map(Install::bytes).into();
             listing["selected"] = (saved.selected.as_deref() == Some(model.id.as_str())).into();
             listing["fit"] = json!(fit);
             listing
@@ -326,6 +333,7 @@ fn list(app: &App) -> Result<Value, String> {
         "note": catalog.note,
         "max_bytes": MAX_MODEL_BYTES,
         "models": models,
+        "disk_bytes": saved.installs.values().map(Install::bytes).sum::<u64>(),
         "machine": machine,
         "needs": needs,
         "recommended": recommended,
@@ -727,6 +735,8 @@ async fn remove(app: &Arc<App>, authority: &Authority, params: Value) -> Result<
     )?;
     #[cfg(feature = "embedding-local")]
     app.schedule_models.models.reset();
+    // Search may have the model loaded; it loads its choice again, or reports it gone.
+    app.search_index.forget_models();
     remove_files(&install.assets);
     Ok(json!({ "removed": true, "mode": saved.mode, "selected": saved.selected }))
 }

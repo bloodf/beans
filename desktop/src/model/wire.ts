@@ -408,6 +408,8 @@ export interface WireLocalModel {
   bytes: number;
   /** How the model suits the Runner's computer. Absent from Runners older than suggestions. */
   fit?: WireModelFit;
+  /** What an installed model takes on disk, its runtime copy included. */
+  installed_bytes?: number | null;
 }
 
 /** One model against the Runner's computer. */
@@ -434,6 +436,8 @@ export interface WireMachine {
 export interface WireLocalModels {
   models: WireLocalModel[];
   max_bytes: number;
+  /** What every installed model takes on this Runner's disk. */
+  disk_bytes?: number;
   /** The model to suggest per kind, for this computer and these chats. Nothing downloads until
    * the user approves a preview. */
   recommended?: { text: string | null; image: string | null };

@@ -93,6 +93,7 @@ describe("demo workspace", () => {
     const body = await page.innerText("body");
     expect(body).toContain("37 pictures indexed");
     expect(body).toContain("SigLIP Base");
+    expect(body).toContain("Local models use 740 MB on Workbench.");
     expect(body).not.toContain("not running");
     expect(errors).toEqual([]);
     await page.close();

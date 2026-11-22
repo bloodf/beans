@@ -126,6 +126,12 @@ impl Runtime {
         self.backoff.lock().clear();
     }
 
+    /// Drops the loaded models only, keeping settings: after a model is removed from disk.
+    pub fn forget_models(&self) {
+        self.text.reset();
+        self.image.reset();
+    }
+
     /// Runs one pass of `queue` unless it is waiting out a failure, and records how it went.
     async fn attempt(&self, queue: Queue, pass: impl std::future::Future<Output = Result<bool, String>>) -> bool {
         if self.backoff.lock().get(&queue).is_some_and(|(until, _)| tokio::time::Instant::now() < *until) {

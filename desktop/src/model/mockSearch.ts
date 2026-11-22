@@ -29,7 +29,7 @@ export function mockSearchIndexStatus(choice: MockSearchChoice): WireSearchIndex
 /** The catalog as the demo Runner sees it: installed, suggested, fits, and does not fit. */
 export function mockLocalModels(choice: MockSearchChoice): WireLocalModels {
   const fits = (memory: number, reasons: string[] = []) => ({ fits: true, reasons, memory_bytes: memory });
-  return {
+  const listing: WireLocalModels = {
     max_bytes: 1_000_000_000,
     models: [
       { id: "multilingual-e5-small", name: "Multilingual E5 Small", kind: "text", languages: "About 100 languages", license: "MIT", installed: choice.text?.kind === "local", pinned: true, bytes: 135_000_000, fit: fits(420_000_000, ["multilingual", "installed"]) },
@@ -42,6 +42,10 @@ export function mockLocalModels(choice: MockSearchChoice): WireLocalModels {
     machine: { memory_bytes: 16_000_000_000, free_disk_bytes: 210_000_000_000, cores: 8, os: "linux", arch: "x86_64", onnx_runtime: true },
     needs: { multilingual: true, images: true },
   };
+  // Installed models say what they take on disk, as a Runner does.
+  listing.models = listing.models.map((model) => (model.installed ? { ...model, installed_bytes: model.bytes } : model));
+  listing.disk_bytes = listing.models.reduce((total, model) => total + (model.installed_bytes ?? 0), 0);
+  return listing;
 }
 
 /** What a download would take; the demo shows it and never installs. */

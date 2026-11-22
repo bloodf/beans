@@ -912,3 +912,75 @@ async fn live_hub_installs_the_measured_model_and_it_reads_the_held_out_messages
     assert_eq!(installed["state"], "ready", "{installed}");
     reads_the_held_out_messages(app).await;
 }
+
+/// Issue #581: an install's size bounds it, not a fixed five minutes.
+#[test]
+fn an_install_may_take_as_long_as_its_size_needs() {
+    use crate::embeddings::assets::transfer_cap;
+    assert!(transfer_cap(0) >= Duration::from_secs(600));
+    // 1 GB at 1 MB/s takes about 17 minutes; the cap leaves room for much slower links.
+    assert!(transfer_cap(1_000_000_000) > Duration::from_secs(2 * 3600), "{:?}", transfer_cap(1_000_000_000));
+}
+
+/// Issue #581: a slow download reports its bytes as they arrive and finishes however long it
+/// takes, as long as bytes keep coming; a cancel stops it and installs nothing, and the next
+/// approved download installs.
+#[tokio::test]
+async fn a_slow_download_shows_progress_and_a_cancel_installs_nothing() {
+    let scratch = runner();
+    let app = &scratch.0;
+    let files = hub_files();
+    let total: usize = files.iter().map(|(_, bytes)| bytes.len()).sum();
+    let slow = |bytes: &Vec<u8>| Serve::Slow(bytes.clone(), 512, Duration::from_millis(150));
+    let hub = MockHub::start(files.iter().map(|(name, bytes)| (name.as_str(), slow(bytes)))).await;
+    app.schedule_models.set_hub(hub.hub.clone());
+    assert_eq!(call(app, "schedule_models.progress", json!({})).await.unwrap(), json!({ "installing": null }));
+
+    let installing = tokio::spawn({
+        let app = app.clone();
+        async move { approve(&app, "fixture-static-pinned").await }
+    });
+    let mut seen = Value::Null;
+    for _ in 0..400 {
+        seen = call(app, "schedule_models.progress", json!({})).await.unwrap();
+        if seen["installing"]["done_bytes"].as_u64().is_some_and(|done| done > 0) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(seen["installing"]["model_id"], "fixture-static-pinned", "{seen}");
+    assert_eq!(seen["installing"]["total_bytes"], total);
+    assert!(seen["installing"]["done_bytes"].as_u64().unwrap() < total as u64, "{seen}");
+    assert_eq!(call(app, "schedule_models.cancel", json!({ "model_id": "other" })).await.unwrap(), json!({ "cancelled": false }));
+    assert_eq!(call(app, "schedule_models.cancel", json!({})).await.unwrap(), json!({ "cancelled": true }));
+    assert_eq!(installing.await.unwrap().unwrap_err(), "install_cancelled");
+    assert_eq!(call(app, "schedule_models.progress", json!({})).await.unwrap(), json!({ "installing": null }));
+    assert_eq!(call(app, "schedule_models.status", json!({})).await.unwrap()["installed"], json!([]));
+    fn staging(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir).map(|entries| entries.flatten().flat_map(|entry| {
+            let path = entry.path();
+            if entry.file_name().to_string_lossy().starts_with(".staging-") { vec![path] } else if path.is_dir() { staging(&path) } else { vec![] }
+        }).collect()).unwrap_or_default()
+    }
+    assert_eq!(staging(&app.config.home.join(ASSET_DIR)), Vec::<PathBuf>::new(), "nothing partial is left");
+
+    // Slower than the idle timeout in all, but never idle that long: it finishes.
+    let started = std::time::Instant::now();
+    approve(app, "fixture-static-pinned").await.unwrap();
+    assert!(started.elapsed() > crate::embeddings::assets::IDLE_TIMEOUT, "the download took {:?}", started.elapsed());
+    assert_eq!(call(app, "schedule_models.progress", json!({})).await.unwrap(), json!({ "installing": null }));
+}
+
+/// Issue #581: a download that stops sending stops after the idle timeout, installing nothing.
+#[tokio::test]
+async fn a_stalled_download_stops_after_the_idle_timeout() {
+    let scratch = runner();
+    let app = &scratch.0;
+    let files = hub_files();
+    let hub = MockHub::start(files.iter().map(|(name, bytes)| (name.as_str(), Serve::Stall(bytes.clone(), 100)))).await;
+    app.schedule_models.set_hub(hub.hub.clone());
+    let started = std::time::Instant::now();
+    assert_eq!(approve(app, "fixture-static-pinned").await.unwrap_err(), "asset_install_failed");
+    assert!(started.elapsed() < crate::embeddings::assets::IDLE_TIMEOUT * 5, "{:?}", started.elapsed());
+    assert_eq!(call(app, "schedule_models.status", json!({})).await.unwrap()["installed"], json!([]));
+}

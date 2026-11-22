@@ -93,6 +93,35 @@ impl Drop for StagingGuard {
     }
 }
 /// One installer per current account. Core invalidates it on unpair and fences profile revisions.
+/// No bytes for this long and a download stops: a stalled connection, not a slow one.
+#[cfg(not(test))]
+pub(crate) const IDLE_TIMEOUT:Duration=Duration::from_secs(60);
+/// Tests stall a download for seconds, not a minute.
+#[cfg(test)]
+pub(crate) const IDLE_TIMEOUT:Duration=Duration::from_secs(2);
+/// The slowest transfer an install still waits for, to bound it by its size (#581).
+const MIN_BYTES_PER_SEC:u64=128*1024;
+
+/// How long a whole install may take: ten minutes, plus its pinned bytes at the slowest rate
+/// an install still waits for. A 1 GB model gets about 2.5 hours; each read also stops after
+/// `IDLE_TIMEOUT` without a byte.
+pub(crate) fn transfer_cap(total_bytes:u64)->Duration {
+    Duration::from_secs(600+total_bytes/MIN_BYTES_PER_SEC)
+}
+
+/// An install's bytes so far and in all, for the apps to show while they download.
+#[derive(Debug,Default)]
+pub struct InstallProgress {pub done:std::sync::atomic::AtomicU64,pub total:u64}
+impl InstallProgress {
+    pub fn done(&self)->u64 {self.done.load(std::sync::atomic::Ordering::Relaxed)}
+    fn add(&self,bytes:u64) {self.done.fetch_add(bytes,std::sync::atomic::Ordering::Relaxed);}
+}
+
+/// What an install moves: each asset's pinned bytes, and a downloaded archive's own size.
+pub(crate) fn plan_bytes(plan:&AssetPlan)->u64 {
+    plan.assets.iter().map(|a| match &a.source {AssetSource::Archive{bytes,..}=>a.bytes+*bytes,_=>a.bytes}).sum()
+}
+
 pub struct AssetInstaller {
     root:PathBuf,
     allowed_origins:BTreeSet<String>,
@@ -119,7 +148,7 @@ impl AssetInstaller {
             })
         };
         let client=beans_tls::client_builder().redirect(policy)
-            .connect_timeout(Duration::from_secs(10)).timeout(Duration::from_secs(300))
+            .connect_timeout(Duration::from_secs(10)).read_timeout(IDLE_TIMEOUT)
             .no_gzip().build().map_err(|_|EmbeddingError::Transport)?;
         Ok(Self{root,allowed_origins,allow_insecure_http,client,pending:Mutex::new(HashMap::new())})
     }
@@ -173,8 +202,17 @@ impl AssetInstaller {
         let bound=|kind|installed.get(kind).cloned().ok_or(EmbeddingError::InvalidInput);
         Ok(LocalBinding{runtime:bound(AssetKind::Runtime)?,model:bound(AssetKind::Model)?,tokenizer:bound(AssetKind::Tokenizer)?})
     }
+    /// The bytes an approved preview will move, for progress.
+    pub fn planned_bytes(&self,token:&str)->Option<u64> {
+        self.pending.lock().get(token).map(|pending|plan_bytes(&pending.plan))
+    }
     /// Installs an approved preview of any kinds, as `apply` does.
     pub async fn apply_assets(&self,token:&str,digest:&str,confirmed:bool,cancel:CancellationToken)->Result<InstalledAssets,EmbeddingError> {
+        self.apply_assets_with_progress(token,digest,confirmed,cancel,None).await
+    }
+    /// As `apply_assets`, counting bytes into `progress` as they arrive. A cancelled or failed
+    /// install leaves nothing behind.
+    pub async fn apply_assets_with_progress(&self,token:&str,digest:&str,confirmed:bool,cancel:CancellationToken,progress:Option<std::sync::Arc<InstallProgress>>)->Result<InstalledAssets,EmbeddingError> {
         if !confirmed {return Err(EmbeddingError::ApprovalRequired);}
         let pending={
             let mut map=self.pending.lock();
@@ -196,7 +234,7 @@ impl AssetInstaller {
         }
         let result=tokio::select! {biased;
             _=cancel.cancelled()=>Err(EmbeddingError::Cancelled),
-            r=tokio::time::timeout(Duration::from_secs(600),self.transfer(&pending.plan,&staging))=>r.map_err(|_|EmbeddingError::Timeout).and_then(|r|r),
+            r=tokio::time::timeout(transfer_cap(plan_bytes(&pending.plan)),self.transfer(&pending.plan,&staging,progress.as_deref()))=>r.map_err(|_|EmbeddingError::Timeout).and_then(|r|r),
         };
         #[cfg(unix)] if result.is_ok() {
             let directory=staging.clone();
@@ -215,7 +253,8 @@ impl AssetInstaller {
         Ok(InstalledAssets{assets:pending.plan.assets.iter()
             .map(|a|(a.kind,BoundAsset{path:destination.join(a.kind.filename()),bytes:a.bytes,sha256:a.sha256.clone()})).collect()})
     }
-    async fn transfer(&self,plan:&AssetPlan,staging:&Path)->Result<(),EmbeddingError> {
+    async fn transfer(&self,plan:&AssetPlan,staging:&Path,progress:Option<&InstallProgress>)->Result<(),EmbeddingError> {
+        let count=|bytes:usize| if let Some(progress)=progress {progress.add(bytes as u64)};
         for a in &plan.assets {
             let path=staging.join(a.kind.filename());
             let mut options=fs::OpenOptions::new();options.write(true).create_new(true);
@@ -229,12 +268,12 @@ impl AssetInstaller {
                     if !metadata.is_file() || metadata.len()!=a.bytes {return Err(EmbeddingError::AssetMismatch);}
                     let mut buffer=vec![0u8;65536];
                     loop {let n=input.read(&mut buffer).await.map_err(|_|EmbeddingError::InstallFailed)?;
-                        if n==0 {break;} write_chunk(&mut output,&mut hash,&mut size,&buffer[..n],a.bytes).await?;}
+                        if n==0 {break;} write_chunk(&mut output,&mut hash,&mut size,&buffer[..n],a.bytes).await?;count(n);}
                 },
                 AssetSource::Download{url}=>{
                     let mut response=self.get(url,a.bytes).await?;
                     while let Some(chunk)=response.chunk().await.map_err(super::api::transport_error)? {
-                        write_chunk(&mut output,&mut hash,&mut size,&chunk,a.bytes).await?;
+                        write_chunk(&mut output,&mut hash,&mut size,&chunk,a.bytes).await?;count(chunk.len());
                     }
                 }
                 AssetSource::Archive{url,bytes,sha256,member}=>{
@@ -243,13 +282,13 @@ impl AssetInstaller {
                     let (mut archive,mut archive_hash,mut archive_size)=(Vec::new(),Sha256::new(),0u64);
                     while let Some(chunk)=response.chunk().await.map_err(super::api::transport_error)? {
                         if chunk.len() as u64>bytes.saturating_sub(archive_size) {return Err(EmbeddingError::AssetMismatch);}
-                        archive_hash.update(&chunk);archive_size+=chunk.len() as u64;archive.extend_from_slice(&chunk);
+                        archive_hash.update(&chunk);archive_size+=chunk.len() as u64;archive.extend_from_slice(&chunk);count(chunk.len());
                     }
                     if archive_size!=*bytes || format!("{:x}",archive_hash.finalize())!=*sha256 {return Err(EmbeddingError::AssetMismatch);}
                     let (member,expected)=(member.clone(),a.bytes);
                     let library=tokio::task::spawn_blocking(move||super::archive::extract_member(&archive,&member,expected))
                         .await.map_err(|_|EmbeddingError::InstallFailed)?.map_err(|error|{tracing::warn!(%error,"unpacking a runtime archive");EmbeddingError::AssetMismatch})?;
-                    write_chunk(&mut output,&mut hash,&mut size,&library,a.bytes).await?;
+                    write_chunk(&mut output,&mut hash,&mut size,&library,a.bytes).await?;count(library.len());
                 }
             }
             if size!=a.bytes || format!("{:x}",hash.finalize())!=a.sha256 {return Err(EmbeddingError::AssetMismatch);}

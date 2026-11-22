@@ -442,6 +442,11 @@ export interface WireLocalModels {
   needs?: { multilingual: boolean; images: boolean };
 }
 
+/** The install under way on a Runner (`schedule_models.progress`). */
+export interface WireInstallProgress {
+  installing: { model_id: string; done_bytes: number; total_bytes: number } | null;
+}
+
 /** What an install will download, for the user to approve. */
 export interface WireModelPreview {
   preview_token: string;

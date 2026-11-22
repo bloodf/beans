@@ -4,7 +4,7 @@
 
 import { L } from "../l10n";
 import * as Format from "./format";
-import type { WireLocalModel, WireModelPreview } from "./wire";
+import type { WireInstallProgress, WireLocalModel, WireModelPreview } from "./wire";
 
 /** What keeps a model from the Runner's computer, or is worth knowing before downloading it.
  * `multilingual` and `installed` go unsaid: the languages and the menus show them; a reason
@@ -58,4 +58,13 @@ export function previewSummary(preview: WireModelPreview, runner: string): strin
   const runtime = preview.runtime_download;
   if (!runtime) return files;
   return `${files} ${L("It also downloads ONNX Runtime %@ (%@) from %@, which runs the model, checked the same way.", runtime.version, Format.megabytes(runtime.bytes), runtime.from)}`;
+}
+
+/** A download's progress for its row, when the Runner reports `modelID` under way. */
+export function progressText(progress: WireInstallProgress | null, modelID: string): string | undefined {
+  const installing = progress?.installing;
+  if (!installing || installing.model_id !== modelID) return undefined;
+  if (installing.total_bytes <= 0) return L("Downloading…");
+  const percent = Math.min(100, Math.floor((installing.done_bytes / installing.total_bytes) * 100));
+  return L("Downloading… %d%% (%@ of %@)", percent, Format.megabytes(installing.done_bytes), Format.megabytes(installing.total_bytes));
 }

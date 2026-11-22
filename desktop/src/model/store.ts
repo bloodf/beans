@@ -90,6 +90,7 @@ import {
   type WireModelPreview,
   type WireSearchIndexStatus,
   type WireTextSource,
+  type WireInstallProgress,
   type WireSnapshot,
   type WireSyncAccount,
 } from "./wire";
@@ -1676,6 +1677,18 @@ export class AppStore {
       return mockModelPreview(mockLocalModels(this.mockSearch()), modelID);
     }
     return this.request<WireModelPreview>("schedule_models.preview", { runner_id: runnerID, model_id: modelID, source: { kind: "download" } });
+  }
+
+  /** The download under way on a Runner, for a progress line. */
+  async localModelProgress(runnerID: string): Promise<WireInstallProgress> {
+    if (this.isMock) return { installing: null };
+    return this.request<WireInstallProgress>("schedule_models.progress", { runner_id: runnerID });
+  }
+
+  /** Stops the download of `modelID` on a Runner; nothing partial is installed. */
+  async cancelLocalModelInstall(runnerID: string, modelID: string): Promise<void> {
+    if (this.isMock) return;
+    await this.request("schedule_models.cancel", { runner_id: runnerID, model_id: modelID });
   }
 
   /** Downloads and installs what `preview` showed, now that the user approved it. */

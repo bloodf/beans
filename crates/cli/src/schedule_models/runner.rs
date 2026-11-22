@@ -118,6 +118,13 @@ struct Loaded {
     classifier: Classifier,
 }
 
+/// One install in progress (#581).
+struct Installing {
+    model_id: String,
+    progress: Arc<crate::embeddings::assets::InstallProgress>,
+    cancel: CancellationToken,
+}
+
 /// The Runner's schedule-model state in memory.
 #[derive(Default)]
 pub struct Runtime {
@@ -134,6 +141,9 @@ pub struct Runtime {
     runtime_supply: Mutex<Option<RuntimeSupply>>,
     /// Cancels installs when the account pauses or is forgotten.
     cancel: Mutex<CancellationToken>,
+    /// The install under way: its model, bytes so far, and the token `schedule_models.cancel`
+    /// stops it with.
+    installing: Mutex<Option<Installing>>,
     /// The selected model, by `load_key`.
     #[cfg(feature = "embedding-local")]
     models: Arc<Loader<Loaded>>,
@@ -283,6 +293,8 @@ pub async fn serve(app: &Arc<App>, method: &str, params: Value, actor: &str) -> 
         "schedule_models.apply" => apply(app, &authority, params).await,
         "schedule_models.select" => select(app, &authority, params).await,
         "schedule_models.remove" => remove(app, &authority, params).await,
+        "schedule_models.progress" => Ok(progress(app)),
+        "schedule_models.cancel" => cancel_install(app, params),
         _ => Err("unknown_schedule_models_method".into()),
     }
 }
@@ -586,11 +598,21 @@ async fn apply(app: &Arc<App>, authority: &Authority, params: Value) -> Result<V
     }
     authority.check(app)?;
     let cancel = app.schedule_models.cancel_token();
+    let total = approval.installer.planned_bytes(&approval.token).unwrap_or(0);
+    let progress = Arc::new(crate::embeddings::assets::InstallProgress { total, ..Default::default() });
+    {
+        let mut installing = app.schedule_models.installing.lock();
+        if installing.is_some() {
+            return Err("install_in_progress".into());
+        }
+        *installing = Some(Installing { model_id: approval.model_id.clone(), progress: progress.clone(), cancel: cancel.clone() });
+    }
     let installed = approval
         .installer
-        .apply_assets(&approval.token, &approval.digest, true, cancel.clone())
-        .await
-        .map_err(|_| "asset_install_failed")?;
+        .apply_assets_with_progress(&approval.token, &approval.digest, true, cancel.clone(), Some(progress.clone()))
+        .await;
+    app.schedule_models.installing.lock().take_if(|current| Arc::ptr_eq(&current.progress, &progress));
+    let installed = installed.map_err(|error| if error == crate::embeddings::EmbeddingError::Cancelled { "install_cancelled" } else { "asset_install_failed" })?;
     let install = Install {
         assets: installed.clone(),
         classifier: None,
@@ -610,6 +632,34 @@ async fn apply(app: &Arc<App>, authority: &Authority, params: Value) -> Result<V
     let image_model = catalog(app).model(&approval.model_id).is_some_and(|m| m.engine == Engine::Clip);
     let state = if image_model { "installed".into() } else { prepare_now(app, &approval.model_id).await };
     Ok(json!({ "installed": true, "model_id": approval.model_id, "state": state }))
+}
+
+/// The install under way, for the apps to show: its model and bytes so far and in all.
+fn progress(app: &App) -> Value {
+    match app.schedule_models.installing.lock().as_ref() {
+        Some(installing) => json!({ "installing": { "model_id": installing.model_id, "done_bytes": installing.progress.done(), "total_bytes": installing.progress.total } }),
+        None => json!({ "installing": null }),
+    }
+}
+
+/// Stops the install under way (of `model_id`, when given). Nothing partial is kept.
+fn cancel_install(app: &App, params: Value) -> Result<Value, String> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        #[serde(default)]
+        model_id: Option<String>,
+    }
+    let request: Request = decode(params)?;
+    let installing = app.schedule_models.installing.lock();
+    let cancelled = match installing.as_ref() {
+        Some(current) if request.model_id.as_ref().is_none_or(|id| *id == current.model_id) => {
+            current.cancel.cancel();
+            true
+        }
+        _ => false,
+    };
+    Ok(json!({ "cancelled": cancelled }))
 }
 
 /// Deletes an install's directory.

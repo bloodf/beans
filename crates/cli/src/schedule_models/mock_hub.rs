@@ -26,6 +26,11 @@ pub enum Serve {
     ForeignRedirect,
     /// The origin redirects to itself, forever.
     RedirectLoop,
+    /// Redirect to the CDN, which sends the bytes `chunk` at a time, `pause` apart: a slow link.
+    Slow(Vec<u8>, usize, std::time::Duration),
+    /// Redirect to the CDN, which announces the full length, sends `n` bytes, then nothing
+    /// more while the connection stays open: a stalled link.
+    Stall(Vec<u8>, usize),
 }
 
 pub struct MockHub {
@@ -104,7 +109,7 @@ async fn answer_origin(mut stream: TcpStream, files: Arc<Mutex<HashMap<String, S
         Some(Serve::Status(code)) => head(&format!("{code} Mock"), "", 0),
         Some(Serve::ForeignRedirect) => head("302 Found", &format!("location: http://example.invalid:{cdn}/blobs/{}\r\n", name_of(&path)), 0),
         Some(Serve::RedirectLoop) => head("302 Found", &format!("location: http://localhost:{origin}{path}\r\n"), 0),
-        Some(Serve::Bytes(_) | Serve::Truncated(..)) => head("302 Found", &format!("location: http://localhost:{cdn}/blobs/{}\r\n", name_of(&path)), 0),
+        Some(Serve::Bytes(_) | Serve::Truncated(..) | Serve::Slow(..) | Serve::Stall(..)) => head("302 Found", &format!("location: http://localhost:{cdn}/blobs/{}\r\n", name_of(&path)), 0),
     };
     let _ = stream.write_all(&reply).await;
 }
@@ -120,6 +125,25 @@ async fn answer_cdn(mut stream: TcpStream, files: Arc<Mutex<HashMap<String, Serv
         }
         Some(Serve::Bytes(body)) => [head("200 OK", "", body.len()), body].concat(),
         Some(Serve::Truncated(body, sent)) => [head("200 OK", "", body.len()), body[..sent.min(body.len())].to_vec()].concat(),
+        Some(Serve::Slow(body, chunk, pause)) => {
+            if stream.write_all(&head("200 OK", "", body.len())).await.is_err() {
+                return;
+            }
+            for part in body.chunks(chunk.max(1)) {
+                tokio::time::sleep(pause).await;
+                if stream.write_all(part).await.is_err() {
+                    return;
+                }
+            }
+            return;
+        }
+        Some(Serve::Stall(body, sent)) => {
+            let _ = stream.write_all(&[head("200 OK", "", body.len()), body[..sent.min(body.len())].to_vec()].concat()).await;
+            // Holds the connection open, sending nothing, until the client gives up.
+            let mut rest = [0u8; 1];
+            let _ = stream.read(&mut rest).await;
+            return;
+        }
         // The origin loops back to itself on the CDN's host name; it still never ends.
         Some(Serve::RedirectLoop) => head("302 Found", &format!("location: {path}\r\n"), 0),
         _ => head("404 Not Found", "", 0),

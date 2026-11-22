@@ -306,7 +306,14 @@ pub enum Detection {
 pub fn is_method(method: &str) -> bool {
     matches!(
         method,
-        "schedule_models.list" | "schedule_models.status" | "schedule_models.preview" | "schedule_models.apply" | "schedule_models.select" | "schedule_models.remove"
+        "schedule_models.list"
+            | "schedule_models.status"
+            | "schedule_models.preview"
+            | "schedule_models.apply"
+            | "schedule_models.select"
+            | "schedule_models.remove"
+            | "schedule_models.progress"
+            | "schedule_models.cancel"
     )
 }
 

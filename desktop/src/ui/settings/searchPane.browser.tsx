@@ -42,6 +42,7 @@ export async function checkSearchSuggestion(): Promise<Record<string, string>> {
   const saved = {
     searchIndexStatus: store.searchIndexStatus, localModels: store.localModels,
     previewLocalModel: store.previewLocalModel, installLocalModel: store.installLocalModel,
+    localModelProgress: store.localModelProgress, cancelLocalModelInstall: store.cancelLocalModelInstall,
   };
   store.searchIndexStatus = async () => status;
   store.localModels = async () => { calls.push("list"); return listing; };
@@ -82,7 +83,27 @@ export async function checkSearchSuggestion(): Promise<Record<string, string>> {
     await settle();
     assert(calls.includes("install token"), `Approving did not install: ${calls.join(", ")}`);
     assert(!row("Best model") && !root.textContent?.includes("Suggested for Studio"), "An installed suggestion is still offered");
-    return { order: order.join(" › "), approval: "hub and runtime named; cancel installs nothing; approve installs once" };
+
+    // A download under way shows how far it has come and can be cancelled (#581).
+    let stop: ((error: Error) => void) | undefined;
+    store.installLocalModel = () => new Promise<void>((_, reject) => { stop = reject; });
+    store.localModelProgress = async () => ({ installing: { model_id: "small", done_bytes: 10_000_000, total_bytes: 35_000_000 } });
+    store.cancelLocalModelInstall = async (_runner, id) => { calls.push(`cancel ${id}`); stop?.(new Error("install_cancelled")); };
+    download("Small model")!.click();
+    await settle();
+    dialog()!.querySelector<HTMLElement>(".alert")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    await new Promise((r) => setTimeout(r, 1300));
+    await settle();
+    assert(row("Small model")?.textContent?.includes("Downloading… 28% (10 MB of 35 MB)"), `The download's progress is not shown: ${row("Small model")?.textContent}`);
+    const cancel = [...(row("Small model")?.querySelectorAll<HTMLElement>("button, a, [role=button]") ?? [])].find((b) => b.textContent?.trim() === "Cancel");
+    assert(cancel, "The download offers no Cancel");
+    cancel!.click();
+    await settle();
+    assert(calls.includes("cancel small"), `Cancel did not reach the Runner: ${calls.join(", ")}`);
+    assert(!dialog(), "A cancelled download is reported as a failure");
+    assert(!row("Small model")?.textContent?.includes("Downloading"), "The row still says it is downloading");
+    return { order: order.join(" › "), approval: "hub and runtime named; cancel installs nothing; approve installs once", download: "progress shown; cancel stops it quietly" };
   } finally {
     Object.assign(store, saved);
     dispose();

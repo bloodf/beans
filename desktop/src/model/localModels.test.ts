@@ -1,7 +1,7 @@
 // The Search pane's model list: the suggestion first, what fits next, and each row's words.
 
 import { expect, test } from "vitest";
-import { canDownload, downloadOrder, modelSummary, modelTooltip, previewSummary, reasonText } from "./localModels";
+import { canDownload, downloadOrder, modelSummary, modelTooltip, previewSummary, progressText, reasonText } from "./localModels";
 import type { WireLocalModel, WireModelPreview } from "./wire";
 
 function model(id: string, fields: Partial<WireLocalModel> = {}): WireLocalModel {
@@ -63,4 +63,15 @@ test("the download dialog names the hub, and the runtime when one comes with the
     "35 MB from Hugging Face to Studio, checked against its pinned SHA-256 before it runs. License: MIT It also downloads ONNX Runtime 1.31.1 (24 MB) from files.pythonhosted.org, which runs the model, checked the same way.",
   );
   expect(previewSummary({ ...preview, runtime_download: null }, "Studio")).not.toContain("ONNX Runtime");
+});
+
+// Issue #581: a download's row says how far it has come while the Runner reports it.
+test("a download under way reads as its percent and bytes", () => {
+  const progress = (model_id: string, done_bytes: number, total_bytes: number) => ({ installing: { model_id, done_bytes, total_bytes } });
+  expect(progressText(progress("m", 47_000_000, 135_000_000), "m")).toBe("Downloading… 34% (47 MB of 135 MB)");
+  expect(progressText(progress("m", 135_000_000, 135_000_000), "m")).toBe("Downloading… 100% (135 MB of 135 MB)");
+  expect(progressText(progress("m", 0, 0), "m")).toBe("Downloading…");
+  expect(progressText(progress("other", 1, 2), "m"), "another model's download").toBeUndefined();
+  expect(progressText({ installing: null }, "m")).toBeUndefined();
+  expect(progressText(null, "m")).toBeUndefined();
 });

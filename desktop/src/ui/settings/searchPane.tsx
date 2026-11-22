@@ -9,10 +9,10 @@
 
 import { createEffect, createSignal, For, onSettled, Show } from "solid-js";
 import { L } from "../../l10n";
-import { canDownload, downloadOrder, modelSummary, modelTooltip, previewSummary } from "../../model/localModels";
+import { canDownload, downloadOrder, modelSummary, modelTooltip, previewSummary, progressText } from "../../model/localModels";
 import { providerName, withCustomModels, type Device, type ProviderKind } from "../../model/models";
 import { errorText, store } from "../../model/store";
-import type { WireLocalModel, WireLocalModels, WireSearchIndexStatus, WireSearchRole, WireTextSource } from "../../model/wire";
+import type { WireInstallProgress, WireLocalModel, WireLocalModels, WireSearchIndexStatus, WireSearchRole, WireTextSource } from "../../model/wire";
 import { alert } from "../overlay";
 import { ActionRow, KeyValueRow, NoteRow, PopUpRow, Section } from "../sections";
 import { Footnote, PaneFrame, pickedDevice, Placeholder } from "./panes";
@@ -20,6 +20,8 @@ import { Entries } from "./search";
 
 /** How often the pane asks again while indexing or loading moves. */
 const REFRESH_MS = 5000;
+/** How often a download under way reports its bytes. */
+const PROGRESS_MS = 1000;
 
 export function SearchPane() {
   const device = pickedDevice;
@@ -67,6 +69,8 @@ export function SearchSettings(props: { device: Device }) {
   const [failure, setFailure] = createSignal<string | null>(null);
   /** The model being downloaded, whose row shows a spinner. */
   const [installing, setInstalling] = createSignal<string | null>(null);
+  /** The Runner's report on the download under way, polled while one is. */
+  const [download, setDownload] = createSignal<WireInstallProgress | null>(null);
   let loads = 0;
   const load = async () => {
     const runnerID = props.device.id;
@@ -127,13 +131,30 @@ export function SearchSettings(props: { device: Device }) {
         buttons: [{ title: L("Download") }, { title: L("Cancel") }],
       });
       if (answer !== 0) return;
-      await store.installLocalModel(runnerID, preview);
+      // The download answers when it ends; meanwhile its row shows how far it has come.
+      const poll = setInterval(() => {
+        store.localModelProgress(runnerID).then(setDownload, () => {});
+      }, PROGRESS_MS);
+      try {
+        await store.installLocalModel(runnerID, preview);
+      } finally {
+        clearInterval(poll);
+        setDownload(null);
+      }
       await load();
     } catch (error) {
-      void alert({ message: L("Couldn't download “%@”", model.name), informative: errorText(error) });
+      // A cancel the user asked for is not a failure to report.
+      if (!(error instanceof Error && error.message === "install_cancelled")) {
+        void alert({ message: L("Couldn't download “%@”", model.name), informative: errorText(error) });
+      }
     } finally {
       setInstalling(null);
     }
+  };
+  const cancelInstall = (model: WireLocalModel) => {
+    void store.cancelLocalModelInstall(props.device.id, model.id).catch((error) => {
+      void alert({ message: L("Couldn't cancel the download"), informative: errorText(error) });
+    });
   };
 
   const chooseText = async (value: string) => {
@@ -176,12 +197,14 @@ export function SearchSettings(props: { device: Device }) {
         {(model) => (
           <ActionRow
             label={model().name}
-            value={modelSummary(model(), model().id === recommended()?.[rowProps.kind])}
+            value={progressText(download(), model().id) ?? modelSummary(model(), model().id === recommended()?.[rowProps.kind])}
             tint={model().id === recommended()?.[rowProps.kind] ? undefined : "var(--label-2)"}
             tooltip={modelTooltip(model())}
             actionTitle={canDownload(model()) ? L("Download…") : undefined}
             busy={installing() === model().id}
             onAction={() => void install(model())}
+            secondActionTitle={installing() === model().id && download()?.installing?.model_id === model().id ? L("Cancel") : undefined}
+            onSecondAction={() => cancelInstall(model())}
           />
         )}
       </For>

@@ -385,6 +385,11 @@ impl Provider for OpenAiCompatProvider {
         self.info.as_deref()
     }
 
+    fn default_max_output_tokens(&self) -> Option<u64> {
+        // This wire omits max_tokens unless the host supplies a per-request cap.
+        None
+    }
+
     async fn stream(&self, request: ModelRequest, cancel: CancellationToken) -> AssistantEventStream {
         let (tx, rx) = mpsc::channel(64);
         if !self.supports_tools && !request.tools.is_empty() {
@@ -393,7 +398,10 @@ impl Provider for OpenAiCompatProvider {
         }
         let mut body = self.body(&request);
         let options = request.options.clone();
-        options.before_payload(&mut body);
+        if let Err(message) = options.before_payload_with_output_cap(&mut body, "max_tokens") {
+            let _ = tx.send(AssistantEvent::Error { message, aborted: false }).await;
+            return channel_stream(rx);
+        }
         let api_key = options.api_key(&self.api_key).await;
         let url = format!("{}/chat/completions", self.base_url);
         let client = self.client.clone();
@@ -402,11 +410,8 @@ impl Provider for OpenAiCompatProvider {
 
         tokio::spawn(async move {
             let build = || options.apply_to(bearer_auth(client.post(&url), &api_key).header("User-Agent", USER_AGENT)).json(&body);
-            let response = match send_with_retry(build, max_retries, max_retry_delay_ms, &cancel).await {
-                Ok(response) => {
-                    options.report(&response);
-                    response
-                }
+            let response = match send_with_retry(build, max_retries, max_retry_delay_ms, &cancel, &options).await {
+                Ok(response) => response,
                 Err(failure) => {
                     let aborted = matches!(failure, RequestFailure::Aborted);
                     let _ = tx.send(AssistantEvent::Error { message: failure.message(), aborted }).await;
@@ -487,6 +492,30 @@ mod tests {
 
     fn request(messages: Vec<LlmMessage>) -> ModelRequest {
         ModelRequest { system_prompt: String::new(), messages, tools: Vec::new(), cache_points: Vec::new(), max_tokens: None, options: Default::default() }
+    }
+
+    #[tokio::test]
+    async fn payload_hooks_cannot_raise_or_remove_the_output_cap() {
+        use futures::StreamExt;
+        struct Override(Value);
+        #[async_trait::async_trait]
+        impl crate::request::RequestHooks for Override {
+            fn before_payload(&self, payload: &mut Value) {
+                payload["max_tokens"] = self.0.clone();
+            }
+        }
+        for replacement in [json!(4096), Value::Null, json!("2048")] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let provider = (|base: &str| OpenAiCompatProvider::new("custom:fixture", base, "k", "fixture"))(&format!("http://{}/v1", listener.local_addr().unwrap()));
+            let mut request = request(Vec::new());
+            request.max_tokens = Some(2048);
+            request.options = request.options.with_hooks(std::sync::Arc::new(Override(replacement))).with_timeout(std::time::Duration::from_millis(100));
+            let events: Vec<_> = provider.stream(request, CancellationToken::new()).await.collect().await;
+            assert!(matches!(&events[..], [AssistantEvent::Error { message, aborted: false }] if message.contains("effective output cap")), "{events:?}");
+            // Refused before any request reaches the service.
+            assert!(matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        }
     }
 
     #[tokio::test]

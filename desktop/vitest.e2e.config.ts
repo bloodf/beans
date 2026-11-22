@@ -11,5 +11,7 @@ export default defineConfig({
     testTimeout: 60_000,
     hookTimeout: 120_000,
     passWithNoTests: false,
+    // A first page compiles on demand in the dev server: polls wait for it, not 1 s.
+    expect: { poll: { timeout: 20_000, interval: 100 } },
   },
 });

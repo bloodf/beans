@@ -194,7 +194,9 @@ fn text_choice(app: &App, source: &TextSource) -> Result<Choice, String> {
             let fingerprint = spec.fingerprint().as_str();
             Ok(Choice {
                 key: format!("{account}\0provider\0{profile_id}\0{fingerprint}\0{}\0{}", revision.counter, revision.device_id),
-                space: space_id("text", &format!("profile:{profile_id}"), fingerprint),
+                // `shielded`: vectors made before the shield stood in front of providers hold
+                // secrets' values and are rebuilt, so queries and text are redacted alike.
+                space: space_id("text", &format!("profile:{profile_id}:shielded"), fingerprint),
             })
         }
     }
@@ -241,7 +243,13 @@ async fn load_text(app: Arc<App>, source: TextSource, space: String, cancel: Can
         }
         TextSource::Provider { profile_id } => {
             let (_, profile) = api_profile(&app, &profile_id)?;
-            Arc::new(crate::embeddings::api::ApiEmbedding::new(&profile, false, Default::default()).map_err(|e| e.to_string())?)
+            // Tests record what a provider is sent on a loopback HTTP server; real profiles
+            // need HTTPS.
+            let loopback_http = cfg!(test) && profile.endpoint.as_deref().is_some_and(|endpoint| endpoint.starts_with("http://127.0.0.1:"));
+            let api = crate::embeddings::api::ApiEmbedding::new(&profile, loopback_http, Default::default()).map_err(|e| e.to_string())?;
+            // The secret shield, as memory's embeddings have it: indexed text and queries both
+            // reach the service with `{{secret:NAME}}` where a secret's value was.
+            crate::secret_shield::shielded_embedding(&app, Arc::new(api))
         }
     };
     Ok(Model { space, text, images: None })

@@ -596,3 +596,85 @@ fn an_answer_counts_as_searched_when_either_space_was() {
     assert!(!searched(&json!({ "state": "off", "image_state": "failed" })));
     assert!(!searched(&json!({})));
 }
+
+/// A loopback embedding service that records every input it is sent and answers with unit
+/// vectors of `dimensions`.
+async fn recording_embeddings(model: &'static str, dimensions: usize) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1/embeddings", listener.local_addr().unwrap());
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let recorded = recorded.clone();
+            tokio::spawn(async move {
+                let (mut bytes, mut buf) = (Vec::new(), [0u8; 8192]);
+                let end = loop {
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(at) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                let length: usize = head.lines().find_map(|line| line.strip_prefix("content-length:").and_then(|v| v.trim().parse().ok())).unwrap_or(0);
+                while bytes.len() < end + length {
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+                }
+                recorded.lock().unwrap().push(String::from_utf8_lossy(&bytes[end..]).into_owned());
+                let body: Value = serde_json::from_slice(&bytes[end..]).unwrap_or(Value::Null);
+                let count = body["input"].as_array().map(Vec::len).unwrap_or(0);
+                let mut unit = vec![0.0f32; dimensions];
+                unit[0] = 1.0;
+                let data: Vec<Value> = (0..count).map(|index| json!({ "index": index, "embedding": unit })).collect();
+                let answer = json!({ "model": model, "data": data }).to_string();
+                let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}", answer.len());
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (url, seen)
+}
+
+/// Issue #594: indexed text and queries reach an embedding provider through the secret shield.
+#[tokio::test]
+async fn an_embedding_provider_is_sent_placeholders_never_secret_values() {
+    use base64::Engine;
+    use crate::memory_service::{config::Record, types::Revision};
+    const KEY: &str = "sk-proj-abcdefghijklmnopqrstuvwxyz0123";
+    let scratch = runner();
+    let app = &scratch.0;
+    app.secrets.seed_environment([("OPENAI_API_KEY", KEY)]);
+    let (endpoint, seen) = recording_embeddings("text-embedding-3-small", 4).await;
+    let profile: crate::memory_service::types::EmbeddingProfile = serde_json::from_value(json!({
+        "mode": "api", "model": "text-embedding-3-small", "revision": "1", "dimensions": 4, "normalization": "l2",
+        "distance": "cosine", "document_prefix": "", "query_prefix": "", "endpoint": endpoint, "secret": "fixture-key",
+    }))
+    .unwrap();
+    let revision = Revision { counter: 1, device_id: app.this_device_id().unwrap() };
+    app.memory_config.lock().embeddings.insert("openai".into(), Record { revision, value: Some(profile), extra: Default::default() });
+    let chat = chat(app);
+    say(app, &chat, "m1", 1.0, Body::text(format!("the deploy key is {KEY} and the weather is fine")));
+    choose(app, json!({ "text": { "kind": "provider", "profile_id": "openai" }, "confirm_external": true })).await;
+    index_all(app).await;
+    let found = search(app, &format!("where did I paste {KEY}")).await;
+    assert_eq!(found["state"], "ready", "{found}");
+
+    let sent = seen.lock().unwrap().join("\n");
+    assert!(sent.contains("the deploy key is {{secret:OPENAI_API_KEY}}"), "the message was indexed with a placeholder: {sent}");
+    assert!(sent.contains("where did I paste {{secret:OPENAI_API_KEY}}"), "the query is redacted the same way: {sent}");
+    let escaped = serde_json::to_string(KEY).unwrap();
+    let percent: String = KEY.bytes().map(|b| format!("%{b:02X}")).collect();
+    let base64 = base64::engine::general_purpose::STANDARD.encode(KEY);
+    for form in [KEY, escaped.trim_matches('"'), &percent, &base64, "abcdefghijklmnopqrstuvwxyz0123"] {
+        assert!(!sent.contains(form), "the secret reached the provider as {form}");
+    }
+}

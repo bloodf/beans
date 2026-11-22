@@ -87,7 +87,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [Memory services](docs/architecture/memory-services.md) | Encrypted config, dispatch, queues, deletion and embeddings |
 | [Schedule models](docs/architecture/schedule-models.md) | Local CPU models: catalog, installs, routine detection, [semantic search](docs/architecture/semantic-search.md) |
 | [Bot avatars](docs/architecture/avatars.md) | Appearance contract, photos, validated edits and encrypted persistence |
-| [Providers](docs/architecture/providers.md) | Each model provider and its sign-in, custom providers, thinking levels, compaction, retries |
+| [Providers](docs/architecture/providers.md) | Each model provider and its sign-in, custom providers, thinking levels, compaction, retries, [typed decisions](docs/architecture/typed-decisions.md) |
 | [Zhipu GLM compatibility](docs/architecture/glm-compatibility.md) | Chosen contract, vendor docs, reasoning-tool continuation |
 | [Model catalog and cost](docs/architecture/model-catalog.md) | Model metadata, pricing completeness, usage and catalog refresh |
 | [macOS app](docs/architecture/macos-app.md) | AppKit launch, windows, onboarding, settings, updates, inspector, Blobatar |

@@ -22,7 +22,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type ColorValue, type ImageSourcePropType, type StyleProp, type ViewStyle } from "react-native";
 import { ImagePasteView, type PastedImage } from "../../modules/beans-core/ImagePasteView";
 import type { PickedFile } from "../core/engine";
-import { composerDraft, editComposerDraft, releaseComposerDraft, submitComposerDraft, type ComposerDraft } from "../core/composerDraft";
+import { composerDraft, discardPastedImages, editComposerDraft, releaseComposerDraft, submitComposerDraft, type ComposerDraft } from "../core/composerDraft";
 import { useStore } from "../core/store";
 import { fileSize, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, type Bot } from "../core/model";
 import { notifyAvatarScroll } from "./avatarVisibility";
@@ -247,6 +247,9 @@ export function Composer({
       }
       return next;
     });
+    // Includes oversized/excess images and a native result arriving after navigation.
+    // Accepted images are retained by their draft; picker originals are never removed.
+    discardPastedImages(files);
     if (problems.length) Alert.alert(t("Some files were not attached"), problems.join("\n"));
   }
 

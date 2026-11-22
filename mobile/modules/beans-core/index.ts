@@ -18,6 +18,13 @@ interface Native {
 }
 
 const native = requireNativeModule<Native>("BeansCore");
+// Creating the module also prunes abandoned paste files once per native process, before
+// new copies. Keep filesystem ownership checks in the native module that writes them.
+const pasteCache = requireNativeModule<{ deleteFiles(uris: string[]): Promise<void> }>("ImagePasteView");
+
+export function deletePastedImages(uris: string[]): Promise<void> {
+  return pasteCache.deleteFiles(uris);
+}
 
 export interface HostFacts {
   name: string;

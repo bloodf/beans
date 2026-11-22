@@ -177,3 +177,4 @@ mod tests {
         assert_eq!(store.reads.get(), 0);
         assert_eq!(store.value, None);
     }
+}

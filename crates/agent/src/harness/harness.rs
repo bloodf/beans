@@ -887,6 +887,11 @@ impl AgentHarness {
             AgentEvent::Retry { attempt, max_attempts, delay_ms, error } => {
                 self.events.emit(HarnessEvent::RetryScheduled { run_id, attempt, max_attempts, delay_ms, error }).await;
             }
+            AgentEvent::BoundThinkingDropped { model } => {
+                crate::providers::anthropic::drop_bound_thinking(&model, &mut self.messages);
+                crate::providers::anthropic::drop_bound_thinking(&model, added);
+                self.events.emit(HarnessEvent::BoundThinkingDropped { run_id, model }).await;
+            }
             AgentEvent::MessageStart { message } => {
                 self.events.emit(HarnessEvent::MessageStart { run_id, message }).await;
             }

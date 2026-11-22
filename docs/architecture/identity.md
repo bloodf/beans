@@ -47,13 +47,7 @@ This is an incompatible fresh format, not an upgrade of existing accounts. No re
 
 ## Pairing a Device
 
-1. Device A, any paired computer, asks the relay for a pairing nonce and shows `beans://pair?v=2&relay=…&id=<identity pubkey>&ek=<ephemeral pubkey>&n=<nonce>`. The URI must use this exact scheme/authority/version; duplicated fields, unsupported versions and arbitrary `pair?` strings are rejected before persistence. The CLI waits ten minutes; Done keeps the code valid, while `pair.cancel` drops the waiter and deletes `DELETE /v1/pair/{nonce}`.
-2. Device B pastes it (onboarding or `beans pair <string>`), validates version and relay protocol/format, generates machine keys, and posts a request sealed to `ek` at `POST /v1/pair/{nonce}/request`: `format: "beans-v2"`, machine and box public keys, `name` and `os`. `pair.accept` emits `pair.posted` after upload and polls; `pair.abort` ends the wait, a newer accept replaces it, and a gone mailbox reports a fresh code is needed.
-3. A validates the sealed request format, attests B, and posts a reply sealed to B’s box key: `format: "beans-v2"`, identity/content public keys, account DEK and relay URL. An identity device uses signed `POST /v1/identities`; another paired computer uses its bearer on `POST /v1/machines`. Both paths require protocol 5 and Beans format capability, including the public pairing mailbox. The core verifies relay health before displaying a pairing code.
-4. B unseals and validates the reply format before saving `machine.json`, authenticates with the challenge, and uploads encrypted machine metadata (`name`, `os`, installed plugins and their state).
-5. B syncs the roster, the account’s credentials, and the chats, and shows up in the Device list. Its sync loop starts as soon as the keys are saved, and its first pull takes everything but the messages before the chats' newest messages; `sync.account` answers once that part has landed, so onboarding learns whether the account has a provider without waiting for the chats. A Runner is ready for bots as soon as the `credentials` blob lands.
-
-App ↔ CLI on one machine uses `127.0.0.1`; those keys are already local.
+A new Device joins through a one-use pairing string and the relay's sealed mailbox: see [Pairing](pairing.md).
 
 ## Unpairing a Device
 

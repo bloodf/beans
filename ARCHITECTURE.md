@@ -61,6 +61,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | --- | --- |
 | [Account model](docs/architecture/account-model.md) | Entities, Device/relay data ownership and cross-Runner routing |
 | [Identity](docs/architecture/identity.md) | Key pairs, pairing and unpairing, Devices and Runners, what the relay sees, account credentials, [keystore](docs/architecture/keystore.md) |
+| [Pairing](docs/architecture/pairing.md) | The pairing string, its parser, and the sealed request and reply through the relay's mailbox |
 | [Device names](docs/architecture/device-names.md) | Account aliases, machine names and durable roster intent |
 | [Device revocation](docs/architecture/device-revocation.md) | Lost-Device boundaries; proposed containment and rotation |
 | [Relay](docs/architecture/relay.md) | `crates/relay`: SQLite/Postgres storage, files, quotas, auth, blob/sync/push APIs, deploys |

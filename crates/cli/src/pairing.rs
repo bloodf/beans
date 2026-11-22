@@ -17,18 +17,67 @@ use crate::model::{host_facts, Device, PairReply, PairRequest};
 const PAIR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const POLL: std::time::Duration = std::time::Duration::from_millis(1500);
 
-pub fn parse_pairing_string(text: &str) -> anyhow::Result<(String, String, String, String)> {
-    let query = text.trim().strip_prefix("beans://pair?")
+/// What a pairing string carries: the relay both Devices use, A's identity key, the ephemeral
+/// key B seals its request to, and the mailbox nonce. Named fields, so the two keys cannot be
+/// swapped by position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingCode {
+    pub relay: String,
+    pub identity_pubkey: String,
+    pub ephemeral_pubkey: String,
+    pub nonce: String,
+}
+
+impl std::fmt::Display for PairingCode {
+    /// The string A shows: byte for byte what earlier versions made.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "beans://pair?v=2&relay={}&id={}&ek={}&n={}",
+            percent_encode(&self.relay),
+            percent_encode(&self.identity_pubkey),
+            percent_encode(&self.ephemeral_pubkey),
+            percent_encode(&self.nonce)
+        )
+    }
+}
+
+const PAIRING_PREFIX: &str = "beans://pair?";
+
+/// Undoes what carrying a pairing string through chat, email or a terminal does to it: spaces
+/// and line breaks wrapped into it, zero-width characters, `<…>` around it, and a capitalised
+/// scheme. A string that is not one stays as it is and fails the prefix check.
+fn normalise(text: &str) -> String {
+    let kept: String = text.chars().filter(|c| !c.is_whitespace() && !matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')).collect();
+    let kept = kept.strip_prefix('<').and_then(|inner| inner.strip_suffix('>')).unwrap_or(&kept);
+    match kept.get(..PAIRING_PREFIX.len()) {
+        Some(prefix) if prefix.eq_ignore_ascii_case(PAIRING_PREFIX) => format!("{PAIRING_PREFIX}{}", &kept[PAIRING_PREFIX.len()..]),
+        _ => kept.to_string(),
+    }
+}
+
+pub fn parse_pairing_string(text: &str) -> anyhow::Result<PairingCode> {
+    let text = normalise(text);
+    let query = text.strip_prefix(PAIRING_PREFIX)
         .ok_or_else(|| anyhow::anyhow!("That is not a Beans v2 pairing string"))?;
     let mut fields = std::collections::BTreeMap::new();
-    for pair in query.split('&') {
-        let (key, value) = pair.split_once('=').ok_or_else(|| anyhow::anyhow!("Invalid pairing field"))?;
-        if !matches!(key, "v" | "relay" | "id" | "ek" | "n") || fields.insert(key, percent_decode(value)?).is_some() {
-            anyhow::bail!("Unknown or duplicate pairing field");
+    // An empty segment (a trailing `&`) is nothing; a key this version does not know is one a
+    // newer Device added, which it must not need.
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').ok_or_else(|| anyhow::anyhow!("Invalid pairing field “{pair}”"))?;
+        if !matches!(key, "v" | "relay" | "id" | "ek" | "n") {
+            continue;
+        }
+        if fields.insert(key, percent_decode(value)?).is_some() {
+            anyhow::bail!("The pairing string has {key} twice");
         }
     }
-    if fields.get("v").map(String::as_str) != Some("2") {
-        anyhow::bail!("Beans v2 pairing code required; incompatible pairing format");
+    match fields.get("v").map(String::as_str) {
+        Some("2") => {}
+        Some(version) if version.parse::<u32>().is_ok_and(|version| version > 2) => {
+            anyhow::bail!("This pairing string comes from a newer version of Beans. Update this Device, then pair again.")
+        }
+        _ => anyhow::bail!("Beans v2 pairing code required; incompatible pairing format. Get a new pairing string from a Device on this version."),
     }
     let mut required = |key| fields.remove(key).filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("Pairing string is missing {key}"));
@@ -36,6 +85,9 @@ pub fn parse_pairing_string(text: &str) -> anyhow::Result<(String, String, Strin
     let id = required("id")?;
     let ek = required("ek")?;
     let nonce = required("n")?;
+    if relay.chars().any(char::is_control) {
+        anyhow::bail!("Invalid pairing relay URL");
+    }
     let url = reqwest::Url::parse(&relay)?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
         || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
@@ -49,7 +101,8 @@ pub fn parse_pairing_string(text: &str) -> anyhow::Result<(String, String, Strin
     if nonce.len() > 256 || !nonce.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
         anyhow::bail!("Invalid pairing nonce");
     }
-    Ok((relay, id, ek, nonce))
+    // The relay as the phone reads it: no trailing slash, so both name one relay the same way.
+    Ok(PairingCode { relay: relay.trim_end_matches('/').to_string(), identity_pubkey: id, ephemeral_pubkey: ek, nonce })
 }
 
 fn percent_encode(value: &str) -> String {
@@ -63,15 +116,16 @@ fn percent_encode(value: &str) -> String {
     out
 }
 
+/// `%` must be followed by exactly two hex digits (`from_str_radix` alone takes `+A`).
 fn percent_decode(value: &str) -> anyhow::Result<String> {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' {
-            let encoded = bytes.get(i + 1..i + 3).ok_or_else(|| anyhow::anyhow!("Invalid pairing escape"))?;
-            let encoded = std::str::from_utf8(encoded)?;
-            out.push(u8::from_str_radix(encoded, 16)?);
+            let encoded = bytes.get(i + 1..i + 3).filter(|pair| pair.iter().all(u8::is_ascii_hexdigit))
+                .ok_or_else(|| anyhow::anyhow!("Invalid pairing escape"))?;
+            out.push(u8::from_str_radix(std::str::from_utf8(encoded)?, 16)?);
             i += 3;
         } else {
             out.push(bytes[i]);
@@ -96,13 +150,7 @@ pub async fn start(app: Arc<App>) -> anyhow::Result<(String, String)> {
 
     let ephemeral = crypto_box::SecretKey::generate(&mut rand::rngs::OsRng);
     let ek = keys::b64(ephemeral.public_key().as_bytes());
-    let pairing_string = format!(
-        "beans://pair?v=2&relay={}&id={}&ek={}&n={}",
-        percent_encode(&url),
-        percent_encode(&machine_file.identity_pubkey),
-        percent_encode(&ek),
-        percent_encode(&nonce)
-    );
+    let pairing_string = PairingCode { relay: url.clone(), identity_pubkey: machine_file.identity_pubkey.clone(), ephemeral_pubkey: ek, nonce: nonce.clone() }.to_string();
 
     let cancel = CancellationToken::new();
     app.pairings.lock().unwrap().insert(nonce.clone(), PendingPairing { ephemeral, status: PairingStatus::Waiting, cancel: cancel.clone() });
@@ -244,13 +292,13 @@ pub fn abort(app: &Arc<App>) {
     }
 }
 
-async fn join(app: &Arc<App>, pairing: (String, String, String, String), device_name: Option<String>) -> anyhow::Result<Value> {
+async fn join(app: &Arc<App>, pairing: PairingCode, device_name: Option<String>) -> anyhow::Result<Value> {
     let incarnation = {
         let admission = app.plugin_admission(None).map_err(anyhow::Error::msg)?;
         if app.has_identity() { anyhow::bail!("This Device already has an identity."); }
         admission.get().0
     };
-    let (relay_url, identity_pubkey, ek, nonce) = pairing;
+    let PairingCode { relay: relay_url, identity_pubkey, ephemeral_pubkey: ek, nonce } = pairing;
     app.relay.health(&relay_url).await.map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let machine = Machine::generate();
@@ -373,7 +421,7 @@ mod publication_tests {
             let url = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
             let held = app.clone();
-            let joining = tokio::spawn(async move { join(&held, (url, identity.pubkey(), ek, "synthetic".into()), Some("Synthetic joined".into())).await });
+            let joining = tokio::spawn(async move { join(&held, PairingCode { relay: url, identity_pubkey: identity.pubkey(), ephemeral_pubkey: ek, nonce: "synthetic".into() }, Some("Synthetic joined".into())).await });
             waiting.await.unwrap();
             let competing = match transition {
                 "forget" => { app.forget_identity().unwrap(); None },
@@ -403,7 +451,7 @@ mod format_tests {
         let key = keys::b64(&[7; 32]);
         let good = format!("beans://pair?v=2&relay=http%3A%2F%2F127.0.0.1%3A8787&id={key}&ek={key}&n=nonce");
         let parsed = parse_pairing_string(&good).unwrap();
-        assert_eq!(parsed, ("http://127.0.0.1:8787".into(), key.clone(), key, "nonce".into()));
+        assert_eq!(parsed, PairingCode { relay: "http://127.0.0.1:8787".into(), identity_pubkey: key.clone(), ephemeral_pubkey: key.clone(), nonce: "nonce".into() });
         for bad in [
             good.replace("beans://", "other://"), good.replace("v=2&", ""),
             good.replace("v=2", "v=1"), format!("{good}&v=2"), format!("{good}&n=other"),
@@ -412,5 +460,63 @@ mod format_tests {
         ] {
             assert!(parse_pairing_string(&bad).is_err(), "{bad}");
         }
+    }
+
+    fn code() -> (String, PairingCode) {
+        let id = keys::b64(&[7; 32]);
+        let ek = keys::b64(&[9; 32]);
+        let code = PairingCode { relay: "https://relay.example:8787".into(), identity_pubkey: id, ephemeral_pubkey: ek, nonce: "abc_DEF-123".into() };
+        (code.to_string(), code)
+    }
+
+    #[test]
+    fn the_string_round_trips_and_keeps_its_exact_encoding() {
+        let (text, code) = code();
+        assert!(text.starts_with("beans://pair?v=2&relay=https%3A%2F%2Frelay.example%3A8787&id="), "{text}");
+        assert_eq!(parse_pairing_string(&text).unwrap(), code);
+        // The two keys keep their places.
+        let parsed = parse_pairing_string(&text).unwrap();
+        assert_eq!((parsed.identity_pubkey, parsed.ephemeral_pubkey), (keys::b64(&[7; 32]), keys::b64(&[9; 32])));
+    }
+
+    #[test]
+    fn escapes_need_exactly_two_hex_digits() {
+        assert!(percent_decode("%+A").is_err());
+        assert!(percent_decode("%-1").is_err());
+        assert!(percent_decode("%4").is_err());
+        assert!(percent_decode("% A").is_err());
+        assert_eq!(percent_decode("%41%2f").unwrap(), "A/");
+    }
+
+    #[test]
+    fn what_chat_and_email_do_to_a_string_is_undone() {
+        let (text, code) = code();
+        let wrapped = text.replacen("&id=", "&\nid=", 1).replacen("&n=", "& n=", 1);
+        for carried in [
+            format!("{text}&"), format!("  {text}\n"), format!("<{text}>"), format!("\u{200B}{text}"), format!("{text}\u{FEFF}"),
+            text.replacen("beans://pair?", "BEANS://Pair?", 1), wrapped, format!("{text}&exp=1893456000"),
+        ] {
+            assert_eq!(parse_pairing_string(&carried).unwrap(), code, "{carried:?}");
+        }
+    }
+
+    #[test]
+    fn errors_say_what_is_wrong() {
+        let (text, _) = code();
+        let error = |text: String| parse_pairing_string(&text).unwrap_err().to_string();
+        assert!(error(text.replace("v=2", "v=3")).contains("Update this Device"));
+        assert!(error(text.replace("v=2", "v=1")).contains("incompatible"));
+        assert!(error(format!("{text}&n=again")).contains("n twice"));
+        assert!(error(format!("{text}&oops")).contains("“oops”"));
+        assert!(error(text.replace("&n=abc_DEF-123", "")).contains("missing n"));
+    }
+
+    #[test]
+    fn a_relay_with_a_control_character_is_refused_not_passed_on() {
+        let (text, _) = code();
+        let relay = text.replace("relay=https%3A%2F%2Frelay.example%3A8787", "relay=https%3A%2F%2Frelay.example%2F%0A");
+        assert!(parse_pairing_string(&relay).is_err());
+        let slash = text.replace("relay=https%3A%2F%2Frelay.example%3A8787", "relay=https%3A%2F%2Frelay.example%3A8787%2F");
+        assert_eq!(parse_pairing_string(&slash).unwrap().relay, "https://relay.example:8787", "the phone strips it too");
     }
 }

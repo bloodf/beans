@@ -66,6 +66,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [Relay](docs/architecture/relay.md) | `crates/relay`: SQLite/Postgres storage, files, quotas, auth, blob/sync/push APIs, deploys |
 | [Computer display](docs/architecture/computer-display.md) | Proposed authenticated display/input transport and its gaps |
 | [Protocols](docs/architecture/protocols.md) | The app ↔ CLI websocket and the CLI ↔ relay requests and blobs |
+| [Remote requests](docs/architecture/remote-requests.md) | Device-to-Runner request signatures, authority, envelopes and deadlines |
 | [Computer ownership](docs/architecture/computer-ownership.md) | Proposed encrypted ownership, lifecycle and old-client fixture |
 | [Computer ownership compatibility](docs/architecture/computer-ownership-compatibility.md) | Source-extracted fixture, hashes, replay and limits |
 | [Managed policy receipts and replay](docs/architecture/managed-policy-replay.md) | Opaque policy commits, receipts, replay cuts and teardown |

@@ -8,11 +8,11 @@
     "build": "mygo build",
     "generate": "mygo generate",
     "dev:web": "vite",
-    "build:web": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run --config vitest.config.ts && tsx test-browser.ts",
-    "test:unit": "vitest run --config vitest.config.ts",
-    "test:e2e": "vitest run --config vitest.e2e.config.ts"
+    "build:web": "tsx ensure-bindings.ts && tsc --noEmit && vite build",
+    "typecheck": "tsx ensure-bindings.ts && tsc --noEmit",
+    "test": "tsx ensure-bindings.ts && vitest run --config vitest.config.ts && tsx test-browser.ts",
+    "test:unit": "tsx ensure-bindings.ts && vitest run --config vitest.config.ts",
+    "test:e2e": "tsx ensure-bindings.ts && vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
     "@beans/blobatar": "file:../packages/beans-blobatar",

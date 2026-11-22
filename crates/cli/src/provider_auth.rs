@@ -68,6 +68,61 @@ fn opencode_root(root: &str) -> &str {
     root.trim_end_matches('/').strip_suffix("/v1").unwrap_or_else(|| root.trim_end_matches('/'))
 }
 
+/// One check for every pasted key: trimmed, present, and only the visible ASCII an HTTP header
+/// carries, so a line break or a non-ASCII character pasted with it is named before any network
+/// call instead of surfacing as "unreachable".
+fn pasted_key<'a>(api_key: &'a str, missing: &str) -> Result<&'a str, String> {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Err(missing.into());
+    }
+    valid_key_characters(key)?;
+    Ok(key)
+}
+
+fn valid_key_characters(key: &str) -> Result<(), String> {
+    if key.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
+        Ok(())
+    } else {
+        Err("The key contains invalid characters. Copy it again from the provider.".into())
+    }
+}
+
+/// An Anthropic root as the runtime extends it (`{root}/v1/messages`): a pasted `…/v1` is the
+/// API's version path, not part of the root.
+fn anthropic_root(root: &str) -> String {
+    let root = root.trim_end_matches('/');
+    root.strip_suffix("/v1").unwrap_or(root).to_string()
+}
+
+/// What a key check's status means. `opencode`: the OpenCode usage endpoint, where 403 after
+/// authentication is a valid key without Go (`Some(false)`) or a missing subscription
+/// (`Some(true)`, Go needs it).
+fn key_check_status(name: &str, status: reqwest::StatusCode, opencode: Option<bool>) -> Result<(), String> {
+    match (status, opencode) {
+        (reqwest::StatusCode::UNAUTHORIZED, _) => Err(format!("{name} rejected that key")),
+        (reqwest::StatusCode::FORBIDDEN, Some(true)) => Err("OpenCode Go needs an active subscription".into()),
+        (reqwest::StatusCode::FORBIDDEN, Some(false)) => Ok(()),
+        (reqwest::StatusCode::FORBIDDEN, None) => Err(format!("{name} rejected that key")),
+        (status, _) if status.is_success() => Ok(()),
+        (status, _) if status.is_redirection() => Err(format!("{name} redirected the key check to another address. Use the address it ends at as the base URL.")),
+        (status, _) => Err(format!("{name} answered {status}")),
+    }
+}
+
+/// Where an OpenCode key is checked, and how its answer reads. Any root on OpenCode's own
+/// service (Zen or Go, however it was pasted) checks the authenticated usage endpoint, since
+/// the model catalog there is public and would pass any key; another server lists models.
+fn opencode_check(root: &str, go: bool) -> (String, Option<bool>) {
+    let root = opencode_root(root);
+    let service = |base: &str| root == base || root == format!("{base}/v1");
+    if service(OPENCODE_BASE_URL) || service(OPENCODE_GO_BASE_URL) {
+        (format!("{OPENCODE_GO_BASE_URL}/v1/usage"), Some(go))
+    } else {
+        (format!("{root}/v1/models"), None)
+    }
+}
+
 /// A base URL the user typed: blank means the default; otherwise an http(s) root without a
 /// trailing slash.
 fn custom_base_url(base_url: Option<&str>) -> Result<Option<String>, String> {
@@ -84,27 +139,22 @@ fn custom_base_url(base_url: Option<&str>) -> Result<Option<String>, String> {
 
 /// Checks a DeepSeek key against the API (the given root, or DeepSeek's) before saving both.
 pub async fn connect_deepseek(app: &Arc<App>, api_key: &str, base_url: Option<&str>) -> Result<(), String> {
-    let key = api_key.trim();
-    if key.is_empty() {
-        return Err("Paste a DeepSeek API key".into());
-    }
+    let key = pasted_key(api_key, "Paste a DeepSeek API key")?;
     let base_url = custom_base_url(base_url)?;
     let root = base_url.clone().unwrap_or_else(deepseek_base_url);
-    let request = app.http.get(format!("{}/models", root.trim_end_matches("/anthropic"))).bearer_auth(key);
-    check_key("DeepSeek", request).await?;
+    let request = discovery_client()?.get(format!("{}/models", root.trim_end_matches("/anthropic"))).bearer_auth(key);
+    check_key("DeepSeek", request, None).await?;
     save_api_key(app, "deepseek", key, base_url)
 }
 
 /// Checks an Anthropic key against the API (the given root, or Anthropic's) before saving both.
 pub async fn connect_anthropic(app: &Arc<App>, api_key: &str, base_url: Option<&str>) -> Result<(), String> {
-    let key = api_key.trim();
-    if key.is_empty() {
-        return Err("Paste an Anthropic API key".into());
-    }
-    let base_url = custom_base_url(base_url)?;
+    let key = pasted_key(api_key, "Paste an Anthropic API key")?;
+    let base_url = custom_base_url(base_url)?.map(|root| anthropic_root(&root));
     let root = base_url.clone().unwrap_or_else(anthropic_base_url);
-    let request = app.http.get(format!("{root}/v1/models")).header("x-api-key", key).header("anthropic-version", ANTHROPIC_VERSION);
-    check_key("Anthropic", request).await?;
+    // No redirects: reqwest drops `Authorization` on one, but not `x-api-key`.
+    let request = discovery_client()?.get(format!("{root}/v1/models")).header("x-api-key", key).header("anthropic-version", ANTHROPIC_VERSION);
+    check_key("Anthropic", request, None).await?;
     save_api_key(app, "anthropic", key, base_url)
 }
 
@@ -112,60 +162,31 @@ pub async fn connect_anthropic(app: &Arc<App>, api_key: &str, base_url: Option<&
 /// authenticated usage endpoint; a valid Zen key without a Go subscription answers 403 after
 /// authentication and is still a valid Zen credential.
 pub async fn connect_opencode(app: &Arc<App>, api_key: &str, base_url: Option<&str>) -> Result<(), String> {
-    let key = api_key.trim();
-    if key.is_empty() {
-        return Err("Paste an OpenCode Zen API key".into());
-    }
+    let key = pasted_key(api_key, "Paste an OpenCode Zen API key")?;
     let base_url = custom_base_url(base_url)?;
     let configured = base_url.clone().or_else(|| env_url("BEANS_OPENCODE_BASE_URL"));
-    let root = configured.as_deref().map(opencode_root).unwrap_or(OPENCODE_BASE_URL);
-    if root == OPENCODE_BASE_URL {
-        let request = app.http.get(format!("{root}/go/v1/usage")).bearer_auth(key);
-        check_opencode_key("OpenCode Zen", request, false).await?;
-    } else {
-        check_key("OpenCode Zen", app.http.get(format!("{root}/v1/models")).bearer_auth(key)).await?;
-    }
+    let (url, opencode) = opencode_check(configured.as_deref().unwrap_or(OPENCODE_BASE_URL), false);
+    check_key("OpenCode Zen", discovery_client()?.get(url).bearer_auth(key), opencode).await?;
     save_api_key(app, "opencode", key, base_url)
 }
 
 /// Checks both the OpenCode key and its Go entitlement against the authenticated usage route.
 pub async fn connect_opencode_go(app: &Arc<App>, api_key: &str, base_url: Option<&str>) -> Result<(), String> {
-    let key = api_key.trim();
-    if key.is_empty() {
-        return Err("Paste an OpenCode Go API key".into());
-    }
+    let key = pasted_key(api_key, "Paste an OpenCode Go API key")?;
     let base_url = custom_base_url(base_url)?;
     let root = base_url
         .clone()
         .or_else(|| env_url("BEANS_OPENCODE_GO_BASE_URL"))
         .unwrap_or_else(|| OPENCODE_GO_BASE_URL.into());
-    let root = opencode_root(&root);
-    if root == OPENCODE_GO_BASE_URL {
-        check_opencode_key("OpenCode Go", app.http.get(format!("{root}/v1/usage")).bearer_auth(key), true).await?;
-    } else {
-        check_key("OpenCode Go", app.http.get(format!("{root}/v1/models")).bearer_auth(key)).await?;
-    }
+    let (url, opencode) = opencode_check(&root, true);
+    check_key("OpenCode Go", discovery_client()?.get(url).bearer_auth(key), opencode).await?;
     save_api_key(app, "opencode-go", key, base_url)
 }
 
-async fn check_key(name: &str, request: reqwest::RequestBuilder) -> Result<(), String> {
+/// Sends a key check with the no-redirect client and reads its status (`key_check_status`).
+async fn check_key(name: &str, request: reqwest::RequestBuilder, opencode: Option<bool>) -> Result<(), String> {
     let response = request.send().await.map_err(|e| format!("{name} unreachable: {}", beans_tls::describe(&e)))?;
-    match response.status() {
-        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Err(format!("{name} rejected that key")),
-        status if status.is_success() => Ok(()),
-        status => Err(format!("{name} answered {status}")),
-    }
-}
-
-async fn check_opencode_key(name: &str, request: reqwest::RequestBuilder, requires_go: bool) -> Result<(), String> {
-    let response = request.send().await.map_err(|e| format!("{name} unreachable: {}", beans_tls::describe(&e)))?;
-    match response.status() {
-        reqwest::StatusCode::UNAUTHORIZED => Err(format!("{name} rejected that key")),
-        reqwest::StatusCode::FORBIDDEN if requires_go => Err("OpenCode Go needs an active subscription".into()),
-        reqwest::StatusCode::FORBIDDEN => Ok(()),
-        status if status.is_success() => Ok(()),
-        status => Err(format!("{name} answered {status}")),
-    }
+    key_check_status(name, response.status(), opencode)
 }
 
 fn save_api_key(app: &Arc<App>, kind: &str, key: &str, base_url: Option<String>) -> Result<(), String> {
@@ -297,8 +318,12 @@ async fn connect_custom_as(app: &Arc<App>, input: CustomInput, authority: Option
     let api = CustomApi::parse(input.api.trim()).ok_or_else(|| format!("Unknown API {}", input.api.trim()))?;
     let base_url = integration_root(api, &input.base_url, integration)?;
     let api_key = input.api_key.trim().to_string();
+    if !api_key.is_empty() {
+        valid_key_characters(&api_key)?;
+    }
+    // Ids as typed, trimmed: " gpt-4o " and "gpt-4o" are one model.
     let mut ids: Vec<String> = Vec::new();
-    for id in input.models.iter().filter(|id| !id.trim().is_empty()) {
+    for id in input.models.iter().map(|id| id.trim()).filter(|id| !id.is_empty()) {
         if !ids.iter().any(|seen| seen == id) {
             ids.push(id.to_string());
         }
@@ -394,6 +419,9 @@ pub async fn list_custom_models(_app: &Arc<App>, name: &str, api: &str, base_url
     let api = CustomApi::parse(api.trim()).ok_or_else(|| format!("Unknown API {}", api.trim()))?;
     let integration = CustomIntegration::parse(integration)?;
     let root = integration_root(api, base_url, integration)?;
+    if !api_key.trim().is_empty() {
+        valid_key_characters(api_key.trim())?;
+    }
     let listed = list_models(name, api, &root, api_key.trim()).await?;
     Ok(listed.map(|models| models.into_iter().filter(|(not_chat, _)| !not_chat).map(|(_, model)| model).collect()))
 }
@@ -673,3 +701,5 @@ pub fn disconnect(app: &Arc<App>, kind: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod builtin_tests;

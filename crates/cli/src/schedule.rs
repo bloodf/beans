@@ -273,8 +273,8 @@ fn parse_value(text: &str, min: u32, max: u32, names: &[&str], reading: Reading)
 
 impl Schedule {
     /// The first time this schedule fires strictly after `after` (unix seconds), in the local
-    /// time zone. `None` when nothing matches in the next eight years, or past what the clock
-    /// can say.
+    /// time zone. `None` when an interval's next firing exceeds the timestamp range, when no
+    /// cron matches in the next eight years, or past what the clock can say.
     pub fn next_after(&self, after: i64) -> Option<i64> {
         self.next_in(after, &LocalZone)
     }
@@ -632,6 +632,26 @@ mod tests {
     }
 
     #[test]
+    fn oversized_intervals_reject_without_overflow_or_wraparound() {
+        for input in [
+            "every 9223372036854775807m", "every 9223372036854775807h",
+            "every 9223372036854775807d", "every 144115188075855873d",
+        ] {
+            assert!(parse(input).is_err(), "accepted {input}");
+        }
+        assert_eq!(parse("every 366d").unwrap(), Schedule::Every(366 * 86_400));
+        assert!(parse("every 367d").is_err());
+    }
+
+    #[test]
+    fn interval_next_firing_does_not_wrap_timestamp() {
+        let schedule = parse("every 5m").unwrap();
+        assert_eq!(schedule.next_after(i64::MAX - 300), Some(i64::MAX));
+        assert_eq!(schedule.next_after(i64::MAX - 299), None);
+        assert_eq!(schedule.next_after(i64::MIN), Some(i64::MIN + 300));
+    }
+
+    #[test]
     fn intervals_parse_and_read_back() {
         assert_eq!(parse("every 30m").unwrap(), Schedule::Every(1800));
         assert_eq!(parse("every 2 hours").unwrap(), Schedule::Every(7200));
@@ -644,6 +664,9 @@ mod tests {
         assert_eq!(parse("every 120m").unwrap().canonical(), "every 2h");
         assert!(parse("every 2m").unwrap_err().contains("too often"));
         assert!(parse("every fortnight").is_err());
+        for unit in ["m", "h", "d"] {
+            assert!(parse(&format!("every {}{unit}", i64::MAX)).unwrap_err().contains("longer than a year"));
+        }
         assert_eq!(parse("every 30m").unwrap().next_after(1000), Some(2800));
     }
 

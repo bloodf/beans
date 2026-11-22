@@ -16,6 +16,7 @@ import { isLive, isSentMessage, showsCard, type Author, type Body, type Bot, typ
 import { engine } from "../core/engine";
 import { useStore } from "../core/store";
 import { language, t, useLanguage } from "../i18n";
+import { alwaysAllowNote } from "./alwaysAllow";
 import { AttachmentBlock } from "./attachments";
 import { BotAvatar } from "./Avatar";
 import { daySeparator, firstLine, workingActivity } from "./format";
@@ -365,13 +366,7 @@ export function PermissionRow({ row, isGroup, onDecide }: { row: Extract<Row, { 
           ? t("{who} wants to run a command on {plugin}", { who, plugin })
           : t("{who} wants to use {plugin}", { who, plugin });
   const command = row.body.command ?? row.body.summary.replace(/^\$ /, "");
-  const ruleNote = proposal || !row.body.rule
-    ? undefined
-    : pending
-      ? t("Always allow adds the rule “{rule}”.", { rule: row.body.rule })
-      : row.body.decision === "always"
-        ? t("Added the rule “{rule}” to Auto-review.", { rule: row.body.rule })
-        : undefined;
+  const ruleNote = proposal ? undefined : alwaysAllowNote(row.body, pending, row.body.decision);
   const decided: Record<string, string> = proposal
     ? { allowed: t("Approved for saving"), denied: t("Declined"), expired: t("No answer in time"), dismissed: t("Dismissed") }
     : connect
@@ -597,7 +592,7 @@ export function CommandRow({
             ))}
           </View>
         ) : null}
-        {run.state === "asking" && run.rule ? <Text style={[styles.ruleNote, { color: p.secondaryLabel }]}>{t("Always allow adds the rule “{rule}”.", { rule: run.rule })}</Text> : null}
+        {run.state === "asking" && run.rule ? <Text style={[styles.ruleNote, { color: p.secondaryLabel }]}>{alwaysAllowNote(run, true)}</Text> : null}
         {run.state === "waiting" && takesInput ? (
           <View style={{ flexDirection: "row", marginTop: 4 }}>
             <Pressable onPress={onAnswer} style={({ pressed }) => [styles.permissionButton, { backgroundColor: pressed ? p.separator : p.fill }]} accessibilityRole="button">

@@ -2,7 +2,7 @@
 // as a bot's provider, and a command's card.
 
 import { expect, test } from "vitest";
-import { contextSummary, runsInForeground } from "./models";
+import { alwaysAllowNote, contextSummary, runsInForeground } from "./models";
 import { toAutoReview, toUsage, toBot, toCustomModel, toMessage, toProviders, type WireBot } from "./wire";
 
 test("statuses keep custom providers after the built-in ones and leave out unknown kinds", () => {
@@ -108,4 +108,44 @@ test("full access is off unless the CLI says it is on, so a CLI that does not kn
   expect(toAutoReview({ is_enabled: false, rules: null, full_access: null }).fullAccess).toBe(false);
   const on = toAutoReview({ is_enabled: false, rules: [{ id: "r1", text: "deploy", behavior: "allow" }], full_access: true });
   expect(on).toEqual({ isEnabled: false, fullAccess: true, rules: [{ id: "r1", text: "deploy", behavior: "allow", tool: undefined }] });
+});
+
+// Issue #550: Always allow on a secret's card keeps a grant in the secret store, not an
+// Auto-review rule, and the card says so.
+test("a secret's grant is worded as a grant, and an Auto-review rule as a rule", () => {
+  const permission = (body: Record<string, unknown>) =>
+    toMessage({
+      id: "m1",
+      chat_id: "c1",
+      author: { kind: "bot", bot_id: "b1" },
+      body: { kind: "permission", plugin_id: "github", plugin_name: "GitHub", tool: "create_issue", summary: "create_issue with your secrets: GITHUB_TOKEN", ...body },
+      state: { kind: "complete" },
+      created_at: 1,
+    });
+  const grant = permission({ decision: "pending", rule: "always send GITHUB_TOKEN through create_issue", grant: true });
+  if (grant.body.kind !== "permission") throw new Error("not a permission");
+  expect(grant.body.request.grant).toBe(true);
+  expect(alwaysAllowNote(grant.body.request, true)).toBe("Always allow grants this from now on: “always send GITHUB_TOKEN through create_issue”.");
+  expect(alwaysAllowNote(grant.body.request, false, "always")).toBe("Allowed always. Manage it with the secrets tool.");
+  expect(alwaysAllowNote(grant.body.request, false, "allowed")).toBeUndefined();
+
+  // Older Runners send no `grant`: the card reads as an Auto-review rule, as before.
+  const rule = permission({ decision: "pending", rule: "Allow creating issues in beans" });
+  if (rule.body.kind !== "permission") throw new Error("not a permission");
+  expect(rule.body.request.grant).toBeUndefined();
+  expect(alwaysAllowNote(rule.body.request, true)).toBe("Always allow adds the rule “Allow creating issues in beans”.");
+  expect(alwaysAllowNote(rule.body.request, false, "always")).toBe("Added the rule “Allow creating issues in beans” to Auto-review.");
+
+  // A command's own card carries it on its run.
+  const command = toMessage({
+    id: "m2",
+    chat_id: "c1",
+    author: { kind: "bot", bot_id: "b1" },
+    body: { kind: "tool", name: "bash", summary: "Running", is_running: true, run: { command: "echo {{secret:K}}", state: "asking", rule: "always run this exact command here with K", grant: true } },
+    state: { kind: "complete" },
+    created_at: 1,
+  });
+  const run = command.body.kind === "tool" ? command.body.tool.run : undefined;
+  expect(run?.grant).toBe(true);
+  expect(alwaysAllowNote(run!, true)).toBe("Always allow grants this from now on: “always run this exact command here with K”.");
 });

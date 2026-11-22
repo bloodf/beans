@@ -548,7 +548,7 @@ class Engine {
     const answered = (m: Message): Message => {
       if (m.body.kind === "permission") return { ...m, body: { ...m.body, decision: decided } };
       if (m.body.kind === "tool" && m.body.run?.state === "asking") {
-        const run = { ...m.body.run, decision: decided, state: decided === "denied" ? ("denied" as const) : ("running" as const), rule: decided === "always" ? m.body.run.rule : undefined };
+        const run = { ...m.body.run, decision: decided, state: decided === "denied" ? ("denied" as const) : ("running" as const), rule: decided === "always" ? m.body.run.rule : undefined, grant: decided === "always" ? m.body.run.grant : undefined };
         return { ...m, body: { ...m.body, run } };
       }
       return m;

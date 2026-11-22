@@ -1849,6 +1849,51 @@ mod runner_tests {
         let _ = std::fs::remove_dir_all(scratch);
     }
 
+    /// Issue #550: the apps word Always allow by what it keeps, so the card says which it is.
+    #[tokio::test]
+    async fn a_secret_grant_is_marked_on_its_card_and_an_auto_review_rule_is_not() {
+        use crate::model::Body;
+        use crate::plugins::mcp::{self, Decision};
+        let (app, scratch) = app();
+        app.state.lock().unwrap().chats.push(serde_json::from_value(json!({ "id": "chat", "kind": "dm", "bot_ids": ["bot"], "created_at": 0.0 })).unwrap());
+        let cancel = CancellationToken::new();
+        let deny_next = || {
+            let app = app.clone();
+            async move {
+                let started = std::time::Instant::now();
+                loop {
+                    assert!(started.elapsed() < std::time::Duration::from_secs(10), "the card was never asked");
+                    let pending = app.pending_permissions.lock().unwrap().keys().next().cloned();
+                    if let Some(id) = pending {
+                        assert!(mcp::answer(&app, &id, Decision::Denied));
+                        return id;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+        };
+        let offer = Some("always send GITHUB_TOKEN through create_issue".to_string());
+        let (_, asked) = tokio::join!(
+            mcp::ask_offering(&app, "chat", "bot", "github", "GitHub", "create_issue", "create_issue with your secrets: GITHUB_TOKEN", serde_json::Value::Null, None, offer, None, &cancel),
+            deny_next()
+        );
+        let card = app.message("chat", &asked).unwrap();
+        let Body::Permission { grant, rule, .. } = &card.body else { panic!("not a permission message") };
+        assert!(*grant && rule.is_some());
+        assert_eq!(serde_json::to_value(&card.body).unwrap()["grant"], true);
+
+        let rule = crate::model::AutoReviewRule { id: "r".into(), text: "Allow cargo test in this project".into(), behavior: "allow".into(), tool: None };
+        let (_, asked) = tokio::join!(
+            mcp::ask_with_rule(&app, "chat", "bot", "computer", "Runner", "bash", "$ cargo test", serde_json::Value::Null, None, Some(rule), &cancel),
+            deny_next()
+        );
+        let card = app.message("chat", &asked).unwrap();
+        let Body::Permission { grant, rule, .. } = &card.body else { panic!("not a permission message") };
+        assert!(!*grant && rule.as_deref() == Some("Allow cargo test in this project"));
+        assert!(serde_json::to_value(&card.body).unwrap().get("grant").is_none(), "older apps see the card as before");
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
     #[tokio::test]
     async fn a_command_with_secrets_waits_for_the_user_whatever_auto_review_says() {
         use crate::local_review::before_tool_call_with;
@@ -1901,7 +1946,8 @@ mod runner_tests {
         let (allowed, asked) = tokio::join!(before_tool_call_with(&app, "chat", &trigger, &bot, &work, false, &secrets, ctx), answer_with(Decision::Always));
         assert_eq!(allowed.unwrap().args.unwrap()["command"], format!("echo {OPENAI}"));
         assert_eq!(app.auto_review().rules.len(), rules, "Always allow does not make a rule for secrets");
-        let Body::Permission { summary, reason, rule, .. } = app.message("chat", &asked).unwrap().body else { panic!("not a permission message") };
+        let Body::Permission { summary, reason, rule, grant, .. } = app.message("chat", &asked).unwrap().body else { panic!("not a permission message") };
+        assert!(grant, "the card says Always allow is a secret's grant, not an Auto-review rule");
         assert!(summary.contains("{{secret:OPENAI_API_KEY}}") && !summary.contains(OPENAI), "{summary}");
         assert!(reason.is_some_and(|reason| reason.contains("only you can allow")));
         assert_eq!(rule.as_deref(), Some("always run this exact command here with OPENAI_API_KEY"), "Always allow grants this command");

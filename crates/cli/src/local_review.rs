@@ -253,11 +253,14 @@ async fn ask_on_card_offering(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Decision {
     let rule = offer;
+    // An offer with no Auto-review rule behind it is a secret's grant, which the apps word as one.
+    let grant = rule.is_some() && always_rule.is_none();
     let decision = mcp::await_answer(app, chat_id, message_id, always_rule, cancel, || {
         app.shell_sessions.update_card(app, chat_id, message_id, |run| {
             run.state = "asking".into();
             run.reason = reason;
             run.rule = rule;
+            run.grant = grant;
         });
         if let Some(message) = app.message(chat_id, message_id) {
             crate::push::permission(app, &message);
@@ -269,6 +272,7 @@ async fn ask_on_card_offering(
         // The rule stays to say an Always allow added it.
         if decision != Decision::Always {
             run.rule = None;
+            run.grant = false;
         }
         run.state = match decision {
             Decision::Allowed | Decision::Always => "running",

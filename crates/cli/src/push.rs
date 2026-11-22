@@ -308,7 +308,7 @@ mod tests {
             let mut message = Message::new(id, Author::Bot { bot_id: bot.id.clone() }, Body::Permission {
                 plugin_id: "computer".into(), plugin_name: "Mac".into(), tool: "bash".into(),
                 summary: "Deploy the app".into(), arguments: serde_json::Value::Null,
-                decision: "pending".into(), reason: Some("Needs confirmation".into()), rule: None, command: None, title: None, content: None, path: None, link: None, code: None,
+                decision: "pending".into(), reason: Some("Needs confirmation".into()), rule: None, grant: false, command: None, title: None, content: None, path: None, link: None, code: None,
             });
             if id == "failed" || id == "read-error" {
                 message.body = Body::text("Partial output");

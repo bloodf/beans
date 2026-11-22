@@ -739,6 +739,8 @@ export interface PermissionRequest {
   reason?: string;
   /** The rule Always allow adds, which Auto-review proposed for a shell command. */
   rule?: string;
+  /** `rule` is a secret's grant kept in the secret store, not an Auto-review rule. */
+  grant?: boolean;
   /** A shell card's whole command, where `summary` is its first line. */
   command?: string;
   /** Proposed draft, shown for review before writing to the bot's workdir. */
@@ -788,6 +790,18 @@ export function decisionText(request: PermissionRequest): string {
     case "failed":
       return L("Sign-in failed");
   }
+}
+
+/** What a card says under Always allow: the Auto-review rule it would add or added, or, for a
+ * secret's grant, what it lets through and where the grant is managed. */
+export function alwaysAllowNote(offer: { rule?: string; grant?: boolean }, pending: boolean, decision?: string): string | undefined {
+  if (offer.rule === undefined) return undefined;
+  if (offer.grant) {
+    if (pending) return L("Always allow grants this from now on: “%@”.", offer.rule);
+    return decision === "always" ? L("Allowed always. Manage it with the secrets tool.") : undefined;
+  }
+  if (pending) return L("Always allow adds the rule “%@”.", offer.rule);
+  return decision === "always" ? L("Added the rule “%@” to Auto-review.", offer.rule) : undefined;
 }
 
 /** The buttons a pending card offers: [title, decision]. A shell command offers Always allow only
@@ -922,6 +936,8 @@ export interface CommandRun {
   reason?: string;
   /** The rule Always allow adds. */
   rule?: string;
+  /** `rule` is a secret's grant kept in the secret store, not an Auto-review rule. */
+  grant?: boolean;
   /** The bot left the command to the user: its turn ended with the command still running, or it
    * waits on the command at a question. */
   handedOver: boolean;

@@ -274,7 +274,7 @@ export type Body =
   /// The bot asks before a plugin or shell action, or before installing a plugin (`tool` is `install`).
   /// `rule` is the rule Always allow adds, which Auto-review proposed for a shell command (`plugin_id` is `computer`);
   /// `command` is that command in full, where `summary` is its first line.
-  | { kind: "permission"; plugin_id: string; plugin_name: string; tool: string; summary: string; decision: "pending" | "allowed" | "always" | "denied" | "expired" | "dismissed" | "connected" | "failed"; reason?: string; rule?: string; command?: string; link?: string; code?: string; title?: string; content?: string; path?: string };
+  | { kind: "permission"; plugin_id: string; plugin_name: string; tool: string; summary: string; decision: "pending" | "allowed" | "always" | "denied" | "expired" | "dismissed" | "connected" | "failed"; reason?: string; rule?: string; grant?: boolean; command?: string; link?: string; code?: string; title?: string; content?: string; path?: string };
 
 /// Where a bash call's command stands: Auto-review checking it, the question it asks, the command
 /// running in its terminal, what the command asks, and that it ended. While it asks, its card takes
@@ -306,6 +306,8 @@ export interface CommandRun {
   reason?: string;
   /** The rule Always allow adds. */
   rule?: string;
+  /** `rule` is a secret's grant kept in the secret store, not an Auto-review rule. */
+  grant?: boolean;
 }
 
 export function isLive(run: CommandRun): boolean {

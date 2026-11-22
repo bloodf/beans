@@ -355,6 +355,11 @@ pub enum Body {
         /// command. A shell card without one offers only Allow once and Deny.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rule: Option<String>,
+        /// `rule` is not an Auto-review rule but a secret's grant (`secret_store::Grant`): Always
+        /// allow lets this exact command, or this tool, use the named secrets from then on, and it
+        /// is managed with the secrets tool. Absent (false) for older Runners' cards.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        grant: bool,
         /// A shell card's whole command, for the apps, which never get `arguments`: `for_app`
         /// fills it with the first `APP_COMMAND_CHARS` characters.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -467,6 +472,9 @@ pub struct CommandRun {
     /// question offers only Allow once and Deny.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
+    /// `rule` offers a secret's grant, not an Auto-review rule (see `Body::Permission::grant`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub grant: bool,
     /// The answer to Auto-review's question: `allowed` (once), `always`, `denied`, `expired`, or
     /// `dismissed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1215,7 +1223,7 @@ mod app_view_tests {
     fn permission_cards_drop_the_reviewed_payload() {
         let permission = Message::new("c", Author::Bot { bot_id: "b".into() }, Body::Permission {
             plugin_id: "computer".into(), plugin_name: "Mac".into(), tool: "bash".into(), summary: "Run a command".into(),
-            arguments: serde_json::json!({ "command": "secret" }), decision: "pending".into(), reason: None, rule: None, command: None, title: None, content: None, path: None, link: None, code: None,
+            arguments: serde_json::json!({ "command": "secret" }), decision: "pending".into(), reason: None, rule: None, grant: false, command: None, title: None, content: None, path: None, link: None, code: None,
         });
         let app = permission.for_app();
         let Body::Permission { arguments, summary, command, .. } = &app.body else { panic!() };
@@ -1233,7 +1241,7 @@ mod app_view_tests {
         let card = Message::new("c", Author::Bot { bot_id: "b".into() }, Body::Permission {
             plugin_id: "computer".into(), plugin_name: "Runner".into(), tool: "propose".into(),
             summary: "Review draft".into(), arguments: serde_json::json!({ "content": "hidden" }), decision: "pending".into(),
-            reason: None, rule: None, command: None, title: Some("Draft".into()), content: Some(text.clone()),
+            reason: None, rule: None, grant: false, command: None, title: Some("Draft".into()), content: Some(text.clone()),
             path: Some("notes/draft.md".into()), link: None, code: None,
         });
         let Body::Permission { content, arguments, path, .. } = card.for_app().for_app().body else { panic!() };

@@ -3648,7 +3648,7 @@ mod tests {
             let mut message = Message::new("chat", Author::Bot { bot_id: "b1".into() }, Body::Permission {
                 plugin_id: "computer".into(), plugin_name: "Runner".into(), tool: tool.into(),
                 summary: "Review draft".into(), arguments: Value::Null, decision: "pending".into(),
-                reason: None, rule: None, command: None, title: Some("Draft".into()),
+                reason: None, rule: None, grant: false, command: None, title: Some("Draft".into()),
                 content: Some("Original".into()), path: Some("draft.md".into()), link: None, code: None,
             });
             message.id = id.into();

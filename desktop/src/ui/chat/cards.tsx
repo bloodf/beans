@@ -8,6 +8,7 @@ import type { JSX } from "@solidjs/web";
 import { host } from "../../host";
 import { L } from "../../l10n";
 import {
+  alwaysAllowNote,
   asksYesOrNo,
   commandChoices,
   decisionText,
@@ -114,11 +115,10 @@ function hostOf(link: string | undefined): string | undefined {
   }
 }
 
-/** What a card says about its rule: the one Always allow would add, or the one it added. */
+/** What a card says about its rule: the one Always allow would add, or the one it added, or the
+ * secret's grant it keeps. */
 function ruleNote(request: PermissionRequest): string | undefined {
-  if (request.rule === undefined) return undefined;
-  if (isPending(request)) return L("Always allow adds the rule “%@”.", request.rule);
-  return request.decision === "always" ? L("Added the rule “%@” to Auto-review.", request.rule) : undefined;
+  return alwaysAllowNote(request, isPending(request), request.decision);
 }
 
 export function permissionSpokenText(request: PermissionRequest, botName: string): string {
@@ -239,7 +239,7 @@ export function outputText(run: { output?: string }): string | undefined {
 }
 
 function commandNote(run: CommandRun): string | undefined {
-  if (run.state === "asking") return run.rule !== undefined ? L("Always allow adds the rule “%@”.", run.rule) : undefined;
+  if (run.state === "asking") return alwaysAllowNote(run, true);
   if (takesInput(run) && run.handedOver) return L("What you type goes straight to the command, not into the chat.");
   return undefined;
 }

@@ -143,6 +143,7 @@ export interface WireRun {
   device?: string | null;
   reason?: string | null;
   rule?: string | null;
+  grant?: boolean | null;
   handed_over?: boolean | null;
   background?: boolean | null;
 }
@@ -168,6 +169,7 @@ export interface WireBody {
   link?: string | null;
   code?: string | null;
   rule?: string | null;
+  grant?: boolean | null;
   command?: string | null;
   run?: WireRun | null;
   title?: string | null;
@@ -684,6 +686,7 @@ export function toMessage(wire: WireMessage): Message {
             device: optional(body.run.device),
             reason: optional(body.run.reason),
             rule: optional(body.run.rule),
+            ...(body.run.grant ? { grant: true } : {}),
             handedOver: body.run.handed_over ?? false,
             background: body.run.background ?? false,
           }
@@ -723,6 +726,7 @@ export function toMessage(wire: WireMessage): Message {
           code: optional(body.code),
           reason: optional(body.reason),
           rule: optional(body.rule),
+          ...(body.grant ? { grant: true } : {}),
           command: optional(body.command),
           title: optional(body.title),
           content: optional(body.content),

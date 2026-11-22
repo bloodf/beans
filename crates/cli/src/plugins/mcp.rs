@@ -818,6 +818,7 @@ pub fn post_sign_in_card(app: &Arc<App>, chat_id: &str, bot_id: &str, plugin_id:
             decision: "pending".into(),
             reason: None,
             rule: None,
+            grant: false,
             command: None,
             title: None,
             content: None,
@@ -2535,6 +2536,8 @@ pub async fn ask_offering(
     always_rule: Option<AutoReviewRule>,
     cancel: &CancellationToken,
 ) -> Decision {
+    // An offer with no Auto-review rule behind it is a secret's grant, which the apps word as one.
+    let grant = offer.is_some() && always_rule.is_none();
     let message = Message::new(
         chat_id,
         Author::Bot { bot_id: bot_id.to_string() },
@@ -2547,6 +2550,7 @@ pub async fn ask_offering(
             decision: "pending".into(),
             reason,
             rule: offer,
+            grant,
             command: None,
             title: None,
             content: None,
@@ -2602,7 +2606,7 @@ pub async fn propose(app: &Arc<App>, chat_id: &str, bot_id: &str, call_id: &str,
     let mut card = Message::new(chat_id, Author::Bot { bot_id: bot_id.to_string() }, Body::Permission {
         plugin_id: "computer".into(), plugin_name: this_runner(app), tool: "propose".into(),
         summary, arguments: Value::Null, decision: "pending".into(), reason: None,
-        rule: None, command: None, title: title.clone(), content: content.clone(), path: path.clone(), link: None, code: None,
+        rule: None, grant: false, command: None, title: title.clone(), content: content.clone(), path: path.clone(), link: None, code: None,
     });
     card.id = card_id;
     let choice = await_answer(app, chat_id, &card.id, None, cancel, || {

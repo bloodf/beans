@@ -76,6 +76,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [CLI service and updates](docs/architecture/service-updates.md) | Installation, standalone services, admission drain, update availability |
 | [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review, [secrets](docs/architecture/secrets.md) |
 | [Computer provenance](docs/architecture/computer-provenance.md) | Proposed computer-stack provenance and verification gates |
+| [Computer threat model](docs/architecture/computer-threat-model.md) | Planned computer boundaries, fail-closed requirements, residual risks |
 | [Terminal sessions](docs/architecture/terminal-sessions.md) | Command terminals: returns, background commands, cards, input, stopping |
 | [Realtime voice evaluation](docs/architecture/voice-evaluation.md) | Voice stack options, transports, privacy and pending evidence |
 | [Codemode and Plugins](docs/architecture/plugins.md) | Plugin-calling scripts, MCP plugins, installs, sign-in, turn-time calls |

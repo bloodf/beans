@@ -140,6 +140,7 @@ export const zh: Record<string, string> = {
   "Added %@. It needs setup: click Set Up.": "已添加 %@。它需要设置：点按“设置”。",
   "Added the rule “%@” to Auto-review.": "已将规则“%@”添加到自动审查。",
   "Allowed always. Manage it with the secrets tool.": "已始终允许。可用密钥工具管理。",
+  "The demo does not download models.": "演示模式不会下载模型。",
   "Adding %@": "正在添加 %@",
   "Adding %@…": "正在添加 %@…",
   "Adding %d servers…": "正在添加 %d 个服务器…",

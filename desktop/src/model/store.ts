@@ -89,6 +89,7 @@ import {
   type WireLocalModels,
   type WireModelPreview,
   type WireSearchIndexStatus,
+  type WireTextSource,
   type WireSnapshot,
   type WireSyncAccount,
 } from "./wire";
@@ -1624,33 +1625,62 @@ export class AppStore {
 
   /** Messages near the query in meaning, and pictures by what they show, from the Runner's search models. */
   async searchRelated(query: string): Promise<WireRelatedResults> {
-    if (this.isMock) return { state: "off", related: [], runner_id: null };
+    if (this.isMock) {
+      const { mockRelated } = await import("./mockSearch");
+      return mockRelated(query, this.chats, this.mockSearch());
+    }
     return this.request<WireRelatedResults>("chats.search_semantic", { query, limit: 8 });
   }
 
   /** What a Runner searches with, and how far its indexing has come. */
   async searchIndexStatus(runnerID: string): Promise<WireSearchIndexStatus> {
+    if (this.isMock) {
+      const { mockSearchIndexStatus } = await import("./mockSearch");
+      return mockSearchIndexStatus(this.mockSearch());
+    }
     return this.request<WireSearchIndexStatus>("search_index.status", { runner_id: runnerID });
+  }
+
+  /** What the demo Runner searches with; Settings › Search changes it in memory only. */
+  private mockSearchState?: { text: WireTextSource | null; image: string | null };
+  private mockSearch(): { text: WireTextSource | null; image: string | null } {
+    this.mockSearchState ??= { text: { kind: "local", model_id: "multilingual-e5-small" }, image: "clip-vit-b32" };
+    return this.mockSearchState;
   }
 
   /** Changes any of `text`, `image_model_id`, and `describe` on a Runner; null turns one off.
    * `confirmExternal` is the user's yes to sending messages or images to a provider. */
   async chooseSearch(runnerID: string, choice: Record<string, unknown>, confirmExternal = false): Promise<WireSearchIndexStatus> {
+    if (this.isMock) {
+      const state = this.mockSearch();
+      if ("text" in choice) state.text = (choice.text as WireTextSource | null) ?? null;
+      if ("image_model_id" in choice) state.image = (choice.image_model_id as string | null) ?? null;
+      return this.searchIndexStatus(runnerID);
+    }
     return this.request<WireSearchIndexStatus>("search_index.select", { runner_id: runnerID, ...choice, confirm_external: confirmExternal });
   }
 
   /** The catalog of models a Runner can download and run on its CPU. */
   async localModels(runnerID: string): Promise<WireLocalModels> {
+    if (this.isMock) {
+      const { mockLocalModels } = await import("./mockSearch");
+      return mockLocalModels(this.mockSearch());
+    }
     return this.request<WireLocalModels>("schedule_models.list", { runner_id: runnerID });
   }
 
   /** What downloading `modelID` takes, for the user to approve before `installLocalModel`. */
   async previewLocalModel(runnerID: string, modelID: string): Promise<WireModelPreview> {
+    if (this.isMock) {
+      const { mockLocalModels, mockModelPreview } = await import("./mockSearch");
+      return mockModelPreview(mockLocalModels(this.mockSearch()), modelID);
+    }
     return this.request<WireModelPreview>("schedule_models.preview", { runner_id: runnerID, model_id: modelID, source: { kind: "download" } });
   }
 
   /** Downloads and installs what `preview` showed, now that the user approved it. */
   async installLocalModel(runnerID: string, preview: WireModelPreview): Promise<void> {
+    if (this.isMock) throw new RequestError(L("The demo does not download models."));
     await this.request("schedule_models.apply", { runner_id: runnerID, preview_token: preview.preview_token, preview_digest: preview.preview_digest, confirm: true });
   }
 

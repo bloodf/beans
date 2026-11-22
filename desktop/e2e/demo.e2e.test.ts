@@ -52,8 +52,8 @@ describe("demo workspace", () => {
 
   test("Search opens the palette, filters actions and runs the picked one", async () => {
     const { page, errors } = await harness.open();
-    // The sidebar field is a read-only trigger; the palette owns the query. The demo engine has
-    // no content search (#586), so this checks actions and Settings entries.
+    // The sidebar field is a read-only trigger; the palette owns the query. This checks actions
+    // and Settings entries; the demo's content search has its own test below.
     await page.getByPlaceholder("Search").first().click();
     const dialog = page.getByRole("dialog").last();
     await expect.poll(() => dialog.innerText()).toContain("New Bot…");
@@ -68,6 +68,32 @@ describe("demo workspace", () => {
     // The action opens its sheet in place of the palette.
     await expect.poll(async () => (await page.getByRole("dialog").last().innerText()).includes("New Bot")).toBe(true);
     await page.keyboard.press("Escape");
+    expect(errors).toEqual([]);
+    await page.close();
+  });
+
+  test("the demo's search finds related messages and pictures by meaning (#586)", async () => {
+    const { page, errors } = await harness.open();
+    await page.getByPlaceholder("Search").first().click();
+    const dialog = page.getByRole("dialog").last();
+    await dialog.locator("input").first().fill("ship");
+    await expect.poll(() => dialog.innerText()).toContain("Related");
+    await expect.poll(() => dialog.innerText()).toContain("launch-banner.png");
+    expect(await dialog.innerText()).toContain("Pictures");
+    await page.keyboard.press("Escape");
+    expect(errors).toEqual([]);
+    await page.close();
+  });
+
+  test("Settings › Search shows the demo Runner's models instead of an error (#586)", async () => {
+    const { page, errors } = await harness.open();
+    await page.keyboard.press("Control+Comma");
+    await page.getByText("Search", { exact: true }).last().click();
+    await expect.poll(() => page.innerText("body")).toContain("1284 messages indexed");
+    const body = await page.innerText("body");
+    expect(body).toContain("37 pictures indexed");
+    expect(body).toContain("SigLIP Base");
+    expect(body).not.toContain("not running");
     expect(errors).toEqual([]);
     await page.close();
   });

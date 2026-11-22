@@ -1188,6 +1188,9 @@ fn apply_incoming_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
         return apply_chat_blob(app, machine_file, blob, remember, false);
     }
     if blob.kind == "attention" {
+        // Attention rows belong to the pulling account: recheck it (the guard is reentrant,
+        // page loops already hold it) so a Forget mid-pull cannot land rows in a new account.
+        let _account = sync_account_guard(app, machine_file)?;
         // Propagate unavailable keys and storage failures before the page advances its
         // cursor. An upgrade replay can retry old slots; a live pull has no second pass.
         apply_attention_blob(app, machine_file, blob)

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use beans_agent::codemode::{CodemodeOptions, CodemodeTool, StaticCatalog};
-use beans_agent::tool::{DirectRunner, Tool, ToolOutcome, ToolRunner};
+use beans_agent::tool::{DirectRunner, ExecutionScope, Tool, ToolOutcome, ToolRunner};
 use beans_agent::tools::{BashTool, LsTool, ReadTool};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
@@ -24,15 +24,17 @@ struct Recorder(Mutex<Vec<(String, String, ToolOutcome)>>);
 
 #[async_trait]
 impl ToolRunner for Recorder {
-    async fn run(
+    // Nested calls arrive scoped to their owning call (#462); record the same outcome.
+    async fn run_scoped(
         &self,
         tool: Arc<dyn Tool>,
         id: String,
         args: Value,
         cancel: CancellationToken,
+        scope: &ExecutionScope,
     ) -> ToolOutcome {
         let outcome = DirectRunner
-            .run(tool.clone(), id.clone(), args, cancel)
+            .run_scoped(tool.clone(), id.clone(), args, cancel, scope)
             .await;
         self.0
             .lock()

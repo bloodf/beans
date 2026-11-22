@@ -1637,17 +1637,14 @@ mod runner_tests {
     #[tokio::test]
     async fn results_reach_the_model_and_scripts_with_placeholders() {
         let (app, scratch) = app();
-        let result = ToolResult {
-            content: vec![ContentPart::text(format!("connected to {DATABASE}"))],
-            details: json!({ "output": format!("token {GITHUB}") }),
-            structured: Some(json!({ "output": format!("key={OPENAI}"), "exit_code": 0 })),
-            ..ToolResult::default()
-        };
+        let result = ToolResult::text(format!("connected to {DATABASE}"))
+            .with_details(json!({ "output": format!("token {GITHUB}") }))
+            .with_structured(json!({ "output": format!("key={OPENAI}"), "exit_code": 0 }));
         let shown = redact_result(&app, &result).await.unwrap();
         assert_eq!(shown.content.unwrap()[0].as_text().unwrap(), "connected to {{secret:DATABASE_URL}}");
         assert_eq!(shown.structured.unwrap(), json!({ "output": "key={{secret:OPENAI_API_KEY}}", "exit_code": 0 }));
         assert_eq!(shown.details.unwrap(), json!({ "output": "token {{secret:GITHUB_TOKEN}}" }));
-        let plain = ToolResult { content: vec![ContentPart::text("3 files changed")], ..ToolResult::default() };
+        let plain = ToolResult::text("3 files changed");
         assert!(redact_result(&app, &plain).await.is_none(), "a result without secrets is left as it is");
 
         // Files that hold secrets, so a command that names one asks.

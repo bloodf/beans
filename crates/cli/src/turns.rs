@@ -3946,7 +3946,7 @@ mod tests {
 
         // A result comes back with placeholders, and the file it showed is remembered.
         let read = ToolCall { id: "r1".into(), name: "read".into(), arguments: json!({ "path": "config/deploy.sh" }) };
-        let result = ToolResult { content: vec![ContentPart::text(format!("export GH={GITHUB}\n"))], ..ToolResult::default() };
+        let result = ToolResult::text(format!("export GH={GITHUB}\n"));
         let shown = here.after_tool_call(AfterToolCallContext { assistant_message: &assistant, tool_call: &read, args: &read.arguments, result: &result, is_error: false, context: &context, parent: None }).await.unwrap();
         assert_eq!(shown.content.unwrap()[0].as_text().unwrap(), "export GH={{secret:GITHUB_TOKEN}}\n");
         assert!(app.secrets.files().contains(&("config".to_string(), "deploy.sh".to_string())));
@@ -4044,7 +4044,7 @@ mod tests {
         let assistant = AssistantMessage::empty("test", "test");
         let context = beans_agent::AgentContext { system_prompt: String::new(), messages: Vec::new(), tools: Vec::new(), cache_points: Vec::new() };
         let call = ToolCall { id: "c".into(), name: name.into(), arguments: args };
-        let result = ToolResult { content: content.clone(), ..ToolResult::default() };
+        let result = ToolResult::from_content(content.clone());
         let context = beans_agent::AfterToolCallContext { assistant_message: &assistant, tool_call: &call, args: &call.arguments, result: &result, is_error: false, context: &context, parent: None };
         hooks.after_tool_call(context).await.and_then(|after| after.content).unwrap_or(content)
     }

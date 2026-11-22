@@ -78,7 +78,18 @@ impl ToolResult {
     }
 
     pub fn text(text: impl Into<String>) -> Self {
-        ToolResult { content: vec![ContentPart::text(text)], ..ToolResult::default() }
+        ToolResult::from_content(vec![ContentPart::text(text)])
+    }
+
+    /// A result with this content and nothing else. Other crates build results through these
+    /// constructors: cleanup provenance stays owned by the runner, never by tool output.
+    pub fn from_content(content: Vec<ContentPart>) -> Self {
+        ToolResult { content, ..ToolResult::default() }
+    }
+
+    pub fn with_structured(mut self, structured: Value) -> Self {
+        self.structured = Some(structured);
+        self
     }
 
     pub fn with_details(mut self, details: Value) -> Self {

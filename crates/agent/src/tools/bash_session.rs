@@ -1491,7 +1491,7 @@ mod tests {
         {
             let since = Instant::now();
             let mut wait = std::pin::pin!(session.wait(session.total(), since, idle,
-                Some(since + BACKGROUND_SETTLE), &cancel, |_| {}));
+                Some(since + BACKGROUND_SETTLE), &cancel, || false, |_| {}));
             assert!(futures::poll!(wait.as_mut()).is_pending());
             tokio::time::advance(Duration::from_millis(399)).await;
             assert!(futures::poll!(wait.as_mut()).is_pending());
@@ -1502,7 +1502,7 @@ mod tests {
         for cap in [Duration::from_millis(500), BACKGROUND_SETTLE] {
             let since = Instant::now();
             let mut wait = std::pin::pin!(session.wait(session.total(), since, idle,
-                Some(since + cap), &cancel, |_| {}));
+                Some(since + cap), &cancel, || false, |_| {}));
             assert!(futures::poll!(wait.as_mut()).is_pending());
             while Instant::now() - since + Duration::from_millis(100) < cap {
                 tokio::time::advance(Duration::from_millis(100)).await;
@@ -1585,7 +1585,7 @@ mod tests {
             };
             let idle = Idle { after: Duration::from_millis(400), needs_output };
             let cancel = CancellationToken::new();
-            let mut wait = std::pin::pin!(session.wait(0, started, idle, None, &cancel, |_| {}));
+            let mut wait = std::pin::pin!(session.wait(0, started, idle, None, &cancel, || false, |_| {}));
             let waker = futures::task::noop_waker();
             let mut context = Context::from_waker(&waker);
             assert_eq!(wait.as_mut().poll(&mut context), Poll::Pending);

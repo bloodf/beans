@@ -460,7 +460,7 @@ impl Tool for SecretsTool {
             }
             other => Err(format!("{other} is not an action: use list, save, generate, write_env, delete, or revoke.")),
         }?;
-        Ok(ToolResult { content: vec![beans_agent::ContentPart::text(reply)], ..ToolResult::default() })
+        Ok(ToolResult::text(reply))
     }
 }
 

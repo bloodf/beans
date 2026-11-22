@@ -224,7 +224,9 @@ struct CustomModel: Hashable {
     var contextWindow: Int? = nil
     /// Whether it takes images.
     var images: Bool? = nil
-    var levels: [String] = []
+    /// Discovery omits unknown declarations; an explicit empty array clears saved levels.
+    /// Provider statuses supply the CLI's resolved levels for the runtime picker.
+    var levels: [String]? = nil
     var maxOutput: Int? = nil
     var reasoning: Bool? = nil
     var tools: Bool? = nil
@@ -239,6 +241,7 @@ struct CustomModel: Hashable {
         model.contextWindow = discovered.contextWindow ?? contextWindow
         model.maxOutput = discovered.maxOutput ?? maxOutput
         model.images = discovered.images ?? images
+        model.levels = discovered.levels ?? levels
         model.reasoning = discovered.reasoning ?? reasoning
         model.tools = discovered.tools ?? tools
         model.thinkingFormat = discovered.thinkingFormat ?? thinkingFormat

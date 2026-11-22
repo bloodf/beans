@@ -583,7 +583,7 @@ async fn installs_and_finds_pictures(app: &Arc<App>, id: &str, runtime_source: &
             bytes.into_inner()
         };
         let attachment = crate::model::Attachment { id: format!("att-{id}"), name: format!("{id}.png"), mime: "image/png".into(), size: png.len() as u64, width: Some(8), height: Some(8) };
-        std::fs::write(crate::files::local_path(app, &attachment.id), png).unwrap();
+        std::fs::write(crate::files::local_path(app, &attachment.id).unwrap(), png).unwrap();
         let body = crate::model::Body::Text { text: "a picture".into(), attachments: vec![attachment], mentions: vec![], reply_to: None };
         let mut message = crate::model::Message::new(&chat, crate::model::Author::You, body);
         message.id = id.into();

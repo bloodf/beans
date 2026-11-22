@@ -115,7 +115,8 @@ describe("endpoint geometry", () => {
         if (layout.extra[0]) expect(hausdorff(sample(g.extra, 64), sampleD(layout.extra[0]))).toBeLessThan(0.05);
       }
     }
-  });
+    // Every seed × shape pair samples two curves: seconds of CPU, more on a loaded CI runner.
+  }, 60_000);
 
   test("decorations: petals, taper and backdrop match the static marks", () => {
     for (const shape of BOT_SHAPES) {

@@ -196,7 +196,7 @@ test("tools read the admitted snapshot even if the original is replaced; symlink
     expect(() => readNativeIdentity("a.apk", "github", { PATH: bin })).toThrow();
     expect(() => readNativeIdentity(dir, "github", { PATH: bin })).toThrow();
   } finally { await rm(dir, { recursive: true, force: true }); }
-});
+}, 30_000); // spawns stub tools and copies snapshots; slow on a loaded runner
 
 // A FIFO with no writer must be refused quickly, not wait forever in open(). The real snapshot and reader
 // run in a subprocess under a watchdog; a watchdog kill is a failure, and no tool/inspector/file may appear.

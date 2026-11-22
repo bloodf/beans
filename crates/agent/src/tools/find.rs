@@ -121,3 +121,87 @@ impl Tool for FindTool {
         Ok(ToolResult::text(output).with_details(json!({ "summary": format!("Found {} file{}", results.len(), if results.len() == 1 { "" } else { "s" }), "result_limit_reached": limit_reached })))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// A scratch directory removed when the test ends.
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("beans-tool-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).unwrap();
+            Scratch(path)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn find(cwd: &std::path::Path, args: Value) -> Result<ToolResult, ToolError> {
+        FindTool::new(cwd.to_path_buf()).execute("find", args, CancellationToken::new(), Arc::new(|_| {})).await
+    }
+
+    fn tree(files: &[&str]) -> Scratch {
+        let dir = Scratch::new();
+        for path in files {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x").unwrap();
+        }
+        dir
+    }
+
+    #[tokio::test]
+    async fn a_bare_pattern_matches_at_any_depth_and_results_are_sorted() {
+        let dir = tree(&["b.ts", "a.ts", "src/c.ts", "src/d.rs"]);
+        let result = find(dir.path(), json!({ "pattern": "*.ts" })).await.unwrap();
+        assert_eq!(result.text_content(), "a.ts\nb.ts\nsrc/c.ts");
+        assert_eq!(result.details["summary"], "Found 3 files");
+    }
+
+    #[tokio::test]
+    async fn a_path_pattern_keeps_its_separators_literal() {
+        let dir = tree(&["src/a.rs", "src/deep/b.rs", "other/c.rs"]);
+        assert_eq!(find(dir.path(), json!({ "pattern": "src/*.rs" })).await.unwrap().text_content(), "src/a.rs");
+        assert_eq!(find(dir.path(), json!({ "pattern": "src/**/*.rs" })).await.unwrap().text_content(), "src/a.rs\nsrc/deep/b.rs");
+        assert_eq!(find(dir.path(), json!({ "pattern": "./other/*.rs" })).await.unwrap().text_content(), "other/c.rs");
+    }
+
+    #[tokio::test]
+    async fn directories_end_with_a_slash() {
+        let dir = tree(&["pkg/lib/a.rs"]);
+        assert_eq!(find(dir.path(), json!({ "pattern": "lib" })).await.unwrap().text_content(), "pkg/lib/");
+    }
+
+    #[tokio::test]
+    async fn gitignore_and_git_internals() {
+        let dir = tree(&[".gitignore", "ignored.log", "kept.log", ".git/x.log"]);
+        std::fs::write(dir.path().join(".gitignore"), "ignored.log\n").unwrap();
+        assert_eq!(find(dir.path(), json!({ "pattern": "*.log" })).await.unwrap().text_content(), "kept.log");
+    }
+
+    #[tokio::test]
+    async fn the_result_limit_says_so() {
+        let dir = tree(&["a.md", "b.md", "c.md"]);
+        let result = find(dir.path(), json!({ "pattern": "*.md", "limit": 2 })).await.unwrap();
+        assert!(result.text_content().ends_with("\n\n[2 results limit reached. Use limit=4 for more, or refine pattern]"), "{}", result.text_content());
+        assert_eq!(result.details["result_limit_reached"], true);
+    }
+
+    #[tokio::test]
+    async fn errors_and_empty_results() {
+        let dir = tree(&["a.rs"]);
+        assert!(find(dir.path(), json!({})).await.unwrap_err().0.contains("pattern is required"));
+        assert!(find(dir.path(), json!({ "pattern": "*.rs", "path": "missing" })).await.unwrap_err().0.contains("Path not found"));
+        assert!(find(dir.path(), json!({ "pattern": "[" })).await.unwrap_err().0.contains("Invalid glob"));
+        assert_eq!(find(dir.path(), json!({ "pattern": "*.py" })).await.unwrap().text_content(), "No files found matching pattern");
+    }
+}

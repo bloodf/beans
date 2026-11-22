@@ -79,3 +79,68 @@ impl Tool for LsTool {
         Ok(ToolResult::text(output).with_details(json!({ "summary": format!("Listed {} entr{}", results.len(), if results.len() == 1 { "y" } else { "ies" }) })))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// A scratch directory removed when the test ends.
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("beans-tool-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&path).unwrap();
+            Scratch(path)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn ls(cwd: &std::path::Path, args: Value) -> Result<ToolResult, ToolError> {
+        LsTool::new(cwd.to_path_buf()).execute("ls", args, CancellationToken::new(), Arc::new(|_| {})).await
+    }
+
+    #[tokio::test]
+    async fn lists_case_insensitively_with_dotfiles_and_directory_slashes() {
+        let dir = Scratch::new();
+        for name in ["b.txt", "A.txt", ".env"] { std::fs::write(dir.path().join(name), "x").unwrap(); }
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        let result = ls(dir.path(), json!({})).await.unwrap();
+        assert_eq!(result.text_content(), ".env\nA.txt\nb.txt\nsrc/");
+        assert_eq!(result.details["summary"], "Listed 4 entries");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_to_a_directory_reads_as_a_directory() {
+        let dir = Scratch::new();
+        std::fs::create_dir(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        assert_eq!(ls(dir.path(), json!({})).await.unwrap().text_content(), "link/\nreal/");
+    }
+
+    #[tokio::test]
+    async fn the_entry_limit_says_so_only_past_it() {
+        let dir = Scratch::new();
+        for name in ["a", "b", "c"] { std::fs::write(dir.path().join(name), "x").unwrap(); }
+        let limited = ls(dir.path(), json!({ "limit": 2 })).await.unwrap();
+        assert_eq!(limited.text_content(), "a\nb\n\n[2 entries limit reached. Use limit=4 for more]");
+        assert_eq!(ls(dir.path(), json!({ "limit": 3 })).await.unwrap().text_content(), "a\nb\nc");
+    }
+
+    #[tokio::test]
+    async fn errors_and_empty_directories() {
+        let dir = Scratch::new();
+        assert_eq!(ls(dir.path(), json!({})).await.unwrap().text_content(), "(empty directory)");
+        std::fs::write(dir.path().join("file"), "x").unwrap();
+        assert!(ls(dir.path(), json!({ "path": "file" })).await.unwrap_err().0.contains("Not a directory"));
+        assert!(ls(dir.path(), json!({ "path": "missing" })).await.unwrap_err().0.contains("Path not found"));
+    }
+}

@@ -1,9 +1,9 @@
-import { expect, mock, test } from "bun:test";
+import { expect, test, vi } from "vitest";
 import type { AttentionBrief, AttentionItem } from "./attention";
 import type { ReviewItem } from "./model";
 
-mock.module("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {}, coreHome: () => "/unused", pathOf: (p: string) => p, wipePrefs: () => {} }));
-mock.module("expo-localization", () => ({ getLocales: () => [{ languageCode: "en", languageTag: "en-US" }] }));
+vi.doMock("./prefs", () => ({ loadPrefs: () => ({}), savePrefs: () => {}, coreHome: () => "/unused", pathOf: (p: string) => p, wipePrefs: () => {} }));
+vi.doMock("expo-localization", () => ({ getLocales: () => [{ languageCode: "en", languageTag: "en-US" }] }));
 
 const { emptyAttention } = await import("./attention");
 const { reviewIsOpen } = await import("./model");

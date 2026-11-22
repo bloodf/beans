@@ -178,7 +178,9 @@ pub fn parse_when(text: &str, now: i64) -> Option<i64> {
 }
 
 static DATE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}-\d{2}-\d{2}$").unwrap());
-static ENTRY_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:\d{4}-\d{2}-\d{2}\s*·?\s*)?(?:from [^·]*·\s*)?").unwrap());
+static ENTRY_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:~~)?(?:\d{4}-\d{2}-\d{2}\s*·?\s*)?(?:from [^·]*·\s*)?").unwrap());
+/// What `supersede` adds around a struck entry: `~~…~~ · superseded 2026-09-18`.
+static STRUCK_SUFFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"~~(?:\s*·\s*superseded \d{4}-\d{2}-\d{2})?\s*$").unwrap());
 static LOG_LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^- (\d{2}:\d{2})(?: · (.*))?$").unwrap());
 static TOPIC_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,80}\.md$").unwrap());
 
@@ -189,6 +191,8 @@ static SECRET_TOKENS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
         r"\bsk-[A-Za-z0-9_-]{16,}",
+        r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}",
+        r"\bgithub_pat_[A-Za-z0-9_]{20,}",
         r"\bAKIA[0-9A-Z]{16}\b",
         r"\bgh[pousr]_[A-Za-z0-9]{20,}",
         r"\bxox[baprs]-[A-Za-z0-9-]{10,}",
@@ -200,10 +204,15 @@ static SECRET_TOKENS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .collect()
 });
 
-/// `password: hunter2`, `API_KEY=…`: the value after the name is the secret.
+/// `password: hunter2`, `API_KEY=…`, `DB_PASSWORD=…`, `"client_secret": "…"`: the value after
+/// the name is the secret. The value never starts with `«`, so a marker this function wrote is
+/// not redacted again on the next write of the file.
 static SECRET_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b((?:api[_-]?key|secret(?:[_-]?key)?|access[_-]?token|auth[_-]?token|token|password|passwd|pwd)\s*[:=]\s*["']?)([^\s"',;]{6,})"#).unwrap()
+    Regex::new(r#"(?i)\b((?:[a-z0-9]+[_-])*(?:api[_-]?key|(?:client[_-]?)?secret(?:[_-]?key)?|access[_-]?token|auth[_-]?token|token|password|passwd|pwd)["']?\s*[:=]\s*["']?)([^\s"',;«]{6,})"#).unwrap()
 });
+
+/// `postgres://user:password@host`: the password part of a URL's credentials.
+static URL_PASSWORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s:/@«]+:)([^\s@/«]+)(@)").unwrap());
 
 fn redaction(len: usize) -> String {
     format!("«redacted {len} chars»")
@@ -215,6 +224,9 @@ pub fn scrub(text: &str) -> String {
     for pattern in SECRET_TOKENS.iter() {
         out = pattern.replace_all(&out, |m: &regex::Captures| redaction(m[0].chars().count())).to_string();
     }
+    out = URL_PASSWORD
+        .replace_all(&out, |m: &regex::Captures| format!("{}{}{}", &m[1], redaction(m[2].chars().count()), &m[3]))
+        .to_string();
     SECRET_ASSIGNMENT
         .replace_all(&out, |m: &regex::Captures| format!("{}{}", &m[1], redaction(m[2].chars().count())))
         .to_string()
@@ -305,8 +317,11 @@ impl MemoryStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // A crash mid-write leaves the old file, never a torn one.
-        let tmp = path.with_extension("md.tmp");
+        // A crash mid-write leaves the old file, never a torn one. The temporary name is unique
+        // per write, so two writers never share (and truncate) one temporary file.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("md.tmp-{}-{n}", std::process::id()));
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
@@ -320,6 +335,7 @@ impl MemoryStore {
 
     /// Replaces the whole index, refusing when it changed since `expected_hash` was read.
     pub fn write_index(&self, text: &str, expected_hash: Option<&str>) -> Result<String, MemoryError> {
+        let _writer = index_writer();
         if let Some(expected) = expected_hash {
             let current = hash_text(&self.read_index());
             if current != expected {
@@ -332,10 +348,13 @@ impl MemoryStore {
 
     /// Adds one dated fact, unless it is already there word for word.
     pub fn append_entry(&self, text: &str, source: Option<&str>, now: i64) -> Result<Change, MemoryError> {
-        let fact = normalise(text);
+        // Scrubbed first: the duplicate check compares it with lines that were scrubbed when
+        // written, and the line handed back to the model must be the one in the file.
+        let fact = scrub(&normalise(text));
         if fact.is_empty() {
             return Err(MemoryError::Invalid("Pass the fact to remember.".into()));
         }
+        let _writer = index_writer();
         let existing = self.read_index();
         if existing.lines().any(|line| fact_of(line).eq_ignore_ascii_case(&fact)) {
             return Ok(Change::Duplicate);
@@ -356,6 +375,9 @@ impl MemoryStore {
         if old.is_empty() {
             return Err(MemoryError::Invalid("Pass the exact passage to change as old_text.".into()));
         }
+        if old.contains('\n') {
+            return Err(MemoryError::Invalid("Pass a passage from one line; change several lines one call at a time.".into()));
+        }
         let text = self.read_index();
         let count = text.matches(old).count();
         match count {
@@ -374,6 +396,7 @@ impl MemoryStore {
         if new.is_empty() {
             return Err(MemoryError::Invalid("Pass the new text.".into()));
         }
+        let _writer = index_writer();
         let (text, at) = self.locate(old_text)?;
         let old = old_text.trim();
         let mut updated = text.clone();
@@ -384,6 +407,7 @@ impl MemoryStore {
 
     /// Deletes one unique passage; a line left empty goes with it.
     pub fn remove(&self, old_text: &str) -> Result<Change, MemoryError> {
+        let _writer = index_writer();
         let (text, at) = self.locate(old_text)?;
         let old = old_text.trim();
         let line_start = text[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -391,7 +415,7 @@ impl MemoryStore {
         let mut line = text[line_start..line_end].to_string();
         line.replace_range(at - line_start..at - line_start + old.len(), "");
         let mut updated = text.clone();
-        if fact_of(&line).trim_matches(|c: char| c == '~' || c == '·' || c.is_whitespace()).is_empty() {
+        if fact_of(&STRUCK_SUFFIX.replace(&line, "")).trim_matches(|c: char| c == '~' || c == '·' || c.is_whitespace()).is_empty() {
             // Nothing but the bullet and its date is left: the line goes with the fact.
             let end = if line_end < text.len() { line_end + 1 } else { line_end };
             updated.replace_range(line_start..end, "");
@@ -405,10 +429,11 @@ impl MemoryStore {
     /// Strikes the line holding one unique passage through, dated, and adds the new fact as
     /// its own entry, so the file shows what changed.
     pub fn supersede(&self, old_text: &str, new_text: &str, source: Option<&str>, now: i64) -> Result<Change, MemoryError> {
-        let new = normalise(new_text);
+        let new = scrub(&normalise(new_text));
         if new.is_empty() {
             return Err(MemoryError::Invalid("Pass the new fact.".into()));
         }
+        let _writer = index_writer();
         let (text, at) = self.locate(old_text)?;
         let date = local_time(now).date;
         let line_start = text[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -561,6 +586,13 @@ impl MemoryStore {
 }
 
 /// One line, whitespace collapsed, without a leading bullet.
+/// One read-change-write of a `MEMORY.md` at a time in this process, so two turns of a bot
+/// (two chats) cannot both read the same file and lose one of their changes.
+fn index_writer() -> std::sync::MutexGuard<'static, ()> {
+    static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    WRITER.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn normalise(text: &str) -> String {
     let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.trim_start_matches("- ").trim().to_string()
@@ -647,6 +679,106 @@ mod tests {
         let loaded = store.load_index();
         assert!(loaded.truncated);
         assert_eq!(loaded.text.len(), MEMORY_MAX_BYTES);
+    }
+
+    #[test]
+    fn scrubbing_twice_changes_nothing() {
+        let key = ["sk-", "abcdefghijklmnopqrstuvwxyz"].concat();
+        let cases = [
+            "password: hunter22".to_string(),
+            format!("api_key={key}"),
+            "DB_PASSWORD=hunter22".into(),
+            "client_secret=abcdef123".into(),
+            r#"{"password": "hunter22", "token": "abcdefghij"}"#.into(),
+            ["github_", "pat_", "11ABCDEFGHIJKLMNOPQRSTUV_wxyz"].concat(),
+            ["sk_", "live_", "abcdefghijklmnop1234"].concat(),
+            "postgres://app:s3cretpass@db.internal:5432/main".into(),
+            "Authorization: Bearer abcdefghijklmnopqrstuvwxyz".into(),
+            "the token budget is 20k tokens".into(),
+        ];
+        for case in cases {
+            let once = scrub(&case);
+            assert_eq!(scrub(&once), once, "{case}");
+            assert_eq!(scrub(&scrub(&once)), once, "{case}");
+        }
+        assert_eq!(scrub("password: «redacted 8 chars»"), "password: «redacted 8 chars»");
+        assert_eq!(scrub(&format!("api_key={key}")), "api_key=«redacted 29 chars»");
+    }
+
+    #[test]
+    fn more_secret_shapes_are_scrubbed() {
+        assert_eq!(scrub("DB_PASSWORD=hunter22"), "DB_PASSWORD=«redacted 8 chars»");
+        assert_eq!(scrub("client_secret=abcdef123"), "client_secret=«redacted 9 chars»");
+        assert_eq!(scrub(r#""password": "hunter22""#), r#""password": "«redacted 8 chars»""#);
+        assert_eq!(scrub(&["github_", "pat_", "11ABCDEFGHIJKLMNOPQRSTUV"].concat()), "«redacted 35 chars»");
+        assert_eq!(scrub(&["sk_", "live_", "abcdefghijklmnop"].concat()), "«redacted 24 chars»");
+        assert_eq!(scrub("postgres://app:s3cretpass@db:5432/x"), "postgres://app:«redacted 10 chars»@db:5432/x");
+        assert_eq!(scrub("see https://example.com/a@b"), "see https://example.com/a@b");
+    }
+
+    #[test]
+    fn a_file_written_many_times_keeps_its_markers() {
+        let (_dir, store) = store();
+        store.append_entry("the wifi password: hunter22", None, 0).unwrap();
+        for i in 0..5 {
+            store.append_entry(&format!("fact {i}"), None, 0).unwrap();
+        }
+        let text = store.read_index();
+        assert!(text.contains("the wifi password: «redacted 8 chars»\n"), "{text}");
+        assert_eq!(text.matches("chars»").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_secret_fact_is_returned_scrubbed_and_deduplicated() {
+        let (_dir, store) = store();
+        let now = local_unix("2026-09-17", Some("09:05")).unwrap();
+        let fact = ["the deploy key is sk-", "abcdefghijklmnopqrstuvwxyz"].concat();
+        let Change::Appended { line } = store.append_entry(&fact, None, now).unwrap() else { panic!("not appended") };
+        assert_eq!(line, "- 2026-09-17 · the deploy key is «redacted 29 chars»");
+        assert!(store.read_index().contains(&line));
+        assert_eq!(store.append_entry(&fact, None, now).unwrap(), Change::Duplicate);
+        let Change::Superseded { line } = store.supersede("the deploy key", &fact.replace("sk-", "sk-new"), None, now).unwrap() else { panic!("not superseded") };
+        assert!(!line.contains("sk-"), "{line}");
+        assert!(store.read_index().ends_with(&format!("{line}\n")));
+    }
+
+    #[test]
+    fn multi_line_passages_are_refused_not_a_panic() {
+        let (_dir, store) = store();
+        store.write_index("- a\n- b\n", None).unwrap();
+        assert!(matches!(store.remove("a\n- b"), Err(MemoryError::Invalid(_))));
+        assert!(matches!(store.supersede("a\n- b", "c", None, 0), Err(MemoryError::Invalid(_))));
+        assert!(matches!(store.replace("a\n- b", "c"), Err(MemoryError::Invalid(_))));
+        assert_eq!(store.read_index(), "- a\n- b\n");
+    }
+
+    #[test]
+    fn removing_the_fact_of_a_struck_line_removes_the_line() {
+        let (_dir, store) = store();
+        let now = local_unix("2026-09-17", Some("09:05")).unwrap();
+        store.append_entry("keep me", None, now).unwrap();
+        store.append_entry("the office is in Pune", None, now).unwrap();
+        store.supersede("the office is in Pune", "the office is in Goa", None, now + 86_400).unwrap();
+        assert_eq!(store.remove("the office is in Pune").unwrap(), Change::Removed);
+        let text = store.read_index();
+        assert!(!text.contains("~~"), "{text}");
+        assert_eq!(text, "- 2026-09-17 · keep me\n- 2026-09-18 · the office is in Goa\n");
+    }
+
+    #[test]
+    fn concurrent_appends_keep_every_fact() {
+        let (_dir, store) = store();
+        std::thread::scope(|scope| {
+            for worker in 0..4 {
+                let store = store.clone();
+                scope.spawn(move || {
+                    for i in 0..10 {
+                        store.append_entry(&format!("worker {worker} fact {i}"), None, 0).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(store.read_index().lines().count(), 40);
     }
 
     #[test]

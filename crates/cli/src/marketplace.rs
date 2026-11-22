@@ -18,6 +18,13 @@ const BUNDLED_INDEX: &str = include_str!("../marketplace/index.json");
 
 const INDEX_TTL_SECS: i64 = 3600;
 const MISSING_EVERY: Duration = Duration::from_secs(300);
+/// After a fetch that failed or a feed that was refused, unforced checks wait this long, so a
+/// relay that is down does not hold every marketplace call for the fetch timeout.
+const FAILED_BACKOFF: Duration = Duration::from_secs(300);
+/// A saved index larger than this is not read: a feed is at most 1 MiB.
+const MAX_CACHE_BYTES: u64 = 4 * 1024 * 1024;
+/// A feed dated further ahead than this would win every later comparison, so it is refused.
+const MAX_FUTURE_SECS: i64 = 24 * 3600;
 
 /// What the marketplace offers, in index order.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -150,11 +157,14 @@ pub struct Updates {
     checking: tokio::sync::Mutex<()>,
     missing_checked: Mutex<Option<Instant>>,
     refresh_selected: Mutex<bool>,
+    /// The last check of a feed URL and how long unforced checks of it wait: the TTL after a
+    /// check that completed, `FAILED_BACKOFF` after one that failed or was refused.
+    attempted: Mutex<Option<(String, Instant, Duration)>>,
 }
 
 impl Updates {
     pub fn load(_config: &Config) -> Self {
-        Self { current: RwLock::new(bundled()), source: Mutex::new(None), checking: tokio::sync::Mutex::new(()), missing_checked: Mutex::new(None), refresh_selected: Mutex::new(false) }
+        Self { current: RwLock::new(bundled()), source: Mutex::new(None), checking: tokio::sync::Mutex::new(()), missing_checked: Mutex::new(None), refresh_selected: Mutex::new(false), attempted: Mutex::new(None) }
     }
 }
 
@@ -166,6 +176,30 @@ struct Cache {
     #[serde(default)]
     checked_at: i64,
     index: Value,
+}
+
+/// The saved index, unless it is missing, unreadable, or larger than any feed could make it.
+fn read_cache(path: &std::path::Path) -> Option<Cache> {
+    if std::fs::metadata(path).ok()?.len() > MAX_CACHE_BYTES {
+        return None;
+    }
+    config::read_json(path)
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` for a Unix time, the form feeds date themselves in.
+fn utc_text(unix: i64) -> String {
+    let (days, secs) = (unix.div_euclid(86_400), unix.rem_euclid(86_400));
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
 fn override_url(app: &App) -> Option<String> {
@@ -189,7 +223,7 @@ pub fn enable(app: &App) {
     *app.marketplace.missing_checked.lock() = None;
     let mut index = bundled();
     if let Some(selected) = selected {
-        if let Some(cache) = config::read_json::<Cache>(&app.config.home.join("marketplace.json")) {
+        if let Some(cache) = read_cache(&app.config.marketplace_path()) {
             if cache.source == selected {
                 if let Ok(cached) = parse(&cache.index.to_string()) {
                     if cached.updated > index.updated { index = effective_index(cached, override_url(app).is_some()); }
@@ -243,20 +277,38 @@ pub async fn check(app: &Arc<App>, force: bool) -> Result<bool, String> {
     if !matches!(parsed.scheme(), "http" | "https") || !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("Marketplace URL must be HTTP(S) without embedded credentials".into());
     }
-    let path = app.config.home.join("marketplace.json");
-    let mut cache: Cache = config::read_json(&path)
+    let path = app.config.marketplace_path();
+    let mut cache: Cache = read_cache(&path)
         .filter(|cache: &Cache| cache.source == url && parse(&cache.index.to_string()).is_ok())
         .unwrap_or_default();
     let now = config::now_unix();
     if !force && (0..INDEX_TTL_SECS).contains(&(now - cache.checked_at)) { return Ok(false); }
+    if !force && app.marketplace.attempted.lock().as_ref().is_some_and(|(at_url, at, wait)| *at_url == url && at.elapsed() < *wait) {
+        return Ok(false);
+    }
+    let attempted = |wait: Duration| *app.marketplace.attempted.lock() = Some((url.clone(), Instant::now(), wait));
     // A public fetch uses an isolated client, never account or provider credentials.
-    let fetched = crate::served::fetch(&url, cache.etag.as_deref()).await?;
+    let fetched = match crate::served::fetch(&url, cache.etag.as_deref()).await {
+        Ok(fetched) => fetched,
+        Err(error) => {
+            attempted(FAILED_BACKOFF);
+            return Err(error);
+        }
+    };
     if source(app).as_deref() != Some(url.as_str()) {
         enable(app);
         return Err("Marketplace source changed while checking".into());
     }
     let changed = if let Some((etag, text)) = fetched {
-        let index = parse(&text)?;
+        let index = match parse(&text).and_then(|index| {
+            if index.updated > utc_text(now + MAX_FUTURE_SECS) { Err(format!("Marketplace index is dated in the future ({})", index.updated)) } else { Ok(index) }
+        }) {
+            Ok(index) => index,
+            Err(error) => {
+                attempted(FAILED_BACKOFF);
+                return Err(error);
+            }
+        };
         let keep = index.updated >= current(app).updated;
         let changed = install_index(app, index);
         if keep {
@@ -265,9 +317,14 @@ pub async fn check(app: &Arc<App>, force: bool) -> Result<bool, String> {
         }
         changed
     } else {
-        if cache.index.is_null() { return Err("Marketplace returned 304 without a cached index".into()); }
+        if cache.index.is_null() {
+            attempted(FAILED_BACKOFF);
+            return Err("Marketplace returned 304 without a cached index".into());
+        }
         false
     };
+    // Checked, even when the feed was older than what is here and nothing was kept.
+    attempted(Duration::from_secs(INDEX_TTL_SECS as u64));
     cache.source = url;
     if !cache.index.is_null() { cache.checked_at = now; }
     if let Err(error) = config::write_json_private(&path, &cache) {
@@ -294,7 +351,9 @@ fn install_index(app: &Arc<App>, index: Index) -> bool {
     let plugins = index.plugins.clone();
     {
         let mut current = app.marketplace.current.write();
-        if index.updated <= current.updated { return false; }
+        // A feed that changed without changing `updated` still replaces what is here, so memory
+        // never disagrees with the saved copy.
+        if index.updated < current.updated || *current == index { return false; }
         *current = index;
     }
     crate::plugins::refresh_installed(app, &plugins);
@@ -422,6 +481,158 @@ pub fn welcome(app: &Arc<App>, bot: &Bot, chat_id: &str, template: &BotTemplate,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A feed server answering each request with the next response (the last one repeats),
+    /// counting requests and keeping their heads.
+    async fn feed(responses: Vec<String>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/marketplace/v1.json", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let requests = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut head = Vec::new();
+                let mut chunk = [0u8; 2048];
+                while !head.windows(4).any(|part| part == b"\r\n\r\n") {
+                    match socket.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => head.extend_from_slice(&chunk[..count]),
+                    }
+                }
+                let index = {
+                    let mut requests = requests.lock().unwrap();
+                    requests.push(String::from_utf8_lossy(&head).to_ascii_lowercase());
+                    requests.len() - 1
+                };
+                let response = responses.get(index).or(responses.last()).unwrap().clone();
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (url, seen)
+    }
+
+    fn ok(body: &str, etag: &str) -> String {
+        format!("HTTP/1.1 200 OK\r\nETag: {etag}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    fn status(line: &str) -> String {
+        format!("HTTP/1.1 {line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    }
+
+    /// The bundled index dated `updated`, with its first plugin's description changed to `note`.
+    fn index_dated(updated: &str, note: &str) -> String {
+        let mut index: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
+        index["updated"] = updated.into();
+        index["plugins"][0]["description"] = note.into();
+        index.to_string()
+    }
+
+    struct Scratch(Arc<App>, std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+
+    fn runner_with_feed(url: &str) -> Scratch {
+        let home = std::env::temp_dir().join(format!("beans-marketplace-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
+        let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
+        app.settings.lock().unwrap().marketplace_url = Some(url.into());
+        enable(&app);
+        Scratch(app, home)
+    }
+
+    #[tokio::test]
+    async fn a_failing_feed_is_not_fetched_again_on_every_call() {
+        let (url, seen) = feed(vec![status("500 Internal Server Error")]).await;
+        let scratch = runner_with_feed(&url);
+        assert!(check(&scratch.0, false).await.unwrap_err().contains("500"));
+        for _ in 0..3 {
+            assert!(!check(&scratch.0, false).await.unwrap(), "backs off");
+        }
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(check(&scratch.0, true).await.is_err(), "a forced check still asks");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_older_or_broken_feed_counts_as_checked() {
+        let (url, seen) = feed(vec![ok(&index_dated("2000-01-01T00:00:00Z", "old"), "\"old\"")]).await;
+        let scratch = runner_with_feed(&url);
+        assert!(!check(&scratch.0, false).await.unwrap());
+        assert!(!check(&scratch.0, false).await.unwrap());
+        assert_eq!(seen.lock().unwrap().len(), 1, "an older feed is not fetched again within the hour");
+        assert_eq!(current(&scratch.0).updated, bundled().updated);
+
+        let (url, seen) = feed(vec![ok("{not json", "\"x\"")]).await;
+        let scratch = runner_with_feed(&url);
+        assert!(check(&scratch.0, false).await.is_err());
+        assert!(!check(&scratch.0, false).await.unwrap());
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_newer_feed_installs_and_revalidates_with_its_etag() {
+        let now = config::now_unix();
+        let newer = index_dated(&utc_text(now - 60), "newer");
+        let (url, seen) = feed(vec![ok(&newer, "\"v1\""), status("304 Not Modified")]).await;
+        let scratch = runner_with_feed(&url);
+        assert!(check(&scratch.0, false).await.unwrap());
+        assert_eq!(current(&scratch.0).updated, utc_text(now - 60));
+        assert!(!check(&scratch.0, false).await.unwrap(), "fresh within the hour");
+        assert!(!check(&scratch.0, true).await.unwrap(), "304: nothing new");
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[0].contains("if-none-match") && requests[1].contains("if-none-match: \"v1\""));
+        let cache: Cache = read_cache(&scratch.0.config.marketplace_path()).unwrap();
+        assert_eq!((cache.source.as_str(), cache.etag.as_deref()), (url.as_str(), Some("\"v1\"")));
+    }
+
+    #[tokio::test]
+    async fn a_feed_dated_in_the_future_is_refused() {
+        let (url, _) = feed(vec![ok(&index_dated("9999-12-31T23:59:59Z", "frozen"), "\"f\"")]).await;
+        let scratch = runner_with_feed(&url);
+        assert!(check(&scratch.0, true).await.unwrap_err().contains("future"));
+        assert_eq!(current(&scratch.0).updated, bundled().updated);
+    }
+
+    #[tokio::test]
+    async fn a_changed_feed_with_the_same_date_replaces_what_is_in_memory() {
+        let updated = utc_text(config::now_unix() - 60);
+        let (url, _) = feed(vec![ok(&index_dated(&updated, "first"), "\"a\""), ok(&index_dated(&updated, "second"), "\"b\"")]).await;
+        let scratch = runner_with_feed(&url);
+        assert!(check(&scratch.0, true).await.unwrap());
+        assert!(check(&scratch.0, true).await.unwrap());
+        let first = bundled().plugins[0].id.clone();
+        assert_eq!(current(&scratch.0).plugin(&first).unwrap().description, "second");
+        let cache: Cache = read_cache(&scratch.0.config.marketplace_path()).unwrap();
+        assert_eq!(cache.index["plugins"][0]["description"], "second", "memory and disk agree");
+    }
+
+    #[test]
+    fn an_oversized_saved_index_is_not_read() {
+        let home = std::env::temp_dir().join(format!("beans-marketplace-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&home).unwrap();
+        let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
+        let path = app.config.marketplace_path();
+        std::fs::write(&path, vec![b' '; MAX_CACHE_BYTES as usize + 1]).unwrap();
+        assert!(read_cache(&path).is_none());
+        app.settings.lock().unwrap().marketplace_url = Some("http://127.0.0.1:9/marketplace/v1.json".into());
+        enable(&app);
+        assert_eq!(current(&app).updated, bundled().updated);
+        drop(app);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn utc_text_formats_unix_times() {
+        assert_eq!(utc_text(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc_text(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(utc_text(1_763_812_345), "2025-11-22T11:52:25Z");
+        assert!(valid_utc_time(&utc_text(config::now_unix())));
+    }
 
     #[test]
     fn the_bundled_index_parses() {

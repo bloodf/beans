@@ -1,4 +1,4 @@
-import { beforeAll, expect, test } from "bun:test";
+import { beforeAll, expect, test } from "vitest";
 import type { AppStore } from "./store";
 
 let Store: typeof AppStore;

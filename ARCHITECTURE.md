@@ -60,7 +60,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | Doc | Read it for |
 | --- | --- |
 | [Account model](docs/architecture/account-model.md) | Entities, Device/relay data ownership and cross-Runner routing |
-| [Identity](docs/architecture/identity.md) | Key pairs, pairing and unpairing, Devices and Runners, what the relay sees, account credentials |
+| [Identity](docs/architecture/identity.md) | Key pairs, pairing and unpairing, Devices and Runners, what the relay sees, account credentials, [keystore](docs/architecture/keystore.md) |
 | [Device names](docs/architecture/device-names.md) | Account aliases, machine names and durable roster intent |
 | [Device revocation](docs/architecture/device-revocation.md) | Lost-Device boundaries; proposed containment and rotation |
 | [Relay](docs/architecture/relay.md) | `crates/relay`: SQLite/Postgres storage, files, quotas, auth, blob/sync/push APIs, deploys |
@@ -146,6 +146,6 @@ See [Phone app](docs/architecture/phone-app.md) for phone identity and key owner
 
 ## Open points
 
-- Native keychain backend selection and qualification for master secrets and credentials. The inert [keystore contract](docs/architecture/identity.md#keystore-contract) provides verified copying with fake tests; production retains private files.
+- Native keychain backend selection and qualification for master secrets and credentials. The inert [keystore contract](docs/architecture/keystore.md) provides verified copying with fake tests; production retains private files.
 
 When those are chosen, update this file.

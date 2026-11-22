@@ -26,6 +26,8 @@ use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::Message as Frame;
 
 const MODEL: &str = "e2e-echo";
+/// A secret in the Runner's environment, by a secret's name, as a user's login shell has one.
+const RUNNER_SECRET: (&str, &str) = ("OPENAI_API_KEY", "sk-proj-e2eQ7wXv2LmN8pR4tY6uZ1aB3cD5fG9h");
 const STEP: Duration = Duration::from_secs(60);
 
 /// The model server: lists one model and answers every chat completion with `pong:` and the
@@ -146,8 +148,14 @@ struct Beans {
 
 impl Beans {
     async fn start(home: &Path, relay: &str, name: &str) -> Self {
+        Self::start_with(home, relay, name, &[]).await
+    }
+
+    /// As `start`, with `extra` in the process environment.
+    async fn start_with(home: &Path, relay: &str, name: &str, extra: &[(&str, &str)]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_beans"));
         base_env(&mut command, home);
+        command.envs(extra.iter().copied());
         command
             .env("BEANS_RELAY_URL", relay)
             .args(["serve", "--ready-stdout", "--port", "0", "--home"]).arg(home.join("beans"))
@@ -262,7 +270,7 @@ async fn paired_account() -> Account {
     // The Runner: a new account, with the relay the test started.
     let runner_home = scratch.path().join("runner");
     std::fs::create_dir_all(&runner_home).unwrap();
-    let mut runner = Beans::start(&runner_home, &relay, "runner").await;
+    let mut runner = Beans::start_with(&runner_home, &relay, "runner", &[RUNNER_SECRET]).await;
     let hello = runner.call("hello", json!({})).await.unwrap();
     assert_eq!(hello["has_identity"], false);
     let created = runner.call("identity.create", json!({ "device_name": "E2E Runner" })).await.unwrap();
@@ -399,4 +407,38 @@ async fn unpairing_a_device_removes_it_everywhere_and_it_forgets_the_account() {
     // The Runner keeps working alone.
     let runner_id = account.runner_id.clone();
     account.runner.wait_for("the Runner still in its own roster", |s| s["devices"].as_array()?.iter().any(|d| d["id"] == runner_id).then_some(())).await;
+}
+
+/// Issue #553, its automated part: a secret the Runner knows, pasted into a chat on the paired
+/// Device, reaches the model server only as `{{secret:NAME}}`, in no request and in no form
+/// (as is, JSON-escaped, percent-encoded, base64), while the bot still answers.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the beans-relay binary in BEANS_E2E_RELAY_BIN (pnpm run test:e2e builds and supplies it)"]
+async fn a_secret_pasted_on_a_device_reaches_the_model_only_as_a_placeholder() {
+    use base64::Engine;
+    let mut account = paired_account().await;
+    let chat_id = account.chat_id.clone();
+    let (name, value) = RUNNER_SECRET;
+    let marker = uuid::Uuid::new_v4().simple().to_string();
+    let text = format!("deploy {marker} with the key {value} please");
+    account.device.call("chats.send", json!({ "chat_id": chat_id, "text": text })).await.unwrap();
+    let reply = account.device.wait_for("the bot's reply", |s| {
+        message_texts(find_chat(s, &chat_id)?).into_iter().map(|(_, text)| text).find(|text| text.starts_with("pong:") && text.contains(&marker))
+    }).await;
+    assert!(reply.contains(&marker), "{reply}");
+
+    let requests = account.model.requests.lock().unwrap().clone();
+    let asked = requests.iter().find(|r| last_user_text(r).contains(&marker)).expect("the model was asked");
+    assert!(last_user_text(asked).contains(&format!("the key {{{{secret:{name}}}}} please")), "{}", last_user_text(asked));
+    let sent = serde_json::to_string(&requests).unwrap();
+    let escaped = serde_json::to_string(value).unwrap();
+    let percent: String = value.bytes().map(|b| format!("%{b:02X}")).collect();
+    let base64 = base64::engine::general_purpose::STANDARD.encode(value);
+    for form in [value, escaped.trim_matches('"'), percent.as_str(), base64.as_str()] {
+        assert!(!sent.contains(form), "the model server received the secret as {form}");
+    }
+    // And the relay never held it in plaintext either.
+    for (path, bytes) in relay_bytes(&account.relay_dir) {
+        assert!(!bytes.windows(value.len()).any(|window| window == value.as_bytes()), "{} holds the secret", path.display());
+    }
 }

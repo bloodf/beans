@@ -180,19 +180,41 @@ pub enum ArtifactOrigin {
     UserRevision { authenticated_request_id: String },
 }
 
+/// Characters that change how text around them displays without showing themselves: bidi
+/// overrides and isolates, zero-width characters, the BOM, and line or paragraph separators.
+/// A name holding one can read as another (`invoice\u{202E}fdp.exe`).
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
+}
 fn structural(value: &str) -> bool {
-    !value.is_empty() && value.len() <= 1024 && !value.chars().any(char::is_control)
+    !value.is_empty() && value.len() <= 1024 && !value.chars().any(|c| c.is_control() || invisible(c))
+}
+/// `type/subtype`, each a media-type token, optionally followed by `; parameters`.
+fn mime(value: &str) -> bool {
+    let token = |part: &str| !part.is_empty() && part.len() <= 127 && part.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(&b));
+    let essence = value.split(';').next().unwrap_or("");
+    structural(value) && essence.split_once('/').is_some_and(|(kind, subtype)| token(kind) && token(subtype))
 }
 fn hash(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
 fn artifact_id(value: &str) -> bool {
     value.strip_prefix("art-").is_some_and(|hex| hex.len() == 48 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
 }
 fn revision_id(value: &str) -> bool {
-    uuid::Uuid::parse_str(value).is_ok_and(|id| id.hyphenated().to_string() == value)
+    uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && !id.is_max() && id.hyphenated().to_string() == value)
 }
+/// Names Windows keeps for devices, with or without an extension (`nul.txt` opens NUL).
+fn windows_reserved(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or(part).trim_end().to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit())
+}
+/// A path inside the bot's workspace on every Runner's file system: no `.`/`..` (including what
+/// Windows reads as them, `.. ` or `...`), no trailing dot or space, no reserved device names or
+/// characters Windows refuses, and each segment within a file system's 255 bytes.
 fn relative_path(value: &str) -> bool {
-    !value.is_empty() && value.chars().count() <= 240 && !value.chars().any(|c| c.is_control() || c == '\\')
-        && value.split('/').all(|part| !part.is_empty() && part != "." && part != ".." && !part.contains(':'))
+    !value.is_empty() && value.chars().count() <= 240 && !value.chars().any(|c| c.is_control() || invisible(c) || matches!(c, '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*'))
+        && value.split('/').all(|part| !part.is_empty() && part.len() <= 255 && part != "." && part != ".."
+            && !part.ends_with('.') && !part.ends_with(' ') && !windows_reserved(part))
 }
 fn optional(value: Option<&str>, valid: impl Fn(&str) -> bool) -> bool { value.is_none_or(valid) }
 fn require(valid: bool) -> Result<(), ArtifactFailure> { if valid { Ok(()) } else { Err(ArtifactFailure::Invalid) } }
@@ -200,7 +222,7 @@ fn require(valid: bool) -> Result<(), ArtifactFailure> { if valid { Ok(()) } els
 impl ArtifactRevision {
     pub fn validate(&self) -> Result<(), ArtifactFailure> {
         require(self.version == 1 && artifact_id(&self.id) && revision_id(&self.revision_id)
-            && structural(&self.name) && structural(&self.mime) && self.mime.contains('/')
+            && structural(&self.name) && mime(&self.mime)
             && self.size <= MAX_FILE_BYTES && hash(&self.content_hash)
             && self.file_id.strip_suffix(".file") == Some(self.revision_id.as_str())
             && structural(&self.chat_id) && structural(&self.runner_id)
@@ -337,4 +359,90 @@ pub fn acceptance_fingerprint(
         revision.path, revision.card_id, revision.attachment_id
     ])).map_err(|_| ArtifactFailure::Invalid)?;
     Ok(Sha256::digest(canonical).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_refuse_characters_that_disguise_them() {
+        for good in ["note.md", "Résumé 2026.pdf", "上海 notes.txt", "a/b", "report (final).docx"] {
+            assert!(structural(good), "{good}");
+        }
+        for bad in ["", "invoice\u{202E}fdp.exe", "zero\u{200B}width", "\u{FEFF}bom", "line\u{2028}break", "tab\there", "nul\0", "iso\u{2066}late", &"x".repeat(1025)] {
+            assert!(!structural(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn media_types_need_a_type_and_a_subtype() {
+        for good in ["text/markdown", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "image/svg+xml", "text/plain; charset=utf-8"] {
+            assert!(mime(good), "{good}");
+        }
+        for bad in ["/", " / ", "text/", "/plain", "text", "text/pl ain", "text/plain/extra", "te\u{202E}xt/plain"] {
+            assert!(!mime(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn revision_ids_are_lowercase_hyphenated_and_not_nil() {
+        assert!(revision_id("00000000-0000-4000-8000-000000000001"));
+        assert!(revision_id(&uuid::Uuid::new_v4().to_string()));
+        for bad in ["00000000-0000-0000-0000-000000000000", "ffffffff-ffff-ffff-ffff-ffffffffffff", "00000000-0000-4000-8000-00000000000A", "0000000000004000800000000000000a", ""] {
+            assert!(!revision_id(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn hashes_and_artifact_ids_are_exact_lowercase_hex() {
+        assert!(hash(&"a".repeat(64)));
+        assert!(!hash(&"A".repeat(64)) && !hash(&"a".repeat(63)) && !hash(&"g".repeat(64)));
+        assert!(artifact_id(&format!("art-{}", "0".repeat(48))));
+        assert!(!artifact_id(&"0".repeat(48)) && !artifact_id(&format!("art-{}", "0".repeat(47))) && !artifact_id(&format!("ART-{}", "0".repeat(48))));
+    }
+
+    #[test]
+    fn paths_stay_inside_the_workspace_on_every_file_system() {
+        for good in ["notes/note.md", "a/b/c.txt", "console.txt", "com10.txt", ".hidden/file", "v1.2/readme"] {
+            assert!(relative_path(good), "{good}");
+        }
+        let long_segment = "\u{1F600}".repeat(64);
+        for bad in [
+            "", "../outside", "a/../b", "./a", "a//b", "/abs", "a\\b", "c:/x", "a/.. ", "a/...", "foo.", "foo ", "dir./x",
+            "CON", "con.d/x", "nul.txt", "Com1", "lpt9.log", "aux/x", "a/<b>", "a/b?", "a/*", "a|b", "a\"b", "a\u{202E}b", "a\nb", &long_segment,
+        ] {
+            assert!(!relative_path(bad), "{bad:?}");
+        }
+        assert!(!relative_path(&"a/".repeat(121)), "more than 240 characters");
+    }
+
+    #[test]
+    fn a_mutated_validator_is_caught_by_its_own_test() {
+        // What the unit tests above guard, checked through `parse` too: every field reaches its
+        // validator, so weakening one shows up here and not only in its own test.
+        let revision_id = "00000000-0000-4000-8000-000000000001";
+        let base = serde_json::json!({
+            "version": 1, "id": format!("art-{}", "0".repeat(48)), "revision_id": revision_id,
+            "name": "note.md", "mime": "text/markdown", "size": 0, "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "parent_revision": null, "parent_content_hash": null, "file_id": format!("{revision_id}.file"), "chat_id": "chat",
+            "bot_id": null, "runner_id": "runner", "card_id": null, "attachment_id": null, "created_at": 1.0, "path": "notes/note.md"
+        });
+        let parse = |value: &serde_json::Value| ArtifactEnvelope::parse(&serde_json::to_vec(value).unwrap());
+        assert!(parse(&base).is_ok());
+        for (field, value) in [("name", "a\u{202E}b"), ("mime", "/"), ("path", "a/.. "), ("path", "nul.txt"), ("chat_id", "c\u{200B}")] {
+            let mut changed = base.clone();
+            changed[field] = value.into();
+            assert_eq!(parse(&changed).unwrap_err(), ArtifactFailure::Invalid, "{field}={value:?}");
+        }
+    }
+
+    #[test]
+    fn created_at_survives_a_json_round_trip() {
+        // `store.rs` compares a stored row's parse with the struct it wrote.
+        for value in [0.0, 1.0, 1_763_000_000.123_456_7, 0.1 + 0.2, f64::from_bits(0x41d6_a8c4_1f3b_6c8d), 1e-300, 9_007_199_254_740_993.0] {
+            let text = serde_json::to_string(&value).unwrap();
+            assert_eq!(serde_json::from_str::<f64>(&text).unwrap().to_bits(), value.to_bits(), "{text}");
+        }
+    }
 }

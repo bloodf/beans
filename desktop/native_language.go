@@ -2,13 +2,14 @@ package main
 
 import (
 	"fmt"
-	"github.com/egoist/mygo"
 	"strings"
 )
 
-// nativeSystemLocale is overridable in tests so headless frames never block on
-// mygo.App.Locale()'s main-thread round-trip.
-var nativeSystemLocale = func() string { return mygo.App.Locale() }
+// The main-thread launch callback captures the system locale once before rendering begins, so render
+// callbacks never dispatch a synchronous locale read to the main loop. nativeSystemLocale stays
+// overridable in tests so headless frames need no app.
+var nativeLocale string
+var nativeSystemLocale = func() string { return nativeLocale }
 
 func nativeL(key string, args ...any) string {
 	language := prefs.get().AppLanguage

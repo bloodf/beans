@@ -28,6 +28,9 @@ impl Drop for CloudBridge {
     }
 }
 impl CloudBridge {
+    /// The bridge to a LanceDB Cloud database. Cloud bindings are refused
+    /// (`CLOUD_TRANSPORT_UNAVAILABLE`) until this transport is switched on; tests use `start_to`.
+    #[allow(dead_code)]
     pub async fn start(database: &str, region: &str, key: &str) -> Result<Self, MemoryError> {
         let target = reqwest::Url::parse(&format!("https://{database}.{region}.api.lancedb.com/"))
             .map_err(|_| MemoryError::new("invalid_lance_cloud_target"))?;

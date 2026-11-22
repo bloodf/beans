@@ -240,7 +240,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::sync::mpsc::Receiver;
-    use std::sync::{Arc, Condvar, Mutex, PoisonError};
+    use std::sync::{Condvar, Mutex, PoisonError};
     use std::time::{Duration, Instant};
 
     /// The real Serve entry, in this process, for the parent test to drive.

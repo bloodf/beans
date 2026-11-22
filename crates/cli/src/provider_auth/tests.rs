@@ -118,7 +118,7 @@ fn model_lists_tell_windows_inputs_and_what_is_not_for_chat() {
     assert!(listed_models(&json!({ "status": "ok" })).is_none());
 }
 
-struct ScratchApp(Arc<App>, std::path::PathBuf);
+pub(super) struct ScratchApp(pub(super) Arc<App>, std::path::PathBuf);
 
 impl Drop for ScratchApp {
     fn drop(&mut self) {
@@ -126,7 +126,7 @@ impl Drop for ScratchApp {
     }
 }
 
-fn scratch_app() -> ScratchApp {
+pub(super) fn scratch_app() -> ScratchApp {
     let home = std::env::temp_dir().join(format!("beans-provider-auth-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&home).unwrap();
     ScratchApp(App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap(), home)
@@ -154,7 +154,7 @@ fn accept_within(listener: &std::net::TcpListener, budget: std::time::Duration) 
     }
 }
 
-fn serve(answers: Vec<(&'static str, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+pub(super) fn serve(answers: Vec<(&'static str, String)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let root = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
@@ -191,7 +191,7 @@ fn serve(answers: Vec<(&'static str, String)>) -> (String, std::thread::JoinHand
 }
 
 /// Never block-join a std fixture thread on the current-thread tokio runtime.
-async fn join_server<T: Send + 'static>(server: std::thread::JoinHandle<T>) -> T {
+pub(super) async fn join_server<T: Send + 'static>(server: std::thread::JoinHandle<T>) -> T {
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio::task::spawn_blocking(move || server.join().expect("fixture server")),
@@ -257,7 +257,7 @@ async fn credential_redirects_are_not_followed() {
         let _ = socket.set_read_timeout(Some(io_timeout));
         let _ = socket.set_write_timeout(Some(io_timeout));
         let mut request = [0u8; 4096];
-        socket.read(&mut request).unwrap();
+        assert!(socket.read(&mut request).unwrap() > 0, "the request arrived");
         let _ = write!(socket, "HTTP/1.1 307 Temporary Redirect\r\nLocation: {destination}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         let _ = socket.shutdown(std::net::Shutdown::Both);
     });
@@ -438,7 +438,7 @@ async fn in_flight_refresh_cannot_restore_a_deleted_provider() {
         let _ = socket.set_read_timeout(Some(io_timeout));
         let _ = socket.set_write_timeout(Some(io_timeout));
         let mut request = [0u8; 4096];
-        socket.read(&mut request).unwrap();
+        assert!(socket.read(&mut request).unwrap() > 0, "the request arrived");
         requested.send(()).unwrap();
         proceed.recv().unwrap();
         let body = json!({ "data": [{ "id": "new" }] }).to_string();
@@ -713,7 +713,7 @@ async fn guided_revocation_during_discovery_prevents_credential_commit() {
         let _ = socket.set_read_timeout(Some(io_timeout));
         let _ = socket.set_write_timeout(Some(io_timeout));
         let mut bytes = [0; 4096];
-        socket.read(&mut bytes).unwrap();
+        assert!(socket.read(&mut bytes).unwrap() > 0, "the request arrived");
         app.state.lock().unwrap().devices.retain(|device| device.id != revoked);
         let body = r#"{"data":[{"id":"alias"}]}"#;
         let _ = write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
@@ -745,7 +745,7 @@ async fn guided_create_delete_during_discovery_preserves_tombstone() {
         let _ = socket.set_read_timeout(Some(io_timeout));
         let _ = socket.set_write_timeout(Some(io_timeout));
         let mut request = [0u8; 4096];
-        socket.read(&mut request).unwrap();
+        assert!(socket.read(&mut request).unwrap() > 0, "the request arrived");
         requested.send(()).unwrap();
         proceed.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         let body = r#"{"data":[{"id":"alias"}]}"#;
@@ -805,7 +805,7 @@ async fn discovery_completion_cannot_publish_into_a_replacement_account() {
             use std::io::{Read, Write};
             let (mut socket, _) = listener.accept().unwrap();
             let mut request = [0u8; 4096];
-            socket.read(&mut request).unwrap();
+            assert!(socket.read(&mut request).unwrap() > 0, "the request arrived");
             requested.send(()).unwrap();
             proceed.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
             let body = json!({ "data": [{ "id": "stale-discovery" }] }).to_string();

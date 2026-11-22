@@ -679,7 +679,7 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Observes the private temporary between its creation and its first byte.
+// Observes the private temporary between its creation and its first byte.
 #[cfg(test)]
 thread_local! {
     static AFTER_PRIVATE_TMP_CREATED: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =

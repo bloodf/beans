@@ -87,7 +87,7 @@ async fn health_failures_never_echo_remote_errors_or_claim_unknown_machine() {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = [0; 4096];
-            socket.read(&mut request).await.unwrap();
+            assert!(socket.read(&mut request).await.unwrap() > 0, "the request arrived");
             socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         });
         let report = api::dispatch(&app, "diagnostics.report", Value::Null).await.unwrap();

@@ -866,7 +866,7 @@ mod tests {
             let server = std::thread::spawn(move || {
                 let (mut socket,_) = listener.accept().unwrap();
                 let mut request = [0u8;8192];
-                socket.read(&mut request).unwrap();
+                assert!(socket.read(&mut request).unwrap() > 0, "the request arrived");
                 write!(socket,"HTTP/1.1 307 Temporary Redirect\r\nLocation: {destination}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
             });
             let provider = CustomProvider { name:"Neutral".into(),api,base_url:root,api_key:"fixture-key".into(),models:vec![model("alias")],created_at:1,integration:None,capabilities:None };

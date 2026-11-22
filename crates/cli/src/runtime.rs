@@ -45,7 +45,7 @@ pub fn send_user_message(
     if text.is_empty() && files.is_empty() {
         anyhow::bail!("Empty message");
     }
-    let chat = app.chat(chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
+    app.chat(chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
     let mentions = resolve_mentions(&app, text, mentions);
     let reply_to = match reply_to.filter(|id| !id.is_empty()) {
         Some(id) => Some(

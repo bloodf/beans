@@ -390,7 +390,7 @@ mod tests {
         let runtime=plan.assets.iter_mut().find(|a|a.kind==AssetKind::Runtime).unwrap();runtime.source=AssetSource::Download{url:format!("{origin}/runtime")};
         let denied=AssetInstaller::new(destination.clone(),BTreeSet::new(),true).unwrap();assert!(denied.preview(plan.clone()).is_err());
         let installer=AssetInstaller::new(destination.clone(),[origin].into_iter().collect(),true).unwrap();
-        let task=tokio::spawn(async move {let (mut stream,_)=listener.accept().await.unwrap();let mut buf=[0u8;4096];stream.read(&mut buf).await.unwrap();
+        let task=tokio::spawn(async move {let (mut stream,_)=listener.accept().await.unwrap();let mut buf=[0u8;4096];assert!(stream.read(&mut buf).await.unwrap() > 0, "the request arrived");
             stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 15\r\nconnection: close\r\n\r\nfixture Runtime").await.unwrap();});
         let preview=installer.preview(plan).unwrap();let binding=installer.apply(&preview.token,&preview.digest,true,CancellationToken::new()).await.unwrap();task.await.unwrap();
         assert_eq!(verified_bytes(&binding.runtime,1024).await.unwrap(),b"fixture Runtime");
@@ -410,7 +410,7 @@ mod tests {
             let installer=AssetInstaller::new(destination.clone(),[origin].into_iter().collect(),true).unwrap();
             let preview=installer.preview(plan).unwrap();
             let task=tokio::spawn(async move {let (mut stream,_)=listener.accept().await.unwrap();let mut buf=[0u8;4096];
-                stream.read(&mut buf).await.unwrap();stream.write_all(response.as_bytes()).await.unwrap();});
+                assert!(stream.read(&mut buf).await.unwrap() > 0, "the request arrived");stream.write_all(response.as_bytes()).await.unwrap();});
             assert_eq!(installer.apply(&preview.token,&preview.digest,true,CancellationToken::new()).await.unwrap_err(),expected);
             task.await.unwrap();let mut entries=fs::read_dir(&destination).await.unwrap();assert!(entries.next_entry().await.unwrap().is_none());
             fs::remove_dir_all(source).await.unwrap();fs::remove_dir_all(destination).await.unwrap();

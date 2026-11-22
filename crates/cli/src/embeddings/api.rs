@@ -184,7 +184,7 @@ mod tests {
         let url=format!("http://{}/embeddings",listener.local_addr().unwrap());
         let task=tokio::spawn(async move {
             let (mut stream,_)=listener.accept().await.unwrap();let mut buffer=[0;4096];
-            stream.read(&mut buffer).await.unwrap();
+            assert!(stream.read(&mut buffer).await.unwrap() > 0, "the request arrived");
             stream.write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n10\r\n0123456789abcdef\r\n0\r\n\r\n").await.unwrap();
         });
         let api=ApiEmbedding::new(&profile(&url),true,EmbeddingLimits{max_response_bytes:10,..EmbeddingLimits::default()}).unwrap();

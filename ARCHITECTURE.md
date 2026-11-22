@@ -100,7 +100,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [Composer capabilities](docs/architecture/composer-capabilities.md) | Proposed context/action consumers and their boundaries |
 | [Composer](docs/architecture/composer.md) | Client inventory; action/reference syntax, authority and compatibility |
 | [Windows and Linux app](docs/architecture/desktop-app.md) | The MyGo app: Go side, Solid page, commands, updates, builds |
-| [Phone app](docs/architecture/phone-app.md) | Expo over the Rust core: native module, pairing, attachments, notifications, turns |
+| [Phone app](docs/architecture/phone-app.md) | Expo over the Rust core: native module, pairing, attachments, notifications, turns, [memory](docs/architecture/phone-memory.md) |
 | [Phone releases and updates](docs/architecture/phone-updates.md) | TestFlight, Android APKs and the Android self-update flow |
 | [Phone interface](docs/architecture/phone-interface.md) | Native screens, transcript presentation and adaptive navigation |
 | [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds, submissions, credentials, [tests](docs/architecture/testing.md) |

@@ -944,7 +944,7 @@ mod tests {
         let source = app.config.home.join("source.txt");
         std::fs::write(&source, b"replacement").unwrap();
         std::fs::create_dir_all(app.config.files_dir()).unwrap();
-        let target = crate::files::local_path(app, "att-existing");
+        let target = crate::files::local_path(app, "att-existing").unwrap();
         std::fs::write(&target, b"original").unwrap();
         let before = app.store.outbox().unwrap().into_iter().map(|item| (item.id, item.ciphertext)).collect::<Vec<_>>();
         app.update.prepare(app, std::time::Duration::from_secs(60));
@@ -1052,7 +1052,7 @@ mod tests {
             let message=send_user_message(app.clone(),"chat","saved while paused",None,vec![file],Vec::new(),None).unwrap();
             assert_eq!(app.message("chat",&message.id).unwrap().body,message.body);
             assert!(matches!(&message.body,Body::Text{attachments,..} if attachments.len()==1 && attachments[0].id==id));
-            assert_eq!(std::fs::read(crate::files::local_path(app,id)).unwrap(),b"saved while paused");
+            assert_eq!(std::fs::read(crate::files::local_path(app,id).unwrap()).unwrap(),b"saved while paused");
             assert!(app.store.outbox().unwrap().iter().any(|item|item.kind=="file" && item.id==id));
             assert_eq!(app.store.outbox().unwrap().iter().filter(|item|item.kind=="chat").count(),before+1);
         }
@@ -1083,7 +1083,7 @@ mod tests {
         let mut chat=empty_chat("chat");chat.meta.bot_ids.push("bot".into());
         app.state.lock().unwrap().chats.push(chat);
         let source=app.config.home.join("source");std::fs::write(&source,b"new").unwrap();
-        let destination=crate::files::local_path(app,"att-existing");
+        let destination=crate::files::local_path(app,"att-existing").unwrap();
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();std::fs::write(&destination,b"old").unwrap();
         let file=crate::files::OutgoingFile{path:source.to_string_lossy().into(),id:Some("att-existing".into()),name:None,mime:None,width:None,height:None};
         #[cfg(feature="runner")]
@@ -1110,7 +1110,7 @@ mod tests {
         #[cfg(feature="runner")]
         assert!(queue.drain().is_empty());
         app.store.connection.lock().unwrap().execute_batch("DROP TRIGGER reject_submission;").unwrap();
-        let broken=crate::files::local_path(app,"att-blocked");
+        let broken=crate::files::local_path(app,"att-blocked").unwrap();
         std::fs::create_dir_all(&broken).unwrap();std::fs::write(broken.join("child"),b"keep").unwrap();
         let file=crate::files::OutgoingFile{id:Some("att-blocked".into()),..file};
         assert!(send_user_message(app.clone(),"chat","rejected finalization",None,vec![file],Vec::new(),None).is_err());

@@ -161,7 +161,7 @@ fn png(colour: [u8; 3]) -> Vec<u8> {
 fn picture(app: &App, chat: &str, id: &str, at: f64, name: &str, colour: [u8; 3]) -> Message {
     let attachment = Attachment { id: format!("att-{id}"), name: name.into(), mime: "image/png".into(), size: 1, width: Some(8), height: Some(8) };
     std::fs::create_dir_all(app.config.files_dir()).unwrap();
-    std::fs::write(crate::files::local_path(app, &attachment.id), png(colour)).unwrap();
+    std::fs::write(crate::files::local_path(app, &attachment.id).unwrap(), png(colour)).unwrap();
     say(app, chat, id, at, Body::Text { text: "look".into(), attachments: vec![attachment], mentions: vec![], reply_to: None })
 }
 
@@ -521,7 +521,7 @@ async fn pictures_are_read_only_once_here_and_a_broken_one_stays_out_of_the_way(
     say(app, &chat, "elsewhere", 1.0, Body::Text { text: "look".into(), attachments: vec![elsewhere.clone()], mentions: vec![], reply_to: None });
     let broken = Attachment { id: "att-broken".into(), name: "broken.png".into(), mime: "image/png".into(), size: 1, width: None, height: None };
     std::fs::create_dir_all(app.config.files_dir()).unwrap();
-    std::fs::write(crate::files::local_path(app, &broken.id), b"not an image at all").unwrap();
+    std::fs::write(crate::files::local_path(app, &broken.id).unwrap(), b"not an image at all").unwrap();
     let blue = picture(app, &chat, "blue", 2.0, "blue.png", [10, 10, 230]);
     let Body::Text { attachments, .. } = &blue.body else { unreachable!() };
     let both = vec![broken, attachments[0].clone()];
@@ -533,7 +533,7 @@ async fn pictures_are_read_only_once_here_and_a_broken_one_stays_out_of_the_way(
     assert!(app.store.embedding_progress(crate::local_store::vectors::Role::Image).unwrap().1 == 0, "nothing is stuck");
     assert!(ids(&search(app, "navy").await, "images").contains(&"mixed".to_string()));
     // The missing picture arrives, as `files::ensure_local` brings it for a turn.
-    std::fs::write(crate::files::local_path(app, &elsewhere.id), png([10, 10, 230])).unwrap();
+    std::fs::write(crate::files::local_path(app, &elsewhere.id).unwrap(), png([10, 10, 230])).unwrap();
     assert_eq!(app.store.requeue_picture(&elsewhere.id).unwrap(), 1);
     index_all(app).await;
     assert!(ids(&search(app, "navy").await, "images").contains(&"elsewhere".to_string()));

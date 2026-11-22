@@ -104,11 +104,11 @@ fn store_avatar(app: &Arc<App>, avatar: Option<Option<crate::files::OutgoingFile
         Some(Some(file)) => {
             let attachment = crate::files::store(app, &file).map_err(|e| e.to_string())?;
             if !attachment.is_image() {
-                let _ = std::fs::remove_file(crate::files::local_path(app, &attachment.id));
+                if let Ok(path) = crate::files::local_path(app, &attachment.id) { let _ = std::fs::remove_file(path); }
                 return Err(format!("{} is not an image", attachment.name));
             }
             if let Err(error) = crate::files::push_blob(app, None, &attachment) {
-                let _ = std::fs::remove_file(crate::files::local_path(app, &attachment.id));
+                if let Ok(path) = crate::files::local_path(app, &attachment.id) { let _ = std::fs::remove_file(path); }
                 return Err(error.to_string());
             }
             Ok(Some(Some(attachment)))

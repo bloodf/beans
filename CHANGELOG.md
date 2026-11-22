@@ -54,6 +54,8 @@ Sparkle update. [desktop/CHANGELOG.md](desktop/CHANGELOG.md) retains legacy desk
 - Durable task startup retains storage admission through execution-owner recovery and rejects unknown future task schemas without downgrading them.
 
 - Attention is a shared, encrypted list of what needs you across chats (`attention.list`, `attention.resolve`, `attention.dismiss_brief`, `attention.preferences`, and `attention.changed`). The phone opens it from the chat list; desktop Attention UI follows separately.
+- Phone: Attention lists what needs you across chats, each coordinator's brief and then the items, opened from the chat list beside Settings while something waits. Long-press a brief and choose Dismiss to take it off the list on every Device (the coordinator's next brief shows again); a brief also leaves once every item it is about is resolved. An item that waits on a review opens its chat with that review's read-only details.
+- A bot resolves an Attention item it alone reported as soon as it sees the work is done, such as a run it approved or a pull request that merged.
 - Fresh Beans accounts use `beans-v2`, isolated v2 homes and ports 4874/4875, mandatory protocol-5/format capability, versioned backup phrases and pairing links; incompatible old storage and phrases are rejected without migration or reset.
 - New releases use Beans-only asset/package names and retain the existing Ed25519 anchor and immutable historical manifests. Update eligibility requires fresh-format relay health and supported protocol floors before Runner replacement.
 - Production Grok OAuth is disabled before callback/network access pending a verified Beans contract; existing provider, avatar and memory mechanisms remain unchanged.

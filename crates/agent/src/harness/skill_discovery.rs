@@ -275,7 +275,7 @@ mod tests {
             fs::write(root.join("oversize/SKILL.md"), vec![b'x'; MAX_FILE_BYTES as usize + 1]).unwrap();
             fs::create_dir(root.join("unreadable")).unwrap();
             fs::write(root.join("unreadable/SKILL.md"), valid).unwrap();
-            fs::set_permissions(root.join("unreadable/SKILL.md"), fs::Permissions::from_mode(0)).unwrap();
+            fs::set_permissions(root.join("unreadable/SKILL.md"), fs::Permissions::from_mode(0o0)).unwrap();
             // A directory named SKILL.md is always rejected even under privileged test users.
             fs::create_dir(root.join("not-file")).unwrap();
             fs::create_dir(root.join("not-file/SKILL.md")).unwrap();

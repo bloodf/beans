@@ -86,7 +86,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [Skills](docs/architecture/skills.md) | Discovery, managed copies, provenance, mounted checks and uninstall |
 | [Marketplace](docs/architecture/marketplace.md) | Relay-backed plugin and bot-template index, offline fallback, updates |
 | [MCP servers](docs/architecture/mcp-servers.md) | A Runner's `mcp.json`, sign-in, `mcp.*` methods, `beans mcp`, app settings |
-| [Bots, Routines, and Memory](docs/architecture/bots.md) | Lead bot, DMs and groups, who answers, handoffs, routines, bot memory |
+| [Bots, Routines, and Memory](docs/architecture/bots.md) | Lead bot, DMs and groups, who answers, handoffs, routines, bot memory, [approval history](docs/architecture/approval-history.md) |
 | [Memory service UI](docs/architecture/memory-ui.md) | Client drafts, masked replies, patches, consent and capability gates |
 | [Memory services](docs/architecture/memory-services.md) | Encrypted config, dispatch, queues, deletion and embeddings |
 | [Schedule models](docs/architecture/schedule-models.md) | Local CPU models: catalog, installs, routine detection, [semantic search](docs/architecture/semantic-search.md) |

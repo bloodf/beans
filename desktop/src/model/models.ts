@@ -477,6 +477,8 @@ export function deviceStatusLabel(status: DeviceStatus): string {
 export interface Device {
   id: string;
   name: string;
+  /** Original machine-reported name, separate from the account alias. */
+  machineName?: string;
   model: string;
   os: DeviceOS;
   osVersion: string;

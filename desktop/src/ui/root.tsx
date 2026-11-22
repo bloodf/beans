@@ -260,8 +260,7 @@ export function botsAvailableToAdd(chatID: string) {
   return store.bots.filter((bot) => !chat.botIDs.includes(bot.id));
 }
 
-export async function renameChat(): Promise<void> {
-  const chatID = selectedChatID();
+export async function renameChat(chatID: string | null = selectedChatID()): Promise<void> {
   const chat = chatID ? store.chat(chatID) : undefined;
   if (!chatID || !chat || !isGroup(chat)) {
     void host.beep();
@@ -277,13 +276,11 @@ export async function renameChat(): Promise<void> {
   if (answer === 0) store.rename(chatID, value);
 }
 
-export function togglePinChat(): void {
-  const chatID = selectedChatID();
+export function togglePinChat(chatID: string | null = selectedChatID()): void {
   if (chatID) store.togglePin(chatID);
 }
 
-export async function deleteChat(): Promise<void> {
-  const chatID = selectedChatID();
+export async function deleteChat(chatID: string | null = selectedChatID()): Promise<void> {
   const chat = chatID ? store.chat(chatID) : undefined;
   if (!chatID || !chat) {
     void host.beep();

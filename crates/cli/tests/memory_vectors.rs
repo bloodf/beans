@@ -271,3 +271,52 @@ async fn lance_real_temp_scoped_upsert_search_provenance_edit_delete_transfer() 
     .is_err());
     drop(Arc::new(backend));
 }
+
+#[tokio::test]
+async fn lance_index_removal_keeps_notes_and_rebuilds_empty_without_old_evidence() {
+    // One Runner home holds both: the canonical notes and the derived index beside them, so
+    // removing the index is shown not to reach its sibling notes.
+    let home = tempfile::tempdir().unwrap();
+    let notes = beans::memory::MemoryStore::new(&home.path().join("workspaces").join("bot"));
+    notes.append_entry("curated note", None, 0).unwrap();
+    let index = home.path().join("lance");
+    let a = scope("a");
+    let open = |create: bool| {
+        LanceBackend::open(
+            LanceBinding::Local { directory: index.join("db"), runner_id: "runner".into() },
+            a.clone(),
+            space(),
+            None,
+            create,
+            CancellationToken::new(),
+        )
+    };
+    let backend = open(true).await.unwrap();
+    backend
+        .retain_vector(&a, doc("one", "derived evidence"), &"a".repeat(64), vec![1., 0., 0.], CancellationToken::new())
+        .await
+        .unwrap();
+    let before = backend
+        .recall_vector(&a, &"a".repeat(64), vec![1., 0., 0.], RecallBudget::default(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(before.evidence.len(), 1);
+    assert_eq!(before.evidence[0].text, "derived evidence");
+    let original_notes = notes.read_index();
+    assert!(original_notes.contains("curated note"));
+    drop(backend);
+    std::fs::remove_dir_all(index.join("db")).unwrap();
+    // The operator-visible refusal, not any failure.
+    match open(false).await {
+        Err(error) => assert_eq!(error.code, "local_memory_unavailable_export_import_required"),
+        Ok(_) => panic!("a removed local index must not reopen without create"),
+    }
+    assert_eq!(notes.read_index(), original_notes);
+    let rebuilt = open(true).await.unwrap();
+    let found = rebuilt
+        .recall_vector(&a, &"a".repeat(64), vec![1., 0., 0.], RecallBudget::default(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(found.evidence.is_empty());
+    assert_eq!(notes.read_index(), original_notes);
+}

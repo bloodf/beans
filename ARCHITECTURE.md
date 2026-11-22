@@ -71,6 +71,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [Managed policy receipts and replay](docs/architecture/managed-policy-replay.md) | Opaque policy commits, receipts, replay cuts and teardown |
 | [Local API](docs/architecture/local-api.md) | The `/ws` socket: trust boundary, every method, events, secret-bearing methods |
 | [CLI (runtime)](docs/architecture/runtime.md) | Commands, local websocket access, proxy trust, diagnostics, agent loop |
+| [Diagnostics report](docs/architecture/diagnostics.md) | Privacy-safe setup report and injected computer-host checks |
 | [Local storage and startup admission](docs/architecture/storage-admission.md) | Data directory, format admission, staged preload, startup persistence |
 | [Local task authority](docs/architecture/tasks.md) | Execution ownership, Job.id admission, receipts, recovery, replay fences |
 | [CLI service and updates](docs/architecture/service-updates.md) | Installation, standalone services, admission drain, update availability |

@@ -274,14 +274,16 @@ async fn lance_real_temp_scoped_upsert_search_provenance_edit_delete_transfer() 
 
 #[tokio::test]
 async fn lance_index_removal_keeps_notes_and_rebuilds_empty_without_old_evidence() {
-    let notes_directory = tempfile::tempdir().unwrap();
-    let notes = beans::memory::MemoryStore::new(notes_directory.path());
+    // One Runner home holds both: the canonical notes and the derived index beside them, so
+    // removing the index is shown not to reach its sibling notes.
+    let home = tempfile::tempdir().unwrap();
+    let notes = beans::memory::MemoryStore::new(&home.path().join("workspaces").join("bot"));
     notes.append_entry("curated note", None, 0).unwrap();
-    let index = tempfile::tempdir().unwrap();
+    let index = home.path().join("lance");
     let a = scope("a");
     let open = |create: bool| {
         LanceBackend::open(
-            LanceBinding::Local { directory: index.path().join("db"), runner_id: "runner".into() },
+            LanceBinding::Local { directory: index.join("db"), runner_id: "runner".into() },
             a.clone(),
             space(),
             None,
@@ -303,8 +305,12 @@ async fn lance_index_removal_keeps_notes_and_rebuilds_empty_without_old_evidence
     let original_notes = notes.read_index();
     assert!(original_notes.contains("curated note"));
     drop(backend);
-    std::fs::remove_dir_all(index.path().join("db")).unwrap();
-    assert!(open(false).await.is_err());
+    std::fs::remove_dir_all(index.join("db")).unwrap();
+    // The operator-visible refusal, not any failure.
+    match open(false).await {
+        Err(error) => assert_eq!(error.code, "local_memory_unavailable_export_import_required"),
+        Ok(_) => panic!("a removed local index must not reopen without create"),
+    }
     assert_eq!(notes.read_index(), original_notes);
     let rebuilt = open(true).await.unwrap();
     let found = rebuilt

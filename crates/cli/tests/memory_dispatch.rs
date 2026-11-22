@@ -239,7 +239,9 @@ async fn retained_document_stops_recalling_after_delete_and_notes_survive(){
     assert_eq!(recalled(&s).await,vec!["service fact".to_string()]);
     let old=s.access().scope;
     // The fence bumps the epoch; no live backend is bound to the new scope yet, so the first
-    // attempt stops with cleanup pending and nothing erased.
+    // attempt stops with cleanup pending and nothing erased. The fixture connection has no
+    // endpoint, so that first refusal is `invalid_endpoint`; the fence and ledger checks below
+    // are the behaviour under test.
     assert_eq!(d::delete(&s.app,&s.bot,Some(doc.id.clone()),old.connection_revision.clone(),old.deletion_epoch,CancellationToken::new()).await.unwrap_err().code,"invalid_endpoint");
     assert!(s.app.store.memory_fence(&s.bot).unwrap().unwrap().pending);
     assert_eq!(ledger.deletes.load(Ordering::SeqCst),0);

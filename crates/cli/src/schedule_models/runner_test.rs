@@ -826,11 +826,14 @@ async fn an_onnx_model_brings_its_runtime_when_none_is_here() {
     let install = saved(app).unwrap().installs["fixture-onnx"].clone();
     let installed = install.assets.get(AssetKind::Runtime).unwrap();
     assert_eq!(std::fs::read(&installed.path).unwrap(), library);
-    let mut kept: Vec<String> = std::fs::read_dir(installed.path.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    // The library is kept once, in the shared store, never the wheel (#583).
+    assert_eq!(installed.path, shared_runtime_path(app, &pin.library_sha256));
+    let model_dir = install.assets.get(AssetKind::Model).unwrap().path.parent().unwrap().to_path_buf();
+    let mut kept: Vec<String> = std::fs::read_dir(&model_dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
     kept.sort();
-    let mut expected = [AssetKind::Runtime.filename(), "model.onnx", "tokenizer.json"];
-    expected.sort();
-    assert_eq!(kept, expected, "only the library is kept, never the wheel");
+    assert_eq!(kept, ["model.onnx", "tokenizer.json"], "the install keeps its own files only");
+    // Without the shared copy, a preview downloads the wheel again.
+    std::fs::remove_dir_all(app.config.home.join(RUNTIME_DIR)).unwrap();
 
     // A wheel that is not the pinned one, or a pinned wheel without the library, installs nothing.
     let wheel = crate::embeddings::archive::tests::zip(&[("onnxruntime/__init__.py", b"# python"), (member, &library)], None);
@@ -994,4 +997,64 @@ async fn a_stalled_download_stops_after_the_idle_timeout() {
     assert_eq!(approve(app, "fixture-static-pinned").await.unwrap_err(), "asset_install_failed");
     assert!(started.elapsed() < crate::embeddings::assets::IDLE_TIMEOUT * 5, "{:?}", started.elapsed());
     assert_eq!(call(app, "schedule_models.status", json!({})).await.unwrap()["installed"], json!([]));
+}
+
+/// Issue #583: ONNX installs share one copy of each runtime library. A second ONNX model, or the
+/// same one again, downloads no runtime; removing the last install that uses it removes it.
+#[tokio::test]
+async fn onnx_installs_share_one_runtime_and_the_last_removal_removes_it() {
+    let scratch = runner();
+    let app = &scratch.0;
+    let mut catalog = fixture_catalog();
+    let mut second = catalog.model("fixture-onnx").unwrap().clone();
+    second.id = "fixture-onnx-2".into();
+    catalog.models.push(second);
+    app.schedule_models.set_catalog(catalog);
+    let (weights, tokenizer) = supplied_files(&scratch.1);
+    // The same stand-in library as the test above: a process dlopens one runtime, and a second,
+    // different library that fails to load would leave ONNX Runtime's global lock poisoned.
+    let library = b"\x7fELF not really a runtime, ".repeat(200);
+    let (hub, pin) = served_runtime(&library, "onnxruntime/capi/libonnxruntime.so").await;
+    app.schedule_models.set_hub(hub.hub.clone());
+    app.schedule_models.set_runtime_supply(RuntimeSupply { beside: None, download: Some(pin.clone()) });
+    let install = |id: &'static str| {
+        let app = app.clone();
+        let (weights, tokenizer) = (weights.clone(), tokenizer.clone());
+        async move {
+            let source = json!({ "kind": "supplied", "files": { "model": weights, "tokenizer": tokenizer } });
+            let preview = call(&app, "schedule_models.preview", json!({ "model_id": id, "source": source })).await.unwrap();
+            call(&app, "schedule_models.apply", json!({ "preview_token": preview["preview_token"], "preview_digest": preview["preview_digest"], "confirm": true })).await.unwrap();
+            preview
+        }
+    };
+    let wheel_downloads = || hub.requests().iter().filter(|r| r.starts_with("cdn ")).count();
+
+    let first = install("fixture-onnx").await;
+    assert!(!first["runtime_download"].is_null());
+    assert_eq!(wheel_downloads(), 1);
+    let shared = shared_runtime_path(app, &pin.library_sha256);
+    assert_eq!(std::fs::read(&shared).unwrap(), library);
+
+    let second = install("fixture-onnx-2").await;
+    assert!(second["runtime_download"].is_null(), "the preview says the runtime is already here");
+    let runtime = second["assets"].as_array().unwrap().iter().find(|a| a["kind"] == "runtime").unwrap().clone();
+    assert_eq!(runtime["source"], json!({ "kind": "supplied", "path": shared }));
+    assert_eq!(wheel_downloads(), 1, "no second download");
+    let saved_now = saved(app).unwrap();
+    for id in ["fixture-onnx", "fixture-onnx-2"] {
+        assert_eq!(saved_now.installs[id].assets.get(AssetKind::Runtime).unwrap().path, shared, "{id}");
+    }
+    let list = call(app, "schedule_models.list", json!({})).await.unwrap();
+    let files: u64 = saved_now.installs.values().flat_map(|i| i.assets.assets.iter().filter(|(k, _)| *k != AssetKind::Runtime).map(|(_, a)| a.bytes)).sum();
+    assert_eq!(list["disk_bytes"], files + library.len() as u64, "the shared library counts once");
+
+    // Installing the same model again replaces its files and keeps the one runtime.
+    install("fixture-onnx").await;
+    assert_eq!(wheel_downloads(), 1);
+    assert!(shared.is_file());
+
+    call(app, "schedule_models.remove", json!({ "model_id": "fixture-onnx" })).await.unwrap();
+    assert!(shared.is_file(), "still used by the other install");
+    call(app, "schedule_models.remove", json!({ "model_id": "fixture-onnx-2" })).await.unwrap();
+    assert!(!shared.exists() && !shared.parent().unwrap().exists(), "the last removal removes it");
 }

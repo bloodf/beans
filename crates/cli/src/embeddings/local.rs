@@ -9,6 +9,9 @@ use tokio_util::sync::CancellationToken;
 
 struct RuntimeState {approved:BoundAsset,_protected:ProtectedRuntime,committed:bool}
 static RUNTIME:Mutex<Option<RuntimeState>>=Mutex::new(None);
+/// Runtime libraries (by SHA-256) that failed to load in this process. Loading one again cannot
+/// succeed and leaves ONNX Runtime's own global lock poisoned, which aborts the process at exit.
+static FAILED:Mutex<Vec<String>>=Mutex::new(Vec::new());
 pub struct LocalEmbedding {
     spec:EmbeddingSpec,
     tokenizer:Arc<Tokenizer>,
@@ -102,8 +105,11 @@ pub(super) fn initialize_runtime(runtime:ProtectedRuntime,fenced:&Mutex<bool>,de
         if !same || !existing.committed {return Err(EmbeddingError::RuntimeConflict);}
         return Ok(());
     }
-    let builder=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||ort::init_from(&runtime.path)))
-        .map_err(|_|EmbeddingError::RuntimeUnavailable)?.map_err(|_|EmbeddingError::RuntimeUnavailable)?;
+    if FAILED.lock().contains(&runtime.original.sha256) {return Err(EmbeddingError::RuntimeUnavailable);}
+    let builder=match std::panic::catch_unwind(std::panic::AssertUnwindSafe(||ort::init_from(&runtime.path))) {
+        Ok(Ok(builder))=>builder,
+        _=>{FAILED.lock().push(runtime.original.sha256.clone());return Err(EmbeddingError::RuntimeUnavailable);}
+    };
     // dlopen is already process-global. Retain its exact protected bytes even if
     // environment commit fails; never pretend another library can replace it.
     *current=Some(RuntimeState{approved:runtime.original.clone(),_protected:runtime,committed:false});

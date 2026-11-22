@@ -29,6 +29,9 @@ use crate::embeddings::assets::{AssetInstaller, AssetKind, AssetPlan, AssetReque
 use crate::embeddings::runtime_download::{self, Pinned};
 
 const ASSET_DIR: &str = "schedule-models/assets";
+/// One copy of each ONNX Runtime library, by its SHA-256, which every install that runs on it
+/// shares (#583): `<RUNTIME_DIR>/<sha256>/<library>`.
+const RUNTIME_DIR: &str = "schedule-models/runtime";
 const APPROVAL_SECS: u64 = 600;
 const MAX_APPROVALS: usize = 16;
 /// The largest ONNX Runtime library a user may supply, as local memory embeddings allow.
@@ -333,7 +336,8 @@ fn list(app: &App) -> Result<Value, String> {
         "note": catalog.note,
         "max_bytes": MAX_MODEL_BYTES,
         "models": models,
-        "disk_bytes": saved.installs.values().map(Install::bytes).sum::<u64>(),
+        // Each file once: installs share their runtime library.
+        "disk_bytes": saved.installs.values().flat_map(|install| install.assets.assets.iter().map(|(_, asset)| (asset.path.clone(), asset.bytes))).collect::<HashMap<_, _>>().values().sum::<u64>(),
         "machine": machine,
         "needs": needs,
         "recommended": recommended,
@@ -461,7 +465,9 @@ async fn preview(app: &Arc<App>, authority: &Authority, params: Value) -> Result
             return Err("runtime_not_needed".into());
         }
     } else {
-        let asset = match (request.runtime.clone().or_else(|| supply.beside.clone()), &supply.download) {
+        // A runtime another install already brought is used again instead of downloaded (#583).
+        let shared = supply.download.as_ref().and_then(|pin| shared_runtime(app, &pin.library_sha256, pin.library_bytes));
+        let asset = match (request.runtime.clone().or_else(|| supply.beside.clone()).or(shared), &supply.download) {
             (Some(path), _) => {
                 let (bytes, sha256) = hash_file(&path, MAX_RUNTIME_BYTES, &cancel).await?;
                 AssetRequest { kind: AssetKind::Runtime, source: AssetSource::Supplied { path }, license: RUNTIME_LICENSE.into(), bytes, sha256 }
@@ -620,7 +626,8 @@ async fn apply(app: &Arc<App>, authority: &Authority, params: Value) -> Result<V
         .apply_assets_with_progress(&approval.token, &approval.digest, true, cancel.clone(), Some(progress.clone()))
         .await;
     app.schedule_models.installing.lock().take_if(|current| Arc::ptr_eq(&current.progress, &progress));
-    let installed = installed.map_err(|error| if error == crate::embeddings::EmbeddingError::Cancelled { "install_cancelled" } else { "asset_install_failed" })?;
+    let mut installed = installed.map_err(|error| if error == crate::embeddings::EmbeddingError::Cancelled { "install_cancelled" } else { "asset_install_failed" })?;
+    share_runtime(app, &mut installed);
     let install = Install {
         assets: installed.clone(),
         classifier: None,
@@ -630,12 +637,14 @@ async fn apply(app: &Arc<App>, authority: &Authority, params: Value) -> Result<V
         Ok(previous) => previous,
         Err(error) => {
             remove_files(&installed);
+            collect_runtimes(app);
             return Err(error);
         }
     };
     if let Some(previous) = previous {
         remove_files(&previous.assets);
     }
+    collect_runtimes(app);
     // An image model is for search; only text models read schedules.
     let image_model = catalog(app).model(&approval.model_id).is_some_and(|m| m.engine == Engine::Clip);
     let state = if image_model { "installed".into() } else { prepare_now(app, &approval.model_id).await };
@@ -668,6 +677,63 @@ fn cancel_install(app: &App, params: Value) -> Result<Value, String> {
         _ => false,
     };
     Ok(json!({ "cancelled": cancelled }))
+}
+
+/// Where the shared copy of the runtime `sha256` lives.
+fn shared_runtime_path(app: &App, sha256: &str) -> PathBuf {
+    app.config.home.join(RUNTIME_DIR).join(sha256).join(AssetKind::Runtime.filename())
+}
+
+/// The shared copy of the runtime `sha256`, when one is here with its pinned size. Loading
+/// checks its SHA-256 again.
+fn shared_runtime(app: &App, sha256: &str, bytes: u64) -> Option<PathBuf> {
+    let path = shared_runtime_path(app, sha256);
+    std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file() && metadata.len() == bytes).then_some(path)
+}
+
+/// Moves a new install's runtime library into the shared store, or drops its copy for the one
+/// already there, and points the install at the shared file. A move that fails keeps the copy.
+fn share_runtime(app: &App, installed: &mut InstalledAssets) {
+    for (kind, asset) in installed.assets.iter_mut() {
+        if *kind != AssetKind::Runtime {
+            continue;
+        }
+        let shared = shared_runtime_path(app, &asset.sha256);
+        if asset.path == shared {
+            continue;
+        }
+        if shared_runtime(app, &asset.sha256, asset.bytes).is_some() {
+            let _ = std::fs::remove_file(&asset.path);
+            asset.path = shared;
+            continue;
+        }
+        let Some(directory) = shared.parent() else { continue };
+        let moved = std::fs::create_dir_all(directory)
+            .and_then(|_| {
+                let _ = crate::config::set_private(directory);
+                std::fs::rename(&asset.path, &shared)
+            });
+        match moved {
+            Ok(()) => asset.path = shared,
+            Err(error) => tracing::warn!(%error, "sharing an ONNX Runtime library; keeping the install's own copy"),
+        }
+    }
+}
+
+/// Deletes every shared runtime no install uses any more.
+fn collect_runtimes(app: &App) {
+    let Ok(saved) = saved(app) else { return };
+    let used: std::collections::HashSet<PathBuf> = saved
+        .installs
+        .values()
+        .flat_map(|install| install.assets.assets.iter().filter(|(kind, _)| *kind == AssetKind::Runtime).map(|(_, asset)| asset.path.clone()))
+        .collect();
+    let Ok(entries) = std::fs::read_dir(app.config.home.join(RUNTIME_DIR)) else { return };
+    for entry in entries.flatten() {
+        if !used.contains(&entry.path().join(AssetKind::Runtime.filename())) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Deletes an install's directory.
@@ -738,6 +804,7 @@ async fn remove(app: &Arc<App>, authority: &Authority, params: Value) -> Result<
     // Search may have the model loaded; it loads its choice again, or reports it gone.
     app.search_index.forget_models();
     remove_files(&install.assets);
+    collect_runtimes(app);
     Ok(json!({ "removed": true, "mode": saved.mode, "selected": saved.selected }))
 }
 

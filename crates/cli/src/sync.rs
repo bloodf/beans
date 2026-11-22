@@ -5302,6 +5302,10 @@ mod tests {
         // Sync path must not error when recording the marker on a fresh upsert.
         mark_attention_upgrade_after_first_sync(&scratch.0).unwrap();
         assert!(scratch.0.store.attention_upgrade_done().unwrap());
+        // The minimal row still loads: a restart before the next state save must not fail on it.
+        let loaded = scratch.0.store.load_state().expect("the minimal metadata row loads");
+        assert_eq!(loaded.auto_review, crate::model::AutoReview::default());
+        assert_eq!(loaded.last_seq, 0);
     }
 
     #[tokio::test]

@@ -1,0 +1,1 @@
+ALTER TABLE metadata ADD COLUMN attention_upgrade INTEGER NOT NULL DEFAULT 0

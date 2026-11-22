@@ -590,6 +590,29 @@ async fn a_stopping_relay_delivers_the_pushes_it_took() {
     apns.abort();
 }
 
+/// The client's complete poll filter must be admitted before sync can publish machine keys.
+#[tokio::test]
+async fn attention_blobs_and_client_poll_kinds_are_admitted() {
+    let relay = Relay::start(0).await;
+    let url = format!("{}/v1/blobs", relay.url);
+    let poll = |kinds: &str| relay.http.get(&url).bearer_auth(&relay.token)
+        .query(&[("since", "0"), ("kinds", kinds)]);
+    poll(beans::sync::POLL_KINDS).send().await.unwrap().error_for_status().unwrap();
+    let response = relay.http.put(&url).bearer_auth(&relay.token)
+        .json(&json!({"id":"attention-record", "kind":"attention", "slot":"attention-slot", "ciphertext":"YQ"}))
+        .send().await.unwrap();
+    assert!(response.status().is_success(), "attention upload: {}", response.status());
+    let page: Value = poll("attention").send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(page["blobs"].as_array().unwrap().len(), 1);
+    assert_eq!(page["blobs"][0]["id"], "attention-record");
+    assert_eq!(page["blobs"][0]["ciphertext"], "YQ");
+    assert_eq!(poll("unknown-kind").send().await.unwrap().status(), StatusCode::BAD_REQUEST);
+    assert_eq!(relay.http.get(&url).query(&[("kinds", "attention")]).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(relay.http.put(&url).bearer_auth(&relay.token)
+        .json(&json!({"id":"unknown-record", "kind":"unknown-kind", "ciphertext":"YQ"}))
+        .send().await.unwrap().status(), StatusCode::BAD_REQUEST);
+}
+
 /// Polls `done` for up to ten seconds, and fails the test naming `what` when it never holds.
 async fn until(what: &str, done: impl Fn() -> bool) {
     for _ in 0..200 {

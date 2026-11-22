@@ -76,6 +76,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [Local task authority](docs/architecture/tasks.md) | Execution ownership, Job.id admission, receipts, recovery, replay fences |
 | [CLI service and updates](docs/architecture/service-updates.md) | Installation, standalone services, admission drain, update availability |
 | [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review, [secrets](docs/architecture/secrets.md) |
+| [Attention](docs/architecture/attention.md) | Coordinator attention projection, briefs, dismiss and local API |
 | [Computer provenance](docs/architecture/computer-provenance.md) | Proposed computer-stack provenance and verification gates |
 | [Computer threat model](docs/architecture/computer-threat-model.md) | Planned computer boundaries, fail-closed requirements, residual risks |
 | [Camofox evaluation](docs/architecture/camofox.md) | Pinned Camofox source evaluation and its open no-go gates |

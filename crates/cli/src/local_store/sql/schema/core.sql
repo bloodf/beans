@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS metadata (
     paused                   INTEGER NOT NULL DEFAULT 0,
     policy_json              TEXT NOT NULL DEFAULT '{}'
 );
+-- Attention items, briefs and preferences: ciphertext only.
+CREATE TABLE IF NOT EXISTS attention (
+    id         TEXT PRIMARY KEY NOT NULL,
+    ciphertext BLOB NOT NULL
+);
 CREATE TABLE IF NOT EXISTS devices (
     id       TEXT PRIMARY KEY NOT NULL,
     position INTEGER NOT NULL,

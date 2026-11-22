@@ -3,7 +3,8 @@
 //!
 //! Every statement lives in `sql/<area>/<name>.sql` and is embedded with `sql!`, so a missing
 //! file fails the build and `tests::every_sql_file_prepares` checks each one against the
-//! schema. The Rust files hold only logic: `tasks` (execution authority), `messages` (the
+//! schema. The Rust files hold only logic: `tasks` (execution authority), `attention` (encrypted
+//! attention rows), `messages` (the
 //! transcript), `state` (the account projection), `outbox` (relay uploads), `search` (exact
 //! search) and `vectors` (semantic search).
 
@@ -37,10 +38,11 @@ fn for_table(template: &str, table: &str) -> String {
 
 /// Columns added after their table first shipped, with the statement that adds each. Derived
 /// search tables need none: they are rebuilt when `SEARCH_INDEX_VERSION` changes.
-const ADDED_COLUMNS: [(&str, &str, &str); 5] = [
+const ADDED_COLUMNS: [(&str, &str, &str); 6] = [
     ("metadata", "paused", sql!("schema/add_metadata_paused")),
     ("metadata", "policy_json", sql!("schema/add_metadata_policy_json")),
     ("metadata", "roster_slot_seq", sql!("schema/add_metadata_roster_slot_seq")),
+    ("metadata", "attention_upgrade", sql!("schema/add_metadata_attention_upgrade")),
     ("pending_chat_creates", "original_json", sql!("schema/add_pending_chat_creates_original_json")),
     ("task_authority", "admission_floor", sql!("schema/add_task_authority_admission_floor")),
 ];
@@ -55,6 +57,7 @@ fn add_missing_columns(connection: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+mod attention;
 mod messages;
 mod outbox;
 mod search;

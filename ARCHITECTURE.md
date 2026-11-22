@@ -105,6 +105,7 @@ Each subject has one doc in `docs/architecture/`. `pnpm run check:docs` enforces
 | [Phone releases and updates](docs/architecture/phone-updates.md) | TestFlight, Android APKs and the Android self-update flow |
 | [Phone interface](docs/architecture/phone-interface.md) | Native screens, transcript presentation and adaptive navigation |
 | [Releases](docs/architecture/releases.md) | Signed readiness, desktop/EAS builds, submissions, credentials, [tests](docs/architecture/testing.md) |
+| [Mobile release trust](docs/architecture/mobile-release-trust.md) | Public signer policies, admission order and the fail-closed IPA gate |
 | [Website](docs/architecture/website.md) | `web/`: the site, its docs, and the install scripts it serves |
 | [Languages](docs/architecture/languages.md) | English and Simplified Chinese in each app, and what the CLI words |
 | [Portable setup](docs/architecture/portable-setup.md) | Secret-free setup recipes: versioning, ownership, validation, import |

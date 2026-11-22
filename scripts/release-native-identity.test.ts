@@ -11,11 +11,13 @@ import { stageLocalBuild } from "./release-eas.ts";
 import { ROOT, readVersion } from "./app.ts";
 import { archiveFixture } from "./release-archive-fixture.ts";
 import { inspectReleaseArchive } from "./release-build-inputs.ts";
+import { androidBuildTools, androidSdk } from "./android-fixture.ts";
 
 // Real metadata-only APKs are generated with the installed Android tools; no private historical
 // artifact directory or signing identity is needed. IPA metadata uses the real unzip/plutil.
-const sdk = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT ?? join(homedir(), "Library/Android/sdk");
-const buildTools = join(sdk, "build-tools", "34.0.0");
+const tools = androidBuildTools();
+const buildTools = tools.path;
+if (tools.skip) console.warn(`skipping native identity fixtures: ${tools.reason} (set CI to require them)`);
 
 const env = { PATH: `${buildTools}:/usr/bin:/bin` };
 const plist = (id: string, version = "1.0.14", build = "42") => `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${id}</string><key>CFBundleShortVersionString</key><string>${version}</string><key>CFBundleVersion</key><string>${build}</string></dict></plist>`;
@@ -27,8 +29,8 @@ async function zipped(directory: string, name: string, files: Record<string, str
   return output;
 }
 
-test("native identity reader: real public APK metadata, real IPA plists, every malformed shape refused", async () => {
-  if (!existsSync(join(buildTools, "aapt2"))) throw new Error("aapt2 fixture prerequisite missing: Android build-tools 34.0.0");
+test.skipIf(tools.skip)("native identity reader: real public APK metadata, real IPA plists, every malformed shape refused", async () => {
+  if (!tools.available) throw new Error(tools.reason);
   const dir = await mkdtemp(join(tmpdir(), "beans-native-"));
   try {
     const app = "Payload/Beans.app", appex = `${app}/PlugIns/Notify.appex`;
@@ -56,20 +58,20 @@ test("native identity reader: real public APK metadata, real IPA plists, every m
     process.env.BEANS_EXPO_PROJECT_ID = "11111111-1111-4111-8111-111111111111";
     try {
       const out = join(dir, "staged");
-      await stageLocalBuild(ipa, "testflight", "a".repeat(40), out);
+      await stageLocalBuild(ipa, "testflight", "a".repeat(40), out, async () => {});
       const proof = JSON.parse(await readFile(join(out, "eas-testflight.json"), "utf8"));
       expect(proof).toMatchObject({ kind: "local-exact-source", buildNumber: "42", version: readVersion() });
       expect(proof.buildId).toBeUndefined();
       // A real reading that differs from the release identity is refused and writes nothing.
       const other = await zipped(dir, "o.ipa", { [`${app}/Info.plist`]: plist("ai.amoena.beans", "9.9.9"), [`${appex}/Info.plist`]: plist("ai.amoena.beans.notify", "9.9.9") });
-      await expect(stageLocalBuild(other, "testflight", "a".repeat(40), join(dir, "other"), async (p, q) => readNativeIdentity(p, q, env))).rejects.toThrow("differs from the release identity");
+      await expect(stageLocalBuild(other, "testflight", "a".repeat(40), join(dir, "other"), async () => {}, async (p, q) => readNativeIdentity(p, q, env))).rejects.toThrow("differs from the release identity");
       expect(existsSync(join(dir, "other", "eas-testflight.json"))).toBe(false);
     } finally { if (old === undefined) delete process.env.BEANS_EXPO_PROJECT_ID; else process.env.BEANS_EXPO_PROJECT_ID = old; }
     // Generate real APKs using aapt2. These are metadata fixtures, never signer approval.
     for (const identifier of ["ai.amoena.beans", "ai.amoena.beans.dev"]) {
       const manifest = join(dir, `${identifier}.xml`), apk = join(dir, `${identifier}.apk`);
       await writeFile(manifest, `<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="${identifier}" android:versionCode="42" android:versionName="1.0.14"><uses-sdk android:minSdkVersion="24"/><application android:hasCode="false"/></manifest>`);
-      const built = runFixture([join(buildTools, "aapt2"), "link", "-I", join(sdk, "platforms/android-34/android.jar"), "--manifest", manifest, "-o", apk], { stdout: "pipe", stderr: "pipe" });
+      const built = runFixture([join(buildTools, "aapt2"), "link", "-I", join(androidSdk(), "platforms/android-34/android.jar"), "--manifest", manifest, "-o", apk], { stdout: "pipe", stderr: "pipe" });
       expect(built.exitCode, built.stderr.toString()).toBe(0);
       expect(readNativeIdentity(apk, "github", env)).toEqual({ identifier, version: "1.0.14", buildNumber: "42" });
     }
@@ -214,7 +216,7 @@ test.skipIf(process.platform === "win32")("a FIFO without a writer is refused fa
       const refused = (run: () => unknown) => { try { run(); return "ACCEPTED"; } catch { return "refused"; } };
       process.env.BEANS_EXPO_PROJECT_ID = "11111111-1111-4111-8111-111111111111";
       let inspected = false;
-      const staged = await stageLocalBuild(fifo, "github", "a".repeat(40), out, async () => { inspected = true; return { identifier: "ai.amoena.beans", version: "x", buildNumber: "1" }; }).then(() => "ACCEPTED", () => "refused");
+      const staged = await stageLocalBuild(fifo, "github", "a".repeat(40), out, async () => {}, async () => { inspected = true; return { identifier: "ai.amoena.beans", version: "x", buildNumber: "1" }; }).then(() => "ACCEPTED", () => "refused");
       console.log(JSON.stringify({ snapshot: refused(() => snapshotArtifact(fifo)), reader: refused(() => readNativeIdentity(fifo, "github", { PATH: bin })), staged, inspected }));
     `);
     const started = Date.now();

@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readVersion, ROOT } from "./app.ts";
 import { readNativeSnapshot, snapshotArtifact } from "./release-native-identity.ts";
+import { preflightMobileTrust, publicTrustArguments, publicTrustVerifier, type MobileBinaryVerifier, type PublicTrustPolicies } from "./release-trust.ts";
 
 const profiles = { github: { platform: "ANDROID", extension: "apk", component: "android" }, production: { platform: "ANDROID", extension: "aab", component: "android-store" }, testflight: { platform: "IOS", extension: "ipa", component: "ios-store" } } as const;
 type Profile = keyof typeof profiles;
@@ -104,11 +105,15 @@ async function eas(args: string[]): Promise<any> {
   if (code !== 0) throw new Error("EAS command failed; no release readiness is published");
   return JSON.parse(text);
 }
-export async function stageEasBuild(build: any, profile: Profile, revision: string, directory: string) {
+// Staging needs the trusted-binary verifier (#275): nothing is written until the downloaded bytes pass
+// native identity and the approved public signer policy. Callers preflight that policy first.
+export async function stageEasBuild(build: any, profile: Profile, revision: string, directory: string, verify: MobileBinaryVerifier) {
   const project = process.env.BEANS_EXPO_PROJECT_ID ?? "";
   validateEasBuild(build, profile, revision, readVersion(), project);
+  if (typeof verify !== "function") throw new Error(`Binary approved public trust policy unavailable for ${profile}`);
   await assertStageFree(directory, stagingNames(profile));
   const bytes = await downloadArtifact(build.artifacts.buildUrl);
+  await verify(bytes, profile, readVersion(), build.appBuildVersion);
   const name = `Beans-${readVersion()}${profile === "testflight" ? "-store" : ""}.${profiles[profile].extension}`;
   // URLs can carry download tokens; provenance records identifiers and hashes, never URLs.
   const provenance = { schema: 1, revision, version: readVersion(), project, buildId: build.id, buildNumber: build.appBuildVersion, profile, platform: build.platform, artifact: name, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
@@ -118,10 +123,11 @@ export async function stageEasBuild(build: any, profile: Profile, revision: stri
 // but EAS records no build for them: the proof has no buildId and the number is read from the binary.
 export type NativeIdentity = { identifier: string; version: string; buildNumber: string };
 export type InspectNative = (path: string, profile: Profile) => Promise<NativeIdentity>;
-export async function stageLocalBuild(input: string, profile: Profile, revision: string, directory: string, inspect?: InspectNative) {
+export async function stageLocalBuild(input: string, profile: Profile, revision: string, directory: string, verify: MobileBinaryVerifier, inspect?: InspectNative) {
   const project = process.env.BEANS_EXPO_PROJECT_ID ?? "";
   const version = readVersion();
   if (!Object.hasOwn(profiles, profile) || !uuid.test(project) || !/^[a-f0-9]{40}$/.test(revision)) throw new Error("Invalid EAS release identity");
+  if (typeof verify !== "function") throw new Error(`Binary approved public trust policy unavailable for ${profile}`);
   // One admitted snapshot: the inspector sees the private copy, and the artifact and proof hash are
   // written from the same retained bytes, so replacing `input` afterwards changes neither.
   await assertStageFree(directory, stagingNames(profile));
@@ -133,14 +139,22 @@ export async function stageLocalBuild(input: string, profile: Profile, revision:
     if (native?.identifier !== "ai.amoena.beans" || native.version !== version || !/^[1-9]\d*$/.test(native.buildNumber) || Number(native.buildNumber) > 2_100_000_000) {
       throw new Error("Local binary differs from the release identity or version, or its build number is not a positive integer at most 2100000000");
     }
+    // The same retained bytes the artifact and proof are written from.
+    await verify(bytes, profile, version, native.buildNumber);
     const name = `Beans-${version}${profile === "testflight" ? "-store" : ""}.${profiles[profile].extension}`;
     const provenance = { schema: 1, kind: "local-exact-source", revision, version, project, profile, platform: profiles[profile].platform, buildNumber: native.buildNumber, artifact: name, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
     await stagePair(directory, [{ name, bytes }, { name: `eas-${profile}.json`, bytes: Buffer.from(JSON.stringify(provenance) + "\n") }]);
   } finally { snapshot.dispose(); }
 }
-export async function runLocalEasRelease(args: string[], inspect: InspectNative | undefined = undefined, run = (args: string[], cwd: string) => ({ exitCode: spawnSync(args[0]!, args.slice(1), { cwd, stdio: "inherit" }).status }), git = gitState) {
+/** Trust policy admission and the verifier it yields; injectable so callers' ordering can be tested. */
+export type TrustSetup = { preflight: typeof preflightMobileTrust; verifier: (policies: PublicTrustPolicies) => MobileBinaryVerifier };
+const publicTrust: TrustSetup = { preflight: preflightMobileTrust, verifier: publicTrustVerifier };
+export async function runLocalEasRelease(input: string[], inspect: InspectNative | undefined = undefined, run = (args: string[], cwd: string) => ({ exitCode: spawnSync(args[0]!, args.slice(1), { cwd, stdio: "inherit" }).status }), git = gitState, trust: TrustSetup = publicTrust) {
+  const { args, policies } = publicTrustArguments(input);
   const [profile, revision, directory, ...extra] = args;
-  if (!Object.hasOwn(profiles, profile) || !revision || !directory || extra.length) throw new Error("usage: <github|production|testflight> <revision> <directory>");
+  if (!Object.hasOwn(profiles, profile) || !revision || !directory || extra.length) throw new Error("usage: <github|production|testflight> <revision> <directory> [--public-trust-policy <file>]");
+  // Missing public authority or inspection tools fail before credentials, checkout checks or a build.
+  trust.preflight(profile as Profile, policies[profile as Profile]);
   if (!process.env.EXPO_TOKEN || !process.env.BEANS_EXPO_OWNER || !uuid.test(process.env.BEANS_EXPO_PROJECT_ID ?? "")) throw new Error("EXPO_TOKEN, BEANS_EXPO_OWNER and linked BEANS_EXPO_PROJECT_ID are required");
   if (profile === "testflight" && !/^[A-Z0-9]{10}$/.test(process.env.BEANS_APPLE_TEAM_ID ?? "")) throw new Error("BEANS_APPLE_TEAM_ID is required for a local store IPA");
   const head = git(["git", "rev-parse", "HEAD"]);
@@ -154,7 +168,7 @@ export async function runLocalEasRelease(args: string[], inspect: InspectNative 
     // No BUILD_NUMBER, no --json/--wait: EAS stays the build-number authority and no build record exists.
     const built = run(["eas", "build", "--local", "--platform", profiles[typedProfile].platform.toLowerCase(), "--profile", profile, "--non-interactive", "--output", output], join(ROOT, "mobile"));
     if (built.exitCode !== 0) throw new Error("Local EAS build failed; no release readiness is published");
-    await stageLocalBuild(output, typedProfile, revision, resolve(directory), inspect);
+    await stageLocalBuild(output, typedProfile, revision, resolve(directory), trust.verifier(policies), inspect);
   } finally { await rm(scratch, { recursive: true, force: true }); }
 }
 /** The release gate reads the checkout state. A spawn failure or a signalled git is a failure,
@@ -164,9 +178,12 @@ function gitState(args: string[]): { exitCode: number; stdout: Buffer } {
   if (result.error || result.status === null) return { exitCode: 1, stdout: Buffer.alloc(0) };
   return { exitCode: result.status, stdout: result.stdout };
 }
-export async function runEasRelease(args: string[], query = eas, git = gitState) {
+export async function runEasRelease(input: string[], query = eas, git = gitState, trust: TrustSetup = publicTrust) {
+  const { args, policies } = publicTrustArguments(input);
   const [command, profile, revision, directory, buildId, ...extra] = args;
-  if (command !== "build" || !Object.hasOwn(profiles, profile) || !revision || !directory || extra.length) throw new Error("usage: release-eas.ts build <github|production|testflight> <revision> <directory> [retry-build-id]");
+  if (command !== "build" || !Object.hasOwn(profiles, profile) || !revision || !directory || extra.length) throw new Error("usage: release-eas.ts build <github|production|testflight> <revision> <directory> [retry-build-id] [--public-trust-policy <file>]");
+  // Missing public authority or inspection tools fail before credentials, checkout checks or EAS calls.
+  trust.preflight(profile as Profile, policies[profile as Profile]);
   if (!process.env.EXPO_TOKEN || !process.env.BEANS_EXPO_OWNER || !uuid.test(process.env.BEANS_EXPO_PROJECT_ID ?? "")) throw new Error("EXPO_TOKEN, BEANS_EXPO_OWNER and linked BEANS_EXPO_PROJECT_ID are required");
   const head = git(["git", "rev-parse", "HEAD"]);
   const dirty = git(["git", "status", "--porcelain", "--untracked-files=all"]);
@@ -175,7 +192,7 @@ export async function runEasRelease(args: string[], query = eas, git = gitState)
   await assertStageFree(resolve(directory), stagingNames(typedProfile));
   const builds = buildId ? [await query(["build:view", buildId, "--json"])] : await query(["build", "--platform", profiles[typedProfile].platform.toLowerCase(), "--profile", profile, "--non-interactive", "--wait", "--json"]);
   if (!Array.isArray(builds) || builds.length !== 1) throw new Error("Expected exactly one completed EAS build");
-  await stageEasBuild(builds[0], typedProfile, revision, resolve(directory));
+  await stageEasBuild(builds[0], typedProfile, revision, resolve(directory), trust.verifier(policies));
 }
 /** Dispatch only when this file is the process entry; importing it must stay inert. */
 const isMain = (() => {

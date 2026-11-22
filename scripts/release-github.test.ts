@@ -11,11 +11,11 @@ import { buildReleaseManifest } from "./release-github.ts";
 import { readVersion, ROOT } from "./app.ts";
 const paths: string[] = [];
 afterEach(async () => { await Promise.all(paths.map((path) => rm(path, { recursive: true, force: true }))); });
-test("all-platform CLI preflight rejects missing notes before loading private credentials", async () => {
+test("all-platform CLI preflight refuses without public mobile trust before notes or private credentials", async () => {
   const path = await mkdtemp(join(tmpdir(), "beans-release-preflight-")); paths.push(path);
   await mkdir(join(path, "scripts"));
   await mkdir(join(path, "updates"));
-  for (const name of ["app.ts", "onnxruntime.ts", "changelog.ts", "release-signing.ts", "release-github.ts"]) {
+  for (const name of ["app.ts", "onnxruntime.ts", "changelog.ts", "release-signing.ts", "release-github.ts", "release-trust.ts", "release-ipa-claims.ts", "release-native-identity.ts", "release-build-inputs.ts"]) {
     await copyFile(join(ROOT, "scripts", name), join(path, "scripts", name));
   }
   await copyFile(join(ROOT, "updates", "public-key.txt"), join(path, "updates", "public-key.txt"));
@@ -45,7 +45,9 @@ test("all-platform CLI preflight rejects missing notes before loading private cr
   expect(result.signal, `process terminated by signal ${result.signal}`).toBeNull();
   expect(result.status, "expected nonzero exit status").not.toBe(0);
   expect(result.status, "expected exit status to be numeric").not.toBeNull();
-  expect(result.stderr, "expected semantic changelog error in stderr").toContain("CHANGELOG.md requires notes for 1.0.13");
+  // Public mobile trust (#275) is admitted first; the missing notes and the empty key are never reached.
+  expect(result.stderr, "expected trust policy refusal in stderr").toContain("trust policy unavailable for github");
+  expect(result.stderr).not.toContain("BEANS_UPDATE_PRIVATE_KEY");
 });
 async function server() {
   const path = await mkdtemp(join(tmpdir(), "beans-release-fixture-")); paths.push(path);
@@ -77,12 +79,18 @@ test("complete all inventory requires hash-bound EAS store provenance", async ()
     await writeFile(join(path, artifact), "fixture");
     await writeFile(join(path, `eas-${profile}.json`), JSON.stringify({ schema: 1, version: v, revision, profile, artifact, size: 7, sha256: sha, project: "11111111-1111-4111-8111-111111111111", buildId: `${index + 2}2222222-2222-4222-8222-222222222222`, buildNumber: String(40 + index), platform: profile === "testflight" ? "IOS" : "ANDROID" }));
   }
-  const result = await buildReleaseManifest(tag, revision, path, "all");
+  // Cloud binaries are inspected too (#275): provenance alone does not finalize a mobile release.
+  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("#275");
+  const verified: string[] = [];
+  const accept = async (bytes: Uint8Array, profile: string, version: string, number: string) => { verified.push(`${profile}:${version}:${number}:${bytes.length}`); };
+  const result = await buildReleaseManifest(tag, revision, path, "all", accept);
+  expect(verified).toEqual([`github:${v}:40:7`, `production:${v}:41:7`, `testflight:${v}:42:7`]);
   expect(result.artifacts.find((a) => a.name.endsWith("-store.ipa"))?.component).toBe("ios-store");
   expect(result.artifacts.some((a) => a.component === "ios")).toBe(false);
-  expect(result).toEqual(await buildReleaseManifest(tag, revision, path, "all"));
+  expect(result).toEqual(await buildReleaseManifest(tag, revision, path, "all", accept));
+  await expect(buildReleaseManifest(tag, revision, path, "all", async () => { throw new Error("Binary signer differs from approved public trust policy"); })).rejects.toThrow("signer differs");
   await writeFile(join(path, `Beans-${v}.aab`), "changed");
-  await expect(buildReleaseManifest(tag, revision, path, "all")).rejects.toThrow("provenance");
+  await expect(buildReleaseManifest(tag, revision, path, "all", accept)).rejects.toThrow("provenance");
 });
 test("local exact-source pipeline: stage with production code, finalize only through a binary verifier", async () => {
   const path = await inventory();
@@ -98,7 +106,7 @@ test("local exact-source pipeline: stage with production code, finalize only thr
       const input = join(source, profile);
       await writeFile(input, new Uint8Array([0x50, 0x4b, 3, 4, profile.length]));
       // Replacing the original after the inspector ran must not change what is staged or hashed.
-      await stageLocalBuild(input, profile, revision, path, async (snapshot, kind) => {
+      await stageLocalBuild(input, profile, revision, path, async () => {}, async (snapshot, kind) => {
         const result = await inspect(snapshot, kind);
         await writeFile(input, new Uint8Array([0x50, 0x4b, 3, 4, 99]));
         return result;

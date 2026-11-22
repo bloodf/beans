@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { readVersion, ROOT } from "./app.ts";
 import { extractReleaseNotes } from "./changelog.ts";
 import { releasePrivateKey, signReleaseBytes } from "./release-signing.ts";
+import { preflightReleaseTrust, publicTrustArguments, publicTrustVerifier, type MobileBinaryVerifier, type MobileReleaseProfile } from "./release-trust.ts";
 
 export interface ReleaseArtifact {
   name: string;
@@ -104,9 +105,10 @@ function scopedArtifact(name: string, version: string, core: string, scope: Rele
   return artifact;
 }
 
-// Real signer/identity verification of a locally built binary (#275). Local proofs are refused without it.
-export type LocalBinaryVerifier = (bytes: Uint8Array, profile: string, version: string, buildNumber: string) => Promise<void>;
-export async function buildReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server", verifyLocal?: LocalBinaryVerifier): Promise<ReleaseManifest> {
+// Native identity and public signer verification of every mobile binary, cloud or local (#275). An
+// all-platform manifest is refused without it; the IPA gate keeps refusing until Apple trust exists.
+export type { MobileBinaryVerifier } from "./release-trust.ts";
+export async function buildReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server", verify?: MobileBinaryVerifier): Promise<ReleaseManifest> {
   scope = releaseScope(scope);
   const version = releaseVersion(tag);
   if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error("Release revision must be the exact40-character tag commit");
@@ -153,17 +155,19 @@ export async function buildReleaseManifest(tag: string, revision: string, direct
           !/^[1-9]\d*$/.test(proof.buildNumber ?? "") || Number(proof.buildNumber) > 2_100_000_000 || proof.platform !== platform) {
         throw new Error(`Invalid EAS artifact provenance: ${profile}`);
       }
-      if (local) {
-        if (!verifyLocal) throw new Error(`Local exact-source ${profile} binary requires the trusted-binary verifier (#275)`);
-        await verifyLocal(new Uint8Array(await readFile(join(directory, name))), profile, version, proof.buildNumber);
-      } else identities.add(proof.buildId);
+      if (!verify) throw new Error(`${local ? "Local exact-source" : "EAS"} ${profile} binary requires the trusted-binary verifier (#275)`);
+      // The bytes read here are hashed again against the proof, so a swap after inspection is refused.
+      const bytes = new Uint8Array(await readFile(join(directory, name)));
+      if (createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) throw new Error(`Invalid EAS artifact provenance: ${profile}`);
+      await verify(bytes, profile as MobileReleaseProfile, version, proof.buildNumber);
+      if (!local) identities.add(proof.buildId);
       numbers.add(`${platform}:${proof.buildNumber}`);
     }
   }
   return { schema: 1, version, revision, protocol: await releaseProtocol(), artifacts };
 }
-export async function writeReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server", verifyLocal?: LocalBinaryVerifier): Promise<ReleaseManifest> {
-  const manifest = await buildReleaseManifest(tag, revision, directory, scope, verifyLocal);
+export async function writeReleaseManifest(tag: string, revision: string, directory: string, scope: ReleaseScope = "server", verify?: MobileBinaryVerifier): Promise<ReleaseManifest> {
+  const manifest = await buildReleaseManifest(tag, revision, directory, scope, verify);
   const bytes = Buffer.from(`${JSON.stringify(manifest)}\n`);
   if (bytes.length > 64 * 1024) throw new Error("Release manifest exceeds64KiB");
   const signature = await signReleaseBytes(bytes);
@@ -189,8 +193,8 @@ async function gh(args: string[]): Promise<string> {
   if (code !== 0) throw new Error(`GitHub release operation failed (${code}): ${stderr}`);
   return Buffer.concat(out).toString("utf8");
 }
-async function publish(tag: string, revision: string, directory: string, scope: ReleaseScope): Promise<void> {
-  const manifest = await writeReleaseManifest(tag, revision, directory, scope);
+async function publish(tag: string, revision: string, directory: string, scope: ReleaseScope, verify?: MobileBinaryVerifier): Promise<void> {
+  const manifest = await writeReleaseManifest(tag, revision, directory, scope, verify);
   const release = JSON.parse(await gh(["api", `repos/${repository}/releases/tags/${tag}`]));
   if (release.draft || release.prerelease || release.tag_name !== tag) throw new Error("Only this exact published stable release can be finalized");
   const tagCommit = JSON.parse(await gh(["api", `repos/${repository}/commits/${tag}`])).sha;
@@ -291,10 +295,13 @@ const isMain = (() => {
 })();
 
 if (isMain) {
-  const [command, first, second, third, fourth, ...extra] = process.argv.slice(2);
+  const { args, policies } = publicTrustArguments(process.argv.slice(2));
+  const [command, first, second, third, fourth, ...extra] = args;
   if (extra.length) throw new Error("Unexpected release arguments");
+  // Mobile public trust is admitted before release notes, private keys or network work.
+  const scopeOf = (value?: string) => { const scope = releaseScope(value); preflightReleaseTrust(scope, policies); return scope; };
   if (command === "check" && first && !third && !fourth) {
-    const scope = releaseScope(second);
+    const scope = scopeOf(second);
     const version = releaseVersion(first);
     if (scope === "all" && !extractReleaseNotes(await readFile(join(ROOT, "CHANGELOG.md"), "utf8"), version)) {
       throw new Error(`CHANGELOG.md requires notes for ${version} before all-platform builds`);
@@ -306,8 +313,8 @@ if (isMain) {
   } else if (command === "desktop" && first && second && !third && !fourth) {
     await stageDesktopAssets(resolve(first), resolve(second));
   } else if (command === "manifest" && first && second && third) {
-    await writeReleaseManifest(first, second, resolve(third), releaseScope(fourth));
+    await writeReleaseManifest(first, second, resolve(third), scopeOf(fourth), publicTrustVerifier(policies));
   } else if (command === "publish" && first && second && third) {
-    await publish(first, second, resolve(third), releaseScope(fourth));
-  } else throw new Error("usage: release-github.ts check <tag> [server|all] | collect <source> <dir> [server|all] | desktop <inventory> <dir> | manifest|publish <tag> <revision> <dir> [server|all]");
+    await publish(first, second, resolve(third), scopeOf(fourth), publicTrustVerifier(policies));
+  } else throw new Error("usage: release-github.ts check <tag> [server|all] | collect <source> <dir> [server|all] | desktop <inventory> <dir> | manifest|publish <tag> <revision> <dir> [server|all], each optionally ending --public-trust-policy <file>");
 }

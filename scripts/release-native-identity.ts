@@ -56,6 +56,20 @@ export function snapshotArtifact(input: string): ArtifactSnapshot {
   } catch (error) { dispose(); throw error; }
 }
 
+// The same admission for bytes already in memory (an EAS download): a private 0700 directory and a
+// 0600 copy the native tools read, with the retained buffer as the only source of staged bytes.
+export function snapshotBytes(input: Uint8Array): ArtifactSnapshot {
+  if (input.length < 1 || input.length > MAX_ARTIFACT) throw new Error("Native artifact must be nonempty and of bounded size");
+  const bytes = Buffer.from(input);
+  const directory = mkdtempSync(join(tmpdir(), "beans-native-snapshot-"));
+  const dispose = () => rmSync(directory, { recursive: true, force: true });
+  try {
+    const path = join(directory, "artifact");
+    writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
+    return { bytes, path, dispose };
+  } catch (error) { dispose(); throw error; }
+}
+
 export function readNativeIdentity(path: string, profile: Profile, env: Env = process.env): NativeIdentity {
   if (!["github", "production", "testflight"].includes(profile) || !path.startsWith("/")) throw new Error("Invalid native identity request");
   const snapshot = snapshotArtifact(path);

@@ -99,6 +99,18 @@ describe("demo workspace", () => {
     await page.close();
   });
 
+  test("Settings › Secrets shows the picked Runner's store, empty in the demo (#560)", async () => {
+    const { page, errors } = await harness.open();
+    await page.keyboard.press("Control+Comma");
+    await page.getByText("Secrets", { exact: true }).last().click();
+    await expect.poll(() => page.innerText("body")).toContain("No secrets yet.");
+    const body = await page.innerText("body");
+    expect(body).toContain("Allowed Always");
+    expect(body).toContain("Values never leave the Runner");
+    expect(errors).toEqual([]);
+    await page.close();
+  });
+
   test("Settings opens with its panes and returns to the chats", async () => {
     const { page, errors } = await harness.open();
     await page.keyboard.press("Control+Comma");

@@ -56,6 +56,7 @@ export const Entries = {
   searchText: () => entry("search", L("Search messages with"), { keywords: [L("semantic meaning embedding index model multilingual provider")] }),
   searchImages: () => entry("search", L("Find pictures with"), { keywords: [L("images photos pictures image model clip")] }),
   describeImages: () => entry("search", L("Describe pictures with"), { keywords: [L("vision describe images photos pictures")] }),
+  secrets: () => entry("secrets", L("Secrets on this Runner"), { keywords: [L("secret key token password credential store grant revoke always allow")] }),
   machineKey: () => entry("device", L("Machine key"), { keywords: [L("device os role runner last seen relay")] }),
   pairing: () => entry("device", L("Pairing"), { keywords: [L("unpair remove device paired")] }),
   bot: (bot: Bot, providers: readonly ProviderCredential[]) =>
@@ -99,6 +100,8 @@ export function entriesIn(pane: SettingsPane, device: Device | undefined, store:
     }
     case "search":
       return device && isRunner(device) ? [Entries.searchText(), Entries.searchImages(), Entries.describeImages()] : [];
+    case "secrets":
+      return device && isRunner(device) ? [Entries.secrets()] : [];
     case "device":
       return device ? [Entries.machineKey(), Entries.pairing()] : [Entries.machineKey()];
   }

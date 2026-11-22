@@ -49,6 +49,8 @@ pub mod secret_shield;
 /// The secrets the user keeps on this Runner, and the tool bots keep them with.
 #[cfg(feature = "runner")]
 pub mod secret_store;
+/// The `secrets.*` methods the apps manage a Runner's secret store with.
+pub mod secrets_api;
 pub mod search_index;
 #[cfg(feature = "runner")]
 pub(crate) mod runner_state;

@@ -42,6 +42,7 @@ import { presentPlugin } from "../sheets/plugin";
 import { presentSkillDiscovery } from "../sheets/skillDiscovery";
 import { Entries } from "./search";
 import { SearchPane } from "./searchPane";
+import { SecretsPane } from "./secretsPane";
 
 export function SettingsPage(props: { pane: SettingsPane }) {
   return <>{paneFor(props.pane)}</>;
@@ -61,6 +62,8 @@ function paneFor(pane: SettingsPane): JSX.Element {
       return <BotsPane />;
     case "search":
       return <SearchPane />;
+    case "secrets":
+      return <SecretsPane />;
     case "device":
       return <DevicePane />;
     case "advanced":

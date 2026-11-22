@@ -53,6 +53,7 @@ import {
   commandRunOf,
   runsInForeground,
 } from "./models";
+import type { WireSecrets } from "./secrets";
 import { parseLocally, type McpEntry, type McpFile, type McpServer, type ParsedServer } from "./mcp";
 import { ReplyEngine } from "./replies";
 import {
@@ -1677,6 +1678,28 @@ export class AppStore {
       return mockModelPreview(mockLocalModels(this.mockSearch()), modelID);
     }
     return this.request<WireModelPreview>("schedule_models.preview", { runner_id: runnerID, model_id: modelID, source: { kind: "download" } });
+  }
+
+  /** A Runner's secret store: names, lengths and sources, and the grants; never a value (#560). */
+  async listSecrets(runnerID: string): Promise<WireSecrets> {
+    if (this.isMock) return { secrets: [], grants: [] };
+    return this.request<WireSecrets>("secrets.list", { runner_id: runnerID });
+  }
+
+  /** Keeps a secret the user typed in on a Runner. */
+  async setSecret(runnerID: string, name: string, value: string, note: string): Promise<void> {
+    if (this.isMock) throw new RequestError(L("The demo does not keep secrets."));
+    await this.request("secrets.set", { runner_id: runnerID, name, value, note });
+  }
+
+  /** Forgets a secret on a Runner, and the grants that name it. */
+  async deleteSecret(runnerID: string, name: string): Promise<void> {
+    await this.request("secrets.delete", { runner_id: runnerID, name });
+  }
+
+  /** Revokes what was allowed always with `name`, or everything. */
+  async revokeSecretGrants(runnerID: string, name?: string): Promise<void> {
+    await this.request("secrets.revoke", { runner_id: runnerID, ...(name === undefined ? {} : { name }) });
   }
 
   /** Removes an installed model from a Runner's disk; search or schedules using it stop using it. */

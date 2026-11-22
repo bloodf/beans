@@ -481,6 +481,26 @@ class Engine {
 
   /// Refreshes saved custom providers through the core, then reads the latest model catalogs
   /// for this Device's pickers. `updated` counts providers whose models changed, not models.
+  /** A Runner's secret store: names, lengths, sources and grants; never a value (#560). */
+  async listSecrets(runnerID: string): Promise<import("./secrets").SecretsListing> {
+    const { readSecretsListing } = await import("./secrets");
+    return readSecretsListing(await core.request("secrets.list", { runner_id: runnerID }));
+  }
+
+  /** Keeps a secret typed in on the phone on a Runner; the value is never shown again. */
+  async setSecret(runnerID: string, name: string, value: string, note: string): Promise<void> {
+    await core.request("secrets.set", { runner_id: runnerID, name, value, note });
+  }
+
+  async deleteSecret(runnerID: string, name: string): Promise<void> {
+    await core.request("secrets.delete", { runner_id: runnerID, name });
+  }
+
+  /** Revokes what was allowed always with `name`, or everything. */
+  async revokeSecretGrants(runnerID: string, name?: string): Promise<void> {
+    await core.request("secrets.revoke", { runner_id: runnerID, ...(name === undefined ? {} : { name }) });
+  }
+
   async refreshCustomModels(runnerID?: string, kind?: string): Promise<{ updated: number }> {
     try {
       return await core.request<{ updated: number }>("providers.refresh", { runner_id: runnerID, kind });

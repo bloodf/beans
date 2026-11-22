@@ -104,6 +104,12 @@ export default function DeviceScreen() {
         )}
 
         {runner && (
+          <Section>
+            <Row title={t("Secrets")} icon="key.fill" chevron onPress={() => router.push(`/settings/secrets/${device.id}`)} />
+          </Section>
+        )}
+
+        {runner && (
           <Section title={t("Plugins")}>
             {(device.plugins ?? []).length === 0 ? (
               <Row title={t("No plugins installed")} />

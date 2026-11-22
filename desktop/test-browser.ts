@@ -16,6 +16,7 @@ const expected: Record<string, string> = {
   "src/ui/overlay.browser.tsx": "checkSheetDialogName",
   "src/ui/palette.browser.tsx": "checkSearchResults",
   "src/ui/settings/searchPane.browser.tsx": "checkSearchSuggestion",
+  "src/ui/settings/secretsPane.browser.tsx": "checkSecretsPane",
   "src/ui/sheets/skillDiscovery.browser.tsx": "checkSkillDiscoveryConsumer",
   "src/ui/sheets/skillLibrary.browser.tsx": "checkSkillLibraryConsumer",
 };

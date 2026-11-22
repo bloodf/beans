@@ -115,21 +115,22 @@ The required string parameters that `api.rs` reads through its `string` helper (
 | --- | --- | --- |
 | `marketplace` | `query?` | `plugins`, `bots` |
 | `plugins.install` | `runner_id`, `plugin_id` or `manifest` | `status` |
-| `plugins.uninstall`, `plugins.detail` | `runner_id`, `plugin_id` | `null` for uninstall; for detail, the plugin, which variables are set (never their values) and each server's state, including a sign-in `code` and `link` while one waits |
+| `plugins.uninstall`, `plugins.detail` | `runner_id`, `plugin_id` | uninstall: `null`; detail: the plugin, which variables are set (never values), each server's state with a waiting sign-in's `code` and `link` |
 | `plugins.set_variables` | `runner_id`, `plugin_id`, `variables` (secret values) | `status` |
 | `plugins.connect` | `runner_id`, `plugin_id`, `server?` (the Runner owns its loopback callback) | `message`, `url`, `sign_in` |
 | `plugins.sign_out` | `runner_id`, `plugin_id`, `server?` | plugin detail |
 | `plugins.auth.cancel` | `sign_in?` | `null` |
 | `mcp.parse` | `text` | parsed servers |
 | `mcp.list`, `mcp.reload` | `runner_id?` | `path`, `error`, `servers` |
-| `mcp.get`, `mcp.remove`, `mcp.sign_out`, `mcp.reconnect` (`fresh?`, default true), `mcp.sign_in` (`wait?`) | `runner_id?`, `name` | `get`, `reconnect`, `sign_out` and a waited `sign_in`: `path`, `server`; `remove`: `null`; `sign_in` otherwise: `message` |
+| `mcp.get`, `mcp.remove`, `mcp.sign_out`, `mcp.reconnect` (`fresh?`, default true), `mcp.sign_in` (`wait?`) | `runner_id?`, `name` | `remove`: `null`; an unwaited `sign_in`: `message`; the others: `path`, `server` |
 | `mcp.save` | `runner_id?`, `name`, `config`, `previous_name?` | `path`, `server` |
 | `mcp.set_enabled` | `runner_id?`, `name`, `enabled` | `path`, `server` |
 | `mcp.hide_tool` | `runner_id?`, `name`, `tool`, `hidden` | `path`, `server` |
+| `secrets.list`, `secrets.set`, `secrets.delete`, `secrets.revoke` | `runner_id`, see [Secrets](secrets.md#from-the-apps) | never a value |
 | `providers.api_key` | `kind` | `api_key` (secret), `base_url` |
 | `providers.connect_deepseek`, `_anthropic`, `_opencode`, `_opencode_go` [PA] | `api_key` (secret), `base_url?` | `providers` (masked) |
 | `providers.connect_custom` [PA] | `name`, `base_url`, `api_key`, `models`, `api?`, `kind?`, `integration?` | `kind`, `providers` |
-| `providers.connect_chatgpt`, `providers.connect_grok` [PA] | none | `email`, `providers`; `connect_grok` is disabled in production builds |
+| `providers.connect_chatgpt`, `providers.connect_grok` [PA] | none | `email`, `providers`; Grok is off in production builds |
 | `providers.list_models`, `providers.refresh`, `providers.auth.cancel`, `providers.disconnect` [PA] | `name`, `api`, `base_url`, `api_key`, `integration?` (list); `kind` (disconnect) | `listed`, `models`; `updated`; `null`; `providers` |
 
 Every `mcp.*` result that holds a server carries its full `config`, which is secret-bearing; see [MCP servers](mcp-servers.md#managing-it).

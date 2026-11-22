@@ -1213,14 +1213,14 @@ export function spendSummary(usage: ChatUsage): string {
 
 // MARK: - Settings
 
-export type SettingsPane = "general" | "providers" | "auto-review" | "plugins" | "bots" | "search" | "device" | "advanced";
+export type SettingsPane = "general" | "providers" | "auto-review" | "plugins" | "bots" | "search" | "secrets" | "device" | "advanced";
 
-export const settingsPanes: SettingsPane[] = ["general", "providers", "auto-review", "plugins", "bots", "search", "device", "advanced"];
+export const settingsPanes: SettingsPane[] = ["general", "providers", "auto-review", "plugins", "bots", "search", "secrets", "device", "advanced"];
 
 /** Bots, plugins, and search models live on a Runner, so these panes show one Device, picked at
  * the top of the page. The others hold this computer's settings and the account's. */
 export function isDeviceScoped(pane: SettingsPane): boolean {
-  return pane === "bots" || pane === "plugins" || pane === "search" || pane === "device";
+  return pane === "bots" || pane === "plugins" || pane === "search" || pane === "secrets" || pane === "device";
 }
 
 export function paneTitle(pane: SettingsPane): string {
@@ -1239,6 +1239,8 @@ export function paneTitle(pane: SettingsPane): string {
       return L("Plugins");
     case "search":
       return L("Search");
+    case "secrets":
+      return L("Secrets");
     case "device":
       return L("Devices");
   }
@@ -1260,6 +1262,8 @@ export function paneSymbol(pane: SettingsPane): string {
       return "puzzlepiece.extension";
     case "search":
       return "magnifyingglass";
+    case "secrets":
+      return "key.fill";
     case "device":
       return "desktopcomputer";
   }

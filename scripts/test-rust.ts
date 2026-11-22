@@ -10,7 +10,7 @@
 // 1. The phone core compiles without the Runner (`provider-auth` only), so nothing Runner-only
 //    leaks into it; and a Runner compiles without local models (`runner` only).
 // 2. The Runner crate with its default features (local models included), with the relay binary
-//    the revocation test drives.
+//    the revocation test drives, then the end-to-end pairing and chat test on that relay.
 // 3. The tests that need a real ONNX Runtime (`onnx_runtime_*`, ignored by default), with the
 //    pinned runtime (scripts/onnxruntime.ts) in BEANS_ONNXRUNTIME.
 // 4. The phone core's own tests.
@@ -51,7 +51,10 @@ if (quick) {
   // A Runner built without local models still compiles and reports them unavailable.
   cargo(["check", "-p", "beans", "--no-default-features", "--features", "runner"])
   cargo(["build", "-p", "beans-relay"])
-  cargo(["test", "-p", "beans", "--no-fail-fast"], { BEANS_REVOCATION_RELAY_BIN: join(ROOT, "target", "debug", "beans-relay") })
+  const relay = join(ROOT, "target", "debug", "beans-relay")
+  cargo(["test", "-p", "beans", "--no-fail-fast"], { BEANS_REVOCATION_RELAY_BIN: relay })
+  // The end-to-end pairing and chat through a real relay and two `beans serve` processes.
+  cargo(["test", "-p", "beans", "--test", "e2e_paired_chat", "--", "--ignored", "--test-threads=1"], { BEANS_E2E_RELAY_BIN: relay })
 }
 if (runtime) cargo(["test", "-p", "beans", "--lib", "onnx_runtime", "--", "--ignored"], { BEANS_ONNXRUNTIME: runtime })
 if (!quick) cargo(["test", "-p", "beans-mobile"])

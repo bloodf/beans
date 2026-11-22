@@ -3,7 +3,9 @@
 # a Windows Runner runs, on Windows; the macOS app's XCTest suite over the markdown crate it links;
 # the Windows and Linux app's page and Go side on Ubuntu, plus Go-only desktop builds and tests on
 # macOS and Windows; and the phone app's TypeScript. Jobs that compile the CLI install a pinned
-# protoc first. The end-to-end scripts, which need a live relay, a model, or a simulator, run locally.
+# protoc first. The Rust jobs also run the end-to-end pairing and chat test on the real relay they
+# build; the desktop and website jobs run their pages' end-to-end checks in Chromium. Checks that
+# need a live provider, a device or a simulator run locally.
 name: Tests
 
 on:
@@ -82,6 +84,8 @@ jobs:
         run: cargo test --locked -p beans --no-default-features --lib --no-run
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
+      - name: End-to-end pairing and chat through a real relay
+        run: BEANS_E2E_RELAY_BIN="$BEANS_REVOCATION_RELAY_BIN" cargo test --locked -p beans --test e2e_paired_chat -- --ignored --test-threads=1
       - name: Report disk space after Rust tests
         if: always()
         run: df -h .
@@ -119,6 +123,8 @@ jobs:
           printf 'BEANS_REVOCATION_RELAY_BIN=%s\n' "$relay" >> "$GITHUB_ENV"
       - run: cargo test --locked --workspace --exclude beans-mobile
       - run: cargo test --locked -p beans-mobile
+      - name: End-to-end pairing and chat through a real relay
+        run: BEANS_E2E_RELAY_BIN="$BEANS_REVOCATION_RELAY_BIN" cargo test --locked -p beans --test e2e_paired_chat -- --ignored --test-threads=1
       # #427: bash_input used to hang forever on a command that keeps printing; prove the
       # bounded return and the background settle path stay green under repetition on macOS
       # (and Linux, same step on rust-linux).
@@ -242,7 +248,27 @@ jobs:
       - name: Install Chromium for desktop browser checks
         run: pnpm exec playwright install --with-deps chromium
       - run: pnpm run test
+      # The page in Chromium over its demo workspace: send, search, settings, language, menus.
+      - run: pnpm run test:e2e
       - run: go test -count=1 ./...
+
+  website:
+    name: Website
+    # Playwright 1.59.1 has no Chromium build for ubuntu26.04; pin until the pin is raised.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.18.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir web exec playwright install --with-deps chromium
+      # The site in Chromium, with the desktop preview it embeds built first.
+      - run: pnpm --dir web run test:e2e
 
   # Go module of desktop/ on macOS (MyGo host compiles without the Solid page or mygo-cli).
   desktop-go-macos:

@@ -32,6 +32,7 @@
     "android": "pnpm --dir mobile run core android && pnpm --dir mobile run android",
     "test": "vitest run --config vitest.config.ts",
     "test:rust": "tsx scripts/test-rust.ts",
+    "test:e2e": "tsx scripts/test-e2e.ts",
     "models:pin": "python3 scripts/schedule-intent-eval/pin_models.py",
     "test:scripts": "vitest run --config vitest.config.ts scripts",
     "test:blobatar": "vitest run --config vitest.config.ts packages/beans-blobatar",

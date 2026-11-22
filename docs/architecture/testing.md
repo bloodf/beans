@@ -12,6 +12,8 @@ How the code is tested, and the one command per stack that runs it.
 | `pnpm test` | Script, web and Blobatar tests (Vitest) |
 | `pnpm --dir desktop test` | Desktop unit tests, then its browser checks (Playwright) |
 | `pnpm --dir mobile test` | Phone tests against the mocked native core |
+| `pnpm run test:e2e` | The end-to-end suites below (`--rust`, `--desktop`, `--web` pick one) |
+| `pnpm --dir desktop run test:e2e`, `pnpm --dir web run test:e2e` | The desktop page's and the website's end-to-end checks in Chromium |
 | `pnpm run check:docs`, `pnpm run l10n` | Doc budgets and links; every UI string translated |
 
 `scripts/test-rust.ts` runs the Rust matrix in order:
@@ -23,6 +25,16 @@ How the code is tested, and the one command per stack that runs it.
 5. The catalog pin script's tests against a mock Hugging Face (`python3 -I -B scripts/schedule-intent-eval/test_pin_models.py`; tensor checks need `onnxruntime`).
 
 A test that needs something the machine may lack is `#[ignore]`d with the reason, and this script supplies it. No test skips silently.
+
+## End to end
+
+Three suites drive whole systems through their real boundaries, with nothing mocked inside them:
+
+- **Runner, Device and relay** (`crates/cli/tests/e2e_paired_chat.rs`): a real `beans-relay` and two `beans serve` processes with their own homes, driven over the local websocket API the apps use, with a local OpenAI-compatible model server standing in for the provider. A Device pairs with a new account's Runner; the Runner connects the model server as a custom provider and creates a bot; messages from either side reach the bot and its reply reaches the Device through the relay; the relay's database and files hold no plaintext of the messages, bot profile, provider name or key. It also restarts the Runner on its home (history kept, answering again) and unpairs the Device (it leaves every roster and forgets the account). The tests are `#[ignore]`d because they need the relay binary in `BEANS_E2E_RELAY_BIN`; `pnpm run test:rust` and `pnpm run test:e2e` build and supply it.
+- **Desktop page** (`desktop/e2e`): the production page in Chromium against its own Vite dev server, over the demo workspace (`?mock=1`): sending and the demo reply, the composer, the search palette and its actions, Settings panes, switching the app language, New Bot, a chat's context menu, the sidebar toggle. A page error or console error fails a check.
+- **Website** (`web/e2e`): the site in Chromium against its Vite dev server, after `build:preview` builds the desktop demo it embeds: the home page and its live preview, docs navigation, `/zh`, the download page, the install scripts, `llms.txt`, the served catalogs and not-found.
+
+The phone and the native macOS and Windows/Linux windows need a device, a simulator or the platform's toolchain; their end-to-end acceptance is manual.
 
 ## Conventions
 

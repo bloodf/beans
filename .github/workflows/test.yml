@@ -54,7 +54,7 @@ jobs:
         with:
           version: 12.18.0
       - run: pnpm install --frozen-lockfile
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
         with:
           distribution: temurin
           java-version: '17'
@@ -222,7 +222,7 @@ jobs:
         with:
           version: 12.18.0
       - run: pnpm install --frozen-lockfile
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
         with:
           distribution: temurin
           java-version: '17'

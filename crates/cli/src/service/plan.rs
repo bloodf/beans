@@ -778,8 +778,8 @@ pub(crate) fn read_run_key(line: &str) -> Stored {
 mod tests {
     use super::*;
 
-    const NEW: &str = "/home/me/.local/bin/beans";
-    const OLD: &str = "/home/me/.cargo/bin/beans";
+    const NEW: &str = "/example/user/.local/bin/beans";
+    const OLD: &str = "/example/user/.cargo/bin/beans";
     const VERSION: &str = "0.2.0";
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -1179,7 +1179,7 @@ mod tests {
         let mut host = host_for(&before);
         apply(&install(&before, definition(NEW, "/h"), VERSION).unwrap(), &before, &mut host).unwrap();
         assert_eq!(host.calls, ["stop", "clear", "write", "start"]);
-        assert_eq!((host.stored.as_deref(), host.active), (Some("text of /home/me/.local/bin/beans /h"), true));
+        assert_eq!((host.stored.as_deref(), host.active), (Some("text of /example/user/.local/bin/beans /h"), true));
     }
 
     #[test]
@@ -1199,7 +1199,7 @@ mod tests {
         let mut host = host_for(&before);
         let error = apply(&install(&before, definition(NEW, "/h"), VERSION).unwrap(), &before, &mut host).unwrap_err();
         assert_eq!(host.calls, ["stop", "clear", "restore", "start"]);
-        assert_eq!((host.stored.as_deref(), host.active), (Some("text of /home/me/.cargo/bin/beans /h"), true));
+        assert_eq!((host.stored.as_deref(), host.active), (Some("text of /example/user/.cargo/bin/beans /h"), true));
         assert!(format!("{error:#}").contains("already answers on port 4874"), "{error:#}");
         assert!(host.port.is_some(), "never stopped");
     }
@@ -1210,7 +1210,7 @@ mod tests {
         let mut host = FakeHost { fail: Some("start"), ..host_for(&before) };
         let error = apply(&install(&before, definition(NEW, "/h"), VERSION).unwrap(), &before, &mut host).unwrap_err();
         assert_eq!(host.calls, ["stop", "clear", "write", "start", "restore", "start"]);
-        assert_eq!((host.stored.as_deref(), host.active), (Some("text of /home/me/.cargo/bin/beans /h"), true));
+        assert_eq!((host.stored.as_deref(), host.active), (Some("text of /example/user/.cargo/bin/beans /h"), true));
         let message = format!("{error:#}");
         assert!(message.contains("start failed") && message.contains("put back as it was"), "{message}");
     }
@@ -1230,7 +1230,7 @@ mod tests {
         let mut host = FakeHost { fail: Some("write"), ..host_for(&before) };
         assert!(apply(&refresh(&before, NEW, None, VERSION), &before, &mut host).is_err());
         assert_eq!(host.calls, ["stop", "write", "restore", "start"]);
-        assert_eq!((host.stored.as_deref(), host.active), (Some("text of /home/me/.local/bin/beans /h"), true));
+        assert_eq!((host.stored.as_deref(), host.active), (Some("text of /example/user/.local/bin/beans /h"), true));
     }
 
     #[test]
@@ -1239,7 +1239,7 @@ mod tests {
         let mut host = FakeHost { fail: Some("stop"), ..host_for(&before) };
         assert!(apply(&install(&before, definition(NEW, "/h"), VERSION).unwrap(), &before, &mut host).is_err());
         assert_eq!(host.calls, ["stop"]);
-        assert_eq!((host.stored.as_deref(), host.active), (Some("text of /home/me/.cargo/bin/beans /h"), true));
+        assert_eq!((host.stored.as_deref(), host.active), (Some("text of /example/user/.cargo/bin/beans /h"), true));
     }
 
     #[test]
@@ -1273,7 +1273,7 @@ mod tests {
             assert_eq!((host.stored.as_deref(), host.active), (None, false), "{before:?}");
             let clean = found(Stored::Absent, false, None, false);
             apply(&install(&clean, definition(NEW, "/h"), VERSION).unwrap(), &clean, &mut host).unwrap();
-            assert_eq!((host.stored.as_deref(), host.active), (Some("text of /home/me/.local/bin/beans /h"), true));
+            assert_eq!((host.stored.as_deref(), host.active), (Some("text of /example/user/.local/bin/beans /h"), true));
         }
     }
 

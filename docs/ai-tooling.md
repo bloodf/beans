@@ -6,7 +6,7 @@ Read [AGENTS.md](../AGENTS.md), [BEANS.md](../BEANS.md) and [ARCHITECTURE.md](..
 
 This preparation permits onboarding, tooling installation, independently reviewed tooling PRs, normal tooling merges and branch propagation. Product work remains HOLD until Heitor explicitly says OK. Green checks, a tooling merge and completed propagation do not release product work. Do not merge product PRs during this rollout.
 
-The central coordinator owns global settings and routing. Read `/Users/heitor/.config/ai-tooling/COORDINATION.md` and the current `GLOBAL-ROLLOUT.md` linked there. Report global configuration gaps to that coordinator. Keep one external rollout REPORT with commands, exit codes, receipt hashes, exact heads, resources and blockers.
+The central coordinator owns global settings and routing. Read `$HOME/.config/ai-tooling/COORDINATION.md` and the current `GLOBAL-ROLLOUT.md` linked there. Report global configuration gaps to that coordinator. Keep one external rollout REPORT with commands, exit codes, receipt hashes, exact heads, resources and blockers.
 
 Target `bloodf/beans` explicitly for GitHub operations. `origin` is the Beans repository; `upstream` is `egoist/lorca`. T3's upstream canonical identity does not authorize upstream publication or integration. Confirm remotes, branch, HEAD, current base, worktrees and dirty state before writing. Similar source content does not prove ancestry.
 
@@ -37,7 +37,7 @@ Track only `.codegraph/.gitignore` inside `.codegraph/`. The ignore file exclude
 
 ## Preserve command status with RTK 1.0.1
 
-Read `/Users/heitor/.codex/RTK.md` when present. With a native RTK PreToolUse hook, run normal commands and do not wrap them twice. Without a native hook, use supported explicit commands such as `rtk git status` and `rtk gh pr list --repo bloodf/beans`. MiniMax uses this CLI route. Do not assume one harness's hooks apply to another.
+Read `$HOME/.codex/RTK.md` when present. With a native RTK PreToolUse hook, run normal commands and do not wrap them twice. Without a native hook, use supported explicit commands such as `rtk git status` and `rtk gh pr list --repo bloodf/beans`. MiniMax uses this CLI route. Do not assume one harness's hooks apply to another.
 
 Preserve the actual exit code and first failure receipt. If condensed output is empty, contradictory or unusable, recover it with `rtk bypass <cmd>` or the stored raw receipt. Diagnose the first failure before another attempt. Do not weaken a check, timeout, baseline, security boundary or review requirement to obtain green results.
 

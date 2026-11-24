@@ -1001,8 +1001,8 @@ mod tests {
             ("OPENAI_API_KEY", "sk-proj-abcdefghijklmnopqrstuvwxyz0123"),
             ("DATABASE_URL", "postgres://app:hunter2hunter2@db.internal:5432/app"),
             ("GITHUB_TOKEN", "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"),
-            ("HOME", "/home/user"),
-            ("PWD", "/home/user/dev/project"),
+            ("HOME", "/example/user"),
+            ("PWD", "/example/user/dev/project"),
             ("SSH_AUTH_SOCK", "/tmp/ssh-XXXX/agent.123"),
             ("EDITOR", "code --wait"),
             ("NODE_ENV", "development"),
@@ -1027,8 +1027,8 @@ mod tests {
     #[test]
     fn output_shows_placeholders_instead_of_values() {
         let vault = vault();
-        let output = "key=sk-proj-abcdefghijklmnopqrstuvwxyz0123\nurl postgres://app:hunter2hunter2@db.internal:5432/app\nhome /home/user";
-        assert_eq!(vault.redact(output), "key={{secret:OPENAI_API_KEY}}\nurl {{secret:DATABASE_URL}}\nhome /home/user");
+        let output = "key=sk-proj-abcdefghijklmnopqrstuvwxyz0123\nurl postgres://app:hunter2hunter2@db.internal:5432/app\nhome /example/user";
+        assert_eq!(vault.redact(output), "key={{secret:OPENAI_API_KEY}}\nurl {{secret:DATABASE_URL}}\nhome /example/user");
         assert_eq!(vault.redact("short"), "short");
     }
 
@@ -1125,7 +1125,7 @@ mod tests {
             ("AWS_SECRET_ACCESS_KEY", "/K7MDENG/bPxRfiCYEXAMPLEKEYabc"),
             ("PASSWORD_HASH", "$2b$12$R9h/cIPz0gi.URNNX3kh2OPST9/PgBkqquzi.Ss7KIUgO2t0jWMUW"),
             ("SECRET_FILE", "/run/secrets/app"),
-            ("TOKEN_PATH", "/Users/alice/project/.config/token.json"),
+            ("TOKEN_PATH", "/example/user/project/.config/token.json"),
             ("API_KEY_REF", "${OTHER_API_KEY}"),
             ("CLIENT_SECRET_TEMPLATE", "${{ secrets.CLIENT_SECRET }}"),
             ("DOCS_API_KEY", "<your-api-key>"),
@@ -1316,12 +1316,12 @@ mod tests {
             ("/net/host/.env", Some("on a network share or another disk")),
             ("/tmp/.env", Some("outside the bot's working folder")),
             ("Dropbox/.env", Some("in a folder a cloud service syncs")),
-            ("/Users/me/Library/Mobile Documents/com~apple~CloudDocs/.env", Some("in a folder a cloud service syncs")),
+            ("/example/user/Library/Mobile Documents/com~apple~CloudDocs/.env", Some("in a folder a cloud service syncs")),
         ] {
             assert_eq!(risky_destination(Path::new(path), work).as_deref(), risky, "{path}");
         }
         // A working folder in a synced folder still asks: the secret would go to the cloud.
-        assert!(risky_destination(Path::new(".env"), Path::new("/Users/me/Dropbox/app")).is_some());
+        assert!(risky_destination(Path::new(".env"), Path::new("/example/user/Dropbox/app")).is_some());
     }
 
     /// Regression: `..` was dropped from a path whose folders did not exist yet, so `../.env`
@@ -1544,7 +1544,7 @@ mod runner_tests {
             created_at: 1,
         });
         // The environment commands run with, before anything reads the real one.
-        app.secrets.seed_environment([("OPENAI_API_KEY", OPENAI), ("GITHUB_TOKEN", GITHUB), ("DATABASE_URL", DATABASE), ("HOME", "/home/user")]);
+        app.secrets.seed_environment([("OPENAI_API_KEY", OPENAI), ("GITHUB_TOKEN", GITHUB), ("DATABASE_URL", DATABASE), ("HOME", "/example/user")]);
         (app, scratch)
     }
 

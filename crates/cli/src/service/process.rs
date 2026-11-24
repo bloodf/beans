@@ -470,8 +470,8 @@ mod tests {
 
     #[test]
     fn only_a_binary_named_like_beans_can_be_stopped() {
-        for name in ["/home/me/.local/bin/beans", r"C:\Users\me\.local\bin\beans.exe", r"C:\bin\BEANS.EXE", r"C:\bin\beans.exe.old-0123456789abcdef0123456789abcdef",
-            "/x/target/debug/deps/beans-60717c7e82695169", "/home/me/.local/bin/beans (deleted)", r"\\?\C:\bin\beans.exe"] {
+        for name in ["/example/user/.local/bin/beans", r"C:\Users\me\.local\bin\beans.exe", r"C:\bin\BEANS.EXE", r"C:\bin\beans.exe.old-0123456789abcdef0123456789abcdef",
+            "/x/target/debug/deps/beans-60717c7e82695169", "/example/user/.local/bin/beans (deleted)", r"\\?\C:\bin\beans.exe"] {
             assert!(beans_named(name), "{name}");
         }
         for name in ["/sbin/init", "/usr/lib/systemd/systemd", "/bin/sh", r"C:\Windows\explorer.exe", "/x/beansprout", "/beans/launchd", "", "/"] {
@@ -481,26 +481,26 @@ mod tests {
 
     #[test]
     fn the_process_must_run_the_binary_it_named() {
-        assert!(same_executable("/home/me/.local/bin/beans", "/home/me/.local/bin/beans"));
+        assert!(same_executable("/example/user/.local/bin/beans", "/example/user/.local/bin/beans"));
         // Replaced since it started: Linux says so on both sides.
-        assert!(same_executable("/home/me/.local/bin/beans (deleted)", "/home/me/.local/bin/beans (deleted)"));
-        assert!(same_executable("/home/me/.local/bin/beans (deleted)", "/home/me/.local/bin/beans"));
+        assert!(same_executable("/example/user/.local/bin/beans (deleted)", "/example/user/.local/bin/beans (deleted)"));
+        assert!(same_executable("/example/user/.local/bin/beans (deleted)", "/example/user/.local/bin/beans"));
         assert!(same_executable(r"\\?\C:\bin\beans.exe", r"C:\bin\beans.exe"));
-        assert!(!same_executable("/opt/beans", "/home/me/.local/bin/beans"));
+        assert!(!same_executable("/opt/beans", "/example/user/.local/bin/beans"));
         assert_eq!(same_executable(r"C:\BIN\BEANS.EXE", r"c:\bin\beans.exe"), cfg!(windows), "Windows names ignore case");
     }
 
     #[test]
     fn a_reused_or_misnamed_pid_is_never_the_holder() {
-        let beans = Some("/home/me/.local/bin/beans".to_string());
-        assert!(is_the_holder(4242, Some("/home/me/.local/bin/beans"), beans.clone()));
+        let beans = Some("/example/user/.local/bin/beans".to_string());
+        assert!(is_the_holder(4242, Some("/example/user/.local/bin/beans"), beans.clone()));
         assert!(is_the_holder(4242, None, beans.clone()), "a beans from before hello named its binary");
         // The PID now belongs to another program.
-        assert!(!is_the_holder(4242, Some("/home/me/.local/bin/beans"), Some("/usr/bin/python3".into())));
+        assert!(!is_the_holder(4242, Some("/example/user/.local/bin/beans"), Some("/usr/bin/python3".into())));
         // Another beans than the one that answered.
-        assert!(!is_the_holder(4242, Some("/home/me/.local/bin/beans"), Some("/opt/other/beans".into())));
+        assert!(!is_the_holder(4242, Some("/example/user/.local/bin/beans"), Some("/opt/other/beans".into())));
         // Gone, another user's, or no way to tell.
-        assert!(!is_the_holder(4242, Some("/home/me/.local/bin/beans"), None));
+        assert!(!is_the_holder(4242, Some("/example/user/.local/bin/beans"), None));
         // An answer naming init or the idle process, even for a binary called beans.
         for pid in [0, 1] {
             assert!(!is_the_holder(pid, Some("/beans"), Some("/beans".into())));

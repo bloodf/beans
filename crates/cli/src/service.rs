@@ -1297,19 +1297,19 @@ mod tests {
 
     #[test]
     fn the_plist_is_written_exactly_so() {
-        let environment = env(&[("BEANS_HOME", "/Users/me/Beans \"home\" 100%"), ("BEANS_PORT", "4999"), ("BEANS_RELAY_URL", "https://relay.example/?a=1&b=$x")]);
-        let written = launchd_plist("app.beans.serve", "/Users/me/.local/bin/beans", "/Users/me/Library/Logs/Beans/serve.log", &environment).unwrap();
-        assert_eq!(written, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>app.beans.serve</string>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/Users/me/.local/bin/beans</string>\n\t\t<string>serve</string>\n\t</array>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>BEANS_SERVICE</key>\n\t\t<string>1</string>\n\t\t<key>BEANS_HOME</key>\n\t\t<string>/Users/me/Beans \"home\" 100%</string>\n\t\t<key>BEANS_PORT</key>\n\t\t<string>4999</string>\n\t\t<key>BEANS_RELAY_URL</key>\n\t\t<string>https://relay.example/?a=1&amp;b=$x</string>\n\t</dict>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>StandardOutPath</key>\n\t<string>/Users/me/Library/Logs/Beans/serve.log</string>\n\t<key>StandardErrorPath</key>\n\t<string>/Users/me/Library/Logs/Beans/serve.log</string>\n</dict>\n</plist>\n");
+        let environment = env(&[("BEANS_HOME", "/example/user/Beans \"home\" 100%"), ("BEANS_PORT", "4999"), ("BEANS_RELAY_URL", "https://relay.example/?a=1&b=$x")]);
+        let written = launchd_plist("app.beans.serve", "/example/user/.local/bin/beans", "/example/user/Library/Logs/Beans/serve.log", &environment).unwrap();
+        assert_eq!(written, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>app.beans.serve</string>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/example/user/.local/bin/beans</string>\n\t\t<string>serve</string>\n\t</array>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>BEANS_SERVICE</key>\n\t\t<string>1</string>\n\t\t<key>BEANS_HOME</key>\n\t\t<string>/example/user/Beans \"home\" 100%</string>\n\t\t<key>BEANS_PORT</key>\n\t\t<string>4999</string>\n\t\t<key>BEANS_RELAY_URL</key>\n\t\t<string>https://relay.example/?a=1&amp;b=$x</string>\n\t</dict>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>KeepAlive</key>\n\t<true/>\n\t<key>StandardOutPath</key>\n\t<string>/example/user/Library/Logs/Beans/serve.log</string>\n\t<key>StandardErrorPath</key>\n\t<string>/example/user/Library/Logs/Beans/serve.log</string>\n</dict>\n</plist>\n");
     }
 
     #[test]
     fn the_unit_is_written_exactly_so() {
-        let environment = env(&[("BEANS_HOME", "/Users/me/Beans \"home\" 100%"), ("BEANS_PORT", "4999"), ("BEANS_RELAY_URL", "https://relay.example/?a=1&b=$x")]);
-        let expected = "[Unit]\nDescription=Beans: this computer's Runner (beans serve)\n\n[Service]\nExecStart=\"/home/me/.local/bin/beans\" serve\nEnvironment=BEANS_SERVICE=1\nEnvironment=\"BEANS_HOME=/Users/me/Beans \\\"home\\\" 100%%\"\nEnvironment=\"BEANS_PORT=4999\"\nEnvironment=\"BEANS_RELAY_URL=https://relay.example/?a=1&b=$x\"\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n";
-        assert_eq!(systemd_unit("/home/me/.local/bin/beans", &environment, Some(257)).unwrap(), expected);
+        let environment = env(&[("BEANS_HOME", "/example/user/Beans \"home\" 100%"), ("BEANS_PORT", "4999"), ("BEANS_RELAY_URL", "https://relay.example/?a=1&b=$x")]);
+        let expected = "[Unit]\nDescription=Beans: this computer's Runner (beans serve)\n\n[Service]\nExecStart=\"/example/user/.local/bin/beans\" serve\nEnvironment=BEANS_SERVICE=1\nEnvironment=\"BEANS_HOME=/example/user/Beans \\\"home\\\" 100%%\"\nEnvironment=\"BEANS_PORT=4999\"\nEnvironment=\"BEANS_RELAY_URL=https://relay.example/?a=1&b=$x\"\nRestart=always\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n";
+        assert_eq!(systemd_unit("/example/user/.local/bin/beans", &environment, Some(257)).unwrap(), expected);
         // The release decides only what is refused, never how a kept value is written.
         for release in [Some(237), Some(245), Some(300), None] {
-            assert_eq!(systemd_unit("/home/me/.local/bin/beans", &environment, release).unwrap(), expected, "{release:?}");
+            assert_eq!(systemd_unit("/example/user/.local/bin/beans", &environment, release).unwrap(), expected, "{release:?}");
         }
     }
 
@@ -1328,7 +1328,7 @@ mod tests {
 
     #[test]
     fn passed_on_values_are_kept_exactly() {
-        let default = Path::new("/home/me/.beans-v2");
+        let default = Path::new("/example/user/.beans-v2");
         let config = Config { home: default.into(), port: crate::config::DEFAULT_PORT };
         assert!(environment(&config, Some(default), None, &cwd()).unwrap().is_empty());
         assert!(environment(&config, Some(default), Some(" \t".into()), &cwd()).unwrap().is_empty(), "a blank relay is no relay");
@@ -1351,17 +1351,17 @@ mod tests {
         assert_eq!(home("/srv/./beans/"), "/srv/beans");
         assert_eq!(home("/srv/beans"), "/srv/beans");
         // The default home written another way is still the default: nothing to pass on.
-        let config = Config { home: "/home/me/./.beans-v2".into(), port: crate::config::DEFAULT_PORT };
-        assert!(environment(&config, Some(Path::new("/home/me/.beans-v2")), None, Path::new("/work")).unwrap().is_empty());
+        let config = Config { home: "/example/user/./.beans-v2".into(), port: crate::config::DEFAULT_PORT };
+        assert!(environment(&config, Some(Path::new("/example/user/.beans-v2")), None, Path::new("/work")).unwrap().is_empty());
         let config = Config { home: ".beans-v2".into(), port: crate::config::DEFAULT_PORT };
-        assert!(environment(&config, Some(Path::new("/home/me/.beans-v2")), None, Path::new("/home/me")).unwrap().is_empty(), "run from the home folder");
+        assert!(environment(&config, Some(Path::new("/example/user/.beans-v2")), None, Path::new("/example/user")).unwrap().is_empty(), "run from the home folder");
     }
 
     #[test]
     fn a_binary_replaced_while_it_runs_is_no_program_for_a_service() {
-        assert_eq!(replaced_while_running("/home/me/.local/bin/beans (deleted)"), cfg!(target_os = "linux"));
-        assert!(!replaced_while_running("/home/me/.local/bin/beans"));
-        assert!(!replaced_while_running("/home/me/(deleted)/beans"));
+        assert_eq!(replaced_while_running("/example/user/.local/bin/beans (deleted)"), cfg!(target_os = "linux"));
+        assert!(!replaced_while_running("/example/user/.local/bin/beans"));
+        assert!(!replaced_while_running("/example/user/(deleted)/beans"));
     }
 
     #[test]
@@ -1370,7 +1370,7 @@ mod tests {
         for program in [
             "/private/var/folders/xy/T/AppTranslocation/0123-4567/d/Beans.app/Contents/Resources/bin/beans",
             "/tmp/.mount_BeansAbC123/usr/bin/beans",
-            "/home/me/Downloads/.mount_Beans/beans",
+            "/example/user/Downloads/.mount_Beans/beans",
         ] {
             assert!(transient_location(program, temp).is_some(), "{program}");
         }
@@ -1378,8 +1378,8 @@ mod tests {
         assert_eq!(transient_location(in_temp, temp), Some("the temporary folder"), "{in_temp}");
         assert_eq!(transient_location("/Volumes/Beans/Beans.app/Contents/Resources/bin/beans", temp).is_some(), cfg!(target_os = "macos"));
         for program in [
-            "/Applications/Beans.app/Contents/Resources/bin/beans", "/home/me/.local/bin/beans", r"C:\Users\me\.local\bin\beans.exe",
-            "/tmpfiles/beans", "/home/me/tmp/beans", "/opt/apptranslocation-tools/beans",
+            "/Applications/Beans.app/Contents/Resources/bin/beans", "/example/user/.local/bin/beans", r"C:\Users\me\.local\bin\beans.exe",
+            "/tmpfiles/beans", "/example/user/tmp/beans", "/opt/apptranslocation-tools/beans",
         ] {
             assert_eq!(transient_location(program, temp), None, "{program}");
         }
@@ -1390,7 +1390,7 @@ mod tests {
     #[test]
     fn a_home_that_is_not_unicode_is_refused_not_replaced() {
         use std::os::unix::ffi::OsStrExt;
-        let home = PathBuf::from(std::ffi::OsStr::from_bytes(b"/home/me/\xffbeans"));
+        let home = PathBuf::from(std::ffi::OsStr::from_bytes(b"/example/user/\xffbeans"));
         let config = Config { home, port: crate::config::DEFAULT_PORT };
         let error = environment(&config, None, None, Path::new("/work")).unwrap_err().to_string();
         assert!(error.contains("BEANS_HOME") && error.contains("not valid Unicode"), "{error}");
@@ -1477,7 +1477,7 @@ mod tests {
         for value in HARD {
             let environment = hard_environment(value);
             let exe = format!("/Applications/Be ans{value}/beans");
-            let log = format!("/Users/me/Library/Logs/{value}/serve.log");
+            let log = format!("/example/user/Library/Logs/{value}/serve.log");
             let plist = launchd_plist("app.beans.serve", &exe, &log, &environment).unwrap();
             let (arguments, read, read_log) = read_plist(&plist);
             assert_eq!(arguments, [exe.as_str(), "serve"], "{value:?}");
@@ -1646,7 +1646,7 @@ mod tests {
     fn systemd_unit_passes_hard_values_unchanged_on_every_release() {
         for release in SYSTEMD_RELEASES.iter().copied().map(Some).chain([None]) {
             for value in HARD {
-                check_unit("/home/me/Be ans 100%/$HOME/${x}/beans", &hard_environment(value), release);
+                check_unit("/example/user/Be ans 100%/$HOME/${x}/beans", &hard_environment(value), release);
             }
         }
         for value in HARD {
@@ -1723,12 +1723,12 @@ mod tests {
 
     #[test]
     fn systemd_show_output_is_read_as_systemctl_prints_it() {
-        let output = "FragmentPath=/home/me/.config/systemd/user/beans.service\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\nMainPID=4242\n";
+        let output = "FragmentPath=/example/user/.config/systemd/user/beans.service\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\nMainPID=4242\n";
         assert_eq!(read_systemd_show(output), SystemdUnit {
-            fragment: "/home/me/.config/systemd/user/beans.service".into(), drop_ins: vec![], load: "loaded".into(), active: "active".into(), enabled: "enabled".into(), pid: Some(4242),
+            fragment: "/example/user/.config/systemd/user/beans.service".into(), drop_ins: vec![], load: "loaded".into(), active: "active".into(), enabled: "enabled".into(), pid: Some(4242),
         });
-        let edited = read_systemd_show("DropInPaths=/home/me/.config/systemd/user/beans.service.d/override.conf /etc/systemd/user/beans.service.d/proxy.conf\n");
-        assert_eq!(edited.drop_ins, ["/home/me/.config/systemd/user/beans.service.d/override.conf", "/etc/systemd/user/beans.service.d/proxy.conf"]);
+        let edited = read_systemd_show("DropInPaths=/example/user/.config/systemd/user/beans.service.d/override.conf /etc/systemd/user/beans.service.d/proxy.conf\n");
+        assert_eq!(edited.drop_ins, ["/example/user/.config/systemd/user/beans.service.d/override.conf", "/etc/systemd/user/beans.service.d/proxy.conf"]);
         // A value holding `=`, and lines that are not properties.
         assert_eq!(read_systemd_show("FragmentPath=/a=b/beans.service\nnot a property\n=\n").fragment, "/a=b/beans.service");
         let gone = read_systemd_show("FragmentPath=\nLoadState=not-found\nActiveState=inactive\nUnitFileState=\nMainPID=0\n");
@@ -1738,7 +1738,7 @@ mod tests {
 
     #[test]
     fn systemd_states_are_classified_from_the_file_and_the_manager() {
-        let ours = "/home/me/.config/systemd/user/beans.service";
+        let ours = "/example/user/.config/systemd/user/beans.service";
         let unit = |fragment: &str, load: &str, active: &str, enabled: &str, pid: Option<u32>| SystemdUnit {
             fragment: fragment.into(), drop_ins: vec![], load: load.into(), active: active.into(), enabled: enabled.into(), pid,
         };
@@ -1946,7 +1946,7 @@ mod tests {
 
     #[test]
     fn launchctl_print_gives_the_jobs_own_pid() {
-        let running = "gui/501/app.beans.serve = {\n\tactive count = 1\n\tpath = /Users/me/Library/LaunchAgents/app.beans.serve.plist\n\tstate = running\n\n\tprogram = /Users/me/.local/bin/beans\n\targuments = {\n\t\t/Users/me/.local/bin/beans\n\t\tserve\n\t}\n\n\tendpoints = {\n\t\t\"x\" = {\n\t\t\tpid = 999\n\t\t}\n\t}\n\tpid = 4242\n\timmediate reason = speculative\n}\n";
+        let running = "gui/501/app.beans.serve = {\n\tactive count = 1\n\tpath = /example/user/Library/LaunchAgents/app.beans.serve.plist\n\tstate = running\n\n\tprogram = /example/user/.local/bin/beans\n\targuments = {\n\t\t/example/user/.local/bin/beans\n\t\tserve\n\t}\n\n\tendpoints = {\n\t\t\"x\" = {\n\t\t\tpid = 999\n\t\t}\n\t}\n\tpid = 4242\n\timmediate reason = speculative\n}\n";
         assert_eq!(launchd_pid(running), Some(4242), "not the nested block's pid");
         let waiting = "gui/501/app.beans.serve = {\n\tactive count = 0\n\tstate = not running\n\tlast exit code = 1\n}\n";
         assert_eq!(launchd_pid(waiting), None);

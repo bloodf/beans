@@ -348,11 +348,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parses_nul_separated_entries_and_drops_the_capture_shells_own() {
-        let environment = parse(b"PATH=/Users/me/.bun/bin:/usr/bin\0TOKEN=line one\nline two=rest\0EMPTY=\0PWD=/tmp\0SHLVL=2\0_=/usr/bin/env\0BEANS_SHELL_ENV_FILE=/tmp/x\0").unwrap();
+        let environment = parse(b"PATH=/example/user/.bun/bin:/usr/bin\0TOKEN=line one\nline two=rest\0EMPTY=\0PWD=/tmp\0SHLVL=2\0_=/usr/bin/env\0BEANS_SHELL_ENV_FILE=/tmp/x\0").unwrap();
         assert_eq!(
             environment,
             vec![
-                ("PATH".into(), "/Users/me/.bun/bin:/usr/bin".into()),
+                ("PATH".into(), "/example/user/.bun/bin:/usr/bin".into()),
                 ("TOKEN".into(), "line one\nline two=rest".into()),
                 ("EMPTY".into(), OsString::new()),
             ]
@@ -364,16 +364,16 @@ mod tests {
     #[test]
     fn the_login_path_comes_before_the_inherited_one_and_install_folders_last() {
         let environment = child_environment(
-            vec![("PATH".into(), "/Users/me/.local/share/mise/shims:/usr/bin".into()), ("GOPATH".into(), "/Users/me/go".into())],
+            vec![("PATH".into(), "/example/user/.local/share/mise/shims:/usr/bin".into()), ("GOPATH".into(), "/example/user/go".into())],
             Some(OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin")),
-            Some(Path::new("/Users/me")),
+            Some(Path::new("/example/user")),
         );
-        assert_eq!(environment[0], ("GOPATH".into(), "/Users/me/go".into()));
+        assert_eq!(environment[0], ("GOPATH".into(), "/example/user/go".into()));
         let (name, path) = &environment[1];
         assert_eq!(name, "PATH");
         let directories: Vec<PathBuf> = std::env::split_paths(path).collect();
-        assert_eq!(directories[..4], ["/Users/me/.local/share/mise/shims", "/usr/bin", "/bin", "/usr/sbin"].map(PathBuf::from));
-        assert!(directories.contains(&PathBuf::from("/Users/me/.bun/bin")) && directories.contains(&PathBuf::from("/opt/homebrew/bin")));
+        assert_eq!(directories[..4], ["/example/user/.local/share/mise/shims", "/usr/bin", "/bin", "/usr/sbin"].map(PathBuf::from));
+        assert!(directories.contains(&PathBuf::from("/example/user/.bun/bin")) && directories.contains(&PathBuf::from("/opt/homebrew/bin")));
         assert_eq!(directories.iter().filter(|directory| *directory == Path::new("/usr/bin")).count(), 1);
     }
 

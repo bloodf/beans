@@ -22,7 +22,7 @@ export async function checkSecretsPane(): Promise<Record<string, string>> {
     secrets: [{ name: "STRIPE_KEY", length: 35, source: "typed in Beans on Studio", note: "billing", saved_by: "", updated_at: 1 }],
     grants: [
       { kind: "tool", tool: "create_charge", secrets: ["STRIPE_KEY"], granted_at: 1_763_000_000 },
-      { kind: "command", folder: "/home/ana/shop", command: "vercel env add STRIPE_KEY {{secret:STRIPE_KEY}}", secrets: ["STRIPE_KEY"], granted_at: 1_763_000_000 },
+      { kind: "command", folder: "/example/user/shop", command: "vercel env add STRIPE_KEY {{secret:STRIPE_KEY}}", secrets: ["STRIPE_KEY"], granted_at: 1_763_000_000 },
     ],
   };
   const calls: string[] = [];
@@ -51,7 +51,7 @@ export async function checkSecretsPane(): Promise<Record<string, string>> {
     await settle();
     assert(row("STRIPE_KEY")?.textContent?.includes("35 characters · typed in Beans on Studio · billing"), `The secret's row: ${row("STRIPE_KEY")?.textContent}`);
     assert(row("create_charge receives STRIPE_KEY"), "The tool grant is not listed");
-    assert(row("$ vercel env add STRIPE_KEY {{secret:STRIPE_KEY}}")?.textContent?.includes("in /home/ana/shop with STRIPE_KEY"), "The command grant is not listed with its folder");
+    assert(row("$ vercel env add STRIPE_KEY {{secret:STRIPE_KEY}}")?.textContent?.includes("in /example/user/shop with STRIPE_KEY"), "The command grant is not listed with its folder");
 
     // Add one typed in: the value goes to the Runner once and is never shown.
     button(row("Add a secret"), "Add…")!.click();

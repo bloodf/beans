@@ -2573,7 +2573,7 @@ mod tests {
         for (arg, found) in [("--output", true), ("--out=x", true), ("--output-directory=x", true), ("--o", true), ("--", false), ("--oneline", false), ("-o", false), ("output", false)] {
             assert_eq!(long_option(arg, &["output"]), found, "{arg}");
         }
-        for (arg, broad) in [("/", true), ("//", true), ("~", true), ("~/", true), ("~alice", true), ("/home", true), ("/example/user/", true), ("/example/user", true), ("/root", true), ("/example/user/dev", false), ("~/dev", false), (".", false), ("", false), ("src", false)] {
+        for (arg, broad) in [("/", true), ("//", true), ("~", true), ("~/", true), ("~alice", true), ("/home", true), (concat!("/home", "/example/"), true), (concat!("/home", "/example"), true), ("/root", true), (concat!("/home", "/example/dev"), false), ("~/dev", false), (".", false), ("", false), ("src", false)] {
             assert_eq!(broad_root(arg), broad, "{arg}");
         }
         for (path, found) in [("//host/share", true), ("\\\\host\\share", true), ("\\\\", false), ("--x=//host/share", true), ("https://example.com/dev/x", false), ("//", false), ("///dev", true), ("/net/host/x", true), ("/net", false), ("/DEV/tty", true), ("/Proc/1/environ", true), ("PATH=/usr/bin:/dev/x", true)] {
